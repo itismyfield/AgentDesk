@@ -23,6 +23,7 @@ struct RegisteredCompletionFooter {
     message_id: MessageId,
     provider: super::ProviderKind,
     base_body: String,
+    last_completion_block: Option<String>,
     registered_at_unix: i64,
     consecutive_edit_failures: u8,
 }
@@ -32,6 +33,7 @@ pub(in crate::services::discord) struct CompletionFooterEdit {
     pub(in crate::services::discord) message_id: MessageId,
     pub(in crate::services::discord) text: String,
     pub(in crate::services::discord) remove_after_edit: bool,
+    completion_block: Option<String>,
 }
 
 fn completion_footer_registry() -> &'static Mutex<HashMap<u64, RegisteredCompletionFooter>> {
@@ -155,25 +157,40 @@ pub(in crate::services::discord) fn register_completion_footer_target(
     provider: &super::ProviderKind,
     registered_at_unix: i64,
     base_body: &str,
+    completion_block: Option<&str>,
     has_unfinished_entries: bool,
-) {
+) -> Option<CompletionFooterEdit> {
     let mut guard = completion_footer_registry()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous = guard.remove(&channel_id.get());
     if has_unfinished_entries {
+        let base_body = completion_footer_base_body(base_body, provider);
         guard.insert(
             channel_id.get(),
             RegisteredCompletionFooter {
                 message_id,
                 provider: provider.clone(),
-                base_body: completion_footer_base_body(base_body, provider),
+                base_body,
+                last_completion_block: completion_block.map(str::to_string),
                 registered_at_unix,
                 consecutive_edit_failures: 0,
             },
         );
-    } else {
-        guard.remove(&channel_id.get());
     }
+    previous
+        .filter(|target| target.message_id != message_id)
+        .map(supersede_edit_from_registered_target)
+}
+
+pub(in crate::services::discord) fn completion_footer_supersede_registered_target(
+    channel_id: ChannelId,
+) -> Option<CompletionFooterEdit> {
+    completion_footer_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&channel_id.get())
+        .map(supersede_edit_from_registered_target)
 }
 
 #[cfg(test)]
@@ -232,7 +249,8 @@ pub(in crate::services::discord) fn completion_footer_edit_for_registered_target
         &target.provider,
         render_indicator,
     );
-    let text = compose_completion_footer_text(&target.base_body, rendered.block.as_deref());
+    let completion_block = rendered.block;
+    let text = compose_completion_footer_text(&target.base_body, completion_block.as_deref());
     if text.trim().is_empty() {
         if idle_expired {
             completion_footer_forget_registered_target(channel_id);
@@ -243,6 +261,7 @@ pub(in crate::services::discord) fn completion_footer_edit_for_registered_target
         message_id: target.message_id,
         text,
         remove_after_edit: idle_expired || !rendered.has_unfinished_entries,
+        completion_block,
     })
 }
 
@@ -254,6 +273,28 @@ pub(in crate::services::discord) fn completion_footer_record_edit_result(
     channel_id: ChannelId,
     remove_after_edit: bool,
     edited: bool,
+) {
+    completion_footer_record_edit_result_with_block(channel_id, remove_after_edit, edited, None);
+}
+
+pub(in crate::services::discord) fn completion_footer_record_edit_result_for_edit(
+    channel_id: ChannelId,
+    edit: &CompletionFooterEdit,
+    edited: bool,
+) {
+    completion_footer_record_edit_result_with_block(
+        channel_id,
+        edit.remove_after_edit,
+        edited,
+        edit.completion_block.as_deref(),
+    );
+}
+
+fn completion_footer_record_edit_result_with_block(
+    channel_id: ChannelId,
+    remove_after_edit: bool,
+    edited: bool,
+    completion_block: Option<&str>,
 ) {
     if remove_after_edit {
         completion_footer_forget_registered_target(channel_id);
@@ -268,12 +309,39 @@ pub(in crate::services::discord) fn completion_footer_record_edit_result(
     };
     if edited {
         target.consecutive_edit_failures = 0;
+        if let Some(block) = completion_block {
+            target.last_completion_block = Some(block.to_string());
+        }
         return;
     }
     target.consecutive_edit_failures = target.consecutive_edit_failures.saturating_add(1);
     if target.consecutive_edit_failures >= COMPLETION_FOOTER_MAX_CONSECUTIVE_EDIT_FAILURES {
         guard.remove(&channel_id.get());
     }
+}
+
+fn supersede_edit_from_registered_target(
+    target: RegisteredCompletionFooter,
+) -> CompletionFooterEdit {
+    let completion_block = target
+        .last_completion_block
+        .as_deref()
+        .map(freeze_completion_footer_block);
+    let text = compose_completion_footer_text(&target.base_body, completion_block.as_deref());
+    CompletionFooterEdit {
+        message_id: target.message_id,
+        text,
+        remove_after_edit: true,
+        completion_block,
+    }
+}
+
+fn freeze_completion_footer_block(block: &str) -> String {
+    SINGLE_MESSAGE_PANEL_SPINNER_FRAMES
+        .iter()
+        .fold(block.to_string(), |acc, frame| {
+            acc.replace(frame, COMPLETION_FOOTER_IDLE_EXPIRED_INDICATOR)
+        })
 }
 
 pub(in crate::services::discord) fn completion_footer_forget_registered_target(
@@ -894,17 +962,232 @@ mod tests {
     }
 
     #[test]
+    fn completion_footer_strip_removes_frozen_supersede_shape() {
+        let completion = "Context   📦 154.6k / 1.0M tokens (15%) · auto-compact 60%\n\nSubagents\n└ bgworker Long job …";
+
+        assert_eq!(
+            super::strip_streaming_footer(
+                &format!("visible assistant body\n\n{completion}"),
+                &ProviderKind::Claude,
+            ),
+            Some("visible assistant body".to_string())
+        );
+    }
+
+    #[test]
+    fn registering_new_target_supersedes_old_footer_once_and_keeps_snapshot() {
+        let channel_id = ChannelId::new(3_089_021);
+        super::completion_footer_forget_registered_target(channel_id);
+        let shared = push_unfinished_subagent(channel_id);
+        assert!(
+            shared
+                .ui
+                .placeholder_live_events
+                .set_context_panel_usage(channel_id, None, 154_600, 0, 0, 1_000_000, 60,)
+        );
+        let old_block = shared
+            .ui
+            .placeholder_live_events
+            .render_completion_footer(channel_id, &ProviderKind::Claude, "⠸")
+            .block
+            .expect("old footer block");
+        assert!(old_block.contains('⠸'));
+        assert!(old_block.contains("Context   "));
+        assert!(old_block.contains("Subagents\n└ "));
+
+        assert_eq!(
+            super::register_completion_footer_target(
+                channel_id,
+                MessageId::new(3_089_121),
+                &ProviderKind::Claude,
+                1_800_000_000,
+                "Old answer",
+                Some(&old_block),
+                true,
+            ),
+            None
+        );
+        let new_block = old_block.replace('⠸', "⠼");
+        let supersede = super::register_completion_footer_target(
+            channel_id,
+            MessageId::new(3_089_122),
+            &ProviderKind::Claude,
+            1_800_000_010,
+            "New answer",
+            Some(&new_block),
+            true,
+        )
+        .expect("new target should supersede old target");
+
+        assert_eq!(supersede.message_id, MessageId::new(3_089_121));
+        assert!(supersede.remove_after_edit);
+        assert!(supersede.text.starts_with("Old answer\n\nContext   "));
+        assert!(supersede.text.contains("Subagents\n└ "));
+        assert!(supersede.text.contains('…'));
+        assert!(!supersede.text.contains('⠸'));
+        assert!(!supersede.text.contains('⠼'));
+
+        let latest = super::completion_footer_edit_for_registered_target_at(
+            shared.as_ref(),
+            channel_id,
+            "⠋",
+            1_800_000_011,
+        )
+        .expect("new target should be the only registered target");
+        assert_eq!(latest.message_id, MessageId::new(3_089_122));
+        assert!(!latest.text.contains("Old answer"));
+        super::completion_footer_forget_registered_target(channel_id);
+    }
+
+    #[test]
+    fn carried_entry_notification_updates_latest_target_not_superseded_text() {
+        let channel_id = ChannelId::new(3_089_022);
+        super::completion_footer_forget_registered_target(channel_id);
+        let shared = super::super::make_shared_data_for_tests();
+        shared.ui.placeholder_live_events.push_status_event(
+            channel_id,
+            StatusEvent::BackgroundTaskStart {
+                name: "Bash".to_string(),
+                summary: "Carried bash".to_string(),
+                tool_use_id: "toolu_latest_bash".to_string(),
+            },
+        );
+        shared.ui.placeholder_live_events.push_status_event(
+            channel_id,
+            StatusEvent::SubagentStart {
+                subagent_type: Some("bgworker".to_string()),
+                desc: Some("Carried agent".to_string()),
+                tool_use_id: Some("toolu_latest_agent".to_string()),
+                background: true,
+            },
+        );
+        let old_block = shared
+            .ui
+            .placeholder_live_events
+            .render_completion_footer(channel_id, &ProviderKind::Claude, "⠸")
+            .block
+            .expect("old footer block");
+        let _ = super::register_completion_footer_target(
+            channel_id,
+            MessageId::new(3_089_221),
+            &ProviderKind::Claude,
+            1_800_000_000,
+            "Old answer",
+            Some(&old_block),
+            true,
+        );
+        shared
+            .ui
+            .placeholder_live_events
+            .clear_channel_preserving_footer_residuals(channel_id);
+        let carried_block = shared
+            .ui
+            .placeholder_live_events
+            .render_completion_footer(channel_id, &ProviderKind::Claude, "⠼")
+            .block
+            .expect("carried footer block");
+        let supersede = super::register_completion_footer_target(
+            channel_id,
+            MessageId::new(3_089_222),
+            &ProviderKind::Claude,
+            1_800_000_010,
+            "New answer",
+            Some(&carried_block),
+            true,
+        )
+        .expect("new target should supersede old target");
+        assert_eq!(supersede.message_id, MessageId::new(3_089_221));
+        assert!(supersede.text.contains("Carried bash …"));
+        assert!(supersede.text.contains("Carried agent …"));
+        assert!(!supersede.text.contains('✓'));
+
+        shared.ui.placeholder_live_events.push_status_event(
+            channel_id,
+            StatusEvent::BackgroundTaskEnd {
+                tool_use_id: "toolu_latest_bash".to_string(),
+                success: true,
+            },
+        );
+        shared.ui.placeholder_live_events.push_status_event(
+            channel_id,
+            StatusEvent::SubagentEnd {
+                success: true,
+                tool_use_id: Some("toolu_latest_agent".to_string()),
+                summary: None,
+                ack_only: false,
+            },
+        );
+        let latest = super::completion_footer_edit_for_registered_target_at(
+            shared.as_ref(),
+            channel_id,
+            "⠋",
+            1_800_000_011,
+        )
+        .expect("latest target should receive finalization");
+        assert_eq!(latest.message_id, MessageId::new(3_089_222));
+        assert!(latest.text.contains("Carried bash ✓"));
+        assert!(latest.text.contains("Carried agent ✓"));
+        assert!(!supersede.text.contains('✓'));
+        super::completion_footer_record_edit_result_for_edit(channel_id, &latest, true);
+        assert!(!super::completion_footer_has_registered_target(channel_id));
+    }
+
+    #[test]
+    fn ttl_freezes_carried_entries_on_latest_target() {
+        let channel_id = ChannelId::new(3_089_023);
+        super::completion_footer_forget_registered_target(channel_id);
+        let shared = push_unfinished_background_task(channel_id);
+        shared
+            .ui
+            .placeholder_live_events
+            .clear_channel_preserving_footer_residuals(channel_id);
+        let carried_block = shared
+            .ui
+            .placeholder_live_events
+            .render_completion_footer(channel_id, &ProviderKind::Claude, "⠸")
+            .block
+            .expect("carried footer block");
+        let now = 1_800_000_000;
+        let _ = super::register_completion_footer_target(
+            channel_id,
+            MessageId::new(3_089_123),
+            &ProviderKind::Claude,
+            now - super::COMPLETION_FOOTER_MAX_IDLE_ANIMATION_SECS - 1,
+            "Latest answer",
+            Some(&carried_block),
+            true,
+        );
+
+        let edit = super::completion_footer_edit_for_registered_target_at(
+            shared.as_ref(),
+            channel_id,
+            "⠼",
+            now,
+        )
+        .expect("carried latest target should receive TTL freeze edit");
+
+        assert_eq!(edit.message_id, MessageId::new(3_089_123));
+        assert!(edit.remove_after_edit);
+        assert!(edit.text.contains("Tasks\n└ Bash Run background codex …"));
+        assert!(!edit.text.contains('⠼'));
+        assert!(!edit.text.contains('✓'));
+        super::completion_footer_record_edit_result_for_edit(channel_id, &edit, true);
+        assert!(!super::completion_footer_has_registered_target(channel_id));
+    }
+
+    #[test]
     fn completion_footer_ttl_freezes_unfinished_entries_then_forgets_target() {
         let channel_id = ChannelId::new(3_089_001);
         super::completion_footer_forget_registered_target(channel_id);
         let shared = push_unfinished_subagent(channel_id);
         let now = 1_800_000_000;
-        super::register_completion_footer_target(
+        let _ = super::register_completion_footer_target(
             channel_id,
             MessageId::new(3_089_101),
             &ProviderKind::Claude,
             now - super::COMPLETION_FOOTER_MAX_IDLE_ANIMATION_SECS - 1,
             "Final answer",
+            None,
             true,
         );
 
@@ -932,12 +1215,13 @@ mod tests {
         super::completion_footer_forget_registered_target(channel_id);
         let shared = push_unfinished_background_task(channel_id);
         let now = 1_800_000_000;
-        super::register_completion_footer_target(
+        let _ = super::register_completion_footer_target(
             channel_id,
             MessageId::new(3_089_111),
             &ProviderKind::Claude,
             now - super::COMPLETION_FOOTER_MAX_IDLE_ANIMATION_SECS - 1,
             "Final answer",
+            None,
             true,
         );
 
@@ -965,12 +1249,13 @@ mod tests {
         super::completion_footer_forget_registered_target(channel_id);
         let shared = push_unfinished_subagent(channel_id);
         let now = 1_800_000_000;
-        super::register_completion_footer_target(
+        let _ = super::register_completion_footer_target(
             channel_id,
             MessageId::new(3_089_102),
             &ProviderKind::Claude,
             now - super::COMPLETION_FOOTER_MAX_IDLE_ANIMATION_SECS + 1,
             "Final answer",
+            None,
             true,
         );
 
@@ -996,12 +1281,13 @@ mod tests {
         let channel_id = ChannelId::new(3_089_003);
         super::completion_footer_forget_registered_target(channel_id);
         let shared = push_unfinished_subagent(channel_id);
-        super::register_completion_footer_target(
+        let _ = super::register_completion_footer_target(
             channel_id,
             MessageId::new(3_089_103),
             &ProviderKind::Claude,
             1_800_000_000,
             "Final answer",
+            None,
             true,
         );
 
@@ -1032,12 +1318,13 @@ mod tests {
         let channel_id = ChannelId::new(3_089_004);
         super::completion_footer_forget_registered_target(channel_id);
         let shared = push_unfinished_subagent(channel_id);
-        super::register_completion_footer_target(
+        let _ = super::register_completion_footer_target(
             channel_id,
             MessageId::new(3_089_104),
             &ProviderKind::Claude,
             1_800_000_000,
             "Final answer",
+            None,
             true,
         );
 

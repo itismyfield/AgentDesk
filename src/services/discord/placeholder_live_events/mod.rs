@@ -80,6 +80,25 @@ impl PlaceholderLiveEvents {
         self.status_by_channel.remove(&channel_id);
     }
 
+    pub(in crate::services::discord) fn clear_channel_preserving_footer_residuals(
+        &self,
+        channel_id: ChannelId,
+    ) {
+        self.by_channel.remove(&channel_id);
+        let has_residuals = self
+            .status_by_channel
+            .get(&channel_id)
+            .is_some_and(|entry| {
+                entry
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .reset_turn_content_preserving_unfinished_footer_residuals()
+            });
+        if !has_residuals {
+            self.status_by_channel.remove(&channel_id);
+        }
+    }
+
     pub(in crate::services::discord) fn push_event(
         &self,
         channel_id: ChannelId,
