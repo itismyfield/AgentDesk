@@ -575,6 +575,7 @@ src/
 │   │   ├── shadow_parity_warn.rs
 │   │   ├── shared_memory.rs
 │   │   ├── shared_state.rs
+│   │   ├── single_message_panel.rs
 │   │   ├── stall_recovery.rs
 │   │   ├── standby_relay.rs
 │   │   ├── status_panel_controller.rs

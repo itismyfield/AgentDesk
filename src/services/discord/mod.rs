@@ -69,6 +69,7 @@ pub(crate) mod shared_memory;
 // dedicated inherent impls). See `shared_state::QueuedPlaceholderState` and
 // `shared_state::SessionOverrideState`.
 mod shared_state;
+mod single_message_panel;
 mod stall_recovery;
 mod status_panel_orphan_store;
 pub(in crate::services::discord) mod streaming_finalizer;
@@ -676,8 +677,12 @@ pub(in crate::services::discord) fn advance_last_message_checkpoint(
     checkpoint
 }
 
-pub(in crate::services::discord) use queue_io::schedule_deferred_idle_queue_kickoff;
-pub(in crate::services::discord) use queue_io::schedule_deferred_idle_queue_kickoff_immediate;
+pub(in crate::services::discord) use queue_io::{
+    schedule_deferred_idle_queue_kickoff, schedule_deferred_idle_queue_kickoff_immediate,
+};
+pub(super) fn single_message_panel_enabled() -> bool {
+    single_message_panel::enabled()
+}
 /// Minimum interval between Discord placeholder edits for progress status.
 /// Configurable via AGENTDESK_STATUS_INTERVAL_SECS env var. Default: 5 seconds.
 pub(super) fn status_update_interval() -> Duration {

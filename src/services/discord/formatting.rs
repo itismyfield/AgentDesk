@@ -851,10 +851,88 @@ pub(super) fn format_for_discord_with_status_panel(
 mod status_panel_v2_formatter_tests {
     use super::{
         MonitorHandoffReason, MonitorHandoffStatus, build_monitor_handoff_placeholder,
-        build_monitor_handoff_placeholder_with_live_events, format_for_discord,
-        format_for_discord_with_provider,
+        build_monitor_handoff_placeholder_with_live_events, build_status_panel_streaming_edit_text,
+        build_streaming_placeholder_text, format_for_discord, format_for_discord_with_provider,
+        format_for_discord_with_status_panel, plan_streaming_rollover,
     };
     use crate::services::provider::ProviderKind;
+
+    const LIVENESS_FOOTER: &str = "⠸ 계속 처리 중";
+
+    #[test]
+    fn plan_streaming_rollover_strips_liveness_footer_from_frozen_chunk_s0() {
+        let footer = format!("\n\n{LIVENESS_FOOTER}");
+        let body_budget = super::DISCORD_MSG_LIMIT
+            .saturating_sub(footer.len() + super::STREAMING_PLACEHOLDER_MARGIN)
+            .max(1);
+        let current_portion = "x".repeat(body_budget + 64);
+
+        let plan = plan_streaming_rollover(&current_portion, LIVENESS_FOOTER)
+            .expect("current portion should roll over once footer budget is reserved");
+
+        assert_eq!(plan.frozen_chunk.len(), body_budget);
+        assert_eq!(plan.frozen_chunk, &current_portion[..plan.split_at]);
+        assert!(!plan.frozen_chunk.contains(LIVENESS_FOOTER));
+        assert!(plan.display_snapshot.ends_with(&footer));
+    }
+
+    #[test]
+    fn rollover_seed_starts_as_liveness_footer_only_s0() {
+        let seed = build_streaming_placeholder_text("", LIVENESS_FOOTER);
+
+        assert_eq!(seed, LIVENESS_FOOTER);
+    }
+
+    #[test]
+    fn plan_streaming_rollover_reserves_footer_length_before_2000_byte_limit_s0() {
+        let footer = format!("\n\n{LIVENESS_FOOTER}");
+        let body_budget = super::DISCORD_MSG_LIMIT
+            .saturating_sub(footer.len() + super::STREAMING_PLACEHOLDER_MARGIN)
+            .max(1);
+        let current_portion = "x".repeat(body_budget + 1);
+        assert!(current_portion.len() < super::DISCORD_MSG_LIMIT);
+
+        let plan = plan_streaming_rollover(&current_portion, LIVENESS_FOOTER)
+            .expect("body fits raw Discord limit but not the reserved footer budget");
+
+        assert_eq!(plan.split_at, body_budget);
+        assert!(plan.display_snapshot.len() <= super::DISCORD_MSG_LIMIT);
+        assert!(plan.display_snapshot.ends_with(&footer));
+    }
+
+    #[test]
+    fn no_rollover_body_and_footer_under_limit_stays_single_message_s0() {
+        let current_portion = "short streamed body";
+        let rendered = build_streaming_placeholder_text(current_portion, LIVENESS_FOOTER);
+
+        assert!(plan_streaming_rollover(current_portion, LIVENESS_FOOTER).is_none());
+        assert_eq!(rendered, format!("{current_portion}\n\n{LIVENESS_FOOTER}"));
+        assert!(rendered.len() < super::DISCORD_MSG_LIMIT);
+    }
+
+    #[test]
+    fn empty_body_with_near_limit_footer_stays_footer_only_s0() {
+        let oversized_footer = "⠸".repeat(super::DISCORD_MSG_LIMIT);
+        let rendered = build_streaming_placeholder_text("", &oversized_footer);
+
+        assert!(plan_streaming_rollover("", &oversized_footer).is_none());
+        assert!(rendered.len() <= super::DISCORD_MSG_LIMIT);
+        assert!(rendered.starts_with('⠸'));
+        assert!(!rendered.contains("\n\n"));
+    }
+
+    #[test]
+    fn single_message_panel_s0_streaming_footer_present_and_final_body_absent() {
+        let streamed = build_status_panel_streaming_edit_text(
+            "Final answer",
+            LIVENESS_FOOTER,
+            &ProviderKind::Codex,
+        );
+        assert_eq!(streamed, "Final answer\n\n⠸ 계속 처리 중");
+
+        let finalized = format_for_discord_with_status_panel(&streamed, &ProviderKind::Codex);
+        assert_eq!(finalized, "Final answer");
+    }
 
     #[test]
     fn monitor_handoff_active_keeps_processing_tail_last() {

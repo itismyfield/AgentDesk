@@ -42,6 +42,9 @@
   instead of looping back through the internal HTTP cleanup route. The singleton
   assumption remains unchanged: the task is still spawned from the leased
   gateway runtime.
+- 2026-06-12 audit note (#3089 S0): `runtime_bootstrap` only initializes the
+  default-off `single_message_panel` flag for startup logging. Gateway lease,
+  startup order, worker ownership, and singleton assumptions are unchanged.
 - invariants: `singleton_on_leader`,
   `heartbeat_capability_registry_routing`.
 - allowed_changes: `bugfix` only before #876/#877. New gateway, reconnect,

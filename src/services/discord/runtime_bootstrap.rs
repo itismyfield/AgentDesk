@@ -104,6 +104,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
 
     // Initialize debug logging from environment variable
     claude::init_debug_from_env();
+    super::single_message_panel_enabled();
 
     let mut bot_settings = load_bot_settings(token);
     bot_settings.provider = provider.clone();

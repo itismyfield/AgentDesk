@@ -1,5 +1,6 @@
 use super::super::formatting::{
     MonitorHandoffReason, MonitorHandoffStatus, build_monitor_handoff_placeholder_with_live_events,
+    build_processing_status_block, build_streaming_placeholder_text, plan_streaming_rollover,
     redact_sensitive_for_placeholder,
 };
 use super::common::{
@@ -240,6 +241,44 @@ fn status_panel_renders_derived_tool_state_under_limit() {
     assert!(rendered.contains("도구 실행 중"));
     assert!(rendered.contains("[Bash]"));
     assert!(rendered.chars().count() <= STATUS_PANEL_MAX_CHARS);
+}
+
+#[test]
+fn characterize_rollover_seed_has_no_status_panel_content_s0() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3089);
+    let tool_args = json!({"command": "cargo test --lib placeholder_live_events"}).to_string();
+    events.push_status_events(channel_id, status_events_from_tool_use("Bash", &tool_args));
+    events.push_event(
+        channel_id,
+        RecentPlaceholderEvent::tool_use("Bash", &tool_args).unwrap(),
+    );
+
+    let panel = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(panel.contains("도구 실행 중"));
+    assert!(panel.contains("[Bash]"));
+    assert!(panel.contains("cargo test --lib placeholder_live_events"));
+
+    let status_block = build_processing_status_block("⠸");
+    let current_portion = "relay body ".repeat(250);
+    let plan = plan_streaming_rollover(&current_portion, &status_block)
+        .expect("representative relay body should roll over");
+    let rollover_seed = build_streaming_placeholder_text("", &status_block);
+
+    assert_eq!(rollover_seed, status_block);
+    assert!(
+        plan.display_snapshot
+            .ends_with(&format!("\n\n{status_block}"))
+    );
+    for status_panel_fragment in [
+        "도구 실행 중",
+        "[Bash]",
+        "cargo test --lib placeholder_live_events",
+    ] {
+        assert!(!rollover_seed.contains(status_panel_fragment));
+        assert!(!plan.display_snapshot.contains(status_panel_fragment));
+        assert!(!plan.frozen_chunk.contains(status_panel_fragment));
+    }
 }
 
 fn status_for(events: &PlaceholderLiveEvents, channel_id: ChannelId) -> DerivedStatus {
