@@ -289,12 +289,13 @@ pub(super) async fn complete_watcher_single_message_completion_footer(
         edited,
     );
     // #3391: the finalize edit delivered this render's terminal marks once;
-    // evict them so subsequent footer renders (incl. #3386 migration) drop them.
+    // evict those slot identities so subsequent footer renders (incl. #3386
+    // migration) drop the completed task AND subagent entries.
     if edited {
         shared
             .ui
             .placeholder_live_events
-            .evict_delivered_terminal_footer_tasks(channel_id, &rendered.terminal_task_lines);
+            .evict_delivered_terminal_footer_tasks(channel_id, &rendered.delivered_terminal_ids);
     }
     edited
 }

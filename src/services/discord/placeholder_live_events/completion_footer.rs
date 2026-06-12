@@ -8,35 +8,64 @@ use super::common::{
 };
 use super::context_panel::render_context_panel_line;
 use super::status_panel::{StatusPanelState, SubagentSlot, render_subagent_slot};
-use super::task_panel::{TaskToolSlot, render_task_tool_slot, task_tool_terminal_marker};
+use super::task_panel::{
+    TaskToolSlot, render_task_tool_slot, task_tool_slot_identity, task_tool_slot_is_terminal,
+    task_tool_terminal_marker,
+};
+
+/// #3391: stable per-slot handle (NOT the rendered line). `ToolUseId`/`TaskId`
+/// carry the slot's primary external id; `Ordinal` is the never-reused internal
+/// counter every slot also has. Compared for equality during eviction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::services::discord) enum SlotKey {
+    ToolUseId(String),
+    TaskId(String),
+    Ordinal(u64),
+}
+
+/// #3391: identity of a terminal slot whose mark was INCLUDED in a delivered
+/// block, tagged by which list it lives in so eviction targets the right Vec
+/// (a task and a subagent could share the same ordinal counter value only
+/// across lists; the tag keeps them disjoint).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::services::discord) enum TerminalSlotId {
+    Task(SlotKey),
+    Subagent(SlotKey),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::services::discord) struct CompletionFooterRender {
     pub(in crate::services::discord) block: Option<String>,
     pub(in crate::services::discord) has_unfinished_entries: bool,
-    /// #3391: task lines in `block` carrying a terminal mark (✓/✗) that
-    /// survived the S3 clamp. After the Discord edit containing `block` is
-    /// CONFIRMED delivered, pass these to
+    /// #3391: identities of EXACTLY the terminal task/subagent slots whose
+    /// lines were included in `block` post-clamp. After the Discord edit
+    /// containing `block` is CONFIRMED delivered, pass these to
     /// `evict_delivered_terminal_footer_tasks` so the next render drops them.
-    pub(in crate::services::discord) terminal_task_lines: Vec<String>,
+    /// Slot identity (not the line string) is used so two slots rendering the
+    /// IDENTICAL terminal line stay distinct: a clamped-out duplicate keeps its
+    /// (undelivered) mark, and a slot that turned terminal between render and
+    /// ack — whose line happens to match another delivered line — is never
+    /// evicted on a mark it never showed (Finding 1).
+    pub(in crate::services::discord) delivered_terminal_ids: Vec<TerminalSlotId>,
 }
 
-// #3391: delivery-ack surface colocated with the render below — eviction must
-// reproduce exactly the per-slot lines `render_completion_footer` produced.
+// #3391: delivery-ack surface colocated with the render below — eviction drops
+// exactly the slot identities `render_completion_footer` reported as delivered.
 impl super::PlaceholderLiveEvents {
-    /// Drops task slots whose terminal mark (✓/✗) was confirmed delivered in a
-    /// completion-footer render. Call only after the Discord edit/send returned
-    /// Ok — a failed edit retries the terminal mark on the next render. A slot
-    /// is matched by its recomputed render line (terminal lines are
-    /// indicator-free), so a slot that mutated since the delivered render keeps
-    /// rendering and evicts on the next confirmed delivery; in-flight slots
-    /// never match.
+    /// Drops task/subagent slots whose terminal mark (✓/✗) was confirmed
+    /// delivered in a completion-footer render, addressing them by SLOT
+    /// IDENTITY rather than the rendered line. Call only after the Discord
+    /// edit/send returned Ok — a failed edit retries the terminal mark on the
+    /// next render. A slot is dropped only if its identity is in the delivered
+    /// set AND it is STILL terminal at evict time; ordinals are unique and never
+    /// reused, so a non-terminal slot can never carry a recycled id that aliases
+    /// an evicted one, and in-flight slots are never dropped.
     pub(in crate::services::discord) fn evict_delivered_terminal_footer_tasks(
         &self,
         channel_id: ChannelId,
-        delivered_terminal_task_lines: &[String],
+        delivered_terminal_ids: &[TerminalSlotId],
     ) {
-        if delivered_terminal_task_lines.is_empty() {
+        if delivered_terminal_ids.is_empty() {
             return;
         }
         let Some(entry) = self.status_by_channel.get(&channel_id) else {
@@ -46,10 +75,24 @@ impl super::PlaceholderLiveEvents {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard.tasks.retain(|slot| {
-            let (line, unfinished) = render_completion_task_tool_slot(slot, "");
-            unfinished || !delivered_terminal_task_lines.contains(&line)
+            !task_tool_slot_is_terminal(slot)
+                || !delivered_terminal_ids
+                    .contains(&TerminalSlotId::Task(task_tool_slot_identity(slot)))
+        });
+        guard.subagents.retain(|slot| {
+            !slot.is_terminal()
+                || !delivered_terminal_ids.contains(&TerminalSlotId::Subagent(slot.identity()))
         });
     }
+}
+
+/// #3391: one emitted footer line plus the identity of the terminal slot it
+/// belongs to (`None` for headers and non-terminal lines). The clamp keeps a
+/// contiguous prefix of these, so survival is decided by POSITION — never by
+/// line-string matching, which collides on duplicate terminal lines.
+struct EmittedLine {
+    text: String,
+    terminal_id: Option<TerminalSlotId>,
 }
 
 pub(super) fn render_completion_footer(
@@ -66,67 +109,101 @@ pub(super) fn render_completion_footer(
         sections.push(context_line);
     }
 
-    let mut task_sections: Vec<String> = Vec::new();
+    // Flat ordered list of emitted task/subagent lines (incl. section headers
+    // and the blank separator) carrying each terminal slot's identity. The
+    // clamp below keeps a prefix of these, so a terminal line counts as
+    // delivered iff its position survives.
+    let mut emitted: Vec<EmittedLine> = Vec::new();
     let mut has_unfinished_entries = false;
-    let mut terminal_task_lines: Vec<String> = Vec::new();
 
     if !snapshot.tasks.is_empty() {
+        emitted.push(EmittedLine::header("Tasks"));
         let mut task_unfinished = false;
-        let lines = snapshot
-            .tasks
-            .iter()
-            .rev()
-            .take(STATUS_PANEL_TASK_LIMIT)
-            .map(|slot| {
-                let (line, unfinished) = render_completion_task_tool_slot(slot, indicator);
-                task_unfinished |= unfinished;
-                if !unfinished {
-                    terminal_task_lines.push(line.clone());
-                }
-                line
-            })
-            .collect::<Vec<_>>();
+        for slot in snapshot.tasks.iter().rev().take(STATUS_PANEL_TASK_LIMIT) {
+            let (line, unfinished) = render_completion_task_tool_slot(slot, indicator);
+            task_unfinished |= unfinished;
+            let terminal_id =
+                (!unfinished).then(|| TerminalSlotId::Task(task_tool_slot_identity(slot)));
+            emitted.push(EmittedLine {
+                text: line,
+                terminal_id,
+            });
+        }
         has_unfinished_entries |= task_unfinished;
-        task_sections.push(format!("Tasks\n{}", lines.join("\n")));
     }
 
     if !matches!(provider, ProviderKind::Codex) && !snapshot.subagents.is_empty() {
+        if !emitted.is_empty() {
+            emitted.push(EmittedLine::blank());
+        }
+        emitted.push(EmittedLine::header("Subagents"));
         let mut subagent_unfinished = false;
-        let lines = snapshot
+        for slot in snapshot
             .subagents
             .iter()
             .rev()
             .take(STATUS_PANEL_SUBAGENT_LIMIT)
-            .map(|slot| {
-                subagent_unfinished |= slot.finished.is_none();
-                render_completion_subagent_slot(slot, indicator)
-            })
-            .collect::<Vec<_>>();
+        {
+            subagent_unfinished |= !slot.is_terminal();
+            let line = render_completion_subagent_slot(slot, indicator);
+            let terminal_id = slot
+                .is_terminal()
+                .then(|| TerminalSlotId::Subagent(slot.identity()));
+            emitted.push(EmittedLine {
+                text: line,
+                terminal_id,
+            });
+        }
         has_unfinished_entries |= subagent_unfinished;
-        task_sections.push(format!("Subagents\n{}", lines.join("\n")));
     }
 
-    if !task_sections.is_empty() {
+    if !emitted.is_empty() {
         // #3089 completion footer: keep the Context line outside the S3 budget
         // so usage never disappears because a task section is noisy. The same
         // 600-byte cap applies to the combined task/subagent section.
-        let clamped = clamp_completion_task_section(&task_sections.join("\n\n"));
-        // #3391: a terminal mark counts as rendered only if its full line
-        // survived the clamp. Tasks render first, so the task lines are the
-        // prefix of `clamped` up to the first blank separator line.
-        terminal_task_lines.retain(|line| {
-            clamped
-                .lines()
-                .take_while(|l| !l.is_empty())
-                .any(|l| l == line)
-        });
+        let section = emitted
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (clamped, kept_count) = clamp_completion_task_section(&section);
+        // #3391: a terminal mark counts as delivered iff its emitted line
+        // survived the clamp by POSITION. `kept_count` is the number of leading
+        // emitted lines retained (the rest are replaced by the `…` marker), so
+        // exactly the first `kept_count` identities are delivered.
+        let delivered_terminal_ids = emitted
+            .iter()
+            .take(kept_count)
+            .filter_map(|line| line.terminal_id.clone())
+            .collect::<Vec<_>>();
         sections.push(clamped);
+        return CompletionFooterRender {
+            block: Some(sections.join("\n\n")),
+            has_unfinished_entries,
+            delivered_terminal_ids,
+        };
     }
 
     CompletionFooterRender {
         block: (!sections.is_empty()).then(|| sections.join("\n\n")),
         has_unfinished_entries,
-        terminal_task_lines,
+        delivered_terminal_ids: Vec::new(),
+    }
+}
+
+impl EmittedLine {
+    fn header(name: &str) -> Self {
+        Self {
+            text: name.to_string(),
+            terminal_id: None,
+        }
+    }
+
+    fn blank() -> Self {
+        Self {
+            text: String::new(),
+            terminal_id: None,
+        }
     }
 }
 
@@ -189,21 +266,27 @@ fn render_completion_subagent_slot(slot: &SubagentSlot, indicator: &str) -> Stri
     }
 }
 
-fn clamp_completion_task_section(task_section: &str) -> String {
+/// #3391: returns the clamped section together with `kept_count` — the number
+/// of leading lines retained verbatim. Callers map emitted-line positions
+/// `< kept_count` to delivered terminal identities; positions beyond it were
+/// collapsed into the `…` marker and are NOT delivered.
+fn clamp_completion_task_section(task_section: &str) -> (String, usize) {
+    let lines: Vec<&str> = task_section.lines().collect();
     if task_section.len() <= SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES {
-        return task_section.to_string();
+        return (task_section.to_string(), lines.len());
     }
 
     const TRUNCATION_MARKER: &str = "…";
-    let lines: Vec<&str> = task_section.lines().collect();
     for keep_count in (1..=lines.len()).rev() {
         let prefix = lines[..keep_count].join("\n");
         let candidate = format!("{prefix}\n{TRUNCATION_MARKER}");
         if candidate.len() <= SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES {
-            return candidate;
+            return (candidate, keep_count);
         }
     }
 
+    // Not even the first full line fits: it is truncated mid-line, so no whole
+    // emitted line survived — `kept_count` is 0 and nothing is delivered.
     let first_line = lines.first().copied().unwrap_or_default();
     let first_line_budget = SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES
         .saturating_sub(TRUNCATION_MARKER.len())
@@ -211,8 +294,11 @@ fn clamp_completion_task_section(task_section: &str) -> String {
     let safe_end =
         crate::services::discord::formatting::floor_char_boundary(first_line, first_line_budget);
     if safe_end == 0 {
-        TRUNCATION_MARKER.to_string()
+        (TRUNCATION_MARKER.to_string(), 0)
     } else {
-        format!("{}\n{TRUNCATION_MARKER}", &first_line[..safe_end])
+        (
+            format!("{}\n{TRUNCATION_MARKER}", &first_line[..safe_end]),
+            0,
+        )
     }
 }

@@ -1913,6 +1913,20 @@ fn push_background_bash_task(
     );
 }
 
+// #3391: a background task's slot identity keys on its `tool_use_id`.
+fn bg_task_id(tool_use_id: &str) -> super::completion_footer::TerminalSlotId {
+    super::completion_footer::TerminalSlotId::Task(super::completion_footer::SlotKey::ToolUseId(
+        tool_use_id.to_string(),
+    ))
+}
+
+// #3391: a subagent slot keyed on its launching `tool_use_id`.
+fn subagent_id(tool_use_id: &str) -> super::completion_footer::TerminalSlotId {
+    super::completion_footer::TerminalSlotId::Subagent(
+        super::completion_footer::SlotKey::ToolUseId(tool_use_id.to_string()),
+    )
+}
+
 fn complete_background_bash_task(
     events: &PlaceholderLiveEvents,
     channel_id: ChannelId,
@@ -1944,18 +1958,18 @@ fn completion_footer_delivered_terminal_task_evicts_from_next_render() {
     assert!(block.contains("Bash Evict after ack ✓"));
     assert!(block.contains("Bash Keep running ⠸"));
     assert_eq!(
-        delivered.terminal_task_lines,
-        vec!["└ Bash Evict after ack ✓".to_string()]
+        delivered.delivered_terminal_ids,
+        vec![bg_task_id("toolu_3391_done")]
     );
 
-    events.evict_delivered_terminal_footer_tasks(channel_id, &delivered.terminal_task_lines);
+    events.evict_delivered_terminal_footer_tasks(channel_id, &delivered.delivered_terminal_ids);
 
     let next = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
     let next_block = next.block.expect("running task should keep rendering");
     assert!(!next_block.contains("Evict after ack"));
     assert!(next_block.contains("Bash Keep running ⠼"));
     assert!(next.has_unfinished_entries);
-    assert!(next.terminal_task_lines.is_empty());
+    assert!(next.delivered_terminal_ids.is_empty());
 }
 
 #[test]
@@ -1973,7 +1987,7 @@ fn completion_footer_undelivered_terminal_task_keeps_rendering_and_inflight_neve
 
     // A failed Discord edit never acks the render, so the ✓ renders again.
     let first = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
-    assert_eq!(first.terminal_task_lines.len(), 1);
+    assert_eq!(first.delivered_terminal_ids.len(), 1);
     let retry = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
     assert!(
         retry
@@ -1981,15 +1995,12 @@ fn completion_footer_undelivered_terminal_task_keeps_rendering_and_inflight_neve
             .expect("undelivered terminal task should re-render")
             .contains("Bash Retry my checkmark ✓")
     );
-    assert_eq!(retry.terminal_task_lines, first.terminal_task_lines);
+    assert_eq!(retry.delivered_terminal_ids, first.delivered_terminal_ids);
 
-    // Stale lines and in-flight base lines never evict anything.
+    // Stale/unknown identities and the in-flight slot's id never evict anything.
     events.evict_delivered_terminal_footer_tasks(
         channel_id,
-        &[
-            "└ Bash Stay running".to_string(),
-            "└ Bash Some other line ✓".to_string(),
-        ],
+        &[bg_task_id("toolu_3391_stay"), bg_task_id("toolu_unknown")],
     );
     let after = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
     let after_block = after.block.expect("both tasks should still render");
@@ -2008,9 +2019,9 @@ fn completion_footer_evicts_all_terminal_tasks_delivered_in_one_render() {
     complete_background_bash_task(&events, channel_id, "toolu_3391_b");
 
     let delivered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
-    assert_eq!(delivered.terminal_task_lines.len(), 2);
+    assert_eq!(delivered.delivered_terminal_ids.len(), 2);
 
-    events.evict_delivered_terminal_footer_tasks(channel_id, &delivered.terminal_task_lines);
+    events.evict_delivered_terminal_footer_tasks(channel_id, &delivered.delivered_terminal_ids);
 
     let next = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
     let next_block = next.block.expect("running task should keep rendering");
@@ -2036,26 +2047,257 @@ fn completion_footer_terminal_lines_clamped_out_of_budget_are_not_delivered() {
     }
 
     let first = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
-    let first_block = first.block.expect("clamped task section should render");
+    let _first_block = first.block.expect("clamped task section should render");
+    let first_delivered = first.delivered_terminal_ids.clone();
     assert!(
-        !first.terminal_task_lines.is_empty()
-            && first.terminal_task_lines.len() < STATUS_PANEL_TASK_LIMIT,
-        "the 600B clamp should cut some terminal lines: {first_block}"
+        !first_delivered.is_empty() && first_delivered.len() < STATUS_PANEL_TASK_LIMIT,
+        "the 600B clamp should deliver some but not all terminal slots: {}",
+        first_delivered.len()
     );
-    for line in &first.terminal_task_lines {
-        assert!(first_block.contains(line.as_str()));
-    }
 
-    events.evict_delivered_terminal_footer_tasks(channel_id, &first.terminal_task_lines);
+    events.evict_delivered_terminal_footer_tasks(channel_id, &first_delivered);
 
+    // The clamped-out (undelivered) slots are still terminal and re-render with
+    // their marks; the delivered ones are gone, so their identities cannot
+    // reappear in a later render's delivered set.
     let second = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
-    let second_block = second
+    second
         .block
         .expect("clamped-out terminal tasks must render on a later pass");
-    for line in &first.terminal_task_lines {
-        assert!(!second_block.contains(line.as_str()));
+    for id in &first_delivered {
+        assert!(
+            !second.delivered_terminal_ids.contains(id),
+            "an already-evicted slot id must not re-deliver: {id:?}"
+        );
     }
-    assert!(!second.terminal_task_lines.is_empty());
+    assert!(!second.delivered_terminal_ids.is_empty());
+}
+
+// #3391 Finding 1(a) collision pin: two slots render the IDENTICAL terminal
+// line but only ONE survives the 600B clamp. Slot-identity eviction must drop
+// EXACTLY the delivered slot; the clamped-out duplicate keeps its ✓ and
+// re-renders. The old line-string eviction dropped BOTH (matched the shared
+// line), permanently swallowing the clamped-out mark, so this FAILS on HEAD.
+#[test]
+fn completion_footer_identical_terminal_lines_evict_only_the_delivered_slot() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_391_201);
+    const DUP_SUMMARY: &str = "Wait until CI settles";
+
+    // Push dup_a first, then padding, then dup_b. Newest renders first (`.rev()`),
+    // so render order is [Tasks, dup_b, ...padding, dup_a]: dup_b survives the
+    // clamp while dup_a is pushed past the 600B budget.
+    push_background_bash_task(&events, channel_id, DUP_SUMMARY, "toolu_dup_a");
+    complete_background_bash_task(&events, channel_id, "toolu_dup_a");
+    for i in 0..8 {
+        let id = format!("toolu_pad_{i:02}");
+        push_background_bash_task(
+            &events,
+            channel_id,
+            &format!("Padding job {i:02} {}", "y".repeat(80)),
+            &id,
+        );
+        complete_background_bash_task(&events, channel_id, &id);
+    }
+    push_background_bash_task(&events, channel_id, DUP_SUMMARY, "toolu_dup_b");
+    complete_background_bash_task(&events, channel_id, "toolu_dup_b");
+
+    let first = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let first_block = first.block.expect("clamped task section should render");
+    let dup_line = format!("└ Bash {DUP_SUMMARY} ✓");
+    assert!(
+        first_block.contains(&dup_line),
+        "the surviving duplicate's line should render: {first_block}"
+    );
+    // dup_b survives the clamp and is delivered; dup_a was clamped out.
+    assert!(
+        first
+            .delivered_terminal_ids
+            .contains(&bg_task_id("toolu_dup_b"))
+    );
+    assert!(
+        !first
+            .delivered_terminal_ids
+            .contains(&bg_task_id("toolu_dup_a")),
+        "the clamped-out duplicate must NOT be reported delivered"
+    );
+
+    events.evict_delivered_terminal_footer_tasks(channel_id, &first.delivered_terminal_ids);
+
+    // After eviction, dup_a (never delivered) is still terminal and re-renders
+    // its identical ✓ line. With the old line-string eviction both vanished.
+    let second = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
+    let second_block = second.block.expect("clamped-out duplicate must re-render");
+    assert!(
+        second_block.contains(&dup_line),
+        "the clamped-out duplicate's ✓ must survive eviction of its twin: {second_block}"
+    );
+    assert!(
+        second
+            .delivered_terminal_ids
+            .contains(&bg_task_id("toolu_dup_a"))
+    );
+    assert!(
+        !second
+            .delivered_terminal_ids
+            .contains(&bg_task_id("toolu_dup_b")),
+        "the already-evicted slot must not re-appear"
+    );
+}
+
+// #3391 Finding 1(b) race pin: a running slot turns terminal AFTER its render
+// snapshot but BEFORE ack, and the delivered mark belonged to a DIFFERENT slot
+// whose line is identical. The newly-terminal slot must NOT be evicted — its
+// own mark was never shown. The old line-string eviction matched the shared
+// line and dropped it, so this FAILS on HEAD.
+#[test]
+fn completion_footer_slot_turning_terminal_before_ack_is_not_evicted_on_twin_line() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_391_202);
+    const TWIN_SUMMARY: &str = "Bash Wait until CI settles";
+
+    // delivered: completed twin whose mark IS in this render.
+    push_background_bash_task(&events, channel_id, TWIN_SUMMARY, "toolu_delivered");
+    complete_background_bash_task(&events, channel_id, "toolu_delivered");
+    // racing: identical summary, still RUNNING at render time.
+    push_background_bash_task(&events, channel_id, TWIN_SUMMARY, "toolu_racing");
+
+    let delivered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    // Only the completed twin's id is delivered; the running slot is in-flight.
+    assert_eq!(
+        delivered.delivered_terminal_ids,
+        vec![bg_task_id("toolu_delivered")]
+    );
+
+    // The edit is in flight; before the ack lands the racing slot completes and
+    // now renders the IDENTICAL terminal line as the delivered twin.
+    complete_background_bash_task(&events, channel_id, "toolu_racing");
+
+    events.evict_delivered_terminal_footer_tasks(channel_id, &delivered.delivered_terminal_ids);
+
+    // The racing slot's ✓ was never delivered, so it must still render and be
+    // reportable on the next pass; only the delivered twin is gone.
+    let next = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
+    next.block.expect("racing slot's mark must still render");
+    assert_eq!(
+        next.delivered_terminal_ids,
+        vec![bg_task_id("toolu_racing")],
+        "only the racing slot's never-delivered mark should remain"
+    );
+}
+
+// #3391 Finding 2: terminal SUBAGENT slots must evict on confirmed delivery,
+// in-flight subagents are untouched, and the migration carry-over filters
+// evicted subagents. On HEAD eviction only retained over `tasks`, so subagents
+// accumulated and this FAILS for the eviction part.
+#[test]
+fn completion_footer_terminal_subagent_evicts_after_delivery_inflight_unaffected() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_391_203);
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("reviewer".to_string()),
+            desc: Some("Audit the diff".to_string()),
+            tool_use_id: Some("toolu_done_sub".to_string()),
+            background: false,
+        },
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("reviewer".to_string()),
+            desc: Some("Still inspecting".to_string()),
+            tool_use_id: Some("toolu_running_sub".to_string()),
+            background: false,
+        },
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentEnd {
+            success: true,
+            tool_use_id: Some("toolu_done_sub".to_string()),
+            summary: None,
+            ack_only: false,
+        },
+    );
+
+    let delivered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let block = delivered.block.expect("subagents should render");
+    assert!(block.contains("Audit the diff ✓"));
+    assert!(block.contains("Still inspecting ⠸"));
+    assert_eq!(
+        delivered.delivered_terminal_ids,
+        vec![subagent_id("toolu_done_sub")]
+    );
+
+    events.evict_delivered_terminal_footer_tasks(channel_id, &delivered.delivered_terminal_ids);
+
+    let next = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
+    let next_block = next.block.expect("running subagent keeps rendering");
+    assert!(
+        !next_block.contains("Audit the diff"),
+        "delivered terminal subagent must be evicted: {next_block}"
+    );
+    assert!(next_block.contains("Still inspecting ⠼"));
+    assert!(next.has_unfinished_entries);
+    assert!(next.delivered_terminal_ids.is_empty());
+}
+
+// #3391 Finding 2 migration filter: the #3386 carry-over (clear-preserving
+// residuals) must drop an EVICTED terminal subagent. A background subagent that
+// completed and was evicted on delivery must not re-appear in the carried
+// footer; an in-flight background subagent does carry over.
+#[test]
+fn completion_footer_evicted_subagent_does_not_survive_migration_carry_over() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_391_204);
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("bgworker".to_string()),
+            desc: Some("Finished bg agent".to_string()),
+            tool_use_id: Some("toolu_bg_done".to_string()),
+            background: true,
+        },
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("bgworker".to_string()),
+            desc: Some("Running bg agent".to_string()),
+            tool_use_id: Some("toolu_bg_run".to_string()),
+            background: true,
+        },
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentEnd {
+            success: true,
+            tool_use_id: Some("toolu_bg_done".to_string()),
+            summary: None,
+            ack_only: false,
+        },
+    );
+
+    let delivered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    assert_eq!(
+        delivered.delivered_terminal_ids,
+        vec![subagent_id("toolu_bg_done")]
+    );
+    events.evict_delivered_terminal_footer_tasks(channel_id, &delivered.delivered_terminal_ids);
+
+    // #3386 migration carry-over: only unfinished background residuals survive.
+    events.clear_channel_preserving_footer_residuals(channel_id);
+    let carried = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
+    let carried_block = carried
+        .block
+        .expect("running residual subagent carries over");
+    assert!(
+        !carried_block.contains("Finished bg agent"),
+        "an evicted terminal subagent must not carry over: {carried_block}"
+    );
+    assert!(carried_block.contains("Running bg agent"));
 }
 
 #[test]
@@ -3923,6 +4165,11 @@ fn status_panel_caps_partial_workflow_state_without_start() {
         Some("wf-5")
     );
     drop(guard);
+    // Drop the DashMap shard Ref too: the pushes below target channel 2896,
+    // whose `entry()` needs the shard WRITE lock. With the per-instance random
+    // hasher, 2895/2896 sometimes share a shard — holding this read guard
+    // across the pushes then self-deadlocks the test (observed hang).
+    drop(status_entry);
 
     let channel_id = ChannelId::new(2896);
     for idx in 0..=STATUS_PANEL_WORKFLOW_PHASE_LIMIT {

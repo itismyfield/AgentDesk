@@ -34,8 +34,9 @@ pub(in crate::services::discord) struct CompletionFooterEdit {
     pub(in crate::services::discord) text: String,
     pub(in crate::services::discord) remove_after_edit: bool,
     completion_block: Option<String>,
-    // #3391: terminal-marked task lines in `text`; evicted once delivered.
-    terminal_task_lines: Vec<String>,
+    // #3391: identities of terminal task/subagent slots in `text`; evicted by
+    // slot identity (not line string) once this edit is delivered.
+    delivered_terminal_ids: Vec<super::placeholder_live_events::TerminalSlotId>,
 }
 
 fn completion_footer_registry() -> &'static Mutex<HashMap<u64, RegisteredCompletionFooter>> {
@@ -264,7 +265,7 @@ pub(in crate::services::discord) fn completion_footer_edit_for_registered_target
         text,
         remove_after_edit: idle_expired || !rendered.has_unfinished_entries,
         completion_block,
-        terminal_task_lines: rendered.terminal_task_lines,
+        delivered_terminal_ids: rendered.delivered_terminal_ids,
     })
 }
 
@@ -292,13 +293,14 @@ pub(in crate::services::discord) fn completion_footer_record_edit_result_for_edi
         edited,
         edit.completion_block.as_deref(),
     );
-    // #3391: this edit delivered the terminal marks once; evict them so the
-    // next render (and any #3386 migration footer) drops the completed entries.
+    // #3391: this edit delivered the terminal marks once; evict those slot
+    // identities so the next render (and any #3386 migration footer) drops the
+    // completed task AND subagent entries.
     if edited {
         shared
             .ui
             .placeholder_live_events
-            .evict_delivered_terminal_footer_tasks(channel_id, &edit.terminal_task_lines);
+            .evict_delivered_terminal_footer_tasks(channel_id, &edit.delivered_terminal_ids);
     }
 }
 
@@ -350,7 +352,7 @@ fn supersede_edit_from_registered_target(
         // no slot identity. Terminal marks in it were either already evicted by
         // a confirmed live delivery, or (failed-edit race) render once more on
         // the new target and evict on that delivery; a ✓ is never lost.
-        terminal_task_lines: Vec::new(),
+        delivered_terminal_ids: Vec::new(),
     }
 }
 

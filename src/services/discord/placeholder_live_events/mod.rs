@@ -24,6 +24,7 @@ mod workflow_panel;
 mod tests;
 
 use common::CHANNEL_EVENT_CAPACITY;
+pub(in crate::services::discord) use completion_footer::TerminalSlotId;
 use completion_footer::{CompletionFooterRender, render_completion_footer};
 use context_panel::ContextPanelSnapshot;
 use recent_events::render_events;
