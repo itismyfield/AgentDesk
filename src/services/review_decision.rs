@@ -14,7 +14,135 @@
 //! preserved 1:1.
 
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sqlx::PgPool;
+
+use axum::{Json, http::StatusCode};
+
+use crate::app_state::AppState;
+
+// #3038 S1: `submit_review_decision` moved out of the route layer. The route
+// keeps only axum extractor unpacking and delegates after request decode; the
+// former phase helpers live in these sibling modules as verbatim moves from
+// `src/server/routes/review_verdict/decision_route/`.
+mod accept;
+mod adapters;
+mod dismiss_finalize;
+mod dispute;
+mod pending;
+mod repo_card;
+mod repo_dispatch;
+mod review_state_repo;
+mod tuning_aggregate;
+mod worktree_stale;
+
+pub use tuning_aggregate::{aggregate_review_tuning, spawn_aggregate_if_needed_with_pg};
+
+use accept::decision_route_accept;
+use dismiss_finalize::{decision_route_dismiss, decision_route_finalize};
+use dispute::decision_route_dispute;
+use pending::{decision_route_resolve_pending, decision_route_validate_input};
+use repo_dispatch::pending_review_decision_dispatch_id_pg_first;
+
+/// Shared response shape for the review-decision service and its extracted
+/// phase helpers: `(HTTP status, JSON body)`.
+pub(crate) type DecisionResponse = (StatusCode, Json<serde_json::Value>);
+
+/// #3038 god-function decomposition: validated, normalized inputs threaded from
+/// `decision_route_validate_input` into the rest of `submit_review_decision`.
+/// Behavior-preserving — carries exactly the values the original inline
+/// validation produced.
+struct DecisionInput {
+    /// Normalized `commit_sha` from the request body (`None` when absent).
+    submitted_commit: Option<String>,
+}
+
+/// Agent's decision on counter-model review feedback.
+///
+/// #3038 S1: extracted from the axum route after request decode. The route
+/// handler passes the decoded `ReviewDecisionBody` and shared app state here;
+/// control flow, side-effect ordering, transaction boundaries, and response
+/// bodies are preserved from the former route orchestrator.
+pub(crate) async fn submit_review_decision(
+    state: &AppState,
+    body: ReviewDecisionBody,
+) -> DecisionResponse {
+    let submitted_commit = match decision_route_validate_input(state, &body).await {
+        Ok(input) => input.submitted_commit,
+        Err(response) => return response,
+    };
+
+    let pending_rd_id = pending_review_decision_dispatch_id_pg_first(state, &body.card_id).await;
+
+    let (pending_rd_id, resume_side_effects_pending) =
+        match decision_route_resolve_pending(state, &body, pending_rd_id).await {
+            Ok(resolved) => resolved,
+            Err(response) => return response,
+        };
+
+    // #109: When dispatch_id is provided, validate it matches the pending
+    // review-decision dispatch. This prevents replayed or stale decisions from
+    // consuming a different dispatch than the one they were issued for.
+    //
+    // After #2200 sub-fix 4: if we just recovered `pending_rd_id` from the
+    // submitted `dispatch_id` via `lookup_review_decision_dispatch_by_id`,
+    // they are guaranteed equal — this branch is a no-op in that case but is
+    // kept for the canonical "pending lookup populated it" path.
+    if let Some(ref submitted_did) = body.dispatch_id {
+        if pending_rd_id.as_deref() != Some(submitted_did.as_str()) {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": format!(
+                        "dispatch_id mismatch: submitted {} but pending is {}",
+                        submitted_did,
+                        pending_rd_id.as_deref().unwrap_or("(none)")
+                    ),
+                    "card_id": body.card_id,
+                })),
+            );
+        }
+    }
+    let fallthrough_rd_consumed: Option<bool> = match body.decision.as_str() {
+        "accept" => {
+            return decision_route_accept(
+                state,
+                &body,
+                &submitted_commit,
+                &pending_rd_id,
+                resume_side_effects_pending,
+            )
+            .await;
+        }
+        "dispute" => {
+            return decision_route_dispute(
+                state,
+                &body,
+                &pending_rd_id,
+                resume_side_effects_pending,
+            )
+            .await;
+        }
+        "dismiss" => {
+            match decision_route_dismiss(state, &body, &pending_rd_id, resume_side_effects_pending)
+                .await
+            {
+                Ok(rd_consumed) => Some(rd_consumed),
+                Err(response) => return response,
+            }
+        }
+        _ => None,
+    };
+
+    decision_route_finalize(
+        state,
+        &body,
+        &pending_rd_id,
+        resume_side_effects_pending,
+        fallthrough_rd_consumed,
+    )
+    .await
+}
 
 /// Open a card's review-decision dispute review-entry: flip review status to
 /// `reviewing`, sync the canonical review state, and stamp `review_entered_at`.

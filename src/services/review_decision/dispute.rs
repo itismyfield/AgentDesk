@@ -11,8 +11,6 @@ use serde_json::json;
 use crate::app_state::AppState;
 use crate::services::review_decision::ReviewDecisionBody;
 
-use super::super::review_state_repo::update_card_review_state;
-use super::super::tuning_aggregate::record_decision_tuning;
 use super::DecisionResponse;
 use super::adapters::{
     cancel_dispatch_pg_first, commit_belongs_to_card_issue_pg_first,
@@ -27,6 +25,8 @@ use super::repo_card::{
     resolve_effective_pipeline_pg_first, review_state_db, transition_status_pg_first,
 };
 use super::repo_dispatch::has_pending_reviewish_dispatch_pg_first;
+use super::review_state_repo::update_card_review_state;
+use super::tuning_aggregate::record_decision_tuning;
 use super::worktree_stale::{
     SourceReviewLookup, cancel_stale_review_dispatches_for_scope_mismatch_pg_first,
     cancel_stale_review_dispatches_required_pg_first, latest_active_review_dispatch_pg_first,

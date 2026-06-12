@@ -10,7 +10,6 @@ use serde_json::json;
 use crate::app_state::AppState;
 use crate::services::review_decision::ReviewDecisionBody;
 
-use super::super::review_state_repo::update_card_review_state;
 use super::adapters::{dismiss_review_cleanup_pg_first, emit_card_updated};
 use super::repo_card::{
     card_exists_pg_first, card_lifecycle_snapshot_pg_first,
@@ -22,6 +21,7 @@ use super::repo_dispatch::{
     ReviewDecisionDispatchLookup, claim_review_decision_side_effects_resume_pg_first,
     finalized_review_decision_info_pg_first, lookup_review_decision_dispatch_by_id,
 };
+use super::review_state_repo::update_card_review_state;
 use super::worktree_stale::cancel_stale_review_dispatches_for_scope_mismatch_pg_first;
 use super::{DecisionInput, DecisionResponse};
 

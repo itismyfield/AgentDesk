@@ -175,17 +175,20 @@
 "src/services/discord/commands/config.rs" = 954
 "src/services/discord/commands/diagnostics.rs" = 1026
 
-# #3038 slice 1: decision_route.rs (4392 prod LoC) was decomposed into a 139-line
-# module root + 8 directory modules. Each split output is frozen at its landed
-# production LoC so the win is locked in — re-inflation past the giant threshold
-# AND the frozen value fails the ratchet. Lower these as the planned slice-2
-# services relocation lands.
-"src/server/routes/review_verdict/decision_route.rs" = 139
-"src/server/routes/review_verdict/decision_route/accept.rs" = 703
-"src/server/routes/review_verdict/decision_route/adapters.rs" = 227
-"src/server/routes/review_verdict/decision_route/dismiss_finalize.rs" = 182
-"src/server/routes/review_verdict/decision_route/dispute.rs" = 746
-"src/server/routes/review_verdict/decision_route/pending.rs" = 636
-"src/server/routes/review_verdict/decision_route/repo_card.rs" = 748
-"src/server/routes/review_verdict/decision_route/repo_dispatch.rs" = 650
-"src/server/routes/review_verdict/decision_route/worktree_stale.rs" = 553
+# #3038 slice 1: decision_route.rs (4392 prod LoC) was decomposed into a
+# 139-line module root + 8 directory modules. #3038 review-decision S1 lowers
+# the route root 139 -> 26 by moving the orchestrator and verbatim phase
+# modules into services::review_decision; the service root and child modules
+# are frozen at their landed production LoC to prevent re-inflation.
+"src/server/routes/review_verdict/decision_route.rs" = 26
+"src/services/review_decision.rs" = 335
+"src/services/review_decision/accept.rs" = 703
+"src/services/review_decision/adapters.rs" = 226
+"src/services/review_decision/dismiss_finalize.rs" = 182
+"src/services/review_decision/dispute.rs" = 746
+"src/services/review_decision/pending.rs" = 636
+"src/services/review_decision/repo_card.rs" = 748
+"src/services/review_decision/repo_dispatch.rs" = 650
+"src/services/review_decision/review_state_repo.rs" = 35
+"src/services/review_decision/tuning_aggregate.rs" = 469
+"src/services/review_decision/worktree_stale.rs" = 553

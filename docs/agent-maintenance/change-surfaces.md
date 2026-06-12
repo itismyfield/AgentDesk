@@ -870,13 +870,14 @@
   - `src/server/routes/escalation.rs` (1376 lines).
   - `src/server/routes/meetings.rs` (1675 lines).
   - `src/server/routes/review_verdict/decision_route.rs` was decomposed in
-    #3038 slice 1 into a 139-line module root (orchestrator + shared types)
-    plus eight sub-1000-line directory modules under
-    `src/server/routes/review_verdict/decision_route/`
+    #3038 slice 1 and S1-relocated into a 26-line route shim delegating to
+    `src/services/review_decision.rs` plus sub-1000-line service modules under
+    `src/services/review_decision/`
     (`repo_card`/`repo_dispatch`/`worktree_stale`/`adapters`/`pending`/
-    `accept`/`dispute`/`dismiss_finalize`). Conservatively still bugfix-only
-    until the PG-backed characterization harness (slice 3) lands; re-inflation
-    is ratcheted in `scripts/audit_maintainability_giant_baseline.toml`.
+    `accept`/`dispute`/`dismiss_finalize` plus review-state/tuning helpers).
+    Conservatively still bugfix-only until the PG-backed characterization
+    harness (slice 3) lands; re-inflation is ratcheted in
+    `scripts/audit_maintainability_giant_baseline.toml`.
   - `src/server/routes/{agents,agents_crud,agents_setup,v1,resume}.rs` (all
     1000+ production lines). (`dispatches/thread_reuse.rs` dropped below the
     giant threshold in #3037 after its Postgres/Discord-API thread-map helpers

@@ -25,9 +25,10 @@ Every entry uses the common §8 schema: `feature`, `canonical_modules`,
   - `src/server/routes/onboarding.rs:17`
   - `src/server/routes/kanban.rs:16`
   - `src/server/routes/review_verdict/verdict_route.rs:8`
-  - `src/server/routes/review_verdict/decision_route/repo_card.rs:38` (the
+  - `src/services/review_decision/repo_card.rs:38` (the
     `review_state_db` stub — always `None` since #1384; relocated from the
-    former `decision_route.rs` monolith in the #3038 slice-1 split)
+    former `decision_route.rs` monolith in the #3038 slice-1 split and S1
+    service relocation)
   - Plus the engine-side definition `src/engine/mod.rs:436`:
     `pub(crate) fn legacy_db(&self) -> Option<&Db>`.
   - Server-side reads at `src/server/mod.rs:158`, `:365`, `:376`.
