@@ -23,6 +23,7 @@ mod manual_delivery;
 mod provider_probe;
 mod recovery;
 mod redaction;
+mod relay_auto_heal;
 mod runtime_resolve;
 mod send_api;
 mod send_gate;

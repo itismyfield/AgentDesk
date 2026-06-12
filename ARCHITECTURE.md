@@ -400,6 +400,7 @@ src/
 │   │   │   ├── provider_probe.rs
 │   │   │   ├── recovery.rs
 │   │   │   ├── redaction.rs
+│   │   │   ├── relay_auto_heal.rs
 │   │   │   ├── runtime_resolve.rs
 │   │   │   ├── send_api.rs
 │   │   │   ├── send_gate.rs
