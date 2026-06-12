@@ -50,8 +50,7 @@ use super::tmux_restart_handoff::{
 use super::{
     SharedData, TmuxWatcherHandle, TmuxWatcherRegistry, lock_tmux_watcher_registry, rate_limit_wait,
 };
-// Keep the extracted lifecycle code as a tmux child module until the remaining
-// watcher helpers it calls are split out of this file.
+// Extracted lifecycle code stays a tmux child module until its callers split out.
 #[path = "tmux_reattach_offsets.rs"]
 mod tmux_reattach_offsets;
 #[path = "tmux_session_files.rs"]
@@ -60,6 +59,7 @@ mod tmux_session_files;
 mod watcher_lifecycle;
 
 use self::tmux_reattach_offsets::matching_recent_watcher_reattach_offset;
+pub(in crate::services::discord) use self::tmux_session_files::committed_frontier_for_current_generation;
 pub(super) use self::tmux_session_files::read_generation_file_mtime_ns;
 pub(in crate::services::discord) use self::tmux_session_files::reset_relay_watermark_on_generation_change;
 pub(in crate::services::discord) use self::tmux_session_files::reset_stale_relay_watermark_if_output_regressed;

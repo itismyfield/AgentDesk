@@ -8,7 +8,7 @@
 > [`docs/generated/giant-file-registry.md`](../generated/giant-file-registry.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-06-12 (against #3089 completion-footer slice — `tmux.rs` suppression exposure tests now strip completion-only footer blocks so internal turns still delete cleanly; generated inventory includes the new `placeholder_live_events/completion_footer.rs` renderer module, and round 2 adds idle-animation TTL/failure-eviction/recovery-takeover forget; on top of #3038 run_bot S5 closing pass).
+> Last refreshed: 2026-06-13 (against #3358 round 2 — synthetic-inflight carry-forward now gated on same-generation evidence: `tmux.rs` re-exports the new `committed_frontier_for_current_generation` reader from `tmux_session_files.rs`, which pairs the per-channel committed watermark with the `.generation` mtime wrapper-identity signal so a stale pre-restart frontier cannot clamp a freshly-reset synthetic forward — the content-skip guard; `tui_prompt_relay.rs::synthetic_start_offset_carry_forward` now takes `Option<u64>` where `None` means no clamp. On top of #3089 completion-footer slice — `tmux.rs` suppression exposure tests strip completion-only footer blocks so internal turns still delete cleanly; generated inventory includes `placeholder_live_events/completion_footer.rs`; on top of #3038 run_bot S5 closing pass).
 
 ## Read This First
 

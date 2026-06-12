@@ -1284,6 +1284,27 @@ async fn finish_tui_direct_synthetic_pre_save_failure(
     let _ = super::mailbox_finish_turn(shared, provider, channel_id).await;
 }
 
+/// #3358 — offset-authority handover for synthetic inflight creation.
+///
+/// A synthetic is born at the lagging `relay_last_offset()`; when that lags the
+/// watcher's delivered frontier (#3017), a later same-identity re-claim re-seeds
+/// the row backward → trips the monotonicity guards (the incident). CARRY-FORWARD
+/// the frontier so the synthetic is born at/above every delivered byte.
+///
+/// #3358 round 2 — GATED: `committed_relay_offset` is `Some` ONLY when the gating
+/// accessor proved the watermark belongs to the CURRENT wrapper. After a restart
+/// the stream resets to 0; a stale PREVIOUS-generation watermark must NOT clamp
+/// forward — that marks future bytes below it as delivered → CONTENT SKIP (worse
+/// than the original ERROR-only bug). On mismatch the frontier is `None` and we
+/// fall back to pre-fix seeding (`relay_last_offset` only): the rare monotonicity
+/// ERROR beats a skip, and backward writes outside this handover stay guarded.
+pub(in crate::services::discord) fn synthetic_start_offset_carry_forward(
+    relay_last_offset: u64,
+    committed_relay_offset: Option<u64>,
+) -> u64 {
+    relay_last_offset.max(committed_relay_offset.unwrap_or(0))
+}
+
 async fn claim_tui_direct_synthetic_turn(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -1302,10 +1323,31 @@ async fn claim_tui_direct_synthetic_turn(
         channel_id,
         binding.as_ref(),
     );
-    let start_offset = binding
+    let relay_last_offset = binding
         .as_ref()
         .map(crate::services::tui_prompt_dedupe::TuiRuntimeBinding::relay_last_offset)
         .unwrap_or(0);
+    // #3358 round 2: carry the committed frontier forward, but ONLY for the
+    // CURRENT wrapper generation (stale → `None` → no content skip).
+    let committed_relay_offset = super::tmux::committed_frontier_for_current_generation(
+        shared,
+        channel_id,
+        tmux_session_name,
+    );
+    let start_offset =
+        synthetic_start_offset_carry_forward(relay_last_offset, committed_relay_offset);
+    if start_offset > relay_last_offset {
+        tracing::info!(
+            provider = %provider.as_str(),
+            channel_id = channel_id.get(),
+            tmux_session_name = %tmux_session_name,
+            anchor_message_id = anchor_message_id.get(),
+            relay_last_offset,
+            committed_relay_offset = committed_relay_offset.unwrap_or(0),
+            start_offset,
+            "#3358 synthetic inflight offset-authority handover: carried committed relay frontier forward"
+        );
+    }
     let relay_owner = if tui_direct_watcher_can_own_output(
         &shared.tmux_watchers,
         tmux_session_name,
@@ -8817,6 +8859,75 @@ mod tests {
             clamp_idle_tail_start_offset_to_committed(800, 300),
             800,
             "a lagging committed offset must not drag the start offset backwards"
+        );
+    }
+
+    // #3358: a new synthetic inflight whose `relay_last_offset()` LAGS the
+    // watcher's committed frontier must be born at/above that frontier so a
+    // later same-identity re-claim cannot regress `turn_start_offset` /
+    // `last_offset` below already-delivered bytes (the monotonicity ERROR triple).
+    // The committed frontier is `Some(..)` here because the caller validated it
+    // against the CURRENT wrapper generation (see the generation-mismatch test).
+    #[test]
+    fn synthetic_start_offset_carries_committed_frontier_forward() {
+        // relay_last_offset lags (2821677) the watcher committed end (2838484):
+        // born at the committed frontier so no backward re-seed is possible.
+        assert_eq!(
+            synthetic_start_offset_carry_forward(2_821_677, Some(2_838_484)),
+            2_838_484,
+            "lagging relay_last_offset must carry the committed frontier forward"
+        );
+        // Equal frontier → unchanged (born exactly at the committed end).
+        assert_eq!(
+            synthetic_start_offset_carry_forward(2_838_484, Some(2_838_484)),
+            2_838_484
+        );
+    }
+
+    // #3358 round 2 — Finding 1 guard: a STALE committed watermark from a
+    // PREVIOUS wrapper generation must NOT clamp the synthetic forward. The
+    // caller proves same-generation identity and passes `None` on mismatch, so
+    // the helper falls back to `relay_last_offset` only. This is the content-skip
+    // prevention: after a wrapper restart the stream resets to 0 and the new
+    // synthetic must be born at its own (lagging) relay cursor, NOT lifted over a
+    // stale frontier that would mark future bytes as already delivered.
+    #[test]
+    fn synthetic_start_offset_no_clamp_on_generation_mismatch() {
+        // Generation mismatch → caller passes `None`: pre-fix seeding
+        // (`relay_last_offset` only), even though a stale watermark (2838484) was
+        // numerically higher. The rare monotonicity ERROR here is preferable to a
+        // content skip (see helper doc).
+        assert_eq!(
+            synthetic_start_offset_carry_forward(2_821_677, None),
+            2_821_677,
+            "a generation-mismatched (stale) watermark must NOT clamp the synthetic forward"
+        );
+        // Fresh stream reset to 0 after restart, stale watermark unproven → birth
+        // stays at 0, so the watcher walks the new generation from the head.
+        assert_eq!(
+            synthetic_start_offset_carry_forward(0, None),
+            0,
+            "a fresh post-restart stream must not be lifted over a stale frontier (content skip)"
+        );
+    }
+
+    // #3358 genuine-regression guard: the carry-forward is BOUNDED to the
+    // synthetic-creation handover — it never DRAGS a healthy start offset
+    // backwards, and a missing/lagging committed frontier (outage / no confirmed
+    // delivery) leaves the relay_last_offset intact so the invariants still catch
+    // real backward writes elsewhere.
+    #[test]
+    fn synthetic_start_offset_carry_forward_never_regresses() {
+        // committed unprovable/absent (`None`) → no-op.
+        assert_eq!(
+            synthetic_start_offset_carry_forward(2_821_677, None),
+            2_821_677
+        );
+        // committed lags relay_last_offset → must NOT pull the start backwards.
+        assert_eq!(
+            synthetic_start_offset_carry_forward(900, Some(300)),
+            900,
+            "a lagging committed frontier must never drag the synthetic start backwards"
         );
     }
 

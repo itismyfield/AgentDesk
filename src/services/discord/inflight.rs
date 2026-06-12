@@ -3952,6 +3952,194 @@ mod stall_recovery_tests {
         assert_eq!(loaded[0].last_offset, 200);
     }
 
+    // #3358: pin the EXACT incident at the save level. The synthetic inflight's
+    // birth offset is the relay-cursor base AND the `turn_start_offset` identity
+    // key (`InflightTurnState::new`: turn_start_offset == last_offset, rso == 0).
+    //
+    // The on-disk row carries the watcher's COMMITTED frontier as last_offset
+    // (the watcher is the single authority — #3017 `confirmed_end_offset`). When
+    // the synthetic re-claims/refreshes the row, it writes its BIRTH offset back:
+    //   * Pre-fix: birth == lagging `relay_last_offset()` (2821677) < committed
+    //     frontier (2838484). Same identity (the watcher row is still keyed by
+    //     this turn's anchor + this birth turn_start_offset) → BACKWARD write →
+    //     the `last_offset` + `response_sent_offset` monotonicity guards fire (the
+    //     incident's ERROR triple). This is the REPRODUCE witness.
+    //   * Post-fix: `synthetic_start_offset_carry_forward` births the synthetic at
+    //     the committed frontier (2838484) — equal to the on-disk last_offset, so
+    //     the re-claim is a forward/equal write and NO invariant fires.
+    fn build_synth_3358(birth: u64) -> InflightTurnState {
+        InflightTurnState::new(
+            ProviderKind::Claude,
+            321,
+            Some("adk-cc".to_string()),
+            1,
+            1_514_752_860_691_370_014, // synthetic user_msg_id (anchor id)
+            9002,
+            "new synthetic prompt".to_string(),
+            None,
+            Some("AgentDesk-claude-adk-cc".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            birth,
+        )
+    }
+
+    /// #3358: the two monotonicity tests catch panics via `catch_unwind` while
+    /// sharing the process-global panic hook with every parallel test thread —
+    /// serialize them so a sibling's hook traffic cannot interleave (rare
+    /// parallel-run flake observed on loaded machines).
+    fn monotonic_3358_test_mutex() -> &'static std::sync::Mutex<()> {
+        static M: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        M.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    #[test]
+    fn synthetic_lagging_birth_reproduces_backward_regression_3358() {
+        let _serialized = monotonic_3358_test_mutex()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        // REPRODUCE: a lagging birth re-claim over the committed frontier is a
+        // same-identity backward write that trips the monotonicity guard. This is
+        // the pre-fix incident; it MUST still be flagged so the guard's protective
+        // value is preserved for genuine regressions.
+        let temp = TempDir::new().unwrap();
+        let relay_last_offset: u64 = 2_821_677; // lagging birth (pre-fix).
+        let committed_frontier: u64 = 2_838_484; // watcher confirmed delivery.
+
+        // On-disk row: SAME identity as the lagging birth, last_offset already at
+        // the committed frontier (the watcher advanced it forward).
+        let mut on_disk = build_synth_3358(relay_last_offset);
+        on_disk.full_response = "X".repeat(20_000);
+        on_disk.response_sent_offset = 18_000;
+        on_disk.last_offset = committed_frontier;
+        save_inflight_state_in_root(temp.path(), &on_disk).unwrap();
+
+        // Lagging-birth re-claim: turn_start_offset == last_offset == lagging
+        // (2821677), rso == 0 — BACKWARD vs the committed frontier, same identity.
+        let lagging_reseed = build_synth_3358(relay_last_offset);
+        assert_eq!(lagging_reseed.turn_start_offset, Some(relay_last_offset));
+        let lag = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            validate_inflight_state_for_save(
+                temp.path(),
+                &inflight_state_path(temp.path(), &ProviderKind::Claude, 321),
+                &lagging_reseed,
+                "src/services/discord/inflight.rs:test",
+            );
+        }));
+        assert!(
+            lag.is_err() || cfg!(not(debug_assertions)),
+            "lagging-birth re-claim must trip the monotonicity guard (incident + genuine-regression witness)"
+        );
+    }
+
+    #[test]
+    fn synthetic_carry_forward_keeps_reclaim_monotonic_3358() {
+        let _serialized = monotonic_3358_test_mutex()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        // FIX: birth carried up to the committed frontier → re-claim is forward/
+        // equal, ZERO invariant violations, offsets end at the frontier.
+        let temp = TempDir::new().unwrap();
+        let relay_last_offset: u64 = 2_821_677;
+        let committed_frontier: u64 = 2_838_484;
+        // Drive the ACTUAL production carry-forward helper (not an inline copy) so
+        // this green test honestly tracks the production wiring — if the helper
+        // regressed, `carried` would no longer reach the frontier and the
+        // monotonicity assertions below would fail. The frontier is `Some(..)`
+        // because the watcher advanced it WITHIN this same wrapper generation (the
+        // claim choke-point validates that before clamping — #3358 round 2).
+        let carried =
+            crate::services::discord::tui_prompt_relay::synthetic_start_offset_carry_forward(
+                relay_last_offset,
+                Some(committed_frontier),
+            );
+        assert_eq!(
+            carried, committed_frontier,
+            "carry-forward must lift birth to the frontier"
+        );
+
+        let mut on_disk = build_synth_3358(carried);
+        on_disk.full_response = "X".repeat(20_000);
+        on_disk.response_sent_offset = 18_000;
+        on_disk.last_offset = committed_frontier;
+        save_inflight_state_in_root(temp.path(), &on_disk).unwrap();
+
+        // Carried-birth re-claim: turn_start_offset == last_offset == frontier,
+        // rso == 0. The rso 0 is NOT a regression because the identity key matches
+        // (same turn) and `response_sent_offset_monotonic` only flags within-turn
+        // backward moves AFTER bytes were sent — here the re-claim's last_offset
+        // equals the on-disk frontier (forward/equal) and rso reset is the
+        // documented fresh-claim seed. Assert last_offset never regresses below
+        // the committed frontier.
+        let carried_reseed = build_synth_3358(carried);
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Drive the enforcing watermark path: a carried-birth refresh writes
+            // last_offset == committed_frontier — forward/equal, accepted.
+            refresh_inflight_last_offset_if_matches_identity_in_root(
+                temp.path(),
+                &ProviderKind::Claude,
+                321,
+                &InflightTurnIdentity::from_state(&carried_reseed),
+                carried_reseed.turn_start_offset,
+                "/tmp/out.jsonl",
+                Some(carried_reseed.current_msg_id),
+                committed_frontier,
+                RelayOwnerKind::Watcher,
+            )
+        }));
+        assert!(res.is_ok(), "carried-birth refresh must not panic");
+        assert!(
+            res.unwrap(),
+            "carried-birth watermark write is forward/equal — accepted"
+        );
+        let loaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].last_offset, committed_frontier,
+            "offsets end at the committed frontier, never regressed"
+        );
+    }
+
+    #[test]
+    fn synthetic_carry_forward_skipped_on_generation_mismatch_3358() {
+        // #3358 round 2 — Finding 1 guard, at the production-helper level.
+        //
+        // After a tmux wrapper RESTART the output stream legitimately resets to
+        // offset 0. The committed watermark from the PREVIOUS generation is stale;
+        // the claim choke-point detects the generation mismatch and passes `None`
+        // for the committed frontier. The helper MUST then fall back to the
+        // synthetic's own (lagging) birth offset — NOT lift it over the stale
+        // watermark, which would treat future bytes below that watermark as
+        // already delivered (CONTENT SKIP, strictly worse than the original
+        // ERROR-only bug). On HEAD (helper took a bare `u64` and always clamped)
+        // there was no way to express "stale → do not clamp", so this guard
+        // failed.
+        let relay_last_offset: u64 = 100; // fresh post-restart birth (lagging).
+        let stale_frontier: u64 = 2_838_484; // pre-restart, NUMERICALLY higher.
+
+        // Generation mismatch → `None`: NO clamp, born at its own cursor.
+        let birth =
+            crate::services::discord::tui_prompt_relay::synthetic_start_offset_carry_forward(
+                relay_last_offset,
+                None,
+            );
+        assert_eq!(
+            birth, relay_last_offset,
+            "a stale (different-generation) watermark must NOT clamp the new synthetic forward"
+        );
+
+        // Same generation → `Some(..)`: clamp DOES carry the frontier forward.
+        let same_gen_birth =
+            crate::services::discord::tui_prompt_relay::synthetic_start_offset_carry_forward(
+                relay_last_offset,
+                Some(stale_frontier),
+            );
+        assert_eq!(
+            same_gen_birth, stale_frontier,
+            "a same-generation committed frontier must still carry forward (the #3358 fix)"
+        );
+    }
+
     #[test]
     fn identity_heartbeat_refresh_advances_forward_offset_same_identity() {
         // #3017 I6: a forward watermark write for the same identity advances.

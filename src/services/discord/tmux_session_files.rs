@@ -217,6 +217,58 @@ pub(super) fn watermark_after_output_regression(
     if same_wrapper { observed_output_end } else { 0 }
 }
 
+/// #3358 round 2 — gate the committed relay frontier on same-generation identity
+/// for the synthetic-inflight carry-forward. Returns `Some(committed)` ONLY when
+/// the watermark provably belongs to the CURRENT wrapper instance: it is non-zero
+/// AND its `confirmed_end_generation_mtime_ns` snapshot equals the live
+/// `.generation` mtime (both non-zero) — the same wrapper-identity rule
+/// `watermark_after_output_regression` / `reset_relay_watermark_on_generation_change`
+/// use. On a generation mismatch (post-restart) or unprovable identity it returns
+/// `None`, so a STALE frontier never clamps a freshly-reset synthetic forward (the
+/// content-skip risk). Pure for unit testing.
+pub(super) fn committed_frontier_for_same_generation(
+    committed_offset: u64,
+    stored_generation_mtime_ns: i64,
+    current_generation_mtime_ns: i64,
+) -> Option<u64> {
+    let same_wrapper = committed_offset != 0
+        && stored_generation_mtime_ns != 0
+        && current_generation_mtime_ns != 0
+        && stored_generation_mtime_ns == current_generation_mtime_ns;
+    same_wrapper.then_some(committed_offset)
+}
+
+/// #3358 round 2 — read the committed relay frontier for `channel_id`, gated on
+/// same-generation identity (`committed_frontier_for_same_generation`). `Some`
+/// only when the watermark belongs to the CURRENT wrapper for `tmux_session_name`,
+/// else `None` (the synthetic carry-forward's sole input — see
+/// `synthetic_start_offset_carry_forward`).
+pub(in crate::services::discord) fn committed_frontier_for_current_generation(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+) -> Option<u64> {
+    use std::sync::atomic::Ordering::Acquire;
+    let coord = shared.tmux_relay_coord(channel_id);
+    // #3358 r2 review P1 (TOCTOU): the (offset, generation) pair lives in two
+    // atomics — a concurrent commit between the loads could pair an OLD offset
+    // with the NEW wrapper's generation stamp and resurrect the stale clamp.
+    // Double-read fence: the generation stamp must agree on both sides of the
+    // offset load; a mid-transition mismatch returns None (no clamp — the
+    // content-skip-safe direction, same tradeoff as the stale-generation path).
+    let generation_before = coord.confirmed_end_generation_mtime_ns.load(Acquire);
+    let committed_offset = coord.confirmed_end_offset.load(Acquire);
+    let generation_after = coord.confirmed_end_generation_mtime_ns.load(Acquire);
+    if generation_before != generation_after {
+        return None;
+    }
+    committed_frontier_for_same_generation(
+        committed_offset,
+        generation_after,
+        read_generation_file_mtime_ns(tmux_session_name),
+    )
+}
+
 /// Reset the shared relay watermark when the `.generation` mtime has CHANGED
 /// since the watermark was committed (#3016 #3017 codex r6/r7). This is the
 /// "different wrapper → reset to 0" case that
@@ -497,5 +549,38 @@ pub(super) async fn sweep_orphan_session_files() {
             swept,
             dir.display()
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // #3358 round 2 — Finding 1 guard at the pure-decision level.
+    #[test]
+    fn committed_frontier_gated_on_same_generation() {
+        // Same generation (both non-zero, equal) → carries the frontier.
+        assert_eq!(
+            committed_frontier_for_same_generation(2_838_484, 42, 42),
+            Some(2_838_484),
+            "a same-generation watermark must be eligible to carry forward"
+        );
+        // Generation mismatch (post-restart) → None: stale watermark must NOT clamp.
+        assert_eq!(
+            committed_frontier_for_same_generation(2_838_484, 42, 99),
+            None,
+            "a different-generation (stale) watermark must NOT be carried forward"
+        );
+        // Unprovable identity: either mtime 0 → None.
+        assert_eq!(
+            committed_frontier_for_same_generation(2_838_484, 0, 42),
+            None
+        );
+        assert_eq!(
+            committed_frontier_for_same_generation(2_838_484, 42, 0),
+            None
+        );
+        // No committed delivery yet (offset 0) → None even if generations match.
+        assert_eq!(committed_frontier_for_same_generation(0, 42, 42), None);
     }
 }
