@@ -88,7 +88,10 @@
 "src/services/discord/tui_prompt_relay.rs" = 5429
 # #3038: lowered 4728 -> 4657 (-71) as `SensitivityState` (definition + impl)
 # moved to the `voice_sensitivity` sibling module. Locks in the shrink win.
-"src/services/discord/voice_barge_in.rs" = 4657
+# #3038 VoiceBargeInRuntime S1: lowered 4657 -> 4350 (-307) as the STT
+# method cluster moved to `voice_barge_in/stt.rs` (314 prod LoC, below the
+# giant threshold). Locks in the shrink win.
+"src/services/discord/voice_barge_in.rs" = 4350
 # #3248: +60 for the gap-1 deploy-survivable-relay fix —
 # `reseed_watcher_owned_finalizer_ledger` + two guarded reattach call-sites that
 # re-register the watcher-owned turn in the post-restart finalizer ledger (a P1

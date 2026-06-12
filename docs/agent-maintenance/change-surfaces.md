@@ -799,16 +799,13 @@
     was removed from `giant_file_registry.toml`; #3038 S5 locked the final
     root ratchet at 274 production lines).
   - `src/services/discord/session_runtime.rs` (1753 lines).
-  - `src/services/discord/voice_barge_in.rs` (4657 lines; net +0 from #3034
-    scoped dead-code allows on the test-only runtime API
-    (`disabled` / `runtime_config_snapshot` / `apply_voice_command` /
-    `reset_after_playback_start` / `clear_playback`) — the five added `#[allow]`
-    lines were offset by collapsing their reason comments to inline form and
-    rewrapping adjacent doc comments, so the file stays at its frozen baseline;
-    voice STT/TTS,
-    lobby routing, progress mirroring, and barge-in orchestration surface;
-    tracked decompose target — see `giant-file-registry.md` (owner
-    `voice-runtime`, deadline 2026-08-31, #3036)).
+  - `src/services/discord/voice_barge_in.rs` (4350 lines after #3038
+    VoiceBargeInRuntime S1 moved the STT method cluster to
+    `src/services/discord/voice_barge_in/stt.rs` (314 production lines);
+    voice STT/TTS, lobby routing, progress mirroring, and barge-in
+    orchestration surface; tracked decompose target — see
+    `giant-file-registry.md` (owner `voice-runtime`, deadline 2026-08-31,
+    #3036)).
   - `src/voice/receiver.rs` (1052 lines; voice receive pipeline, utterance
     segmentation, artifact cleanup, and retention policy surface; split before
     adding non-bugfix behavior).

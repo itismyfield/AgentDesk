@@ -521,6 +521,8 @@ src/
 │   │   │   └── watcher_handoff.rs
 │   │   ├── turn_finalizer/
 │   │   │   └── cleanup.rs
+│   │   ├── voice_barge_in/
+│   │   │   └── stt.rs
 │   │   ├── watchers/
 │   │   │   ├── lifecycle.rs
 │   │   │   └── lifecycle_decision.rs
