@@ -168,6 +168,59 @@ pub(in crate::services::discord) fn enqueue(
     enqueue_in_root(&root, provider, token_hash, channel_id, panel_msg_id);
 }
 
+fn should_record_separate_status_panel_orphan_for_flags(
+    single_message_panel_enabled: bool,
+    status_panel_v2_enabled: bool,
+) -> bool {
+    super::single_message_panel::separate_status_panel_enabled_for_flags(
+        single_message_panel_enabled,
+        status_panel_v2_enabled,
+    )
+}
+
+fn enqueue_separate_status_panel_orphan_in_root_for_flags(
+    root: &Path,
+    single_message_panel_enabled: bool,
+    status_panel_v2_enabled: bool,
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    panel_msg_id: u64,
+) {
+    if !should_record_separate_status_panel_orphan_for_flags(
+        single_message_panel_enabled,
+        status_panel_v2_enabled,
+    ) {
+        return;
+    }
+    enqueue_in_root(root, provider, token_hash, channel_id, panel_msg_id);
+}
+
+/// Record a same-run separate status-panel orphan. Footer-mode turns never own a
+/// separate status panel, so they must not grow this store. Transition cleanup
+/// for stale flag-off panels uses the raw [`enqueue`] after an attempted sweeper
+/// delete, because those are real legacy panel messages that still need retry.
+pub(in crate::services::discord) fn enqueue_separate_status_panel_orphan(
+    status_panel_v2_enabled: bool,
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    panel_msg_id: u64,
+) {
+    let Some(root) = runtime_store::discord_status_panel_orphans_root() else {
+        return;
+    };
+    enqueue_separate_status_panel_orphan_in_root_for_flags(
+        &root,
+        super::single_message_panel_enabled(),
+        status_panel_v2_enabled,
+        provider,
+        token_hash,
+        channel_id,
+        panel_msg_id,
+    );
+}
+
 /// All pending `(channel_id, panel_msg_id)` records for this bot.
 pub(in crate::services::discord) fn load_pending(
     provider: &ProviderKind,
@@ -544,6 +597,38 @@ mod tests {
         assert_eq!(
             load_pending_in_root(root, &provider, "bot_b"),
             vec![(100, 6001)]
+        );
+    }
+
+    #[test]
+    fn footer_mode_status_panel_orphan_enqueue_is_noop_at_store_api() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let root = root.path();
+        let provider = ProviderKind::Claude;
+
+        enqueue_separate_status_panel_orphan_in_root_for_flags(
+            root, true, true, &provider, "tok", 100, 5001,
+        );
+
+        assert!(
+            load_pending_in_root(root, &provider, "tok").is_empty(),
+            "flag-on footer-mode turns must not create panel orphan records"
+        );
+    }
+
+    #[test]
+    fn flag_off_status_panel_orphan_enqueue_preserves_original_store_behavior() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let root = root.path();
+        let provider = ProviderKind::Claude;
+
+        enqueue_separate_status_panel_orphan_in_root_for_flags(
+            root, false, true, &provider, "tok", 100, 5001,
+        );
+
+        assert_eq!(
+            load_pending_in_root(root, &provider, "tok"),
+            vec![(100, 5001)]
         );
     }
 }

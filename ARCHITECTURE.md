@@ -441,6 +441,8 @@ src/
 │   │   │   ├── memory_guidance.rs
 │   │   │   ├── mod.rs
 │   │   │   └── section_dedupe.rs
+│   │   ├── recovery_engine/
+│   │   │   └── status_panel.rs
 │   │   ├── recovery_paths/
 │   │   │   ├── mod.rs
 │   │   │   ├── restart.rs

@@ -25,6 +25,9 @@ use std::path::Path;
 #[cfg(unix)]
 use std::process::Command;
 
+#[path = "recovery_engine/status_panel.rs"]
+mod recovery_status_panel;
+
 #[cfg(not(unix))]
 fn tmux_session_has_live_pane(_name: &str) -> bool {
     false
@@ -429,9 +432,14 @@ async fn complete_recovery_visible_turn(
     );
     let started_at_unix = super::inflight::parse_started_at_unix(&state.started_at)
         .unwrap_or_else(|| chrono::Utc::now().timestamp());
-    let persisted_inflight = super::inflight::load_inflight_state(provider, channel_id.get());
-    let status_msg_id =
-        recovery_status_panel_message_id_for_completion(state, persisted_inflight.as_ref());
+    let Some(status_msg_id) = recovery_status_panel::completion_target(
+        shared.status_panel_v2_enabled,
+        state,
+        provider,
+        channel_id,
+    ) else {
+        return RecoveryCompletionOutcome::Emitted;
+    };
 
     // EPIC #3078 PR-2 — route recovery completion through the
     // `StatusPanelController` behind a parity check (shadow mode). The
@@ -472,27 +480,6 @@ async fn complete_recovery_visible_turn(
     )
     .await;
     RecoveryCompletionOutcome::Emitted
-}
-
-fn recovery_status_panel_message_id_for_completion(
-    state: &super::inflight::InflightTurnState,
-    persisted: Option<&super::inflight::InflightTurnState>,
-) -> Option<MessageId> {
-    persisted
-        .and_then(|inflight| {
-            if inflight.user_msg_id == state.user_msg_id {
-                super::turn_bridge::normalize_status_panel_message_id(
-                    inflight.status_message_id.map(MessageId::new),
-                )
-            } else {
-                None
-            }
-        })
-        .or_else(|| {
-            super::turn_bridge::normalize_status_panel_message_id(
-                state.status_message_id.map(MessageId::new),
-            )
-        })
 }
 
 /// EPIC #3078 PR-2 — the parity gate between the legacy recovery
@@ -537,8 +524,7 @@ mod recovery_dispatch_gate_tests {
 #[cfg(test)]
 mod recovery_completion_outcome_tests {
     use super::{
-        RecoveryCompletionOutcome, assert_recovery_completion_parity,
-        recovery_status_panel_message_id_for_completion,
+        RecoveryCompletionOutcome, assert_recovery_completion_parity, recovery_status_panel,
     };
     use crate::services::provider::ProviderKind;
 
@@ -580,7 +566,7 @@ mod recovery_completion_outcome_tests {
         persisted.status_message_id = Some(4004);
 
         let status_msg_id =
-            recovery_status_panel_message_id_for_completion(&snapshot, Some(&persisted));
+            recovery_status_panel::message_id_for_completion(&snapshot, Some(&persisted));
 
         assert_eq!(status_msg_id, Some(super::MessageId::new(4004)));
     }
@@ -593,9 +579,60 @@ mod recovery_completion_outcome_tests {
         persisted.status_message_id = Some(4004);
 
         let status_msg_id =
-            recovery_status_panel_message_id_for_completion(&snapshot, Some(&persisted));
+            recovery_status_panel::message_id_for_completion(&snapshot, Some(&persisted));
 
         assert_eq!(status_msg_id, Some(super::MessageId::new(3003)));
+    }
+
+    #[test]
+    fn footer_mode_skips_recovery_status_panel_completion_for_stale_persisted_id() {
+        let mut snapshot = state_for_recovery(9101);
+        snapshot.status_message_id = Some(3003);
+        let mut persisted = state_for_recovery(9101);
+        persisted.status_message_id = Some(4004);
+
+        let target = recovery_status_panel::completion_target_for_flags(
+            true,
+            true,
+            &snapshot,
+            Some(&persisted),
+        );
+
+        assert_eq!(
+            target, None,
+            "footer mode must not edit or SendFallback a separate recovery panel; the stale id is left for sweeper reclaim"
+        );
+    }
+
+    #[test]
+    fn flag_off_recovery_status_panel_completion_keeps_original_target() {
+        let mut snapshot = state_for_recovery(9101);
+        snapshot.status_message_id = Some(3003);
+        let mut persisted = state_for_recovery(9101);
+        persisted.status_message_id = Some(4004);
+
+        let target = recovery_status_panel::completion_target_for_flags(
+            false,
+            true,
+            &snapshot,
+            Some(&persisted),
+        );
+
+        assert_eq!(target, Some(Some(super::MessageId::new(4004))));
+    }
+
+    #[test]
+    fn flag_off_recovery_none_target_still_requests_send_fallback() {
+        let snapshot = state_for_recovery(9101);
+
+        let target =
+            recovery_status_panel::completion_target_for_flags(false, true, &snapshot, None);
+
+        assert_eq!(
+            target,
+            Some(None),
+            "flag-off v2 recovery preserves the SendFallback rollback behavior when no status_message_id was persisted"
+        );
     }
 
     // EPIC #3078 PR-2: for representative recovery-completion inputs, the
@@ -615,7 +652,7 @@ mod recovery_completion_outcome_tests {
         snapshot.status_message_id = Some(3003);
         let mut persisted = state_for_recovery(9101);
         persisted.status_message_id = Some(4004);
-        let legacy = recovery_status_panel_message_id_for_completion(&snapshot, Some(&persisted));
+        let legacy = recovery_status_panel::message_id_for_completion(&snapshot, Some(&persisted));
         assert_eq!(legacy, Some(super::MessageId::new(4004)));
 
         let ctl = StatusPanelController::spawn(true);
@@ -632,7 +669,7 @@ mod recovery_completion_outcome_tests {
         // collapses onto the single live entry it adopted, choosing the same id.
         let mut snapshot0 = state_for_recovery(0);
         snapshot0.status_message_id = Some(5005);
-        let legacy0 = recovery_status_panel_message_id_for_completion(&snapshot0, None);
+        let legacy0 = recovery_status_panel::message_id_for_completion(&snapshot0, None);
         assert_eq!(legacy0, Some(super::MessageId::new(5005)));
 
         let ctl0 = StatusPanelController::spawn(true);
@@ -647,7 +684,7 @@ mod recovery_completion_outcome_tests {
 
         // Case C: no panel id at all (None) — both agree on None.
         let snapshot_none = state_for_recovery(9300);
-        let legacy_none = recovery_status_panel_message_id_for_completion(&snapshot_none, None);
+        let legacy_none = recovery_status_panel::message_id_for_completion(&snapshot_none, None);
         assert_eq!(legacy_none, None);
 
         let ctl_none = StatusPanelController::spawn(true);

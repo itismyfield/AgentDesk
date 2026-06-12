@@ -1349,12 +1349,7 @@ async fn cleanup_orphan_external_input_status_panel(
         // clear its inflight before any retry runs, leaving no per-turn handle.
         // Record the panel in the durable store so the sweeper drain reclaims it
         // independent of inflight lifecycle.
-        crate::services::discord::status_panel_orphan_store::enqueue(
-            provider,
-            &shared.token_hash,
-            channel_id.get(),
-            panel_msg_id.get(),
-        );
+        enqueue_watcher_status_panel_orphan(shared.as_ref(), provider, channel_id, panel_msg_id);
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::warn!(
             "  [{ts}] ⚠ watcher: orphan status-panel-v2 delete did not commit for channel {} panel_msg {}; kept local id + enqueued durable retry",
@@ -3459,11 +3454,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                                 // inflight, so record it in the durable store for
                                                 // the sweeper drain to reclaim independent of turn
                                                 // lifecycle (#3003 codex P2 r14 pattern).
-                                                crate::services::discord::status_panel_orphan_store::enqueue(
+                                                enqueue_watcher_status_panel_orphan(
+                                                    shared.as_ref(),
                                                     &watcher_provider,
-                                                    &shared.token_hash,
-                                                    channel_id.get(),
-                                                    panel_msg.id.get(),
+                                                    channel_id,
+                                                    panel_msg.id,
                                                 );
                                             }
                                             // Resolve the handle from the row's CURRENT owned id as
@@ -3524,11 +3519,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                             // #3003 (codex P2 r14): transient delete failure but the
                                             // duplicate exists and this path never persists it —
                                             // record it for the sweeper drain to reclaim.
-                                            crate::services::discord::status_panel_orphan_store::enqueue(
+                                            enqueue_watcher_status_panel_orphan(
+                                                shared.as_ref(),
                                                 &watcher_provider,
-                                                &shared.token_hash,
-                                                channel_id.get(),
-                                                panel_msg.id.get(),
+                                                channel_id,
+                                                panel_msg.id,
                                             );
                                             // #3003 (codex P2 r19/r22): adopt the CANONICAL persisted
                                             // panel ONLY for a same-turn overlapping-watcher duplicate
@@ -6887,11 +6882,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         // path, dropping the only handle to the panel that is still stuck at
                         // the processing state. Enqueue it in the durable store so the sweeper
                         // drain reclaims (deletes) it independent of inflight lifecycle.
-                        crate::services::discord::status_panel_orphan_store::enqueue(
+                        enqueue_watcher_status_panel_orphan(
+                            shared.as_ref(),
                             &watcher_provider,
-                            &shared.token_hash,
-                            channel_id.get(),
-                            panel_msg_id.get(),
+                            channel_id,
+                            panel_msg_id,
                         );
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         tracing::warn!(

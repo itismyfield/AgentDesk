@@ -174,6 +174,21 @@ pub(super) fn watcher_should_create_external_input_status_panel(
     status_panel_v2_enabled && !status_panel_present && inflight_represents_external_input
 }
 
+pub(super) fn enqueue_watcher_status_panel_orphan(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    panel_msg_id: serenity::MessageId,
+) {
+    crate::services::discord::status_panel_orphan_store::enqueue_separate_status_panel_orphan(
+        shared.status_panel_v2_enabled,
+        provider,
+        &shared.token_hash,
+        channel_id.get(),
+        panel_msg_id.get(),
+    );
+}
+
 /// #3003 (codex P2): a status-panel-v2 message already persisted on the
 /// matching-session inflight row that the restore seed could not re-hydrate.
 ///

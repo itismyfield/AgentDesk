@@ -33,6 +33,12 @@ pub(in crate::services::discord) fn separate_status_panel_enabled_for_flags(
         && !footer_mode_enabled(single_message_panel_enabled, status_panel_v2_enabled)
 }
 
+pub(in crate::services::discord) fn separate_status_panel_enabled(
+    status_panel_v2_enabled: bool,
+) -> bool {
+    separate_status_panel_enabled_for_flags(enabled(), status_panel_v2_enabled)
+}
+
 pub(in crate::services::discord) fn live_events_dirty_should_force_status_update(
     live_events_dirty: bool,
     single_message_panel_footer_mode: bool,
