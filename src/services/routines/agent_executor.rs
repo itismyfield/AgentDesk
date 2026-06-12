@@ -188,128 +188,126 @@ impl RoutineAgentExecutor {
         message: &str,
         action: String,
     ) -> Result<RoutineRunOutcome> {
-        if claimed.max_retries > 0 && attempt_kind != "fallback" {
-            let retry_at = retry_next_at(0);
-            let result_json = Some(retry_scheduled_result_for_claimed(
-                &claimed,
-                failed_agent_id,
-                attempt_kind,
-                message,
-                &prompt,
-                retry_at,
-                1,
-                &checkpoint,
-                next_due_at,
-            ));
-            let scheduled = store
-                .schedule_agent_retry(
-                    &claimed.run_id,
-                    retry_at,
-                    result_json.clone(),
-                    message,
-                    Some(failed_agent_id),
-                    attempt_kind,
-                )
-                .await?;
-            if !scheduled {
-                return Err(anyhow!(
-                    "routine agent run {} was already closed before retry scheduling",
-                    claimed.run_id
-                ));
-            }
-            return Ok(RoutineRunOutcome {
-                run_id: claimed.run_id,
-                routine_id: claimed.routine_id,
-                script_ref: claimed.script_ref,
-                action,
-                status: "running".to_string(),
-                result_json,
-                error: Some(message.to_string()),
-                fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
-            });
-        }
-
-        let fallback_agent_id = claimed
-            .fallback_agent_id
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .filter(|value| *value != failed_agent_id)
-            .map(str::to_string);
-        if let Some(fallback_agent_id) = fallback_agent_id
-            && attempt_kind != "fallback"
-        {
-            match self
-                .start_turn(
-                    store,
+        match claimed_failure_recovery_plan(&claimed, failed_agent_id, attempt_kind) {
+            AgentFailureRecoveryPlan::Retry {
+                retry_count_after_increment,
+                next_retry_at: retry_at,
+            } => {
+                let result_json = Some(retry_scheduled_result_for_claimed(
                     &claimed,
-                    &fallback_agent_id,
-                    "fallback",
+                    failed_agent_id,
+                    attempt_kind,
+                    message,
                     &prompt,
-                    dm_user_id.as_deref(),
+                    retry_at,
+                    retry_count_after_increment,
                     &checkpoint,
                     next_due_at,
-                )
-                .await
-            {
-                Ok(started) if started.started => {
-                    return Ok(RoutineRunOutcome {
-                        run_id: claimed.run_id,
-                        routine_id: claimed.routine_id,
-                        script_ref: claimed.script_ref,
-                        action,
-                        status: "running".to_string(),
-                        result_json: Some(started.result_json),
-                        error: Some(message.to_string()),
-                        fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
-                    });
-                }
-                Ok(started) => {
-                    let last_result =
-                        "fallback headless command consumed without starting an agent turn";
-                    let closed = store
-                        .complete_agent_run(
-                            &claimed.run_id,
-                            Some(started.result_json.clone()),
-                            checkpoint,
-                            Some(last_result),
-                            match next_due_at {
-                                Some(value) => NextDueAtUpdate::Set(value),
-                                None => NextDueAtUpdate::Preserve,
-                            },
-                        )
-                        .await?;
-                    if !closed {
-                        return Err(anyhow!(
-                            "routine agent run {} was already closed before fallback consumed outcome",
-                            claimed.run_id
-                        ));
-                    }
-                    return Ok(RoutineRunOutcome {
-                        run_id: claimed.run_id,
-                        routine_id: claimed.routine_id,
-                        script_ref: claimed.script_ref,
-                        action,
-                        status: "succeeded".to_string(),
-                        result_json: Some(started.result_json),
-                        error: Some(message.to_string()),
-                        fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
-                    });
-                }
-                Err(fallback_error) => {
-                    let combined = format!(
-                        "{message}; fallback agent {fallback_agent_id} failed: {fallback_error}"
-                    );
-                    return fail_claimed_agent_run(
-                        store,
-                        claimed,
-                        action,
-                        combined,
-                        Some(&fallback_agent_id),
-                        "fallback",
+                ));
+                let scheduled = store
+                    .schedule_agent_retry(
+                        &claimed.run_id,
+                        retry_at,
+                        result_json.clone(),
+                        message,
+                        Some(failed_agent_id),
+                        attempt_kind,
                     )
-                    .await;
+                    .await?;
+                if !scheduled {
+                    return Err(anyhow!(
+                        "routine agent run {} was already closed before retry scheduling",
+                        claimed.run_id
+                    ));
+                }
+                return Ok(RoutineRunOutcome {
+                    run_id: claimed.run_id,
+                    routine_id: claimed.routine_id,
+                    script_ref: claimed.script_ref,
+                    action,
+                    status: "running".to_string(),
+                    result_json,
+                    error: Some(message.to_string()),
+                    fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+                });
+            }
+            AgentFailureRecoveryPlan::Fallback {
+                agent_id: fallback_agent_id,
+            } => {
+                match self
+                    .start_turn(
+                        store,
+                        &claimed,
+                        &fallback_agent_id,
+                        "fallback",
+                        &prompt,
+                        dm_user_id.as_deref(),
+                        &checkpoint,
+                        next_due_at,
+                    )
+                    .await
+                {
+                    Ok(started) if started.started => {
+                        return Ok(RoutineRunOutcome {
+                            run_id: claimed.run_id,
+                            routine_id: claimed.routine_id,
+                            script_ref: claimed.script_ref,
+                            action,
+                            status: "running".to_string(),
+                            result_json: Some(started.result_json),
+                            error: Some(message.to_string()),
+                            fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+                        });
+                    }
+                    Ok(started) => {
+                        let last_result =
+                            "fallback headless command consumed without starting an agent turn";
+                        let closed = store
+                            .complete_agent_run(
+                                &claimed.run_id,
+                                Some(started.result_json.clone()),
+                                checkpoint,
+                                Some(last_result),
+                                match next_due_at {
+                                    Some(value) => NextDueAtUpdate::Set(value),
+                                    None => NextDueAtUpdate::Preserve,
+                                },
+                            )
+                            .await?;
+                        if !closed {
+                            return Err(anyhow!(
+                                "routine agent run {} was already closed before fallback consumed outcome",
+                                claimed.run_id
+                            ));
+                        }
+                        return Ok(RoutineRunOutcome {
+                            run_id: claimed.run_id,
+                            routine_id: claimed.routine_id,
+                            script_ref: claimed.script_ref,
+                            action,
+                            status: "succeeded".to_string(),
+                            result_json: Some(started.result_json),
+                            error: Some(message.to_string()),
+                            fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+                        });
+                    }
+                    Err(fallback_error) => {
+                        let combined = format!(
+                            "{message}; fallback agent {fallback_agent_id} failed: {fallback_error}"
+                        );
+                        return fail_claimed_agent_run(
+                            store,
+                            claimed,
+                            action,
+                            combined,
+                            Some(&fallback_agent_id),
+                            "fallback",
+                        )
+                        .await;
+                    }
                 }
             }
+            AgentFailureRecoveryPlan::Fail => {}
         }
 
         fail_claimed_agent_run(
@@ -547,136 +545,58 @@ impl RoutineAgentExecutor {
         failed_agent_id: Option<&str>,
         attempt_kind: &str,
     ) -> Result<Option<RoutineRunOutcome>> {
-        if attempt_kind != "fallback" && run.retry_count < run.max_retries {
-            let next_retry_at = retry_next_at(run.retry_count);
-            let retry_count = run.retry_count + 1;
-            let mut retry_result = result_json.unwrap_or_else(|| {
-                merge_pending_result(&run, "retry_scheduled", Some(message), None)
-            });
-            if let Some(object) = retry_result.as_object_mut() {
-                object.insert(
-                    "status".to_string(),
-                    Value::String("retry_scheduled".to_string()),
-                );
-                object.insert(
-                    "retry_count".to_string(),
-                    Value::Number(serde_json::Number::from(retry_count)),
-                );
-                object.insert(
-                    "next_retry_at".to_string(),
-                    Value::String(next_retry_at.to_rfc3339()),
-                );
-            }
-            preserve_pending_agent_state(&mut retry_result, run.result_json.as_ref());
-            let result_json = Some(retry_result);
-            let scheduled = store
-                .schedule_agent_retry(
-                    &run.run_id,
-                    next_retry_at,
-                    result_json.clone(),
-                    message,
-                    failed_agent_id,
-                    attempt_kind,
-                )
-                .await?;
-            return Ok(scheduled.then(|| RoutineRunOutcome {
-                run_id: run.run_id,
-                routine_id: run.routine_id,
-                script_ref: run.script_ref,
-                action: "agent".to_string(),
-                status: "running".to_string(),
-                result_json,
-                error: Some(message.to_string()),
-                fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
-            }));
-        }
-
-        let fallback_agent_id = run
-            .fallback_agent_id
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .filter(|value| Some(*value) != failed_agent_id)
-            .filter(|_| attempt_kind != "fallback")
-            .filter(|_| !attempts_include_fallback(&run.attempts))
-            .map(str::to_string);
-        if let Some(fallback_agent_id) = fallback_agent_id {
-            let Some(prompt) = pending_prompt(run.result_json.as_ref()).map(str::to_string) else {
-                let closed = store
-                    .fail_agent_run(&run.run_id, message, result_json.clone(), None)
+        match running_failure_recovery_plan(&run, failed_agent_id, attempt_kind) {
+            AgentFailureRecoveryPlan::Retry {
+                retry_count_after_increment: retry_count,
+                next_retry_at,
+            } => {
+                let mut retry_result = result_json.unwrap_or_else(|| {
+                    merge_pending_result(&run, "retry_scheduled", Some(message), None)
+                });
+                if let Some(object) = retry_result.as_object_mut() {
+                    object.insert(
+                        "status".to_string(),
+                        Value::String("retry_scheduled".to_string()),
+                    );
+                    object.insert(
+                        "retry_count".to_string(),
+                        Value::Number(serde_json::Number::from(retry_count)),
+                    );
+                    object.insert(
+                        "next_retry_at".to_string(),
+                        Value::String(next_retry_at.to_rfc3339()),
+                    );
+                }
+                preserve_pending_agent_state(&mut retry_result, run.result_json.as_ref());
+                let result_json = Some(retry_result);
+                let scheduled = store
+                    .schedule_agent_retry(
+                        &run.run_id,
+                        next_retry_at,
+                        result_json.clone(),
+                        message,
+                        failed_agent_id,
+                        attempt_kind,
+                    )
                     .await?;
-                return Ok(closed.then(|| RoutineRunOutcome {
+                return Ok(scheduled.then(|| RoutineRunOutcome {
                     run_id: run.run_id,
                     routine_id: run.routine_id,
                     script_ref: run.script_ref,
                     action: "agent".to_string(),
-                    status: "failed".to_string(),
+                    status: "running".to_string(),
                     result_json,
                     error: Some(message.to_string()),
                     fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
                 }));
-            };
-            let checkpoint = pending_checkpoint(run.result_json.as_ref());
-            let next_due_at = pending_next_due_at(run.result_json.as_ref());
-            let claimed = claimed_from_running_run(&run);
-            match self
-                .start_turn(
-                    store,
-                    &claimed,
-                    &fallback_agent_id,
-                    "fallback",
-                    &prompt,
-                    None,
-                    &checkpoint,
-                    next_due_at,
-                )
-                .await
-            {
-                Ok(started) if started.started => {
-                    return Ok(Some(RoutineRunOutcome {
-                        run_id: run.run_id,
-                        routine_id: run.routine_id,
-                        script_ref: run.script_ref,
-                        action: "agent".to_string(),
-                        status: "running".to_string(),
-                        result_json: Some(started.result_json),
-                        error: Some(message.to_string()),
-                        fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
-                    }));
-                }
-                Ok(started) => {
-                    let last_result =
-                        "fallback headless command consumed without starting an agent turn";
+            }
+            AgentFailureRecoveryPlan::Fallback {
+                agent_id: fallback_agent_id,
+            } => {
+                let Some(prompt) = pending_prompt(run.result_json.as_ref()).map(str::to_string)
+                else {
                     let closed = store
-                        .complete_agent_run(
-                            &run.run_id,
-                            Some(started.result_json.clone()),
-                            checkpoint,
-                            Some(last_result),
-                            match next_due_at {
-                                Some(value) => NextDueAtUpdate::Set(value),
-                                None => NextDueAtUpdate::Preserve,
-                            },
-                        )
-                        .await?;
-                    return Ok(closed.then(|| RoutineRunOutcome {
-                        run_id: run.run_id,
-                        routine_id: run.routine_id,
-                        script_ref: run.script_ref,
-                        action: "agent".to_string(),
-                        status: "succeeded".to_string(),
-                        result_json: Some(started.result_json),
-                        error: Some(message.to_string()),
-                        fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
-                    }));
-                }
-                Err(fallback_error) => {
-                    let combined = format!(
-                        "{message}; fallback agent {fallback_agent_id} failed: {fallback_error}"
-                    );
-                    let result_json =
-                        Some(merge_pending_result(&run, "failed", Some(&combined), None));
-                    let closed = store
-                        .fail_agent_run(&run.run_id, &combined, result_json.clone(), None)
+                        .fail_agent_run(&run.run_id, message, result_json.clone(), None)
                         .await?;
                     return Ok(closed.then(|| RoutineRunOutcome {
                         run_id: run.run_id,
@@ -685,11 +605,87 @@ impl RoutineAgentExecutor {
                         action: "agent".to_string(),
                         status: "failed".to_string(),
                         result_json,
-                        error: Some(combined),
+                        error: Some(message.to_string()),
                         fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
                     }));
+                };
+                let checkpoint = pending_checkpoint(run.result_json.as_ref());
+                let next_due_at = pending_next_due_at(run.result_json.as_ref());
+                let claimed = claimed_from_running_run(&run);
+                match self
+                    .start_turn(
+                        store,
+                        &claimed,
+                        &fallback_agent_id,
+                        "fallback",
+                        &prompt,
+                        None,
+                        &checkpoint,
+                        next_due_at,
+                    )
+                    .await
+                {
+                    Ok(started) if started.started => {
+                        return Ok(Some(RoutineRunOutcome {
+                            run_id: run.run_id,
+                            routine_id: run.routine_id,
+                            script_ref: run.script_ref,
+                            action: "agent".to_string(),
+                            status: "running".to_string(),
+                            result_json: Some(started.result_json),
+                            error: Some(message.to_string()),
+                            fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+                        }));
+                    }
+                    Ok(started) => {
+                        let last_result =
+                            "fallback headless command consumed without starting an agent turn";
+                        let closed = store
+                            .complete_agent_run(
+                                &run.run_id,
+                                Some(started.result_json.clone()),
+                                checkpoint,
+                                Some(last_result),
+                                match next_due_at {
+                                    Some(value) => NextDueAtUpdate::Set(value),
+                                    None => NextDueAtUpdate::Preserve,
+                                },
+                            )
+                            .await?;
+                        return Ok(closed.then(|| RoutineRunOutcome {
+                            run_id: run.run_id,
+                            routine_id: run.routine_id,
+                            script_ref: run.script_ref,
+                            action: "agent".to_string(),
+                            status: "succeeded".to_string(),
+                            result_json: Some(started.result_json),
+                            error: Some(message.to_string()),
+                            fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+                        }));
+                    }
+                    Err(fallback_error) => {
+                        let combined = format!(
+                            "{message}; fallback agent {fallback_agent_id} failed: {fallback_error}"
+                        );
+                        let result_json =
+                            Some(merge_pending_result(&run, "failed", Some(&combined), None));
+                        let closed = store
+                            .fail_agent_run(&run.run_id, &combined, result_json.clone(), None)
+                            .await?;
+                        return Ok(closed.then(|| RoutineRunOutcome {
+                            run_id: run.run_id,
+                            routine_id: run.routine_id,
+                            script_ref: run.script_ref,
+                            action: "agent".to_string(),
+                            status: "failed".to_string(),
+                            result_json,
+                            error: Some(combined),
+                            fresh_context_guaranteed: FRESH_CONTEXT_GUARANTEED,
+                        }));
+                    }
                 }
             }
+            AgentFailureRecoveryPlan::Fail => {}
         }
 
         let result_json =
@@ -1724,6 +1720,68 @@ fn attempts_include_fallback(attempts: &Value) -> bool {
         .unwrap_or(false)
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum AgentFailureRecoveryPlan {
+    Retry {
+        retry_count_after_increment: i32,
+        next_retry_at: DateTime<Utc>,
+    },
+    Fallback {
+        agent_id: String,
+    },
+    Fail,
+}
+
+fn claimed_failure_recovery_plan(
+    claimed: &ClaimedRoutineRun,
+    failed_agent_id: &str,
+    attempt_kind: &str,
+) -> AgentFailureRecoveryPlan {
+    if claimed.max_retries > 0 && attempt_kind != "fallback" {
+        return AgentFailureRecoveryPlan::Retry {
+            retry_count_after_increment: 1,
+            next_retry_at: retry_next_at(0),
+        };
+    }
+
+    claimed
+        .fallback_agent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .filter(|value| *value != failed_agent_id)
+        .filter(|_| attempt_kind != "fallback")
+        .map(|agent_id| AgentFailureRecoveryPlan::Fallback {
+            agent_id: agent_id.to_string(),
+        })
+        .unwrap_or(AgentFailureRecoveryPlan::Fail)
+}
+
+fn running_failure_recovery_plan(
+    run: &RunningAgentRoutineRun,
+    failed_agent_id: Option<&str>,
+    attempt_kind: &str,
+) -> AgentFailureRecoveryPlan {
+    if attempt_kind != "fallback" && run.retry_count < run.max_retries {
+        return AgentFailureRecoveryPlan::Retry {
+            retry_count_after_increment: run.retry_count + 1,
+            next_retry_at: retry_next_at(run.retry_count),
+        };
+    }
+
+    run.fallback_agent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .filter(|value| Some(*value) != failed_agent_id)
+        .filter(|_| attempt_kind != "fallback")
+        .filter(|_| !attempts_include_fallback(&run.attempts))
+        .map(|agent_id| AgentFailureRecoveryPlan::Fallback {
+            agent_id: agent_id.to_string(),
+        })
+        .unwrap_or(AgentFailureRecoveryPlan::Fail)
+}
+
 fn claimed_from_running_run(run: &RunningAgentRoutineRun) -> ClaimedRoutineRun {
     ClaimedRoutineRun {
         run_id: run.run_id.clone(),
@@ -1908,6 +1966,23 @@ mod tests {
         }
     }
 
+    fn claimed_run() -> ClaimedRoutineRun {
+        ClaimedRoutineRun {
+            run_id: "run-1".to_string(),
+            routine_id: "routine-1".to_string(),
+            agent_id: Some("codex".to_string()),
+            fallback_agent_id: None,
+            max_retries: 0,
+            script_ref: "agent-checkpoint-review.js".to_string(),
+            name: "Agent Checkpoint Review".to_string(),
+            execution_strategy: "fresh".to_string(),
+            checkpoint: None,
+            discord_thread_id: None,
+            timeout_secs: None,
+            lease_expires_at: Utc::now(),
+        }
+    }
+
     fn completion_with_evidence(evidence: AgentTurnCompletionEvidence) -> AgentTurnCompletion {
         AgentTurnCompletion {
             assistant_message: match evidence {
@@ -1936,6 +2011,87 @@ mod tests {
         let capped = retry_next_at(5);
         assert!(capped >= before + chrono::Duration::seconds(899));
         assert!(capped <= before + chrono::Duration::seconds(901));
+    }
+
+    #[test]
+    fn claimed_failure_plan_retries_before_fallback() {
+        let claimed = ClaimedRoutineRun {
+            fallback_agent_id: Some("claude".to_string()),
+            max_retries: 2,
+            ..claimed_run()
+        };
+
+        match claimed_failure_recovery_plan(&claimed, "codex", "primary") {
+            AgentFailureRecoveryPlan::Retry {
+                retry_count_after_increment,
+                next_retry_at,
+            } => {
+                assert_eq!(retry_count_after_increment, 1);
+                assert!(next_retry_at > Utc::now());
+            }
+            other => panic!("expected retry before fallback, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn claimed_failure_plan_falls_back_when_retry_disabled() {
+        let claimed = ClaimedRoutineRun {
+            fallback_agent_id: Some("claude".to_string()),
+            max_retries: 0,
+            ..claimed_run()
+        };
+
+        assert_eq!(
+            claimed_failure_recovery_plan(&claimed, "codex", "primary"),
+            AgentFailureRecoveryPlan::Fallback {
+                agent_id: "claude".to_string()
+            }
+        );
+        assert_eq!(
+            claimed_failure_recovery_plan(&claimed, "claude", "fallback"),
+            AgentFailureRecoveryPlan::Fail
+        );
+    }
+
+    #[test]
+    fn running_failure_plan_retries_until_exhausted_then_fallback_once() {
+        let mut run = RunningAgentRoutineRun {
+            fallback_agent_id: Some("claude".to_string()),
+            max_retries: 2,
+            retry_count: 1,
+            attempts: json!([
+                {"event": "started", "kind": "primary", "agent_id": "codex"}
+            ]),
+            ..running_run_with_result(json!({"prompt": "recover me"}))
+        };
+
+        match running_failure_recovery_plan(&run, Some("codex"), "primary") {
+            AgentFailureRecoveryPlan::Retry {
+                retry_count_after_increment,
+                next_retry_at,
+            } => {
+                assert_eq!(retry_count_after_increment, 2);
+                assert!(next_retry_at > Utc::now());
+            }
+            other => panic!("expected final retry before fallback, got {other:?}"),
+        }
+
+        run.retry_count = 2;
+        assert_eq!(
+            running_failure_recovery_plan(&run, Some("codex"), "retry"),
+            AgentFailureRecoveryPlan::Fallback {
+                agent_id: "claude".to_string()
+            }
+        );
+
+        run.attempts = json!([
+            {"event": "started", "kind": "primary", "agent_id": "codex"},
+            {"event": "started", "kind": "fallback", "agent_id": "claude"}
+        ]);
+        assert_eq!(
+            running_failure_recovery_plan(&run, Some("codex"), "retry"),
+            AgentFailureRecoveryPlan::Fail
+        );
     }
 
     #[test]
