@@ -1050,9 +1050,10 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   `src/services/claude_tui/hosting/` child modules, ratchets claude.rs at 2950
   production LoC, and leaves the #3262 turn-lock machinery in the claude.rs
   root.)
-- `src/services/codex_tui/rollout_tail.rs` (1663) — Codex TUI rollout tail
+- `src/services/codex_tui/rollout_tail.rs` (1711) — Codex TUI rollout tail
   parsing and resume identity surface; split before adding non-bugfix behavior
-  beyond the #2169 session identity fix.
+  beyond the #2169 session identity fix and the #3343 message-boundary
+  separator on the streamed `StreamMessage::Text` surface.
 - `src/services/codex_tui/input.rs` (1350) — Codex TUI input readiness
   detector and prompt delivery surface (#2399 hardened the post-turn
   handoff deadline). Treat as giant-file territory; split before adding

@@ -216,6 +216,19 @@ struct RolloutParseState {
     /// so the drain heuristic must not close the Discord turn while the pane
     /// is still alive.
     heuristic_finalize_waiting_for_completion_logged: bool,
+    /// #3343: trailing-whitespace witness of the last emitted assistant
+    /// `StreamMessage::Text` content. Codex rollout records are one distinct
+    /// assistant message per line (commentary/progress updates and final
+    /// paragraphs each get their own `response_item/message`). The frozen
+    /// watcher/bridge consumers append `StreamMessage::Text` content into
+    /// `full_response` with a raw `push_str`, so without a boundary separator
+    /// distinct messages collapse into `문장.다음문장` walls (see issue #3343).
+    /// `None` until the first non-commentary text chunk is emitted; afterwards
+    /// `Some(true)` when that chunk already ended on a newline (no separator
+    /// needed) or `Some(false)` when a `\n\n` boundary must be injected before
+    /// the next chunk. Mirrors the `\n\n` join the parser already applies to
+    /// `state.final_text` so the streamed surface matches the terminal body.
+    last_emitted_text_ended_with_newline: Option<bool>,
 }
 
 impl RolloutParseState {
@@ -1442,6 +1455,27 @@ fn response_item_messages(json: &Value, state: &mut RolloutParseState) -> Vec<St
     }
 }
 
+/// #3343: prepend a `\n\n` paragraph boundary to a new assistant message's
+/// streamed text when it follows an earlier message in the same turn, so the
+/// frozen watcher/bridge `push_str` consumers render readable separation
+/// instead of `문장.다음문장`.
+///
+/// - `prev_ended_with_newline == None`: this is the first non-commentary chunk
+///   of the turn — emit untouched (never break inside the leading message).
+/// - The previous chunk already ended on a newline, or this chunk already
+///   starts on one: a single `\n` is enough — emit untouched so we never
+///   double an existing separator into `\n\n\n`.
+/// - Otherwise both sides are mid-prose: inject `\n\n` so distinct Codex
+///   commentary/progress/final messages stay visually separated.
+fn join_streamed_message_boundary(prev_ended_with_newline: Option<bool>, text: &str) -> String {
+    match prev_ended_with_newline {
+        None => text.to_string(),
+        Some(true) => text.to_string(),
+        Some(false) if text.starts_with('\n') => text.to_string(),
+        Some(false) => format!("\n\n{text}"),
+    }
+}
+
 fn response_message_items(payload: &Value, state: &mut RolloutParseState) -> Vec<StreamMessage> {
     if payload.get("role").and_then(Value::as_str) != Some("assistant") {
         return Vec::new();
@@ -1467,9 +1501,23 @@ fn response_message_items(payload: &Value, state: &mut RolloutParseState) -> Vec
                     state.final_text.push_str("\n\n");
                 }
                 state.final_text.push_str(&text);
-            } else {
-                state.lifecycle_activity = true;
+                // #3343: inject the same `\n\n` paragraph boundary into the
+                // streamed `StreamMessage::Text` that we just applied to
+                // `final_text`. Each Codex rollout record is a distinct
+                // assistant message, but the frozen watcher/bridge consumers
+                // append chunk content with a raw `push_str`, so without this
+                // the streamed surface concatenates `보겠습니다.로그` walls.
+                // Guard against doubling when either side already carries the
+                // separator, and never break inside a single message (the
+                // first chunk of the turn is emitted untouched).
+                let emitted = join_streamed_message_boundary(
+                    state.last_emitted_text_ended_with_newline,
+                    &text,
+                );
+                state.last_emitted_text_ended_with_newline = Some(text.ends_with('\n'));
+                return Some(StreamMessage::Text { content: emitted });
             }
+            state.lifecycle_activity = true;
             Some(StreamMessage::Text { content: text })
         })
         .collect()
@@ -2426,9 +2474,9 @@ mod tests {
             messages
         );
         assert!(
-            messages
-                .iter()
-                .any(|m| matches!(m, StreamMessage::Text { content } if content == "segment2")),
+            messages.iter().any(
+                |m| matches!(m, StreamMessage::Text { content } if content.trim() == "segment2")
+            ),
             "segment2 must be emitted after the inter-segment pause; got {:?}",
             messages
         );
@@ -2510,9 +2558,9 @@ mod tests {
         assert!(matches!(result, ReadOutputResult::Completed { .. }));
         let messages: Vec<_> = rx.iter().collect();
         assert!(
-            messages
-                .iter()
-                .any(|m| matches!(m, StreamMessage::Text { content } if content == "segment2")),
+            messages.iter().any(
+                |m| matches!(m, StreamMessage::Text { content } if content.trim() == "segment2")
+            ),
             "segment2 must be emitted after the tool call resolves; got {:?}",
             messages
         );
@@ -2584,9 +2632,9 @@ mod tests {
         assert!(matches!(result, ReadOutputResult::Completed { .. }));
         let messages: Vec<_> = rx.iter().collect();
         assert!(
-            messages
-                .iter()
-                .any(|m| matches!(m, StreamMessage::Text { content } if content == "segment2")),
+            messages.iter().any(
+                |m| matches!(m, StreamMessage::Text { content } if content.trim() == "segment2")
+            ),
             "segment2 must be emitted after the tool_search output resolves; got {:?}",
             messages
         );
@@ -2666,9 +2714,9 @@ mod tests {
         assert!(matches!(result, ReadOutputResult::Completed { .. }));
         let messages: Vec<_> = rx.iter().collect();
         assert!(
-            messages
-                .iter()
-                .any(|m| matches!(m, StreamMessage::Text { content } if content == "segment2")),
+            messages.iter().any(
+                |m| matches!(m, StreamMessage::Text { content } if content.trim() == "segment2")
+            ),
             "segment2 must be emitted after BOTH concurrent tool calls resolve; got {:?}",
             messages
         );
@@ -2769,9 +2817,9 @@ mod tests {
         assert!(matches!(result, ReadOutputResult::Completed { .. }));
         let messages: Vec<_> = rx.iter().collect();
         assert!(
-            messages
-                .iter()
-                .any(|m| matches!(m, StreamMessage::Text { content } if content == "segment2")),
+            messages.iter().any(
+                |m| matches!(m, StreamMessage::Text { content } if content.trim() == "segment2")
+            ),
             "segment2 must land after empty tool output refreshes drain clock; got {:?}",
             messages
         );
@@ -2856,9 +2904,9 @@ mod tests {
         assert!(matches!(result, ReadOutputResult::Completed { .. }));
         let messages: Vec<_> = rx.iter().collect();
         assert!(
-            messages
-                .iter()
-                .any(|m| matches!(m, StreamMessage::Text { content } if content == "segment2")),
+            messages.iter().any(
+                |m| matches!(m, StreamMessage::Text { content } if content.trim() == "segment2")
+            ),
             "segment2 must be emitted after progress-only activity refreshes drain; got {:?}",
             messages
         );
@@ -3693,9 +3741,9 @@ mod tests {
             messages
         );
         assert!(
-            messages
-                .iter()
-                .any(|m| matches!(m, StreamMessage::Text { content } if content == "burst2")),
+            messages.iter().any(
+                |m| matches!(m, StreamMessage::Text { content } if content.trim() == "burst2")
+            ),
             "burst2 must be emitted after the legacy-drain-protected pause; got {:?}",
             messages
         );
@@ -4007,6 +4055,139 @@ mod tests {
             done.contains("no assistant response"),
             "with the flag off the global assistant-response deadline copy must surface; got {:?}",
             done
+        );
+    }
+
+    // #3343: collect the streamed text chunks in emission order so the
+    // boundary-separator assertions read the surface a frozen
+    // watcher/bridge `push_str(&content)` consumer would concatenate.
+    fn streamed_text_chunks(messages: &[StreamMessage]) -> Vec<String> {
+        messages
+            .iter()
+            .filter_map(|m| match m {
+                StreamMessage::Text { content } => Some(content.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // #3343 (1) — pins the bug. Two DISTINCT assistant `response_item/message`
+    // records (the real Codex rollout shape) must NOT collapse into a
+    // `보겠습니다.로그` wall when their `StreamMessage::Text` content is appended
+    // with a raw `push_str`. The second chunk must carry a `\n\n` boundary so
+    // the joined surface separates the two messages. FAILS on base, where the
+    // emitted Text is the raw `text` with no separator.
+    #[test]
+    fn distinct_codex_messages_join_with_paragraph_boundary() {
+        let messages = collect_rollout(
+            concat!(
+                r#"{"type":"session_meta","payload":{"id":"sep-1","cwd":"/tmp/repo"}}"#,
+                "\n",
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"로그 꼬리를 확인해 보겠습니다."}]}}"#,
+                "\n",
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"release workspace 정리를 진행합니다."}]}}"#,
+                "\n",
+            ),
+            0,
+        );
+        let chunks = streamed_text_chunks(&messages);
+        assert_eq!(chunks.len(), 2, "two distinct messages -> two chunks");
+        assert_eq!(chunks[0], "로그 꼬리를 확인해 보겠습니다.");
+        // The boundary travels with the second chunk so the frozen consumer's
+        // raw push_str renders readable separation.
+        assert_eq!(chunks[1], "\n\nrelease workspace 정리를 진행합니다.");
+
+        let joined = chunks.concat();
+        assert!(
+            joined.contains("보겠습니다.\n\nrelease workspace"),
+            "distinct Codex messages must keep a paragraph boundary, not \
+             collapse into `보겠습니다.release`; got {joined:?}"
+        );
+        assert!(
+            !joined.contains("보겠습니다.release"),
+            "the unseparated `문장.다음문장` wall must not appear; got {joined:?}"
+        );
+    }
+
+    // #3343 (2) — a single assistant message streamed as the only record must
+    // be emitted untouched: no leading separator is injected before the first
+    // chunk of the turn, so we never break inside a single message.
+    #[test]
+    fn single_codex_message_streams_without_injected_separator() {
+        let messages = collect_rollout(
+            concat!(
+                r#"{"type":"session_meta","payload":{"id":"sep-2","cwd":"/tmp/repo"}}"#,
+                "\n",
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"단일 메시지입니다."}]}}"#,
+                "\n",
+            ),
+            0,
+        );
+        let chunks = streamed_text_chunks(&messages);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(
+            chunks[0], "단일 메시지입니다.",
+            "the sole message must stream verbatim, never gaining a leading \\n\\n"
+        );
+    }
+
+    // #3343 (3) — when a message already ends with a newline (or the next
+    // starts with one) the boundary join must NOT double the separator into
+    // `\n\n\n`. The helper is the single source of truth for the boundary
+    // decision, so assert it directly across the no-double cases.
+    #[test]
+    fn message_boundary_join_never_doubles_existing_separator() {
+        // First chunk of the turn: emitted untouched.
+        assert_eq!(
+            join_streamed_message_boundary(None, "first message"),
+            "first message"
+        );
+        // Previous chunk already ended with a newline -> no extra separator.
+        assert_eq!(
+            join_streamed_message_boundary(Some(true), "next message"),
+            "next message"
+        );
+        // New chunk already starts with a newline -> no extra separator.
+        assert_eq!(
+            join_streamed_message_boundary(Some(false), "\nnext message"),
+            "\nnext message"
+        );
+        // Both sides mid-prose -> exactly one `\n\n` boundary, never `\n\n\n`.
+        let joined = join_streamed_message_boundary(Some(false), "next message");
+        assert_eq!(joined, "\n\nnext message");
+        assert!(
+            !joined.contains("\n\n\n"),
+            "boundary join must never produce a tripled separator; got {joined:?}"
+        );
+    }
+
+    // #3343 — end-to-end across the parser: a turn that ends with a message
+    // already carrying a trailing newline must not double when the next
+    // message arrives, and final_text stays consistent with the streamed
+    // surface (both joined with a single `\n\n`).
+    #[test]
+    fn trailing_newline_message_does_not_double_at_boundary() {
+        let messages = collect_rollout(
+            concat!(
+                r#"{"type":"session_meta","payload":{"id":"sep-3","cwd":"/tmp/repo"}}"#,
+                "\n",
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"첫 메시지\n"}]}}"#,
+                "\n",
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"둘째 메시지"}]}}"#,
+                "\n",
+            ),
+            0,
+        );
+        let chunks = streamed_text_chunks(&messages);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0], "첫 메시지\n");
+        // Prior chunk ended on a newline, so only a single \n separates them —
+        // never \n\n\n.
+        assert_eq!(chunks[1], "둘째 메시지");
+        let joined = chunks.concat();
+        assert!(
+            !joined.contains("\n\n\n"),
+            "must not double an existing trailing newline; got {joined:?}"
         );
     }
 }
