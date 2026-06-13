@@ -144,6 +144,77 @@ pub(super) fn watcher_fresh_idle_finalize_decision(
     }
 }
 
+/// #3419 R2 (codex HIGH): the turn-watchdog TIMEOUT finalize decision. The
+/// timeout path has NO committed output range, so it cannot reuse the fresh-idle
+/// `current_offset` range test. Instead it pins the identity the watcher
+/// ATTACHED to at the top of this loop pass (`startup_inflight_snapshot`, the
+/// turn this watcher instance is watching) and finalizes ONLY when that pinned
+/// turn is STILL the live on-disk inflight owner — exactly the case that wedges
+/// the soft-queue (the watcher's own restored Discord turn holds the mailbox
+/// cancel_token and timed out without a result).
+///
+/// `Finalize` requires BOTH:
+///   1. the pinned snapshot carries a non-zero `user_msg_id` on this session
+///      (a restored Discord turn — the only turn that owns a wedge-prone mailbox
+///      token; `reacquire_watcher_inflight_for_active_stream` synthetic id-0
+///      rows never call `mailbox_try_start_turn`, so an id-0 timeout can NEVER
+///      strand the queue and never needs this finalize), AND
+///   2. the CURRENT on-disk inflight identity still EQUALS the pinned identity
+///      (`user_msg_id` + `started_at` + `tmux_session_name`, the same triple
+///      `InflightTurnIdentity::matches_state` uses). A mismatch means a NEWER
+///      turn B took over the session during the long timeout window — B owns the
+///      mailbox and finalizes itself, so finalizing here would `mailbox_finish_
+///      turn_if_matches` / id-0-collapse onto B and STEAL it.
+///
+/// Otherwise `Skip`: never submit id-0 (the `resolve_channel_only` id-0 collapse
+/// + unconditional `mailbox_finish_turn` at turn_finalizer.rs:1047 is the exact
+/// new-turn-steal hazard), and never finalize a mismatched/absent turn. The
+/// watcher's original turn was already superseded; the queue is not trapped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TimeoutFinalizeDecision {
+    /// No pinned watcher turn, the pinned turn is id-0 (synthetic, no mailbox
+    /// token), or the on-disk inflight is no longer the pinned turn (a newer
+    /// turn took over) — do NOT finalize; just fall through. Carries the pinned
+    /// id (0 when absent/synthetic) purely for the skip log.
+    Skip { pinned_user_msg_id: u64 },
+    /// The watcher's own pinned restored Discord turn is STILL the live inflight
+    /// owner and timed out — finalize it via the single-authority path with its
+    /// REAL pinned id and an identity-matched clear.
+    Finalize { user_msg_id: u64 },
+}
+
+pub(super) fn watcher_timeout_finalize_decision(
+    pinned_startup_inflight: Option<&InflightTurnState>,
+    current_on_disk_inflight: Option<&InflightTurnState>,
+    tmux_session_name: &str,
+) -> TimeoutFinalizeDecision {
+    let Some(pinned) = pinned_startup_inflight.filter(|state| {
+        state.user_msg_id != 0
+            && state.tmux_session_name.as_deref().map(str::trim) == Some(tmux_session_name.trim())
+    }) else {
+        return TimeoutFinalizeDecision::Skip {
+            pinned_user_msg_id: pinned_startup_inflight.map(|s| s.user_msg_id).unwrap_or(0),
+        };
+    };
+    let pinned_identity =
+        crate::services::discord::inflight::InflightTurnIdentity::from_state(pinned);
+    // The current on-disk row must STILL be the pinned turn. A newer turn B that
+    // started during the timeout window has a different identity → Skip (B owns
+    // the mailbox and finalizes itself).
+    let still_owner = current_on_disk_inflight
+        .map(crate::services::discord::inflight::InflightTurnIdentity::from_state)
+        .is_some_and(|current| current == pinned_identity);
+    if still_owner {
+        TimeoutFinalizeDecision::Finalize {
+            user_msg_id: pinned.user_msg_id,
+        }
+    } else {
+        TimeoutFinalizeDecision::Skip {
+            pinned_user_msg_id: pinned.user_msg_id,
+        }
+    }
+}
+
 pub(super) fn watcher_should_clear_stale_terminal_message_ids(
     inflight_present: bool,
     has_assistant_response: bool,

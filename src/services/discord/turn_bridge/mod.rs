@@ -960,20 +960,80 @@ mod sentinel_overwrite_clamp_tests {
         ));
     }
 
-    // The clamp the bridge applies after `full_response = resolved`. Models the
-    // exact `response_sent_offset.min(full_response.len())` so a mutation that
-    // drops the clamp (keeping the prior offset) is caught by the bound check.
+    // #3419 R3 / codex MEDIUM: drive the REAL normalizer the bridge now calls
+    // (`sync_response_delivery_state` → `normalized_response_sent_offset`), not a
+    // re-implemented clamp, so a mutation that drops the clamp OR the char-boundary
+    // walk-back is caught against actual production behaviour.
     #[test]
-    fn clamp_keeps_offset_within_replaced_body() {
+    fn sync_clamps_offset_within_replaced_body() {
+        use crate::services::discord::InflightTurnState;
+        use crate::services::provider::ProviderKind;
+
         let replaced = "⚠ tool-only turn, no assistant text".to_string();
-        let prior_offset = 900usize; // tracked the long pre-swap body
-        let clamped = prior_offset.min(replaced.len());
-        assert_eq!(clamped, replaced.len());
-        assert!(clamped <= replaced.len());
-        assert!(replaced.is_char_boundary(clamped));
-        // Mutation guard: the UNCLAMPED offset is out of bounds (the wedge).
-        assert!(replaced.get(prior_offset..).is_none());
-        assert!(replaced.get(clamped..).is_some());
+        let mut offset = 900usize; // tracked the long pre-swap body
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            1,
+            Some("adk-cc".to_string()),
+            42,
+            5001,
+            5002,
+            "prompt".to_string(),
+            Some("session".to_string()),
+            Some("AgentDesk-claude-adk-cc-1".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            10,
+        );
+        super::sync_response_delivery_state(&replaced, &mut offset, &mut state);
+        // Clamped to len() (out-of-bounds prior offset) and char-boundary valid.
+        assert_eq!(offset, replaced.len());
+        assert!(replaced.is_char_boundary(offset));
+        assert_eq!(state.response_sent_offset, offset);
+        assert_eq!(state.full_response, replaced);
+        // Mutation guard: the UNCLAMPED prior offset is out of bounds (the wedge).
+        assert!(replaced.get(900..).is_none());
+        assert!(replaced.get(offset..).is_some());
+    }
+
+    // #3419 R3 / codex MEDIUM (the char-boundary case the bare `.min(len)` missed):
+    // a replacement BEGINNING with a multibyte sentinel (`⚠` = 3 bytes) with a
+    // prior offset of 1. `1 < len()`, so `.min(len)` would leave it UNCHANGED at 1
+    // — but byte 1 is INSIDE `⚠`, violating the char-boundary invariant and
+    // panicking any later `full_response[offset..]` slice. The normalizer must walk
+    // BACK to the nearest valid boundary (0).
+    #[test]
+    fn sync_normalizes_prior_offset_inside_leading_multibyte_char() {
+        use crate::services::discord::InflightTurnState;
+        use crate::services::provider::ProviderKind;
+
+        let replaced = "⚠ tool-only turn, no assistant text".to_string();
+        // Precondition: byte 1 is genuinely mid-multibyte (the bug surface).
+        assert!(!replaced.is_char_boundary(1));
+        let mut offset = 1usize; // prior valid offset that now lands mid-char
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            1,
+            Some("adk-cc".to_string()),
+            42,
+            5001,
+            5002,
+            "prompt".to_string(),
+            Some("session".to_string()),
+            Some("AgentDesk-claude-adk-cc-1".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            10,
+        );
+        super::sync_response_delivery_state(&replaced, &mut offset, &mut state);
+        // Normalized back to the leading boundary (0) — NOT left at the mid-char 1.
+        assert_eq!(offset, 0);
+        assert!(replaced.is_char_boundary(offset));
+        assert_eq!(state.response_sent_offset, 0);
+        // Mutation guard: a bare `.min(len)` (no walk-back) would leave offset 1,
+        // which is NOT a char boundary and would panic on `&replaced[1..]`.
+        assert!(replaced.get(1..).is_none());
+        assert!(replaced.get(offset..).is_some());
     }
 }
 
@@ -3327,19 +3387,17 @@ pub(super) fn spawn_turn_bridge(
                         } => {
                             let session_died_retry = result == "__session_died_retry__";
                             if session_died_retry {
-                                // Recovery reader requests the generic
-                                // Discord-history auto-retry path when the
-                                // resumed session dies before completion.
+                                // Recovery reader requests the generic Discord-history
+                                // auto-retry when the resumed session dies pre-completion.
                                 recovery_retry = true;
                             }
                             if pending_long_running_open_after_state_save.take().is_some() {
                                 inflight_state.long_running_placeholder_active = false;
                                 let _ = save_inflight_state(&inflight_state);
                             }
-                            // #1255: turn finished while a long-running
-                            // placeholder is still flagged as Active — close
-                            // it now so the user does not stare at a stale
-                            // 🔄 card forever. Idempotent if a prior
+                            // #1255: turn finished while a long-running placeholder
+                            // is still Active — close it now so the user does not
+                            // stare at a stale 🔄 card. Idempotent if a prior
                             // ToolResult already fired Completed.
                             if let Some((key, snapshot, close_trigger, ack_consumed)) =
                                 long_running_placeholder_active.take()
@@ -3386,17 +3444,19 @@ pub(super) fn spawn_turn_bridge(
                                 has_post_tool_text,
                             ) {
                                 full_response = resolved;
-                                inflight_state.full_response = full_response.clone();
-                                // #3419 R3: the resolved Done body can be a SHORT
-                                // sentinel/tool-only replacement (context_window.rs)
-                                // that shrinks full_response below a prior streamed
-                                // offset. `done_result_requires_full_terminal_replay`
-                                // only resets on a >8000-byte replay, so a sentinel
-                                // leaves response_sent_offset out of bounds → watcher
-                                // empty-slice → relay wedge. Clamp here to the new len.
-                                response_sent_offset =
-                                    response_sent_offset.min(full_response.len());
-                                inflight_state.response_sent_offset = response_sent_offset;
+                                // #3419 R3 (codex MEDIUM): a short sentinel/tool-only
+                                // resolved body shrinks full_response below a prior
+                                // streamed offset that the >8000-byte replay gate
+                                // (`done_result_requires_full_terminal_replay`) does not
+                                // reset → out of bounds (watcher empty-slice wedge).
+                                // `sync_response_delivery_state` clamps to len AND walks
+                                // back to a valid char boundary (a bare `.min(len())`
+                                // could land mid multibyte char) and mirrors both.
+                                sync_response_delivery_state(
+                                    &full_response,
+                                    &mut response_sent_offset,
+                                    &mut inflight_state,
+                                );
                             }
                             if done_result_requires_full_terminal_replay(
                                 &full_response,
