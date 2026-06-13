@@ -887,6 +887,46 @@ mod tests {
         assert!(!bridge_epilogue_marks_watcher_delivered(false, true));
     }
 
+    /// #3089 A1 r3 pin — terminal_delivery does NOT commit a fallback-after-
+    /// edit-failure. The commit predicate matches `EditedOriginal` only
+    /// (`replace_outcome_commits_terminal_delivery`, this file `:42`), and the
+    /// live path records the cleanup failure and returns `committed = false`
+    /// (this file `:143`). This characterization pins that non-commit branch
+    /// BEFORE A5 cuts turn_bridge over to the unified controller: the controller
+    /// must pass `FallbackCommitPolicy::NoCommitOnFallback` for this owner to
+    /// preserve the behavior pinned here (sink/standby pass `CommitOnFallback`).
+    /// If the predicate ever started committing the fallback variant, this test
+    /// fails and the A5 cutover would be caught.
+    #[test]
+    fn sent_fallback_after_edit_failure_does_not_commit_terminal_delivery() {
+        let outcome = ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
+            edit_error: "edit 500; fallback POST succeeded".to_string(),
+        };
+
+        // The commit predicate: a fallback-after-edit-failure is NOT a commit.
+        assert!(!replace_outcome_commits_terminal_delivery(&outcome));
+        // And so the downstream dispatch gates do not complete the work
+        // dispatch on a non-committed terminal delivery.
+        assert!(!should_complete_work_dispatch_after_terminal_delivery(
+            true,
+            replace_outcome_commits_terminal_delivery(&outcome),
+            false,
+            false,
+            false,
+            "final response delivered via fallback after edit failure",
+        ));
+        assert!(!should_fail_dispatch_after_terminal_delivery(
+            true,
+            replace_outcome_commits_terminal_delivery(&outcome),
+            false,
+        ));
+
+        // Contrast: an actual edit IS a commit (the only committing variant).
+        assert!(replace_outcome_commits_terminal_delivery(
+            &ReplaceLongMessageOutcome::EditedOriginal
+        ));
+    }
+
     #[test]
     fn partial_continuation_failure_does_not_commit_terminal_delivery() {
         let outcome = ReplaceLongMessageOutcome::PartialContinuationFailure {

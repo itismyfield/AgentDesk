@@ -218,6 +218,41 @@ pub(in crate::services::discord) enum EditFailPlaceholderPolicy {
     DeleteIfProvenStale,
 }
 
+/// How a `SentFallbackAfterEditFailure` replace result advances the lease.
+///
+/// `ReplaceLongMessageOutcome::SentFallbackAfterEditFailure` is NOT classified
+/// uniformly across the existing owners, so the controller must NOT hard-code
+/// one mapping:
+///
+/// - The sink commits/advances it: it bumps `delivered_total` and calls
+///   `advance_after_confirmed_post`, returning `Delivered`
+///   (`session_relay_sink.rs:905`). The fallback POST carried the response, so
+///   the offset advances.
+/// - Standby likewise returns success (`standby_relay.rs:662`): the fallback
+///   delivered the body, advance.
+/// - `turn_bridge`/`terminal_delivery` does NOT commit it: it records the
+///   cleanup failure and returns `committed = false`
+///   (`terminal_delivery.rs:143`); its commit predicate matches `EditedOriginal`
+///   only (`terminal_delivery.rs:42`). The placeholder edit failed and the
+///   terminal-delivery contract treats a non-edited terminal card as not yet
+///   committed, so the offset must NOT advance.
+///
+/// Each owner therefore MUST pass its policy explicitly — NO `Default` (the
+/// #2757 fence philosophy shared with [`EditFailPlaceholderPolicy`]): a missing
+/// policy must be a compile error, never a silent advance/non-advance. The
+/// sink/standby cutovers (A2/A3) pass `CommitOnFallback`; the turn_bridge
+/// cutover (A5) passes `NoCommitOnFallback`.
+#[allow(dead_code)] // #3089 A1: NoCommitOnFallback arm wired by turn_bridge at A5.
+pub(in crate::services::discord) enum FallbackCommitPolicy {
+    /// The fallback POST counts as delivery → commit/advance the offset
+    /// (sink `session_relay_sink.rs:905`, standby `standby_relay.rs:662`).
+    CommitOnFallback,
+    /// The fallback edit failure does NOT commit → leave the offset un-advanced
+    /// (turn_bridge `terminal_delivery.rs:143`, predicate `:42`). Maps to
+    /// `Unknown` so a retry can re-deliver from the same offset (I2).
+    NoCommitOnFallback,
+}
+
 /// Borrowed delivery context for one `deliver_turn_output` call. The controller
 /// drives the borrowed [`DeliveryLeaseCell`] through acquire → send → commit →
 /// release internally (I1).
@@ -246,6 +281,10 @@ pub(in crate::services::discord) struct TurnOutputCtx<
     pub(in crate::services::discord) plan: OutputPlan,
     /// Explicit per-owner edit-fail fallback policy; NO default (#2757 fence).
     pub(in crate::services::discord) edit_fail_policy: EditFailPlaceholderPolicy,
+    /// Explicit per-owner advance policy for `SentFallbackAfterEditFailure`; NO
+    /// default. The sink/standby advance on fallback POST; turn_bridge does not
+    /// (see [`FallbackCommitPolicy`]). The controller must not hard-code one.
+    pub(in crate::services::discord) fallback_commit_policy: FallbackCommitPolicy,
 }
 
 /// Deliver one turn's output through the single controller path.
@@ -382,7 +421,7 @@ where
                 .replace_message_with_outcome(ctx.channel_id, *message_id, ctx.body)
                 .await
             {
-                Ok(outcome) => classify_replace_outcome(&outcome),
+                Ok(outcome) => classify_replace_outcome(&outcome, &ctx.fallback_commit_policy),
                 Err(_) => transient_or_unknown(ctx),
             }
         }
@@ -423,29 +462,42 @@ where
 /// `Ok(_) => Delivered` was wrong: `PartialContinuationFailure` is a
 /// not-delivered / retry-preserving result for every owner, never an advance.
 ///
-/// Owner-mapping evidence (the controller's first cutover target is the sink):
-/// - `EditedOriginal` → delivered:
+/// Owner-mapping evidence:
+/// - `EditedOriginal` → delivered for EVERY owner:
 ///   `session_relay_sink.rs:863` (`Delivered` + `advance_after_confirmed_post`),
-///   `turn_bridge/terminal_delivery.rs:131` (committed = true),
-///   `formatting.rs:1785` (`Ok(())`).
-/// - `SentFallbackAfterEditFailure` → delivered (the fallback POST carried the
-///   response): `session_relay_sink.rs:905` (`Delivered` +
-///   `advance_after_confirmed_post`), `formatting.rs:1786` (`Ok(())`).
-///   (turn_bridge treats it as a non-commit cleanup case; A1 follows the sink,
-///   the cutover-order-first owner — see commit message decision note.)
+///   `standby_relay.rs:653` (success), `turn_bridge/terminal_delivery.rs:131`
+///   (committed = true) and its predicate `terminal_delivery.rs:42`
+///   (`matches!(.., EditedOriginal)`), `formatting.rs:1785` (`Ok(())`).
+/// - `SentFallbackAfterEditFailure` → owner-SPECIFIC (review-fix H1 r3): the
+///   sink advances (`session_relay_sink.rs:905`, `Delivered` +
+///   `advance_after_confirmed_post`) and standby advances
+///   (`standby_relay.rs:662`, `true`), but turn_bridge/terminal_delivery does
+///   NOT (`terminal_delivery.rs:143` records the cleanup failure and returns
+///   `committed = false`; its predicate `:42` commits `EditedOriginal` only).
+///   The controller therefore consults the owner-passed `FallbackCommitPolicy`
+///   instead of hard-coding `Delivered`:
+///   `CommitOnFallback` → `Delivered`, `NoCommitOnFallback` → `Unknown`.
 /// - `PartialContinuationFailure` → ambiguous, NEVER advance (I2):
 ///   `session_relay_sink.rs:956` (`RelaySinkError::Transient`),
-///   `turn_bridge/terminal_delivery.rs:155` + the
-///   `partial_continuation_failure_does_not_commit_terminal_delivery` test at
-///   `:891` (committed = false), `formatting.rs:1787` (`Err`).
+///   `standby_relay.rs:678` (`false`), `turn_bridge/terminal_delivery.rs:155` +
+///   the `partial_continuation_failure_does_not_commit_terminal_delivery` test
+///   at `:891` (committed = false), `formatting.rs:1787` (`Err`).
 fn classify_replace_outcome(
     outcome: &crate::services::discord::formatting::ReplaceLongMessageOutcome,
+    fallback_commit_policy: &FallbackCommitPolicy,
 ) -> TransportResult {
     use crate::services::discord::formatting::ReplaceLongMessageOutcome;
     match outcome {
-        ReplaceLongMessageOutcome::EditedOriginal
-        | ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. } => {
-            TransportResult::Delivered
+        ReplaceLongMessageOutcome::EditedOriginal => TransportResult::Delivered,
+        // Owner-specific (H1 r3): the original edit failed and a fallback POST
+        // carried the body. The sink/standby treat that as delivery (advance);
+        // turn_bridge/terminal_delivery does not commit it. Honour the policy
+        // the owner passed instead of hard-coding an advance.
+        ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. } => {
+            match fallback_commit_policy {
+                FallbackCommitPolicy::CommitOnFallback => TransportResult::Delivered,
+                FallbackCommitPolicy::NoCommitOnFallback => TransportResult::Unknown,
+            }
         }
         // Partial continuation failure: chunks were sent then a continuation
         // failed mid-stream. Every owner treats this as not-delivered and
@@ -951,6 +1003,7 @@ mod tests {
                 lifecycle: PlaceholderLifecycle::Completed,
             },
             edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
+            fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -1076,6 +1129,7 @@ mod tests {
                 lifecycle: PlaceholderLifecycle::Completed,
             },
             edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
+            fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -1139,6 +1193,7 @@ mod tests {
             send_range: (0, body.len() as u64),
             plan: OutputPlan::NoOp,
             edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
+            fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -1189,6 +1244,7 @@ mod tests {
             send_range: (0, body.len() as u64),
             plan: OutputPlan::SendNewChunks { chunk_count: 3 },
             edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
+            fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -1234,6 +1290,7 @@ mod tests {
             send_range: (0, body.len() as u64),
             plan: OutputPlan::SendNewChunks { chunk_count: 1 },
             edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
+            fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -1306,6 +1363,7 @@ mod tests {
                 lifecycle: PlaceholderLifecycle::Completed,
             },
             edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
+            fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -1331,10 +1389,11 @@ mod tests {
         );
     }
 
-    /// H2 companion — `SentFallbackAfterEditFailure` is Delivered for the sink
-    /// (session_relay_sink.rs:905 advances), so the controller commits it. This
-    /// pins the explicit-match contract: only `PartialContinuationFailure` is
-    /// non-advance; the two success variants advance.
+    /// H1 r3 arm A — under `FallbackCommitPolicy::CommitOnFallback`,
+    /// `SentFallbackAfterEditFailure` advances. This is the sink/standby owner
+    /// policy: the fallback POST carried the body, so the offset commits
+    /// (`session_relay_sink.rs:905` bumps `delivered_total` + advances,
+    /// `standby_relay.rs:662` returns `true`). Exactly one Delivered commit.
     #[tokio::test]
     async fn replace_sent_fallback_after_edit_failure_commits_and_advances() {
         let channel = ChannelId::new(106);
@@ -1367,6 +1426,7 @@ mod tests {
                 lifecycle: PlaceholderLifecycle::Completed,
             },
             edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
+            fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -1382,11 +1442,86 @@ mod tests {
         assert_eq!(
             lease.delivered_commit_calls.load(Ordering::SeqCst),
             1,
-            "H2: SentFallbackAfterEditFailure must commit Delivered exactly once"
+            "H1 r3: CommitOnFallback must commit Delivered exactly once"
         );
         assert!(
             matches!(lease.read(), LeaseSnapshot::Unleased),
             "delivered fallback must release the lease"
+        );
+    }
+
+    /// H1 r3 arm B — under `FallbackCommitPolicy::NoCommitOnFallback`, the SAME
+    /// `SentFallbackAfterEditFailure` transport result must NOT advance. This is
+    /// the turn_bridge/terminal_delivery owner policy: `terminal_delivery.rs:143`
+    /// records the cleanup failure and returns `committed = false`, and its
+    /// commit predicate `terminal_delivery.rs:42` matches `EditedOriginal` only.
+    /// Cutting turn_bridge over to the controller must therefore NOT regress
+    /// into advancing on a fallback edit failure that is non-committed today.
+    ///
+    /// Mutation guard (codex r3): flipping `NoCommitOnFallback` back to
+    /// `Delivered` in `classify_replace_outcome` makes this test fail — the
+    /// outcome would be `Delivered` (not `Unknown`) and `commit_calls` would be
+    /// 1 (not 0). The two arms share an identical scenario apart from the
+    /// policy, so the policy is the sole load-bearing input.
+    #[tokio::test]
+    async fn replace_sent_fallback_after_edit_failure_no_commit_does_not_advance() {
+        let channel = ChannelId::new(112);
+        let lease = Arc::new(RecordingLease::new(channel));
+        let placeholder_msg = MessageId::new(44444);
+        let key = placeholder_key(channel, placeholder_msg);
+        let gateway =
+            ObservingGateway::new(lease.clone() as Arc<dyn DeliveryLease + Send + Sync>, true)
+                .with_replace_outcome(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
+                    edit_error: "edit 500, fallback POST succeeded".to_string(),
+                });
+        let controller = PlaceholderController::default();
+        // Prime Active so a wrongful commit would expose itself via the
+        // post-send transition await (M4 recorder).
+        prime_active(&controller, &gateway, key.clone()).await;
+        let body = "replace body delivered via fallback post (turn_bridge policy)";
+
+        let ctx = TurnOutputCtx {
+            turn: turn_key(channel),
+            // turn_bridge is the watcher-owned terminal-delivery path.
+            owner: RelayOwnerKind::Watcher,
+            holder: LeaseHolder::Watcher { instance_id: 1 },
+            lease: lease.as_ref(),
+            channel_id: channel,
+            placeholder_controller: &controller,
+            placeholder: PlaceholderSlot::Active {
+                message_id: placeholder_msg,
+                key,
+            },
+            body,
+            send_range: (0, body.len() as u64),
+            plan: OutputPlan::Replace {
+                lifecycle: PlaceholderLifecycle::Completed,
+            },
+            edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
+            fallback_commit_policy: FallbackCommitPolicy::NoCommitOnFallback,
+        };
+
+        let outcome = deliver_turn_output(&gateway, ctx).await;
+        assert!(
+            matches!(outcome, DeliveryOutcome::Unknown),
+            "H1 r3: NoCommitOnFallback must yield Unknown (non-advance), got {}",
+            debug_outcome(&outcome)
+        );
+        // The send returned Ok, but the owner policy says do not commit — the
+        // recorder must count ZERO commit calls (even a silent commit-then-
+        // release would be caught here, M4).
+        assert_eq!(
+            lease.commit_calls.load(Ordering::SeqCst),
+            0,
+            "H1 r3: NoCommitOnFallback must NEVER commit/advance the lease"
+        );
+        assert!(
+            !gateway.post_send_await_seen.load(Ordering::SeqCst),
+            "H1 r3: a non-advance fallback must not reach the post-send finalize await"
+        );
+        assert!(
+            matches!(lease.read(), LeaseSnapshot::Unleased),
+            "H1 r3: NoCommitOnFallback must release the lease without committing"
         );
     }
 
@@ -1425,6 +1560,7 @@ mod tests {
                 lifecycle: PlaceholderLifecycle::Completed,
             },
             edit_fail_policy: EditFailPlaceholderPolicy::DeleteIfProvenStale,
+            fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -1480,6 +1616,7 @@ mod tests {
                 lifecycle: PlaceholderLifecycle::Completed,
             },
             edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
+            fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
