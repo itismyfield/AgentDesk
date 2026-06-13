@@ -4283,15 +4283,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // Skip when paused/epoch-bumped (Discord turn took over, below) or an
             // error branch owns cleanup (after).
             //
-            // #3419 R2 (codex HIGH — no new-turn steal, no id-0): the long timeout
-            // window can let a NEWER turn B start. `watcher_timeout_finalize_decision`
-            // reuses the fresh-idle pinned-identity discipline: finalize ONLY when the
-            // turn this watcher ATTACHED to (`startup_inflight_snapshot`) is STILL the
-            // live on-disk inflight owner (the only case that wedges — its restored
-            // Discord turn owns the mailbox token). Absent / id-0 synthetic (no token)
-            // / newer-turn-took-over → DO NOT finalize: a id-0 submit would collapse
-            // onto B (`resolve_channel_only` → unconditional `mailbox_finish_turn`) and
-            // STEAL it, and B owns the mailbox so the queue is not trapped.
+            // #3419 R3 (codex HIGH — drain re-acquire id-0 wedge, no steal): key
+            // the decision on the LIVE MAILBOX active-turn id, not the on-disk
+            // inflight (the mailbox token is what wedges the queue). The re-acquire
+            // path can mint an id-0 inflight while pinned A's token is still active,
+            // so R2's on-disk-identity test Skipped A and left it wedged. Finalize
+            // (drain) ONLY when the mailbox still holds pinned A's token; a DIFFERENT
+            // live active turn B / no active turn → Skip. The submit is A's REAL
+            // pinned id through identity-guarded `mailbox_finish_turn_if_matches`, so
+            // B can never be stolen and an id-0 is never submitted.
             if !found_result
                 && turn_start.elapsed() >= turn_timeout
                 && !was_paused
@@ -4301,33 +4301,35 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 && !is_provider_overloaded
             {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                // Compare the pinned snapshot against the CURRENT on-disk row (a
-                // mismatch = turn B took over during the timeout window).
-                let timeout_current_inflight =
-                    crate::services::discord::inflight::load_inflight_state(
-                        &watcher_provider,
-                        channel_id.get(),
-                    );
+                // The wedge is the mailbox token; the decision keys on the mailbox's
+                // CURRENT active-turn id (different/absent = B took over or released).
+                let mailbox_active_user_msg_id = shared
+                    .mailbox(channel_id)
+                    .snapshot()
+                    .await
+                    .active_user_message_id
+                    .map(serenity::MessageId::get);
                 match watcher_timeout_finalize_decision(
                     startup_inflight_snapshot.as_ref(),
-                    timeout_current_inflight.as_ref(),
+                    mailbox_active_user_msg_id,
                     &tmux_session_name,
                 ) {
                     TimeoutFinalizeDecision::Skip { pinned_user_msg_id } => {
                         tracing::warn!(
-                            "  [{ts}] ⚠ #3419: watcher turn watchdog timed out for {tmux_session_name} after {}s, but pinned turn {pinned_user_msg_id} is no longer the live inflight owner (absent / id-0 / newer turn took over); NOT finalizing — the live turn finalizes itself",
+                            "  [{ts}] ⚠ #3419: watcher turn watchdog timed out for {tmux_session_name} after {}s, but pinned turn {pinned_user_msg_id} no longer holds the mailbox token (id-0 / no active turn / newer turn took over); NOT finalizing — the live turn finalizes itself",
                             turn_start.elapsed().as_secs()
                         );
                     }
                     TimeoutFinalizeDecision::Finalize { user_msg_id } => {
                         tracing::warn!(
-                            "  [{ts}] ⚠ #3419: watcher turn watchdog timed out for {tmux_session_name} after {}s (pinned turn {user_msg_id} still owns inflight); routing through the single-authority finalizer to release the mailbox token and drain the queue",
+                            "  [{ts}] ⚠ #3419: watcher turn watchdog timed out for {tmux_session_name} after {}s (pinned turn {user_msg_id} still holds the mailbox token); routing through the single-authority finalizer to release the token and drain the queue",
                             turn_start.elapsed().as_secs()
                         );
                         // Identity-matched clear: removes the row ONLY while it is
-                        // still the pinned turn (newer identity → `UserMsgMismatch`
-                        // no-op), mirroring the fresh-idle clear. `if let` is
-                        // panic-free though `Finalize` implies a non-zero pinned id.
+                        // still the pinned turn (same identity INCLUDING
+                        // turn_start_offset, so the clear key == the decision key).
+                        // A re-acquired id-0 / newer row → `UserMsgMismatch` no-op, so
+                        // the drain releases the token without touching a stale row.
                         if let Some(pinned) = startup_inflight_snapshot.as_ref() {
                             let _ = crate::services::discord::inflight::clear_inflight_state_if_matches_identity(
                                 &watcher_provider,
@@ -8933,19 +8935,17 @@ mod tests {
         );
     }
 
-    // #3419 R2 (codex HIGH): the turn-stealing regression. A STALE turn A times
-    // out while a NEWER turn B is the LIVE mailbox + on-disk inflight owner. The
+    // #3419 R3 (codex HIGH): the turn-stealing regression. A STALE turn A times
+    // out while a NEWER turn B is the LIVE mailbox active-turn (token) owner. The
     // production timeout guard now consults `watcher_timeout_finalize_decision`
-    // with A's PINNED `startup_inflight_snapshot` and B's current on-disk row:
-    // the identities MISMATCH, so the decision is `Skip` and the guard NEVER calls
-    // the finalizer — B's cancel_token and inflight survive untouched. Then the
-    // POSITIVE case: the watcher's OWN pinned turn (still the inflight owner) times
-    // out → `Finalize` releases its token and drains the queue (the wedge fix).
+    // with A's PINNED `startup_inflight_snapshot` and the mailbox's CURRENT
+    // `active_user_message_id` (= B): they MISMATCH, so the decision is `Skip` and
+    // the guard NEVER calls the finalizer — B's cancel_token and inflight survive.
+    // Then the POSITIVE case: the watcher's OWN pinned turn (still the mailbox
+    // token holder) times out → `Finalize` releases its token + drains the queue.
     //
-    // This is the real-state regression: we write B's inflight to disk, start B in
-    // the mailbox, and assert via the production decision that A's timeout does not
-    // steal B. The earlier (buggy) path loaded "whatever inflight exists at timeout
-    // time" (= B's row) and submitted it / id-0 → it WOULD have stolen B.
+    // This is the real-state regression: we start B in the mailbox (token live)
+    // and assert via the production decision that A's timeout does not steal B.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn timeout_finalize_does_not_steal_a_newer_live_turn_but_drains_its_own() {
@@ -8974,19 +8974,7 @@ mod tests {
         );
 
         // Turn B took over the session DURING A's long timeout window: B is the
-        // live mailbox turn AND the current on-disk inflight (different identity:
-        // different user_msg_id + started_at + turn_start_offset).
-        let mut on_disk_b = fresh_idle_inflight(
-            provider.clone(),
-            channel_id.get(),
-            tmux_session_name,
-            4002,
-            900,
-        );
-        on_disk_b.started_at = "2026-05-17 10:00:05".to_string();
-        crate::services::discord::inflight::save_inflight_state(&on_disk_b)
-            .expect("persist turn B inflight");
-
+        // live mailbox active turn (it holds the token, user_msg_id 4002).
         let token_b = std::sync::Arc::new(CancelToken::new());
         assert!(
             mailbox_try_start_turn(
@@ -8999,12 +8987,15 @@ mod tests {
             .await
         );
 
-        // The PRODUCTION decision: A's pinned snapshot vs B's current on-disk row.
-        let on_disk_now =
-            crate::services::discord::inflight::load_inflight_state(&provider, channel_id.get());
+        // The PRODUCTION decision: A's pinned snapshot vs the mailbox's CURRENT
+        // active-turn id (= B). Mismatch → Skip.
+        let mailbox_active = mailbox_snapshot(&shared, channel_id)
+            .await
+            .active_user_message_id
+            .map(MessageId::get);
         let decision = super::watcher_timeout_finalize_decision(
             Some(&pinned_a),
-            on_disk_now.as_ref(),
+            mailbox_active,
             tmux_session_name,
         );
         assert_eq!(
@@ -9012,35 +9003,36 @@ mod tests {
             super::TimeoutFinalizeDecision::Skip {
                 pinned_user_msg_id: 3001
             },
-            "A's timeout must SKIP when B took over the inflight — no finalize, no steal"
+            "A's timeout must SKIP when B holds the mailbox token — no finalize, no steal"
         );
 
-        // Skip ⇒ the guard does not finalize. Assert B survives end-to-end: token
-        // still held, on-disk inflight still B, queue not drained.
-        let snapshot_b = mailbox_snapshot(&shared, channel_id).await;
+        // Skip ⇒ the guard does not finalize. Assert B survives: token still held.
         assert!(
-            snapshot_b.cancel_token.is_some(),
+            mailbox_snapshot(&shared, channel_id)
+                .await
+                .cancel_token
+                .is_some(),
             "#3419 turn-steal: B's cancel_token MUST survive A's timeout"
         );
-        let on_disk_after =
-            crate::services::discord::inflight::load_inflight_state(&provider, channel_id.get())
-                .expect("B's inflight still present");
-        assert_eq!(
-            on_disk_after.user_msg_id, 4002,
-            "#3419 turn-steal: B's inflight MUST NOT be cleared by A's timeout"
-        );
 
-        // POSITIVE case: B's OWN watcher times out while B is still the owner. The
-        // pinned snapshot equals the on-disk identity → Finalize with B's real id.
+        // POSITIVE case: B's OWN watcher times out while B still holds the token.
+        // The pinned id equals the mailbox active id → Finalize with B's real id.
+        let on_disk_b = fresh_idle_inflight(
+            provider.clone(),
+            channel_id.get(),
+            tmux_session_name,
+            4002,
+            900,
+        );
         let finalize_decision = super::watcher_timeout_finalize_decision(
-            Some(&on_disk_after),
-            Some(&on_disk_after),
+            Some(&on_disk_b),
+            Some(4002),
             tmux_session_name,
         );
         assert_eq!(
             finalize_decision,
             super::TimeoutFinalizeDecision::Finalize { user_msg_id: 4002 },
-            "the watcher's OWN pinned turn (still inflight owner) finalizes on timeout"
+            "the watcher's OWN pinned turn (still the mailbox token holder) finalizes on timeout"
         );
         // Drive the same finalize the production Finalize arm runs and assert the
         // wedge fix: B's token is released and the queue can drain.
@@ -9066,30 +9058,165 @@ mod tests {
         );
     }
 
-    // #3419 R2 (codex HIGH): the id-0 escape — a synthetic / re-acquired
-    // watcher-owned turn (user_msg_id == 0, no mailbox token) must NEVER drive an
-    // id-0 finalize from the timeout path (`resolve_channel_only` would collapse
-    // id-0 onto the single live ledger entry and unconditionally
-    // `mailbox_finish_turn` it — the steal hazard). The decision is always `Skip`.
+    // #3419 R3 (codex HIGH — the re-acquire id-0 wedge drain): turn A is the live
+    // mailbox token holder, but `reacquire_watcher_inflight_for_active_stream`
+    // minted a `user_msg_id == 0` synthetic inflight on disk (A lost its row
+    // mid-stream). R2 keyed the decision on the on-disk row → pinned A (nonzero)
+    // mismatched id-0 → Skip → A's token stayed WEDGED. R3 keys on the mailbox
+    // active id (still A) → Finalize: A drains (token released, queued follow-up
+    // admitted) and a DIFFERENT turn is never stolen.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn timeout_finalize_drains_reacquired_id_zero_wedge_for_live_pinned_turn() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(987_3422);
+        let tmux_session_name = "AgentDesk-claude-adk-cc-9873422";
+        shared
+            .tmux_watchers
+            .insert(channel_id, test_watcher_handle(tmux_session_name));
+
+        // Turn A: the real restored Discord turn this watcher attached to. Its
+        // mailbox token is LIVE (started for real, never finished).
+        let pinned_a = fresh_idle_inflight(
+            provider.clone(),
+            channel_id.get(),
+            tmux_session_name,
+            3500,
+            10,
+        );
+        let token_a = std::sync::Arc::new(CancelToken::new());
+        assert!(
+            mailbox_try_start_turn(
+                &shared,
+                channel_id,
+                token_a.clone(),
+                UserId::new(7),
+                MessageId::new(3500),
+            )
+            .await
+        );
+        // A follow-up message is queued behind A's live turn (the queue the wedge
+        // would trap).
+        let enqueue = mailbox_enqueue_intervention(
+            &shared,
+            &provider,
+            channel_id,
+            Intervention {
+                author_id: UserId::new(99),
+                author_is_bot: false,
+                message_id: MessageId::new(3600),
+                source_message_ids: vec![MessageId::new(3600)],
+                text: "follow-up while A runs".to_string(),
+                mode: InterventionMode::Soft,
+                created_at: std::time::Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
+                pending_uploads: Vec::new(),
+                voice_announcement: None,
+            },
+        )
+        .await;
+        assert!(enqueue.enqueued, "follow-up queues behind A's live turn");
+
+        // The re-acquire path minted an id-0 synthetic inflight (A's real row was
+        // cleared mid-stream); A's mailbox token is still live.
+        let reacquired_id0 = fresh_idle_inflight(
+            provider.clone(),
+            channel_id.get(),
+            tmux_session_name,
+            0,
+            900,
+        );
+        crate::services::discord::inflight::save_inflight_state(&reacquired_id0)
+            .expect("persist re-acquired id-0 inflight");
+
+        // The PRODUCTION decision keys on the mailbox active id (still A == 3500),
+        // NOT the id-0 on-disk row. R2 would have read id-0 here and Skipped.
+        let mailbox_active = mailbox_snapshot(&shared, channel_id)
+            .await
+            .active_user_message_id
+            .map(MessageId::get);
+        assert_eq!(
+            mailbox_active,
+            Some(3500),
+            "A still holds the mailbox token"
+        );
+        let decision = super::watcher_timeout_finalize_decision(
+            Some(&pinned_a),
+            mailbox_active,
+            tmux_session_name,
+        );
+        assert_eq!(
+            decision,
+            super::TimeoutFinalizeDecision::Finalize { user_msg_id: 3500 },
+            "A's timeout must FINALIZE (drain) when A still holds the token, even with an id-0 on-disk row"
+        );
+
+        // Drive the production Finalize arm: identity-guarded clear (id-0 row ≠ A's
+        // identity → no-op, leaving the row for the live drain) + finalize on A's id.
+        let drove = super::finish_restored_watcher_active_turn(
+            &shared,
+            &provider,
+            channel_id,
+            3500,
+            true,
+            false,
+            true,
+            None,
+            "watcher turn watchdog timeout (#3419)",
+        )
+        .await;
+        assert!(drove, "the wedged A turn drives the finalizer");
+        // The wedge is gone: A's token is released so the queued follow-up can run.
+        assert!(
+            mailbox_snapshot(&shared, channel_id)
+                .await
+                .cancel_token
+                .is_none(),
+            "#3419 R3: draining A's wedge releases the mailbox token"
+        );
+    }
+
+    // #3419 R3 (codex HIGH): the id-0 escape — a synthetic / re-acquired
+    // watcher-owned PINNED turn (user_msg_id == 0, no mailbox token) must NEVER
+    // drive an id-0 finalize from the timeout path. The decision is always `Skip`
+    // regardless of the mailbox active id.
     #[test]
     fn timeout_finalize_skips_id_zero_pinned_turn() {
         let provider = ProviderKind::Claude;
         let session = "AgentDesk-claude-adk-cc-9873421";
-        // Pinned + on-disk are the SAME id-0 synthetic turn (identity would match),
-        // yet the id-0 filter still forces Skip (no token to wedge, no id-0 submit).
+        // Pinned is an id-0 synthetic turn: the id-0 filter forces Skip (no token
+        // of its own to drain, no id-0 submit) even if the mailbox is busy.
         let synthetic = fresh_idle_inflight(provider.clone(), 987_3421, session, 0, 10);
         assert_eq!(
-            super::watcher_timeout_finalize_decision(Some(&synthetic), Some(&synthetic), session,),
+            super::watcher_timeout_finalize_decision(Some(&synthetic), Some(4242), session),
             super::TimeoutFinalizeDecision::Skip {
                 pinned_user_msg_id: 0
             },
-            "id-0 synthetic turn must never id-0-finalize from the timeout path"
+            "id-0 synthetic pinned turn must never id-0-finalize from the timeout path"
         );
         // No pinned snapshot at all → Skip too (no inflight to authenticate).
         assert_eq!(
             super::watcher_timeout_finalize_decision(None, None, session),
             super::TimeoutFinalizeDecision::Skip {
                 pinned_user_msg_id: 0
+            },
+        );
+        // Pinned A is nonzero but the mailbox has NO active turn → Skip (no token
+        // wedged to drain).
+        let pinned_a = fresh_idle_inflight(provider.clone(), 987_3421, session, 3001, 10);
+        assert_eq!(
+            super::watcher_timeout_finalize_decision(Some(&pinned_a), None, session),
+            super::TimeoutFinalizeDecision::Skip {
+                pinned_user_msg_id: 3001
             },
         );
     }
