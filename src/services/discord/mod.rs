@@ -40,8 +40,7 @@ mod relay_recovery;
 pub(crate) mod response_sanitizer;
 #[cfg(unix)]
 mod session_relay_sink;
-// #2011 Phase 5.3: standalone JSONL → Discord relay loop spawned by the bridge
-// on cluster-standby nodes (leader keeps using tmux_watcher's relay path).
+// #2011 Phase 5.3: standalone JSONL → Discord relay loop on cluster-standby nodes (leader uses tmux_watcher's relay path).
 #[cfg(unix)]
 mod standby_relay;
 // #1074: landing zone for the future recovery-engine module split
@@ -71,6 +70,7 @@ pub(crate) mod shared_memory;
 mod shared_state;
 mod single_message_panel;
 mod stall_recovery;
+mod startup_reclaim;
 mod status_panel_orphan_store;
 pub(in crate::services::discord) mod streaming_finalizer;
 pub(in crate::services::discord) mod task_supervisor;

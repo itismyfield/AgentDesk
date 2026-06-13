@@ -555,6 +555,195 @@ pub(in crate::services::discord) fn finalize_streaming_footer(
     }
 }
 
+/// Stop marker appended to a panel whose live spinner footer is reclaimed by
+/// the #3412 startup sweep. The original body is preserved verbatim; only the
+/// animated footer/Tasks block is replaced by this single static line so the
+/// user can tell the turn was cut short by a restart rather than left hanging
+/// on a frozen spinner forever.
+pub(in crate::services::discord) const STARTUP_RECLAIM_STOP_MARKER: &str = "⏹ (재시작으로 중단됨)";
+
+/// #3412: true when `text` still carries a LIVE animated footer that a prior
+/// generation left frozen — either a single-message streaming status line
+/// (진행 중 / 도구 실행 중 / …) or a completion-footer Tasks/Subagents block
+/// whose slot lines still end in a braille spinner glyph rather than a terminal
+/// ✓/✗/… mark. A panel that already finalized (only terminal marks remain) is
+/// NOT reclaimable and returns false, so the sweep never re-touches a completed
+/// panel.
+///
+/// codex round-1 High-b: detection is anchored to the message TAIL. The footer
+/// must be the message's final run of footer-shaped lines, and the spinner glyph
+/// must sit on a line within that tail run. A footer/Tasks block quoted in the
+/// middle of an ordinary bot message (this very channel posts such quotes) is
+/// followed by non-footer prose, so the trailing run never reaches it and the
+/// body is left intact. The general live-panel path keeps using the broad
+/// `strip_streaming_footer` matcher — this narrowing is reclaim-only.
+pub(in crate::services::discord) fn text_has_frozen_spinner_footer(text: &str) -> bool {
+    tail_frozen_footer_split(text).is_some()
+}
+
+/// codex round-1 High-b core: split `text` into `(body, footer)` only when the
+/// message ends with a frozen-spinner footer. The footer is the maximal trailing
+/// run of footer-shaped lines (streaming status line, `Tasks`/`Subagents` header,
+/// `└ ` slot line, or `Context   ` summary), the run must contain a braille
+/// spinner glyph, and its first line must open a footer (a status line or section
+/// header) so an unrelated `└ ` quote alone cannot trigger it. `body` is every
+/// line before the run, joined verbatim. Returns `None` when the tail is ordinary
+/// prose (a mid-body footer quote ends up here), so the reclaim edit is skipped.
+fn tail_frozen_footer_split(text: &str) -> Option<(String, String)> {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.is_empty() {
+        return None;
+    }
+    // Walk up from the last line, collecting the trailing run of footer-shaped
+    // lines. Blank lines inside the run are tolerated (the `\n\n` before the
+    // footer / between sections) but a non-blank, non-footer line ends the run.
+    //
+    // codex round-2 Medium: when `clamp_completion_task_section` (and the byte
+    // clamp `clamp_footer_panel_text`) trims a frozen footer over the 600-byte
+    // budget, it appends a bare truncation-marker line (`…`, U+2026 on its own
+    // line) BELOW the kept footer prefix. That marker is NOT footer-shaped, so a
+    // naive walk ended on the last line and the clamped frozen tail
+    // (`Tasks\n└ Bash … ⠧\n…`) was never reclaimed.
+    //
+    // codex round-3 Medium: the clamp marker is ALWAYS at the very tail (below the
+    // footer). Letting a marker pass through anywhere in the walk wrongly skipped
+    // a real frozen footer when the BODY ended with a standalone `…` line just
+    // above the footer. So the walk is two phases: (1) consume trailing clamp
+    // markers / blanks at the very bottom, then (2) consume the contiguous footer
+    // run (footer-shaped + inter-section blanks) — a marker reached in phase 2
+    // sits above the footer, is body content, and closes the run.
+    let mut start = lines.len();
+    // Phase 1 — trailing clamp markers / blank lines below the footer.
+    while start > 0 {
+        let line = lines[start - 1];
+        if line.trim().is_empty() || line_is_truncation_marker(line) {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    // Phase 2 — the footer run itself.
+    while start > 0 {
+        let line = lines[start - 1];
+        if line_is_footer_shaped(line) || line.trim().is_empty() {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    if start >= lines.len() {
+        return None;
+    }
+    // Trim leading blank lines of the run so the footer opens on real content.
+    while start < lines.len() && lines[start].trim().is_empty() {
+        start += 1;
+    }
+    if start >= lines.len() {
+        return None;
+    }
+    let footer_lines = &lines[start..];
+    // First footer line must open a footer (status line or section header); a
+    // bare `└ ` / `Context   ` tail without a header is not a panel footer, and a
+    // bare truncation marker without a footer above it is not one either. The
+    // first non-blank line is therefore required to be a real footer opener, NOT a
+    // marker — so a lone `…` tail can never anchor a (nonexistent) footer.
+    let first = footer_lines
+        .iter()
+        .find(|line| !line.trim().is_empty())
+        .map(|line| line.trim())?;
+    let opens_footer = is_single_message_footer_status_line(first)
+        || completion_footer_section_header(first)
+        || completion_footer_context_line(first);
+    if !opens_footer {
+        return None;
+    }
+    // Frozen ⇔ a braille spinner glyph still rides a footer line. A completion-
+    // footer slot carries the spinner as a TRAILING glyph (`└ … ⠧`); a streaming/
+    // merged status line carries it as a LEADING glyph (`⠧ 진행 중 …`). A finished
+    // footer carries only ✓/✗/… terminal marks (or a non-spinner `**응답 완료**`
+    // status line) and matches neither, so a completed panel is never reclaimed.
+    let frozen = footer_lines
+        .iter()
+        .any(|line| line_ends_with_spinner_glyph(line) || line_starts_with_spinner_glyph(line));
+    if !frozen {
+        return None;
+    }
+    let body: String = lines[..start].join("\n");
+    let footer: String = footer_lines.join("\n");
+    Some((body, footer))
+}
+
+/// codex round-2 Medium: true when `line` is the bare truncation marker the
+/// footer clamps emit on their own line when a section overruns the 600-byte
+/// budget — `clamp_completion_task_section` and `clamp_footer_panel_text` both
+/// append `format!("{prefix}\n{…}")`, so the marker is the literal `…` (a single
+/// U+2026 HORIZONTAL ELLIPSIS) on its own line. Matched on the trimmed line so a
+/// frozen-but-clamped footer tail (`… ⠧\n…`) is still reclaimable; the tail walk
+/// passes such a marker through transparently but never lets it *open* a footer.
+fn line_is_truncation_marker(line: &str) -> bool {
+    line.trim() == "…"
+}
+
+/// True when `line` is one of the footer-section shapes the panel renders: a
+/// streaming/merged status line, a `Tasks`/`Subagents` header, a `└ ` slot line,
+/// or a `Context   ` summary. Used only by the tail-anchored reclaim split.
+fn line_is_footer_shaped(line: &str) -> bool {
+    let trimmed = line.trim();
+    is_single_message_footer_status_line(trimmed)
+        || completion_footer_section_header(trimmed)
+        || completion_footer_context_line(trimmed)
+        || trimmed.starts_with("└ ")
+}
+
+fn line_ends_with_spinner_glyph(line: &str) -> bool {
+    line.trim_end().chars().next_back().is_some_and(|c| {
+        SINGLE_MESSAGE_PANEL_SPINNER_FRAMES
+            .iter()
+            .any(|f| f.starts_with(c))
+    })
+}
+
+/// True when the first non-whitespace char of `line` is a braille spinner frame
+/// — the live shape of a streaming/merged footer status line (`⠧ 진행 중 …`).
+fn line_starts_with_spinner_glyph(line: &str) -> bool {
+    line.trim_start().chars().next().is_some_and(|c| {
+        SINGLE_MESSAGE_PANEL_SPINNER_FRAMES
+            .iter()
+            .any(|f| f.starts_with(c))
+    })
+}
+
+/// #3412: produce the one-shot finalize edit for a frozen panel. Strips the
+/// tail-anchored animated footer/Tasks block (codex round-1 High-b), preserves
+/// the body verbatim, appends a single `STARTUP_RECLAIM_STOP_MARKER` line, and
+/// re-balances ``` fences (#3394) so a body that ended mid code block stays
+/// renderable. Returns `None` when there is no frozen TAIL footer to reclaim (so
+/// the caller can skip the edit) — the body itself is NEVER mutated, and a
+/// mid-body footer quote never matches.
+pub(in crate::services::discord) fn reclaim_finalize_text(
+    last_edit_text: &str,
+    provider: &super::ProviderKind,
+) -> Option<String> {
+    if !text_has_frozen_spinner_footer(last_edit_text) {
+        return None; // No frozen TAIL footer (or a mid-body quote) — skip.
+    }
+    let (body, _footer) = tail_frozen_footer_split(last_edit_text)?;
+    let _ = provider; // body is preserved verbatim; provider reserved for parity.
+    let body = body.trim_end();
+    let repaired = repair_fence_parity(body);
+    let stop = STARTUP_RECLAIM_STOP_MARKER;
+    let finalized = if repaired.trim().is_empty() {
+        stop.to_string()
+    } else {
+        format!("{repaired}\n\n{stop}")
+    };
+    if finalized == last_edit_text {
+        None
+    } else {
+        Some(finalized)
+    }
+}
+
 pub(in crate::services::discord) fn strip_streaming_footer(
     last_edit_text: &str,
     provider: &super::ProviderKind,
@@ -1831,5 +2020,167 @@ mod tests {
 
         assert!(rendered.len() <= DISCORD_MSG_LIMIT);
         assert!(rendered.contains("\n\n"));
+    }
+
+    // ---- codex round-1 High-b: tail-anchored reclaim detection ----
+
+    #[test]
+    fn reclaim_tail_footer_matches_when_footer_is_last_section() {
+        // A genuine frozen panel: prose body then a Tasks footer with a spinner
+        // as the message's final section. Must reclaim, body preserved verbatim.
+        let body = "여기 실제 응답 본문입니다.\n\n두 번째 문단도 보존되어야 합니다.";
+        let frozen = format!("{body}\n\nTasks\n└ Bash 백그라운드 실행 ⠧");
+        assert!(super::text_has_frozen_spinner_footer(&frozen));
+        let out = super::reclaim_finalize_text(&frozen, &ProviderKind::Claude)
+            .expect("real tail footer must reclaim");
+        assert!(out.starts_with(body), "body must be preserved verbatim");
+        assert!(out.contains(super::STARTUP_RECLAIM_STOP_MARKER));
+        assert!(!out.contains('⠧'), "spinner must be gone");
+    }
+
+    #[test]
+    fn reclaim_tail_footer_ignores_mid_body_footer_quote() {
+        // This channel posts bot messages that QUOTE a footer/Tasks example in
+        // the middle of ordinary prose. The quote is followed by real prose, so
+        // the trailing run never reaches it: the message must NOT be reclaimed
+        // and the body must never be truncated.
+        let quoted = "여기 패널 예시를 인용합니다:\n\nTasks\n└ Bash 실행 중 ⠧\n\n그리고 이것은 인용 뒤에 오는 실제 본문 산문입니다.";
+        assert!(
+            !super::text_has_frozen_spinner_footer(quoted),
+            "mid-body footer quote must not be detected as a frozen tail footer"
+        );
+        assert_eq!(
+            super::reclaim_finalize_text(quoted, &ProviderKind::Claude),
+            None,
+            "mid-body footer quote must never be stripped (no body truncation)"
+        );
+    }
+
+    #[test]
+    fn reclaim_tail_footer_ignores_mid_body_streaming_status_quote() {
+        // Same risk for a streaming status line quoted mid-body.
+        let quoted =
+            "상태 라인 예시:\n\n⠧ 진행 중 — claude (<t:1700000000:R>)\n\n뒤따르는 실제 본문 산문.";
+        assert!(!super::text_has_frozen_spinner_footer(quoted));
+        assert_eq!(
+            super::reclaim_finalize_text(quoted, &ProviderKind::Claude),
+            None
+        );
+    }
+
+    #[test]
+    fn reclaim_tail_footer_ignores_completed_tail_footer() {
+        // A completed tail footer (terminal ✓ marks, no live spinner) must not
+        // be reclaimed even though it IS the message's last section.
+        let done = "완료된 응답 본문.\n\nTasks\n└ Bash 백그라운드 실행 ✓";
+        assert!(!super::text_has_frozen_spinner_footer(done));
+        assert_eq!(
+            super::reclaim_finalize_text(done, &ProviderKind::Claude),
+            None
+        );
+    }
+
+    #[test]
+    fn reclaim_tail_footer_matches_clamped_frozen_tail_with_truncation_marker() {
+        // codex round-2 Medium: when the frozen footer overran the 600-byte
+        // budget, `clamp_completion_task_section` keeps a leading prefix and
+        // appends a bare `…` truncation-marker line. The frozen spinner still
+        // rides a KEPT slot line, but the marker is the message's last line. The
+        // tail walk must pass the marker through and reclaim the clamped tail
+        // (previously it bailed on the marker and returned None), stripping BOTH
+        // the footer and the marker while preserving the body verbatim.
+        let body = "여기 실제 응답 본문입니다.\n\n두 번째 문단도 보존되어야 합니다.";
+        // Exact clamp shape: kept prefix (header + frozen slot) then `…` line,
+        // mirroring `format!("{prefix}\n{TRUNCATION_MARKER}")`.
+        let clamped_footer = "Tasks\n└ Bash 백그라운드 실행 … ⠧\n…";
+        let frozen = format!("{body}\n\n{clamped_footer}");
+        assert!(
+            super::text_has_frozen_spinner_footer(&frozen),
+            "clamped frozen tail (footer prefix + `…` marker) must be detected"
+        );
+        let out = super::reclaim_finalize_text(&frozen, &ProviderKind::Claude)
+            .expect("clamped frozen tail must reclaim");
+        assert!(out.starts_with(body), "body must be preserved verbatim");
+        assert!(out.contains(super::STARTUP_RECLAIM_STOP_MARKER));
+        assert!(!out.contains('⠧'), "frozen spinner must be gone");
+        assert!(
+            !out.contains('…'),
+            "trailing truncation marker must be stripped with the footer"
+        );
+    }
+
+    #[test]
+    fn reclaim_tail_footer_matches_frozen_panel_when_body_ends_with_bare_marker() {
+        // codex round-3 Medium: the body's own last line is a standalone `…` just
+        // above the footer (NOT a clamp marker — the clamp marker only ever sits
+        // BELOW the footer). The two-phase walk must still reclaim the real frozen
+        // footer below; the body `…` stays in the preserved body. Previously the
+        // marker passed through transparently, made `…` the run's first line, and
+        // `opens_footer` failed → the frozen panel was missed.
+        let body = "본문이 여기서 끝납니다.\n…";
+        let frozen = format!("{body}\n\nTasks\n└ Bash 실행 중 ⠧");
+        assert!(
+            super::text_has_frozen_spinner_footer(&frozen),
+            "frozen footer must be detected even when the body ends with a bare `…`"
+        );
+        let out = super::reclaim_finalize_text(&frozen, &ProviderKind::Claude)
+            .expect("frozen footer below a body `…` must reclaim");
+        assert!(
+            out.starts_with(body),
+            "body (including its `…` line) preserved"
+        );
+        assert!(out.contains('…'), "the body's own `…` line must survive");
+        assert!(!out.contains('⠧'), "frozen spinner must be gone");
+        assert!(out.contains(super::STARTUP_RECLAIM_STOP_MARKER));
+    }
+
+    #[test]
+    fn reclaim_tail_footer_matches_clamped_streaming_status_with_marker() {
+        // The byte clamp `clamp_footer_panel_text` appends the same `…` marker.
+        // A frozen merged/streaming status line (leading-spinner shape) followed
+        // by the marker must also reclaim.
+        let body = "스트리밍 본문 텍스트.";
+        let frozen = format!("{body}\n\n⠧ 진행 중 — claude (<t:1700000000:R>)\n…");
+        assert!(super::text_has_frozen_spinner_footer(&frozen));
+        let out = super::reclaim_finalize_text(&frozen, &ProviderKind::Claude)
+            .expect("clamped frozen streaming tail must reclaim");
+        assert!(out.starts_with(body), "body preserved verbatim");
+        assert!(!out.contains('⠧'));
+        assert!(!out.contains('…'), "marker stripped with footer");
+    }
+
+    #[test]
+    fn reclaim_tail_footer_ignores_bare_truncation_marker_without_footer() {
+        // A bare `…` tail with ordinary prose above it (no footer run) must NOT
+        // be reclaimed: the marker passes the walk but the run's first line is
+        // prose, which fails `opens_footer`. The body is never touched.
+        let prose = "그냥 평범한 본문 산문입니다. 패널 푸터가 없습니다.\n…";
+        assert!(
+            !super::text_has_frozen_spinner_footer(prose),
+            "a lone `…` after prose must not anchor a footer"
+        );
+        assert_eq!(
+            super::reclaim_finalize_text(prose, &ProviderKind::Claude),
+            None
+        );
+    }
+
+    #[test]
+    fn reclaim_tail_footer_ignores_mid_body_quote_with_trailing_marker() {
+        // codex round-2 Medium High-b re-confirmation: a footer QUOTED mid-body
+        // (followed by real prose) must STILL not be reclaimed even though a `…`
+        // marker now passes the walk transparently. The trailing prose breaks the
+        // walk before it ever reaches the quoted footer, so the marker allowance
+        // cannot revive a mid-body quote match.
+        let quoted = "여기 패널 예시를 인용합니다:\n\nTasks\n└ Bash 실행 중 ⠧\n…\n\n그리고 이것은 인용 뒤에 오는 실제 본문 산문입니다.";
+        assert!(
+            !super::text_has_frozen_spinner_footer(quoted),
+            "mid-body footer quote (with a marker) must not be a frozen tail footer"
+        );
+        assert_eq!(
+            super::reclaim_finalize_text(quoted, &ProviderKind::Claude),
+            None,
+            "mid-body footer quote must never be stripped"
+        );
     }
 }
