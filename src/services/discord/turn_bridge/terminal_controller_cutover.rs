@@ -200,6 +200,26 @@ impl toc::PostHeartbeatGuard for BridgePostHeartbeatGuard {}
 /// — the SAME monotonic-CAS, SAME `end` (`tmux_last_offset`), SAME channel as
 /// legacy — and returns `true` → Delivered.
 ///
+/// Channel split (codex r1 [High], matching legacy mod.rs site 5 EXACTLY):
+/// - `channel_id` (the bridge's delivery/dispatch channel) is the EDIT TARGET —
+///   `TurnOutputCtx.channel_id` (→ `replace_message_with_outcome(ctx.channel_id, ..)`,
+///   controller:830, == legacy `replace_message_with_outcome(channel_id, ..)`
+///   mod.rs:6180) and `PlaceholderKey.channel_id` (the placeholder card lives in
+///   the delivery channel).
+/// - `watcher_owner_channel_id` (the resolved tmux-session owner channel) is the
+///   LEASE/ADVANCE AUTHORITY — the `cell` (keyed by `delivery_lease(watcher_owner_channel_id)`,
+///   mod.rs:6105), the `TurnKey` (`TurnKey::new(watcher_owner_channel_id, ..)`,
+///   mod.rs:6090), and the advance callback
+///   (`advance_tmux_relay_confirmed_end(.., watcher_owner_channel_id, ..)` →
+///   `tmux_relay_coord(watcher_owner_channel_id)`, == legacy
+///   `commit_and_advance(.., watcher_owner_channel_id, ..)` mod.rs:6216).
+///
+/// These two CAN differ in production: a recovered/restored bridge that reuses an
+/// existing watcher resolves the owner channel X for the lease while still
+/// editing its own dispatch channel Y (mod.rs:2207-2213). Routing the edit
+/// through `watcher_owner_channel_id` would edit the WRONG channel (or fail and
+/// misclassify) — so the edit MUST use the delivery `channel_id`.
+///
 /// `gateway` is the bridge's already-constructed `Arc<dyn TurnGateway>` (passed as
 /// `&dyn`); the test injects a fake driving the REAL controller + real cell.
 #[allow(clippy::too_many_arguments)]
@@ -207,6 +227,7 @@ pub(super) async fn deliver_short_replace_via_controller(
     gateway: &dyn TurnGateway,
     shared: &SharedData,
     provider: &ProviderKind,
+    channel_id: ChannelId,
     watcher_owner_channel_id: ChannelId,
     tmux_session_name: Option<&str>,
     cell: &Arc<DeliveryLeaseCell>,
@@ -247,14 +268,22 @@ pub(super) async fn deliver_short_replace_via_controller(
             // historical bridge-owned/default shape (observability only).
             owner: RelayOwnerKind::None,
             holder,
+            // Lease cell is keyed by `watcher_owner_channel_id` (acquired by the
+            // caller via `delivery_lease(watcher_owner_channel_id)`, mod.rs:6105).
             lease: &**cell,
-            channel_id: watcher_owner_channel_id,
+            // EDIT TARGET = the bridge's delivery channel (codex r1 [High]): the
+            // controller POSTs `replace_message_with_outcome(ctx.channel_id, ..)`
+            // (controller:830), which legacy site 5 routes through `channel_id`
+            // (mod.rs:6180), NOT `watcher_owner_channel_id`. These can differ for
+            // a recovered/reused-watcher bridge (mod.rs:2207-2213).
+            channel_id,
             placeholder_controller,
             placeholder: toc::PlaceholderSlot::Active {
                 message_id: msg_id,
                 key: PlaceholderKey {
                     provider: provider.clone(),
-                    channel_id: watcher_owner_channel_id,
+                    // The placeholder card lives in the delivery `channel_id`.
+                    channel_id,
                     message_id: msg_id,
                 },
             },
@@ -333,6 +362,7 @@ pub(super) async fn apply_bridge_short_replace_controller(
         gateway,
         shared,
         provider,
+        channel_id,
         watcher_owner_channel_id,
         tmux_session_name,
         cell,
@@ -578,39 +608,51 @@ mod tests {
         use crate::services::provider::ProviderKind;
         use serenity::all::{ChannelId, MessageId};
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
         const CH: u64 = 8_151;
         const MSG: u64 = 77;
         const START: u64 = 12;
         const END: u64 = 48;
+        // codex r1 [High] regression: a recovered/reused-watcher bridge resolves a
+        // DIFFERENT owner channel for the lease/advance than its delivery channel
+        // (mod.rs:2207-2213). The edit MUST land in the delivery channel.
+        const OWNER_CH: u64 = 9_999;
 
         fn ch() -> ChannelId {
             ChannelId::new(CH)
+        }
+        fn owner_ch() -> ChannelId {
+            ChannelId::new(OWNER_CH)
         }
         fn turn() -> TurnKey {
             TurnKey::new(ch(), 21, 0)
         }
 
         // A fake `TurnGateway` whose `replace_message_with_outcome` returns a fixed
-        // outcome (or `Err`) and counts transport calls. All other methods panic —
-        // the short-replace path must touch ONLY `replace_message_with_outcome`
-        // (the `Active` lifecycle keeps `post_send_finalize` a no-op, no edit).
+        // outcome (or `Err`), counts transport calls, AND records the `channel_id`
+        // it was called with (0 = never called) so a test can assert the edit was
+        // routed to the DELIVERY channel — not the lease/advance owner channel
+        // (codex r1 [High]). All other methods panic — the short-replace path must
+        // touch ONLY `replace_message_with_outcome` (the `Active` lifecycle keeps
+        // `post_send_finalize` a no-op, no edit).
         struct ShortReplaceFakeGateway {
             outcome: ReplaceLongMessageOutcome,
             ok: bool,
             replace_calls: AtomicUsize,
+            replace_channel: AtomicU64,
         }
 
         impl TurnGateway for ShortReplaceFakeGateway {
             fn replace_message_with_outcome<'a>(
                 &'a self,
-                _c: ChannelId,
+                c: ChannelId,
                 _m: MessageId,
                 _content: &'a str,
             ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
                 Box::pin(async move {
                     self.replace_calls.fetch_add(1, Ordering::SeqCst);
+                    self.replace_channel.store(c.get(), Ordering::SeqCst);
                     if self.ok {
                         Ok(self.outcome.clone())
                     } else {
@@ -703,21 +745,38 @@ mod tests {
                 outcome,
                 ok,
                 replace_calls: AtomicUsize::new(0),
+                replace_channel: AtomicU64::new(0),
             }
         }
 
         // Drive the REAL controller through the production helper with a fresh cell,
-        // returning the `DeliveryOutcome` the bridge write-back consumes.
+        // returning the `DeliveryOutcome` the bridge write-back consumes. The existing
+        // tests use the SAME channel for delivery and owner (no drift); the
+        // routing regression below uses `run_split` with differing ids.
         async fn run(
             gw: &ShortReplaceFakeGateway,
             shared: &Arc<SharedData>,
             cell: &Arc<DeliveryLeaseCell>,
         ) -> toc::DeliveryOutcome {
+            run_split(gw, shared, cell, ch(), ch()).await
+        }
+
+        // Drive the REAL controller with EXPLICIT delivery vs owner channels so a
+        // test can assert the edit routes to the delivery channel while the
+        // lease/advance use the owner channel (codex r1 [High]).
+        async fn run_split(
+            gw: &ShortReplaceFakeGateway,
+            shared: &Arc<SharedData>,
+            cell: &Arc<DeliveryLeaseCell>,
+            delivery_channel: ChannelId,
+            owner_channel: ChannelId,
+        ) -> toc::DeliveryOutcome {
             deliver_short_replace_via_controller(
                 gw,
                 shared.as_ref(),
                 &ProviderKind::Claude,
-                ch(),
+                delivery_channel,
+                owner_channel,
                 Some("AgentDesk-claude-8151"),
                 cell,
                 &shared.ui.placeholder_controller,
@@ -984,6 +1043,65 @@ mod tests {
                 "NO dual-offset bump on the partial arm (nothing landed)"
             );
             assert!(!locals.committed);
+        }
+
+        // (6b) codex r1 [High] channel-routing regression: when the delivery channel
+        // differs from the lease/advance OWNER channel (a recovered/reused-watcher
+        // bridge, mod.rs:2207-2213), the in-place EDIT must route to the DELIVERY
+        // channel (legacy `replace_message_with_outcome(channel_id, ..)` mod.rs:6180),
+        // NOT the owner channel — while the lease (cell keyed by the owner channel)
+        // and the confirmed_end advance use the OWNER channel (legacy
+        // `commit_and_advance(.., watcher_owner_channel_id, ..)` mod.rs:6216).
+        //
+        // Mutation pin: reverting the ctx to route the edit through
+        // `watcher_owner_channel_id` (the r1 bug) records OWNER_CH on the gateway →
+        // the DELIVERY-channel assertion fails. (Manually applied + reverted to
+        // confirm the test catches it.)
+        #[tokio::test(flavor = "current_thread")]
+        async fn bridge_short_replace_routes_edit_to_delivery_channel() {
+            let shared = make_shared_data_for_tests();
+            // The lease cell is keyed by the OWNER channel (delivery_lease(owner)).
+            let cell = Arc::new(DeliveryLeaseCell::new(owner_ch()));
+            assert_ne!(CH, OWNER_CH, "delivery and owner channels must differ");
+            assert_eq!(shared.committed_relay_offset(ch()), 0);
+            assert_eq!(shared.committed_relay_offset(owner_ch()), 0);
+
+            let gw = gateway(ReplaceLongMessageOutcome::EditedOriginal, true);
+            let outcome = run_split(&gw, &shared, &cell, ch(), owner_ch()).await;
+            assert!(
+                matches!(outcome, toc::DeliveryOutcome::Delivered { .. }),
+                "EditedOriginal → Delivered"
+            );
+
+            // The edit went to the DELIVERY channel — NOT the owner channel.
+            assert_eq!(gw.replace_calls.load(Ordering::SeqCst), 1, "one edit POST");
+            assert_eq!(
+                gw.replace_channel.load(Ordering::SeqCst),
+                CH,
+                "the in-place edit MUST route to the DELIVERY channel (codex r1 [High])"
+            );
+            assert_ne!(
+                gw.replace_channel.load(Ordering::SeqCst),
+                OWNER_CH,
+                "the edit MUST NOT route to the lease/advance owner channel"
+            );
+
+            // The advance committed on the OWNER channel (lease/advance authority),
+            // NOT the delivery channel.
+            assert_eq!(
+                shared.committed_relay_offset(owner_ch()),
+                END,
+                "confirmed_end advances on the OWNER channel (lease/advance authority)"
+            );
+            assert_eq!(
+                shared.committed_relay_offset(ch()),
+                0,
+                "the delivery channel is NOT the advance authority — no offset there"
+            );
+            assert!(
+                matches!(cell.read(), LeaseSnapshot::Unleased),
+                "the owner-keyed lease cell released after commit"
+            );
         }
 
         // (7) pure no-double-acquire gate + flag-ON skip: `bridge_terminal_lease_range`
