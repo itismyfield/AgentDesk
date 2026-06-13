@@ -115,6 +115,56 @@ impl DeliveryLease for DeliveryLeaseCell {
     }
 }
 
+/// #3089 A3: a zero-sized no-op [`DeliveryLease`] for transport-only owners that
+/// legacy never held a lease (standby_relay — no `DeliveryLeaseCell`, no offset
+/// authority, no heartbeat). `try_acquire` ALWAYS returns `false`, so the
+/// controller takes the `ProceedMarkerless` acquire-failure path: it holds no
+/// lease (`lease_guard = None`, `heartbeat_guard = None`) and never commits or
+/// releases — a pure transport. `commit`/`release`/`renew` are no-ops returning
+/// `false` (unreachable on the markerless path, but a defensible answer keeps the
+/// trait honest), and `read` reports `Unleased` (nothing was ever held).
+/// Combined with `advance: None`, `commit_and_finalize` treats every confirmed
+/// transport as `advanced = true` → `Delivered`, reproducing legacy standby
+/// short-replace (transport-only, no state mutation).
+pub(in crate::services::discord) struct NoLease;
+
+impl DeliveryLease for NoLease {
+    fn try_acquire(
+        &self,
+        _turn: TurnKey,
+        _holder: LeaseHolder,
+        _start: u64,
+        _end: u64,
+        _deadline_ms: u64,
+    ) -> bool {
+        // ALWAYS fail the acquire → controller takes `ProceedMarkerless`
+        // (transport-only, no lease held). This is the whole point of `NoLease`.
+        false
+    }
+    fn commit(
+        &self,
+        _holder: LeaseHolder,
+        _turn: TurnKey,
+        _start: u64,
+        _end: u64,
+        _outcome: LeaseOutcome,
+    ) -> bool {
+        // Unreachable on the markerless path (`lease_guard == None` ⇒ no commit);
+        // a no-op keeps the trait honest.
+        false
+    }
+    fn release(&self, _holder: LeaseHolder, _turn: TurnKey, _start: u64, _end: u64) -> bool {
+        false
+    }
+    fn renew(&self, _holder: LeaseHolder, _turn: TurnKey, _new_deadline_ms: u64) -> bool {
+        false
+    }
+    fn read(&self) -> LeaseSnapshot {
+        // Never held → `Unleased`.
+        LeaseSnapshot::Unleased
+    }
+}
+
 /// Initial acquire deadline (process-monotonic ms) the controller stamps on the
 /// delivery lease for a single `deliver_turn_output` attempt. A1 recorded a
 /// fixed 60s TTL because nothing renewed it; A2a instead matches the sink/watcher

@@ -23,6 +23,7 @@
 //! Leader path is unchanged.
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -32,9 +33,36 @@ use serenity::model::id::{ChannelId, MessageId};
 use super::SharedData;
 use super::formatting::{self, ReplaceLongMessageOutcome};
 use super::inflight::{
-    GuardedClearOutcome, InflightSignal, InflightTurnIdentity, InflightTurnState,
+    GuardedClearOutcome, InflightSignal, InflightTurnIdentity, InflightTurnState, RelayOwnerKind,
 };
+use super::outbound::turn_output_controller as toc;
+use super::placeholder_controller::{PlaceholderKey, PlaceholderLifecycle};
 use crate::services::provider::ProviderKind;
+
+/// #3089 A3: flag gating ONLY the standby short-replace branch onto the
+/// turn-output controller (`deliver_turn_output`). Default OFF → the legacy
+/// `replace_long_message_raw_with_outcome` short-replace path runs
+/// byte-identically; ON → that branch routes through the controller as a
+/// transport-only `ProceedMarkerless` delivery (standby holds no lease, advances
+/// no offset, runs no heartbeat — see [`NoLease`](toc::NoLease)). OnceLock+env,
+/// mirroring `sink_short_replace_controller_enabled`. The long-chunk (send new
+/// chunks + delete original) and new-message branches stay legacy (deferred,
+/// exactly like the A2b sink cutover).
+pub(in crate::services::discord) fn standby_relay_controller_enabled() -> bool {
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let on = std::env::var("AGENTDESK_STANDBY_RELAY_CONTROLLER")
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase())
+            .is_some_and(|v| v == "1" || v == "true");
+        // Telemetry ONLY when ENABLED — the default-OFF first evaluation must have
+        // NO observable side effect (byte-identical / deploy no-op), matching A2b.
+        if on {
+            tracing::info!("  ✓ standby_relay_controller: enabled");
+        }
+        on
+    })
+}
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// #2448 graduation: the 900s (15min) cap was the heuristic stop signal —
@@ -604,6 +632,111 @@ fn complete_standby_inflight_state(
     outcome
 }
 
+/// #3089 A3: standby short-replace via the turn-output controller, behaviourally
+/// equal to legacy `replace_long_message_raw_with_outcome`. Standby is
+/// TRANSPORT-ONLY — it never held a `DeliveryLeaseCell`, never advanced an
+/// offset, and ran no heartbeat — so this uses [`toc::NoLease`] (acquire always
+/// fails → `ProceedMarkerless`: no lease held, `heartbeat = None`) with
+/// `advance = None` (no offset authority → `commit_and_finalize` treats a
+/// confirmed transport as `advanced = true` → `Delivered`). #2757 is preserved
+/// via `PreserveAlways` (the original placeholder is NEVER deleted on fallback —
+/// the legacy short-replace path never deletes either; only the deferred
+/// long-chunk branch does). `CommitOnFallback` mirrors legacy returning true on
+/// `SentFallbackAfterEditFailure`. `Replace { Active }` keeps `post_send_finalize`
+/// a no-op (the replace IS the edit). `gateway` is a seam: the live path builds
+/// the real `DiscordGateway`; tests inject a fake driving the REAL controller.
+///
+/// Legacy bool mapping (must reproduce legacy EXACTLY):
+/// - `EditedOriginal` → `Delivered` → `true`.
+/// - `SentFallbackAfterEditFailure` (CommitOnFallback) → `Delivered` → `true`.
+/// - `PartialContinuationFailure` → `Unknown` (no advance, I2) → `false`.
+/// - transport `Err` → `Unknown` (`transient_or_unknown`) → `false`.
+///
+/// `NotDelivered` cannot arise here (no advance callback ⇒ `advanced` always
+/// `true`), but is mapped to `false` for completeness; `Transient`/`Skipped`
+/// likewise map to `false`.
+async fn deliver_short_replace_via_controller<G: super::gateway::TurnGateway + ?Sized>(
+    gateway: &G,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    msg_id: MessageId,
+    formatted: &str,
+) -> bool {
+    // Standby has no turn binding here; the `TurnKey` is COSMETIC on the
+    // markerless + `NoLease` path (acquire always fails ⇒ the lease/turn identity
+    // never gates anything). `user_msg_id = 0` is a defensible degenerate value.
+    let turn =
+        super::turn_finalizer::TurnKey::new(channel_id, 0, shared.restart.current_generation);
+    let no_lease = toc::NoLease;
+    let outcome = toc::deliver_turn_output(
+        gateway,
+        toc::TurnOutputCtx {
+            turn,
+            owner: RelayOwnerKind::StandbyRelay,
+            // Reuse `LeaseHolder::Sink` (its doc reads "The standby / output sink
+            // relay") — cosmetic on the markerless path; no `Standby` variant
+            // exists and `mod.rs` is a frozen baseline, so adding one is avoided.
+            holder: super::LeaseHolder::Sink,
+            lease: &no_lease,
+            channel_id,
+            placeholder_controller: &shared.ui.placeholder_controller,
+            placeholder: toc::PlaceholderSlot::Active {
+                message_id: msg_id,
+                key: PlaceholderKey {
+                    provider: provider.clone(),
+                    channel_id,
+                    message_id: msg_id,
+                },
+            },
+            body: formatted,
+            // Standby has no offsets and never commits (NoLease) — the range is
+            // inert. A degenerate `(0, 0)` is defensible: nothing reads it.
+            send_range: (0, 0),
+            // `Replace { Active }` → non-terminal → `post_send_finalize` no-ops,
+            // matching the legacy edit-in-place.
+            plan: toc::OutputPlan::Replace {
+                lifecycle: PlaceholderLifecycle::Active,
+            },
+            // #2757: never delete the original on edit-fail fallback.
+            edit_fail_policy: toc::EditFailPlaceholderPolicy::PreserveAlways,
+            // Standby returns true on fallback (`standby_relay.rs` legacy).
+            fallback_commit_policy: toc::FallbackCommitPolicy::CommitOnFallback,
+            // Transport-only: a (failed) acquire still POSTs, markerless.
+            acquire_failure_mode: toc::AcquireFailureMode::ProceedMarkerless,
+            // No offset authority → unconditional advance (A1 semantics).
+            advance: None,
+            // No heartbeat (no lease to renew).
+            heartbeat: None,
+        },
+    )
+    .await;
+
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    match outcome {
+        // Confirmed POST (EditedOriginal OR #2757 CommitOnFallback): the controller
+        // ran the (no-op markerless) commit; legacy returned true for both.
+        toc::DeliveryOutcome::Delivered { .. } => {
+            tracing::info!(
+                "  [{ts}] 👁 standby_relay ✓ delivered terminal response via controller channel {} msg {} (#3089 A3)",
+                channel_id.get(),
+                msg_id.get()
+            );
+            true
+        }
+        // PartialContinuationFailure → Unknown (I2, no advance); transport Err →
+        // Unknown; NotDelivered/Transient/Skipped → not confirmed. Legacy → false.
+        _ => {
+            tracing::warn!(
+                "  [{ts}] ⚠ standby_relay controller delivery not confirmed for channel {} msg {} (#3089 A3)",
+                channel_id.get(),
+                msg_id.get()
+            );
+            false
+        }
+    }
+}
+
 async fn deliver_response(
     http: &Arc<serenity::http::Http>,
     channel_id: ChannelId,
@@ -643,6 +776,24 @@ async fn deliver_response(
                     chars
                 );
                 return true;
+            }
+            // #3089 A3: route the short-replace branch through the unified
+            // controller behind a flag (default OFF). The nonempty gate mirrors
+            // A2b: `replace_long_message_raw_with_outcome` treats a zero-chunk
+            // (empty) body as `EditedOriginal` (→ true), but the controller
+            // short-circuits an empty body to `Skipped` (→ false), so empty bodies
+            // MUST stay on the legacy path. OFF → the verbatim legacy path below.
+            if standby_relay_controller_enabled() && !formatted.is_empty() {
+                let gateway = super::gateway::DiscordGateway::new(
+                    http.clone(),
+                    shared.clone(),
+                    provider.clone(),
+                    None,
+                );
+                return deliver_short_replace_via_controller(
+                    &gateway, shared, provider, channel_id, msg_id, &formatted,
+                )
+                .await;
             }
             let outcome = formatting::replace_long_message_raw_with_outcome(
                 http, channel_id, msg_id, &formatted, shared,
@@ -1172,6 +1323,277 @@ mod tests {
                 "2001 bytes is over-limit => new chunks"
             );
             assert!(!should_send("short"));
+        }
+    }
+
+    // #3089 A3 — drive the flag-ON production helper
+    // (`deliver_short_replace_via_controller`) with a fake `TurnGateway` through
+    // the REAL controller path, asserting the legacy bool mapping is reproduced
+    // EXACTLY and #2757 is preserved. Mutation-sensitive (see module docstring on
+    // the helper): each test fails under a targeted controller mutation.
+    mod a3_controller_cutover_tests {
+        use super::super::{
+            RelayOwnerKind, deliver_short_replace_via_controller, standby_relay_controller_enabled,
+        };
+        use crate::services::discord::formatting::ReplaceLongMessageOutcome;
+        use crate::services::discord::gateway::{GatewayFuture, TurnGateway};
+        use crate::services::discord::make_shared_data_for_tests;
+        use crate::services::provider::ProviderKind;
+        use poise::serenity_prelude::{ChannelId, MessageId};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Minimal `TurnGateway` fake for the standby short-replace controller path.
+        // Only `replace_message_with_outcome` is exercised (`Replace { Active }`
+        // transport); `post_send_finalize` no-ops for the non-terminal `Active`
+        // lifecycle, so no edit/delete fires. Every other method `panic!`s —
+        // reaching one (e.g. a `delete_message` regressing #2757) is a behaviour
+        // drift the test catches.
+        struct StandbyFakeGateway {
+            outcome: ReplaceLongMessageOutcome,
+            ok: bool,
+            replace_calls: AtomicUsize,
+            delete_calls: AtomicUsize,
+        }
+
+        impl StandbyFakeGateway {
+            fn new(outcome: ReplaceLongMessageOutcome, ok: bool) -> Self {
+                Self {
+                    outcome,
+                    ok,
+                    replace_calls: AtomicUsize::new(0),
+                    delete_calls: AtomicUsize::new(0),
+                }
+            }
+        }
+
+        impl TurnGateway for StandbyFakeGateway {
+            fn replace_message_with_outcome<'a>(
+                &'a self,
+                _c: ChannelId,
+                _m: MessageId,
+                _content: &'a str,
+            ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
+                Box::pin(async move {
+                    self.replace_calls.fetch_add(1, Ordering::SeqCst);
+                    if self.ok {
+                        Ok(self.outcome.clone())
+                    } else {
+                        Err("fake transport failure".to_string())
+                    }
+                })
+            }
+            fn delete_message<'a>(
+                &'a self,
+                _c: ChannelId,
+                _m: MessageId,
+            ) -> GatewayFuture<'a, Result<(), String>> {
+                // #2757: the standby short-replace path must NEVER delete the
+                // original. Record (and still succeed) so a fallback-delete
+                // mutation is caught by the `delete_calls == 0` assertions.
+                self.delete_calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move { Ok(()) })
+            }
+            fn send_message<'a>(
+                &'a self,
+                _c: ChannelId,
+                _x: &'a str,
+            ) -> GatewayFuture<'a, Result<MessageId, String>> {
+                panic!("standby short-replace path never sends a new message")
+            }
+            fn edit_message<'a>(
+                &'a self,
+                _c: ChannelId,
+                _m: MessageId,
+                _x: &'a str,
+            ) -> GatewayFuture<'a, Result<(), String>> {
+                panic!("Active lifecycle → post_send_finalize no-op → no edit")
+            }
+            fn add_reaction<'a>(
+                &'a self,
+                _c: ChannelId,
+                _m: MessageId,
+                _e: char,
+            ) -> GatewayFuture<'a, ()> {
+                panic!("unused TurnGateway method on the standby short-replace path")
+            }
+            fn remove_reaction<'a>(
+                &'a self,
+                _c: ChannelId,
+                _m: MessageId,
+                _e: char,
+            ) -> GatewayFuture<'a, ()> {
+                panic!("unused TurnGateway method on the standby short-replace path")
+            }
+            fn schedule_retry_with_history<'a>(
+                &'a self,
+                _c: ChannelId,
+                _u: MessageId,
+                _t: &'a str,
+            ) -> GatewayFuture<'a, ()> {
+                panic!("unused TurnGateway method on the standby short-replace path")
+            }
+            fn dispatch_queued_turn<'a>(
+                &'a self,
+                _c: ChannelId,
+                _i: &'a crate::services::discord::Intervention,
+                _o: &'a str,
+                _h: bool,
+            ) -> GatewayFuture<'a, Result<(), String>> {
+                panic!("unused TurnGateway method on the standby short-replace path")
+            }
+            fn validate_live_routing<'a>(
+                &'a self,
+                _c: ChannelId,
+            ) -> GatewayFuture<'a, Result<(), String>> {
+                panic!("unused TurnGateway method on the standby short-replace path")
+            }
+            fn requester_mention(&self) -> Option<String> {
+                None
+            }
+            fn can_chain_locally(&self) -> bool {
+                false
+            }
+            fn bot_owner_provider(&self) -> Option<ProviderKind> {
+                None
+            }
+        }
+
+        fn run(outcome: ReplaceLongMessageOutcome, ok: bool) -> (bool, usize, usize) {
+            let shared = make_shared_data_for_tests();
+            let provider = ProviderKind::Claude;
+            let channel = ChannelId::new(9_041);
+            let gateway = StandbyFakeGateway::new(outcome, ok);
+            let delivered = futures::executor::block_on(deliver_short_replace_via_controller(
+                &gateway,
+                &shared,
+                &provider,
+                channel,
+                MessageId::new(99),
+                "answer",
+            ));
+            (
+                delivered,
+                gateway.replace_calls.load(Ordering::SeqCst),
+                gateway.delete_calls.load(Ordering::SeqCst),
+            )
+        }
+
+        #[test]
+        fn edited_original_returns_true_and_does_not_delete_original() {
+            let (delivered, replace_calls, delete_calls) =
+                run(ReplaceLongMessageOutcome::EditedOriginal, true);
+            assert!(
+                delivered,
+                "EditedOriginal → Delivered → true (legacy parity)"
+            );
+            assert_eq!(replace_calls, 1, "exactly one transport POST");
+            assert_eq!(delete_calls, 0, "the original placeholder is never deleted");
+        }
+
+        #[test]
+        fn fallback_after_edit_failure_returns_true_and_preserves_original() {
+            // #2757: SentFallbackAfterEditFailure + CommitOnFallback → Delivered →
+            // true, and PreserveAlways must NEVER delete the original. Flipping the
+            // fallback policy to NoCommitOnFallback flips this to false.
+            let (delivered, replace_calls, delete_calls) = run(
+                ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
+                    edit_error: "edit failed".to_string(),
+                },
+                true,
+            );
+            assert!(
+                delivered,
+                "fallback (CommitOnFallback) → Delivered → true (legacy parity)"
+            );
+            assert_eq!(replace_calls, 1, "exactly one transport POST");
+            assert_eq!(
+                delete_calls, 0,
+                "#2757: PreserveAlways must never delete the original on fallback"
+            );
+        }
+
+        #[test]
+        fn partial_continuation_failure_returns_false() {
+            // PartialContinuationFailure → Unknown (I2: never advances) → false.
+            // A mutation mapping Unknown → true flips this.
+            let (delivered, replace_calls, _delete_calls) = run(
+                ReplaceLongMessageOutcome::PartialContinuationFailure {
+                    sent_chunks: 1,
+                    total_chunks: 2,
+                    failed_chunk_index: 1,
+                    sent_continuation_message_ids: vec![1],
+                    cleanup_errors: vec![],
+                    error: "mid-stream".to_string(),
+                },
+                true,
+            );
+            assert!(
+                !delivered,
+                "PartialContinuationFailure → Unknown → false (I2)"
+            );
+            assert_eq!(replace_calls, 1, "exactly one transport POST attempt");
+        }
+
+        #[test]
+        fn transport_error_returns_false() {
+            // transport Err → transient_or_unknown → Unknown → false.
+            let (delivered, replace_calls, _delete_calls) =
+                run(ReplaceLongMessageOutcome::EditedOriginal, false);
+            assert!(!delivered, "transport Err → Unknown → false");
+            assert_eq!(replace_calls, 1, "the single POST was attempted and failed");
+        }
+
+        // #3089 A3 flag-state: the cut-over gate (`standby_relay_controller_enabled()
+        // && !formatted.is_empty()`) must keep the legacy path for (a) flag OFF and
+        // (b) empty bodies. The flag is `OnceLock`-cached + env-driven, default OFF —
+        // under the shared env lock with the env var unset, the first evaluation in
+        // this process is OFF, so the `deliver_response` guard does NOT route to the
+        // controller (the legacy `replace_long_message_raw_with_outcome` runs). The
+        // EMPTY-body half mirrors A2b: an empty body would diverge (controller →
+        // Skipped → false; legacy zero-chunk → EditedOriginal → true), so the
+        // nonempty gate is load-bearing. Dropping `!formatted.is_empty()` flips the
+        // empty-body branch; the empty-body assertion proves the controller's
+        // Skipped → false divergence the gate guards against.
+        #[test]
+        fn flag_default_off_and_empty_body_diverges_so_gate_keeps_legacy() {
+            let _lock = crate::config::shared_test_env_lock()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            // (a) Default OFF when the env var is unset (deploy no-op). Only assert
+            // when truly unset, since `OnceLock` caches the first observation.
+            if std::env::var_os("AGENTDESK_STANDBY_RELAY_CONTROLLER").is_none() {
+                assert!(
+                    !standby_relay_controller_enabled(),
+                    "flag default OFF (byte-identical legacy path)"
+                );
+            }
+            // (b) Empty body → controller Skipped → false (legacy would return true),
+            // proving the nonempty gate must keep empty bodies on the legacy path.
+            let shared = make_shared_data_for_tests();
+            let provider = ProviderKind::Claude;
+            let channel = ChannelId::new(9_042);
+            // Gateway whose transport PANICS if reached — the empty-body Skip must
+            // short-circuit BEFORE any POST.
+            let gateway = StandbyFakeGateway::new(ReplaceLongMessageOutcome::EditedOriginal, true);
+            let delivered = futures::executor::block_on(deliver_short_replace_via_controller(
+                &gateway,
+                &shared,
+                &provider,
+                channel,
+                MessageId::new(99),
+                "",
+            ));
+            assert!(
+                !delivered,
+                "controller Skips an empty body → false; the cut-over gate keeps empty bodies legacy"
+            );
+            assert_eq!(
+                gateway.replace_calls.load(Ordering::SeqCst),
+                0,
+                "an empty body never reaches transport on the controller path"
+            );
+            // owner identity is StandbyRelay (cosmetic, but asserted for honesty).
+            assert_eq!(RelayOwnerKind::StandbyRelay.as_str(), "standby_relay");
         }
     }
 }
