@@ -8808,15 +8808,26 @@ mod tests {
     // queue wedged forever. The double-submit asserts the once-gate
     // (Pending→Finalizing→Finalized) makes a later normal-completion finalize an
     // idempotent no-op — the timeout path cannot collide with the normal path.
-    #[allow(clippy::await_holding_lock)]
-    #[tokio::test]
-    async fn watchdog_timeout_path_releases_mailbox_via_finalizer_and_does_not_double_finalize() {
+    #[test]
+    fn watchdog_timeout_path_releases_mailbox_via_finalizer_and_does_not_double_finalize() {
+        // The serialization guard protects the PROCESS-WIDE `AGENTDESK_ROOT_DIR`
+        // env (set via `AgentdeskRootGuard`) that the async inflight/mailbox
+        // helpers read while they run, so it must be held for the whole test —
+        // including the async work. Driving the async body on a current-thread
+        // runtime via `block_on` keeps the std guard inside a synchronous frame so
+        // it never crosses an `.await` suspension point (no `await_holding_lock`),
+        // while the serialization + env stability are fully preserved.
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
         let _root_guard = AgentdeskRootGuard::set(tmp.path());
 
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        runtime.block_on(async {
         let shared = crate::services::discord::make_shared_data_for_tests();
         let provider = ProviderKind::Claude;
         let channel_id = ChannelId::new(987_3419);
@@ -8933,6 +8944,7 @@ mod tests {
             .await,
             "#3419: channel must accept a new turn after the timeout finalize + idempotent re-submit"
         );
+        });
     }
 
     // #3419 R3 (codex HIGH): the turn-stealing regression. A STALE turn A times
@@ -8946,15 +8958,23 @@ mod tests {
     //
     // This is the real-state regression: we start B in the mailbox (token live)
     // and assert via the production decision that A's timeout does not steal B.
-    #[allow(clippy::await_holding_lock)]
-    #[tokio::test]
-    async fn timeout_finalize_does_not_steal_a_newer_live_turn_but_drains_its_own() {
+    #[test]
+    fn timeout_finalize_does_not_steal_a_newer_live_turn_but_drains_its_own() {
+        // Hold the process-wide root/env serialization guard across the whole test
+        // (the async helpers read `AGENTDESK_ROOT_DIR` as they run); drive the async
+        // body via a current-thread `block_on` so the std guard never crosses an
+        // `.await` (no `await_holding_lock`) while serialization is preserved.
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
         let _root_guard = AgentdeskRootGuard::set(tmp.path());
 
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        runtime.block_on(async {
         let shared = crate::services::discord::make_shared_data_for_tests();
         let provider = ProviderKind::Claude;
         let channel_id = ChannelId::new(987_3420);
@@ -9056,6 +9076,7 @@ mod tests {
                 .is_none(),
             "#3419: own-turn timeout finalize releases the mailbox token (wedge fix)"
         );
+        });
     }
 
     // #3419 R3 (codex HIGH — the re-acquire id-0 wedge drain): turn A is the live
@@ -9065,15 +9086,23 @@ mod tests {
     // mismatched id-0 → Skip → A's token stayed WEDGED. R3 keys on the mailbox
     // active id (still A) → Finalize: A drains (token released, queued follow-up
     // admitted) and a DIFFERENT turn is never stolen.
-    #[allow(clippy::await_holding_lock)]
-    #[tokio::test]
-    async fn timeout_finalize_drains_reacquired_id_zero_wedge_for_live_pinned_turn() {
+    #[test]
+    fn timeout_finalize_drains_reacquired_id_zero_wedge_for_live_pinned_turn() {
+        // Hold the process-wide root/env serialization guard across the whole test
+        // (the async helpers read `AGENTDESK_ROOT_DIR` as they run); drive the async
+        // body via a current-thread `block_on` so the std guard never crosses an
+        // `.await` (no `await_holding_lock`) while serialization is preserved.
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
         let _root_guard = AgentdeskRootGuard::set(tmp.path());
 
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        runtime.block_on(async {
         let shared = crate::services::discord::make_shared_data_for_tests();
         let provider = ProviderKind::Claude;
         let channel_id = ChannelId::new(987_3422);
@@ -9183,6 +9212,7 @@ mod tests {
                 .is_none(),
             "#3419 R3: draining A's wedge releases the mailbox token"
         );
+        });
     }
 
     // #3419 R3 (codex HIGH): the id-0 escape — a synthetic / re-acquired
