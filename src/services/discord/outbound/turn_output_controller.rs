@@ -344,7 +344,14 @@ pub(in crate::services::discord) enum AcquireFailureMode {
 /// I1 inline-before-await ordering needs no ownership transfer. Owners that have
 /// no identity gate (A1 semantics — unconditional advance) simply pass `None`,
 /// preserving the existing always-`Delivered` behaviour.
-pub(in crate::services::discord) type ConfirmedAdvance<'a> = &'a (dyn Fn((u64, u64)) -> bool + 'a);
+/// `Send + Sync` (#3089 A2b): the first live owner (the session-bound sink) calls
+/// `deliver_turn_output` from an `#[async_trait]` `RelaySink::deliver`, whose
+/// future is `Send`. The advance callback is borrowed by `commit_and_finalize`
+/// across no await (it runs inline before the post-send awaits, I1), but the ctx
+/// that holds it lives across `drive_transport().await`, so the trait object must
+/// be `Send + Sync` for the future to be `Send`.
+pub(in crate::services::discord) type ConfirmedAdvance<'a> =
+    &'a (dyn Fn((u64, u64)) -> bool + Send + Sync + 'a);
 
 /// The POST-duration heartbeat the controller drives (A2a capability 3).
 ///
@@ -365,7 +372,12 @@ pub(in crate::services::discord) type ConfirmedAdvance<'a> = &'a (dyn Fn((u64, u
 /// the inline commit. The production impl (wired by owners at A2b+) is a thin
 /// adapter over `DeliveryLeaseHeartbeat::spawn`; A2a's tests use a recorder that
 /// counts `renew` ticks.
-pub(in crate::services::discord) trait PostHeartbeat {
+// `Send + Sync` (#3089 A2b): see `ConfirmedAdvance` — the sink owner drives this
+// from a `Send` `async_trait` future, so the borrowed `&dyn PostHeartbeat` and
+// the boxed guard held across the POST await must both be `Send`.
+pub(in crate::services::discord) trait PostHeartbeat:
+    Send + Sync
+{
     /// Begin renewing `(holder, turn)`'s lease deadline for the duration of the
     /// POST. Returns an opaque guard; dropping it stops the heartbeat (mirrors
     /// `DeliveryLeaseHeartbeat`'s `Drop`/`stop`). Called ONLY on the held-lease
@@ -375,8 +387,12 @@ pub(in crate::services::discord) trait PostHeartbeat {
 
 /// RAII guard returned by [`PostHeartbeat::start`]. Dropping it stops the
 /// heartbeat task; the controller drops it explicitly BEFORE the inline commit
-/// so a last renew tick can never race the commit (#3151 ordering).
-pub(in crate::services::discord) trait PostHeartbeatGuard {}
+/// so a last renew tick can never race the commit (#3151 ordering). `Send` so it
+/// can be held across the POST await inside a `Send` future (#3089 A2b).
+pub(in crate::services::discord) trait PostHeartbeatGuard:
+    Send
+{
+}
 
 /// Borrowed delivery context for one `deliver_turn_output` call. The controller
 /// drives the borrowed [`DeliveryLeaseCell`] through acquire → send → commit →
