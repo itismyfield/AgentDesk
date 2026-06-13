@@ -443,6 +443,7 @@ src/
 │   │   ├── recovery_engine/
 │   │   │   └── status_panel.rs
 │   │   ├── recovery_paths/
+│   │   │   ├── controller_cutover.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── restart.rs
 │   │   │   └── shared.rs

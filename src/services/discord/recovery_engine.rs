@@ -280,6 +280,30 @@ async fn relay_recovered_terminal_text_to_placeholder(
     forget_completion_footer_for_recovery_takeover(channel_id);
     let delivery = match placeholder {
         Some(placeholder) => {
+            use super::recovery_paths::controller_cutover as cc;
+            // #3089 A6a: anchored short-replace via the unified controller behind a
+            // flag (default OFF); the adapter maps the verdict to
+            // `RecoveryRelayOutcome` AND re-runs the #3297 probe, returning the
+            // legacy path's equal. OFF / None / empty → verbatim legacy. Provider is
+            // cosmetic on the markerless `NoLease` path (no marker gates on it).
+            if cc::recovery_short_replace_should_cutover(
+                cc::recovery_relay_controller_enabled(),
+                true,
+                text,
+            ) {
+                let gateway =
+                    DiscordGateway::new(http.clone(), shared.clone(), ProviderKind::Claude, None);
+                return cc::deliver_recovery_replace_via_controller(
+                    &gateway,
+                    shared,
+                    &ProviderKind::Claude,
+                    http,
+                    channel_id,
+                    placeholder,
+                    text,
+                )
+                .await;
+            }
             super::formatting::replace_long_message_raw(http, channel_id, placeholder, text, shared)
                 .await
         }
@@ -1743,15 +1767,11 @@ async fn lookup_turn_finished_dispatch_kind(dispatch_id: Option<&str>) -> Option
     .map(str::to_string)
 }
 
-/// Build the transcript turn id for a recovered turn. A recovery/orphan turn
-/// with no anchored Discord user message (`user_msg_id == 0`, e.g. a TUI-direct
-/// turn) must NOT key its transcript on `discord:<channel>:0` — that bogus key
-/// would collide across every such turn in the channel and overwrite recovered
-/// transcripts (Codex P2 r2). It must ALSO not key purely on the session
-/// (stable across the whole tmux session), or repeated message-less turns in
-/// the same session would upsert-overwrite each other (Codex P2 r3). For the
-/// message-less case we therefore append a PER-TURN discriminator: the turn's
-/// JSONL start offset (distinct per turn within a session), falling back to its
+/// Build the transcript turn id for a recovered turn. A message-less recovery
+/// turn (`user_msg_id == 0`, e.g. TUI-direct) must NOT key on `discord:<ch>:0`
+/// (collides across every such turn → overwrite, Codex P2 r2) NOR purely on the
+/// session (repeated message-less turns upsert-overwrite, Codex P2 r3): instead
+/// append a PER-TURN discriminator — the JSONL start offset, falling back to the
 /// `started_at` timestamp when no offset is recorded.
 fn recovered_transcript_turn_id(
     channel_id: u64,
@@ -2008,12 +2028,10 @@ fn jsonl_tail_contains_terminal_end_sentinel(output_path: &str) -> bool {
     if file.read_to_end(&mut buf).is_err() {
         return false;
     }
-    // The sentinel is one JSONL line: {"type":"terminal_end",...}. We
-    // search for the literal `"type":"terminal_end"` token because the
-    // wrapper writes the JSON with `serde_json::Value::to_string()`, which
-    // emits this exact compact form. If a future patch switches to
-    // pretty-printing the sentinel, the search needs to be reworked — but
-    // we keep that contract in `tmux_common::emit_wrapper_sentinel`.
+    // The sentinel is one JSONL line: {"type":"terminal_end",...}. We search the
+    // literal `"type":"terminal_end"` token because the wrapper writes JSON via
+    // `serde_json::Value::to_string()` (exact compact form); the contract lives in
+    // `tmux_common::emit_wrapper_sentinel` (pretty-printing would need a rework).
     let needle = format!(
         "\"type\":\"{}\"",
         crate::services::tmux_common::WRAPPER_TERMINAL_END_EVENT
@@ -2130,11 +2148,10 @@ pub(super) async fn restore_inflight_turns(
             },
         );
 
-        // No generation gate — adopt mode allows old-gen session recovery.
-        // If a restart report exists for this channel, check whether the agent
-        // has already finished before deciding to skip recovery.  When the output
-        // file contains a completed result we deliver it directly and clear both
-        // the inflight state and the restart report, so the flush loop won't
+        // No generation gate — adopt mode allows old-gen session recovery. If a
+        // restart report exists, check whether the agent already finished before
+        // skipping recovery: a completed result is delivered directly and clears
+        // both the inflight state and the restart report, so the flush loop won't
         // overwrite the message with a generic follow-up.
         if restart_report_exists {
             let output_path_for_check: Option<String> = state
@@ -2209,12 +2226,11 @@ pub(super) async fn restore_inflight_turns(
                     )
                 };
                 let channel_id = ChannelId::new(state.channel_id);
-                // A TUI-direct / recovery turn (current_msg_id == 0) never
-                // anchored a Discord placeholder, so the recovered terminal text
-                // is delivered as a NEW channel message instead of an in-place
-                // edit (the helper handles both). `relay_ok` still reflects
-                // actual delivery so we never advance recovery without posting
-                // the answer; `MessageId::new(0)` would panic.
+                // An un-anchored TUI-direct/recovery turn (current_msg_id == 0)
+                // delivers the recovered text as a NEW channel message, not an
+                // in-place edit (the helper handles both); `relay_ok` still
+                // reflects actual delivery so recovery never advances without
+                // posting. `MessageId::new(0)` would panic.
                 let relay_ok = relay_recovered_terminal_text_to_placeholder(
                     http,
                     shared,
@@ -2231,13 +2247,11 @@ pub(super) async fn restore_inflight_turns(
                     );
                     continue;
                 }
-                // Mark user message as completed only after Discord terminal
-                // delivery commits; otherwise the channel shows completion
-                // without the final assistant message. A recovery/orphan turn
-                // may carry no user message (user_msg_id == 0) — there is then
-                // no analytics row to key (`discord:<channel>:0` would be bogus,
-                // per the rebind-origin note above) and `MessageId::new(0)`
-                // would panic; the transcript persist below stays unconditional.
+                // Mark the user message completed only after terminal delivery
+                // commits (else the channel shows completion without the final
+                // message). A message-less turn (user_msg_id == 0) has no analytics
+                // row to key (`discord:<ch>:0` is bogus) and `MessageId::new(0)`
+                // panics; the transcript persist below stays unconditional.
                 let user_msg_id = optional_message_id(state.user_msg_id);
                 let visible_outcome = complete_recovery_visible_turn(
                     http,
@@ -2599,11 +2613,9 @@ pub(super) async fn restore_inflight_turns(
                 let finish_mailbox_on_completion =
                     reregister_active_turn_from_inflight(shared, &state).await;
 
-                // Immediately spawn a tmux watcher instead of deferring to
-                // restore_tmux_watchers().  The previous "watcher will adopt"
-                // approach had a race condition: the tmux session could die
-                // between recovery (now) and restore_tmux_watchers (~50s later),
-                // losing the in-progress response entirely.
+                // Spawn the tmux watcher immediately rather than deferring to
+                // restore_tmux_watchers(): the "watcher will adopt" approach raced
+                // — the session could die in the ~50s gap and lose the response.
                 if let Some(ref tmux_session_name) = tmux_name {
                     let output_path =
                         crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl");
@@ -2721,14 +2733,11 @@ pub(super) async fn restore_inflight_turns(
             }
         }
 
-        // current_msg_id == 0 / user_msg_id == 0 are LEGITIMATE for a
-        // TUI-direct / recovery turn that never anchored a Discord placeholder
-        // (or carries no user message). `MessageId::new(0)` PANICS, and because
-        // this loop runs inline during startup recovery, a single such inflight
-        // would abort the loop before `reconcile_done` is set — leaving the
-        // provider permanently degraded. Carry both as `Option` and skip the
-        // placeholder/analytics step at each use site while still recovering the
-        // tmux watcher/session below.
+        // current_msg_id/user_msg_id == 0 are LEGITIMATE (TUI-direct / un-anchored
+        // recovery turn). `MessageId::new(0)` PANICS, and this loop runs inline at
+        // startup, so one such inflight would abort it before `reconcile_done` is
+        // set → provider permanently degraded. Carry both as `Option`, skip the
+        // placeholder/analytics step per use site, still recover the tmux session.
         let current_msg_id = optional_message_id(state.current_msg_id);
         let user_msg_id = optional_message_id(state.user_msg_id);
         let channel_name = state.channel_name.clone();
@@ -3590,11 +3599,9 @@ pub(super) async fn restore_inflight_turns(
             continue;
         }
 
-        // If tmux pane is alive, skip recovery reader entirely.
-        // The session is idle (waiting for input) — spawn a watcher immediately
-        // instead of deferring to restore_tmux_watchers() to avoid a race
-        // condition where the session could die in the gap between recovery and
-        // restore_tmux_watchers (~50s), losing the response.
+        // If the tmux pane is alive, skip the recovery reader entirely. The idle
+        // session gets a watcher immediately rather than deferring to
+        // restore_tmux_watchers() — that ~50s gap raced and lost the response.
         let pane_alive = tmux_session_alive_with_retry(&tmux_session_name);
         if matches!(
             recovery_phase_after_tmux_probe(true, Some(pane_alive)),
@@ -4239,12 +4246,10 @@ pub(crate) async fn rebind_inflight_for_channel(
 ) -> Result<RebindOutcome, RebindError> {
     let discord_channel_id = ChannelId::new(channel_id);
 
-    // Preflight existence check — fast 409 before we walk the validation /
-    // tmux-liveness path when the caller obviously shouldn't be rebinding.
-    // This is advisory only; the AUTHORITATIVE guard is the atomic
-    // `save_inflight_state_create_new` below which uses `O_CREAT | O_EXCL`
-    // so a live turn that wins the race between here and the write cannot
-    // be clobbered by the synthetic rebind state.
+    // Preflight existence check — fast 409 before walking the validation /
+    // tmux-liveness path. Advisory only; the AUTHORITATIVE guard is the atomic
+    // `save_inflight_state_create_new` below (`O_CREAT | O_EXCL`), so a live turn
+    // winning the race between here and the write cannot be clobbered.
     let existing_inflight = match super::inflight::load_inflight_state(provider, channel_id) {
         Some(existing) => match recovery_phase_for_existing_inflight_rebind(&existing) {
             RecoveryPhase::WatcherReattach => {

@@ -26,5 +26,11 @@
 //! recovery code should add helpers here if they are cross-path, and in the
 //! path-specific module otherwise.
 
+/// #3089 A6a: sibling holding the recovery anchored short-replace controller
+/// cutover (flag + pure predicate + `DeliveryOutcome → RecoveryRelayOutcome`
+/// adapter with the #3297 probe). Kept here (a sub-1000-prod-LoC, ratchet-free
+/// sibling) so the frozen `recovery_engine.rs` 4090 baseline gains only the
+/// 1-arm gate call; the cutover body lives off the frozen file.
+pub(super) mod controller_cutover;
 pub(super) mod restart;
 pub(super) mod shared;
