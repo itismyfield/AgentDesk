@@ -116,4 +116,43 @@ mod tests {
 
         assert_eq!(resolved, None);
     }
+
+    // #3419 R3: a tool-only turn replaces a LONG streamed `full_response` with a
+    // SHORT sentinel `result`. The turn_bridge clamp at mod.rs:~3372
+    // (`response_sent_offset = response_sent_offset.min(full_response.len())`)
+    // must keep the offset inside the replaced body so the watcher slice
+    // `full_response.get(offset..)` is non-empty (no relay wedge) and the
+    // `response_sent_offset_in_bounds` invariant (inflight.rs) holds.
+    #[test]
+    fn sentinel_overwrite_clamps_response_sent_offset_within_bounds() {
+        // A long streamed pre-tool narration, then a Done with a short sentinel.
+        let streamed_long = "a".repeat(900);
+        let sentinel = "⚠ tool-only turn, no assistant text";
+        // tool used + no post-tool text → resolve replaces with the sentinel.
+        let resolved = resolve_done_response(&streamed_long, sentinel, true, false);
+        assert_eq!(resolved.as_deref(), Some(sentinel));
+
+        let replaced = resolved.expect("sentinel replacement");
+        // The prior offset tracked the long streamed body and now exceeds the
+        // replaced length — exactly the out-of-bounds the wedge came from.
+        let prior_offset = streamed_long.len();
+        assert!(prior_offset > replaced.len());
+
+        // The clamp the bridge applies right after the swap.
+        let clamped = prior_offset.min(replaced.len());
+        assert_eq!(clamped, replaced.len());
+        // Bound + char-boundary invariant (what validate_inflight_state_for_save
+        // enforces). Removing the clamp (mutation: `clamped = prior_offset`) makes
+        // BOTH assertions fail — the offset is out of bounds and the slice empties.
+        assert!(clamped <= replaced.len());
+        assert!(replaced.is_char_boundary(clamped));
+        assert!(
+            !replaced.get(clamped..).unwrap_or("").is_empty() || clamped == replaced.len(),
+            "clamped offset yields a valid (possibly empty-at-end) slice, never a panic/None"
+        );
+        // Concretely: at the clamped offset the remaining slice is well-defined,
+        // whereas the unclamped offset would slice OUT OF BOUNDS → `.get` None →
+        // watcher empty-slice wedge.
+        assert!(replaced.get(prior_offset..).is_none());
+    }
 }

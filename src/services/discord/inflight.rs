@@ -680,10 +680,9 @@ pub(in crate::services::discord) struct InflightTurnIdentity {
     pub started_at: String,
     pub tmux_session_name: Option<String>,
     /// #3041 P1-3 (codex P1-3 issue 2): the turn's `turn_start_offset` — the JSONL
-    /// byte offset at which this turn began. Used to disambiguate two consecutive
-    /// `user_msg_id == 0` TUI-direct turns whose `started_at` collides because
-    /// `now_string` only has 1-second resolution. Monotonic per turn, so it makes
-    /// the frame-carried turn identity unique even within a single second.
+    /// byte offset at which this turn began. Disambiguates two consecutive
+    /// `user_msg_id == 0` TUI-direct turns whose `started_at` collides at
+    /// `now_string`'s 1-second resolution; monotonic per turn → unique identity.
     pub turn_start_offset: Option<u64>,
 }
 
@@ -701,6 +700,8 @@ impl InflightTurnIdentity {
         self.user_msg_id == state.user_msg_id
             && self.started_at == state.started_at
             && self.tmux_session_name == state.tmux_session_name
+            // #3419 R3 (codex MEDIUM): keep the clear key == full-struct-eq decision key (TOCTOU on offset-only-diff rows).
+            && self.turn_start_offset == state.turn_start_offset
     }
 }
 
@@ -1710,10 +1711,9 @@ pub(crate) enum GuardedClearOutcome {
 
 /// Idempotent inflight cleanup driven by an *explicit* turn-completion
 /// signal (`TurnCompleted` emit, pane death detection, etc.). This is the
-/// #2427 D / A wire — by the time we run, the regular hook on the
-/// completion path may have already cleared the file (Cleared turns into
-/// Missing). We only act when the inflight on disk still describes the
-/// turn we believe just finished.
+/// #2427 D / A wire — the regular completion-path hook may have already
+/// cleared the file (Cleared turns into Missing), so we only act when the
+/// on-disk inflight still describes the turn we believe just finished.
 ///
 /// Guards:
 /// * `expected_user_msg_id` — required to defeat the Pitfall #1 race where
@@ -3773,6 +3773,64 @@ mod stall_recovery_tests {
             still_there[0].tmux_session_name, old_turn.tmux_session_name,
             "test must cover same-named respawn"
         );
+    }
+
+    // #3419 R3 (codex MEDIUM): the plain identity-guarded clear must use the SAME
+    // key as the timeout decision, which compares the FULL `InflightTurnIdentity`
+    // (including `turn_start_offset`). Two rows that share user_msg_id + started_at
+    // + tmux_session_name but differ only by `turn_start_offset` are DIFFERENT
+    // turns (the offset disambiguates consecutive same-second turns). Clearing
+    // against the OTHER offset must no-op so a stale clear cannot wipe the live
+    // row. Dropping `turn_start_offset` from `matches_state` reopens this TOCTOU
+    // and breaks this test.
+    #[test]
+    fn identity_guard_clear_respects_turn_start_offset() {
+        let temp = TempDir::new().unwrap();
+        let on_disk = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 100);
+        save_inflight_state_in_root(temp.path(), &on_disk).unwrap();
+
+        // Same user_msg_id + started_at + session, but a DIFFERENT turn_start_offset.
+        let mut stale_offset_identity = InflightTurnIdentity::from_state(&on_disk);
+        assert_ne!(
+            stale_offset_identity.turn_start_offset,
+            Some(999),
+            "guard fixture must differ from the probed offset"
+        );
+        stale_offset_identity.turn_start_offset = Some(999);
+
+        let outcome = clear_inflight_state_if_matches_identity_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            321,
+            &stale_offset_identity,
+        );
+        assert_eq!(
+            outcome,
+            GuardedClearOutcome::UserMsgMismatch,
+            "an offset-only-diff identity must NOT clear the live row"
+        );
+        let still_there = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(
+            still_there.len(),
+            1,
+            "the live row survives the stale clear"
+        );
+        assert_eq!(still_there[0].turn_start_offset, on_disk.turn_start_offset);
+
+        // Sanity: the matching offset DOES clear (the key is offset-sensitive, not
+        // offset-blind).
+        let matching_identity = InflightTurnIdentity::from_state(&on_disk);
+        assert_eq!(
+            clear_inflight_state_if_matches_identity_in_root(
+                temp.path(),
+                &ProviderKind::Claude,
+                321,
+                &matching_identity,
+            ),
+            GuardedClearOutcome::Cleared,
+            "the exact-offset identity clears the row"
+        );
+        assert!(load_inflight_states_from_root(temp.path(), &ProviderKind::Claude).is_empty());
     }
 
     #[test]

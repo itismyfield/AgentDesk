@@ -144,6 +144,78 @@ pub(super) fn watcher_fresh_idle_finalize_decision(
     }
 }
 
+/// #3419 R3 (codex HIGH): the turn-watchdog TIMEOUT finalize decision, keyed on
+/// the LIVE MAILBOX active-turn identity — not the on-disk inflight row. What
+/// wedges the soft-queue is the mailbox `cancel_token`/active-turn slot, NOT the
+/// inflight sidecar; the decision must therefore look at what the mailbox is
+/// still holding. The pinned snapshot (`startup_inflight_snapshot`) identifies
+/// the turn this watcher instance ATTACHED to; the mailbox `active_user_message_
+/// id` says which turn (if any) currently owns the wedge-prone token.
+///
+/// R2 keyed on the on-disk inflight identity instead, which the existing
+/// re-acquire path falsifies: `reacquire_watcher_inflight_for_active_stream`
+/// mints a `user_msg_id == 0` synthetic inflight when a live pane lost its row
+/// mid-stream, WHILE the original real turn A's mailbox token is still active.
+/// Pinned A (nonzero) then mismatched the on-disk id-0 row → R2 Skipped → A's
+/// token stayed wedged (the #3419 bug reappearing on that path).
+///
+/// `Finalize` (drain) requires BOTH:
+///   1. the pinned snapshot carries a non-zero `user_msg_id` on this session
+///      (a restored Discord turn — the only turn that owns a wedge-prone mailbox
+///      token; a pinned id-0 has no token to drain → Skip), AND
+///   2. the mailbox's CURRENT `active_user_message_id` still EQUALS the pinned
+///      `user_msg_id` — A is still the live token holder and timed out without a
+///      result, so its token must be drained EVEN IF the on-disk inflight is now
+///      an id-0 synthetic / absent. The finalize submits A's REAL pinned id
+///      through the IDENTITY-GUARDED `mailbox_finish_turn_if_matches(A)`, whose
+///      actor guard (`active_user_message_id == expected`) makes stealing a
+///      different turn B structurally impossible — never an id-0 submit.
+///
+/// Otherwise `Skip`: the mailbox active turn is a DIFFERENT turn B (B is live and
+/// owns the token — finalizing here would target B; forbidden), or the mailbox
+/// has NO active turn / the pinned turn is id-0 (no token to drain). The on-disk
+/// inflight identity is auxiliary only — it keys the destructive clear, not the
+/// drain decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TimeoutFinalizeDecision {
+    /// No pinned watcher turn / the pinned turn is id-0 (no mailbox token), or
+    /// the mailbox's active turn is a DIFFERENT (live) turn / there is no active
+    /// turn — do NOT finalize; just fall through. Carries the pinned id (0 when
+    /// absent/synthetic) purely for the skip log.
+    Skip { pinned_user_msg_id: u64 },
+    /// The watcher's own pinned restored Discord turn is STILL the live mailbox
+    /// token holder and timed out — drain it via the single-authority path with
+    /// its REAL pinned id and an identity-matched clear of any stale row.
+    Finalize { user_msg_id: u64 },
+}
+
+pub(super) fn watcher_timeout_finalize_decision(
+    pinned_startup_inflight: Option<&InflightTurnState>,
+    mailbox_active_user_msg_id: Option<u64>,
+    tmux_session_name: &str,
+) -> TimeoutFinalizeDecision {
+    let Some(pinned) = pinned_startup_inflight.filter(|state| {
+        state.user_msg_id != 0
+            && state.tmux_session_name.as_deref().map(str::trim) == Some(tmux_session_name.trim())
+    }) else {
+        return TimeoutFinalizeDecision::Skip {
+            pinned_user_msg_id: pinned_startup_inflight.map(|s| s.user_msg_id).unwrap_or(0),
+        };
+    };
+    // The mailbox must STILL hold pinned A's token. A newer turn B (different
+    // active id) is live and owns the token → Skip (the guarded finish would
+    // target B; forbidden). No active turn → Skip (nothing wedged to drain).
+    if mailbox_active_user_msg_id == Some(pinned.user_msg_id) {
+        TimeoutFinalizeDecision::Finalize {
+            user_msg_id: pinned.user_msg_id,
+        }
+    } else {
+        TimeoutFinalizeDecision::Skip {
+            pinned_user_msg_id: pinned.user_msg_id,
+        }
+    }
+}
+
 pub(super) fn watcher_should_clear_stale_terminal_message_ids(
     inflight_present: bool,
     has_assistant_response: bool,

@@ -940,6 +940,103 @@ fn done_result_requires_full_terminal_replay(
         && full_response.trim() == result.trim()
 }
 
+#[cfg(test)]
+mod sentinel_overwrite_clamp_tests {
+    use super::done_result_requires_full_terminal_replay;
+
+    // #3419 R3: the existing offset-reset gate requires a >DISCORD_MSG_LIMIT
+    // (8000-byte) authoritative replay, so a short sentinel NEVER trips it —
+    // which is exactly why the SEPARATE clamp at the swap site is needed. This
+    // pins that gap so a future refactor cannot silently make the clamp dead
+    // (e.g. by assuming the replay gate already handles sentinels).
+    #[test]
+    fn replay_gate_does_not_reset_offset_for_short_sentinel() {
+        let sentinel = "⚠ tool-only turn, no assistant text"; // ~40 bytes, < 8000
+        assert!(sentinel.len() <= super::super::DISCORD_MSG_LIMIT);
+        // streamed text this turn, prior offset > 0, sentinel == full_response:
+        // the replay gate STILL returns false because of the length floor.
+        assert!(!done_result_requires_full_terminal_replay(
+            sentinel, sentinel, 900, true,
+        ));
+    }
+
+    // #3419 R3 / codex MEDIUM: drive the REAL normalizer the bridge now calls
+    // (`sync_response_delivery_state` → `normalized_response_sent_offset`), not a
+    // re-implemented clamp, so a mutation that drops the clamp OR the char-boundary
+    // walk-back is caught against actual production behaviour.
+    #[test]
+    fn sync_clamps_offset_within_replaced_body() {
+        use crate::services::discord::InflightTurnState;
+        use crate::services::provider::ProviderKind;
+
+        let replaced = "⚠ tool-only turn, no assistant text".to_string();
+        let mut offset = 900usize; // tracked the long pre-swap body
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            1,
+            Some("adk-cc".to_string()),
+            42,
+            5001,
+            5002,
+            "prompt".to_string(),
+            Some("session".to_string()),
+            Some("AgentDesk-claude-adk-cc-1".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            10,
+        );
+        super::sync_response_delivery_state(&replaced, &mut offset, &mut state);
+        // Clamped to len() (out-of-bounds prior offset) and char-boundary valid.
+        assert_eq!(offset, replaced.len());
+        assert!(replaced.is_char_boundary(offset));
+        assert_eq!(state.response_sent_offset, offset);
+        assert_eq!(state.full_response, replaced);
+        // Mutation guard: the UNCLAMPED prior offset is out of bounds (the wedge).
+        assert!(replaced.get(900..).is_none());
+        assert!(replaced.get(offset..).is_some());
+    }
+
+    // #3419 R3 / codex MEDIUM (the char-boundary case the bare `.min(len)` missed):
+    // a replacement BEGINNING with a multibyte sentinel (`⚠` = 3 bytes) with a
+    // prior offset of 1. `1 < len()`, so `.min(len)` would leave it UNCHANGED at 1
+    // — but byte 1 is INSIDE `⚠`, violating the char-boundary invariant and
+    // panicking any later `full_response[offset..]` slice. The normalizer must walk
+    // BACK to the nearest valid boundary (0).
+    #[test]
+    fn sync_normalizes_prior_offset_inside_leading_multibyte_char() {
+        use crate::services::discord::InflightTurnState;
+        use crate::services::provider::ProviderKind;
+
+        let replaced = "⚠ tool-only turn, no assistant text".to_string();
+        // Precondition: byte 1 is genuinely mid-multibyte (the bug surface).
+        assert!(!replaced.is_char_boundary(1));
+        let mut offset = 1usize; // prior valid offset that now lands mid-char
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            1,
+            Some("adk-cc".to_string()),
+            42,
+            5001,
+            5002,
+            "prompt".to_string(),
+            Some("session".to_string()),
+            Some("AgentDesk-claude-adk-cc-1".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            10,
+        );
+        super::sync_response_delivery_state(&replaced, &mut offset, &mut state);
+        // Normalized back to the leading boundary (0) — NOT left at the mid-char 1.
+        assert_eq!(offset, 0);
+        assert!(replaced.is_char_boundary(offset));
+        assert_eq!(state.response_sent_offset, 0);
+        // Mutation guard: a bare `.min(len)` (no walk-back) would leave offset 1,
+        // which is NOT a char boundary and would panic on `&replaced[1..]`.
+        assert!(replaced.get(1..).is_none());
+        assert!(replaced.get(offset..).is_some());
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WatcherHandoffClaimOutcome {
     None,
@@ -2568,32 +2665,22 @@ pub(super) fn spawn_turn_bridge(
                 match next_message {
                     Ok(msg) => {
                         // #2289 cancel boundary: re-sample `cancel_requested`
-                        // AFTER `try_recv` returns, but ONLY for variants
-                        // that would flip `done = true` (`Done` and
-                        // `Error` today). The pre-recv guard above samples
-                        // before the receive call; if `/stop` flips the
-                        // token between that guard and `try_recv`
-                        // returning a terminal frame, letting that arm
-                        // run sets `done = true` and suppresses the outer
-                        // cancel arm — recording the turn as completed,
-                        // failed, or transport-errored when the user
-                        // actually stopped it. Drop the terminal frame
-                        // and jump to cancel-finalize so the cancel claims
-                        // the outcome.
+                        // AFTER `try_recv`, but ONLY for variants that flip
+                        // `done = true` (`Done`/`Error`). The pre-recv guard
+                        // samples before the receive; if `/stop` flips the token
+                        // in that gap, letting a terminal arm run sets `done` and
+                        // suppresses the outer cancel arm — recording a completed/
+                        // failed turn the user actually stopped. Drop the frame
+                        // and jump to cancel-finalize.
                         //
-                        // The gate is scoped to variants that set
-                        // `done = true` so non-terminal control/output
-                        // frames (`RuntimeReady`, `TmuxReady`,
-                        // `ProcessReady`, `OutputOffset`, `Text`,
-                        // `RetryBoundary`, …) are still processed: they
-                        // may carry handoff paths, offsets, watcher debt,
-                        // or session-reset decisions that the cancel
-                        // path expects to be applied. None of those
-                        // variants flip `done = true`, so the next outer
-                        // iteration's pre-recv cancel guard finalizes
-                        // cancel cleanly on the very next pass. When a
-                        // new terminal variant is added, it MUST be added
-                        // here too — see `is_done_setting_terminal_frame`.
+                        // Scoped to done-setting variants so non-terminal frames
+                        // (`RuntimeReady`, `TmuxReady`, `ProcessReady`,
+                        // `OutputOffset`, `Text`, `RetryBoundary`, …) are still
+                        // processed (they carry handoff paths, offsets, watcher
+                        // debt, session-reset that the cancel path needs); none
+                        // flip `done`, so the next pre-recv cancel guard finalizes
+                        // cancel cleanly. A new terminal variant MUST be added here
+                        // too — see `is_done_setting_terminal_frame`.
                         if is_done_setting_terminal_frame(&msg)
                             && should_finalize_cancel_after_recv(
                                 done,
@@ -3300,19 +3387,17 @@ pub(super) fn spawn_turn_bridge(
                         } => {
                             let session_died_retry = result == "__session_died_retry__";
                             if session_died_retry {
-                                // Recovery reader requests the generic
-                                // Discord-history auto-retry path when the
-                                // resumed session dies before completion.
+                                // Recovery reader requests the generic Discord-history
+                                // auto-retry when the resumed session dies pre-completion.
                                 recovery_retry = true;
                             }
                             if pending_long_running_open_after_state_save.take().is_some() {
                                 inflight_state.long_running_placeholder_active = false;
                                 let _ = save_inflight_state(&inflight_state);
                             }
-                            // #1255: turn finished while a long-running
-                            // placeholder is still flagged as Active — close
-                            // it now so the user does not stare at a stale
-                            // 🔄 card forever. Idempotent if a prior
+                            // #1255: turn finished while a long-running placeholder
+                            // is still Active — close it now so the user does not
+                            // stare at a stale 🔄 card. Idempotent if a prior
                             // ToolResult already fired Completed.
                             if let Some((key, snapshot, close_trigger, ack_consumed)) =
                                 long_running_placeholder_active.take()
@@ -3359,7 +3444,19 @@ pub(super) fn spawn_turn_bridge(
                                 has_post_tool_text,
                             ) {
                                 full_response = resolved;
-                                inflight_state.full_response = full_response.clone();
+                                // #3419 R3 (codex MEDIUM): a short sentinel/tool-only
+                                // resolved body shrinks full_response below a prior
+                                // streamed offset that the >8000-byte replay gate
+                                // (`done_result_requires_full_terminal_replay`) does not
+                                // reset → out of bounds (watcher empty-slice wedge).
+                                // `sync_response_delivery_state` clamps to len AND walks
+                                // back to a valid char boundary (a bare `.min(len())`
+                                // could land mid multibyte char) and mirrors both.
+                                sync_response_delivery_state(
+                                    &full_response,
+                                    &mut response_sent_offset,
+                                    &mut inflight_state,
+                                );
                             }
                             if done_result_requires_full_terminal_replay(
                                 &full_response,
