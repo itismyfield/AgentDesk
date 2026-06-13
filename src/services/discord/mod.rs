@@ -687,41 +687,41 @@ pub(in crate::services::discord) use queue_io::{
 pub(super) fn single_message_panel_enabled() -> bool {
     single_message_panel::enabled()
 }
-/// Minimum interval between Discord placeholder edits for progress status.
-/// Configurable via AGENTDESK_STATUS_INTERVAL_SECS env var. Default: 5 seconds.
-pub(super) fn status_update_interval() -> Duration {
-    static CACHED: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        let secs = std::env::var("AGENTDESK_STATUS_INTERVAL_SECS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(5);
-        Duration::from_secs(secs)
-    })
+/// Parse `var` as a `u64` seconds `Duration`, falling back to `default_secs`.
+fn env_duration_secs(var: &str, default_secs: u64) -> Duration {
+    let secs = (std::env::var(var).ok()).and_then(|s| s.parse::<u64>().ok());
+    Duration::from_secs(secs.unwrap_or(default_secs))
 }
 
-/// Turn watchdog timeout. Configurable via AGENTDESK_TURN_TIMEOUT_SECS env var.
-/// Default: 3600 seconds (60 minutes).
+/// Minimum interval between Discord placeholder progress edits (AGENTDESK_STATUS_INTERVAL_SECS, default 5s).
+pub(super) fn status_update_interval() -> Duration {
+    static CACHED: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| env_duration_secs("AGENTDESK_STATUS_INTERVAL_SECS", 5))
+}
+
+/// #3419 B: turn watchdog ABSOLUTE cap, a generous supplementary upper bound —
+/// the primary firing measure is IDLE (`turn_idle_timeout`), so a turn emitting
+/// output stays alive until it idles. Default 6h only guards an output that
+/// never stops yet never finishes. AGENTDESK_TURN_TIMEOUT_SECS.
 pub(super) fn turn_watchdog_timeout() -> Duration {
     static CACHED: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        let secs = std::env::var("AGENTDESK_TURN_TIMEOUT_SECS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(3600);
-        Duration::from_secs(secs)
-    })
+    *CACHED.get_or_init(|| env_duration_secs("AGENTDESK_TURN_TIMEOUT_SECS", 6 * 3600))
+}
+
+/// #3419 B: watcher turn IDLE window — fire only after this much silence since
+/// the last real byte (`last_output_at`, NOT empty polls). Default 3600s == the
+/// old absolute cap, so a turn must be FULLY idle for an hour (codex
+/// interactive/subagent turns emit far sooner). AGENTDESK_TURN_IDLE_TIMEOUT_SECS.
+pub(super) fn turn_idle_timeout() -> Duration {
+    static CACHED: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| env_duration_secs("AGENTDESK_TURN_IDLE_TIMEOUT_SECS", 3600))
 }
 
 /// Extend the watchdog deadline for a channel and move the per-turn max cap
-/// with it.  Also refreshes the in-memory voice-background handoff marker
-/// TTL (if one exists for the active turn) so extended turns do not lose
-/// their routing metadata (#2352).
-///
-/// When `pg_pool` is `Some`, the durable PG row's `expires_at` is refreshed
-/// as well via `voice::announce_meta::refresh_handoff_ttl_durable`.  Durable
-/// refresh errors are logged and ignored so a PG hiccup cannot break the
-/// deadline extension.
+/// with it. Also refreshes the in-memory voice-background handoff marker TTL so
+/// extended turns keep their routing metadata (#2352). When `pg_pool` is `Some`
+/// the durable PG `expires_at` is refreshed too (`refresh_handoff_ttl_durable`);
+/// durable errors are logged and ignored so a PG hiccup cannot break extension.
 pub async fn extend_watchdog_deadline(
     channel_id: u64,
     extend_by_secs: u64,
