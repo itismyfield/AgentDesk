@@ -18,6 +18,7 @@ pub(crate) mod send_gate;
 pub(crate) mod send_target;
 pub(crate) mod send_to_agent;
 mod transport;
+pub(in crate::services::discord) mod turn_output_controller; // #3089 A1
 
 pub(crate) use decision::{
     DISCORD_MESSAGE_HARD_LIMIT_CHARS as DISCORD_HARD_LIMIT_CHARS,

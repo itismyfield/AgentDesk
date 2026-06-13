@@ -10,7 +10,7 @@
 > Turn-owned delivery paths can pass a `CancelToken` so post-cancel sends,
 > fallback retries, split chunks, and headless outbox enqueue are suppressed.
 >
-> Last refreshed: 2026-05-18 (against #2535 legacy outbound bridge removal).
+> Last refreshed: 2026-06-13 (against #3089 A1 turn-output controller skeleton; pure add, no owner wired).
 >
 > Companion docs: [`docs/discord-outbound-remaining-producers.md`](../discord-outbound-remaining-producers.md) (#1175 closure), [`docs/source-of-truth.md`](../source-of-truth.md).
 
@@ -19,7 +19,8 @@ on the v3 migration path?". The former compatibility facade
 `src/services/discord/outbound/legacy.rs` was removed in #2535 after the last
 production producers moved to direct v3 envelopes. The outbound API now lives
 in `src/services/discord/outbound/{message, policy, decision, result, delivery,
-transport}.rs`.
+transport}.rs`, plus the #3089 A1 turn-output controller skeleton in
+`outbound/turn_output_controller.rs` (pure add, no live owner yet).
 
 As of #2535, "migrated_v3" means the callsite builds a v3
 `DiscordOutboundMessage` and calls `outbound::delivery::deliver_outbound`
@@ -43,10 +44,15 @@ HTTP path.
 | **v3 delivery** `deliver_outbound<C>(...)` | `outbound/delivery.rs:46` | active | Executes the v3 message/policy/decision/result contract. Accepts an optional `CancelToken`; split delivery records ordered chunk metadata and duplicate replay preserves it. Success paths record the reservation; terminal skip/permanent-failure paths explicitly release it before returning. |
 | `DiscordOutboundClient`, `HttpOutboundClient`, `OutboundDeduper` | `outbound/transport.rs` | active | Transport trait, HTTP client, fingerprint helper, and in-memory dedup store with atomic `reserve` / in-flight wait semantics over the lookup -> send -> record/release window. v3 stores serialized `Vec<DeliveredMessage>`. |
 | `shared_outbound_deduper()` | `outbound/mod.rs` | active | Process-wide in-memory deduper shared by migrated producers once they have built a structured outbound delivery key. This is only the final in-process duplicate-send guard; durable SQL outbox uniqueness still belongs to the `message_outbox` enqueue/claim path. |
+| **turn-output controller** `deliver_turn_output<G, L>(...)` | `outbound/turn_output_controller.rs` | skeleton — **pure add, no live owner (#3089 A1)** | The single delivery entry point Phase A will route all seven turn-output surfaces through (sink / standby / watcher / turn_bridge / recovery / tui_prompt_relay). A1 fully implements + tests it but wires **no** owner — the live-path cutover starts at A2 (`session_relay_sink` first). Owns lease `commit`+advance inline before any post-send await (I1), never advances on ambiguous/partial transport (I2), maps `ReplaceLongMessageOutcome::PartialContinuationFailure` to non-advance, and drives the live placeholder card to its terminal state via `PlaceholderController.transition` with the explicit `EditFailPlaceholderPolicy` (#2757) fence. The `DeliveryLease` trait abstracts the frozen #3041 `DeliveryLeaseCell` so the controller's commit invariants are mutation-tested. No callsite-coverage row yet (added per owner at A2–A6b). |
 
 `outbound/mod.rs` re-exports the v3 message/policy/result and shared
 transport primitives. New production callsites should import
 `outbound::delivery::deliver_outbound` explicitly.
+
+The new turn-output controller (`outbound/turn_output_controller.rs`, #3089 A1)
+is a **pure add** with no live owner yet; its callsite coverage will be filled
+in §3 as each owner cuts over (A2–A6b).
 
 ---
 

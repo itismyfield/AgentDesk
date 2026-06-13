@@ -414,7 +414,8 @@ src/
 │   │   │   ├── send_gate.rs
 │   │   │   ├── send_target.rs
 │   │   │   ├── send_to_agent.rs
-│   │   │   └── transport.rs
+│   │   │   ├── transport.rs
+│   │   │   └── turn_output_controller.rs
 │   │   ├── placeholder_live_events/
 │   │   │   ├── background_task_events.rs
 │   │   │   ├── common.rs
@@ -589,6 +590,7 @@ src/
 │   │   ├── single_message_panel.rs
 │   │   ├── stall_recovery.rs
 │   │   ├── standby_relay.rs
+│   │   ├── startup_reclaim.rs
 │   │   ├── status_panel_controller.rs
 │   │   ├── status_panel_orphan_store.rs
 │   │   ├── streaming_finalizer.rs
