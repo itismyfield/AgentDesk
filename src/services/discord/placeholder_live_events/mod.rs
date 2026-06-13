@@ -68,6 +68,10 @@ pub(in crate::services::discord) use status_events::status_events_from_json;
 pub(in crate::services::discord) struct PlaceholderLiveEvents {
     by_channel: dashmap::DashMap<ChannelId, Mutex<VecDeque<RecentPlaceholderEvent>>>,
     status_by_channel: dashmap::DashMap<ChannelId, Mutex<StatusPanelState>>,
+    // #3404 (codex r1): last logged live-panel compaction counts per channel —
+    // the INFO line fires on count CHANGE only, not every render tick, so the
+    // log stays usable as a compaction event counter for the relay scan.
+    compaction_log_counts: dashmap::DashMap<ChannelId, (usize, usize)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +85,7 @@ impl PlaceholderLiveEvents {
     pub(in crate::services::discord) fn clear_channel(&self, channel_id: ChannelId) {
         self.by_channel.remove(&channel_id);
         self.status_by_channel.remove(&channel_id);
+        self.compaction_log_counts.remove(&channel_id);
     }
 
     pub(in crate::services::discord) fn clear_channel_preserving_footer_residuals(
@@ -88,6 +93,9 @@ impl PlaceholderLiveEvents {
         channel_id: ChannelId,
     ) {
         self.by_channel.remove(&channel_id);
+        // #3404 (codex r2): a turn reset starts a new compaction episode — re-arm
+        // the count-change log gate even when footer residuals survive.
+        self.compaction_log_counts.remove(&channel_id);
         let has_residuals = self
             .status_by_channel
             .get(&channel_id)
@@ -412,6 +420,23 @@ impl PlaceholderLiveEvents {
         )
     }
 
+    // True when the live-panel compaction counts for this channel differ from
+    // the last logged pair. Zero counts re-arm the gate (the next compaction
+    // episode logs again) and never log themselves.
+    fn compaction_counts_changed(
+        &self,
+        channel_id: ChannelId,
+        evicted_tasks: usize,
+        evicted_subagents: usize,
+    ) -> bool {
+        if evicted_tasks == 0 && evicted_subagents == 0 {
+            self.compaction_log_counts.remove(&channel_id);
+            return false;
+        }
+        let counts = (evicted_tasks, evicted_subagents);
+        self.compaction_log_counts.insert(channel_id, counts) != Some(counts)
+    }
+
     fn render_status_panel_with_heartbeat(
         &self,
         channel_id: ChannelId,
@@ -429,6 +454,21 @@ impl PlaceholderLiveEvents {
                     .clone()
             })
             .unwrap_or_default();
+        // #3404: observability — log when completed Tasks/Subagents are compacted
+        // out of the live panel (the live-side analogue of the completion-footer
+        // eviction log), gated on count CHANGE so a long over-cap turn does not
+        // repeat the same line every render tick (codex r1).
+        let (evicted_tasks, evicted_subagents) =
+            completion_footer::live_panel_compaction_counts(&snapshot, provider);
+        if self.compaction_counts_changed(channel_id, evicted_tasks, evicted_subagents) {
+            tracing::info!(
+                target: "agentdesk::discord::live_panel",
+                channel_id = channel_id.get(),
+                evicted_tasks,
+                evicted_subagents,
+                "#3404: compacted delivered terminal slots from the live status panel"
+            );
+        }
         render_status_panel(
             snapshot,
             self.render_block(channel_id),

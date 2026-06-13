@@ -5455,3 +5455,226 @@ fn rehydration_bound_skips_records_before_compact_boundary() {
         "pre-boundary skipped: {block}"
     );
 }
+
+// ===========================================================================
+// #3404: live (turn-in-progress) status-panel terminal-slot compaction.
+// ===========================================================================
+
+const LIVE_CAP: usize = super::completion_footer::LIVE_PANEL_TERMINAL_RENDER_CAP;
+
+// #3404 fail-on-base: during a long turn the LIVE panel accumulated EVERY
+// completed Task forever; the running entry and even the section budget got
+// starved. Compaction keeps only the most recent `LIVE_CAP` completions plus all
+// running entries and collapses the rest into a `… (+N completed)` summary. On
+// HEAD (no compaction) all completed lines render and no summary line exists, so
+// this fails.
+#[test]
+fn live_panel_compacts_completed_tasks_keeping_running_and_header() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_404_001);
+    let completed = LIVE_CAP + 4;
+    for i in 0..completed {
+        let id = format!("toolu_3404_done_{i:02}");
+        push_background_bash_task(&events, channel_id, &format!("Completed job {i:02}"), &id);
+        complete_background_bash_task(&events, channel_id, &id);
+    }
+    push_background_bash_task(&events, channel_id, "Still running", "toolu_3404_run");
+
+    let panel = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    let rendered_done = panel.matches('✓').count();
+    assert_eq!(
+        rendered_done, LIVE_CAP,
+        "live panel must cap rendered completions at {LIVE_CAP}: {panel}"
+    );
+    let collapsed = completed - LIVE_CAP;
+    assert!(
+        panel.contains(&format!("… (+{collapsed} completed)")),
+        "older completions must collapse into a summary: {panel}"
+    );
+    assert!(panel.contains("Tasks"), "Tasks header survives: {panel}");
+    assert!(
+        panel.contains("Still running"),
+        "the running entry is never capped: {panel}"
+    );
+    // The most recent completion stays visible; the oldest is collapsed away.
+    assert!(panel.contains(&format!("Completed job {:02}", completed - 1)));
+    assert!(!panel.contains("Completed job 00"));
+}
+
+// #3404 fail-on-base: the bug's headline symptom — a long backlog of completed
+// SUBAGENTS truncated the whole Subagents section to `…`. Compaction keeps the
+// Subagents header + running entry visible. On HEAD the running subagent and the
+// header are pushed out, so this fails.
+#[test]
+fn live_panel_compaction_keeps_subagents_section_and_running_entry() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_404_002);
+    for i in 0..(LIVE_CAP + 5) {
+        let id = format!("toolu_3404_sub_{i:02}");
+        events.push_status_event(
+            channel_id,
+            StatusEvent::SubagentStart {
+                subagent_type: Some("reviewer".to_string()),
+                desc: Some(format!("Audit chunk {i:02}")),
+                tool_use_id: Some(id.clone()),
+                background: false,
+            },
+        );
+        events.push_status_event(
+            channel_id,
+            StatusEvent::SubagentEnd {
+                success: true,
+                tool_use_id: Some(id),
+                summary: None,
+                ack_only: false,
+            },
+        );
+    }
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("reviewer".to_string()),
+            desc: Some("Live inspection".to_string()),
+            tool_use_id: Some("toolu_3404_sub_live".to_string()),
+            background: false,
+        },
+    );
+
+    let panel = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(
+        panel.contains("Subagents"),
+        "Subagents header survives compaction: {panel}"
+    );
+    assert!(
+        panel.contains("Live inspection"),
+        "the running subagent stays visible: {panel}"
+    );
+    assert_eq!(
+        panel.matches('✓').count(),
+        LIVE_CAP,
+        "completed subagents are capped: {panel}"
+    );
+}
+
+// #3404 SAFETY: the live path must NEVER mutate slot state — a ✓ that the live
+// edit dropped from the RENDER must still be in state so the Ok-gated
+// completion-footer eviction (#3391) remains authoritative and no ✓ is lost
+// unseen. After a compacted live render, the completion footer still sees and
+// can deliver every completed slot.
+#[test]
+fn live_panel_compaction_preserves_state_for_footer_eviction() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_404_003);
+    let completed = LIVE_CAP + 3;
+    let mut ids = Vec::new();
+    for i in 0..completed {
+        let id = format!("toolu_3404_state_{i:02}");
+        push_background_bash_task(&events, channel_id, &format!("Job {i:02}"), &id);
+        complete_background_bash_task(&events, channel_id, &id);
+        ids.push(id);
+    }
+
+    // Live render compacts the display but must not touch state.
+    let _ = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+
+    // The completion footer (separate render) still reports EVERY completed slot
+    // as deliverable — none were silently evicted by the live render.
+    let footer = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    assert_eq!(
+        footer.delivered_terminal_ids.len(),
+        completed,
+        "live compaction must not remove slots from state: {:?}",
+        footer.delivered_terminal_ids
+    );
+}
+
+// #3404: a small backlog at or under the cap renders verbatim (no summary line,
+// no behavior change for short turns).
+#[test]
+fn live_panel_no_compaction_under_cap() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_404_004);
+    for i in 0..LIVE_CAP {
+        let id = format!("toolu_3404_small_{i:02}");
+        push_background_bash_task(&events, channel_id, &format!("Job {i:02}"), &id);
+        complete_background_bash_task(&events, channel_id, &id);
+    }
+    let panel = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert_eq!(panel.matches('✓').count(), LIVE_CAP);
+    assert!(
+        !panel.contains("completed)"),
+        "no summary under cap: {panel}"
+    );
+}
+
+// #3404 unit: the compaction primitive keeps the newest `cap` terminal lines,
+// preserves every in-flight line in place, and emits one summary for the rest.
+#[test]
+fn compact_live_panel_terminal_lines_caps_and_preserves_inflight() {
+    use super::completion_footer::compact_live_panel_terminal_lines;
+    // Newest-first order (the live panel renders `.rev()`).
+    let lines: Vec<String> = vec![
+        "└ Bash running A ⠸".to_string(),
+        "└ Bash done 5 ✓".to_string(),
+        "└ Bash done 4 ✓".to_string(),
+        "└ Bash done 3 ✓".to_string(),
+        "└ Bash done 2 ✗".to_string(),
+        "└ Bash done 1 ✓".to_string(),
+    ];
+    let (out, collapsed) =
+        compact_live_panel_terminal_lines(&lines).expect("over-cap input must compact");
+    assert_eq!(collapsed, 5 - LIVE_CAP);
+    // Running line preserved in position.
+    assert_eq!(out[0], "└ Bash running A ⠸");
+    // Exactly `cap` terminal lines survive (the newest), plus one summary line.
+    assert_eq!(
+        out.iter()
+            .filter(|l| l.ends_with('✓') || l.ends_with('✗'))
+            .count(),
+        LIVE_CAP
+    );
+    assert_eq!(out.iter().filter(|l| l.contains("completed)")).count(), 1);
+    assert!(out.iter().any(|l| l.contains("done 5")));
+    assert!(!out.iter().any(|l| l.contains("done 1")));
+    // Under-cap input is left untouched.
+    assert!(compact_live_panel_terminal_lines(&lines[..2].to_vec()).is_none());
+}
+
+// #3404 codex r1 — the compaction INFO log is count-change gated: same counts
+// across render ticks must not re-log; zero counts re-arm the gate so the next
+// compaction episode logs again.
+#[test]
+fn compaction_log_gate_fires_on_change_only() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_404_100);
+    assert!(
+        events.compaction_counts_changed(channel_id, 4, 0),
+        "first over-cap render logs"
+    );
+    assert!(
+        !events.compaction_counts_changed(channel_id, 4, 0),
+        "same counts stay silent"
+    );
+    assert!(
+        events.compaction_counts_changed(channel_id, 5, 1),
+        "count growth logs"
+    );
+    assert!(
+        !events.compaction_counts_changed(channel_id, 5, 1),
+        "steady state stays silent"
+    );
+    assert!(
+        !events.compaction_counts_changed(channel_id, 0, 0),
+        "zero never logs"
+    );
+    assert!(
+        events.compaction_counts_changed(channel_id, 5, 1),
+        "zero re-arms the next episode"
+    );
+    // codex r2: a turn reset (even residual-preserving) re-arms the gate.
+    events.clear_channel_preserving_footer_residuals(channel_id);
+    assert!(
+        events.compaction_counts_changed(channel_id, 5, 1),
+        "turn reset re-arms the gate without an interleaved zero render"
+    );
+}

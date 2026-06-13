@@ -7,6 +7,7 @@ use super::common::{
     escape_status_panel_markdown, normalize_summary, sanitized_tool_name, tool_prefix,
     truncate_chars, truncate_chars_with_marker,
 };
+use super::completion_footer::compact_live_panel_terminal_lines;
 use super::context_panel::{ContextPanelSnapshot, render_context_panel_line};
 use super::session_panel::{SessionPanelSnapshot, render_session_panel_line};
 use super::status_events::{is_schedule_wakeup_tool, parse_eta_secs};
@@ -497,6 +498,8 @@ pub(super) fn render_status_panel(
             .take(STATUS_PANEL_TASK_LIMIT)
             .map(render_task_tool_slot)
             .collect::<Vec<_>>();
+        // #3404: cap completed entries so they cannot starve the 600-byte footer.
+        let lines = compact_live_panel_terminal_lines(&lines).map_or(lines, |(out, _)| out);
         sections.push(format!("Tasks\n{}", lines.join("\n")));
     }
 
@@ -508,6 +511,8 @@ pub(super) fn render_status_panel(
             .take(STATUS_PANEL_SUBAGENT_LIMIT)
             .map(render_subagent_slot)
             .collect::<Vec<_>>();
+        // #3404: cap completed entries so the running Subagents stay visible.
+        let lines = compact_live_panel_terminal_lines(&lines).map_or(lines, |(out, _)| out);
         sections.push(format!("Subagents\n{}", lines.join("\n")));
     }
 
