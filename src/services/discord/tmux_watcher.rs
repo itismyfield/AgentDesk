@@ -11886,6 +11886,24 @@ TUI-E2E-marker ssh-direct
         // which DOES register the footer target + `Succeeded`. Collapsing the
         // FreshFallback branch back to the `EditedOriginal` side-effects (the r1 bug)
         // fails this test on the footer-target + cleanup-outcome assertions.
+        //
+        // #3089 A4 r3 (codex r2 [Medium]): also PIN the preserve else-branch locals
+        // the fallback arm clears. The completion footer at
+        // `single_message_footer.rs:399-405` resolves its edit target as
+        // `terminal_target.or(fallback_target)` where `fallback_target` is built FROM
+        // `placeholder_msg_id`. So the fallback arm not registering a `terminal_target`
+        // is NOT sufficient on its own: it MUST ALSO clear `placeholder_msg_id` to None
+        // (legacy fallback `else`, tmux_watcher.rs:6356), or the footer's
+        // placeholder-derived fallback target would STILL edit the preserved original.
+        // We surface the post-apply preserve-branch locals and assert the fallback arm
+        // cleared `placeholder_msg_id` (load-bearing), reset
+        // `placeholder_from_restored_inflight`, and cleared `last_edit_text`
+        // (tmux_watcher.rs:6356-6358), and that the resolved footer target
+        // (`terminal_target.or(placeholder_msg_id→fallback)`) is therefore None — the
+        // second footer-target path can never reach the preserved original. The
+        // `EditedOriginal` arm DOES resolve a footer target (its `terminal_target` is
+        // registered, tmux_watcher.rs:6256), so the resolved-target assertion
+        // DISCRIMINATES the two arms.
         #[test]
         fn watcher_short_replace_fallback_mirrors_legacy() {
             use super::super::single_message_footer::WatcherCompletionFooterTerminalTarget;
@@ -11894,11 +11912,28 @@ TUI-E2E-marker ssh-direct
                 apply_watcher_short_replace_result,
             };
 
-            // Drive `apply_watcher_short_replace_result` with `result` and report
-            // (footer_target_registered, cleanup_committed, cleanup_retry_pending).
+            // Post-apply observation of `apply_watcher_short_replace_result`: the
+            // footer-target registration, the cleanup record outcome, AND the
+            // preserve-branch locals (the #3089 A4 r3 pin). `footer_target_resolves`
+            // replays the `single_message_footer.rs:405` resolution
+            // (`terminal_target.or(placeholder_msg_id→fallback)`) so we observe whether
+            // ANY footer-edit path could still reach the original `msg_id`.
+            struct Observed {
+                footer_registered: bool,
+                /// `single_message_footer.rs:405`: `terminal_target.or(fallback)` where
+                /// `fallback = placeholder_msg_id.map(..)`. True iff some path resolves.
+                footer_target_resolves: bool,
+                committed: bool,
+                retry_pending: bool,
+                placeholder_msg_id_cleared: bool,
+                placeholder_from_restored_inflight_reset: bool,
+                last_edit_text_cleared: bool,
+            }
+
+            // Drive `apply_watcher_short_replace_result` with `result`.
             // `single_message_panel_footer_mode = true` so an `EditedOriginal`
             // registration is observable (the footer remember is gated on it).
-            fn run(result: WatcherShortReplaceResult) -> (bool, bool, bool) {
+            fn run(result: WatcherShortReplaceResult) -> Observed {
                 let shared = crate::services::discord::make_shared_data_for_tests();
                 let mut relay_ok = true;
                 let mut direct_send_delivered = false;
@@ -11937,6 +11972,12 @@ TUI-E2E-marker ssh-direct
                     },
                 );
                 let footer_registered = completion_footer_terminal_target.is_some();
+                // Replay `single_message_footer.rs:399-405`: in footer mode the target
+                // is `terminal_target.or(fallback)` where the fallback is derived FROM
+                // `placeholder_msg_id`. A resolved target is what the footer would edit;
+                // for the preserved-original fallback case it MUST resolve to None.
+                let footer_target_resolves =
+                    completion_footer_terminal_target.is_some() || placeholder_msg_id.is_some();
                 let committed = shared.ui.placeholder_cleanup.terminal_cleanup_committed(
                     &ProviderKind::Claude,
                     ch(),
@@ -11953,42 +11994,86 @@ TUI-E2E-marker ssh-direct
                 // Both arms mark the body delivered (advance already happened).
                 assert!(direct_send_delivered, "the body landed → delivered");
                 assert!(tui_direct_anchor_terminal_body_visible);
-                (footer_registered, committed, retry_pending)
+                Observed {
+                    footer_registered,
+                    footer_target_resolves,
+                    committed,
+                    retry_pending,
+                    placeholder_msg_id_cleared: placeholder_msg_id.is_none(),
+                    placeholder_from_restored_inflight_reset: !placeholder_from_restored_inflight,
+                    last_edit_text_cleared: last_edit_text.is_empty(),
+                }
             }
 
             // FreshFallback: NO footer target, cleanup `Failed` (retry_pending), NOT
             // committed — the legacy fallback arm (tmux_watcher.rs:6289-6372).
-            let (fb_footer, fb_committed, fb_retry) =
-                run(WatcherShortReplaceResult::DeliveredFallback {
-                    edit_error: "edit failed".to_string(),
-                });
+            let fb = run(WatcherShortReplaceResult::DeliveredFallback {
+                edit_error: "edit failed".to_string(),
+            });
             assert!(
-                !fb_footer,
+                !fb.footer_registered,
                 "fallback must NOT register the original as the completion-footer target (#2757)"
             );
             assert!(
-                !fb_committed,
+                !fb.committed,
                 "fallback records Failed(edit_error), so the cleanup is NOT committed (Succeeded)"
             );
             assert!(
-                fb_retry,
+                fb.retry_pending,
                 "fallback records a Failed cleanup → terminal_cleanup_retry_pending"
+            );
+            // #3089 A4 r3 (codex r2 [Medium]): pin the preserve else-branch locals the
+            // legacy fallback `else` clears (tmux_watcher.rs:6356-6358). The load-bearing
+            // one is `placeholder_msg_id`: the footer's fallback target is built from it
+            // (single_message_footer.rs:401), so leaving it SET would let the completion
+            // footer edit the PRESERVED original even though no `terminal_target` was
+            // registered.
+            assert!(
+                fb.placeholder_msg_id_cleared,
+                "fallback MUST clear placeholder_msg_id (tmux_watcher.rs:6356) — else the \
+                 footer's placeholder-derived fallback target (single_message_footer.rs:401) \
+                 would edit the preserved original"
+            );
+            assert!(
+                fb.placeholder_from_restored_inflight_reset,
+                "fallback resets placeholder_from_restored_inflight to false (tmux_watcher.rs:6357)"
+            );
+            assert!(
+                fb.last_edit_text_cleared,
+                "fallback clears last_edit_text (tmux_watcher.rs:6358)"
+            );
+            assert!(
+                !fb.footer_target_resolves,
+                "fallback: with no terminal_target AND placeholder_msg_id cleared, the \
+                 completion footer (single_message_footer.rs:405) resolves NO edit target \
+                 → it can never reach the preserved original"
             );
 
             // EditedOriginal: footer target REGISTERED, cleanup `Succeeded` — the
             // legacy edit arm (tmux_watcher.rs:6247-6288).
-            let (eo_footer, eo_committed, eo_retry) = run(WatcherShortReplaceResult::Delivered);
+            let eo = run(WatcherShortReplaceResult::Delivered);
             assert!(
-                eo_footer,
+                eo.footer_registered,
                 "EditedOriginal registers the original as the completion-footer target"
             );
             assert!(
-                eo_committed,
+                eo.committed,
                 "EditedOriginal records EditTerminal/Succeeded → cleanup committed"
             );
             assert!(
-                !eo_retry,
+                !eo.retry_pending,
                 "EditedOriginal cleanup Succeeded, so no retry is pending"
+            );
+            // DISCRIMINATION: the edit arm DOES resolve a footer target (its
+            // `terminal_target` is registered, tmux_watcher.rs:6256) so the footer edits
+            // the original ON PURPOSE — the opposite of the fallback arm. This is what
+            // makes `footer_target_resolves` a discriminating assertion: the fallback arm
+            // resolves NO target only because it cleared `placeholder_msg_id`; if it
+            // stopped clearing it, the fallback target would resolve here too.
+            assert!(
+                eo.footer_target_resolves,
+                "EditedOriginal: the registered terminal_target resolves → footer edits the \
+                 original deliberately (discriminates the fallback preserve arm)"
             );
         }
     }
