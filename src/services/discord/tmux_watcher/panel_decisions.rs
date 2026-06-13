@@ -216,6 +216,25 @@ pub(super) fn watcher_timeout_finalize_decision(
     }
 }
 
+/// #3419 B (activity-based idle): single-authority predicate for whether the
+/// watcher turn is still ACTIVE and the read loop should keep waiting.
+///
+/// A turn is active while BOTH (a) it has produced a real byte within the IDLE
+/// window (`idle_elapsed < idle_window`; `idle_elapsed` is measured from the
+/// last non-empty read, never reset by empty polls) AND (b) it is under the
+/// generous absolute cap (`total_elapsed < cap`). When EITHER timer expires the
+/// turn is no longer active: the loop exits and the timeout-finalize gate (C)
+/// drains it. The loop uses this (`while active`) and the finalize gate uses its
+/// negation (`if !active`), so the two firing points cannot diverge.
+pub(super) fn watcher_turn_still_active(
+    idle_elapsed: std::time::Duration,
+    idle_window: std::time::Duration,
+    total_elapsed: std::time::Duration,
+    cap: std::time::Duration,
+) -> bool {
+    idle_elapsed < idle_window && total_elapsed < cap
+}
+
 pub(super) fn watcher_should_clear_stale_terminal_message_ids(
     inflight_present: bool,
     has_assistant_response: bool,

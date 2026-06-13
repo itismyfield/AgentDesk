@@ -2542,6 +2542,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         if !found_result {
             let turn_start = tokio::time::Instant::now();
             let turn_timeout = crate::services::discord::turn_watchdog_timeout();
+            let turn_idle_timeout = crate::services::discord::turn_idle_timeout();
             let mut last_status_update = tokio::time::Instant::now();
             let mut last_output_at = tokio::time::Instant::now();
             if watcher_live_events_dirty_should_force_status_update(
@@ -2561,10 +2562,19 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             let mut streaming_suppressed_by_missing_inflight = false;
             let mut fresh_ready_for_input_idle = false;
 
-            while !found_result && turn_start.elapsed() < turn_timeout {
-                // The inner loop can wait for minutes while a long tool/test produces no
-                // provider JSONL result. Keep the registry heartbeat fresh so the heartbeat sweeper
-                // does not mistake a healthy streaming watcher for a dead task and cancel relay.
+            // #3419 B: read while ACTIVE — a real byte within the IDLE window
+            // (`last_output_at` advances only on a non-empty read) under a generous
+            // cap; shared predicate with the finalize gate (single authority).
+            while !found_result
+                && watcher_turn_still_active(
+                    last_output_at.elapsed(),
+                    turn_idle_timeout,
+                    turn_start.elapsed(),
+                    turn_timeout,
+                )
+            {
+                // Loop can wait minutes for a long tool/test; keep the registry heartbeat
+                // fresh so the sweeper does not cancel relay on a healthy streaming watcher.
                 last_heartbeat_ts_ms.store(
                     crate::services::discord::tmux_watcher_now_ms(),
                     std::sync::atomic::Ordering::Release,
@@ -2836,18 +2846,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         )
                         .await;
                         let now = std::time::Instant::now();
-                        // #2442 (H3) — wrapper emits a `ready_for_input`
-                        // JSONL sentinel as soon as it transitions back to
-                        // accepting stdin. If we see the sentinel in the
-                        // tail bytes, treat it as a free readiness signal
-                        // and short-circuit the 2s probe cadence. The
-                        // legacy `should_probe_ready` cadence stays as a
-                        // fallback for the SIGKILL / sentinel-lost case.
-                        //
-                        // Claude TUI is transcript-backed: its visible
-                        // composer can stay on-screen during active work, so
-                        // watcher completion must use the JSONL turn state,
-                        // not pane chrome.
+                        // #2442 (H3) — wrapper emits a `ready_for_input` JSONL
+                        // sentinel on transitioning back to accepting stdin; seeing
+                        // it in the tail bytes is a free readiness signal that
+                        // short-circuits the 2s probe cadence (legacy
+                        // `should_probe_ready` stays a SIGKILL/sentinel-lost fallback).
+                        // Claude TUI is transcript-backed (composer can stay on-screen
+                        // during work) so completion uses JSONL turn state, not chrome.
                         let sentinel_ready =
                             !matches!(
                                 watcher_provider,
@@ -2985,12 +2990,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
 
                     // #3003 single-chokepoint orphan reclaim: reclaim a watcher-created
                     // external-input v2 panel the moment its turn is abandoned (stopped/
-                    // cancelled → inflight cleared, or covered by a recent turn-stop
-                    // tombstone). Positioned BEFORE every early-`continue` guard below
-                    // (silent / bridge-delivered / inflight-missing / recent-stop) so no
-                    // guard can skip it — the recurring orphan source. Committed turns
-                    // null out `status_panel_msg_id` right after completion, so a
-                    // finalized panel is never deleted here.
+                    // cancelled → inflight cleared, or a recent turn-stop tombstone).
+                    // Positioned BEFORE every early-`continue` guard below (silent /
+                    // bridge-delivered / inflight-missing / recent-stop) so none can skip
+                    // it — the recurring orphan source. Committed turns null out
+                    // `status_panel_msg_id` at completion, so a finalized panel is safe.
                     // #3351: reclaim the turn's stuck relay placeholder alongside the
                     // panel (still-placeholder gated; real responses never deleted).
                     let tick_placeholder_reclaim = watcher_should_reclaim_orphan_turn_placeholder(
@@ -3181,16 +3185,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             data_start_offset,
                             status_panel_msg_id,
                             placeholder_msg_id,
-                            // #3107 codex re-review (P2#3, F3): thread the #3099
-                            // hourglass anchor captured up front from the restored
-                            // turn (before `restored_turn` was consumed by the
-                            // streaming path's `.take()`). Previously this was
-                            // hardcoded `None`, so a hourglass-anchored turn that
-                            // lost its inflight MID-STREAM was re-acquired WITHOUT the
-                            // pinned message id — orphaning the `⏳` because the
-                            // `⏳ → ✅` cleanup could no longer find its own anchor.
-                            // Preserving it keeps the re-acquired streaming inflight
-                            // pointing at the hourglass message.
+                            // #3107 (P2#3, F3): thread the #3099 hourglass anchor
+                            // captured up front (before `restored_turn` was consumed by
+                            // the streaming `.take()`). Previously hardcoded `None`, so a
+                            // hourglass-anchored turn losing its inflight MID-STREAM was
+                            // re-acquired WITHOUT the pinned id — orphaning the `⏳` (the
+                            // `⏳ → ✅` cleanup lost its anchor). Preserving it keeps the
+                            // re-acquired streaming inflight pointing at the ⏳ message.
                             restored_injected_prompt_message_id,
                         );
                         if reacquired && !active_stream_inflight_reacquire_logged {
@@ -3347,10 +3348,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             // before the inflight row is removed; without this guard the
                             // interval-top reclaim would delete the panel and this branch
                             // would immediately recreate one for the same stopped turn.
-                            //
                             // Snapshot the turn identity *before* the await so a
-                            // stop/cancel/next-turn that lands during send cannot make
-                            // us persist stale state onto a different turn (codex P2 r4).
+                            // stop/cancel/next-turn during send cannot persist stale
+                            // state onto a different turn (codex P2 r4).
                             let pre_send_identity = inflight_for_panel
                                 .as_ref()
                                 .map(crate::services::discord::inflight::InflightTurnIdentity::from_state);
@@ -3409,13 +3409,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                                 ..Default::default()
                                             },
                                         );
-                                        // #3077 (codex P1): the pre-send snapshot/`identity_matches`
-                                        // check narrows but does NOT close the race; an overlapping
-                                        // watcher can rebind between our load and this atomic bind.
-                                        // The bind is the single source of truth for whether THIS
-                                        // panel is now recorded, so the adopted handle MUST come
-                                        // from its return — adopting `panel_msg.id` unconditionally
-                                        // would leak a sent-but-unrecorded panel as our own.
+                                        // #3077 (codex P1): the pre-send snapshot narrows but does
+                                        // NOT close the race (an overlapping watcher can rebind
+                                        // between our load and this atomic bind). The bind is the
+                                        // single source of truth for whether THIS panel is recorded,
+                                        // so the adopted handle MUST come from its return — adopting
+                                        // `panel_msg.id` unconditionally leaks a sent-but-unrecorded panel.
                                         let decision =
                                             resolve_tui_status_panel_bind_decision(bind_outcome);
                                         if decision.delete_sent_panel {
@@ -4274,26 +4273,30 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 continue;
             }
 
-            // #3419 R2: turn-watchdog timeout fall-through (`!found_result` past
-            // the fresh-idle / tmux-death / cancel / notice exits). Pre-#3419 this
-            // left the turn UN-finalized — `TurnFinalizer` never ran, the mailbox
-            // cancel_token leaked, the soft-queue wedged. Route through the SAME
+            // #3419 R2: turn-watchdog timeout fall-through (`!found_result` past the
+            // fresh-idle / tmux-death / cancel / notice exits). Pre-#3419 this left
+            // the turn UN-finalized (TurnFinalizer never ran, mailbox cancel_token
+            // leaked, soft-queue wedged). Route through the SAME
             // `finish_restored_watcher_active_turn` entry normal completion uses (no
-            // new authority; the once-gate makes a later normal finalize idempotent).
-            // Skip when paused/epoch-bumped (Discord turn took over, below) or an
-            // error branch owns cleanup (after).
-            //
-            // #3419 R3 (codex HIGH — drain re-acquire id-0 wedge, no steal): key
-            // the decision on the LIVE MAILBOX active-turn id, not the on-disk
-            // inflight (the mailbox token is what wedges the queue). The re-acquire
-            // path can mint an id-0 inflight while pinned A's token is still active,
-            // so R2's on-disk-identity test Skipped A and left it wedged. Finalize
-            // (drain) ONLY when the mailbox still holds pinned A's token; a DIFFERENT
-            // live active turn B / no active turn → Skip. The submit is A's REAL
-            // pinned id through identity-guarded `mailbox_finish_turn_if_matches`, so
-            // B can never be stolen and an id-0 is never submitted.
+            // new authority; once-gate makes a later normal finalize idempotent).
+            // Skip when paused/epoch-bumped or an error branch owns cleanup (below).
+            // #3419 R3 (codex HIGH — drain re-acquire id-0 wedge, no steal): key the
+            // decision on the LIVE MAILBOX active-turn id, not the on-disk inflight
+            // (the mailbox token wedges the queue; re-acquire can mint an id-0
+            // inflight while pinned A's token is still active, so R2's on-disk test
+            // Skipped A and left it wedged). Finalize ONLY when the mailbox still
+            // holds pinned A's token; a DIFFERENT live turn B / no active turn → Skip.
+            // The submit is A's REAL pinned id via identity-guarded
+            // `mailbox_finish_turn_if_matches`, so B can't be stolen / id-0 submitted.
+            // #3419 B: NOT-active (idle OR cap expired) routes the stuck turn
+            // through this C finalize; same predicate as the loop (single authority).
             if !found_result
-                && turn_start.elapsed() >= turn_timeout
+                && !watcher_turn_still_active(
+                    last_output_at.elapsed(),
+                    turn_idle_timeout,
+                    turn_start.elapsed(),
+                    turn_timeout,
+                )
                 && !was_paused
                 && pause_epoch.load(Ordering::Relaxed) == epoch_snapshot
                 && !is_prompt_too_long
@@ -4301,8 +4304,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 && !is_provider_overloaded
             {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                // The wedge is the mailbox token; the decision keys on the mailbox's
-                // CURRENT active-turn id (different/absent = B took over or released).
+                // Wedge is the mailbox token; decide on its CURRENT active-turn id (different/absent = B took over / released).
                 let mailbox_active_user_msg_id = shared
                     .mailbox(channel_id)
                     .snapshot()
@@ -4325,11 +4327,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             "  [{ts}] ⚠ #3419: watcher turn watchdog timed out for {tmux_session_name} after {}s (pinned turn {user_msg_id} still holds the mailbox token); routing through the single-authority finalizer to release the token and drain the queue",
                             turn_start.elapsed().as_secs()
                         );
-                        // Identity-matched clear: removes the row ONLY while it is
-                        // still the pinned turn (same identity INCLUDING
-                        // turn_start_offset, so the clear key == the decision key).
-                        // A re-acquired id-0 / newer row → `UserMsgMismatch` no-op, so
-                        // the drain releases the token without touching a stale row.
+                        // Identity-matched clear: removes the row ONLY while still
+                        // the pinned turn (same identity INCL. turn_start_offset, so
+                        // clear key == decision key). A re-acquired id-0 / newer row →
+                        // `UserMsgMismatch` no-op (drain frees the token, stale row untouched).
                         if let Some(pinned) = startup_inflight_snapshot.as_ref() {
                             let _ = crate::services::discord::inflight::clear_inflight_state_if_matches_identity(
                                 &watcher_provider,
@@ -4337,11 +4338,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 &crate::services::discord::inflight::InflightTurnIdentity::from_state(pinned),
                             );
                         }
-                        // finish_mailbox=true releases the watcher-owned token (wedge
-                        // fix); normal_completion=false (no confirmed completion);
-                        // kickoff_queue=true admits the next turn. The REAL pinned id
-                        // keys the IDENTITY-GUARDED `mailbox_finish_turn_if_matches`, so
-                        // it cannot release a newer turn even on a stale ledger.
+                        // finish_mailbox=true releases the watcher token (wedge fix);
+                        // normal_completion=false; kickoff_queue=true admits the next
+                        // turn. The REAL pinned id keys IDENTITY-GUARDED
+                        // `mailbox_finish_turn_if_matches` (can't release a newer turn).
                         finish_restored_watcher_active_turn(
                             &shared,
                             &watcher_provider,
@@ -4372,8 +4372,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             }
         }
 
-        // If paused was set while we were reading (even if already unpaused), discard partial data.
-        // Also check epoch: if it changed, a Discord turn claimed this data even if paused is now false.
+        // Discard partial data if paused while reading (even if now unpaused), or if the epoch
+        // changed (a Discord turn claimed this data even when paused is now false).
         let paused_now = paused.load(Ordering::Relaxed);
         let epoch_changed_now = pause_epoch.load(Ordering::Relaxed) != epoch_snapshot;
         let deferred_monitor_ready =
@@ -9249,6 +9249,80 @@ mod tests {
                 pinned_user_msg_id: 3001
             },
         );
+    }
+
+    /// #3419 B: the watcher turn-active predicate is the SINGLE AUTHORITY shared
+    /// by the read loop (`while active`) and the timeout-finalize gate (`if
+    /// !active`). It must hold the turn active while BOTH timers are within
+    /// bounds, and release it the instant EITHER expires — independently — so a
+    /// turn that keeps emitting output (idle reset) survives until it idles, and
+    /// a turn that idles is released even far below the absolute cap.
+    #[test]
+    fn watcher_turn_still_active_releases_on_idle_or_cap_independently() {
+        use std::time::Duration;
+        let idle_window = Duration::from_secs(3600);
+        let cap = Duration::from_secs(6 * 3600);
+
+        // Active turn (codex still producing output): idle just reset, well
+        // under both windows → keep reading.
+        assert!(
+            super::watcher_turn_still_active(
+                Duration::from_secs(2),
+                idle_window,
+                Duration::from_secs(120),
+                cap
+            ),
+            "a turn with recent output and short total age must stay active"
+        );
+
+        // A LIVE long/interactive turn: huge total age (near the cap) but
+        // output keeps arriving so idle stays tiny → still active. This is the
+        // exact case absolute-time timeouts killed pre-B.
+        assert!(
+            super::watcher_turn_still_active(
+                Duration::from_secs(5),
+                idle_window,
+                cap - Duration::from_secs(1),
+                cap
+            ),
+            "a long turn that keeps emitting output (idle reset) must survive"
+        );
+
+        // Idle expired (no real byte for the whole window) but total age is
+        // small → NOT active. Idle fires independently of the cap; this is the
+        // genuinely-stuck turn C then drains.
+        assert!(
+            !super::watcher_turn_still_active(
+                idle_window,
+                idle_window,
+                Duration::from_secs(60),
+                cap
+            ),
+            "reaching the idle window with no output must release the turn"
+        );
+
+        // Absolute cap expired even though idle is tiny (pathological: output
+        // that never stops yet never finishes) → NOT active. Cap fires
+        // independently of idle.
+        assert!(
+            !super::watcher_turn_still_active(Duration::from_secs(1), idle_window, cap, cap),
+            "reaching the absolute cap must release the turn even while output flows"
+        );
+
+        // Boundary: strictly LESS-THAN keeps it active one tick before the
+        // window, and `>=` releases at the window — no off-by-one straddle.
+        assert!(super::watcher_turn_still_active(
+            idle_window - Duration::from_nanos(1),
+            idle_window,
+            Duration::ZERO,
+            cap
+        ));
+        assert!(!super::watcher_turn_still_active(
+            idle_window,
+            idle_window,
+            Duration::ZERO,
+            cap
+        ));
     }
 
     // #3016 test helper: a real, non-stale watcher handle so the registry slot

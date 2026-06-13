@@ -842,16 +842,14 @@ fn tail_rollout_file_until_assistant_response(
                 // is currently in flight. Otherwise the natural silence while
                 // codex waits for the tool result would trip the timer.
                 //
-                // #2453: when the tail has yet to observe ANY `event_msg`
-                // record (legacy Codex CLI fingerprint), bump the drain to
-                // `legacy_terminal_drain`. Modern CLIs emit at least one
-                // `event_msg` per message, so this branch only widens the
-                // drain for legacy writers that lack the structural signals
+                // #2453: with NO `event_msg` observed yet (legacy CLI
+                // fingerprint), bump to `legacy_terminal_drain`. Modern CLIs
+                // emit ≥1 `event_msg` per message, so this widens the drain
+                // only for legacy writers lacking the structural signals
                 // (token_count refresh, hook/envelope completion) the short
-                // default leans on. The bump is applied only when the
-                // configured legacy drain is strictly longer than the
-                // base drain — `terminal_drain.is_zero()` (replay) and
-                // shorter overrides stay verbatim.
+                // default leans on. Applied only when legacy drain is strictly
+                // longer — `terminal_drain.is_zero()` (replay) / shorter
+                // overrides stay verbatim.
                 let effective_drain = if state.seen_any_event_msg || terminal_drain.is_zero() {
                     terminal_drain
                 } else {
@@ -882,21 +880,16 @@ fn tail_rollout_file_until_assistant_response(
                         last_output_at = Some(Instant::now());
                     }
                 }
-                // #2419 follow-up (Codex review HIGH): bounded recovery for
-                // a pending tool call whose `*_output` never arrives (hung
-                // tool, malformed line, call_id skew). Without this, the
-                // drain gate stays shut forever while the pane is alive and
-                // the Discord turn hangs. After `pending_tool_call_deadline`
-                // of inactivity past the last lifecycle event we surface a
-                // terminal Done with a warning so the upstream advances.
-                //
-                // #2429 HIGH 2 (tool-first stuck calls bypass recovery):
-                // when `apply_pending_tool_deadline_without_assistant_text`
-                // is enabled (default), the deadline also fires for a tool
-                // that hangs BEFORE any assistant text has been emitted —
-                // previously such turns fell back to the 30 min global
-                // deadline. The warning copy distinguishes the no-text case
-                // so operators can spot tool-first stuck calls in logs.
+                // #2419 (Codex HIGH): bounded recovery for a pending tool call
+                // whose `*_output` never arrives (hung tool / malformed line /
+                // call_id skew) — else the drain gate stays shut forever while
+                // the pane lives and the Discord turn hangs. After
+                // `pending_tool_call_deadline` of inactivity past the last
+                // lifecycle event we surface a terminal Done. #2429 HIGH 2:
+                // with `apply_pending_tool_deadline_without_assistant_text`
+                // (default) it ALSO fires for a tool that hangs BEFORE any
+                // assistant text (previously fell to the 30 min global); the
+                // warning copy flags the no-text case for operators.
                 let tool_deadline_gate = state.has_pending_tool_call()
                     && (state.saw_assistant_text
                         || apply_pending_tool_deadline_without_assistant_text);
@@ -963,18 +956,25 @@ fn tail_rollout_file_until_assistant_response(
                     };
                     return Ok((result, outcome(&state, current_offset)));
                 }
-                // #2182 follow-up: global deadline guard. Without this, a
-                // stuck/hung Codex TUI keeps the tailer alive indefinitely
-                // and the upstream turn never sees `StreamMessage::Done`.
+                // #2182: hung-TUI guard (else the tailer lives forever, no
+                // `Done`). #3419 B: fire on IDLE, not absolute age — silence
+                // since the last rollout activity (`last_output_at`: assistant
+                // text AND tool/event lifecycle, NOT empty 100ms polls), or
+                // `started_at` while no output ever arrived. A live codex turn
+                // (write_stdin/tool/event) resets idle and survives; only a
+                // genuinely silent turn trips `deadline`. `!saw_assistant_text`
+                // keeps this the no-text branch (post-text drain owns the rest).
+                let idle_elapsed =
+                    last_output_at.map_or_else(|| started_at.elapsed(), |at| at.elapsed());
                 if !state.saw_assistant_text
                     && let Some(deadline) = assistant_response_deadline
-                    && started_at.elapsed() >= deadline
+                    && idle_elapsed >= deadline
                 {
-                    let elapsed_secs = started_at.elapsed().as_secs();
+                    let elapsed_secs = idle_elapsed.as_secs();
                     tracing::warn!(
                         rollout_path = %rollout_path.display(),
                         elapsed_secs,
-                        "Codex rollout tail timed out waiting for assistant response; emitting Done"
+                        "Codex rollout tail idle past deadline with no assistant response; emitting Done"
                     );
                     sender.send(StreamMessage::Done {
                         result: format!(
@@ -2368,6 +2368,161 @@ mod tests {
             done,
             Some(StreamMessage::Done { result, .. }) if result.contains("timed out")
         ));
+    }
+
+    /// #3419 B (activity-based idle): a turn that keeps emitting NON-assistant
+    /// output (here `reasoning` lifecycle records) at an interval SHORTER than
+    /// the idle deadline must NOT trip the no-assistant-response timeout — the
+    /// idle clock resets on every real rollout record. Pre-B this measured
+    /// `started_at.elapsed()` (absolute) and would have fired regardless of
+    /// activity, killing a live long/interactive codex turn. We append several
+    /// reasoning lines spaced under the deadline, then assert no timeout Done
+    /// was emitted (and the turn ends only when the pane dies, not the timer).
+    #[test]
+    fn idle_deadline_survives_continuous_nonassistant_activity() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let rollout = write_rollout(
+            dir.path(),
+            "rollout-idle-active.jsonl",
+            "session-idle-active",
+            cwd.path(),
+            "",
+        );
+        let (tx, rx) = mpsc::channel();
+        // Pane death is the ONLY non-timer exit; flip it AFTER the activity
+        // window so the test terminates deterministically without relying on
+        // the (longer) idle deadline. `alive` stays true while we append.
+        let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let writer_alive = alive.clone();
+        let writer_path = rollout.clone();
+        let writer = std::thread::spawn(move || {
+            // 5 reasoning records, ~60ms apart (300ms total) — each one is a
+            // rollout activity that resets the 200ms idle clock, so the gap
+            // between activities (60ms) never reaches the deadline (200ms).
+            for _ in 0..5 {
+                std::thread::sleep(Duration::from_millis(60));
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&writer_path)
+                    .unwrap();
+                file.write_all(
+                    b"{\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\"}}\n",
+                )
+                .unwrap();
+            }
+            // Activity over: let the pane die so the tail exits via `is_alive`,
+            // proving it reached EOF still ALIVE without the timer firing.
+            std::thread::sleep(Duration::from_millis(60));
+            writer_alive.store(false, std::sync::atomic::Ordering::SeqCst);
+        });
+        let is_alive_flag = alive.clone();
+        let (result, _outcome) = tail_rollout_file_until_assistant_response(
+            &rollout,
+            0,
+            None,
+            &tx,
+            None,
+            move || is_alive_flag.load(std::sync::atomic::Ordering::SeqCst),
+            Duration::ZERO,
+            // Idle deadline (200ms) is shorter than the TOTAL active window
+            // (~360ms) but longer than the per-activity gap (60ms): an
+            // absolute-time gate would fire; an idle gate must not.
+            Some(Duration::from_millis(200)),
+            None,
+            true,
+            None,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        writer.join().unwrap();
+        drop(tx);
+        let messages: Vec<_> = rx.iter().collect();
+        // No assistant text ever arrived, so the pane-death branch surfaces
+        // SessionDied — NOT a timer-driven Completed/Done.
+        assert!(
+            matches!(result, ReadOutputResult::SessionDied { .. }),
+            "live activity must keep the idle timer from firing; got {result:?}"
+        );
+        assert!(
+            !messages.iter().any(|m| matches!(
+                m,
+                StreamMessage::Done { result, .. }
+                    if result.contains("timed out") || result.contains("idle")
+            )),
+            "no idle/timeout Done may be emitted while activity is ongoing: {messages:?}"
+        );
+    }
+
+    /// #3419 B: once output STOPS, the idle clock (measured from the last real
+    /// record, not the tailer start) must elapse and fire the timeout Done.
+    /// Here a single reasoning record arrives, then the rollout goes silent —
+    /// after the idle window the no-assistant-response Done surfaces, which is
+    /// what the downstream C finalizer drains. Crucially the deadline is timed
+    /// from the LAST record: the early activity does not buy unlimited time.
+    #[test]
+    fn idle_deadline_fires_after_output_goes_silent() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let rollout = write_rollout(
+            dir.path(),
+            "rollout-idle-silent.jsonl",
+            "session-idle-silent",
+            cwd.path(),
+            // One reasoning record up front, then permanent silence.
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\"}}\n",
+        );
+        // Append a second record after a short delay so `last_output_at` is set
+        // well after `started_at`; the deadline must still fire promptly,
+        // proving it tracks idle-since-last-record (not absolute age).
+        let writer_path = rollout.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(80));
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&writer_path)
+                .unwrap();
+            file.write_all(b"{\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\"}}\n")
+                .unwrap();
+            // Then go silent forever — empty 100ms polls must NOT reset idle.
+        });
+        let (tx, rx) = mpsc::channel();
+        let (result, _outcome) = tail_rollout_file_until_assistant_response(
+            &rollout,
+            0,
+            None,
+            &tx,
+            None,
+            || true, // pane stays ALIVE — only the idle deadline rescues us
+            Duration::ZERO,
+            Some(Duration::from_millis(150)),
+            None,
+            true,
+            None,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        writer.join().unwrap();
+        drop(tx);
+        assert!(matches!(result, ReadOutputResult::Completed { .. }));
+        let messages: Vec<_> = rx.iter().collect();
+        let done = messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m, StreamMessage::Done { .. }));
+        assert!(
+            matches!(
+                done,
+                Some(StreamMessage::Done { result, .. }) if result.contains("timed out")
+            ),
+            "silence past the idle window must emit the timeout Done: {messages:?}"
+        );
     }
 
     #[test]
