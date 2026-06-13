@@ -344,7 +344,71 @@ pub(in crate::services::discord) enum AcquireFailureMode {
 /// I1 inline-before-await ordering needs no ownership transfer. Owners that have
 /// no identity gate (A1 semantics — unconditional advance) simply pass `None`,
 /// preserving the existing always-`Delivered` behaviour.
-pub(in crate::services::discord) type ConfirmedAdvance<'a> = &'a (dyn Fn((u64, u64)) -> bool + 'a);
+/// `Send + Sync` (#3089 A2b): the first live owner (the session-bound sink) calls
+/// `deliver_turn_output` from an `#[async_trait]` `RelaySink::deliver`, whose
+/// future is `Send`. The advance callback is borrowed by `commit_and_finalize`
+/// across no await (it runs inline before the post-send awaits, I1), but the ctx
+/// that holds it lives across `drive_transport().await`, so the trait object must
+/// be `Send + Sync` for the future to be `Send`.
+pub(in crate::services::discord) type ConfirmedAdvance<'a> =
+    &'a (dyn Fn((u64, u64)) -> bool + Send + Sync + 'a);
+
+/// Internal RAII guard owning the controller's WON acquire, mirroring legacy
+/// `SinkDeliveryLeaseGuard::Drop` (`session_relay_sink.rs:354`): the lease is
+/// `release`d on EVERY exit — the normal commit/release arms AND an unwind /
+/// future-cancellation between the acquire (`:480`) and the inline commit
+/// (`:514` transport await). Without it a dropped/panicking `deliver_turn_output`
+/// future stopped the heartbeat (its own Drop) but left the lease `Leased` until
+/// the deadline — a leak the legacy guard never had (review-fix H1 r2).
+///
+/// `release` is full-identity-gated and valid from BOTH `Leased` (failure) and
+/// `Committed` (success), so dropping the guard after a commit clears ONLY our
+/// own `(holder, turn, [start,end))` marker — a newer turn that re-leased the
+/// cell survives, exactly as the legacy guard. `disarm` (via `release_and_disarm`)
+/// is called once an explicit release has run so the Drop cannot double-release
+/// (a second release is a no-op under the identity gate, but disarming keeps the
+/// contract crisp). Only the held path arms it; a markerless send holds no lease.
+struct ControllerLeaseGuard<'a, L: DeliveryLease + ?Sized> {
+    lease: &'a L,
+    holder: LeaseHolder,
+    turn: TurnKey,
+    start: u64,
+    end: u64,
+    armed: bool,
+}
+
+impl<'a, L: DeliveryLease + ?Sized> ControllerLeaseGuard<'a, L> {
+    fn arm(lease: &'a L, holder: LeaseHolder, turn: TurnKey, start: u64, end: u64) -> Self {
+        Self {
+            lease,
+            holder,
+            turn,
+            start,
+            end,
+            armed: true,
+        }
+    }
+
+    /// Release now and disarm so the Drop is a no-op. Used by the normal arms so
+    /// the release ORDERING (AFTER `post_send_finalize`, I1) stays explicit while
+    /// the Drop is the cancel/panic safety net only.
+    fn release_and_disarm(&mut self) {
+        if self.armed {
+            self.armed = false;
+            self.lease
+                .release(self.holder, self.turn, self.start, self.end);
+        }
+    }
+}
+
+impl<L: DeliveryLease + ?Sized> Drop for ControllerLeaseGuard<'_, L> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.lease
+                .release(self.holder, self.turn, self.start, self.end);
+        }
+    }
+}
 
 /// The POST-duration heartbeat the controller drives (A2a capability 3).
 ///
@@ -365,7 +429,12 @@ pub(in crate::services::discord) type ConfirmedAdvance<'a> = &'a (dyn Fn((u64, u
 /// the inline commit. The production impl (wired by owners at A2b+) is a thin
 /// adapter over `DeliveryLeaseHeartbeat::spawn`; A2a's tests use a recorder that
 /// counts `renew` ticks.
-pub(in crate::services::discord) trait PostHeartbeat {
+// `Send + Sync` (#3089 A2b): see `ConfirmedAdvance` — the sink owner drives this
+// from a `Send` `async_trait` future, so the borrowed `&dyn PostHeartbeat` and
+// the boxed guard held across the POST await must both be `Send`.
+pub(in crate::services::discord) trait PostHeartbeat:
+    Send + Sync
+{
     /// Begin renewing `(holder, turn)`'s lease deadline for the duration of the
     /// POST. Returns an opaque guard; dropping it stops the heartbeat (mirrors
     /// `DeliveryLeaseHeartbeat`'s `Drop`/`stop`). Called ONLY on the held-lease
@@ -375,8 +444,12 @@ pub(in crate::services::discord) trait PostHeartbeat {
 
 /// RAII guard returned by [`PostHeartbeat::start`]. Dropping it stops the
 /// heartbeat task; the controller drops it explicitly BEFORE the inline commit
-/// so a last renew tick can never race the commit (#3151 ordering).
-pub(in crate::services::discord) trait PostHeartbeatGuard {}
+/// so a last renew tick can never race the commit (#3151 ordering). `Send` so it
+/// can be held across the POST await inside a `Send` future (#3089 A2b).
+pub(in crate::services::discord) trait PostHeartbeatGuard:
+    Send
+{
+}
 
 /// Borrowed delivery context for one `deliver_turn_output` call. The controller
 /// drives the borrowed [`DeliveryLeaseCell`] through acquire → send → commit →
@@ -481,6 +554,16 @@ where
         }
     }
 
+    // RAII lease guard (review-fix H1 r2): arm it the instant the acquire wins,
+    // so a future drop / panic during the transport await below releases the
+    // lease just like the legacy `SinkDeliveryLeaseGuard` — no leak-until-deadline.
+    // `None` on the markerless path (it holds no lease). The normal arms call
+    // `release_and_disarm()` so the release ORDERING stays explicit (after the
+    // inline commit + post-send finalize, I1) while the Drop is the cancel/panic
+    // safety net only.
+    let mut lease_guard =
+        lease_held.then(|| ControllerLeaseGuard::arm(ctx.lease, ctx.holder, ctx.turn, start, end));
+
     // A2a capability 3: while the POST is in flight, keep the (held) lease
     // deadline fresh. Only the held-lease path has a lease to renew; a
     // markerless send holds none. The guard's Drop stops the heartbeat, so an
@@ -507,15 +590,15 @@ where
             // in one fn so every commit is structurally trailed by a post-send
             // gateway await a recorder can witness (I1 / review-fix M4).
             drop(heartbeat_guard);
-            commit_and_finalize(gateway, &ctx, start, end, lease_held).await
+            commit_and_finalize(gateway, &ctx, start, end, lease_guard.as_mut()).await
         }
         TransportResult::Transient => {
             // I2: ambiguous-but-retriable. Do NOT commit/advance — release the
             // (held) lease so a retry can re-acquire from `start`. No commit
             // happens on this arm: it never calls `commit_and_finalize`.
             drop(heartbeat_guard);
-            if lease_held {
-                ctx.lease.release(ctx.holder, ctx.turn, start, end);
+            if let Some(guard) = lease_guard.as_mut() {
+                guard.release_and_disarm();
             }
             DeliveryOutcome::Transient {
                 retry_from_offset: start,
@@ -525,8 +608,8 @@ where
             // I2: ambiguous (drop / panic / partial). Release WITHOUT commit so
             // the offset never advances. No commit happens on this arm.
             drop(heartbeat_guard);
-            if lease_held {
-                ctx.lease.release(ctx.holder, ctx.turn, start, end);
+            if let Some(guard) = lease_guard.as_mut() {
+                guard.release_and_disarm();
             }
             DeliveryOutcome::Unknown
         }
@@ -545,17 +628,20 @@ where
 /// always visible to a gateway-side commit recorder (review-fix M4: no silent
 /// commit-then-release).
 ///
-/// `lease_held` distinguishes the held path (sink-acquire won, or
-/// watcher/bridge) from the markerless `ProceedMarkerless` path where the
-/// acquire LOST: with no lease there is nothing to commit/release, but the
+/// `lease_guard` is `Some` on the held path (sink-acquire won, or
+/// watcher/bridge) and `None` on the markerless `ProceedMarkerless` path where
+/// the acquire LOST: with no lease there is nothing to commit/release, but the
 /// owner's identity-gated advance still runs (the marker only gated the watcher;
-/// the advance authority was always the identity gate, not the lease).
+/// the advance authority was always the identity gate, not the lease). The held
+/// path commits through the same `(holder, turn, range)` the guard owns, then
+/// releases via the guard AFTER `post_send_finalize` (so its Drop stays the
+/// cancel/panic safety net without double-releasing).
 async fn commit_and_finalize<G, L>(
     gateway: &G,
     ctx: &TurnOutputCtx<'_, L>,
     start: u64,
     end: u64,
-    lease_held: bool,
+    lease_guard: Option<&mut ControllerLeaseGuard<'_, L>>,
 ) -> DeliveryOutcome
 where
     G: TurnGateway + ?Sized,
@@ -578,7 +664,7 @@ where
     // reconciliation re-sends (the sink's `advanced == false` arm). On the
     // markerless path there is no lease to commit — the advance bool alone
     // decides the outcome. Runs synchronously here, BEFORE the post-send awaits.
-    if lease_held {
+    if lease_guard.is_some() {
         let outcome = if advanced {
             LeaseOutcome::Delivered
         } else {
@@ -590,8 +676,10 @@ where
 
     // ---- post-send work (AFTER the inline commit) -----------------------
     post_send_finalize(gateway, ctx).await;
-    if lease_held {
-        ctx.lease.release(ctx.holder, ctx.turn, start, end);
+    if let Some(guard) = lease_guard {
+        // I1 release ordering: AFTER the post-send finalize. Disarms so the
+        // guard's Drop (cancel/panic safety net) cannot double-release.
+        guard.release_and_disarm();
     }
 
     if advanced {
@@ -1443,6 +1531,207 @@ mod tests {
         assert!(
             matches!(lease.read(), LeaseSnapshot::Unleased),
             "I2: ambiguous outcome must release the lease without committing/advancing"
+        );
+    }
+
+    /// A `TurnGateway` whose transport send PARKS forever (never resolves), so a
+    /// `deliver_turn_output` future can be POLLED past the acquire and then
+    /// DROPPED mid-transport — the exact cancellation the RAII lease guard must
+    /// survive (review-fix H1 r2). Records that the send was entered so the test
+    /// proves the drop happened AFTER the lease was acquired+leased.
+    struct HangingTransportGateway {
+        entered_send: Arc<AtomicBool>,
+    }
+
+    impl TurnGateway for HangingTransportGateway {
+        fn replace_message_with_outcome<'a>(
+            &'a self,
+            _c: ChannelId,
+            _m: MessageId,
+            _content: &'a str,
+        ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
+            Box::pin(async move {
+                self.entered_send.store(true, Ordering::SeqCst);
+                std::future::pending::<()>().await;
+                unreachable!("the parked transport never resolves")
+            })
+        }
+        fn send_message<'a>(
+            &'a self,
+            _c: ChannelId,
+            _x: &'a str,
+        ) -> GatewayFuture<'a, Result<MessageId, String>> {
+            Box::pin(async move {
+                self.entered_send.store(true, Ordering::SeqCst);
+                std::future::pending::<()>().await;
+                unreachable!("the parked transport never resolves")
+            })
+        }
+        fn edit_message<'a>(
+            &'a self,
+            _c: ChannelId,
+            _m: MessageId,
+            _x: &'a str,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            Box::pin(async move { Ok(()) })
+        }
+        fn delete_message<'a>(
+            &'a self,
+            _c: ChannelId,
+            _m: MessageId,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            Box::pin(async move { Ok(()) })
+        }
+        fn add_reaction<'a>(
+            &'a self,
+            _c: ChannelId,
+            _m: MessageId,
+            _e: char,
+        ) -> GatewayFuture<'a, ()> {
+            Box::pin(async move {})
+        }
+        fn remove_reaction<'a>(
+            &'a self,
+            _c: ChannelId,
+            _m: MessageId,
+            _e: char,
+        ) -> GatewayFuture<'a, ()> {
+            Box::pin(async move {})
+        }
+        fn schedule_retry_with_history<'a>(
+            &'a self,
+            _c: ChannelId,
+            _m: MessageId,
+            _t: &'a str,
+        ) -> GatewayFuture<'a, ()> {
+            Box::pin(async move {})
+        }
+        fn dispatch_queued_turn<'a>(
+            &'a self,
+            _c: ChannelId,
+            _i: &'a crate::services::discord::Intervention,
+            _n: &'a str,
+            _h: bool,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            Box::pin(async move { Ok(()) })
+        }
+        fn validate_live_routing<'a>(
+            &'a self,
+            _c: ChannelId,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            Box::pin(async move { Ok(()) })
+        }
+        fn requester_mention(&self) -> Option<String> {
+            None
+        }
+        fn can_chain_locally(&self) -> bool {
+            false
+        }
+        fn bot_owner_provider(&self) -> Option<ProviderKind> {
+            None
+        }
+    }
+
+    /// review-fix H1 r2 — the controller-held lease is RAII-released when the
+    /// `deliver_turn_output` future is CANCELLED (dropped) mid-transport, exactly
+    /// like the legacy `SinkDeliveryLeaseGuard::Drop`. Without the guard the
+    /// acquired lease would stay `Leased{Sink}` until the deadline (the leak the
+    /// review found): the heartbeat guard drops but the lease was only released
+    /// in the normal match arms, which a cancelled future never reaches.
+    ///
+    /// Proof: poll the future until it parks inside the (never-resolving)
+    /// transport — at which point the acquire has ALREADY won (lease is
+    /// `Leased`) — then DROP the future and assert the lease is back to
+    /// `Unleased` (the guard's Drop released it) and re-acquirable.
+    #[tokio::test]
+    async fn cancelled_future_raii_releases_held_lease() {
+        use std::task::{Context, Poll};
+        let channel = ChannelId::new(130);
+        let lease = Arc::new(RecordingLease::new(channel));
+        let entered_send = Arc::new(AtomicBool::new(false));
+        let gateway = HangingTransportGateway {
+            entered_send: entered_send.clone(),
+        };
+        let controller = PlaceholderController::default();
+        let body = "this turn's future is cancelled mid-POST";
+        let turn = turn_key(channel);
+
+        let mut fut = Box::pin(deliver_turn_output(
+            &gateway,
+            TurnOutputCtx {
+                turn,
+                owner: RelayOwnerKind::SessionBoundRelay,
+                holder: LeaseHolder::Sink,
+                lease: lease.as_ref(),
+                channel_id: channel,
+                placeholder_controller: &controller,
+                placeholder: PlaceholderSlot::None,
+                body,
+                send_range: (0, body.len() as u64),
+                plan: OutputPlan::Replace {
+                    lifecycle: PlaceholderLifecycle::Completed,
+                },
+                edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
+                fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
+                acquire_failure_mode: AcquireFailureMode::ProceedMarkerless,
+                advance: None,
+                heartbeat: None,
+            },
+        ));
+
+        // Poll once: the controller acquires the lease, then parks inside the
+        // never-resolving transport send.
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(
+            matches!(fut.as_mut().poll(&mut cx), Poll::Pending),
+            "the future must park inside the hanging transport (acquire already won)"
+        );
+        assert!(
+            entered_send.load(Ordering::SeqCst),
+            "the transport send must have been entered (so the acquire ran first)"
+        );
+        // The lease is HELD at this point — the acquire won and nothing has
+        // released it yet.
+        assert!(
+            matches!(
+                lease.read(),
+                LeaseSnapshot::Leased {
+                    holder: LeaseHolder::Sink,
+                    ..
+                }
+            ),
+            "the controller must hold the lease while parked in the transport"
+        );
+
+        // CANCEL: drop the future mid-transport. The RAII guard's Drop must
+        // release the lease — the legacy `SinkDeliveryLeaseGuard::Drop` semantics.
+        drop(fut);
+
+        assert_eq!(
+            lease.release_calls.load(Ordering::SeqCst),
+            1,
+            "H1 r2: cancelling the future mid-transport must RAII-release the held lease exactly once"
+        );
+        assert_eq!(
+            lease.commit_calls.load(Ordering::SeqCst),
+            0,
+            "H1 r2: a cancelled (never-confirmed) transport must NEVER commit/advance"
+        );
+        assert!(
+            matches!(lease.read(), LeaseSnapshot::Unleased),
+            "H1 r2: the lease must be Unleased after the cancelled future's guard Drop"
+        );
+        // Re-acquirable proof: the cell is genuinely free, not stranded leased.
+        assert!(
+            lease.try_acquire(
+                turn,
+                LeaseHolder::Sink,
+                0,
+                body.len() as u64,
+                lease_now_ms().saturating_add(DELIVERY_LEASE_DEADLINE_MS),
+            ),
+            "H1 r2: the released cell must be immediately re-acquirable (not stranded)"
         );
     }
 
