@@ -940,6 +940,43 @@ fn done_result_requires_full_terminal_replay(
         && full_response.trim() == result.trim()
 }
 
+#[cfg(test)]
+mod sentinel_overwrite_clamp_tests {
+    use super::done_result_requires_full_terminal_replay;
+
+    // #3419 R3: the existing offset-reset gate requires a >DISCORD_MSG_LIMIT
+    // (8000-byte) authoritative replay, so a short sentinel NEVER trips it —
+    // which is exactly why the SEPARATE clamp at the swap site is needed. This
+    // pins that gap so a future refactor cannot silently make the clamp dead
+    // (e.g. by assuming the replay gate already handles sentinels).
+    #[test]
+    fn replay_gate_does_not_reset_offset_for_short_sentinel() {
+        let sentinel = "⚠ tool-only turn, no assistant text"; // ~40 bytes, < 8000
+        assert!(sentinel.len() <= super::super::DISCORD_MSG_LIMIT);
+        // streamed text this turn, prior offset > 0, sentinel == full_response:
+        // the replay gate STILL returns false because of the length floor.
+        assert!(!done_result_requires_full_terminal_replay(
+            sentinel, sentinel, 900, true,
+        ));
+    }
+
+    // The clamp the bridge applies after `full_response = resolved`. Models the
+    // exact `response_sent_offset.min(full_response.len())` so a mutation that
+    // drops the clamp (keeping the prior offset) is caught by the bound check.
+    #[test]
+    fn clamp_keeps_offset_within_replaced_body() {
+        let replaced = "⚠ tool-only turn, no assistant text".to_string();
+        let prior_offset = 900usize; // tracked the long pre-swap body
+        let clamped = prior_offset.min(replaced.len());
+        assert_eq!(clamped, replaced.len());
+        assert!(clamped <= replaced.len());
+        assert!(replaced.is_char_boundary(clamped));
+        // Mutation guard: the UNCLAMPED offset is out of bounds (the wedge).
+        assert!(replaced.get(prior_offset..).is_none());
+        assert!(replaced.get(clamped..).is_some());
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WatcherHandoffClaimOutcome {
     None,
@@ -2568,32 +2605,22 @@ pub(super) fn spawn_turn_bridge(
                 match next_message {
                     Ok(msg) => {
                         // #2289 cancel boundary: re-sample `cancel_requested`
-                        // AFTER `try_recv` returns, but ONLY for variants
-                        // that would flip `done = true` (`Done` and
-                        // `Error` today). The pre-recv guard above samples
-                        // before the receive call; if `/stop` flips the
-                        // token between that guard and `try_recv`
-                        // returning a terminal frame, letting that arm
-                        // run sets `done = true` and suppresses the outer
-                        // cancel arm — recording the turn as completed,
-                        // failed, or transport-errored when the user
-                        // actually stopped it. Drop the terminal frame
-                        // and jump to cancel-finalize so the cancel claims
-                        // the outcome.
+                        // AFTER `try_recv`, but ONLY for variants that flip
+                        // `done = true` (`Done`/`Error`). The pre-recv guard
+                        // samples before the receive; if `/stop` flips the token
+                        // in that gap, letting a terminal arm run sets `done` and
+                        // suppresses the outer cancel arm — recording a completed/
+                        // failed turn the user actually stopped. Drop the frame
+                        // and jump to cancel-finalize.
                         //
-                        // The gate is scoped to variants that set
-                        // `done = true` so non-terminal control/output
-                        // frames (`RuntimeReady`, `TmuxReady`,
-                        // `ProcessReady`, `OutputOffset`, `Text`,
-                        // `RetryBoundary`, …) are still processed: they
-                        // may carry handoff paths, offsets, watcher debt,
-                        // or session-reset decisions that the cancel
-                        // path expects to be applied. None of those
-                        // variants flip `done = true`, so the next outer
-                        // iteration's pre-recv cancel guard finalizes
-                        // cancel cleanly on the very next pass. When a
-                        // new terminal variant is added, it MUST be added
-                        // here too — see `is_done_setting_terminal_frame`.
+                        // Scoped to done-setting variants so non-terminal frames
+                        // (`RuntimeReady`, `TmuxReady`, `ProcessReady`,
+                        // `OutputOffset`, `Text`, `RetryBoundary`, …) are still
+                        // processed (they carry handoff paths, offsets, watcher
+                        // debt, session-reset that the cancel path needs); none
+                        // flip `done`, so the next pre-recv cancel guard finalizes
+                        // cancel cleanly. A new terminal variant MUST be added here
+                        // too — see `is_done_setting_terminal_frame`.
                         if is_done_setting_terminal_frame(&msg)
                             && should_finalize_cancel_after_recv(
                                 done,
@@ -3360,6 +3387,16 @@ pub(super) fn spawn_turn_bridge(
                             ) {
                                 full_response = resolved;
                                 inflight_state.full_response = full_response.clone();
+                                // #3419 R3: the resolved Done body can be a SHORT
+                                // sentinel/tool-only replacement (context_window.rs)
+                                // that shrinks full_response below a prior streamed
+                                // offset. `done_result_requires_full_terminal_replay`
+                                // only resets on a >8000-byte replay, so a sentinel
+                                // leaves response_sent_offset out of bounds → watcher
+                                // empty-slice → relay wedge. Clamp here to the new len.
+                                response_sent_offset =
+                                    response_sent_offset.min(full_response.len());
+                                inflight_state.response_sent_offset = response_sent_offset;
                             }
                             if done_result_requires_full_terminal_replay(
                                 &full_response,
