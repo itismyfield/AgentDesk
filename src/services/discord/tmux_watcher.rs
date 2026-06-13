@@ -6200,8 +6200,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             // CONTROLLER owns the SINGLE `LeaseHolder::Watcher` lease (the
                             // watcher's own acquire/heartbeat/commit/advance/release were
                             // skipped at the acquire site). #2757 PreserveAlways is honoured;
-                            // the rare `SentFallbackAfterEditFailure` sub-case takes the
-                            // `EditedOriginal` footer/telemetry — COSMETIC only.
+                            // the rare `SentFallbackAfterEditFailure` sub-case mirrors the
+                            // legacy fallback arm (NO footer target, `Failed(edit_error)`
+                            // cleanup, original preserved) via the controller-surfaced
+                            // `ReplaceDeliveryKind` (#3089 A4 r2, codex r1 [High]).
                             terminal_send::apply_watcher_short_replace_controller(
                                 &http,
                                 &shared,
@@ -11763,8 +11765,10 @@ TUI-E2E-marker ssh-direct
         }
 
         // (5) FallbackCommitPolicy: `SentFallbackAfterEditFailure` + CommitOnFallback →
-        // Delivered (advance); `PartialContinuationFailure` → Unknown → PartialFailureRetry
-        // (no advance, I2). The offset must NOT advance on the partial path.
+        // DeliveredFallback (advance, but carries the replace identity + `edit_error`
+        // so the write-back mirrors the legacy fallback arm — #3089 A4 r2);
+        // `PartialContinuationFailure` → Unknown → PartialFailureRetry (no advance,
+        // I2). The offset must NOT advance on the partial path but MUST on fallback.
         #[tokio::test(flavor = "current_thread")]
         async fn watcher_short_replace_fallback_commit_policy() {
             let shared = crate::services::discord::make_shared_data_for_tests();
@@ -11777,8 +11781,11 @@ TUI-E2E-marker ssh-direct
             );
             assert_eq!(
                 run(&gw, &shared, &cell).await,
-                WatcherShortReplaceResult::Delivered,
-                "CommitOnFallback maps SentFallbackAfterEditFailure → Delivered"
+                WatcherShortReplaceResult::DeliveredFallback {
+                    edit_error: "edit failed".to_string(),
+                },
+                "CommitOnFallback maps SentFallbackAfterEditFailure → DeliveredFallback \
+                 (advances, surfaces the replace identity + edit_error)"
             );
             assert_eq!(shared.committed_relay_offset(ch()), END);
 
@@ -11869,6 +11876,120 @@ TUI-E2E-marker ssh-direct
                 false,
                 false,
             ));
+        }
+
+        // (9) #3089 A4 r2 (codex r1 [High]): the controller write-back MUST mirror
+        // the legacy per-variant cleanup. `DeliveredFallback`
+        // (`SentFallbackAfterEditFailure`) must NOT register the original `msg_id` as
+        // the completion-footer target, must record `Failed(edit_error)` cleanup, and
+        // must preserve the original placeholder — the OPPOSITE of `EditedOriginal`,
+        // which DOES register the footer target + `Succeeded`. Collapsing the
+        // FreshFallback branch back to the `EditedOriginal` side-effects (the r1 bug)
+        // fails this test on the footer-target + cleanup-outcome assertions.
+        #[test]
+        fn watcher_short_replace_fallback_mirrors_legacy() {
+            use super::super::single_message_footer::WatcherCompletionFooterTerminalTarget;
+            use super::super::terminal_send::{
+                WatcherShortReplaceLocals, WatcherShortReplaceResult,
+                apply_watcher_short_replace_result,
+            };
+
+            // Drive `apply_watcher_short_replace_result` with `result` and report
+            // (footer_target_registered, cleanup_committed, cleanup_retry_pending).
+            // `single_message_panel_footer_mode = true` so an `EditedOriginal`
+            // registration is observable (the footer remember is gated on it).
+            fn run(result: WatcherShortReplaceResult) -> (bool, bool, bool) {
+                let shared = crate::services::discord::make_shared_data_for_tests();
+                let mut relay_ok = true;
+                let mut direct_send_delivered = false;
+                let mut tui_direct_anchor_terminal_body_visible = false;
+                let mut external_input_lease_consumed_by_relay = false;
+                let mut placeholder_msg_id: Option<MessageId> = Some(MessageId::new(MSG));
+                let mut placeholder_from_restored_inflight = true;
+                let mut last_edit_text = String::from("streamed body");
+                let mut completion_footer_terminal_target: Option<
+                    WatcherCompletionFooterTerminalTarget,
+                > = None;
+                let mut retry_terminal_delivery_from_offset = false;
+                apply_watcher_short_replace_result(
+                    result,
+                    &shared,
+                    &ProviderKind::Claude,
+                    ch(),
+                    "AgentDesk-claude-8141",
+                    MessageId::new(MSG),
+                    "answer",
+                    true,
+                    None,
+                    WatcherShortReplaceLocals {
+                        relay_ok: &mut relay_ok,
+                        direct_send_delivered: &mut direct_send_delivered,
+                        tui_direct_anchor_terminal_body_visible:
+                            &mut tui_direct_anchor_terminal_body_visible,
+                        external_input_lease_consumed_by_relay:
+                            &mut external_input_lease_consumed_by_relay,
+                        placeholder_msg_id: &mut placeholder_msg_id,
+                        placeholder_from_restored_inflight: &mut placeholder_from_restored_inflight,
+                        last_edit_text: &mut last_edit_text,
+                        completion_footer_terminal_target: &mut completion_footer_terminal_target,
+                        retry_terminal_delivery_from_offset:
+                            &mut retry_terminal_delivery_from_offset,
+                    },
+                );
+                let footer_registered = completion_footer_terminal_target.is_some();
+                let committed = shared.ui.placeholder_cleanup.terminal_cleanup_committed(
+                    &ProviderKind::Claude,
+                    ch(),
+                    MessageId::new(MSG),
+                );
+                let retry_pending = shared
+                    .ui
+                    .placeholder_cleanup
+                    .terminal_cleanup_retry_pending(
+                        &ProviderKind::Claude,
+                        ch(),
+                        MessageId::new(MSG),
+                    );
+                // Both arms mark the body delivered (advance already happened).
+                assert!(direct_send_delivered, "the body landed → delivered");
+                assert!(tui_direct_anchor_terminal_body_visible);
+                (footer_registered, committed, retry_pending)
+            }
+
+            // FreshFallback: NO footer target, cleanup `Failed` (retry_pending), NOT
+            // committed — the legacy fallback arm (tmux_watcher.rs:6289-6372).
+            let (fb_footer, fb_committed, fb_retry) =
+                run(WatcherShortReplaceResult::DeliveredFallback {
+                    edit_error: "edit failed".to_string(),
+                });
+            assert!(
+                !fb_footer,
+                "fallback must NOT register the original as the completion-footer target (#2757)"
+            );
+            assert!(
+                !fb_committed,
+                "fallback records Failed(edit_error), so the cleanup is NOT committed (Succeeded)"
+            );
+            assert!(
+                fb_retry,
+                "fallback records a Failed cleanup → terminal_cleanup_retry_pending"
+            );
+
+            // EditedOriginal: footer target REGISTERED, cleanup `Succeeded` — the
+            // legacy edit arm (tmux_watcher.rs:6247-6288).
+            let (eo_footer, eo_committed, eo_retry) = run(WatcherShortReplaceResult::Delivered);
+            assert!(
+                eo_footer,
+                "EditedOriginal registers the original as the completion-footer target"
+            );
+            assert!(
+                eo_committed,
+                "EditedOriginal records EditTerminal/Succeeded → cleanup committed"
+            );
+            assert!(
+                !eo_retry,
+                "EditedOriginal cleanup Succeeded, so no retry is pending"
+            );
         }
     }
 

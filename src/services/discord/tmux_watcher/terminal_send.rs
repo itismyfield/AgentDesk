@@ -229,9 +229,14 @@ impl toc::PostHeartbeatGuard for WatcherPostHeartbeatGuard {}
 /// `DeliveryOutcome` → [`WatcherShortReplaceResult`] (the caller maps it back into the
 /// watcher's `(relay_ok, direct_send_delivered, retry)` locals; the unchanged
 /// lifecycle then consumes them):
-/// - `Delivered` / `NotDelivered` → confirmed POST landed → `Delivered`
-///   (`relay_ok = true`, `direct_send_delivered = true`). The lease outcome only steered
-///   the watcher's own re-send gate, which the controller already committed.
+/// - `Delivered { EditedOriginal | None }` / `NotDelivered` → confirmed POST via the
+///   in-place edit → `Delivered` (`relay_ok = true`, `direct_send_delivered = true`).
+///   The lease outcome only steered the watcher's own re-send gate, which the
+///   controller already committed.
+/// - `Delivered { FreshFallbackAfterEditFailure { edit_error } }` → confirmed POST via
+///   a FRESH fallback send after the in-place edit failed → `DeliveredFallback`
+///   (#3089 A4 r2). Still delivered/advanced, but the write-back mirrors the legacy
+///   fallback arm (NO footer target, `Failed(edit_error)` cleanup, original preserved).
 /// - `Transient` → lost acquire (another holder owns the range). The legacy watcher
 ///   would have lost its OWN acquire at :5944 and taken the `watcher_lease_b2_skip` arm
 ///   (:6103), which returns `relay_ok = false` with NO transport (the live holder commits
@@ -324,7 +329,18 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
 
     match outcome {
         // Confirmed POST (edit OR #2757 fallback): the controller already ran
-        // advance + commit + release. The turn delivered.
+        // advance + commit + release. The turn delivered. Carry the replace
+        // identity (#3089 A4 r2): `EditedOriginal` → the legacy edit side-effects
+        // (footer-target, `Succeeded`); `FreshFallbackAfterEditFailure` → the
+        // legacy fallback arm (NO footer-target, `Failed(edit_error)`, preserve).
+        // `NotDelivered` carries no delivered original to footer → treat as
+        // `EditedOriginal` (the existing arm; the gate excludes the refused-advance
+        // case from the cut-over set, so this is the conservative legacy default).
+        toc::DeliveryOutcome::Delivered {
+            replace_kind:
+                Some(toc::ReplaceDeliveryKind::FreshFallbackAfterEditFailure { edit_error }),
+            ..
+        } => WatcherShortReplaceResult::DeliveredFallback { edit_error },
         toc::DeliveryOutcome::Delivered { .. } | toc::DeliveryOutcome::NotDelivered { .. } => {
             WatcherShortReplaceResult::Delivered
         }
@@ -360,9 +376,14 @@ pub(in crate::services::discord) struct WatcherShortReplaceLocals<'a> {
 }
 
 /// #3089 A4: run the controller short-replace then write the outcome back into the
-/// watcher send-arm locals — the production cut-over wiring. `Delivered` reproduces
-/// the legacy `EditedOriginal` delivered side-effects (footer target, placeholder
-/// clear, orphan-record drop, `EditTerminal`/`Succeeded` cleanup record). `B2Skip`
+/// watcher send-arm locals — the production cut-over wiring. `Delivered`
+/// (`EditedOriginal`) reproduces the legacy `EditedOriginal` delivered side-effects
+/// (footer target, placeholder clear, orphan-record drop, `EditTerminal`/
+/// `Succeeded` cleanup record, tmux_watcher.rs:6247-6288). `DeliveredFallback`
+/// (`SentFallbackAfterEditFailure`) reproduces the legacy FALLBACK arm
+/// (tmux_watcher.rs:6289-6372, codex r1 [High]): NO footer target,
+/// `EditTerminal`/`Failed(edit_error)` cleanup record, the original placeholder
+/// PRESERVED (#2757) — clear placeholder locals + drop orphan record only. `B2Skip`
 /// = the legacy `watcher_lease_b2_skip` arm (`relay_ok = false`, no transport).
 /// `PartialFailureRetry` = the legacy partial-continuation reset
 /// (`watcher_partial_continuation_retry_plan`, tmux_watcher.rs:6384). `Skipped`
@@ -407,7 +428,43 @@ pub(in crate::services::discord) async fn apply_watcher_short_replace_controller
         range.1,
     )
     .await;
+    apply_watcher_short_replace_result(
+        result,
+        shared,
+        provider,
+        channel_id,
+        tmux_session_name,
+        msg_id,
+        relay_text,
+        single_message_panel_footer_mode,
+        inflight_before_relay,
+        locals,
+    );
+}
+
+/// #3089 A4: write the controller-path [`WatcherShortReplaceResult`] back into the
+/// watcher send-arm locals. Split out of [`apply_watcher_short_replace_controller`]
+/// (a pure, synchronous mapping with NO gateway/transport) so the per-variant
+/// side-effects — the #3089 A4 r2 footer-target / cleanup-record / preserve branch —
+/// are unit-testable WITHOUT a live `DiscordGateway`
+/// (`watcher_short_replace_fallback_mirrors_legacy`).
+#[allow(clippy::too_many_arguments)]
+pub(in crate::services::discord) fn apply_watcher_short_replace_result(
+    result: WatcherShortReplaceResult,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    msg_id: MessageId,
+    relay_text: &str,
+    single_message_panel_footer_mode: bool,
+    inflight_before_relay: Option<&crate::services::discord::InflightTurnState>,
+    locals: WatcherShortReplaceLocals<'_>,
+) {
     match result {
+        // Legacy `EditedOriginal` arm (tmux_watcher.rs:6247-6288): the original was
+        // edited in place → register it as the completion-footer target +
+        // `EditTerminal`/`Succeeded` cleanup record.
         WatcherShortReplaceResult::Delivered => {
             *locals.direct_send_delivered = true;
             *locals.tui_direct_anchor_terminal_body_visible = true;
@@ -435,6 +492,53 @@ pub(in crate::services::discord) async fn apply_watcher_short_replace_controller
                 "watcher_terminal_relay_controller",
             );
         }
+        // #3089 A4 r2 (codex r1 [High]): the in-place edit FAILED and the body was
+        // delivered via a FRESH fallback send. Mirror the LEGACY fallback arm
+        // (tmux_watcher.rs:6289-6372) EXACTLY — it does the OPPOSITE of the
+        // `EditedOriginal` arm for the original `msg_id`: it does NOT register the
+        // original as the completion-footer target (so footer mode can never later
+        // edit the preserved original), it records the cleanup as
+        // `Failed(edit_error)` (not `Succeeded`), and it PRESERVES the original
+        // placeholder. The body still landed (advance happened in the controller),
+        // so `direct_send_delivered`/`tui_direct_anchor_terminal_body_visible`/
+        // `external_input_lease_consumed_by_relay` are set identically to the
+        // `EditedOriginal` arm. Because the watcher's
+        // `watcher_fallback_edit_failure_can_delete_original_placeholder` is
+        // UNCONDITIONALLY false (#2757, liveness.rs:127-135), the legacy arm always
+        // takes its `else` branch (tmux_watcher.rs:6353-6371): clear the placeholder
+        // locals and drop the orphan record while preserving the message itself.
+        WatcherShortReplaceResult::DeliveredFallback { edit_error } => {
+            *locals.direct_send_delivered = true;
+            *locals.tui_direct_anchor_terminal_body_visible = true;
+            *locals.external_input_lease_consumed_by_relay =
+                super::watcher_inflight_represents_external_input(inflight_before_relay);
+            // Legacy fallback cleanup record: `EditTerminal` / `Failed(edit_error)`
+            // (tmux_watcher.rs:6305-6314) — NOT `Succeeded`. The `edit_error` is the
+            // failing in-place edit's error, surfaced through the controller.
+            super::super::record_placeholder_cleanup(
+                shared,
+                provider,
+                channel_id,
+                msg_id,
+                tmux_session_name,
+                crate::services::discord::placeholder_cleanup::PlaceholderCleanupOperation::EditTerminal,
+                crate::services::discord::placeholder_cleanup::PlaceholderCleanupOutcome::failed(
+                    edit_error,
+                ),
+                "watcher_terminal_relay_controller",
+            );
+            // #2757: NO `remember_watcher_completion_footer_terminal_target` — the
+            // original placeholder is preserved and must NEVER become the footer
+            // target (the legacy fallback arm omits the call entirely).
+            //
+            // Legacy `else` branch (const-false delete predicate, #2757):
+            // clear the placeholder locals + drop the orphan record while the
+            // message itself is preserved (tmux_watcher.rs:6353-6371).
+            *locals.placeholder_msg_id = None;
+            *locals.placeholder_from_restored_inflight = false;
+            locals.last_edit_text.clear();
+            drop_placeholder_orphan_record(provider, shared, channel_id, msg_id);
+        }
         WatcherShortReplaceResult::B2Skip | WatcherShortReplaceResult::Skipped => {
             *locals.relay_ok = false;
         }
@@ -449,11 +553,25 @@ pub(in crate::services::discord) async fn apply_watcher_short_replace_controller
 /// #3089 A4: the controller-path result mapped back into the watcher's send-arm
 /// locals by `apply_watcher_short_replace_controller`. Keeps the `DeliveryOutcome`
 /// → `(relay_ok, direct_send_delivered, retry)` translation in one testable place.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// NOT `Copy` (the `DeliveredFallback` arm carries the `edit_error` `String` so the
+/// write-back reproduces the legacy `PlaceholderCleanupOutcome::failed(edit_error)`
+/// record — #3089 A4 r2).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::services::discord) enum WatcherShortReplaceResult {
-    /// Confirmed transport (edit or #2757 fallback). The controller committed +
-    /// advanced + released. `relay_ok = true`, `direct_send_delivered = true`.
+    /// Confirmed transport via the in-place edit (`EditedOriginal`). The
+    /// controller committed + advanced + released. `relay_ok = true`,
+    /// `direct_send_delivered = true`. The original IS the final message →
+    /// register it as the completion-footer target + `EditTerminal`/`Succeeded`
+    /// cleanup (legacy `EditedOriginal` arm, tmux_watcher.rs:6247-6288).
     Delivered,
+    /// Confirmed transport via a FRESH fallback send after the in-place edit
+    /// FAILED (`SentFallbackAfterEditFailure`). The body landed (advance), but the
+    /// original placeholder is PRESERVED (#2757) and is NOT the final message.
+    /// Mirrors the legacy fallback arm (tmux_watcher.rs:6289-6372): do NOT register
+    /// the original as the footer target, record `EditTerminal`/`Failed(edit_error)`
+    /// cleanup, preserve the original (clear placeholder locals / drop orphan).
+    DeliveredFallback { edit_error: String },
     /// Lost acquire → the legacy `watcher_lease_b2_skip` arm: another holder owns
     /// the range. No transport. `relay_ok = false`, `direct_send_delivered = false`
     /// (the live holder advances the offset).

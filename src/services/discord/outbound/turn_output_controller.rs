@@ -249,6 +249,26 @@ impl OutputPlan {
     }
 }
 
+/// How a `Replace` plan's body reached Discord on a confirmed delivery, surfaced
+/// so an owner can mirror the legacy per-variant post-send cleanup — both advance
+/// the offset but the watcher cleans up DIFFERENTLY (#3089 A4 r2, codex r1 [High]).
+/// The legacy fallback arm (`tmux_watcher.rs:6289-6372`) does NOT register the
+/// original as the footer target and records `Failed(edit_error)` (not
+/// `Succeeded`); collapsing both into a bare `Delivered` (r1) lost that → footer
+/// mode could later edit the preserved original. `None` on `Delivered` (non-replace
+/// / `NewSend` / markerless) means "no replace identity" — owners are unaffected.
+#[allow(dead_code)] // #3089 A4: FreshFallbackAfterEditFailure read by the watcher write-back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::services::discord) enum ReplaceDeliveryKind {
+    /// The original placeholder was edited in place (the original IS the final
+    /// message). Owners take their existing delivered side-effects.
+    EditedOriginal,
+    /// The in-place edit failed; the body was delivered via a FRESH send and the
+    /// original placeholder is preserved (#2757). `edit_error` (the failing edit's
+    /// error) lets the watcher record the legacy `failed(edit_error)` cleanup.
+    FreshFallbackAfterEditFailure { edit_error: String },
+}
+
 /// The three-way committed result of a delivery attempt. The returned outcome
 /// is ALREADY committed (I1): `Delivered` means the lease was committed
 /// `Delivered` and the offset advanced before any post-send await ran.
@@ -259,8 +279,15 @@ impl OutputPlan {
 #[allow(dead_code)] // #3089 A1: Transient arm dormant; owners wire it at A2.
 pub(in crate::services::discord) enum DeliveryOutcome {
     /// Confirmed delivered to Discord; the committed offset advanced to
-    /// `committed_to`.
-    Delivered { committed_to: u64 },
+    /// `committed_to`. `replace_kind` carries HOW a `Replace` plan's body reached
+    /// Discord (edit-in-place vs fresh fallback after an edit failure) so an owner
+    /// can mirror the legacy per-variant post-send cleanup (#3089 A4 r2). `None`
+    /// for non-`Replace` plans / `NewSend` / markerless — those owners are
+    /// unaffected and ignore the field.
+    Delivered {
+        committed_to: u64,
+        replace_kind: Option<ReplaceDeliveryKind>,
+    },
     /// Transport was confirmed, but the owner's identity-gated advance callback
     /// REFUSED to advance the offset (e.g. the inflight turn was cleared /
     /// replaced during a slow POST). The lease is committed `NotDelivered`, the
@@ -631,7 +658,7 @@ where
     let transport = drive_transport(gateway, &ctx, chunk_count).await;
 
     match transport {
-        TransportResult::Delivered => {
+        TransportResult::Delivered(replace_kind) => {
             // ---- I1: commit + advance INLINE, before any post-send await --
             // Stop the heartbeat FIRST (#3151) so its renew loop cannot race the
             // commit, THEN run the single commit+advance authority. The advance
@@ -639,8 +666,18 @@ where
             // decides Delivered vs NotDelivered. The whole commit+finalize lives
             // in one fn so every commit is structurally trailed by a post-send
             // gateway await a recorder can witness (I1 / review-fix M4).
+            // `replace_kind` is threaded onto the returned `Delivered` so the owner
+            // can mirror the legacy per-variant cleanup (#3089 A4 r2).
             drop(heartbeat_guard);
-            commit_and_finalize(gateway, &ctx, start, end, lease_guard.as_mut()).await
+            commit_and_finalize(
+                gateway,
+                &ctx,
+                start,
+                end,
+                lease_guard.as_mut(),
+                replace_kind,
+            )
+            .await
         }
         TransportResult::Transient => {
             // I2: ambiguous-but-retriable. Do NOT commit/advance — release the
@@ -692,6 +729,7 @@ async fn commit_and_finalize<G, L>(
     start: u64,
     end: u64,
     lease_guard: Option<&mut ControllerLeaseGuard<'_, L>>,
+    replace_kind: Option<ReplaceDeliveryKind>,
 ) -> DeliveryOutcome
 where
     G: TurnGateway + ?Sized,
@@ -733,7 +771,15 @@ where
     }
 
     if advanced {
-        DeliveryOutcome::Delivered { committed_to: end }
+        DeliveryOutcome::Delivered {
+            committed_to: end,
+            // Surface the replace identity so the owner mirrors the legacy
+            // per-variant cleanup (#3089 A4 r2). `None` on a refused advance
+            // (`NotDelivered` has no replace identity to carry) and for non-replace
+            // plans. The advance refusal drops `replace_kind` on the floor because
+            // the body was NOT committed — there is no delivered original to footer.
+            replace_kind,
+        }
     } else {
         DeliveryOutcome::NotDelivered {
             committed_from: start,
@@ -748,7 +794,11 @@ where
 /// transport-error taxonomy at A2.
 #[allow(dead_code)] // #3089 A1: Transient arm dormant until A2 transport taxonomy.
 enum TransportResult {
-    Delivered,
+    /// Confirmed delivered. `Option<ReplaceDeliveryKind>` carries the replace
+    /// identity (edit-in-place vs fresh fallback) for `Replace` plans so the
+    /// owner write-back can mirror the legacy per-variant cleanup (#3089 A4 r2);
+    /// `None` for `NewSend` / chunked / NoOp.
+    Delivered(Option<ReplaceDeliveryKind>),
     Transient,
     Unknown,
 }
@@ -776,10 +826,11 @@ where
             }
         }
         // Replace requested but no live placeholder to edit → fall back to a
-        // fresh send of the single inline body.
+        // fresh send of the single inline body. No replace identity to surface
+        // (there was no original placeholder to edit) → `None`.
         (OutputPlan::Replace { .. }, PlaceholderSlot::None) => {
             match gateway.send_message(ctx.channel_id, ctx.body).await {
-                Ok(_) => TransportResult::Delivered,
+                Ok(_) => TransportResult::Delivered(None),
                 Err(_) => transient_or_unknown(ctx),
             }
         }
@@ -797,12 +848,13 @@ where
                 // PARTIAL send — ambiguous — and must NEVER advance (I2,
                 // review-fix H1). `chunk_count` from `LengthPolicyDecision::Split`
                 // is always >= 1, so this is the exact-or-more contract.
-                Ok(ids) if ids.len() >= chunk_count => TransportResult::Delivered,
+                // Chunked sends carry no replace identity → `None`.
+                Ok(ids) if ids.len() >= chunk_count => TransportResult::Delivered(None),
                 Ok(_) => TransportResult::Unknown,
                 Err(_) => transient_or_unknown(ctx),
             }
         }
-        (OutputPlan::NoOp, _) => TransportResult::Delivered,
+        (OutputPlan::NoOp, _) => TransportResult::Delivered(None),
     }
 }
 
@@ -838,14 +890,26 @@ fn classify_replace_outcome(
 ) -> TransportResult {
     use crate::services::discord::formatting::ReplaceLongMessageOutcome;
     match outcome {
-        ReplaceLongMessageOutcome::EditedOriginal => TransportResult::Delivered,
+        // The original placeholder was edited in place → carry the
+        // `EditedOriginal` replace identity so the owner takes its existing
+        // delivered side-effects (footer-target register, `Succeeded` cleanup).
+        ReplaceLongMessageOutcome::EditedOriginal => {
+            TransportResult::Delivered(Some(ReplaceDeliveryKind::EditedOriginal))
+        }
         // Owner-specific (H1 r3): the original edit failed and a fallback POST
         // carried the body. The sink/standby treat that as delivery (advance);
         // turn_bridge/terminal_delivery does not commit it. Honour the policy
-        // the owner passed instead of hard-coding an advance.
-        ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. } => {
+        // the owner passed instead of hard-coding an advance. On the committing
+        // arm, carry the `FreshFallbackAfterEditFailure { edit_error }` identity
+        // (#3089 A4 r2) so the watcher mirrors the legacy fallback cleanup
+        // (`Failed(edit_error)`, no footer-target, preserve original).
+        ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { edit_error } => {
             match fallback_commit_policy {
-                FallbackCommitPolicy::CommitOnFallback => TransportResult::Delivered,
+                FallbackCommitPolicy::CommitOnFallback => TransportResult::Delivered(Some(
+                    ReplaceDeliveryKind::FreshFallbackAfterEditFailure {
+                        edit_error: edit_error.clone(),
+                    },
+                )),
                 FallbackCommitPolicy::NoCommitOnFallback => TransportResult::Unknown,
             }
         }
@@ -1420,7 +1484,7 @@ mod tests {
 
         // The returned outcome is already committed/advanced to `end`.
         match outcome {
-            DeliveryOutcome::Delivered { committed_to } => {
+            DeliveryOutcome::Delivered { committed_to, .. } => {
                 assert_eq!(committed_to, body.len() as u64);
             }
             other => panic!("expected Delivered, got {}", debug_outcome(&other)),
@@ -1918,7 +1982,7 @@ mod tests {
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
         match outcome {
-            DeliveryOutcome::Delivered { committed_to } => {
+            DeliveryOutcome::Delivered { committed_to, .. } => {
                 assert_eq!(committed_to, body.len() as u64);
             }
             other => panic!(
@@ -2060,7 +2124,7 @@ mod tests {
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
         match outcome {
-            DeliveryOutcome::Delivered { committed_to } => {
+            DeliveryOutcome::Delivered { committed_to, .. } => {
                 assert_eq!(committed_to, body.len() as u64);
             }
             other => panic!(
@@ -2430,7 +2494,7 @@ mod tests {
         let outcome = deliver_turn_output(&gateway, ctx).await;
         // The send happened (markerless), and the callback advanced → Delivered.
         match outcome {
-            DeliveryOutcome::Delivered { committed_to } => {
+            DeliveryOutcome::Delivered { committed_to, .. } => {
                 assert_eq!(committed_to, body.len() as u64);
             }
             other => panic!(
@@ -2582,7 +2646,7 @@ mod tests {
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
         match outcome {
-            DeliveryOutcome::Delivered { committed_to } => {
+            DeliveryOutcome::Delivered { committed_to, .. } => {
                 assert_eq!(committed_to, body.len() as u64);
             }
             other => panic!("advance=true must Deliver, got {}", debug_outcome(&other)),

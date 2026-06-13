@@ -2640,7 +2640,10 @@ mod tests {
         // (committed then released — `Unleased` after) and one transport call.
         assert!(matches!(
             outcome,
-            toc::DeliveryOutcome::Delivered { committed_to: 42 }
+            toc::DeliveryOutcome::Delivered {
+                committed_to: 42,
+                ..
+            }
         ));
         assert_eq!(replace_calls, 1, "exactly one transport POST");
         assert!(
