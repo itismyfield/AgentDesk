@@ -718,7 +718,7 @@ impl SessionBoundDiscordRelaySink {
             // Ambiguous/failed (PartialContinuationFailure or transport Err): the controller
             // released without committing (I2 — offset NOT advanced). Surface `Err(Transient)`.
             toc::DeliveryOutcome::Transient { .. }
-            | toc::DeliveryOutcome::Unknown
+            | toc::DeliveryOutcome::Unknown { .. }
             | toc::DeliveryOutcome::Skipped => Err(RelaySinkError::Transient(
                 "session-bound short-replace controller delivery not confirmed".to_string(),
             )),
@@ -2692,7 +2692,13 @@ mod tests {
             },
             true,
         ));
-        assert!(matches!(partial, toc::DeliveryOutcome::Unknown));
+        // #3089 A5: the sink uses CommitOnFallback, so it never reaches the
+        // fell_back=true arm; a partial continuation is fell_back=false — the
+        // controller extension is byte-identical for this owner.
+        assert!(matches!(
+            partial,
+            toc::DeliveryOutcome::Unknown { fell_back: false }
+        ));
     }
 
     // #3089 A2b (review-fix Medium-1): drive the flag-ON `deliver_response`

@@ -10,6 +10,7 @@ mod single_message_footer;
 mod skill_usage;
 mod stale_resume;
 mod status_panel;
+mod terminal_controller_cutover;
 mod terminal_delivery;
 mod tmux_runtime;
 mod turn_analytics;
@@ -5399,19 +5400,12 @@ pub(super) fn spawn_turn_bridge(
             };
 
             // #3041 P1-2 (site 1 — cancel/stop terminal replace): acquire the
-            // shared delivery lease BEFORE delivering the `[Stopped]` terminal
-            // body. A B2 Skip means the watcher (or another bridge path) owns the
-            // live lease for this turn/range → do NOT deliver+advance.
-            //
-            // #3041 P1-2 (codex P1-a): lease on the SAME channel's cell the WATCHER
-            // uses — `watcher_owner_channel_id`. A reused watcher can own a channel
-            // DIFFERENT from this bridge's `channel_id`; the watcher leases (and
-            // advances `confirmed_end_offset`) on ITS owner channel, and the bridge
-            // already advances on `watcher_owner_channel_id` (see
-            // `commit_and_advance`). Keying the cell + the `TurnKey` channel on
-            // `watcher_owner_channel_id` makes the bridge and watcher resolve to the
-            // SAME cell for the same actual turn so their acquires CONTEND
-            // (single-holder B2) instead of both delivering = duplicate.
+            // shared delivery lease BEFORE delivering the `[Stopped]` body; a B2
+            // Skip means the holder owns this turn/range → do NOT deliver+advance.
+            // (codex P1-a) lease on `watcher_owner_channel_id` — the cell + TurnKey
+            // channel the WATCHER uses (a reused watcher can own a channel != this
+            // bridge's `channel_id`), so the two CONTEND on one cell (single-holder
+            // B2) instead of both delivering = duplicate.
             let stop_lease_acquire = BridgeDeliveryLease::acquire(
                 shared_owned.as_ref(),
                 watcher_owner_channel_id,
@@ -5430,18 +5424,14 @@ pub(super) fn spawn_turn_bridge(
                     "  [{ts}] 🌉 #3041 B2: delivery lease held by another holder — bridge skipped duplicate cancel/stop terminal replace (channel {})",
                     channel_id
                 );
-                // #3041 P1-2 (codex P1-c): a B2 Skip means the live lease holder
-                // (the watcher) owns delivery of this range — the bridge must be a
-                // TRUE no-op on completion side-effects. PRESERVE the inflight so
-                // the cleanup epilogue does NOT clear it (~9017) and does NOT mark
-                // `watcher.turn_delivered = true` (~8356); the bridge never
-                // delivered this range. If the holder ultimately fails to deliver,
-                // the existing ACK-poll / next-pass machinery re-delivers the
-                // still-retry-able turn instead of black-holing it.
+                // #3041 P1-2 (codex P1-c): a B2 Skip means the holder (the watcher)
+                // owns this range — the bridge is a TRUE no-op on completion
+                // side-effects. PRESERVE inflight so the epilogue does NOT clear it
+                // (~9017) / mark `watcher.turn_delivered` (~8356); a still-retry-able
+                // turn is re-delivered by ACK-poll if the holder ultimately fails.
+                // (codex P1-2 R3) the holder owns the inflight lifecycle → make the
+                // epilogue save identity-guarded so it never resurrects a cleared row.
                 preserve_inflight_for_cleanup_retry = true;
-                // codex P1-2 R3: the watcher (holder) owns the inflight lifecycle
-                // on a Skip — make the epilogue save identity-guarded so it never
-                // resurrects a row the holder already cleared on success.
                 bridge_skip_holder_owns_inflight = true;
             } else {
                 let stop_lease = match stop_lease_acquire {
@@ -5465,13 +5455,10 @@ pub(super) fn spawn_turn_bridge(
                 if replace_committed {
                     status_panel_terminal_committed = true;
                 }
-                // B6: the ONLY confirmed_end advance on the bridge path is via a
-                // successful lease commit. `Held` → commit (Delivered advances,
-                // NotDelivered does not). `NoRange` (`end <= start` or None/0) has
-                // NO new bytes to commit, so there is nothing to advance — do NOT
-                // call `advance_tmux_relay_confirmed_end` outside a lease (codex
-                // P1-b: a degenerate equal-nonzero range like start==end==64 must
-                // not advance the offset outside a lease commit).
+                // B6: the ONLY confirmed_end advance is via a successful lease
+                // commit. `Held` → commit (Delivered advances, NotDelivered not).
+                // `NoRange` has NO new bytes → no advance outside a lease (codex
+                // P1-b: a degenerate equal-nonzero range must not advance).
                 if let Some(lease) = stop_lease {
                     let outcome = if replace_committed {
                         crate::services::discord::LeaseOutcome::Delivered
@@ -5507,10 +5494,8 @@ pub(super) fn spawn_turn_bridge(
                 mention
             );
             // #3041 P1-2 (site 2 — prompt-too-long terminal replace): same lease
-            // routing as site 1. Acquire before the replace; B2-skip if another
-            // holder owns the live lease. (codex P1-a) lease on
-            // `watcher_owner_channel_id` so the bridge and the (possibly reused)
-            // watcher share the SAME cell + TurnKey channel.
+            // routing as site 1 — acquire before replace; B2-skip if held. (codex
+            // P1-a) lease on `watcher_owner_channel_id` (shared cell + TurnKey).
             let plt_lease_acquire = BridgeDeliveryLease::acquire(
                 shared_owned.as_ref(),
                 watcher_owner_channel_id,
@@ -5529,11 +5514,10 @@ pub(super) fn spawn_turn_bridge(
                     "  [{ts}] 🌉 #3041 B2: delivery lease held by another holder — bridge skipped duplicate prompt-too-long terminal replace (channel {})",
                     channel_id
                 );
-                // #3041 P1-2 (codex P1-c): preserve retry state on a B2 Skip — the
-                // holder owns delivery; the bridge must not clear inflight or mark
-                // the watcher delivered. See the cancel/stop skip arm above.
+                // #3041 P1-2 (codex P1-c): preserve retry on a B2 Skip — holder owns
+                // delivery; do NOT clear inflight / mark the watcher delivered.
+                // (codex P1-2 R3) holder owns the inflight lifecycle on a Skip.
                 preserve_inflight_for_cleanup_retry = true;
-                // codex P1-2 R3: holder owns the inflight lifecycle on a Skip.
                 bridge_skip_holder_owns_inflight = true;
             } else {
                 let plt_lease = match plt_lease_acquire {
@@ -5920,28 +5904,16 @@ pub(super) fn spawn_turn_bridge(
                     delivery_response.len()
                 );
                 terminal_body_visible = true;
-                // #3041 P1-2 (site 3 — silent_turn suppression): no Discord post
-                // happens, but the offset STILL advances so the suppressed range is
-                // marked consumed (not re-delivered by recovery). Per B6 the advance
-                // must flow through a lease commit, so we acquire→commit(Delivered)
-                // →release here: the bridge OWNS and resolves this range. If the
-                // watcher already holds the live lease for this turn/range we B2-skip
-                // (the watcher will advance it). The "send" is instantaneous, so the
-                // heartbeat is a formality (spawned then immediately stopped at
-                // commit). Outcome=Delivered because the offset DOES advance (the
-                // range is accounted for), exactly mirroring the pre-P1-2 advance.
-                //
-                // (codex P1-a) lease on `watcher_owner_channel_id` (same cell +
-                // TurnKey channel as the watcher).
-                //
-                // (codex P1-c) `terminal_delivery_committed` is set ONLY when THIS
-                // actor actually resolves the range — `Held`→commit (we own it) or
-                // `NoRange` (no bytes to deliver, suppression is the resolution). On
-                // `Skip` the live holder (the watcher) owns delivery; the bridge must
-                // be a NO-OP on completion side-effects: do NOT mark committed, do
-                // NOT advance, do NOT clear inflight as delivered — leave the turn
-                // retry-able so if the holder ultimately commits NotDelivered/Unknown
-                // the existing retry machinery (ACK-poll / next pass) re-attempts.
+                // #3041 P1-2 (site 3 — silent_turn suppression): no Discord post,
+                // but the offset STILL advances so the suppressed range is marked
+                // consumed (not re-delivered by recovery). Per B6 the advance flows
+                // through a lease commit: acquire→commit(Delivered)→release (the
+                // bridge OWNS this range; instantaneous "send" → heartbeat formality).
+                // (codex P1-a) lease on `watcher_owner_channel_id` (shared cell +
+                // TurnKey channel as the watcher). (codex P1-c)
+                // `terminal_delivery_committed` is set ONLY when THIS actor resolves
+                // the range (`Held`→commit / `NoRange`); on `Skip` the watcher owns
+                // delivery → NO-OP on completion side-effects, leave the turn retry-able.
                 let lease_acquire = BridgeDeliveryLease::acquire(
                     shared_owned.as_ref(),
                     watcher_owner_channel_id,
@@ -5969,15 +5941,12 @@ pub(super) fn spawn_turn_bridge(
                     }
                     BridgeLeaseAcquire::Skip => {
                         // B2-skip: the watcher holds the live lease and owns this
-                        // range's delivery. Do NOT mark committed / advance / clear
-                        // inflight — leave the turn retry-able (codex P1-c). The
-                        // `terminal_delivery_committed = false` above is NOT enough
-                        // on its own: the cleanup epilogue still marks
-                        // `watcher.turn_delivered = true` (~8356) and CLEARS inflight
-                        // (~9017) unless `preserve_inflight_for_cleanup_retry` is set.
-                        // Set it so a Skip is a TRUE no-op on completion side-effects
-                        // and the holder's eventual NotDelivered/Unknown stays
-                        // re-deliverable.
+                        // range's delivery (codex P1-c). `terminal_delivery_committed
+                        // = false` alone is NOT enough — the epilogue still marks
+                        // `watcher.turn_delivered` (~8356) and CLEARS inflight (~9017)
+                        // unless `preserve_inflight_for_cleanup_retry` is set; set it
+                        // so a Skip is a TRUE no-op and the holder's eventual
+                        // NotDelivered/Unknown stays re-deliverable.
                         preserve_inflight_for_cleanup_retry = true;
                         // codex P1-2 R3: holder owns the inflight lifecycle on a
                         // Skip — identity-guard the epilogue save (no resurrect).
@@ -5990,9 +5959,8 @@ pub(super) fn spawn_turn_bridge(
                         );
                     }
                     BridgeLeaseAcquire::NoRange => {
-                        // No offset to advance (zero/inverted range): nothing to
-                        // deliver, the suppression itself resolves the (empty) range.
-                        // B6 holds (no advance).
+                        // No offset to advance (zero/inverted range): the suppression
+                        // resolves the (empty) range. B6 holds (no advance).
                     }
                 }
             } else if delivery_response.trim().is_empty() {
@@ -6025,15 +5993,12 @@ pub(super) fn spawn_turn_bridge(
                         can_chain_locally,
                         &delivery_response,
                     ) {
-                        // #3041 P1-2 (site 4 — long chunked terminal delivery):
-                        // this is the one bridge delivery that can run PAST the
-                        // 15s lease deadline (a multi-chunk
-                        // `send_long_message_with_rollback` with per-chunk pacing),
-                        // so the lease's HEARTBEAT (spawned in `acquire`) is what
-                        // keeps it alive mid-send. Acquire BEFORE the send; B2-skip
-                        // if another holder owns the live lease. (codex P1-a) lease
-                        // on `watcher_owner_channel_id` (shared cell + TurnKey
-                        // channel with the watcher).
+                        // #3041 P1-2 (site 4 — long chunked terminal delivery): the
+                        // one bridge delivery that can run PAST the 15s deadline
+                        // (multi-chunk `send_long_message_with_rollback`), so the
+                        // lease HEARTBEAT keeps it alive mid-send. Acquire BEFORE the
+                        // send; B2-skip if another holder owns it. (codex P1-a) lease
+                        // on `watcher_owner_channel_id` (shared cell + TurnKey).
                         let lease_acquire = BridgeDeliveryLease::acquire(
                             shared_owned.as_ref(),
                             watcher_owner_channel_id,
@@ -6053,12 +6018,10 @@ pub(super) fn spawn_turn_bridge(
                                 channel_id
                             );
                             // #3041 P1-2 (codex P1-c): preserve retry state on a B2
-                            // Skip — the holder owns delivery; the bridge must not
-                            // clear inflight or mark the watcher delivered. See the
-                            // cancel/stop skip arm.
+                            // Skip — the holder owns delivery; do NOT clear inflight
+                            // or mark the watcher delivered. (codex P1-2 R3) holder
+                            // owns the inflight lifecycle → identity-guard the save.
                             preserve_inflight_for_cleanup_retry = true;
-                            // codex P1-2 R3: holder owns the inflight lifecycle on
-                            // a Skip — identity-guard the epilogue save.
                             bridge_skip_holder_owns_inflight = true;
                         } else {
                             let lease = match lease_acquire {
@@ -6107,10 +6070,8 @@ pub(super) fn spawn_turn_bridge(
                                         channel_id,
                                         error
                                     );
-                                    // Send failed: NotDelivered → no advance. The
-                                    // lease's `commit_and_advance` records the
-                                    // outcome and releases so the next turn / the
-                                    // watcher can proceed.
+                                    // Send failed: NotDelivered → no advance;
+                                    // commit_and_advance records + releases.
                                     if let Some(lease) = lease {
                                         lease.commit_and_advance(
                                             shared_owned.as_ref(),
@@ -6124,24 +6085,77 @@ pub(super) fn spawn_turn_bridge(
                             }
                         }
                     } else {
-                        // #3041 P1-2 (site 5 — normal bridge terminal replace):
-                        // acquire the shared delivery lease BEFORE delivering so
-                        // the watcher and the bridge serialize on this channel. On
-                        // a B2 Skip the watcher (or another bridge path) owns the
-                        // live lease for this range/turn → do NOT deliver+advance.
-                        // (codex P1-a) lease on `watcher_owner_channel_id` (shared
-                        // cell + TurnKey channel with the watcher).
-                        let lease_acquire = BridgeDeliveryLease::acquire(
-                            shared_owned.as_ref(),
+                        // #3089 A5 (flag, default OFF): route short-replace through the
+                        // controller (`terminal_controller_cutover`); OFF → legacy below.
+                        let bridge_turn = super::turn_finalizer::TurnKey::new(
                             watcher_owner_channel_id,
-                            super::turn_finalizer::TurnKey::new(
-                                watcher_owner_channel_id,
-                                inflight_state.user_msg_id,
-                                shared_owned.restart.current_generation,
-                            ),
-                            inflight_state.turn_start_offset.unwrap_or(0),
-                            tmux_last_offset,
+                            inflight_state.user_msg_id,
+                            shared_owned.restart.current_generation,
                         );
+                        let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
+                        let cutover_short_replace =
+                            terminal_controller_cutover::bridge_short_replace_cutover_decision(
+                                terminal_controller_cutover::turn_bridge_terminal_controller_enabled(),
+                                can_chain_locally,
+                                &delivery_response,
+                                tmux_last_offset.is_some_and(|e| e > bridge_start),
+                                true,
+                            );
+                        if cutover_short_replace {
+                            let cell = shared_owned.delivery_lease(watcher_owner_channel_id);
+                            terminal_controller_cutover::apply_bridge_short_replace_controller(
+                                gateway.as_ref(),
+                                shared_owned.as_ref(),
+                                &provider,
+                                channel_id,
+                                watcher_owner_channel_id,
+                                inflight_state.tmux_session_name.as_deref(),
+                                &cell,
+                                &shared_owned.ui.placeholder_controller,
+                                current_msg_id,
+                                &delivery_response,
+                                full_response.len(),
+                                bridge_turn,
+                                bridge_start,
+                                tmux_last_offset.unwrap_or(0),
+                                single_message_panel_footer_mode,
+                                dispatch_id.as_deref(),
+                                adk_session_key.as_deref(),
+                                Some(turn_id.as_str()),
+                                terminal_controller_cutover::BridgeShortReplaceLocals {
+                                    terminal_delivery_committed: &mut terminal_delivery_committed,
+                                    terminal_body_visible: &mut terminal_body_visible,
+                                    completion_footer_terminal_text:
+                                        &mut completion_footer_terminal_text,
+                                    preserve_inflight_for_cleanup_retry:
+                                        &mut preserve_inflight_for_cleanup_retry,
+                                    bridge_skip_holder_owns_inflight:
+                                        &mut bridge_skip_holder_owns_inflight,
+                                    inflight_response_sent_offset:
+                                        &mut inflight_state.response_sent_offset,
+                                },
+                            )
+                            .await;
+                        } else {
+                        // #3041 P1-2 (site 5 — normal bridge terminal replace):
+                        // acquire the shared delivery lease BEFORE delivering so the
+                        // watcher and the bridge serialize. On a B2 Skip the holder
+                        // owns this range/turn → do NOT deliver+advance. (codex P1-a)
+                        // lease on `watcher_owner_channel_id` (shared cell + TurnKey).
+                        // The lease-range gate keeps the acquire off the cut-over set.
+                        let lease_acquire = match terminal_controller_cutover::bridge_terminal_lease_range(
+                            Some((bridge_start, tmux_last_offset.unwrap_or(0))),
+                            cutover_short_replace,
+                        ) {
+                            Some(_) => BridgeDeliveryLease::acquire(
+                                shared_owned.as_ref(),
+                                watcher_owner_channel_id,
+                                bridge_turn,
+                                bridge_start,
+                                tmux_last_offset,
+                            ),
+                            None => BridgeLeaseAcquire::NoRange,
+                        };
                         if matches!(lease_acquire, BridgeLeaseAcquire::Skip) {
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             tracing::warn!(
@@ -6149,13 +6163,10 @@ pub(super) fn spawn_turn_bridge(
                                 "  [{ts}] 🌉 #3041 B2: delivery lease held by another holder — bridge skipped duplicate terminal replace (channel {})",
                                 channel_id
                             );
-                            // #3041 P1-2 (codex P1-c): preserve retry state on a B2
-                            // Skip — the holder owns delivery; the bridge must not
-                            // clear inflight or mark the watcher delivered. See the
-                            // cancel/stop skip arm.
+                            // #3041 P1-2 (codex P1-c): preserve retry on a B2 Skip —
+                            // holder owns delivery; do NOT clear inflight / mark the
+                            // watcher delivered. (codex P1-2 R3) identity-guard the save.
                             preserve_inflight_for_cleanup_retry = true;
-                            // codex P1-2 R3: holder owns the inflight lifecycle on
-                            // a Skip — identity-guard the epilogue save.
                             bridge_skip_holder_owns_inflight = true;
                         } else {
                             // `Held(lease)` → commit via the lease; `NoRange` →
@@ -6172,13 +6183,11 @@ pub(super) fn spawn_turn_bridge(
                                         &delivery_response,
                                     )
                                     .await;
-                                // #2860: the answer reached the channel if the placeholder was
-                                // edited OR a fallback message was posted. A fallback posts the
-                                // full delivery_response as a fresh message and reports the
-                                // placeholder edit as non-committed; record it as delivered
-                                // (advance the offset) so this turn does not later present as a
-                                // never-delivered completed-stale leak and get re-delivered by
-                                // the stall-watchdog recovery.
+                                // #2860: the answer reached the channel if the placeholder
+                                // was edited OR a fallback message was posted. A fallback
+                                // posts the full delivery_response as a fresh message and
+                                // reports the edit as non-committed; record it as delivered
+                                // so this turn is not re-delivered by stall-watchdog recovery.
                                 let fallback_delivered = matches!(
                                     &replace_outcome,
                                     Ok(super::formatting::ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. })
@@ -6195,11 +6204,9 @@ pub(super) fn spawn_turn_bridge(
                                     Some(turn_id.as_str()),
                                     "turn_bridge_terminal_replace",
                                 );
-                                // #3041 P1-2 / B6: the confirmed_end advance now flows
-                                // ONLY through the lease commit. `Delivered` on a
-                                // committed replace (advances), `NotDelivered` on a
-                                // non-committed one (no advance) — mirroring the
-                                // pre-P1-2 `if replace_committed { advance }` gate.
+                                // #3041 P1-2 / B6: confirmed_end advance flows ONLY
+                                // through the lease commit — `Delivered` on a committed
+                                // replace, `NotDelivered` otherwise (mirrors pre-P1-2).
                                 let outcome = if let Some(lease) = lease {
                                     let outcome = if replace_committed {
                                         crate::services::discord::LeaseOutcome::Delivered
@@ -6215,12 +6222,8 @@ pub(super) fn spawn_turn_bridge(
                                     replace_committed
                                 } else {
                                     // NoRange (zero/inverted range or no tmux session):
-                                    // there are NO new bytes to commit, so there is
-                                    // nothing to advance. Deliver without a lease and
-                                    // WITHOUT advancing `confirmed_end_offset` (codex
-                                    // P1-b: no advance outside a lease commit). The
-                                    // message still reaches Discord; only the offset
-                                    // advance is gated to a real range.
+                                    // NO new bytes → deliver without a lease and WITHOUT
+                                    // advancing (codex P1-b: no advance outside a commit).
                                     replace_committed
                                 };
                                 if outcome {
@@ -6234,14 +6237,14 @@ pub(super) fn spawn_turn_bridge(
                                     preserve_inflight_for_cleanup_retry = true;
                                     if fallback_delivered {
                                         // Mark the whole response delivered: the fallback
-                                        // message carried it. The preserved-inflight save on
-                                        // the `preserve_inflight_for_cleanup_retry` path below
-                                        // persists this advanced offset, so the turn never
+                                        // message carried it; the preserved-inflight save
+                                        // below persists this offset so the turn never
                                         // re-presents as a never-delivered leak for recovery.
                                         inflight_state.response_sent_offset = full_response.len();
                                     }
                                 }
                             }
+                        }
                         }
                     }
                 } else {
@@ -6276,14 +6279,11 @@ pub(super) fn spawn_turn_bridge(
                                 channel_id,
                                 error
                             );
-                            // Symmetric with the can_chain_locally failure arm
-                            // above: the answer was NOT delivered (enqueue
-                            // failed), so we must NOT let finalization clear
-                            // inflight — that would destroy the only persisted
-                            // copy of full_response with no retry path, losing
-                            // the answer entirely. Preserving inflight routes
-                            // disposition through save_inflight_state so recovery
-                            // can re-deliver, and holds queued turns until then.
+                            // Symmetric with the can_chain_locally failure arm: the
+                            // answer was NOT delivered (enqueue failed) → do NOT let
+                            // finalization clear inflight (it is the only persisted
+                            // full_response). Preserving routes disposition through
+                            // save_inflight_state so recovery can re-deliver.
                             preserve_inflight_for_cleanup_retry = true;
                         }
                     }

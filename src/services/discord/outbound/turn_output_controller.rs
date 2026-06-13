@@ -303,7 +303,13 @@ pub(in crate::services::discord) enum DeliveryOutcome {
     /// may retry from `retry_from_offset`.
     Transient { retry_from_offset: u64 },
     /// Ambiguous (drop / panic / partial). I2: the offset did NOT advance.
-    Unknown,
+    ///
+    /// `fell_back` (#3089 A5) is `true`, on the `NoCommitOnFallback` arm ONLY,
+    /// when the body still reached Discord via a FRESH fallback send
+    /// (`SentFallbackAfterEditFailure`): still NO advance, but the turn_bridge
+    /// owner does the legacy dual-offset recovery (`response_sent_offset` bump,
+    /// mod.rs ~6241) + a `failed(..)` cleanup. `false` for partial / Err.
+    Unknown { fell_back: bool },
     /// Nothing was delivered by design (NoOp plan / suppressed); offset
     /// unchanged.
     Skipped,
@@ -691,14 +697,13 @@ where
                 retry_from_offset: start,
             }
         }
-        TransportResult::Unknown => {
-            // I2: ambiguous (drop / panic / partial). Release WITHOUT commit so
-            // the offset never advances. No commit happens on this arm.
+        TransportResult::Unknown { fell_back } => {
+            // I2: ambiguous — release WITHOUT commit; carry `fell_back` (#3089 A5).
             drop(heartbeat_guard);
             if let Some(guard) = lease_guard.as_mut() {
                 guard.release_and_disarm();
             }
-            DeliveryOutcome::Unknown
+            DeliveryOutcome::Unknown { fell_back }
         }
     }
 }
@@ -800,7 +805,11 @@ enum TransportResult {
     /// `None` for `NewSend` / chunked / NoOp.
     Delivered(Option<ReplaceDeliveryKind>),
     Transient,
-    Unknown,
+    /// Ambiguous, never advance (I2). `fell_back` (#3089 A5): see
+    /// [`DeliveryOutcome::Unknown`] — true only on NoCommitOnFallback fresh-fallback.
+    Unknown {
+        fell_back: bool,
+    },
 }
 
 /// Drive the gateway transport for the plan. Returns ONLY the transport
@@ -844,13 +853,13 @@ where
                 .await
             {
                 // A Split body MUST land all `chunk_count` messages to be
-                // Delivered. A short write (fewer message IDs than chunks) is a
-                // PARTIAL send — ambiguous — and must NEVER advance (I2,
-                // review-fix H1). `chunk_count` from `LengthPolicyDecision::Split`
-                // is always >= 1, so this is the exact-or-more contract.
-                // Chunked sends carry no replace identity → `None`.
+                // Delivered. A short write (fewer IDs than chunks) is a PARTIAL
+                // send — ambiguous — and must NEVER advance (I2, review-fix H1).
+                // `chunk_count` is always >= 1 (exact-or-more contract). Chunked
+                // sends carry no replace identity → `None`.
                 Ok(ids) if ids.len() >= chunk_count => TransportResult::Delivered(None),
-                Ok(_) => TransportResult::Unknown,
+                // Short chunked write: ambiguous, nothing fell back (#3089 A5).
+                Ok(_) => TransportResult::Unknown { fell_back: false },
                 Err(_) => transient_or_unknown(ctx),
             }
         }
@@ -859,50 +868,41 @@ where
 }
 
 /// Map a `replace_message_with_outcome` success into the controller's transport
-/// classification, mirroring the EXACT semantics the existing owners already
-/// give each `ReplaceLongMessageOutcome` variant (review-fix H2). The catch-all
-/// `Ok(_) => Delivered` was wrong: `PartialContinuationFailure` is a
-/// not-delivered / retry-preserving result for every owner, never an advance.
+/// classification, mirroring the EXACT semantics each owner gives each
+/// `ReplaceLongMessageOutcome` variant (review-fix H2 — the catch-all
+/// `Ok(_) => Delivered` was wrong: `PartialContinuationFailure` never advances).
 ///
 /// Owner-mapping evidence:
 /// - `EditedOriginal` → delivered for EVERY owner:
-///   `session_relay_sink.rs:863` (`Delivered` + `advance_after_confirmed_post`),
-///   `standby_relay.rs:653` (success), `turn_bridge/terminal_delivery.rs:131`
-///   (committed = true) and its predicate `terminal_delivery.rs:42`
-///   (`matches!(.., EditedOriginal)`), `formatting.rs:1785` (`Ok(())`).
-/// - `SentFallbackAfterEditFailure` → owner-SPECIFIC (review-fix H1 r3): the
-///   sink advances (`session_relay_sink.rs:905`, `Delivered` +
-///   `advance_after_confirmed_post`) and standby advances
-///   (`standby_relay.rs:662`, `true`), but turn_bridge/terminal_delivery does
-///   NOT (`terminal_delivery.rs:143` records the cleanup failure and returns
-///   `committed = false`; its predicate `:42` commits `EditedOriginal` only).
-///   The controller therefore consults the owner-passed `FallbackCommitPolicy`
-///   instead of hard-coding `Delivered`:
-///   `CommitOnFallback` → `Delivered`, `NoCommitOnFallback` → `Unknown`.
+///   `session_relay_sink.rs:863`, `standby_relay.rs:653`,
+///   `turn_bridge/terminal_delivery.rs:131` (committed = true) + predicate `:42`,
+///   `formatting.rs:1785` (`Ok(())`).
+/// - `SentFallbackAfterEditFailure` → owner-SPECIFIC (review-fix H1 r3): the sink
+///   advances (`session_relay_sink.rs:905`) and standby advances
+///   (`standby_relay.rs:662`), but turn_bridge does NOT
+///   (`terminal_delivery.rs:143` returns `committed = false`; predicate `:42`
+///   commits `EditedOriginal` only). The controller consults the owner-passed
+///   `FallbackCommitPolicy`: `CommitOnFallback` → `Delivered`,
+///   `NoCommitOnFallback` → `Unknown { fell_back: true }` (#3089 A5).
 /// - `PartialContinuationFailure` → ambiguous, NEVER advance (I2):
-///   `session_relay_sink.rs:956` (`RelaySinkError::Transient`),
-///   `standby_relay.rs:678` (`false`), `turn_bridge/terminal_delivery.rs:155` +
-///   the `partial_continuation_failure_does_not_commit_terminal_delivery` test
-///   at `:891` (committed = false), `formatting.rs:1787` (`Err`).
+///   `session_relay_sink.rs:956`, `standby_relay.rs:678`,
+///   `turn_bridge/terminal_delivery.rs:155` (committed = false), `formatting.rs:1787`.
 fn classify_replace_outcome(
     outcome: &crate::services::discord::formatting::ReplaceLongMessageOutcome,
     fallback_commit_policy: &FallbackCommitPolicy,
 ) -> TransportResult {
     use crate::services::discord::formatting::ReplaceLongMessageOutcome;
     match outcome {
-        // The original placeholder was edited in place → carry the
-        // `EditedOriginal` replace identity so the owner takes its existing
-        // delivered side-effects (footer-target register, `Succeeded` cleanup).
+        // Edited in place → carry the `EditedOriginal` replace identity so the
+        // owner takes its delivered side-effects (footer register, Succeeded).
         ReplaceLongMessageOutcome::EditedOriginal => {
             TransportResult::Delivered(Some(ReplaceDeliveryKind::EditedOriginal))
         }
-        // Owner-specific (H1 r3): the original edit failed and a fallback POST
-        // carried the body. The sink/standby treat that as delivery (advance);
-        // turn_bridge/terminal_delivery does not commit it. Honour the policy
-        // the owner passed instead of hard-coding an advance. On the committing
-        // arm, carry the `FreshFallbackAfterEditFailure { edit_error }` identity
-        // (#3089 A4 r2) so the watcher mirrors the legacy fallback cleanup
-        // (`Failed(edit_error)`, no footer-target, preserve original).
+        // Owner-specific (H1 r3): the edit failed but a fallback POST carried the
+        // body. Honour the owner's `FallbackCommitPolicy` (sink/standby advance;
+        // turn_bridge does not). On the committing arm carry the
+        // `FreshFallbackAfterEditFailure { edit_error }` identity (#3089 A4 r2) so
+        // the watcher mirrors the legacy fallback cleanup.
         ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { edit_error } => {
             match fallback_commit_policy {
                 FallbackCommitPolicy::CommitOnFallback => TransportResult::Delivered(Some(
@@ -910,25 +910,29 @@ fn classify_replace_outcome(
                         edit_error: edit_error.clone(),
                     },
                 )),
-                FallbackCommitPolicy::NoCommitOnFallback => TransportResult::Unknown,
+                // #3089 A5: edit FAILED but fallback POST landed the body → no
+                // advance + `fell_back = true` (see `DeliveryOutcome::Unknown`).
+                FallbackCommitPolicy::NoCommitOnFallback => {
+                    TransportResult::Unknown { fell_back: true }
+                }
             }
         }
-        // Partial continuation failure: chunks were sent then a continuation
-        // failed mid-stream. Every owner treats this as not-delivered and
-        // preserves the retry offset. Map to Unknown so the offset never
-        // advances (I2). Explicit — no catch-all.
-        ReplaceLongMessageOutcome::PartialContinuationFailure { .. } => TransportResult::Unknown,
+        // Partial continuation failure: never advance (I2); `fell_back = false`
+        // (nothing landed → no bump, #3089 A5).
+        ReplaceLongMessageOutcome::PartialContinuationFailure { .. } => {
+            TransportResult::Unknown { fell_back: false }
+        }
     }
 }
 
 /// Classify a transport error into the ambiguous halves. A1 keeps the rule
-/// conservative (design I3): anything we cannot prove transient is treated as
-/// `Unknown` so the offset never advances. The owner-specific edit-fail policy
-/// only influences post-send placeholder cleanup, never the advance decision.
+/// conservative (design I3): anything we cannot prove transient is `Unknown` so
+/// the offset never advances (the edit-fail policy only affects post-send cleanup).
 fn transient_or_unknown<L: DeliveryLease + ?Sized>(_ctx: &TurnOutputCtx<'_, L>) -> TransportResult {
     // A1 has no transport-error taxonomy wired (owners land from A2). Be
-    // conservative: a bare Err is ambiguous → Unknown (never advance, I2).
-    TransportResult::Unknown
+    // conservative: a bare Err is ambiguous → Unknown (never advance, I2);
+    // `fell_back = false` (#3089 A5 — a transport error landed no body).
+    TransportResult::Unknown { fell_back: false }
 }
 
 /// Post-send finalization: placeholder terminal transition + edit-fail
@@ -1611,7 +1615,7 @@ mod tests {
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
         assert!(
-            matches!(outcome, DeliveryOutcome::Unknown),
+            matches!(outcome, DeliveryOutcome::Unknown { .. }),
             "ambiguous transport must yield Unknown, got {}",
             debug_outcome(&outcome)
         );
@@ -1933,7 +1937,7 @@ mod tests {
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
         assert!(
-            matches!(outcome, DeliveryOutcome::Unknown),
+            matches!(outcome, DeliveryOutcome::Unknown { .. }),
             "a partial split send (1 id < 3 chunks) must be Unknown, got {}",
             debug_outcome(&outcome)
         );
@@ -2058,7 +2062,7 @@ mod tests {
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
         assert!(
-            matches!(outcome, DeliveryOutcome::Unknown),
+            matches!(outcome, DeliveryOutcome::Unknown { fell_back: false }),
             "H2: PartialContinuationFailure must be Unknown (non-advance), got {}",
             debug_outcome(&outcome)
         );
@@ -2199,8 +2203,8 @@ mod tests {
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
         assert!(
-            matches!(outcome, DeliveryOutcome::Unknown),
-            "H1 r3: NoCommitOnFallback must yield Unknown (non-advance), got {}",
+            matches!(outcome, DeliveryOutcome::Unknown { fell_back: true }),
+            "H1 r3: NoCommitOnFallback + SentFallback must yield Unknown{{fell_back:true}} (#3089 A5: body landed via fallback, no advance), got {}",
             debug_outcome(&outcome)
         );
         // The send returned Ok, but the owner policy says do not commit — the
@@ -2218,6 +2222,113 @@ mod tests {
         assert!(
             matches!(lease.read(), LeaseSnapshot::Unleased),
             "H1 r3: NoCommitOnFallback must release the lease without committing"
+        );
+    }
+
+    /// #3089 A5 — the `NoCommitOnFallback` `Unknown` arm SURFACES `fell_back`:
+    /// `SentFallbackAfterEditFailure` → `Unknown { fell_back: true }` (the body
+    /// reached Discord via a fresh fallback send, so the turn_bridge owner bumps
+    /// `response_sent_offset` even though `confirmed_end` is NOT advanced — the
+    /// dual-offset recovery), while `PartialContinuationFailure` →
+    /// `Unknown { fell_back: false }` (nothing landed — no bump). Neither
+    /// advances (I2: `commit_calls == 0` on both). The CommitOnFallback owner is
+    /// proven UNAFFECTED by `replace_sent_fallback_after_edit_failure_commits_and_advances`
+    /// (same scenario, `CommitOnFallback` → `Delivered { FreshFallback }`).
+    /// Mutation guard: flipping the SentFallback arm to
+    /// `Unknown { fell_back: false }` (or back to a bare advance) fails the
+    /// `fell_back: true` assertion below; collapsing the partial arm to
+    /// `fell_back: true` fails the second assertion.
+    #[tokio::test]
+    async fn no_commit_on_fallback_surfaces_fell_back() {
+        async fn run_no_commit(
+            channel_n: u64,
+            msg_n: u64,
+            outcome: ReplaceLongMessageOutcome,
+        ) -> (DeliveryOutcome, usize) {
+            let channel = ChannelId::new(channel_n);
+            let lease = Arc::new(RecordingLease::new(channel));
+            let placeholder_msg = MessageId::new(msg_n);
+            let key = placeholder_key(channel, placeholder_msg);
+            let gateway =
+                ObservingGateway::new(lease.clone() as Arc<dyn DeliveryLease + Send + Sync>, true)
+                    .with_replace_outcome(outcome);
+            let controller = PlaceholderController::default();
+            prime_active(&controller, &gateway, key.clone()).await;
+            let body = "turn_bridge short-replace body (NoCommitOnFallback)";
+            let ctx = TurnOutputCtx {
+                turn: turn_key(channel),
+                owner: RelayOwnerKind::None,
+                holder: LeaseHolder::Bridge,
+                lease: lease.as_ref(),
+                channel_id: channel,
+                placeholder_controller: &controller,
+                placeholder: PlaceholderSlot::Active {
+                    message_id: placeholder_msg,
+                    key,
+                },
+                body,
+                send_range: (0, body.len() as u64),
+                plan: OutputPlan::Replace {
+                    lifecycle: PlaceholderLifecycle::Active,
+                },
+                edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
+                fallback_commit_policy: FallbackCommitPolicy::NoCommitOnFallback,
+                acquire_failure_mode: AcquireFailureMode::Transient,
+                advance: None,
+                heartbeat: None,
+            };
+            let outcome = deliver_turn_output(&gateway, ctx).await;
+            let commits = lease.commit_calls.load(Ordering::SeqCst);
+            (outcome, commits)
+        }
+
+        // SentFallbackAfterEditFailure → fell_back = true (body landed), no commit.
+        let (fell_back_outcome, fell_back_commits) = run_no_commit(
+            221,
+            55551,
+            ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
+                edit_error: "edit 500; fallback POST succeeded".to_string(),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                fell_back_outcome,
+                DeliveryOutcome::Unknown { fell_back: true }
+            ),
+            "SentFallback under NoCommitOnFallback must surface fell_back=true, got {}",
+            debug_outcome(&fell_back_outcome)
+        );
+        assert_eq!(
+            fell_back_commits, 0,
+            "fell_back=true is still Unknown (I2): NEVER advance/commit"
+        );
+
+        // PartialContinuationFailure → fell_back = false (nothing landed), no commit.
+        let (partial_outcome, partial_commits) = run_no_commit(
+            222,
+            55552,
+            ReplaceLongMessageOutcome::PartialContinuationFailure {
+                sent_chunks: 1,
+                total_chunks: 3,
+                failed_chunk_index: 1,
+                sent_continuation_message_ids: Vec::new(),
+                cleanup_errors: Vec::new(),
+                error: "HTTP 500".to_string(),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                partial_outcome,
+                DeliveryOutcome::Unknown { fell_back: false }
+            ),
+            "PartialContinuationFailure must surface fell_back=false, got {}",
+            debug_outcome(&partial_outcome)
+        );
+        assert_eq!(
+            partial_commits, 0,
+            "fell_back=false is Unknown (I2): NEVER advance/commit"
         );
     }
 
@@ -2792,7 +2903,7 @@ mod tests {
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
         assert!(
-            matches!(outcome, DeliveryOutcome::Unknown),
+            matches!(outcome, DeliveryOutcome::Unknown { .. }),
             "ambiguous transport must yield Unknown, got {}",
             debug_outcome(&outcome)
         );
@@ -2963,7 +3074,8 @@ mod tests {
             DeliveryOutcome::Delivered { .. } => "Delivered",
             DeliveryOutcome::NotDelivered { .. } => "NotDelivered",
             DeliveryOutcome::Transient { .. } => "Transient",
-            DeliveryOutcome::Unknown => "Unknown",
+            DeliveryOutcome::Unknown { fell_back: true } => "Unknown{fell_back:true}",
+            DeliveryOutcome::Unknown { fell_back: false } => "Unknown{fell_back:false}",
             DeliveryOutcome::Skipped => "Skipped",
         }
     }

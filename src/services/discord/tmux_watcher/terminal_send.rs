@@ -353,7 +353,10 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
         // Reproduce the legacy partial-failure handling: relay_ok = false + reset the
         // retry offset (the caller performs the `retry_terminal_delivery_from_offset` /
         // current_offset / all_data reset + abandon-release, tmux_watcher.rs:6546-6579).
-        toc::DeliveryOutcome::Unknown => WatcherShortReplaceResult::PartialFailureRetry,
+        // #3089 A5: the watcher uses CommitOnFallback, so `fell_back` is always
+        // false for it (a fallback send commits → Delivered, never reaching this
+        // arm) — byte-identical: the watcher ignores the field.
+        toc::DeliveryOutcome::Unknown { .. } => WatcherShortReplaceResult::PartialFailureRetry,
         // Empty body — excluded by the cut-over gate, so this is unreachable in prod.
         toc::DeliveryOutcome::Skipped => WatcherShortReplaceResult::Skipped,
     }

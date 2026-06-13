@@ -1,7 +1,10 @@
 use super::super::formatting::ReplaceLongMessageOutcome;
 use super::*;
 
-fn record_turn_bridge_terminal_replace_cleanup(
+// #3089 A5: `pub(super)` so the `terminal_controller_cutover` sibling reproduces
+// the legacy per-arm cleanup record (the controller's `post_send_finalize` no-ops
+// on `Replace { Active }`, so the cutover write-back records it itself).
+pub(super) fn record_turn_bridge_terminal_replace_cleanup(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -241,7 +244,9 @@ pub(super) fn tui_quiescence_timeout_requires_inflight_retry(
     !terminal_delivery_committed
 }
 
-fn advance_tmux_relay_confirmed_end(
+// #3089 A5: `pub(super)` so the `terminal_controller_cutover` sibling's advance
+// callback runs the SAME monotonic-CAS confirmed-end advance as the legacy site-5.
+pub(super) fn advance_tmux_relay_confirmed_end(
     shared: &SharedData,
     channel_id: ChannelId,
     confirmed_end_offset: Option<u64>,
