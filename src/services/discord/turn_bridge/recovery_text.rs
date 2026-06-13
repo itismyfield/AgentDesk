@@ -257,25 +257,24 @@ pub(in crate::services::discord) fn store_session_retry_context(
     store_session_retry_context_impl(db, pg_pool, channel_id, history, None)
 }
 
-pub(in crate::services::discord) fn store_session_retry_context_with_notify(
+/// Store the session retry (recovery) context together with its recovery
+/// audit record (keyed by `session_key`).
+///
+/// #3418 D1: the lifecycle notification that used to fire here
+/// (`lifecycle.recovery_context` → "📋 최근 Discord 메시지를 복원
+/// 컨텍스트로 저장했습니다…") was pure duplication of the status panel's
+/// inline `(최근 대화 N개를 읽어들였습니다)` suffix (rendered from
+/// `recovery_message_count`, independent of any notification). The notify
+/// enqueue was dropped; the audit-bearing store path is retained so the
+/// prompt manifest sha256 validation keeps working.
+pub(in crate::services::discord) fn store_session_retry_context_with_audit(
     db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     channel_id: u64,
     history: &str,
     session_key: Option<&str>,
-) -> Result<bool, String> {
-    store_session_retry_context_impl(db, pg_pool, channel_id, history, session_key)?;
-    let sqlite_runtime_db = if pg_pool.is_some() { None } else { db };
-    Ok(
-        crate::services::message_outbox::enqueue_lifecycle_notification_best_effort(
-            sqlite_runtime_db,
-            pg_pool,
-            &format!("channel:{channel_id}"),
-            session_key,
-            "lifecycle.recovery_context",
-            "📋 최근 Discord 메시지를 복원 컨텍스트로 저장했습니다. 다음 턴에 자동 주입합니다.",
-        ),
-    )
+) -> Result<(), String> {
+    store_session_retry_context_impl(db, pg_pool, channel_id, history, session_key)
 }
 
 fn mark_recovery_audit_consumed_pg(
@@ -434,6 +433,39 @@ mod tests {
         assert_eq!(built.1, 2);
         assert_eq!(built.0, format!("alice: hello\nbob: {}", "x".repeat(300)));
     }
+
+    /// #3418 D1 regression lock: storing the session recovery context must
+    /// NOT enqueue a lifecycle notification. The removed notify (reason_code
+    /// built below) was pure duplication of the status panel's inline
+    /// recovery suffix, which is rendered from `recovery_message_count`
+    /// (SessionStrategyDetails) and is entirely independent of any
+    /// notification. Backends are PG-only in practice
+    /// (`Db = Arc<LegacySqliteDisabled>`, an uninhabited enum), so this
+    /// guards the wiring at the source level rather than via a DB fixture.
+    ///
+    /// The forbidden literals are assembled at runtime from fragments so the
+    /// test source itself never contains them verbatim (otherwise the
+    /// `include_str!` scan would match its own assertion text).
+    #[test]
+    fn recovery_context_store_does_not_enqueue_lifecycle_notification() {
+        let module_src = include_str!("recovery_text.rs");
+
+        // reason_code: "lifecycle." + "recovery_context"
+        let reason_code = format!("\"{}{}\"", "lifecycle.", "recovery_context");
+        assert!(
+            !module_src.contains(&reason_code),
+            "recovery context store must not enqueue the lifecycle recovery_context \
+             notification (duplicate of the status panel recovery suffix)"
+        );
+
+        // user-facing notify body fragment (Korean, assembled from parts)
+        let notify_phrase = format!("{}{}", "복원 컨텍스트로 ", "저장했습니다");
+        assert!(
+            !module_src.contains(&notify_phrase),
+            "recovery context store must not enqueue the duplicate recovery-context \
+             user notification body"
+        );
+    }
 }
 
 /// #2452 H6: dedup guard for `auto_retry_with_history`. Kept at module
@@ -535,7 +567,7 @@ pub(in crate::services::discord) async fn auto_retry_with_history(
             super::super::adk_session::build_adk_session_key(shared, channel_id, provider)
                 .await
                 .unwrap_or_else(|| format!("channel:{}", channel_id.get()));
-        let stored = store_session_retry_context_with_notify(
+        let stored = store_session_retry_context_with_audit(
             None::<&crate::db::Db>,
             shared.pg_pool.as_ref(),
             channel_id.get(),
