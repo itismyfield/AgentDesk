@@ -10,7 +10,7 @@
 > Turn-owned delivery paths can pass a `CancelToken` so post-cancel sends,
 > fallback retries, split chunks, and headless outbox enqueue are suppressed.
 >
-> Last refreshed: 2026-06-13 (against #3089 A1 turn-output controller skeleton; pure add, no owner wired).
+> Last refreshed: 2026-06-13 (against #3089 A2b r2 — session_relay_sink short-replace cut over to the turn-output controller behind a default-OFF flag; controller now RAII-releases its held lease on future cancel/panic via ControllerLeaseGuard).
 >
 > Companion docs: [`docs/discord-outbound-remaining-producers.md`](../discord-outbound-remaining-producers.md) (#1175 closure), [`docs/source-of-truth.md`](../source-of-truth.md).
 
@@ -44,15 +44,15 @@ HTTP path.
 | **v3 delivery** `deliver_outbound<C>(...)` | `outbound/delivery.rs:46` | active | Executes the v3 message/policy/decision/result contract. Accepts an optional `CancelToken`; split delivery records ordered chunk metadata and duplicate replay preserves it. Success paths record the reservation; terminal skip/permanent-failure paths explicitly release it before returning. |
 | `DiscordOutboundClient`, `HttpOutboundClient`, `OutboundDeduper` | `outbound/transport.rs` | active | Transport trait, HTTP client, fingerprint helper, and in-memory dedup store with atomic `reserve` / in-flight wait semantics over the lookup -> send -> record/release window. v3 stores serialized `Vec<DeliveredMessage>`. |
 | `shared_outbound_deduper()` | `outbound/mod.rs` | active | Process-wide in-memory deduper shared by migrated producers once they have built a structured outbound delivery key. This is only the final in-process duplicate-send guard; durable SQL outbox uniqueness still belongs to the `message_outbox` enqueue/claim path. |
-| **turn-output controller** `deliver_turn_output<G, L>(...)` | `outbound/turn_output_controller.rs` | skeleton — **pure add, no live owner (#3089 A1)** | The single delivery entry point Phase A will route all seven turn-output surfaces through (sink / standby / watcher / turn_bridge / recovery / tui_prompt_relay). A1 fully implements + tests it but wires **no** owner — the live-path cutover starts at A2 (`session_relay_sink` first). Owns lease `commit`+advance inline before any post-send await (I1), never advances on ambiguous/partial transport (I2), maps `ReplaceLongMessageOutcome::PartialContinuationFailure` to non-advance, and drives the live placeholder card to its terminal state via `PlaceholderController.transition` with the explicit `EditFailPlaceholderPolicy` (#2757) fence. The `DeliveryLease` trait abstracts the frozen #3041 `DeliveryLeaseCell` so the controller's commit invariants are mutation-tested. No callsite-coverage row yet (added per owner at A2–A6b). |
+| **turn-output controller** `deliver_turn_output<G, L>(...)` | `outbound/turn_output_controller.rs` | **first live owner wired: `session_relay_sink` short-replace, flag-gated (#3089 A2b)** | The single delivery entry point Phase A will route all seven turn-output surfaces through (sink / standby / watcher / turn_bridge / recovery / tui_prompt_relay). A2b cuts the FIRST owner over: `session_relay_sink`'s short-replace branch behind `AGENTDESK_SINK_SHORT_REPLACE_CONTROLLER` (default OFF → byte-identical legacy; the other six owners stay legacy). Owns lease `commit`+advance inline before any post-send await (I1), never advances on ambiguous/partial transport (I2), maps `ReplaceLongMessageOutcome::PartialContinuationFailure` to non-advance, and drives the live placeholder card to its terminal state via `PlaceholderController.transition` with the explicit `EditFailPlaceholderPolicy` (#2757) fence. The held lease is now RAII-released on future cancel/panic via the internal `ControllerLeaseGuard` (review-fix H1 r2), matching legacy `SinkDeliveryLeaseGuard::Drop`. The `DeliveryLease` trait abstracts the frozen #3041 `DeliveryLeaseCell` so the controller's commit invariants are mutation-tested. |
 
 `outbound/mod.rs` re-exports the v3 message/policy/result and shared
 transport primitives. New production callsites should import
 `outbound::delivery::deliver_outbound` explicitly.
 
-The new turn-output controller (`outbound/turn_output_controller.rs`, #3089 A1)
-is a **pure add** with no live owner yet; its callsite coverage will be filled
-in §3 as each owner cuts over (A2–A6b).
+The turn-output controller (`outbound/turn_output_controller.rs`, #3089) now has
+its FIRST live owner: the `session_relay_sink` short-replace branch, flag-gated
+(A2b, default OFF). The remaining owners cut over in §3 (A3–A6b).
 
 ---
 

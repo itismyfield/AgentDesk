@@ -55,10 +55,11 @@ pub(in crate::services::discord) fn sink_short_replace_controller_enabled() -> b
             .ok()
             .map(|v| v.trim().to_ascii_lowercase())
             .is_some_and(|v| v == "1" || v == "true");
-        tracing::info!(
-            "  ✓ sink_short_replace_controller: {}",
-            if on { "enabled" } else { "disabled" }
-        );
+        // review-fix L1: telemetry ONLY when ENABLED — the default-OFF first evaluation
+        // must have NO observable side effect (byte-identical / deploy no-op).
+        if on {
+            tracing::info!("  ✓ sink_short_replace_controller: enabled");
+        }
         on
     })
 }
@@ -281,16 +282,14 @@ impl Drop for SessionBoundExternalInputLeaseGuard {
 
 /// #3151: RAII in-flight sink-delivery marker on the per-channel
 /// [`super::DeliveryLeaseCell`], acquired as [`super::LeaseHolder::Sink`] for the SAME
-/// `(channel, turn, [start,end))` coordinate the watcher's §3.2 reconciliation computes,
-/// BEFORE the POST; a [`super::DeliveryLeaseHeartbeat`] renews the deadline so the watcher
-/// reads `Leased{Sink, fresh}` and WAITS instead of re-sending (the slow-sink dup).
-/// RECLAIMABLE: the heartbeat dies with the sink → a crashed sink stops renewing → the
-/// watcher reclaims within ~one deadline (no black-hole).
-///
-/// CLEAR ordering (SUCCESS): advance committed FIRST (`advance_after_confirmed_post`)
-/// THEN [`Self::commit`] → the watcher reads `committed >= end` → Skip. EVERY exit Drop
-/// RELEASES (full-identity → stale release no-ops); a never-committed failure leaves
-/// `Unleased`, committed NOT advanced → watcher SendFull.
+/// `(channel, turn, [start,end))` the watcher's §3.2 reconciliation computes, BEFORE the
+/// POST; a [`super::DeliveryLeaseHeartbeat`] renews the deadline so the watcher reads
+/// `Leased{Sink, fresh}` and WAITS instead of re-sending (slow-sink dup). RECLAIMABLE: a
+/// crashed sink stops renewing → the watcher reclaims within ~one deadline (no black-hole).
+/// CLEAR ordering (SUCCESS): advance committed FIRST (`advance_after_confirmed_post`) THEN
+/// [`Self::commit`] → watcher reads `committed >= end` → Skip. EVERY exit Drop RELEASES
+/// (full-identity → stale no-ops); a never-committed failure leaves `Unleased`, committed
+/// NOT advanced → watcher SendFull.
 struct SinkDeliveryLeaseGuard {
     cell: Arc<super::DeliveryLeaseCell>,
     turn: super::turn_finalizer::TurnKey,
@@ -361,11 +360,10 @@ impl Drop for SinkDeliveryLeaseGuard {
     }
 }
 
-/// #3089 A2b: adapts the sink's `DeliveryLeaseHeartbeat` to [`toc::PostHeartbeat`]. The
-/// controller drives the lease behind a borrowed `&cell`, so this adapter holds the
-/// `Arc` and spawns the SAME `DeliveryLeaseHeartbeat::spawn` the legacy guard used
-/// (#3151 — identical renew). `start`'s guard Drop aborts the renew task; the controller
-/// drops it BEFORE the inline commit so a last tick can't race the commit.
+/// #3089 A2b: adapts the sink's `DeliveryLeaseHeartbeat` to [`toc::PostHeartbeat`]. Holds the
+/// `Arc` (the controller drives the lease behind a borrowed `&cell`) and spawns the SAME
+/// `DeliveryLeaseHeartbeat::spawn` the legacy guard used (#3151 — identical renew); the guard
+/// Drop aborts the renew task BEFORE the inline commit.
 struct SinkPostHeartbeat {
     cell: Arc<super::DeliveryLeaseCell>,
 }
@@ -390,6 +388,17 @@ impl toc::PostHeartbeatGuard for SinkPostHeartbeatGuard {}
 
 fn session_bound_should_send_new_chunks_for_placeholder(response_text: &str) -> bool {
     response_text.len() > super::DISCORD_MSG_LIMIT
+}
+
+/// #3089 A2b (review-fix Medium-1): pure `SinkDeliveryLeaseGuard` acquire decision — legacy
+/// branches acquire ONE `Leased{Sink}` marker over `cutover_range`; the cut-over short-replace
+/// branch is EXCLUDED (controller owns the single lease). Extracted so the no-double-acquire
+/// invariant is testable: dropping `!cutover` fails `cutover_skips_sink_guard_acquire`.
+fn sink_guard_lease_range(
+    cutover_range: Option<(u64, u64)>,
+    cutover_short_replace: bool,
+) -> Option<(u64, u64)> {
+    cutover_range.filter(|_| !cutover_short_replace)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -593,22 +602,18 @@ impl SessionBoundDiscordRelaySink {
         true
     }
 
-    /// #3089 A2b: the short-replace branch via the turn-output controller
-    /// (`deliver_turn_output`), behaviourally equal to the legacy
-    /// `replace_long_message_raw_with_outcome` arm below — SAME transport
-    /// (`replace_message_with_outcome` → that fn), SAME cell as `LeaseHolder::Sink`
+    /// #3089 A2b: short-replace via the turn-output controller, behaviourally equal to legacy
+    /// `replace_long_message_raw_with_outcome` — SAME transport, SAME cell as `LeaseHolder::Sink`
     /// acquired/committed/released ONCE (no double-acquire: `deliver_response` skipped
-    /// `SinkDeliveryLeaseGuard` for this branch), SAME #3151 heartbeat, #2757
-    /// `PreserveAlways` fence, `CommitOnFallback`, and SAME identity-gated advance
-    /// (`advance_offset_for_confirmed_delegated_terminal` after a FRESH post-POST reload)
-    /// via the `advance` callback. Confirmed POST (edit/fallback) → `Delivered`;
-    /// ambiguous/failed → `Err(Transient)` (I2). `Replace { Active }` keeps
-    /// `post_send_finalize` a no-op (the replace IS the edit), matching legacy.
+    /// `SinkDeliveryLeaseGuard` here), SAME #3151 heartbeat, #2757 `PreserveAlways` fence,
+    /// `CommitOnFallback`, SAME identity-gated advance (FRESH post-POST reload). Confirmed POST →
+    /// `Delivered`; ambiguous → `Err(Transient)` (I2). `Replace { Active }` keeps `post_send_finalize`
+    /// a no-op. `gateway` is a seam (review-fix Medium-1): live = real gateway; the test fakes it.
     #[allow(clippy::too_many_arguments)]
-    async fn deliver_short_replace_via_controller(
+    async fn deliver_short_replace_via_controller<G: super::gateway::TurnGateway + ?Sized>(
         &self,
+        gateway: &G,
         shared: &Arc<super::SharedData>,
-        http: &Arc<serenity::http::Http>,
         provider: &ProviderKind,
         channel: ChannelId,
         channel_id: u64,
@@ -625,20 +630,12 @@ impl SessionBoundDiscordRelaySink {
             shared.restart.current_generation,
         );
         let cell = shared.delivery_lease(channel);
-        // Mirror `SinkDeliveryLeaseGuard::acquire`'s self-heal: reclaim an EXPIRED
-        // prior holder before the controller acquires, so a stale dead lease can't
-        // make the acquire lose into a markerless POST.
+        // Self-heal like `SinkDeliveryLeaseGuard::acquire`: reclaim an EXPIRED prior holder
+        // before the acquire (a stale dead lease must not force a markerless POST).
         cell.reclaim_if_expired(super::lease_now_ms());
-        let gateway = super::gateway::DiscordGateway::new(
-            http.clone(),
-            shared.clone(),
-            provider.clone(),
-            None,
-        );
         let heartbeat = SinkPostHeartbeat { cell: cell.clone() };
-        // Identity-gated advance the controller runs INLINE before any post-send await (I1)
-        // — same FRESH-reload-then-gate as `advance_after_confirmed_post` (`true` →
-        // `Delivered`, `false` → `NotDelivered`).
+        // Identity-gated advance: INLINE before any post-send await (I1), SAME FRESH-reload
+        // gate as `advance_after_confirmed_post` (`true`→`Delivered`, `false`→`NotDelivered`).
         let advance = |_range: (u64, u64)| -> bool {
             let fresh = super::inflight::load_inflight_state(provider, channel_id);
             self.advance_offset_for_confirmed_delegated_terminal(
@@ -651,7 +648,7 @@ impl SessionBoundDiscordRelaySink {
             )
         };
         let outcome = toc::deliver_turn_output(
-            &gateway,
+            gateway,
             toc::TurnOutputCtx {
                 turn: sink_turn,
                 owner: RelayOwnerKind::SessionBoundRelay,
@@ -669,8 +666,8 @@ impl SessionBoundDiscordRelaySink {
                 },
                 body: relay_text,
                 send_range: (start, end),
-                // `Replace { Active }` → non-terminal → `post_send_finalize` no-ops
-                // (no placeholder transition), matching the legacy edit-in-place.
+                // `Replace { Active }` → non-terminal → `post_send_finalize` no-ops (no
+                // placeholder transition), matching the legacy edit-in-place.
                 plan: toc::OutputPlan::Replace {
                     lifecycle: PlaceholderLifecycle::Active,
                 },
@@ -684,9 +681,9 @@ impl SessionBoundDiscordRelaySink {
         .await;
 
         match outcome {
-            // Confirmed POST (edit OR #2757 fallback): the controller already ran the
-            // advance + lease commit; BOTH map to the sink-local `Delivered` (the POST
-            // landed — the lease outcome only steers the watcher). Emit legacy side-effects.
+            // Confirmed POST (edit OR #2757 fallback): the controller already ran advance +
+            // commit; BOTH map to sink-local `Delivered` (the POST landed — the lease outcome
+            // only steers the watcher). Emit legacy side-effects.
             toc::DeliveryOutcome::Delivered { .. } | toc::DeliveryOutcome::NotDelivered { .. } => {
                 self.delivered_total.fetch_add(1, Ordering::AcqRel);
                 tracing::info!(
@@ -719,8 +716,7 @@ impl SessionBoundDiscordRelaySink {
                 Ok(SessionRelayDeliveryOutcome::Delivered)
             }
             // Ambiguous/failed (PartialContinuationFailure or transport Err): the controller
-            // released without committing (I2 — offset NOT advanced). Surface legacy
-            // `Err(Transient)` → relay-ring retry.
+            // released without committing (I2 — offset NOT advanced). Surface `Err(Transient)`.
             toc::DeliveryOutcome::Transient { .. }
             | toc::DeliveryOutcome::Unknown
             | toc::DeliveryOutcome::Skipped => Err(RelaySinkError::Transient(
@@ -836,12 +832,13 @@ impl SessionBoundDiscordRelaySink {
         };
         let channel = ChannelId::new(channel_id);
 
-        // #3089 A2b: cut the short-replace branch (PlaceholderEdit + single-message body)
-        // to the controller behind a flag. When it fires the CONTROLLER owns the lease, so
-        // the sink must NOT also acquire `SinkDeliveryLeaseGuard` below (a second CAS on
-        // the non-reentrant cell would fail → markerless). Restricted to a real ordered
-        // `[start,end)` (the legacy guard's lease condition): a degenerate range stays
-        // legacy (markerless, advance no-ops) → byte-identical.
+        // #3089 A2b: cut the short-replace branch (PlaceholderEdit + single-message body) to
+        // the controller behind a flag (CONTROLLER owns the single lease — sink skips
+        // `SinkDeliveryLeaseGuard`, no double-acquire). ONLY a real ordered `[start,end)`
+        // (degenerate stays legacy → byte-identical). EMPTY `relay_text` ALSO stays legacy
+        // (review-fix M2): legacy `replace_long_message_raw_with_outcome` treats zero chunks as
+        // `EditedOriginal` (delivered/advance, `formatting.rs:2063`) but the controller returns
+        // `Skipped` (no-advance) for `body.is_empty()` — diverting would flip → Transient.
         let cutover_range = match (
             delivery.frame_turn_start_offset,
             delivery.terminal_consumed_end,
@@ -851,19 +848,17 @@ impl SessionBoundDiscordRelaySink {
         };
         let cutover_short_replace = sink_short_replace_controller_enabled()
             && cutover_range.is_some()
+            && !relay_text.is_empty()
             && matches!(route, SessionBoundTerminalDeliveryRoute::PlaceholderEdit(_))
             && !session_bound_should_send_new_chunks_for_placeholder(&relay_text);
 
         // #3151: acquire the in-flight `Leased{Sink}` marker BEFORE the POST (see
-        // `SinkDeliveryLeaseGuard`). ONLY a real ordered `[start,end)`; this ONE acquire
-        // covers the legacy long-chunk + new-message branches — the cut-over
-        // short-replace branch is EXCLUDED (`!cutover_short_replace`) so the CONTROLLER
-        // owns its lease (no double-acquire).
-        let sink_lease_guard = match (
-            delivery.frame_turn_start_offset,
-            delivery.terminal_consumed_end,
-        ) {
-            (Some(start), Some(end)) if end > start && !cutover_short_replace => {
+        // `SinkDeliveryLeaseGuard`). The legacy long-chunk + new-message branches acquire
+        // ONE marker over the real ordered `cutover_range`; the cut-over short-replace branch
+        // is EXCLUDED (the CONTROLLER owns its lease — no double-acquire). The pure
+        // `sink_guard_lease_range` encodes that (review-fix Medium-1).
+        let sink_lease_guard = sink_guard_lease_range(cutover_range, cutover_short_replace)
+            .and_then(|(start, end)| {
                 let sink_turn = super::turn_finalizer::TurnKey::new(
                     channel,
                     delivery.frame_turn_user_msg_id,
@@ -871,16 +866,21 @@ impl SessionBoundDiscordRelaySink {
                 );
                 let cell = shared.delivery_lease(channel);
                 SinkDeliveryLeaseGuard::acquire(&cell, sink_turn, start, end)
-            }
-            _ => None,
-        };
+            });
 
         if let SessionBoundTerminalDeliveryRoute::PlaceholderEdit(msg_id) = route {
             if let Some((start, end)) = cutover_range.filter(|_| cutover_short_replace) {
+                // Live path: the real `DiscordGateway` (the seam the ON-path test fakes).
+                let gateway = super::gateway::DiscordGateway::new(
+                    http.clone(),
+                    shared.clone(),
+                    provider.clone(),
+                    None,
+                );
                 return self
                     .deliver_short_replace_via_controller(
+                        &gateway,
                         &shared,
-                        &http,
                         &provider,
                         channel,
                         channel_id,
@@ -2690,6 +2690,264 @@ mod tests {
             true,
         ));
         assert!(matches!(partial, toc::DeliveryOutcome::Unknown));
+    }
+
+    // #3089 A2b (review-fix Medium-1): drive the flag-ON `deliver_response`
+    // short-replace branch through the PRODUCTION helper
+    // (`deliver_short_replace_via_controller`) with an injectable
+    // `TurnGateway` and REAL on-disk inflight, so the test exercises the actual
+    // production wiring — the FRESH-reload identity-gated `advance` and the
+    // no-double-acquire guard skip — not a local stub. This is the test the
+    // earlier `run_short_replace_controller` characterization could not be: it
+    // passed a stub `|_| advance_returns` closure, so replacing the production
+    // advance with unconditional `true` (or dropping the guard-skip) did not
+    // fail it.
+    //
+    // Mutation guards proven here:
+    //  (a) advance = unconditional `true` (instead of the fresh identity gate):
+    //      the MISMATCH case below would flip `NotDelivered`/no-advance into
+    //      `Delivered`/advance and fail.
+    //  (b) guard-skip removed (`&& !cutover_short_replace` dropped from
+    //      `sink_guard_lease_range`): `cutover_skips_sink_guard_acquire` fails.
+    #[test]
+    fn cutover_short_replace_production_path_advance_is_fresh_identity_gated() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        struct EnvReset(Option<std::ffi::OsString>);
+        impl Drop for EnvReset {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+                }
+            }
+        }
+        let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let temp = tempfile::TempDir::new().unwrap();
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
+        // The sink's `SinkPostHeartbeat` spawns a `DeliveryLeaseHeartbeat` task,
+        // which needs a Tokio reactor. Drive the production helper on a local
+        // current-thread runtime (sync `#[test]` keeps the env-lock guard valid).
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let session = "AgentDesk-claude-8041";
+        let channel = ChannelId::new(8_041);
+        let provider = ProviderKind::Claude;
+        // A real ordered [start,end) so the cut-over guard-skip applies and the
+        // controller acquires the SINGLE lease.
+        let (start, end) = (0u64, 256u64);
+        let delivery =
+            delivery_with_fence_offset(session, Some(end), 0, "2026-06-04T00:00:00Z", Some(0));
+
+        // ---- MATCH: the on-disk inflight identity matches the frame ----------
+        // The fresh-reload identity gate inside the production `advance` closure
+        // returns true → Delivered AND the committed offset advances to `end`.
+        let shared = super::super::make_shared_data_for_tests();
+        let sink = SessionBoundDiscordRelaySink::new(Arc::new(HealthRegistry::new()));
+        let matching = inflight_with_identity_offset(
+            channel.get(),
+            session,
+            0,
+            "2026-06-04T00:00:00Z",
+            Some(0),
+        );
+        super::super::inflight::save_inflight_state(&matching).expect("persist matching inflight");
+        assert_eq!(shared.committed_relay_offset(channel), 0);
+
+        let gateway = ShortReplaceFakeGateway {
+            outcome: super::super::formatting::ReplaceLongMessageOutcome::EditedOriginal,
+            ok: true,
+            replace_calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let trace = SessionRelayTraceContext::default();
+        let outcome = rt
+            .block_on(sink.deliver_short_replace_via_controller(
+                &gateway,
+                &shared,
+                &provider,
+                channel,
+                channel.get(),
+                MessageId::new(99),
+                "answer",
+                &delivery,
+                &trace,
+                start,
+                end,
+            ))
+            .expect("matching-identity cut-over delivery is Ok");
+        assert!(
+            matches!(outcome, SessionRelayDeliveryOutcome::Delivered),
+            "MATCH: the fresh identity gate advances → Delivered"
+        );
+        assert_eq!(
+            shared.committed_relay_offset(channel),
+            end,
+            "MATCH: the production advance ran the FRESH identity gate and advanced to end"
+        );
+        assert_eq!(
+            gateway
+                .replace_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "exactly ONE transport POST through the injected gateway"
+        );
+
+        // ---- MISMATCH: the on-disk inflight identity DIVERGES ----------------
+        // A different turn now owns the channel (later turn_start_offset). The
+        // production `advance` closure re-loads inflight FRESH and the gate
+        // REFUSES → NotDelivered AND the committed offset does NOT advance.
+        // A mutation that hard-codes advance=`true` would advance here and Deliver.
+        let shared2 = super::super::make_shared_data_for_tests();
+        let sink2 = SessionBoundDiscordRelaySink::new(Arc::new(HealthRegistry::new()));
+        let mismatched = inflight_with_identity_offset(
+            channel.get(),
+            session,
+            0,
+            "2026-06-04T00:00:00Z",
+            Some(4096),
+        );
+        super::super::inflight::save_inflight_state(&mismatched)
+            .expect("persist mismatched inflight");
+        assert_eq!(shared2.committed_relay_offset(channel), 0);
+
+        let gateway2 = ShortReplaceFakeGateway {
+            outcome: super::super::formatting::ReplaceLongMessageOutcome::EditedOriginal,
+            ok: true,
+            replace_calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let outcome2 = rt
+            .block_on(sink2.deliver_short_replace_via_controller(
+                &gateway2,
+                &shared2,
+                &provider,
+                channel,
+                channel.get(),
+                MessageId::new(99),
+                "answer",
+                &delivery,
+                &trace,
+                start,
+                end,
+            ))
+            .expect("mismatched-identity cut-over delivery is still Ok (POST landed)");
+        // The POST landed (sink-local Delivered maps both lease outcomes), but the
+        // committed offset must NOT advance — the gate refused. The decisive
+        // mutation-sensitive assertion is the offset, not the sink-local outcome.
+        assert!(matches!(outcome2, SessionRelayDeliveryOutcome::Delivered));
+        assert_eq!(
+            shared2.committed_relay_offset(channel),
+            0,
+            "MISMATCH: the FRESH identity gate must REFUSE the advance (offset stays 0). \
+             A hard-coded advance=true mutation advances here and fails this assertion."
+        );
+        assert_eq!(
+            gateway2
+                .replace_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the mismatched run still POSTs once (markerless-equivalent), only the advance differs"
+        );
+    }
+
+    // #3089 A2b (review-fix Medium-1): the no-double-acquire invariant — a
+    // cut-over short-replace turn must SKIP the legacy `SinkDeliveryLeaseGuard`
+    // acquire so the controller owns the SINGLE lease. The pure
+    // `sink_guard_lease_range` returns `None` for any cut-over turn; dropping the
+    // `&& !cutover_short_replace` exclusion (the guard-skip mutation) makes it
+    // return `Some(..)` and fails here, while the legacy (non-cutover) branches
+    // still acquire over a real ordered range.
+    #[test]
+    fn cutover_skips_sink_guard_acquire() {
+        // Cut-over ON + a real ordered range → guard MUST be skipped (no double-acquire).
+        assert_eq!(
+            sink_guard_lease_range(Some((0, 256)), true),
+            None,
+            "a cut-over short-replace turn must NOT acquire the legacy sink guard \
+             (no double-acquire — the controller owns the single lease)"
+        );
+        // Cut-over OFF (legacy long-chunk / new-message) → guard acquires the range.
+        assert_eq!(
+            sink_guard_lease_range(Some((0, 256)), false),
+            Some((0, 256)),
+            "the legacy branches still acquire ONE sink guard over the ordered range"
+        );
+        // Absent range (degenerate / no fence) → no guard either way.
+        assert_eq!(sink_guard_lease_range(None, false), None);
+        assert_eq!(sink_guard_lease_range(None, true), None);
+    }
+
+    // #3089 A2b (review-fix M2): an EMPTY body diverges between the controller and
+    // legacy, so the cut-over gate (`!relay_text.is_empty()`) MUST keep empty bodies
+    // on the legacy path. This proves the divergence the gate guards against: the
+    // controller returns `Skipped` (→ the sink maps it to `Err(Transient)`, no-advance)
+    // for an empty body, whereas legacy `replace_long_message_raw_with_outcome` treats
+    // zero chunks as `EditedOriginal` (delivered/advance, `formatting.rs:2063`). Without
+    // the `!relay_text.is_empty()` gate a nonempty answer that sanitises to empty would
+    // flip delivered/advance → Transient/no-advance.
+    #[test]
+    fn controller_skips_empty_body_so_cutover_gate_keeps_it_legacy() {
+        let ch = ChannelId::new(8_041);
+        let cell = Arc::new(super::super::DeliveryLeaseCell::new(ch));
+        let turn = super::super::turn_finalizer::TurnKey::new(ch, 7, 0);
+        let controller = super::super::placeholder_controller::PlaceholderController::default();
+        // Gateway whose transport would PANIC if reached — the empty-body short-circuit
+        // must return `Skipped` BEFORE any transport (the controller never POSTs empty).
+        let gateway = ShortReplaceFakeGateway {
+            outcome: super::super::formatting::ReplaceLongMessageOutcome::EditedOriginal,
+            ok: true,
+            replace_calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let hb = NoopHeartbeat;
+        let advance = |_r: (u64, u64)| -> bool { true };
+        let result = futures::executor::block_on(toc::deliver_turn_output(
+            &gateway,
+            toc::TurnOutputCtx {
+                turn,
+                owner: RelayOwnerKind::SessionBoundRelay,
+                holder: super::super::LeaseHolder::Sink,
+                lease: &*cell,
+                channel_id: ch,
+                placeholder_controller: &controller,
+                placeholder: toc::PlaceholderSlot::Active {
+                    message_id: MessageId::new(99),
+                    key: super::super::placeholder_controller::PlaceholderKey {
+                        provider: ProviderKind::Claude,
+                        channel_id: ch,
+                        message_id: MessageId::new(99),
+                    },
+                },
+                body: "",
+                send_range: (10, 42),
+                plan: toc::OutputPlan::Replace {
+                    lifecycle: PlaceholderLifecycle::Active,
+                },
+                edit_fail_policy: toc::EditFailPlaceholderPolicy::PreserveAlways,
+                fallback_commit_policy: toc::FallbackCommitPolicy::CommitOnFallback,
+                acquire_failure_mode: toc::AcquireFailureMode::ProceedMarkerless,
+                advance: Some(&advance),
+                heartbeat: Some(&hb),
+            },
+        ));
+        assert!(
+            matches!(result, toc::DeliveryOutcome::Skipped),
+            "the controller short-circuits an empty body to Skipped (legacy would advance) — \
+             so the cut-over gate must keep empty bodies on the legacy path"
+        );
+        assert_eq!(
+            gateway
+                .replace_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "an empty body never reaches transport on the controller path"
+        );
+        assert!(
+            matches!(cell.read(), super::super::LeaseSnapshot::Unleased),
+            "an empty-body Skip never touches the lease"
+        );
     }
 
     #[allow(dead_code)] // #3034: test helper superseded by `inflight_with_identity_offset`.
