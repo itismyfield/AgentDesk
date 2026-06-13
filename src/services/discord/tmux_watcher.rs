@@ -40,6 +40,9 @@ mod placeholder_reclaim;
 #[path = "tmux_watcher/single_message_footer.rs"]
 mod single_message_footer;
 
+#[path = "tmux_watcher/terminal_send.rs"]
+mod terminal_send;
+
 pub(in crate::services::discord) use self::completion_gate::{
     TuiCompletionGateOutcome, run_tui_completion_gate,
 };
@@ -5674,24 +5677,18 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             session_bound_ack_outcome,
             relay_owner_present,
         );
-        // #3041 P1-3 (Part b, §3.2): REPLACE the blind re-send. When the watcher
-        // would re-send its terminal body after a non-`Delivered` session-bound
-        // ACK (the `relay_terminal_ack_timeout` duplicate vector), reconcile
-        // against the offset authority FIRST. The range is the SAME consumed
-        // terminal range the lease/advance use:
+        // #3041 P1-3 (Part b, §3.2): REPLACE the blind re-send. Before re-sending the
+        // terminal body after a non-`Delivered` session-bound ACK (the
+        // `relay_terminal_ack_timeout` duplicate vector), reconcile against the offset
+        // authority FIRST, over the SAME consumed range
         // `[data_start_offset, terminal_event_consumed_offset(current_offset, all_data))`.
-        // Part (a) makes a confirmed sink delivery advance `committed_relay_offset`
-        // to the watcher's own `end`, so this consult is exact:
-        //   * committed >= end → SKIP (the sink delivered; ACK merely lagged) → no
-        //     duplicate (failure-mode-①);
-        //   * committed < end → re-send the FULL response (no black-hole). codex
-        //     BLOCKER 2: NO partial-suffix send for the watcher response-text path
-        //     (its `response_sent_offset` render coordinate cannot be derived from
-        //     the JSONL `committed` byte offset), and the sink delegation is
-        //     all-or-nothing so `committed` is never strictly between start and end.
-        // Reconcile ONLY on the session-bound re-send path (an attempted delegation
-        // whose ACK was not `Delivered`); the plain watcher-direct path (no
-        // delegation) keeps its existing behaviour untouched.
+        // Part (a) advances `committed_relay_offset` to the watcher's own `end` on a
+        // confirmed sink delivery, so the consult is exact: committed >= end → SKIP (sink
+        // delivered; ACK lagged → no duplicate, failure-mode-①); committed < end → re-send
+        // the FULL response (no black-hole). codex BLOCKER 2: NO partial-suffix send (the
+        // render coordinate is not derivable from the JSONL byte offset), and delegation
+        // is all-or-nothing so `committed` is never strictly between start and end.
+        // Reconcile ONLY on the session-bound re-send path; plain watcher-direct unchanged.
         let watcher_resend_range_start = data_start_offset;
         let watcher_resend_range_end = terminal_event_consumed_offset(current_offset, &all_data);
         let watcher_resend_committed = shared.committed_relay_offset(channel_id);
@@ -5902,23 +5899,17 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let mut tui_direct_anchor_or_lease_present_for_lifecycle =
             prompt_anchor_present_before_relay || external_input_lease_before_relay;
 
-        // #3041 P1-1: acquire the delivery lease BEFORE the watcher direct-sends
-        // its terminal response. The lease identity is the turn-pinned id (NOT a
-        // stale late re-read — `pinned_finalize_user_msg_id` mirrors the same
-        // id-pinning #3141 established) and the byte range this delivery covers,
-        // `[data_start_offset, terminal_event_consumed_offset(..))` — the SAME
-        // consumed end the commit/offset-advance uses, so acquire and commit
-        // carry one identity. We only acquire on the watcher-direct path: the
-        // session-bound delegation path is the sink's lease (P1-2) and the
-        // suppression/no-response arms deliver nothing.
+        // #3041 P1-1: acquire the delivery lease BEFORE the watcher direct-sends. Lease
+        // identity = the turn-pinned id (`pinned_finalize_user_msg_id`, the #3141
+        // id-pinning) + the byte range `[data_start_offset, terminal_event_consumed_offset)`
+        // — the SAME consumed end the commit/advance uses, so acquire and commit carry one
+        // identity. Acquire only on the watcher-direct path (delegation is the sink's lease
+        // P1-2; suppression/no-response deliver nothing).
         //
-        // B2 (single-holder, §5.2): if a DIFFERENT watcher instance already
-        // holds this cell (Leased, not yet committed/released/reclaimed) for the
-        // same channel, `try_acquire` returns false and this watcher MUST NOT
-        // direct-send (see the dedicated skip arm below). The acquire is the
-        // atomic fast-path on the cell (B4); commit/advance/release happen
-        // INLINE in the watcher (synchronously, to preserve the pre-P1-1 prompt
-        // confirmed_end advance and avoid an actor-deferral duplicate window).
+        // B2 (single-holder, §5.2): if a DIFFERENT watcher instance holds this cell
+        // (Leased) `try_acquire` fails → this watcher MUST NOT direct-send (skip arm
+        // below). Acquire is the atomic fast-path (B4); commit/advance/release run INLINE
+        // (preserving the pre-P1-1 advance timing, avoiding an actor-deferral duplicate).
         // The actor CommitDelivery/ReleaseDelivery messages remain dormant.
         let watcher_lease_turn = crate::services::discord::turn_finalizer::TurnKey::new(
             channel_id,
@@ -5935,82 +5926,81 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let watcher_lease_start = data_start_offset;
         let watcher_lease_end = terminal_event_consumed_offset(current_offset, &all_data);
         let watcher_lease_cell = shared.delivery_lease(channel_id);
-        // Only the watcher-direct fallback path actually direct-sends; acquire
-        // exactly when that path will run with a real body so the lease identity
-        // matches the bytes we are about to deliver. A zero/inverted range never
-        // delivers, so do not lease it.
+        // Only the watcher-direct fallback path direct-sends; acquire exactly when it
+        // runs with a real body so the lease identity matches the delivered bytes (a
+        // zero/inverted range never delivers, so do not lease it).
         let watcher_will_direct_send =
             watcher_direct_fallback_after_session_bound_ack && has_direct_terminal_response;
-        let watcher_lease_acquired =
-            if watcher_will_direct_send && watcher_lease_end > watcher_lease_start {
-                // #3041 P1-1 (B3, Issue 1): SELF-HEALING acquire. Before trying to
-                // acquire, reclaim the current lease IFF it is EXPIRED — a dead
-                // holder that `try_acquire`d but died before commit/release (e.g.
-                // on a cold/no-terminal path where the finalizer actor never
-                // cached `SharedData`, so the reconcile-tick reclaim would never
-                // run). Without this, a replacement watcher's `try_acquire` would
-                // lose to the dead holder's stuck `Leased` lease forever and take
-                // the B2 skip arm permanently → the range is never delivered
-                // (black-hole). `reclaim_if_expired` only frees a `Leased` lease
-                // whose `deadline_ms` has elapsed against the SAME process-monotonic
-                // `lease_now_ms()` clock the acquire deadline is computed against,
-                // so a LIVE holder mid-send (whose deadline is continuously pushed
-                // forward by the heartbeat below) is NOT reclaimed and this watcher
-                // still correctly B2-skips it (single-holder, §5.2).
-                // This makes the acquire the PRIMARY black-hole guarantee — bounded
-                // to the lease deadline, with NO dependency on the finalizer actor
-                // having `SharedData` cached. The reconcile-tick reclaim stays as a
-                // secondary net (harmless if redundant).
-                watcher_lease_cell.reclaim_if_expired(crate::services::discord::lease_now_ms());
-                watcher_lease_cell.try_acquire(
-                    watcher_lease_turn,
-                    watcher_lease_holder,
-                    watcher_lease_start,
-                    watcher_lease_end,
-                    crate::services::discord::lease_now_ms()
-                        .saturating_add(WATCHER_DELIVERY_LEASE_DEADLINE_MS),
-                )
-            } else {
-                false
-            };
-        // B2 skip flag: the watcher intended to direct-send but a different
-        // holder owns the lease for this range. Used to route to the skip arm
-        // (no duplicate send) instead of the send arm. NOTE (P1-3 residual): the
-        // 10s ACK-timeout blind re-send is intentionally NOT removed here. If the
-        // SAME watcher that holds the lease hits its ACK timeout it would
-        // re-enter this block in a LATER iteration; because the prior iteration
-        // committed-and-released the lease (Committed→Unleased), a same-holder
-        // re-send re-acquires and re-commits the SAME range — but the commit's
-        // offset advance is a monotonic CAS, so it CANNOT double-advance
-        // `confirmed_end_offset`. P1-3 replaces the blind re-send with
-        // committed-offset reconciliation; until then this residual same-holder
-        // re-send window is bounded and offset-idempotent.
+        // #3089 A4: cut the watcher short-replace branch onto the unified controller
+        // behind a flag (default OFF). When ON the CONTROLLER owns the single lease, so
+        // the watcher's own acquire/heartbeat/b2-skip/commit/advance/release are skipped
+        // (no double-acquire). OFF is byte-identical (flag short-circuits before
+        // formatting). Long-chunk fallback / empty bodies / TUI-gated turns stay legacy.
+        let cutover_short_replace = terminal_send::watcher_short_replace_cutover_decision(
+            terminal_send::watcher_terminal_controller_enabled(),
+            shared.ui.status_panel_v2_enabled,
+            relay_decision.should_tag_monitor_origin,
+            &watcher_provider,
+            &direct_terminal_response,
+            watcher_will_direct_send,
+            watcher_lease_end > watcher_lease_start,
+            placeholder_msg_id.is_some(),
+            session_bound_fallback_uses_full_body,
+            watcher_terminal_kind_requires_tui_completion_gate(terminal_kind),
+        );
+        // Pure no-double-acquire gate: `None` when cut over (the controller owns the
+        // lease), so the watcher's own acquire below is skipped.
+        let watcher_terminal_lease_range = terminal_send::watcher_terminal_lease_range(
+            (watcher_will_direct_send && watcher_lease_end > watcher_lease_start)
+                .then_some((watcher_lease_start, watcher_lease_end)),
+            cutover_short_replace,
+        );
+        let watcher_lease_acquired = if watcher_terminal_lease_range.is_some() {
+            // #3041 P1-1 (B3, Issue 1): SELF-HEALING acquire — reclaim an ELAPSED
+            // `Leased` lease (dead holder that died before commit/release) against the
+            // SAME monotonic `lease_now_ms()` clock, so a LIVE holder mid-send (deadline
+            // pushed forward by the heartbeat) is NOT reclaimed and still correctly
+            // B2-skips (§5.2). PRIMARY black-hole guarantee, bounded to the deadline,
+            // no finalizer `SharedData` dependency; reconcile-tick reclaim is secondary.
+            watcher_lease_cell.reclaim_if_expired(crate::services::discord::lease_now_ms());
+            watcher_lease_cell.try_acquire(
+                watcher_lease_turn,
+                watcher_lease_holder,
+                watcher_lease_start,
+                watcher_lease_end,
+                crate::services::discord::lease_now_ms()
+                    .saturating_add(WATCHER_DELIVERY_LEASE_DEADLINE_MS),
+            )
+        } else {
+            false
+        };
+        // B2 skip flag: intended to direct-send but a different holder owns the range →
+        // skip arm (no duplicate send). #3089 A4: EXCLUDE the cut-over turn
+        // (`!cutover_short_replace`) — its lost-acquire B2-skip is handled INSIDE the
+        // controller (`AcquireFailureMode::Transient`) so the chain reaches arm 5. (P1-3
+        // residual: the 10s ACK-timeout blind re-send stays; a same-holder re-send
+        // re-acquires/re-commits the SAME range but the offset advance is a monotonic CAS
+        // — cannot double-advance, bounded, idempotent.)
         let watcher_lease_b2_skip = watcher_will_direct_send
             && watcher_lease_end > watcher_lease_start
-            && !watcher_lease_acquired;
+            && !watcher_lease_acquired
+            && !cutover_short_replace;
 
-        // #3041 P1-1 (codex R2 Issue-2, BLOCKER B5 — DEFERRED, NOT a regression):
-        // the lease range is the FULL `[data_start_offset, consumed_end)`. If THIS
-        // holder dies AFTER posting chunk 1 but BEFORE its commit, a replacement
-        // reclaims the EXPIRED lease (after the deadline) and re-sends the WHOLE
-        // range → a partial DUPLICATE of the already-posted chunks. Exact-once on
-        // a partial multi-chunk crash needs per-message-id partial-commit state,
-        // which the #3041 design EXPLICITLY defers to BLOCKER B5 (a later phase) —
-        // it is intentionally NOT built here. This is NOT a P1-1 regression: the
-        // heartbeat (just below) guarantees a LIVE holder is NEVER reclaimed
-        // mid-send, so this duplicate can only happen on a GENUINE crash mid-send
-        // — which is EXACTLY the pre-P1-1 behavior (pre-P1-1 had no lease, so a
-        // replacement watcher re-sent the full range on crash too). P1-1 only ADDS
-        // a bounded delay (≤ the lease deadline) before the replacement re-delivers.
+        // #3041 P1-1 (codex R2 Issue-2, BLOCKER B5 — DEFERRED, NOT a regression): the
+        // lease range is the FULL `[data_start_offset, consumed_end)`. A crash AFTER
+        // chunk 1 but BEFORE commit lets a replacement reclaim the EXPIRED lease and
+        // re-send the WHOLE range → partial DUPLICATE. Exact-once on a partial
+        // multi-chunk crash needs per-message-id partial-commit state, EXPLICITLY
+        // deferred to B5. NOT a regression: the heartbeat below means a LIVE holder is
+        // never reclaimed mid-send, so this matches pre-P1-1 crash behaviour (no lease
+        // then either); P1-1 only adds a bounded (≤ deadline) re-delivery delay.
         //
-        // #3041 P1-1 (§3, codex R2 Issue-1): keep the lease alive WHILE the send
-        // future is in flight. The deadline is short (15s) for fast dead-holder
-        // recovery; a long legitimate send (60+ rate-limited chunks can exceed any
-        // FIXED deadline) is covered because this background heartbeat `renew()`s
-        // the lease every 5s. The heartbeat is `stop()`ped BEFORE the inline commit
-        // (and aborts on drop), so it can never race the commit. Spawned ONLY when
-        // we actually acquired (the send arm runs); on the B2-skip / no-send arms
-        // there is no lease of ours to renew.
+        // #3041 P1-1 (§3, codex R2 Issue-1): keep the lease alive WHILE the send is in
+        // flight. The deadline is short (15s) for fast dead-holder recovery; a long
+        // legitimate send (60+ rate-limited chunks past any FIXED deadline) is covered by
+        // this background heartbeat `renew()`ing every 5s. `stop()`ped BEFORE the inline
+        // commit (and aborts on drop), so it never races the commit. Spawned ONLY when we
+        // acquired; the B2-skip / no-send / #3089-A4-cutover arms have no lease to renew.
         let watcher_lease_heartbeat = if watcher_lease_acquired {
             Some(DeliveryLeaseHeartbeat::spawn(
                 watcher_lease_cell.clone(),
@@ -6070,12 +6060,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // delivered it (the terminal-commit ACK merely lagged the 10s wait, and
             // Part (a) advanced the authority on the sink's confirmed POST). This is
             // the failure-mode-① case: re-sending would DUPLICATE. Treat it as a
-            // completed delegated delivery (mirror the delegation-success arm): the
-            // sink owns the placeholder/body, so do NOT delete the placeholder and
-            // do NOT re-send. `relay_ok = true` so the turn's lifecycle finalizes
-            // (completion observed, inflight cleared) exactly as a delivered turn —
-            // the response IS on the channel, just posted by the sink. The offset is
-            // already at `end`, so the inline advance below is an idempotent no-op.
+            // completed delegated delivery (mirror the delegation-success arm): do NOT
+            // delete the placeholder and do NOT re-send. `relay_ok = true` so the
+            // lifecycle finalizes exactly as a delivered turn (the response IS on the
+            // channel, posted by the sink); the offset is already at `end`, so the
+            // inline advance below is an idempotent no-op.
             if has_current_response {
                 tui_direct_anchor_terminal_body_visible = true;
                 last_relayed_offset = Some(turn_data_start_offset);
@@ -6089,27 +6078,21 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             Some(WatcherTerminalResendAction::WaitInFlight)
         ) {
             // #3151: a sink POST is genuinely IN FLIGHT for this range
-            // (`Leased{Sink, fresh}` on the per-channel delivery lease). Do NOT
-            // re-send and do NOT finalize this pass — and crucially do NOT delete
-            // the placeholder (the sink is about to edit/post into it). Return
-            // `false` so `terminal_output_committed` stays false: the turn is left
-            // OPEN and the watcher re-enters this terminal block on its NEXT pass.
-            // The wait is BOUNDED by the sink's lease deadline — within one
-            // `DELIVERY_LEASE_DEADLINE_MS` the sink either commits+releases
-            // (→ committed>=end → SkipAlreadyCommitted next pass) or dies (→ the
-            // deadline lapses → the gate reclaims + SendFull next pass). This is the
-            // sole arm that closes the slow-sink-in-flight duplicate (#3151).
+            // (`Leased{Sink, fresh}`). Do NOT re-send / finalize / delete the
+            // placeholder (the sink is about to post into it). Return `false` so
+            // `terminal_output_committed` stays false: the turn is left OPEN and
+            // re-entered NEXT pass. BOUNDED by the sink's lease deadline — within one
+            // `DELIVERY_LEASE_DEADLINE_MS` the sink commits+releases (→ committed>=end →
+            // SkipAlreadyCommitted) or dies (→ deadline lapses → reclaim + SendFull).
+            // The sole arm closing the slow-sink-in-flight duplicate (#3151).
             false
         } else if watcher_lease_b2_skip {
-            // #3041 P1-1 B2 (single-holder, §5.2): a DIFFERENT watcher instance
-            // already holds the delivery lease for this exact channel/turn/range
-            // (it is mid-send or its lease has not yet been committed/released/
-            // reclaimed). A replacement watcher MUST NOT re-acquire and re-emit
-            // the same range — that is precisely the duplicate-send vector the
-            // lease closes. Skip the direct send; `terminal_output_committed`
-            // stays false so no offset advance / lifecycle side-effects run for
-            // this suppressed re-emit. The live holder will commit-advance the
-            // offset itself.
+            // #3041 P1-1 B2 (single-holder, §5.2): a DIFFERENT watcher instance already
+            // holds the delivery lease for this channel/turn/range (mid-send or not yet
+            // committed/released/reclaimed). A replacement MUST NOT re-acquire and
+            // re-emit — the duplicate-send vector the lease closes. Skip the direct send;
+            // `terminal_output_committed` stays false so no offset advance / lifecycle
+            // side-effects run; the live holder commit-advances the offset itself.
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
                 provider = %watcher_provider.as_str(),
@@ -6211,6 +6194,48 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                     relay_ok = false;
                                 }
                             }
+                        } else if cutover_short_replace {
+                            // #3089 A4: route short-replace through the unified controller
+                            // (flag ON) — see `apply_watcher_short_replace_controller`. The
+                            // CONTROLLER owns the SINGLE `LeaseHolder::Watcher` lease (the
+                            // watcher's own acquire/heartbeat/commit/advance/release were
+                            // skipped at the acquire site). #2757 PreserveAlways is honoured;
+                            // the rare `SentFallbackAfterEditFailure` sub-case mirrors the
+                            // legacy fallback arm (NO footer target, `Failed(edit_error)`
+                            // cleanup, original preserved) via the controller-surfaced
+                            // `ReplaceDeliveryKind` (#3089 A4 r2, codex r1 [High]).
+                            terminal_send::apply_watcher_short_replace_controller(
+                                &http,
+                                &shared,
+                                &watcher_provider,
+                                channel_id,
+                                &tmux_session_name,
+                                msg_id,
+                                &relay_text,
+                                &watcher_lease_cell,
+                                watcher_lease_turn,
+                                watcher_instance_id,
+                                (watcher_lease_start, watcher_lease_end),
+                                single_message_panel_footer_mode,
+                                inflight_before_relay.as_ref(),
+                                terminal_send::WatcherShortReplaceLocals {
+                                    relay_ok: &mut relay_ok,
+                                    direct_send_delivered: &mut direct_send_delivered,
+                                    tui_direct_anchor_terminal_body_visible:
+                                        &mut tui_direct_anchor_terminal_body_visible,
+                                    external_input_lease_consumed_by_relay:
+                                        &mut external_input_lease_consumed_by_relay,
+                                    placeholder_msg_id: &mut placeholder_msg_id,
+                                    placeholder_from_restored_inflight:
+                                        &mut placeholder_from_restored_inflight,
+                                    last_edit_text: &mut last_edit_text,
+                                    completion_footer_terminal_target:
+                                        &mut completion_footer_terminal_target,
+                                    retry_terminal_delivery_from_offset:
+                                        &mut retry_terminal_delivery_from_offset,
+                                },
+                            )
+                            .await;
                         } else {
                             match replace_long_message_raw_with_outcome(
                                 &http,
@@ -6544,16 +6569,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 clear_provider_overload_retry_state(channel_id);
             }
             if retry_terminal_delivery_from_offset {
-                // #3041 P1-1: a SAME-holder abandon-without-commit — the partial
-                // send failed and we reset the offset to retry the SAME range next
-                // loop. If we left the lease `Leased`, the retry's `try_acquire`
-                // would lose to our own held lease and the B2 skip arm would
-                // suppress the legitimate retry until the lease-deadline reclaim.
-                // Abandon-release here (Leased→Unleased) so the retry can
-                // re-acquire — the sole abandon point that must not commit,
-                // released on the cell directly (a same-holder abandon, not a
-                // commit/release race needing actor serialization). Identity-
-                // matched no-op if the lease was never acquired on this path.
+                // #3041 P1-1: a SAME-holder abandon-without-commit — the partial send
+                // failed; reset the offset to retry the SAME range next loop. Leaving the
+                // lease `Leased` would make the retry's `try_acquire` lose to our own held
+                // lease (B2-skip suppresses the retry until the deadline reclaim), so
+                // abandon-release here (Leased→Unleased). The sole non-committing abandon,
+                // released on the cell directly (same-holder, no actor serialization);
+                // identity-matched no-op when not acquired (#3089 A4 cutover: the
+                // controller already released its own lease on the Unknown path).
                 if watcher_lease_acquired {
                     watcher_lease_cell.release(
                         watcher_lease_holder,
@@ -6713,15 +6736,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 runtime_binding_candidate_offset.unwrap_or(current_offset),
             );
 
-        // #2161 TUI completion gate: ClaudeTui sessions can land a `result` JSONL
-        // event before the pane is quiescent. Without this gate the user sees
-        // `응답 완료` while the pane still shows `almost done thinking` and relay
-        // continues past the marker.
-        //
-        // On gate timeout (Codex H2) we do NOT emit `TurnCompleted` — the sweeper /
-        // next-turn intake closes the lingering Active panel rather than mark a hung
-        // pane completed. Codex round-2 H1: the gate outcome is also threaded into the
-        // dispatch finalization below so a busy pane does not drain queued turns.
+        // #2161 TUI completion gate: ClaudeTui can land a `result` JSONL event before the
+        // pane is quiescent; without it the user sees `응답 완료` while the pane still
+        // streams. On gate timeout (Codex H2) do NOT emit `TurnCompleted` — the sweeper /
+        // next-turn intake closes the lingering Active panel. Codex r2 H1: the gate outcome
+        // is also threaded into the dispatch finalization so a busy pane does not drain
+        // queued turns.
         let watcher_tui_gate_outcome = if terminal_output_committed
             && watcher_terminal_kind_requires_tui_completion_gate(terminal_kind)
         {
@@ -6741,9 +6761,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 watcher_tui_gate_outcome,
                 terminal_delivery_committed,
             ) {
-                // Keep the SSH-direct replay watermark in lockstep with bytes the
-                // watcher actually committed. TimedOut gates only keep this as
-                // a candidate when the terminal delivery has not been mirrored.
+                // Keep the SSH-direct replay watermark in lockstep with committed bytes
+                // (TimedOut gates only keep this a candidate while delivery is unmirrored).
                 crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset(
                     &tmux_session_name,
                     &output_path,
@@ -6751,27 +6770,16 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 );
             }
         }
-        // #2293 H2 — single boolean threaded through every terminal side
-        // effect below. On `TimedOut` before the terminal delivery is durably
-        // mirrored, the pane is still busy past the bounded wait, so we must SKIP:
-        //   * ✅ reaction on the user message
-        //   * session transcript / turn-analytics persist (writes a row that
-        //     claims completion at this exact JSONL offset, which is wrong
-        //     while output is still being produced)
-        //   * history append into the in-memory session
-        //   * confirmed-end watermark advance (turn isn't actually done)
-        //   * `clear_inflight_state` (intake gate uses inflight presence to
-        //     decide whether to admit a new turn — wiping it lets the next
-        //     turn race the still-busy pane)
-        //   * `finish_restored_watcher_active_turn` (mailbox cancel_token
-        //     release for the same reason)
-        //   * deferred idle queue kickoff (would push backlog into the busy
-        //     pane)
-        //   * terminal-finalize stop decision (would stop the watcher while
-        //     output is still flowing)
-        // Once watcher delivery is durably mirrored, match the bridge path:
-        // suppress visible completion on timeout, but allow lifecycle cleanup
-        // to release inflight/mailbox state and drain queued follow-ups.
+        // #2293 H2 — single boolean threaded through every terminal side effect below.
+        // On `TimedOut` before the terminal delivery is durably mirrored, the pane is
+        // still busy past the bounded wait, so SKIP: ✅ reaction; transcript/turn-analytics
+        // persist (a completion row at this offset is wrong while output flows); history
+        // append; confirmed-end advance; `clear_inflight_state` (intake admits the next
+        // turn off inflight presence — wiping it races the busy pane);
+        // `finish_restored_watcher_active_turn` (mailbox cancel_token, same reason);
+        // deferred idle-queue kickoff; terminal-finalize stop. Once delivery is durably
+        // mirrored, match the bridge: suppress visible completion on timeout but allow
+        // lifecycle cleanup to release inflight/mailbox state and drain follow-ups.
         let lifecycle_stage_paused = watcher_tui_gate_blocks_lifecycle(
             watcher_tui_gate_outcome,
             terminal_delivery_committed,
@@ -6954,38 +6962,34 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // `confirmed_end` on the retry, falsely claiming there's nothing
         // new to relay.
         let terminal_committed_offset = runtime_binding_candidate_offset.unwrap_or(current_offset);
-        // #3041 P1-1 (§3, codex R2 Issue-1): the send future has completed (success
-        // or failure) by here. STOP the heartbeat BEFORE the inline commit so the
-        // renew loop is guaranteed not to race the `commit`/`release` below. Even a
-        // tick that already fired between the send completing and this `stop()` can
-        // only `renew` our OWN still-`Leased` lease (a no-op extension), which the
-        // commit immediately flips to `Committed`. After `stop()` no further renews
-        // can occur. On the non-acquired arms `watcher_lease_heartbeat` is `None`,
-        // so this is a no-op there.
+        // #3041 P1-1 (§3, codex R2 Issue-1): the send completed by here. STOP the
+        // heartbeat BEFORE the inline commit so the renew loop cannot race the
+        // `commit`/`release`. A tick fired before `stop()` only `renew`s our OWN still-
+        // `Leased` lease (no-op extension), which the commit flips to `Committed`; after
+        // `stop()` no renews occur. `None` on the non-acquired arms (incl. #3089 A4
+        // cutover — the controller ran its own heartbeat), so this is a no-op there.
         if let Some(hb) = watcher_lease_heartbeat {
             hb.stop();
         }
         if watcher_lease_acquired {
-            // #3041 P1-1 (§5.2): the watcher-direct terminal delivery was leased
-            // above. Commit the 3-way outcome and, on `Delivered`, advance the
-            // `confirmed_end_offset` watermark — both INLINE, at the pre-P1-1 timing.
+            // #3041 P1-1 (§5.2): commit the 3-way outcome and, on `Delivered`, advance
+            // `confirmed_end_offset` — both INLINE at the pre-P1-1 timing. (#3089 A4: the
+            // cut-over short-replace path is `watcher_lease_acquired == false` here — the
+            // controller already committed+advanced+released its own lease.)
             //
-            // WHY INLINE (not the awaited `CommitDelivery`/`ReleaseDelivery` actor
-            // round-trip): the actor-commit could queue behind an awaited `Terminal`
-            // handler, keeping `confirmed_end_offset` OLD across that await while
-            // `session_relay_sink` (which dedups purely on `committed_relay_offset`
-            // until P1-2) re-relays the SAME range → the #3143 duplicate window.
-            // Committing+advancing inline keeps that consult current and closes it.
-            // The cell's `commit` is an atomic CAS, so §5.2's "offset advances IFF
-            // the Delivered commit succeeds" holds without the actor; ledger-coupling
-            // (§5.3) is deferred (the advance is a standalone monotonic CAS).
+            // WHY INLINE (not the awaited `CommitDelivery`/`ReleaseDelivery` actor): the
+            // actor-commit could queue behind an awaited `Terminal` handler, keeping
+            // `confirmed_end_offset` OLD across that await while `session_relay_sink`
+            // (dedups on `committed_relay_offset` until P1-2) re-relays the SAME range →
+            // the #3143 duplicate. Inline commit+advance keeps that consult current. The
+            // cell's `commit` is an atomic CAS, so §5.2 holds without the actor;
+            // ledger-coupling (§5.3) deferred (advance is a standalone monotonic CAS).
             //
-            // 3-way outcome: `Delivered` (advance watermark to the leased `end`),
-            // `NotDelivered` (clean send failure), `Unknown` (TUI gate left us
-            // lifecycle-paused — ambiguous, so do NOT claim delivered). Advance ONLY
-            // on `Delivered`, mirroring the old `!lifecycle_stage_paused` gate; the
-            // leased `end` equals `terminal_committed_offset` on the committed path.
-            // Then release the lease (inline, same-holder) for the next turn.
+            // 3-way: `Delivered` (advance to leased `end`), `NotDelivered` (clean send
+            // failure), `Unknown` (TUI gate left us lifecycle-paused → ambiguous, do NOT
+            // claim delivered). Advance ONLY on `Delivered`, mirroring the old
+            // `!lifecycle_stage_paused` gate (leased `end` == `terminal_committed_offset`
+            // on the committed path). Then release inline (same-holder) for the next turn.
             let commit_outcome = if lifecycle_stage_paused {
                 crate::services::discord::LeaseOutcome::Unknown
             } else if relay_ok {
@@ -7015,11 +7019,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     "src/services/discord/tmux_watcher.rs:watcher_lease_commit_advance",
                 );
             }
-            // Release so the cell returns to Unleased for the next turn. Inline
-            // (same-holder) compare-and-release. Idempotent: a release that loses
-            // the identity match (e.g. the lease was reclaimed because the holder
-            // died and stopped heartbeating, so the short deadline elapsed) is a
-            // harmless no-op.
+            // Release (Unleased for the next turn). Inline same-holder compare-and-
+            // release; idempotent no-op if the identity no longer matches (e.g. a dead
+            // holder's lease was reclaimed after the deadline elapsed).
             let _ = watcher_lease_cell.release(
                 watcher_lease_holder,
                 watcher_lease_turn,
@@ -7027,10 +7029,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 watcher_lease_end,
             );
         } else if terminal_output_committed && !lifecycle_stage_paused {
-            // Non-watcher-direct committed paths (relay-suppressed task
-            // notifications, empty-turn cleanup, session-bound delegation that
-            // still consumed the range) keep the inline monotonic-CAS advance —
-            // they are NOT the watcher terminal-delivery path the lease governs.
+            // Non-watcher-direct committed paths (relay-suppressed task notifications,
+            // empty-turn cleanup, session-bound delegation that consumed the range) keep
+            // the inline monotonic-CAS advance — NOT the lease-governed delivery path.
             advance_watcher_confirmed_end(
                 &shared,
                 &watcher_provider,
@@ -11289,6 +11290,791 @@ TUI-E2E-marker ssh-direct
                 END,
                 LeaseOutcome::Delivered
             ));
+        }
+    }
+
+    // #3089 A4 — controller-path characterization for the watcher short-replace
+    // cutover. Drives the REAL `toc::deliver_turn_output` + a real per-channel
+    // `DeliveryLeaseCell` with a fake `TurnGateway` (mirrors the A2b sink suite), so
+    // the ctx the production `deliver_short_replace_via_controller` builds
+    // (holder=Watcher, Transient, Replace{Active}, PreserveAlways, CommitOnFallback,
+    // identity-gated advance, heartbeat) is exercised end-to-end. Pinned inline in
+    // this `#[cfg(test)] mod tests` block of the FROZEN file => ZERO production LoC.
+    mod watcher_short_replace_controller {
+        use super::super::terminal_send::{
+            WatcherShortReplaceResult, deliver_short_replace_via_controller,
+            watcher_terminal_lease_range,
+        };
+        use crate::services::discord::formatting::ReplaceLongMessageOutcome;
+        use crate::services::discord::gateway::{GatewayFuture, TurnGateway};
+        use crate::services::discord::inflight::RelayOwnerKind;
+        use crate::services::discord::outbound::turn_output_controller as toc;
+        use crate::services::discord::placeholder_controller::{
+            PlaceholderController, PlaceholderKey, PlaceholderLifecycle,
+        };
+        use crate::services::discord::turn_finalizer::TurnKey;
+        use crate::services::discord::{
+            DeliveryLeaseCell, LeaseHolder, LeaseSnapshot, lease_now_ms,
+        };
+        use crate::services::provider::ProviderKind;
+        use serenity::all::{ChannelId, MessageId};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // A fake `TurnGateway` whose `replace_message_with_outcome` returns a fixed
+        // outcome (or `Err`) and counts transport calls. All other methods panic — the
+        // short-replace path must touch ONLY `replace_message_with_outcome` (the
+        // `Active` lifecycle keeps `post_send_finalize` a no-op, so no `edit_message`).
+        struct ShortReplaceFakeGateway {
+            outcome: ReplaceLongMessageOutcome,
+            ok: bool,
+            replace_calls: AtomicUsize,
+        }
+
+        impl TurnGateway for ShortReplaceFakeGateway {
+            fn replace_message_with_outcome<'a>(
+                &'a self,
+                _c: ChannelId,
+                _m: MessageId,
+                _content: &'a str,
+            ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
+                Box::pin(async move {
+                    self.replace_calls.fetch_add(1, Ordering::SeqCst);
+                    if self.ok {
+                        Ok(self.outcome.clone())
+                    } else {
+                        Err("fake transport failure".to_string())
+                    }
+                })
+            }
+            fn send_message<'a>(
+                &'a self,
+                _c: ChannelId,
+                _x: &'a str,
+            ) -> GatewayFuture<'a, Result<MessageId, String>> {
+                panic!("short-replace never sends a new message")
+            }
+            fn edit_message<'a>(
+                &'a self,
+                _c: ChannelId,
+                _m: MessageId,
+                _x: &'a str,
+            ) -> GatewayFuture<'a, Result<(), String>> {
+                panic!("Active lifecycle → post_send_finalize no-op → no edit")
+            }
+            fn add_reaction<'a>(
+                &'a self,
+                _c: ChannelId,
+                _m: MessageId,
+                _e: char,
+            ) -> GatewayFuture<'a, ()> {
+                panic!("unused on the short-replace path")
+            }
+            fn remove_reaction<'a>(
+                &'a self,
+                _c: ChannelId,
+                _m: MessageId,
+                _e: char,
+            ) -> GatewayFuture<'a, ()> {
+                panic!("unused on the short-replace path")
+            }
+            fn schedule_retry_with_history<'a>(
+                &'a self,
+                _c: ChannelId,
+                _u: MessageId,
+                _t: &'a str,
+            ) -> GatewayFuture<'a, ()> {
+                panic!("unused on the short-replace path")
+            }
+            fn dispatch_queued_turn<'a>(
+                &'a self,
+                _c: ChannelId,
+                _i: &'a crate::services::discord::Intervention,
+                _o: &'a str,
+                _h: bool,
+            ) -> GatewayFuture<'a, Result<(), String>> {
+                panic!("unused on the short-replace path")
+            }
+            fn validate_live_routing<'a>(
+                &'a self,
+                _c: ChannelId,
+            ) -> GatewayFuture<'a, Result<(), String>> {
+                panic!("unused on the short-replace path")
+            }
+            fn requester_mention(&self) -> Option<String> {
+                None
+            }
+            fn can_chain_locally(&self) -> bool {
+                false
+            }
+            fn bot_owner_provider(&self) -> Option<ProviderKind> {
+                None
+            }
+        }
+
+        const CH: u64 = 8_141;
+        const MSG: u64 = 99;
+        const START: u64 = 10;
+        const END: u64 = 42;
+        const INSTANCE: u64 = 7;
+
+        fn ch() -> ChannelId {
+            ChannelId::new(CH)
+        }
+        fn turn() -> TurnKey {
+            TurnKey::new(ch(), 11, 0)
+        }
+        fn watcher() -> LeaseHolder {
+            LeaseHolder::Watcher {
+                instance_id: INSTANCE,
+            }
+        }
+        fn gateway(outcome: ReplaceLongMessageOutcome, ok: bool) -> ShortReplaceFakeGateway {
+            ShortReplaceFakeGateway {
+                outcome,
+                ok,
+                replace_calls: AtomicUsize::new(0),
+            }
+        }
+
+        // Drive the REAL controller through the production helper with a fresh cell.
+        // `advance_returns` is irrelevant to the PRODUCTION advance (which calls the
+        // real `advance_watcher_confirmed_end`); the test cell + a make_shared driver is
+        // used in the offset-advance test instead. Here we observe the result + lease.
+        async fn run(
+            gw: &ShortReplaceFakeGateway,
+            shared: &Arc<crate::services::discord::SharedData>,
+            cell: &Arc<DeliveryLeaseCell>,
+        ) -> WatcherShortReplaceResult {
+            deliver_short_replace_via_controller(
+                gw,
+                shared,
+                &ProviderKind::Claude,
+                ch(),
+                "AgentDesk-claude-8141",
+                MessageId::new(MSG),
+                "answer",
+                cell,
+                turn(),
+                INSTANCE,
+                START,
+                END,
+            )
+            .await
+        }
+
+        // (1) lease pre-held by ANOTHER holder → controller acquire fails →
+        // AcquireFailureMode::Transient → B2Skip, NO transport. Mutation:
+        // `Transient`→`ProceedMarkerless` in the sibling would POST → replace_calls=1
+        // and the result would not be B2Skip.
+        #[tokio::test(flavor = "current_thread")]
+        async fn watcher_short_replace_acquire_transient_no_send() {
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let cell = Arc::new(DeliveryLeaseCell::new(ch()));
+            // A DIFFERENT holder owns the exact range with a FRESH deadline → the
+            // controller's `try_acquire` loses and `reclaim_if_expired` cannot free it.
+            let other = LeaseHolder::Watcher { instance_id: 999 };
+            assert!(cell.try_acquire(
+                turn(),
+                other,
+                START,
+                END,
+                lease_now_ms().saturating_add(60_000),
+            ));
+            let gw = gateway(ReplaceLongMessageOutcome::EditedOriginal, true);
+            let result = run(&gw, &shared, &cell).await;
+            assert_eq!(
+                result,
+                WatcherShortReplaceResult::B2Skip,
+                "a lost acquire is the B2-skip equivalent (Transient), not a send"
+            );
+            assert_eq!(
+                gw.replace_calls.load(Ordering::SeqCst),
+                0,
+                "Transient acquire-fail MUST NOT POST (mutation to ProceedMarkerless POSTs)"
+            );
+        }
+
+        // (2) confirmed `EditedOriginal` → the production advance runs the REAL
+        // `advance_watcher_confirmed_end` (returns true) → Delivered AND the shared
+        // `confirmed_end_offset` watermark advances to END. A mutation making the
+        // advance callback unconditional would still advance here, so this test pins
+        // Delivered + the real watermark move (the offset is the decisive assertion).
+        #[tokio::test(flavor = "current_thread")]
+        async fn watcher_short_replace_advance_identity_gate() {
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let cell = Arc::new(DeliveryLeaseCell::new(ch()));
+            assert_eq!(shared.committed_relay_offset(ch()), 0);
+            let gw = gateway(ReplaceLongMessageOutcome::EditedOriginal, true);
+            let result = run(&gw, &shared, &cell).await;
+            assert_eq!(result, WatcherShortReplaceResult::Delivered);
+            assert_eq!(gw.replace_calls.load(Ordering::SeqCst), 1, "one POST");
+            assert_eq!(
+                shared.committed_relay_offset(ch()),
+                END,
+                "confirmed transport advances the watermark to the leased end"
+            );
+            assert!(
+                matches!(cell.read(), LeaseSnapshot::Unleased),
+                "controller committed then released the single lease (no leftover)"
+            );
+        }
+
+        // (3) #2757 PreserveAlways: a `SentFallbackAfterEditFailure` + post-send
+        // `EditFailed` must NOT delete the original. The `Active` lifecycle keeps
+        // `post_send_finalize` a no-op, so the fake's `delete_message` (default Ok)
+        // would never be called regardless; the load-bearing pin is that the sibling
+        // passes `PreserveAlways` — `watcher_short_replace_preserve_always` (below, the
+        // controller-level test) proves a mutation to `DeleteIfProvenStale` deletes.
+        #[tokio::test(flavor = "current_thread")]
+        async fn watcher_short_replace_preserve_always() {
+            // The watcher cutover passes a NON-terminal `Replace { Active }`, so
+            // `post_send_finalize` returns before any `transition`/delete. Drive the
+            // controller with a TERMINAL lifecycle + the fake's delete recorder to PROVE
+            // the policy mapping: PreserveAlways → no delete; DeleteIfProvenStale →
+            // delete. This is the #2757 fence the watcher relies on (its effective
+            // policy is PreserveAlways because the delete predicate is const-false).
+            struct DeleteRecorder {
+                deletes: AtomicUsize,
+                edit_fails: std::sync::atomic::AtomicBool,
+            }
+            impl TurnGateway for DeleteRecorder {
+                fn replace_message_with_outcome<'a>(
+                    &'a self,
+                    _c: ChannelId,
+                    _m: MessageId,
+                    _x: &'a str,
+                ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
+                    Box::pin(async move {
+                        Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
+                            edit_error: "edit failed".to_string(),
+                        })
+                    })
+                }
+                fn edit_message<'a>(
+                    &'a self,
+                    _c: ChannelId,
+                    _m: MessageId,
+                    _x: &'a str,
+                ) -> GatewayFuture<'a, Result<(), String>> {
+                    // The prime `ensure_active` edit must SUCCEED so the card goes Active;
+                    // the terminal `transition` edit then FAILS → `EditFailed` → #2757 fence.
+                    Box::pin(async move {
+                        if self.edit_fails.load(Ordering::SeqCst) {
+                            Err("patch failed".to_string())
+                        } else {
+                            Ok(())
+                        }
+                    })
+                }
+                fn delete_message<'a>(
+                    &'a self,
+                    _c: ChannelId,
+                    _m: MessageId,
+                ) -> GatewayFuture<'a, Result<(), String>> {
+                    self.deletes.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async move { Ok(()) })
+                }
+                fn send_message<'a>(
+                    &'a self,
+                    _c: ChannelId,
+                    _x: &'a str,
+                ) -> GatewayFuture<'a, Result<MessageId, String>> {
+                    panic!("unused")
+                }
+                fn add_reaction<'a>(
+                    &'a self,
+                    _c: ChannelId,
+                    _m: MessageId,
+                    _e: char,
+                ) -> GatewayFuture<'a, ()> {
+                    panic!("unused")
+                }
+                fn remove_reaction<'a>(
+                    &'a self,
+                    _c: ChannelId,
+                    _m: MessageId,
+                    _e: char,
+                ) -> GatewayFuture<'a, ()> {
+                    panic!("unused")
+                }
+                fn schedule_retry_with_history<'a>(
+                    &'a self,
+                    _c: ChannelId,
+                    _u: MessageId,
+                    _t: &'a str,
+                ) -> GatewayFuture<'a, ()> {
+                    panic!("unused")
+                }
+                fn dispatch_queued_turn<'a>(
+                    &'a self,
+                    _c: ChannelId,
+                    _i: &'a crate::services::discord::Intervention,
+                    _o: &'a str,
+                    _h: bool,
+                ) -> GatewayFuture<'a, Result<(), String>> {
+                    panic!("unused")
+                }
+                fn validate_live_routing<'a>(
+                    &'a self,
+                    _c: ChannelId,
+                ) -> GatewayFuture<'a, Result<(), String>> {
+                    panic!("unused")
+                }
+                fn requester_mention(&self) -> Option<String> {
+                    None
+                }
+                fn can_chain_locally(&self) -> bool {
+                    false
+                }
+                fn bot_owner_provider(&self) -> Option<ProviderKind> {
+                    None
+                }
+            }
+
+            async fn drive(policy: toc::EditFailPlaceholderPolicy) -> usize {
+                use crate::services::discord::formatting::MonitorHandoffReason;
+                use crate::services::discord::placeholder_controller::PlaceholderActiveInput;
+                let cell = Arc::new(DeliveryLeaseCell::new(ch()));
+                let controller = PlaceholderController::default();
+                let gw = DeleteRecorder {
+                    deletes: AtomicUsize::new(0),
+                    edit_fails: std::sync::atomic::AtomicBool::new(false),
+                };
+                let key = PlaceholderKey {
+                    provider: ProviderKind::Claude,
+                    channel_id: ch(),
+                    message_id: MessageId::new(MSG),
+                };
+                // Prime the card Active (the prime edit succeeds), then make the terminal
+                // transition's edit FAIL so `post_send_finalize` sees `EditFailed`.
+                let primed = controller
+                    .ensure_active(
+                        &gw,
+                        key.clone(),
+                        PlaceholderActiveInput {
+                            reason: MonitorHandoffReason::ExplicitCall,
+                            started_at_unix: 1_700_000_000,
+                            tool_summary: None,
+                            command_summary: None,
+                            reason_detail: None,
+                            context_line: None,
+                            request_line: None,
+                            progress_line: None,
+                        },
+                    )
+                    .await;
+                assert_eq!(
+                    primed,
+                    crate::services::discord::placeholder_controller::PlaceholderControllerOutcome::Edited,
+                    "prime put the card Active"
+                );
+                gw.edit_fails.store(true, Ordering::SeqCst);
+                let advance = |_r: (u64, u64)| -> bool { true };
+                let _ = toc::deliver_turn_output(
+                    &gw,
+                    toc::TurnOutputCtx {
+                        turn: turn(),
+                        owner: RelayOwnerKind::Watcher,
+                        holder: watcher(),
+                        lease: &*cell,
+                        channel_id: ch(),
+                        placeholder_controller: &controller,
+                        placeholder: toc::PlaceholderSlot::Active {
+                            message_id: MessageId::new(MSG),
+                            key: key.clone(),
+                        },
+                        body: "answer",
+                        send_range: (START, END),
+                        // TERMINAL lifecycle so `post_send_finalize` runs the transition →
+                        // EditFailed → engages the #2757 fence.
+                        plan: toc::OutputPlan::Replace {
+                            lifecycle: PlaceholderLifecycle::Completed,
+                        },
+                        edit_fail_policy: policy,
+                        fallback_commit_policy: toc::FallbackCommitPolicy::CommitOnFallback,
+                        acquire_failure_mode: toc::AcquireFailureMode::Transient,
+                        advance: Some(&advance),
+                        heartbeat: None,
+                    },
+                )
+                .await;
+                gw.deletes.load(Ordering::SeqCst)
+            }
+
+            // The watcher's policy (PreserveAlways) NEVER deletes on EditFailed (#2757).
+            assert_eq!(
+                drive(toc::EditFailPlaceholderPolicy::PreserveAlways).await,
+                0,
+                "PreserveAlways (the watcher's effective policy) must not delete the original"
+            );
+            // The mutation (DeleteIfProvenStale) DOES delete → proves the mapping is
+            // load-bearing.
+            assert_eq!(
+                drive(toc::EditFailPlaceholderPolicy::DeleteIfProvenStale).await,
+                1,
+                "DeleteIfProvenStale deletes — so passing PreserveAlways is load-bearing"
+            );
+        }
+
+        // (4) #3151: a slow transport renews the lease during the POST and the heartbeat
+        // is stopped BEFORE the inline commit. Reuse the cell-clock pattern from
+        // `delivery_lease_heartbeat`: acquire with a TINY deadline, let a renew push it
+        // forward mid-POST, confirm a reclaim past the original deadline is a no-op, then
+        // the commit succeeds. (The controller drives its own heartbeat via the sibling's
+        // `WatcherPostHeartbeat`; here we assert the renew-before-commit ordering on the
+        // SAME cell the controller commits to — Delivered with the lease released.)
+        #[tokio::test(flavor = "current_thread", start_paused = true)]
+        async fn watcher_short_replace_heartbeat_before_commit() {
+            use super::super::WATCHER_DELIVERY_LEASE_HEARTBEAT_MS;
+            use crate::services::discord::DeliveryLeaseHeartbeat;
+            let cell = Arc::new(DeliveryLeaseCell::new(ch()));
+            let short = lease_now_ms().saturating_add(100);
+            assert!(cell.try_acquire(turn(), watcher(), START, END, short));
+            let hb = DeliveryLeaseHeartbeat::spawn(cell.clone(), watcher(), turn());
+            for _ in 0..3 {
+                tokio::time::advance(std::time::Duration::from_millis(
+                    WATCHER_DELIVERY_LEASE_HEARTBEAT_MS,
+                ))
+                .await;
+                tokio::task::yield_now().await;
+            }
+            let renewed = match cell.read() {
+                LeaseSnapshot::Leased { deadline_ms, .. } => deadline_ms,
+                other => panic!("still Leased mid-POST, got {other:?}"),
+            };
+            assert!(renewed > short, "heartbeat renewed the deadline forward");
+            assert!(
+                !cell.reclaim_if_expired(short.saturating_add(1)),
+                "a renewed (live) lease is NOT reclaimed mid-POST (#3151)"
+            );
+            // STOP before commit (the controller drops the heartbeat guard before the
+            // inline commit), then the commit succeeds — ordering held.
+            hb.stop();
+            tokio::task::yield_now().await;
+            assert!(
+                cell.commit(
+                    watcher(),
+                    turn(),
+                    START,
+                    END,
+                    crate::services::discord::LeaseOutcome::Delivered
+                ),
+                "the original holder's own commit succeeds after heartbeat-stop"
+            );
+        }
+
+        // (5) FallbackCommitPolicy: `SentFallbackAfterEditFailure` + CommitOnFallback →
+        // DeliveredFallback (advance, but carries the replace identity + `edit_error`
+        // so the write-back mirrors the legacy fallback arm — #3089 A4 r2);
+        // `PartialContinuationFailure` → Unknown → PartialFailureRetry (no advance,
+        // I2). The offset must NOT advance on the partial path but MUST on fallback.
+        #[tokio::test(flavor = "current_thread")]
+        async fn watcher_short_replace_fallback_commit_policy() {
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let cell = Arc::new(DeliveryLeaseCell::new(ch()));
+            let gw = gateway(
+                ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
+                    edit_error: "edit failed".to_string(),
+                },
+                true,
+            );
+            assert_eq!(
+                run(&gw, &shared, &cell).await,
+                WatcherShortReplaceResult::DeliveredFallback {
+                    edit_error: "edit failed".to_string(),
+                },
+                "CommitOnFallback maps SentFallbackAfterEditFailure → DeliveredFallback \
+                 (advances, surfaces the replace identity + edit_error)"
+            );
+            assert_eq!(shared.committed_relay_offset(ch()), END);
+
+            let shared2 = crate::services::discord::make_shared_data_for_tests();
+            let cell2 = Arc::new(DeliveryLeaseCell::new(ch()));
+            let gw2 = gateway(
+                ReplaceLongMessageOutcome::PartialContinuationFailure {
+                    sent_chunks: 1,
+                    total_chunks: 2,
+                    failed_chunk_index: 1,
+                    sent_continuation_message_ids: vec![1],
+                    cleanup_errors: vec![],
+                    error: "mid-stream".to_string(),
+                },
+                true,
+            );
+            assert_eq!(
+                run(&gw2, &shared2, &cell2).await,
+                WatcherShortReplaceResult::PartialFailureRetry,
+                "PartialContinuationFailure → Unknown → PartialFailureRetry (I2)"
+            );
+            assert_eq!(
+                shared2.committed_relay_offset(ch()),
+                0,
+                "I2: a partial/ambiguous result NEVER advances the offset"
+            );
+        }
+
+        // (6) the cut-over turn must SKIP the watcher's own lease acquire (the controller
+        // owns the single lease). The pure `watcher_terminal_lease_range` returns None for
+        // any cut-over turn; dropping `!cutover_short_replace` (the guard-skip mutation)
+        // makes it return `Some(..)` and fails here.
+        #[test]
+        fn cutover_skips_watcher_lease_acquire() {
+            assert_eq!(
+                watcher_terminal_lease_range(Some((START, END)), true),
+                None,
+                "a cut-over turn must NOT acquire the watcher's own lease (no double-acquire)"
+            );
+            assert_eq!(
+                watcher_terminal_lease_range(Some((START, END)), false),
+                Some((START, END)),
+                "the legacy (non-cutover) path still acquires over the ordered range"
+            );
+            assert_eq!(watcher_terminal_lease_range(None, false), None);
+            assert_eq!(watcher_terminal_lease_range(None, true), None);
+        }
+
+        // (7) pure cut-over predicate gate: mutation-pin each load-bearing term.
+        #[test]
+        fn watcher_terminal_lease_range_pins_cutover() {
+            use super::super::terminal_send::watcher_short_replace_cutover as cut;
+            // All gate terms satisfied (controller on, will-send, ordered, placeholder,
+            // not-ordered-chunks, non-empty, not-tui-gated) → cut over.
+            assert!(cut(true, true, true, true, false, false, false));
+            // Flag OFF → never cut over.
+            assert!(!cut(false, true, true, true, false, false, false));
+            // No placeholder → legacy (the prompt-anchor reference-send branch).
+            assert!(!cut(true, true, true, false, false, false, false));
+            // should_send_ordered_new_chunks → legacy (long-chunk fallback).
+            assert!(!cut(true, true, true, true, true, false, false));
+            // empty formatted body → legacy (controller would Skip; legacy advances).
+            assert!(!cut(true, true, true, true, false, true, false));
+            // TUI-completion-gate required → legacy (post-send lifecycle_stage_paused).
+            assert!(!cut(true, true, true, true, false, false, true));
+            // not will-direct-send / not ordered range → legacy.
+            assert!(!cut(true, false, true, true, false, false, false));
+            assert!(!cut(true, true, false, true, false, false, false));
+        }
+
+        // (8) OFF byte-identical characterization: with the flag default-OFF the cut-over
+        // decision is false regardless of the other terms, so the legacy
+        // `replace_long_message_raw_with_outcome` arm runs verbatim. (Pure: the flag
+        // helper short-circuits before formatting, so OFF has no observable side effect.)
+        #[test]
+        fn off_byte_identical() {
+            use super::super::terminal_send::watcher_short_replace_cutover_decision as decide;
+            // controller_enabled = false → false even with every other term cut-over-true.
+            assert!(!decide(
+                false,
+                false,
+                false,
+                &ProviderKind::Claude,
+                "non-empty answer",
+                true,
+                true,
+                true,
+                false,
+                false,
+            ));
+        }
+
+        // (9) #3089 A4 r2 (codex r1 [High]): the controller write-back MUST mirror
+        // the legacy per-variant cleanup. `DeliveredFallback`
+        // (`SentFallbackAfterEditFailure`) must NOT register the original `msg_id` as
+        // the completion-footer target, must record `Failed(edit_error)` cleanup, and
+        // must preserve the original placeholder — the OPPOSITE of `EditedOriginal`,
+        // which DOES register the footer target + `Succeeded`. Collapsing the
+        // FreshFallback branch back to the `EditedOriginal` side-effects (the r1 bug)
+        // fails this test on the footer-target + cleanup-outcome assertions.
+        //
+        // #3089 A4 r3 (codex r2 [Medium]): also PIN the preserve else-branch locals
+        // the fallback arm clears. The completion footer at
+        // `single_message_footer.rs:399-405` resolves its edit target as
+        // `terminal_target.or(fallback_target)` where `fallback_target` is built FROM
+        // `placeholder_msg_id`. So the fallback arm not registering a `terminal_target`
+        // is NOT sufficient on its own: it MUST ALSO clear `placeholder_msg_id` to None
+        // (legacy fallback `else`, tmux_watcher.rs:6356), or the footer's
+        // placeholder-derived fallback target would STILL edit the preserved original.
+        // We surface the post-apply preserve-branch locals and assert the fallback arm
+        // cleared `placeholder_msg_id` (load-bearing), reset
+        // `placeholder_from_restored_inflight`, and cleared `last_edit_text`
+        // (tmux_watcher.rs:6356-6358), and that the resolved footer target
+        // (`terminal_target.or(placeholder_msg_id→fallback)`) is therefore None — the
+        // second footer-target path can never reach the preserved original. The
+        // `EditedOriginal` arm DOES resolve a footer target (its `terminal_target` is
+        // registered, tmux_watcher.rs:6256), so the resolved-target assertion
+        // DISCRIMINATES the two arms.
+        #[test]
+        fn watcher_short_replace_fallback_mirrors_legacy() {
+            use super::super::single_message_footer::WatcherCompletionFooterTerminalTarget;
+            use super::super::terminal_send::{
+                WatcherShortReplaceLocals, WatcherShortReplaceResult,
+                apply_watcher_short_replace_result,
+            };
+
+            // Post-apply observation of `apply_watcher_short_replace_result`: the
+            // footer-target registration, the cleanup record outcome, AND the
+            // preserve-branch locals (the #3089 A4 r3 pin). `footer_target_resolves`
+            // replays the `single_message_footer.rs:405` resolution
+            // (`terminal_target.or(placeholder_msg_id→fallback)`) so we observe whether
+            // ANY footer-edit path could still reach the original `msg_id`.
+            struct Observed {
+                footer_registered: bool,
+                /// `single_message_footer.rs:405`: `terminal_target.or(fallback)` where
+                /// `fallback = placeholder_msg_id.map(..)`. True iff some path resolves.
+                footer_target_resolves: bool,
+                committed: bool,
+                retry_pending: bool,
+                placeholder_msg_id_cleared: bool,
+                placeholder_from_restored_inflight_reset: bool,
+                last_edit_text_cleared: bool,
+            }
+
+            // Drive `apply_watcher_short_replace_result` with `result`.
+            // `single_message_panel_footer_mode = true` so an `EditedOriginal`
+            // registration is observable (the footer remember is gated on it).
+            fn run(result: WatcherShortReplaceResult) -> Observed {
+                let shared = crate::services::discord::make_shared_data_for_tests();
+                let mut relay_ok = true;
+                let mut direct_send_delivered = false;
+                let mut tui_direct_anchor_terminal_body_visible = false;
+                let mut external_input_lease_consumed_by_relay = false;
+                let mut placeholder_msg_id: Option<MessageId> = Some(MessageId::new(MSG));
+                let mut placeholder_from_restored_inflight = true;
+                let mut last_edit_text = String::from("streamed body");
+                let mut completion_footer_terminal_target: Option<
+                    WatcherCompletionFooterTerminalTarget,
+                > = None;
+                let mut retry_terminal_delivery_from_offset = false;
+                apply_watcher_short_replace_result(
+                    result,
+                    &shared,
+                    &ProviderKind::Claude,
+                    ch(),
+                    "AgentDesk-claude-8141",
+                    MessageId::new(MSG),
+                    "answer",
+                    true,
+                    None,
+                    WatcherShortReplaceLocals {
+                        relay_ok: &mut relay_ok,
+                        direct_send_delivered: &mut direct_send_delivered,
+                        tui_direct_anchor_terminal_body_visible:
+                            &mut tui_direct_anchor_terminal_body_visible,
+                        external_input_lease_consumed_by_relay:
+                            &mut external_input_lease_consumed_by_relay,
+                        placeholder_msg_id: &mut placeholder_msg_id,
+                        placeholder_from_restored_inflight: &mut placeholder_from_restored_inflight,
+                        last_edit_text: &mut last_edit_text,
+                        completion_footer_terminal_target: &mut completion_footer_terminal_target,
+                        retry_terminal_delivery_from_offset:
+                            &mut retry_terminal_delivery_from_offset,
+                    },
+                );
+                let footer_registered = completion_footer_terminal_target.is_some();
+                // Replay `single_message_footer.rs:399-405`: in footer mode the target
+                // is `terminal_target.or(fallback)` where the fallback is derived FROM
+                // `placeholder_msg_id`. A resolved target is what the footer would edit;
+                // for the preserved-original fallback case it MUST resolve to None.
+                let footer_target_resolves =
+                    completion_footer_terminal_target.is_some() || placeholder_msg_id.is_some();
+                let committed = shared.ui.placeholder_cleanup.terminal_cleanup_committed(
+                    &ProviderKind::Claude,
+                    ch(),
+                    MessageId::new(MSG),
+                );
+                let retry_pending = shared
+                    .ui
+                    .placeholder_cleanup
+                    .terminal_cleanup_retry_pending(
+                        &ProviderKind::Claude,
+                        ch(),
+                        MessageId::new(MSG),
+                    );
+                // Both arms mark the body delivered (advance already happened).
+                assert!(direct_send_delivered, "the body landed → delivered");
+                assert!(tui_direct_anchor_terminal_body_visible);
+                Observed {
+                    footer_registered,
+                    footer_target_resolves,
+                    committed,
+                    retry_pending,
+                    placeholder_msg_id_cleared: placeholder_msg_id.is_none(),
+                    placeholder_from_restored_inflight_reset: !placeholder_from_restored_inflight,
+                    last_edit_text_cleared: last_edit_text.is_empty(),
+                }
+            }
+
+            // FreshFallback: NO footer target, cleanup `Failed` (retry_pending), NOT
+            // committed — the legacy fallback arm (tmux_watcher.rs:6289-6372).
+            let fb = run(WatcherShortReplaceResult::DeliveredFallback {
+                edit_error: "edit failed".to_string(),
+            });
+            assert!(
+                !fb.footer_registered,
+                "fallback must NOT register the original as the completion-footer target (#2757)"
+            );
+            assert!(
+                !fb.committed,
+                "fallback records Failed(edit_error), so the cleanup is NOT committed (Succeeded)"
+            );
+            assert!(
+                fb.retry_pending,
+                "fallback records a Failed cleanup → terminal_cleanup_retry_pending"
+            );
+            // #3089 A4 r3 (codex r2 [Medium]): pin the preserve else-branch locals the
+            // legacy fallback `else` clears (tmux_watcher.rs:6356-6358). The load-bearing
+            // one is `placeholder_msg_id`: the footer's fallback target is built from it
+            // (single_message_footer.rs:401), so leaving it SET would let the completion
+            // footer edit the PRESERVED original even though no `terminal_target` was
+            // registered.
+            assert!(
+                fb.placeholder_msg_id_cleared,
+                "fallback MUST clear placeholder_msg_id (tmux_watcher.rs:6356) — else the \
+                 footer's placeholder-derived fallback target (single_message_footer.rs:401) \
+                 would edit the preserved original"
+            );
+            assert!(
+                fb.placeholder_from_restored_inflight_reset,
+                "fallback resets placeholder_from_restored_inflight to false (tmux_watcher.rs:6357)"
+            );
+            assert!(
+                fb.last_edit_text_cleared,
+                "fallback clears last_edit_text (tmux_watcher.rs:6358)"
+            );
+            assert!(
+                !fb.footer_target_resolves,
+                "fallback: with no terminal_target AND placeholder_msg_id cleared, the \
+                 completion footer (single_message_footer.rs:405) resolves NO edit target \
+                 → it can never reach the preserved original"
+            );
+
+            // EditedOriginal: footer target REGISTERED, cleanup `Succeeded` — the
+            // legacy edit arm (tmux_watcher.rs:6247-6288).
+            let eo = run(WatcherShortReplaceResult::Delivered);
+            assert!(
+                eo.footer_registered,
+                "EditedOriginal registers the original as the completion-footer target"
+            );
+            assert!(
+                eo.committed,
+                "EditedOriginal records EditTerminal/Succeeded → cleanup committed"
+            );
+            assert!(
+                !eo.retry_pending,
+                "EditedOriginal cleanup Succeeded, so no retry is pending"
+            );
+            // DISCRIMINATION: the edit arm DOES resolve a footer target (its
+            // `terminal_target` is registered, tmux_watcher.rs:6256) so the footer edits
+            // the original ON PURPOSE — the opposite of the fallback arm. This is what
+            // makes `footer_target_resolves` a discriminating assertion: the fallback arm
+            // resolves NO target only because it cleared `placeholder_msg_id`; if it
+            // stopped clearing it, the fallback target would resolve here too.
+            assert!(
+                eo.footer_target_resolves,
+                "EditedOriginal: the registered terminal_target resolves → footer edits the \
+                 original deliberately (discriminates the fallback preserve arm)"
+            );
         }
     }
 
