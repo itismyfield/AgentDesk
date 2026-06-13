@@ -1137,4 +1137,28 @@ mod tests {
             InflightSignal::Completed { channel_id } => assert_eq!(channel_id, 42),
         }
     }
+
+    // #3089 A0 — characterization of the standby should-send-new-chunks
+    // predicate's EXACT 2000-byte boundary (design §5 A0 item 1). The parent
+    // module already proves long-vs-short; this pins the strict-`>` cliff so the
+    // four surfaces' shared `len > 2000` boundary is locked. Pinned inline in
+    // this `#[cfg(test)] mod tests` block => ZERO production LoC.
+    mod a0_characterization_tests {
+        use super::super::standby_should_send_new_chunks_for_placeholder as should_send;
+        use crate::services::discord::DISCORD_MSG_LIMIT;
+
+        #[test]
+        fn a0_standby_predicate_boundary_is_strictly_greater_than_2000() {
+            assert_eq!(DISCORD_MSG_LIMIT, 2000, "the shared length limit is 2000");
+            assert!(
+                !should_send(&"a".repeat(DISCORD_MSG_LIMIT)),
+                "exactly 2000 bytes is NOT over-limit (strict >)"
+            );
+            assert!(
+                should_send(&"a".repeat(DISCORD_MSG_LIMIT + 1)),
+                "2001 bytes is over-limit => new chunks"
+            );
+            assert!(!should_send("short"));
+        }
+    }
 }

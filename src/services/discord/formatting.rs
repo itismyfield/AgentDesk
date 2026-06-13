@@ -1134,6 +1134,207 @@ mod status_panel_v2_formatter_tests {
         let output = format_for_discord_with_provider(input, &ProviderKind::Claude);
         assert_eq!(output, "Final answer");
     }
+
+    // #3089 A0 — characterization of the chunker + streaming-rollover splitter
+    // (design §5 A0 item 1: split_message chunk boundaries; item 4: streaming
+    // rollover split algorithm). Value-exact pins so any change to chunk
+    // boundaries/ordering, the `len > DISCORD_MSG_LIMIT` cliff, or the rollover
+    // split point fails BEFORE the #3089 controller cutover. Nested inside this
+    // `#[cfg(test)] mod` block => ZERO production LoC under the ratchet
+    // (formatting.rs baseline 2802 stays unchanged).
+    mod a0_characterization_tests {
+        use super::super::{
+            DISCORD_MSG_LIMIT, plan_streaming_rollover, split_message, streaming_split_boundary,
+        };
+
+        // -------------------------------------------------------------------
+        // split_message — the single chunker (design §5 A0 item 1)
+        // -------------------------------------------------------------------
+
+        #[test]
+        fn a0_split_message_keeps_short_body_as_a_single_verbatim_chunk() {
+            let body = "hello world\nsecond line";
+            let chunks = split_message(body);
+            assert_eq!(chunks.len(), 1, "short body must stay one chunk");
+            assert_eq!(chunks[0], body, "the single chunk must be byte-identical");
+        }
+
+        #[test]
+        fn a0_split_message_effective_limit_is_msg_limit_minus_ten_outside_code_block() {
+            let effective_limit = DISCORD_MSG_LIMIT - 10; // 1990
+            assert_eq!(effective_limit, 1990, "pins the 2000-10 effective limit");
+
+            let exactly_at_limit = "a".repeat(effective_limit);
+            let chunks = split_message(&exactly_at_limit);
+            assert_eq!(
+                chunks.len(),
+                1,
+                "a body of exactly effective_limit bytes stays a single chunk"
+            );
+
+            let one_over = "a".repeat(effective_limit + 1);
+            let chunks = split_message(&one_over);
+            assert_eq!(
+                chunks.len(),
+                2,
+                "one byte over the effective limit splits into two chunks"
+            );
+        }
+
+        #[test]
+        fn a0_split_message_hard_splits_newline_free_body_at_the_effective_limit() {
+            let body = "a".repeat(2500);
+            let chunks = split_message(&body);
+            assert_eq!(chunks.len(), 2);
+            assert_eq!(chunks[0].len(), 1990, "hard split at effective_limit");
+            assert_eq!(chunks[1].len(), 2500 - 1990, "remainder length");
+            // Order + completeness: concatenation reproduces the input.
+            assert_eq!(format!("{}{}", chunks[0], chunks[1]), body);
+        }
+
+        #[test]
+        fn a0_split_message_prefers_last_newline_and_strips_the_boundary_newline() {
+            let head = "a".repeat(1000);
+            let tail = "b".repeat(1500);
+            let body = format!("{head}\n{tail}"); // newline at byte 1000, within 1990
+            let chunks = split_message(&body);
+            assert_eq!(chunks.len(), 2);
+            assert_eq!(
+                chunks[0], head,
+                "first chunk ends at the last newline (excl.)"
+            );
+            assert_eq!(
+                chunks[1], tail,
+                "the boundary newline is stripped from the next chunk head"
+            );
+        }
+
+        #[test]
+        fn a0_split_message_leading_newline_does_not_emit_an_empty_chunk() {
+            // Issue #1043 guard.
+            let body = format!("\n{}", "a".repeat(2200));
+            let chunks = split_message(&body);
+            assert!(
+                chunks.iter().all(|c| !c.is_empty()),
+                "no empty chunk may be emitted (#1043)"
+            );
+            assert!(chunks.len() >= 2, "the long body still splits");
+        }
+
+        #[test]
+        fn a0_split_message_reopens_code_fence_across_a_chunk_boundary() {
+            let mut body = String::from("```rust\n");
+            body.push_str(&"x".repeat(2100)); // forces a split while the fence is open
+            let chunks = split_message(&body);
+            assert!(chunks.len() >= 2, "long fenced body splits");
+            assert!(
+                chunks[0].ends_with("\n```"),
+                "first chunk closes the open fence: {:?}",
+                &chunks[0][chunks[0].len().saturating_sub(8)..]
+            );
+            assert!(
+                chunks[1].starts_with("```rust\n"),
+                "next chunk re-opens the fence with the same language tag"
+            );
+        }
+
+        // -------------------------------------------------------------------
+        // streaming_split_boundary — rollover boundary primitive (§5 A0 item 4)
+        // -------------------------------------------------------------------
+
+        #[test]
+        fn a0_streaming_split_boundary_is_none_when_text_fits() {
+            assert_eq!(streaming_split_boundary("short", 100), None);
+            assert_eq!(streaming_split_boundary("anything", 0), None);
+        }
+
+        #[test]
+        fn a0_streaming_split_boundary_prefers_paragraph_then_newline_then_whitespace() {
+            // Preference: "\n\n" (+2) > "\n" (+1) > whitespace > hard safe_end.
+            // safe_end = 50; each break is past safe_end/2 (=25) so the
+            // "early break => hard split" guard does not fire and the preferred
+            // boundary is used (the index INCLUDES the delimiter).
+
+            // Paragraph break at byte 30 ("\n\n") => split at 30 + 2 = 32.
+            let para = format!("{}\n\n{}", "x".repeat(30), "c".repeat(100));
+            assert_eq!(
+                streaming_split_boundary(&para, 50),
+                Some(32),
+                "splits just after the paragraph break"
+            );
+
+            // Single newline at byte 30 => split at 30 + 1 = 31.
+            let nl = format!("{}\n{}", "x".repeat(30), "e".repeat(100));
+            assert_eq!(
+                streaming_split_boundary(&nl, 50),
+                Some(31),
+                "splits just after the single newline"
+            );
+
+            // Whitespace (space) at byte 30, no newline => split at 30 + 1 = 31.
+            let ws = format!("{} {}", "x".repeat(30), "f".repeat(100));
+            assert_eq!(
+                streaming_split_boundary(&ws, 50),
+                Some(31),
+                "splits just after the last whitespace"
+            );
+        }
+
+        #[test]
+        fn a0_streaming_split_boundary_hard_splits_when_break_is_in_first_half() {
+            // "preferred < safe_end / 2 => use safe_end": an early break is
+            // rejected in favor of a hard split.
+            let body = format!("ab\n{}", "g".repeat(100));
+            assert_eq!(
+                streaming_split_boundary(&body, 50),
+                Some(50),
+                "an early break is rejected; hard-split at safe_end"
+            );
+        }
+
+        // -------------------------------------------------------------------
+        // plan_streaming_rollover — the rollover plan (§5 A0 item 4)
+        //
+        // Both turn_bridge and tmux_watcher call THIS single function, so
+        // "same input => same output" is the duplication-free behavior to lock.
+        // -------------------------------------------------------------------
+
+        #[test]
+        fn a0_plan_streaming_rollover_reserves_footer_and_margin_before_the_2000_cliff() {
+            // body_budget = 2000 - ((2 + status.len()) + 10). For "STATUS" (6B):
+            // footer "\n\nSTATUS" = 8; body_budget = 2000 - 18 = 1982.
+            let status = "STATUS";
+            let body = "Z".repeat(2500);
+            let plan = plan_streaming_rollover(&body, status).expect("a long body must roll over");
+            assert_eq!(
+                plan.split_at, 1982,
+                "rollover split point pins the footer+margin reservation"
+            );
+            assert_eq!(
+                plan.frozen_chunk,
+                "Z".repeat(1982),
+                "frozen chunk is body[..split_at]"
+            );
+            assert_eq!(plan.frozen_chunk.len(), plan.split_at);
+        }
+
+        #[test]
+        fn a0_plan_streaming_rollover_is_none_for_empty_or_short_body() {
+            assert_eq!(plan_streaming_rollover("", "STATUS"), None);
+            assert_eq!(plan_streaming_rollover("short body", "STATUS"), None);
+        }
+
+        #[test]
+        fn a0_plan_streaming_rollover_is_deterministic_for_both_caller_surfaces() {
+            // Identical (body, status) must yield byte-identical plans on every
+            // call, so a future per-surface re-derivation is caught.
+            let body = "line one\nline two\n".repeat(200); // > body_budget, newlines
+            let a = plan_streaming_rollover(&body, "STATUS").expect("rolls over");
+            let b = plan_streaming_rollover(&body, "STATUS").expect("rolls over");
+            assert_eq!(a, b, "same input must produce an identical rollover plan");
+            assert_eq!(a.frozen_chunk, body[..a.split_at]);
+        }
+    }
 }
 
 /// Remove ephemeral placeholder lines (e.g. "⏳ 대기 중...") from the final

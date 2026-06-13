@@ -1495,4 +1495,48 @@ mod tests {
         );
         handle.shutdown().await;
     }
+
+    // #3089 A0 — characterization of `RelaySinkOutcome` / `RelaySinkError`
+    // (design §5 A0 item 3, signals #2 and #4 of 5). ONLY `TerminalDelivered`
+    // is a delegation success; `TerminalNotDelivered`/`TerminalUnknown` route
+    // the watcher through reconciliation (no blind skip/re-send); `FrameAccepted`
+    // is non-terminal; `RelaySinkError::Transient` is retryable. Pinned inline
+    // in this `#[cfg(test)] mod tests` block => ZERO production LoC.
+    mod a0_characterization_tests {
+        use super::super::{RelaySinkError, RelaySinkOutcome};
+
+        #[test]
+        fn a0_only_terminal_delivered_is_a_delegation_success() {
+            assert!(RelaySinkOutcome::TerminalDelivered.terminal_delivered());
+            assert!(!RelaySinkOutcome::TerminalNotDelivered.terminal_delivered());
+            assert!(!RelaySinkOutcome::TerminalUnknown.terminal_delivered());
+            assert!(!RelaySinkOutcome::FrameAccepted.terminal_delivered());
+        }
+
+        #[test]
+        fn a0_terminal_not_delivered_and_unknown_classifiers_are_disjoint() {
+            assert!(RelaySinkOutcome::TerminalNotDelivered.terminal_not_delivered());
+            assert!(!RelaySinkOutcome::TerminalNotDelivered.terminal_unknown());
+            assert!(!RelaySinkOutcome::TerminalNotDelivered.terminal_delivered());
+
+            assert!(RelaySinkOutcome::TerminalUnknown.terminal_unknown());
+            assert!(!RelaySinkOutcome::TerminalUnknown.terminal_not_delivered());
+            assert!(!RelaySinkOutcome::TerminalUnknown.terminal_delivered());
+        }
+
+        #[test]
+        fn a0_frame_accepted_is_not_any_terminal_class() {
+            let accepted = RelaySinkOutcome::FrameAccepted;
+            assert!(!accepted.terminal_delivered());
+            assert!(!accepted.terminal_not_delivered());
+            assert!(!accepted.terminal_unknown());
+        }
+
+        #[test]
+        fn a0_relay_sink_transient_error_renders_its_taxonomy_message() {
+            let err = RelaySinkError::Transient("rate limited".to_string());
+            assert_eq!(err.to_string(), "transient sink failure: rate limited");
+            assert!(matches!(err, RelaySinkError::Transient(_)));
+        }
+    }
 }

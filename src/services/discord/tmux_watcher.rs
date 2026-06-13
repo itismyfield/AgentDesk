@@ -10764,4 +10764,47 @@ TUI-E2E-marker ssh-direct
             ));
         }
     }
+
+    // #3089 A0 — characterization of the watcher terminal-fallback
+    // should-send-new-chunks predicate (design §5 A0 item 1). Its gate is
+    // `session_bound_fallback_uses_full_body && text.len() > DISCORD_MSG_LIMIT`.
+    // (The #2757 watcher edit-fail delete policy — the other watcher A0 datum —
+    // is already pinned above by
+    // `fallback_edit_failure_never_deletes_original_without_placeholder_probe`;
+    // A0 does not duplicate it.) Pinned inline in this `#[cfg(test)] mod tests`
+    // block of the FROZEN (#3016, baseline 8223) file => ZERO production LoC.
+    mod a0_characterization_tests {
+        use super::super::watcher_should_send_ordered_new_chunks_for_terminal_fallback as should_send;
+        use crate::services::discord::DISCORD_MSG_LIMIT;
+
+        #[test]
+        fn a0_watcher_fallback_predicate_gates_on_full_body_and_over_limit() {
+            let over = "y".repeat(DISCORD_MSG_LIMIT + 1); // 2001 bytes
+            let at_limit = "y".repeat(DISCORD_MSG_LIMIT); // exactly 2000 bytes
+
+            // Both required: fallback uses the FULL body AND len > 2000.
+            assert!(
+                should_send(true, &over),
+                "full-body fallback AND over-limit => send ordered new chunks"
+            );
+            assert!(
+                !should_send(false, &over),
+                "a non-full-body fallback never sends new chunks, even over-limit"
+            );
+            assert!(
+                !should_send(true, &at_limit),
+                "exactly 2000 is NOT over-limit (strict >)"
+            );
+            assert!(
+                !should_send(false, &at_limit),
+                "neither condition => no new chunks"
+            );
+        }
+
+        #[test]
+        fn a0_watcher_fallback_predicate_boundary_is_strictly_greater_than_2000() {
+            assert!(!should_send(true, &"a".repeat(2000)));
+            assert!(should_send(true, &"a".repeat(2001)));
+        }
+    }
 }

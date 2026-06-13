@@ -1438,4 +1438,47 @@ mod tests {
             ));
         }
     }
+
+    // #3089 A0 — characterization of the terminal-delivery
+    // should-send-new-chunks predicate (design §5 A0 item 1, surface:
+    // turn_bridge terminal delivery). `terminal_delivery_should_send_new_chunks
+    // (can_chain_locally, body)` is one of the FOUR per-surface `len > 2000`
+    // predicates the #3089 controller unifies; its gate is
+    // `can_chain_locally && body.len() > DISCORD_MSG_LIMIT`. Pinned inline in
+    // this `#[cfg(test)] mod tests` block => ZERO production LoC.
+    mod a0_characterization_tests {
+        use super::super::terminal_delivery_should_send_new_chunks as should_send;
+        use crate::services::discord::DISCORD_MSG_LIMIT;
+
+        #[test]
+        fn a0_terminal_delivery_predicate_gates_on_can_chain_and_over_limit() {
+            let over = "x".repeat(DISCORD_MSG_LIMIT + 1); // 2001 bytes
+            let under = "x".repeat(DISCORD_MSG_LIMIT); // exactly 2000 bytes
+
+            // Both conditions required: can_chain_locally AND len > 2000.
+            assert!(
+                should_send(true, &over),
+                "chainable AND over-limit => send new chunks"
+            );
+            assert!(
+                !should_send(false, &over),
+                "not chainable suppresses new chunks even when over-limit"
+            );
+            assert!(
+                !should_send(true, &under),
+                "exactly at the 2000 limit is NOT over-limit (strict >)"
+            );
+            assert!(
+                !should_send(false, &under),
+                "neither condition => no new chunks"
+            );
+        }
+
+        #[test]
+        fn a0_terminal_delivery_predicate_boundary_is_strictly_greater_than_2000() {
+            // The cliff is strict `>`: 2000 stays single, 2001 splits.
+            assert!(!should_send(true, &"a".repeat(2000)));
+            assert!(should_send(true, &"a".repeat(2001)));
+        }
+    }
 }

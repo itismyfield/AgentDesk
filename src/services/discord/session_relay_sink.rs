@@ -3652,4 +3652,29 @@ mod tests {
             drop(guard);
         }
     }
+
+    // #3089 A0 — characterization of the session-bound should-send-new-chunks
+    // predicate's EXACT 2000-byte boundary (design §5 A0 item 1). The parent
+    // module already proves long-vs-short; this pins the strict-`>` cliff (2000
+    // single, 2001 splits) so the controller's single length policy must
+    // reproduce this surface's boundary. Pinned inline in this `#[cfg(test)] mod
+    // tests` block of the FROZEN (#3036, baseline 1731) file => ZERO prod LoC.
+    mod a0_characterization_tests {
+        use super::super::session_bound_should_send_new_chunks_for_placeholder as should_send;
+        use crate::services::discord::DISCORD_MSG_LIMIT;
+
+        #[test]
+        fn a0_session_bound_predicate_boundary_is_strictly_greater_than_2000() {
+            assert_eq!(DISCORD_MSG_LIMIT, 2000, "the shared length limit is 2000");
+            assert!(
+                !should_send(&"a".repeat(DISCORD_MSG_LIMIT)),
+                "exactly 2000 bytes is NOT over-limit (strict >)"
+            );
+            assert!(
+                should_send(&"a".repeat(DISCORD_MSG_LIMIT + 1)),
+                "2001 bytes is over-limit => new chunks"
+            );
+            assert!(!should_send("short"));
+        }
+    }
 }

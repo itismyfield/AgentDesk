@@ -5679,4 +5679,87 @@ mod queued_placeholder_cluster_characterization_tests {
             "different channels must get distinct locks"
         );
     }
+
+    // #3089 A0 — characterization of the `LeaseOutcome` failure-signal
+    // representation and its I2 invariant (design §5 A0 item 3, signal #1 of 5).
+    // The dormant `DeliveryLeaseCell` state machine is already pinned by
+    // `turn_finalizer::tests::delivery_lease`; this pins the load-bearing I2
+    // datum the controller must preserve — `commit` RECORDS the three-way
+    // outcome verbatim and never collapses NotDelivered/Unknown into Delivered,
+    // so the caller can refuse to advance the offset for the ambiguous arms.
+    // Pinned inline in this `#[cfg(test)] mod` of the FROZEN (baseline 4944)
+    // file => ZERO production LoC.
+    mod a0_failure_signal_characterization_tests {
+        use super::super::turn_finalizer::TurnKey;
+        use super::super::{DeliveryLeaseCell, LeaseHolder, LeaseOutcome, LeaseSnapshot};
+        use serenity::model::id::ChannelId;
+
+        fn turn() -> TurnKey {
+            TurnKey::new(ChannelId::new(7), 11, 0)
+        }
+
+        #[test]
+        fn a0_lease_outcome_has_exactly_three_distinct_arms() {
+            assert_ne!(LeaseOutcome::Delivered, LeaseOutcome::NotDelivered);
+            assert_ne!(LeaseOutcome::Delivered, LeaseOutcome::Unknown);
+            assert_ne!(LeaseOutcome::NotDelivered, LeaseOutcome::Unknown);
+        }
+
+        #[test]
+        fn a0_commit_records_each_outcome_verbatim_without_collapsing() {
+            for outcome in [
+                LeaseOutcome::Delivered,
+                LeaseOutcome::NotDelivered,
+                LeaseOutcome::Unknown,
+            ] {
+                let cell = DeliveryLeaseCell::new(ChannelId::new(7));
+                let holder = LeaseHolder::Bridge;
+                assert!(cell.try_acquire(turn(), holder, 100, 200, 1_000));
+                assert!(
+                    cell.commit(holder, turn(), 100, 200, outcome),
+                    "identity-matched commit of {outcome:?} succeeds"
+                );
+                match cell.read() {
+                    LeaseSnapshot::Committed {
+                        outcome: got,
+                        start,
+                        end,
+                        ..
+                    } => {
+                        assert_eq!(got, outcome, "committed outcome is recorded verbatim");
+                        assert_eq!((start, end), (100, 200), "range is preserved on commit");
+                    }
+                    other => panic!("expected Committed{{{outcome:?}}}, got {other:?}"),
+                }
+            }
+        }
+
+        #[test]
+        fn a0_unknown_and_not_delivered_are_distinguishable_after_commit() {
+            let delivered = committed_outcome_of(LeaseOutcome::Delivered);
+            let not_delivered = committed_outcome_of(LeaseOutcome::NotDelivered);
+            let unknown = committed_outcome_of(LeaseOutcome::Unknown);
+
+            assert_eq!(delivered, LeaseOutcome::Delivered);
+            assert_eq!(not_delivered, LeaseOutcome::NotDelivered);
+            assert_eq!(unknown, LeaseOutcome::Unknown);
+
+            // Exactly one of the three permits advancing the offset under I2.
+            let advances = |o: LeaseOutcome| o == LeaseOutcome::Delivered;
+            assert!(advances(delivered));
+            assert!(!advances(not_delivered), "NotDelivered must not advance");
+            assert!(!advances(unknown), "Unknown must not advance (I2)");
+        }
+
+        fn committed_outcome_of(outcome: LeaseOutcome) -> LeaseOutcome {
+            let cell = DeliveryLeaseCell::new(ChannelId::new(7));
+            let holder = LeaseHolder::Sink;
+            assert!(cell.try_acquire(turn(), holder, 0, 5, 1_000));
+            assert!(cell.commit(holder, turn(), 0, 5, outcome));
+            match cell.read() {
+                LeaseSnapshot::Committed { outcome, .. } => outcome,
+                other => panic!("expected Committed, got {other:?}"),
+            }
+        }
+    }
 }
