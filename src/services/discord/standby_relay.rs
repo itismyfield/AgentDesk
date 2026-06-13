@@ -648,6 +648,15 @@ async fn deliver_response(
                 http, channel_id, msg_id, &formatted, shared,
             )
             .await;
+            // #3089 A0: the "delivered?" return is sourced from the shared
+            // disposition policy (committed = EditedOriginal | preserved
+            // fallback) instead of per-arm literals.
+            let committed =
+                crate::services::discord::replace_outcome_policy::relay_outcome_is_committed(
+                    crate::services::discord::replace_outcome_policy::ReplaceOutcomeKind::of(
+                        &outcome,
+                    ),
+                );
             let ts = chrono::Local::now().format("%H:%M:%S");
             match outcome {
                 Ok(ReplaceLongMessageOutcome::EditedOriginal) => {
@@ -657,15 +666,19 @@ async fn deliver_response(
                         msg_id.get(),
                         chars
                     );
-                    true
+                    committed
                 }
                 Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { edit_error }) => {
-                    // Mirror session_relay_sink #2757: never delete the
-                    // original msg_id after fallback delivery. By the time
-                    // the edit fails, msg_id can already be a live response
-                    // card rather than a disposable placeholder; deleting it
-                    // makes the prior Discord turn vanish after the fallback
-                    // copy appears.
+                    // Mirror session_relay_sink #2757: never delete the original
+                    // msg_id after fallback delivery — by the time the edit fails
+                    // it can already be a live response card, not a disposable
+                    // placeholder. The shared disposition policy (#3089 A0) pins
+                    // this preserve-and-deliver decision against a cutover.
+                    debug_assert!(
+                        !crate::services::discord::replace_outcome_policy::edit_fail_fallback_disposition()
+                            .deletes_original(),
+                        "#2757: must preserve original"
+                    );
                     tracing::warn!(
                         "  [{ts}] 👁 standby_relay ✓ delivered terminal response via fallback; preserving original msg {} in channel {} ({} chars, edit_error={})",
                         msg_id.get(),
@@ -673,7 +686,7 @@ async fn deliver_response(
                         chars,
                         edit_error
                     );
-                    true
+                    committed
                 }
                 Ok(ReplaceLongMessageOutcome::PartialContinuationFailure {
                     sent_chunks,
@@ -694,7 +707,7 @@ async fn deliver_response(
                         cleanup_errors.len(),
                         error
                     );
-                    false
+                    committed
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -702,7 +715,7 @@ async fn deliver_response(
                         channel_id.get(),
                         msg_id.get()
                     );
-                    false
+                    committed
                 }
             }
         }

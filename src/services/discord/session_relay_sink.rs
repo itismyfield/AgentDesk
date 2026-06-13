@@ -19,6 +19,7 @@ use serenity::model::id::{ChannelId, MessageId};
 use super::formatting::{self, ReplaceLongMessageOutcome};
 use super::health::HealthRegistry;
 use super::inflight::{InflightTurnState, RelayOwnerKind, TurnSource};
+use super::replace_outcome_policy::edit_fail_fallback_disposition;
 use super::tmux::{WatcherToolState, process_watcher_lines};
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::cluster::stream_relay::{
@@ -903,13 +904,12 @@ impl SessionBoundDiscordRelaySink {
                     Ok(SessionRelayDeliveryOutcome::Delivered)
                 }
                 Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { edit_error }) => {
-                    // #2757: do not delete msg_id here. The 3e158e588 path
-                    // deleted the placeholder assuming it was stale, but
-                    // msg_id is the bridge's current_msg_id which may already
-                    // contain streamed response content. A transient edit
-                    // failure (rate limit, network) then leads to the actual
-                    // response being removed. Leave the original message in
-                    // place; the fallback copy is the redundant one.
+                    // #2757 (A0 #3089): never delete msg_id here — it is the
+                    // bridge's current_msg_id and may already hold streamed content;
+                    // a transient edit failure would then vacuum the real response.
+                    // The shared policy pins this preserve decision vs a cutover.
+                    let preserve_original = !edit_fail_fallback_disposition().deletes_original();
+                    debug_assert!(preserve_original, "#2757: must preserve original");
                     self.delivered_total.fetch_add(1, Ordering::AcqRel);
                     tracing::warn!(
                         provider = provider.as_str(),

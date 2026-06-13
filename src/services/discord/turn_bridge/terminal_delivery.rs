@@ -1481,4 +1481,83 @@ mod tests {
             assert!(should_send(true, &"a".repeat(2001)));
         }
     }
+
+    // #3089 A0 — I2 invariant (design §5 A0 item 3): the committed relay offset
+    // advances ONLY when the bridge lease commits `Delivered`; `Unknown` /
+    // `NotDelivered` must leave it pinned so the next turn re-delivers the
+    // ambiguous range. This drives the REAL production advance path
+    // (`BridgeDeliveryLease::acquire` + `commit_and_advance` against the same
+    // per-channel `DeliveryLeaseCell` the watcher uses) and reads the real
+    // `committed_relay_offset` — NOT a local closure restating the rule — so a
+    // production mutation that advanced on a non-Delivered outcome (or stopped
+    // advancing on Delivered) fails here. Zero production LoC (in `mod tests`).
+    mod a0_i2_advance_characterization_tests {
+        use super::super::{BridgeDeliveryLease, BridgeLeaseAcquire};
+        use crate::services::discord::turn_finalizer::TurnKey;
+        use crate::services::discord::{LeaseOutcome, make_shared_data_for_tests};
+        use poise::serenity_prelude::ChannelId;
+
+        const CH: u64 = 909_777;
+
+        fn held_lease(
+            shared: &std::sync::Arc<crate::services::discord::SharedData>,
+            ch: ChannelId,
+            user_msg_id: u64,
+        ) -> BridgeDeliveryLease {
+            match BridgeDeliveryLease::acquire(
+                shared,
+                ch,
+                TurnKey::new(ch, user_msg_id, 1),
+                0,
+                Some(64),
+            ) {
+                BridgeLeaseAcquire::Held(lease) => lease,
+                _ => panic!("expected Held lease on a fresh cell"),
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a0_i2_only_delivered_advances_the_committed_offset() {
+            // Delivered => advance to the leased end.
+            let shared = make_shared_data_for_tests();
+            let ch = ChannelId::new(CH);
+            assert_eq!(shared.committed_relay_offset(ch), 0);
+            assert!(held_lease(&shared, ch, 1).commit_and_advance(
+                &shared,
+                ch,
+                None,
+                LeaseOutcome::Delivered,
+            ));
+            assert_eq!(
+                shared.committed_relay_offset(ch),
+                64,
+                "Delivered commit advances the committed offset to the leased end (I2)"
+            );
+
+            // Unknown => no advance (ambiguous: must re-deliver).
+            let shared = make_shared_data_for_tests();
+            let ch = ChannelId::new(CH);
+            held_lease(&shared, ch, 2).commit_and_advance(&shared, ch, None, LeaseOutcome::Unknown);
+            assert_eq!(
+                shared.committed_relay_offset(ch),
+                0,
+                "Unknown must NOT advance the offset (I2)"
+            );
+
+            // NotDelivered => no advance.
+            let shared = make_shared_data_for_tests();
+            let ch = ChannelId::new(CH);
+            held_lease(&shared, ch, 3).commit_and_advance(
+                &shared,
+                ch,
+                None,
+                LeaseOutcome::NotDelivered,
+            );
+            assert_eq!(
+                shared.committed_relay_offset(ch),
+                0,
+                "NotDelivered must NOT advance the offset (I2)"
+            );
+        }
+    }
 }

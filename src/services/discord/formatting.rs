@@ -1281,6 +1281,46 @@ mod status_panel_v2_formatter_tests {
         }
 
         #[test]
+        fn a0_streaming_split_boundary_paragraph_beats_a_later_single_newline() {
+            // MIXED delimiters that DISPROVE priority (codex Medium 4): a
+            // paragraph break at byte 26 ("\n\n" => 26 + 2 = 28) precedes a LATER
+            // single newline at byte 40 (=> 41), both inside safe_end = 50 and
+            // both past safe_end/2 = 25. Production prefers paragraph
+            // (`paragraph_split.or(newline_split)`), so the split is 28. If that
+            // `.or` were reordered to newline-first, the later newline would win
+            // and the split would be 41 — a DIFFERENT value, so this pins the
+            // paragraph > single-newline priority, not just the position.
+            let body = format!(
+                "{}\n\n{}\n{}",
+                "x".repeat(26),
+                "y".repeat(12),
+                "z".repeat(100)
+            );
+            assert_eq!(
+                streaming_split_boundary(&body, 50),
+                Some(28),
+                "paragraph break wins over a later single newline"
+            );
+        }
+
+        #[test]
+        fn a0_streaming_split_boundary_single_newline_beats_a_later_space() {
+            // MIXED delimiters: a single newline at byte 30 (=> 31) precedes a
+            // LATER space at byte 42 (=> 43), no paragraph break, both past
+            // safe_end/2. Production prefers newline over whitespace
+            // (`newline_split.or(whitespace_split)`), so the split is 31. If the
+            // chain were reordered to whitespace-first, the later space would win
+            // (43) — a DIFFERENT value, pinning the single-newline > whitespace
+            // priority.
+            let body = format!("{}\n{} {}", "x".repeat(30), "y".repeat(11), "w".repeat(100));
+            assert_eq!(
+                streaming_split_boundary(&body, 50),
+                Some(31),
+                "single newline wins over a later space"
+            );
+        }
+
+        #[test]
         fn a0_streaming_split_boundary_hard_splits_when_break_is_in_first_half() {
             // "preferred < safe_end / 2 => use safe_end": an early break is
             // rejected in favor of a hard split.

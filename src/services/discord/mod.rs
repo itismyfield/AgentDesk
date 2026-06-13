@@ -37,16 +37,17 @@ mod queued_placeholders_store;
 mod reaction_cleanup;
 mod relay_health;
 mod relay_recovery;
+#[cfg(unix)] // #3089 A0: shared ReplaceLongMessageOutcome disposition policy.
+mod replace_outcome_policy;
 pub(crate) mod response_sanitizer;
 #[cfg(unix)]
 mod session_relay_sink;
 // #2011 Phase 5.3: standalone JSONL → Discord relay loop on cluster-standby nodes (leader uses tmux_watcher's relay path).
 #[cfg(unix)]
 mod standby_relay;
-// #1074: landing zone for the future recovery-engine module split
-// (restart / runtime / manual_rebind). See `docs/recovery-paths.md`.
-// Named `recovery_paths` to avoid shadowing the existing
-// `recovery_engine as recovery` alias below until the mechanical split lands.
+// #1074: landing zone for the future recovery-engine module split (restart /
+// runtime / manual_rebind; see `docs/recovery-paths.md`). Named `recovery_paths`
+// to avoid shadowing the `recovery_engine as recovery` alias until the split lands.
 mod recovery_engine;
 mod recovery_paths;
 mod restart_mode;
@@ -55,9 +56,8 @@ pub(crate) mod restart_report;
 mod role_map;
 mod router;
 mod runtime_bootstrap;
-// #1446 stall-deadlock recovery: shared post-clear bookkeeping for the
-// THREAD-GUARD + stall-watchdog cleanup paths so neither leaks
-// `global_active` / orphaned cancel tokens after a dead-dispatch sweep.
+// #1446 stall-deadlock recovery: shared post-clear bookkeeping for the THREAD-GUARD
+// + stall-watchdog cleanup paths so neither leaks `global_active` / cancel tokens.
 pub mod runtime_store;
 pub(crate) mod session_identity;
 mod session_runtime;
@@ -5736,6 +5736,13 @@ mod queued_placeholder_cluster_characterization_tests {
 
         #[test]
         fn a0_unknown_and_not_delivered_are_distinguishable_after_commit() {
+            // This pins ONLY that `DeliveryLeaseCell::commit` preserves each
+            // distinct outcome (so the caller can tell them apart). The I2
+            // advance rule itself — committed offset advances ONLY on Delivered
+            // — is characterized against the REAL production advance path in
+            // `turn_bridge::terminal_delivery`'s
+            // `a0_i2_advance_characterization_tests` (driving
+            // `BridgeDeliveryLease::commit_and_advance`), NOT a local closure.
             let delivered = committed_outcome_of(LeaseOutcome::Delivered);
             let not_delivered = committed_outcome_of(LeaseOutcome::NotDelivered);
             let unknown = committed_outcome_of(LeaseOutcome::Unknown);
@@ -5743,12 +5750,6 @@ mod queued_placeholder_cluster_characterization_tests {
             assert_eq!(delivered, LeaseOutcome::Delivered);
             assert_eq!(not_delivered, LeaseOutcome::NotDelivered);
             assert_eq!(unknown, LeaseOutcome::Unknown);
-
-            // Exactly one of the three permits advancing the offset under I2.
-            let advances = |o: LeaseOutcome| o == LeaseOutcome::Delivered;
-            assert!(advances(delivered));
-            assert!(!advances(not_delivered), "NotDelivered must not advance");
-            assert!(!advances(unknown), "Unknown must not advance (I2)");
         }
 
         fn committed_outcome_of(outcome: LeaseOutcome) -> LeaseOutcome {
