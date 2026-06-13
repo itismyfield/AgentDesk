@@ -816,6 +816,17 @@ mod tests {
         not_delivered_commit_calls: AtomicUsize,
         release_calls: AtomicUsize,
         renew_calls: AtomicUsize,
+        /// A2a #3151 ordering: when a test attaches the gateway's shared step
+        /// clock (`attach_clock`), the FIRST `commit` call stamps its step here.
+        /// Unlike `ObservingGateway::first_commit_step` (only set when a later
+        /// gateway await *observes* a `Committed` lease), this records the step
+        /// of the actual `commit` *call*, so a test can prove the heartbeat
+        /// guard's `Drop` (also stamped on the same clock) precedes the real
+        /// commit — independent of any post-send await. `None` clock (the
+        /// default) leaves `commit_step` at 0, so non-heartbeat tests are
+        /// unaffected.
+        clock: std::sync::Mutex<Option<Arc<AtomicUsize>>>,
+        commit_step: AtomicUsize,
     }
 
     impl RecordingLease {
@@ -827,7 +838,16 @@ mod tests {
                 not_delivered_commit_calls: AtomicUsize::new(0),
                 release_calls: AtomicUsize::new(0),
                 renew_calls: AtomicUsize::new(0),
+                clock: std::sync::Mutex::new(None),
+                commit_step: AtomicUsize::new(0),
             }
+        }
+
+        /// Share the gateway's monotonic step clock so the actual `commit` call
+        /// is stamped on the SAME clock the heartbeat guard's `Drop` uses,
+        /// letting a test assert `drop_step < commit_step` directly.
+        fn attach_clock(&self, clock: Arc<AtomicUsize>) {
+            *self.clock.lock().unwrap() = Some(clock);
         }
     }
 
@@ -851,7 +871,18 @@ mod tests {
             end: u64,
             outcome: LeaseOutcome,
         ) -> bool {
-            self.commit_calls.fetch_add(1, Ordering::SeqCst);
+            // #3151: stamp the actual commit-call step on the shared clock the
+            // FIRST time commit runs (only when a test attached the clock). This
+            // measures when the commit truly happens — not when a later gateway
+            // await observes the committed lease — so the heartbeat ordering
+            // assertion (drop_step < commit_step) cannot be fooled by a mutation
+            // that drops the guard after the commit but before the post-send await.
+            if self.commit_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                if let Some(clock) = self.clock.lock().unwrap().as_ref() {
+                    self.commit_step
+                        .store(clock.fetch_add(1, Ordering::SeqCst), Ordering::SeqCst);
+                }
+            }
             match outcome {
                 LeaseOutcome::Delivered => {
                     self.delivered_commit_calls.fetch_add(1, Ordering::SeqCst);
@@ -2390,6 +2421,11 @@ mod tests {
         let key = placeholder_key(channel, placeholder_msg);
         prime_active(&controller, &gateway, key.clone()).await;
         let clock = gateway.clock_handle();
+        // Share the gateway's monotonic step clock with the lease so the actual
+        // `commit` CALL is stamped on the same clock as the heartbeat guard's
+        // `Drop` — the basis for the mutation-sensitive `drop_step < commit_step`
+        // assertion below.
+        lease.attach_clock(clock.clone());
         let heartbeat =
             RecordingHeartbeat::new(lease.clone() as Arc<dyn DeliveryLease + Send + Sync>, clock);
         let body = "long POST kept alive by the heartbeat";
@@ -2442,16 +2478,32 @@ mod tests {
             lease.renew_calls.load(Ordering::SeqCst) >= 1,
             "the POST heartbeat must renew the lease deadline at least once"
         );
-        // #3151 ordering: the heartbeat guard was DROPPED (stopped) before the
-        // first commit became observable, so the renew loop cannot race the
-        // commit.
+        // #3151 ordering (mutation-sensitive): the heartbeat guard's `Drop` and
+        // the actual `commit` CALL are both stamped on the same shared step
+        // clock, so this directly measures that the guard stopped BEFORE the
+        // commit ran — the renew loop cannot race the commit. This catches the
+        // mutation "commit first, drop the guard before post_send_finalize().await":
+        // the earlier (now-removed) check compared `drop_step` only to
+        // `first_commit_step` (set when a *later* gateway await observes the
+        // committed lease), which is always after the drop regardless of the real
+        // commit time, so it passed under that mutation.
         let drop_step = heartbeat.drop_step.load(Ordering::SeqCst);
-        let first_commit_step = gateway.first_commit_step.load(Ordering::SeqCst);
+        let commit_step = lease.commit_step.load(Ordering::SeqCst);
         assert_ne!(drop_step, 0, "the heartbeat guard must have been dropped");
+        assert_ne!(commit_step, 0, "the lease must have been committed");
         assert!(
-            first_commit_step != 0 && drop_step < first_commit_step,
-            "#3151: the heartbeat must STOP (drop_step {drop_step}) before the commit \
-             becomes observable (step {first_commit_step})"
+            drop_step < commit_step,
+            "#3151: the heartbeat must STOP (drop_step {drop_step}) before the inline \
+             commit CALL runs (commit_step {commit_step})"
+        );
+        // The commit must also remain observable to a post-send gateway await
+        // (the existing I1/M4 ordering): the first await that reads a `Committed`
+        // lease lands after the actual commit call.
+        let first_commit_step = gateway.first_commit_step.load(Ordering::SeqCst);
+        assert!(
+            first_commit_step != 0 && commit_step < first_commit_step,
+            "#3151: the inline commit (step {commit_step}) must be observable to a \
+             post-send gateway await (step {first_commit_step})"
         );
     }
 
