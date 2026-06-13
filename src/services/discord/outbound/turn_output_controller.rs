@@ -35,7 +35,10 @@ use super::super::placeholder_controller::{
     PlaceholderController, PlaceholderControllerOutcome, PlaceholderKey, PlaceholderLifecycle,
 };
 use super::super::turn_finalizer::TurnKey;
-use super::super::{DeliveryLeaseCell, LeaseHolder, LeaseOutcome, LeaseSnapshot, lease_now_ms};
+use super::super::{
+    DELIVERY_LEASE_DEADLINE_MS, DeliveryLeaseCell, LeaseHolder, LeaseOutcome, LeaseSnapshot,
+    lease_now_ms,
+};
 use super::decision::LengthPolicyDecision;
 
 /// The narrow delivery-lease surface the turn-output controller drives
@@ -68,6 +71,14 @@ pub(in crate::services::discord) trait DeliveryLease {
         outcome: LeaseOutcome,
     ) -> bool;
     fn release(&self, holder: LeaseHolder, turn: TurnKey, start: u64, end: u64) -> bool;
+    /// Push this `(holder, turn)`'s lease deadline to `new_deadline_ms` (range is
+    /// not matched — see [`DeliveryLeaseCell::renew`]). A no-op `false` once the
+    /// lease is no longer ours (committed / released / reclaimed). The A2a POST
+    /// heartbeat ([`PostHeartbeat`]) calls this on a fixed interval so the
+    /// `Leased{holder, fresh}` deadline stays ahead of the reconciler while a slow
+    /// POST is in flight (#3151) — replacing A1's fixed-TTL acquire.
+    #[allow(dead_code)] // #3089 A2a: driven by the owner's PostHeartbeat at A2b cutover.
+    fn renew(&self, holder: LeaseHolder, turn: TurnKey, new_deadline_ms: u64) -> bool;
     #[allow(dead_code)] // #3089 A1: read by the controller's own tests only.
     fn read(&self) -> LeaseSnapshot;
 }
@@ -96,16 +107,25 @@ impl DeliveryLease for DeliveryLeaseCell {
     fn release(&self, holder: LeaseHolder, turn: TurnKey, start: u64, end: u64) -> bool {
         DeliveryLeaseCell::release(self, holder, turn, start, end)
     }
+    fn renew(&self, holder: LeaseHolder, turn: TurnKey, new_deadline_ms: u64) -> bool {
+        DeliveryLeaseCell::renew(self, holder, turn, new_deadline_ms)
+    }
     fn read(&self) -> LeaseSnapshot {
         DeliveryLeaseCell::read(self)
     }
 }
 
-/// Maximum wall time (process-monotonic ms) the controller holds the delivery
-/// lease for a single `deliver_turn_output` attempt before a reconciler could
-/// reclaim it. A1 never reclaims (no owner is wired), but the acquire still
-/// records a deadline so the lease identity matches the #3041 cell contract.
-const TURN_OUTPUT_LEASE_TTL_MS: u64 = 60_000;
+/// Initial acquire deadline (process-monotonic ms) the controller stamps on the
+/// delivery lease for a single `deliver_turn_output` attempt. A1 recorded a
+/// fixed 60s TTL because nothing renewed it; A2a instead matches the sink/watcher
+/// HOLDER-LIVENESS contract — acquire with the shared
+/// [`DELIVERY_LEASE_DEADLINE_MS`] (15s) and keep the deadline fresh with a POST
+/// heartbeat ([`spawn_post_heartbeat`]). The deadline is therefore a liveness
+/// signal, NOT a hard cap on delivery duration: a slow multi-chunk POST stays
+/// leased because the heartbeat re-extends within one interval, while a dead
+/// controller stops renewing and the lease lapses within ~one deadline (the
+/// #3151 contract the sink uses at `session_relay_sink.rs:338`).
+const TURN_OUTPUT_LEASE_TTL_MS: u64 = DELIVERY_LEASE_DEADLINE_MS;
 
 /// The placeholder slot carried in the delivery context.
 ///
@@ -191,6 +211,17 @@ pub(in crate::services::discord) enum DeliveryOutcome {
     /// Confirmed delivered to Discord; the committed offset advanced to
     /// `committed_to`.
     Delivered { committed_to: u64 },
+    /// Transport was confirmed, but the owner's identity-gated advance callback
+    /// REFUSED to advance the offset (e.g. the inflight turn was cleared /
+    /// replaced during a slow POST). The lease is committed `NotDelivered`, the
+    /// offset stays at `committed_from`, and the owner's committed-offset
+    /// reconciliation re-sends (no black-hole). Mirrors the sink's
+    /// `advanced == false` arm (`session_relay_sink.rs:571-577`): commit
+    /// `NotDelivered`, never advance.
+    ///
+    /// A2a: produced only when an owner passes an advance callback that returns
+    /// `false`; A1 owners (no callback) keep the unconditional `Delivered`.
+    NotDelivered { committed_from: u64 },
     /// A transient/retriable failure; the offset did NOT advance. The owner
     /// may retry from `retry_from_offset`.
     Transient { retry_from_offset: u64 },
@@ -253,6 +284,100 @@ pub(in crate::services::discord) enum FallbackCommitPolicy {
     NoCommitOnFallback,
 }
 
+/// What the controller does when the delivery-lease acquire FAILS (another
+/// holder owns the `(channel, turn, range)` coordinate). Explicit, with NO
+/// `Default` — each owner must pin its acquire-failure semantics, because the
+/// two existing behaviours diverge and a silent default would either drop a send
+/// or reintroduce a duplicate:
+///
+/// - `Transient` — the A1 behaviour: do NOT send; return
+///   [`DeliveryOutcome::Transient`] so the owner retries. The watcher/bridge
+///   terminal-delivery paths use this — a lost acquire means the range is being
+///   handled elsewhere and a blind send would duplicate.
+/// - `ProceedMarkerless` — the SINK behaviour (`session_relay_sink.rs:777-795`):
+///   a failed acquire yields no marker, so the sink POSTs WITHOUT the lease and
+///   WITHOUT a heartbeat. It never blocks delivery on a lost acquire (no
+///   self-black-hole), and no duplicate arises because the OTHER holder owns the
+///   range (single-winner CAS). Because the lease is not held on this path the
+///   controller cannot commit it, so the advance is delegated to the owner
+///   callback exactly as on the held path (the marker only gated the watcher; it
+///   was never the advance authority).
+///
+/// Constructed by owners at cutover (A2+); A1/A2a prod has no owner, so both
+/// arms are dormant outside the controller's own tests.
+#[allow(dead_code)] // #3089 A2a: pure add; owners pin a mode at cutover (A2b+).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(in crate::services::discord) enum AcquireFailureMode {
+    /// A lost acquire is a not-now: do not send, return `Transient` (A1 /
+    /// watcher / bridge).
+    Transient,
+    /// A lost acquire still POSTs, markerless and heartbeat-less (sink,
+    /// `session_relay_sink.rs:777-795`).
+    ProceedMarkerless,
+}
+
+/// Owner-provided, identity-gated advance callback (A2a capability 2).
+///
+/// On a CONFIRMED transport success the controller does not own the advance
+/// logic — it DELEGATES to this callback, exactly as the sink delegates to
+/// `advance_after_confirmed_post` → `advance_offset_for_confirmed_delegated_terminal`
+/// (`session_relay_sink.rs:542-644`), which re-loads a FRESH inflight AFTER the
+/// POST and runs the strict `(user_msg_id, started_at, turn_start_offset)`
+/// identity gate before calling `tmux::advance_watcher_confirmed_end`.
+///
+/// Contract (matches that `-> bool` return):
+/// - `true`  → the identity gate matched and the confirmed end was advanced; the
+///   controller commits the lease `Delivered` and returns
+///   [`DeliveryOutcome::Delivered`].
+/// - `false` → the identity gate REFUSED (inflight cleared/replaced during the
+///   slow POST); the controller commits `NotDelivered` and returns
+///   [`DeliveryOutcome::NotDelivered`] so the owner's committed-offset
+///   reconciliation re-sends (the `advanced == false` arm at
+///   `session_relay_sink.rs:571-577`).
+///
+/// The argument is the controller's confirmed `(start, end)` byte range so the
+/// owner can pin the same coordinate the lease was acquired for. The callback is
+/// invoked INLINE, BEFORE any post-send await (I1) and ONLY on a confirmed
+/// transport (never on Transient/Unknown — I2).
+///
+/// `&dyn` (not `FnOnce`) because the controller borrows it from the ctx and the
+/// I1 inline-before-await ordering needs no ownership transfer. Owners that have
+/// no identity gate (A1 semantics — unconditional advance) simply pass `None`,
+/// preserving the existing always-`Delivered` behaviour.
+pub(in crate::services::discord) type ConfirmedAdvance<'a> = &'a (dyn Fn((u64, u64)) -> bool + 'a);
+
+/// The POST-duration heartbeat the controller drives (A2a capability 3).
+///
+/// A1 stamped a single fixed 60s TTL at acquire and never renewed it; the sink
+/// (`session_relay_sink.rs:343`) and watcher instead acquire a short
+/// [`DELIVERY_LEASE_DEADLINE_MS`] (15s) and spawn a
+/// [`super::super::DeliveryLeaseHeartbeat`] that `renew`s the deadline every
+/// [`super::super::DELIVERY_LEASE_HEARTBEAT_MS`] while the POST is in flight,
+/// `stop()`ing it BEFORE the inline commit so the renew loop can never race the
+/// commit (#3151).
+///
+/// The controller cannot own the concrete `DeliveryLeaseHeartbeat` here because
+/// it drives the lease behind the [`DeliveryLease`] trait (a borrowed `&L`, not
+/// the `Arc<DeliveryLeaseCell>` the heartbeat task needs). So an owner supplies a
+/// heartbeat through this trait: `start` is called right after a winning acquire
+/// (returning an opaque RAII guard whose `Drop` aborts the task on any early
+/// return / panic), and the guard is dropped — equivalently `stop`ped — BEFORE
+/// the inline commit. The production impl (wired by owners at A2b+) is a thin
+/// adapter over `DeliveryLeaseHeartbeat::spawn`; A2a's tests use a recorder that
+/// counts `renew` ticks.
+pub(in crate::services::discord) trait PostHeartbeat {
+    /// Begin renewing `(holder, turn)`'s lease deadline for the duration of the
+    /// POST. Returns an opaque guard; dropping it stops the heartbeat (mirrors
+    /// `DeliveryLeaseHeartbeat`'s `Drop`/`stop`). Called ONLY on the held-lease
+    /// path (a markerless `ProceedMarkerless` send holds no lease to renew).
+    fn start(&self, holder: LeaseHolder, turn: TurnKey) -> Box<dyn PostHeartbeatGuard>;
+}
+
+/// RAII guard returned by [`PostHeartbeat::start`]. Dropping it stops the
+/// heartbeat task; the controller drops it explicitly BEFORE the inline commit
+/// so a last renew tick can never race the commit (#3151 ordering).
+pub(in crate::services::discord) trait PostHeartbeatGuard {}
+
 /// Borrowed delivery context for one `deliver_turn_output` call. The controller
 /// drives the borrowed [`DeliveryLeaseCell`] through acquire → send → commit →
 /// release internally (I1).
@@ -285,6 +410,22 @@ pub(in crate::services::discord) struct TurnOutputCtx<
     /// default. The sink/standby advance on fallback POST; turn_bridge does not
     /// (see [`FallbackCommitPolicy`]). The controller must not hard-code one.
     pub(in crate::services::discord) fallback_commit_policy: FallbackCommitPolicy,
+    /// A2a capability 1: what to do when the lease acquire FAILS. NO default —
+    /// the sink (`ProceedMarkerless`) and watcher/bridge (`Transient`) diverge.
+    pub(in crate::services::discord) acquire_failure_mode: AcquireFailureMode,
+    /// A2a capability 2: owner-provided, identity-gated advance callback. `Some`
+    /// → the controller delegates the advance decision (and commits
+    /// `Delivered`/`NotDelivered` accordingly); `None` → A1 semantics
+    /// (unconditional `Delivered` advance, for owners with no identity gate).
+    /// Invoked INLINE before any post-send await (I1), only on confirmed
+    /// transport (never on Transient/Unknown — I2).
+    pub(in crate::services::discord) advance: Option<ConfirmedAdvance<'a>>,
+    /// A2a capability 3: owner-provided POST-duration heartbeat. `Some` → the
+    /// controller renews the lease deadline while the POST is in flight and stops
+    /// the heartbeat before the inline commit (#3151); `None` → A1 behaviour (the
+    /// single acquire deadline is the only liveness signal). Only the held-lease
+    /// path renews; a `ProceedMarkerless` send holds no lease.
+    pub(in crate::services::discord) heartbeat: Option<&'a dyn PostHeartbeat>,
 }
 
 /// Deliver one turn's output through the single controller path.
@@ -317,16 +458,39 @@ where
     }
 
     // ---- acquire ---------------------------------------------------------
+    // A2a: acquire with the shared HOLDER-LIVENESS deadline (15s); the POST
+    // heartbeat (below) keeps it fresh — no fixed 60s TTL.
     let deadline_ms = lease_now_ms().saturating_add(TURN_OUTPUT_LEASE_TTL_MS);
-    if !ctx
+    let lease_held = ctx
         .lease
-        .try_acquire(ctx.turn, ctx.holder, start, end, deadline_ms)
-    {
-        // Another holder owns this (channel, turn, range); do not advance.
-        return DeliveryOutcome::Transient {
-            retry_from_offset: start,
-        };
+        .try_acquire(ctx.turn, ctx.holder, start, end, deadline_ms);
+    if !lease_held {
+        // A2a capability 1: another holder owns this (channel, turn, range).
+        match ctx.acquire_failure_mode {
+            AcquireFailureMode::Transient => {
+                // Watcher/bridge: do not send; the owner retries.
+                return DeliveryOutcome::Transient {
+                    retry_from_offset: start,
+                };
+            }
+            AcquireFailureMode::ProceedMarkerless => {
+                // Sink (`session_relay_sink.rs:777-795`): POST WITHOUT a marker
+                // and WITHOUT a heartbeat — fall through to the send below. We
+                // hold no lease, so the markerless path never commits/releases.
+            }
+        }
     }
+
+    // A2a capability 3: while the POST is in flight, keep the (held) lease
+    // deadline fresh. Only the held-lease path has a lease to renew; a
+    // markerless send holds none. The guard's Drop stops the heartbeat, so an
+    // early return / panic in `drive_transport` can never leak the renew task;
+    // it is also dropped explicitly BEFORE the inline commit (#3151 ordering).
+    let heartbeat_guard = if lease_held {
+        ctx.heartbeat.map(|hb| hb.start(ctx.holder, ctx.turn))
+    } else {
+        None
+    };
 
     // ---- send (transport) ------------------------------------------------
     // Any post-send work (placeholder terminal transition, fallback cleanup,
@@ -336,21 +500,23 @@ where
     match transport {
         TransportResult::Delivered => {
             // ---- I1: commit + advance INLINE, before any post-send await --
-            // The single commit+advance authority lives in `commit_and_finalize`
-            // so the ONLY place the lease ever transitions to `Committed` is
-            // immediately followed by the post-send finalize await + release.
-            // That structural pairing is what makes a "commit on the
-            // non-advance arm" mutation observable to the tests: every commit
-            // is always trailed by a gateway await a recorder can witness (I1 /
-            // review-fix M4).
-            commit_and_finalize(gateway, &ctx, start, end).await;
-            DeliveryOutcome::Delivered { committed_to: end }
+            // Stop the heartbeat FIRST (#3151) so its renew loop cannot race the
+            // commit, THEN run the single commit+advance authority. The advance
+            // is DELEGATED to the owner callback (A2a capability 2); its bool
+            // decides Delivered vs NotDelivered. The whole commit+finalize lives
+            // in one fn so every commit is structurally trailed by a post-send
+            // gateway await a recorder can witness (I1 / review-fix M4).
+            drop(heartbeat_guard);
+            commit_and_finalize(gateway, &ctx, start, end, lease_held).await
         }
         TransportResult::Transient => {
             // I2: ambiguous-but-retriable. Do NOT commit/advance — release the
-            // lease so a retry can re-acquire from `start`. No commit happens on
-            // this arm: it never calls `commit_and_finalize`.
-            ctx.lease.release(ctx.holder, ctx.turn, start, end);
+            // (held) lease so a retry can re-acquire from `start`. No commit
+            // happens on this arm: it never calls `commit_and_finalize`.
+            drop(heartbeat_guard);
+            if lease_held {
+                ctx.lease.release(ctx.holder, ctx.turn, start, end);
+            }
             DeliveryOutcome::Transient {
                 retry_from_offset: start,
             }
@@ -358,37 +524,83 @@ where
         TransportResult::Unknown => {
             // I2: ambiguous (drop / panic / partial). Release WITHOUT commit so
             // the offset never advances. No commit happens on this arm.
-            ctx.lease.release(ctx.holder, ctx.turn, start, end);
+            drop(heartbeat_guard);
+            if lease_held {
+                ctx.lease.release(ctx.holder, ctx.turn, start, end);
+            }
             DeliveryOutcome::Unknown
         }
     }
 }
 
-/// The SINGLE commit+advance authority (I1). Commits the lease `Delivered`
-/// (the offset advance to `end`), then runs the post-send finalize await and
-/// releases — in that fixed order. Keeping the commit and the trailing
-/// finalize/release in one fn means every successful `commit` is structurally
-/// paired with a post-send gateway await, so a mutation that commits on the
-/// ambiguous arm (Transient/Unknown) is always visible to a gateway-side commit
-/// recorder (review-fix M4: no silent commit-then-release).
-async fn commit_and_finalize<G, L>(gateway: &G, ctx: &TurnOutputCtx<'_, L>, start: u64, end: u64)
+/// The SINGLE commit+advance authority (I1). Runs the owner's identity-gated
+/// advance (A2a capability 2), commits the lease with the matching outcome
+/// (`Delivered` when the advance succeeded, `NotDelivered` when the owner's gate
+/// refused), then runs the post-send finalize await and releases — in that fixed
+/// order. Returns the corresponding [`DeliveryOutcome`].
+///
+/// Keeping the advance + commit + trailing finalize/release in one fn means
+/// every successful `commit` is structurally paired with a post-send gateway
+/// await, so a mutation that commits on the ambiguous arm (Transient/Unknown) is
+/// always visible to a gateway-side commit recorder (review-fix M4: no silent
+/// commit-then-release).
+///
+/// `lease_held` distinguishes the held path (sink-acquire won, or
+/// watcher/bridge) from the markerless `ProceedMarkerless` path where the
+/// acquire LOST: with no lease there is nothing to commit/release, but the
+/// owner's identity-gated advance still runs (the marker only gated the watcher;
+/// the advance authority was always the identity gate, not the lease).
+async fn commit_and_finalize<G, L>(
+    gateway: &G,
+    ctx: &TurnOutputCtx<'_, L>,
+    start: u64,
+    end: u64,
+    lease_held: bool,
+) -> DeliveryOutcome
 where
     G: TurnGateway + ?Sized,
     L: DeliveryLease + ?Sized,
 {
+    // A2a capability 2: delegate the advance decision. `None` → A1 semantics
+    // (unconditional advance: owners with no identity gate). `Some(cb)` → the
+    // owner's identity gate runs HERE, synchronously, BEFORE the post-send awaits
+    // below, so a post-send await can never land before the advance (#3143).
+    // This mirrors the sink running `advance_after_confirmed_post` inline before
+    // the marker clears (`session_relay_sink.rs:560-577`).
+    let advanced = match ctx.advance {
+        Some(advance) => advance((start, end)),
+        None => true,
+    };
+
     // commit() verifies the full (holder, turn, range) identity and records the
-    // Delivered outcome. This is the offset advance: the committed frontier
-    // moves to `end`. It runs synchronously here, BEFORE the post-send
-    // placeholder-transition / cleanup awaits below, so a post-send await can
-    // never land before the advance (the #3143 fence).
-    let committed = ctx
-        .lease
-        .commit(ctx.holder, ctx.turn, start, end, LeaseOutcome::Delivered);
-    debug_assert!(committed, "delivered commit must match the acquired lease");
+    // outcome. On the advanced arm the committed frontier moves to `end`; on the
+    // refused arm we commit `NotDelivered` so the owner's committed-offset
+    // reconciliation re-sends (the sink's `advanced == false` arm). On the
+    // markerless path there is no lease to commit — the advance bool alone
+    // decides the outcome. Runs synchronously here, BEFORE the post-send awaits.
+    if lease_held {
+        let outcome = if advanced {
+            LeaseOutcome::Delivered
+        } else {
+            LeaseOutcome::NotDelivered
+        };
+        let committed = ctx.lease.commit(ctx.holder, ctx.turn, start, end, outcome);
+        debug_assert!(committed, "confirmed commit must match the acquired lease");
+    }
 
     // ---- post-send work (AFTER the inline commit) -----------------------
     post_send_finalize(gateway, ctx).await;
-    ctx.lease.release(ctx.holder, ctx.turn, start, end);
+    if lease_held {
+        ctx.lease.release(ctx.holder, ctx.turn, start, end);
+    }
+
+    if advanced {
+        DeliveryOutcome::Delivered { committed_to: end }
+    } else {
+        DeliveryOutcome::NotDelivered {
+            committed_from: start,
+        }
+    }
 }
 
 /// Internal three-way transport result, before any lease commit.
@@ -589,7 +801,7 @@ mod tests {
     use crate::services::provider::ProviderKind;
     use poise::serenity_prelude::{ChannelId, MessageId};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
     /// M4 commit recorder: a `DeliveryLease` that wraps the real
     /// `DeliveryLeaseCell` and counts EVERY `commit` and `release` call (with
@@ -601,7 +813,9 @@ mod tests {
         inner: DeliveryLeaseCell,
         commit_calls: AtomicUsize,
         delivered_commit_calls: AtomicUsize,
+        not_delivered_commit_calls: AtomicUsize,
         release_calls: AtomicUsize,
+        renew_calls: AtomicUsize,
     }
 
     impl RecordingLease {
@@ -610,7 +824,9 @@ mod tests {
                 inner: DeliveryLeaseCell::new(channel),
                 commit_calls: AtomicUsize::new(0),
                 delivered_commit_calls: AtomicUsize::new(0),
+                not_delivered_commit_calls: AtomicUsize::new(0),
                 release_calls: AtomicUsize::new(0),
+                renew_calls: AtomicUsize::new(0),
             }
         }
     }
@@ -636,14 +852,25 @@ mod tests {
             outcome: LeaseOutcome,
         ) -> bool {
             self.commit_calls.fetch_add(1, Ordering::SeqCst);
-            if outcome == LeaseOutcome::Delivered {
-                self.delivered_commit_calls.fetch_add(1, Ordering::SeqCst);
+            match outcome {
+                LeaseOutcome::Delivered => {
+                    self.delivered_commit_calls.fetch_add(1, Ordering::SeqCst);
+                }
+                LeaseOutcome::NotDelivered => {
+                    self.not_delivered_commit_calls
+                        .fetch_add(1, Ordering::SeqCst);
+                }
+                LeaseOutcome::Unknown => {}
             }
             self.inner.commit(holder, turn, start, end, outcome)
         }
         fn release(&self, holder: LeaseHolder, turn: TurnKey, start: u64, end: u64) -> bool {
             self.release_calls.fetch_add(1, Ordering::SeqCst);
             self.inner.release(holder, turn, start, end)
+        }
+        fn renew(&self, holder: LeaseHolder, turn: TurnKey, new_deadline_ms: u64) -> bool {
+            self.renew_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.renew(holder, turn, new_deadline_ms)
         }
         fn read(&self) -> LeaseSnapshot {
             self.inner.read()
@@ -707,8 +934,11 @@ mod tests {
         /// `DeliveryLease` trait so the recorder-wrapping `RecordingLease` and
         /// the bare `DeliveryLeaseCell` are interchangeable here.
         lease: Arc<dyn DeliveryLease + Send + Sync>,
-        /// step counter — proves the temporal order of the observations.
-        clock: AtomicUsize,
+        /// step counter — proves the temporal order of the observations. Held in
+        /// an `Arc` so A2a owner-callback / heartbeat recorders can share the SAME
+        /// step clock and order their events against the send / post-send-await
+        /// observations (`clock_handle`).
+        clock: Arc<AtomicUsize>,
         /// snapshot tag observed inside the transport send call (expected
         /// `Leased`: commit has NOT happened yet).
         committed_at_send: AtomicBool,
@@ -749,7 +979,7 @@ mod tests {
         fn new(lease: Arc<dyn DeliveryLease + Send + Sync>, transport_ok: bool) -> Self {
             Self {
                 lease,
-                clock: AtomicUsize::new(1),
+                clock: Arc::new(AtomicUsize::new(1)),
                 committed_at_send: AtomicBool::new(false),
                 send_step: AtomicUsize::new(0),
                 committed_at_post_send_await: AtomicBool::new(false),
@@ -769,6 +999,14 @@ mod tests {
         /// placeholder `transition` reports `EditFailed` (M3 policy arms).
         fn fail_edits_from_now(&self) {
             self.edit_fails.store(true, Ordering::SeqCst);
+        }
+
+        /// A clone of the shared step clock so an A2a owner-callback / heartbeat
+        /// recorder can stamp its events on the SAME monotonic step counter the
+        /// gateway uses — letting a test order the advance call / heartbeat drop
+        /// against the transport send and post-send await observations.
+        fn clock_handle(&self) -> Arc<AtomicUsize> {
+            self.clock.clone()
         }
 
         /// Drive a specific replace outcome on the transport-ok path (H2).
@@ -1004,6 +1242,9 @@ mod tests {
             },
             edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
             fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
+            acquire_failure_mode: AcquireFailureMode::Transient,
+            advance: None,
+            heartbeat: None,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -1130,6 +1371,9 @@ mod tests {
             },
             edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
             fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
+            acquire_failure_mode: AcquireFailureMode::Transient,
+            advance: None,
+            heartbeat: None,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -1194,6 +1438,9 @@ mod tests {
             plan: OutputPlan::NoOp,
             edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
             fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
+            acquire_failure_mode: AcquireFailureMode::Transient,
+            advance: None,
+            heartbeat: None,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -1245,6 +1492,9 @@ mod tests {
             plan: OutputPlan::SendNewChunks { chunk_count: 3 },
             edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
             fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
+            acquire_failure_mode: AcquireFailureMode::Transient,
+            advance: None,
+            heartbeat: None,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -1291,6 +1541,9 @@ mod tests {
             plan: OutputPlan::SendNewChunks { chunk_count: 1 },
             edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
             fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
+            acquire_failure_mode: AcquireFailureMode::Transient,
+            advance: None,
+            heartbeat: None,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -1364,6 +1617,9 @@ mod tests {
             },
             edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
             fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
+            acquire_failure_mode: AcquireFailureMode::Transient,
+            advance: None,
+            heartbeat: None,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -1427,6 +1683,9 @@ mod tests {
             },
             edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
             fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
+            acquire_failure_mode: AcquireFailureMode::Transient,
+            advance: None,
+            heartbeat: None,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -1499,6 +1758,9 @@ mod tests {
             },
             edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
             fallback_commit_policy: FallbackCommitPolicy::NoCommitOnFallback,
+            acquire_failure_mode: AcquireFailureMode::Transient,
+            advance: None,
+            heartbeat: None,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -1561,6 +1823,9 @@ mod tests {
             },
             edit_fail_policy: EditFailPlaceholderPolicy::DeleteIfProvenStale,
             fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
+            acquire_failure_mode: AcquireFailureMode::Transient,
+            advance: None,
+            heartbeat: None,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -1617,6 +1882,9 @@ mod tests {
             },
             edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
             fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
+            acquire_failure_mode: AcquireFailureMode::Transient,
+            advance: None,
+            heartbeat: None,
         };
 
         let outcome = deliver_turn_output(&gateway, ctx).await;
@@ -1630,6 +1898,560 @@ mod tests {
             gateway.delete_calls.load(Ordering::SeqCst),
             0,
             "M3 (#2757): PreserveAlways must NEVER delete the original on EditFailed"
+        );
+    }
+
+    // ====================================================================
+    // #3089 A2a — sink-capable controller: acquire-failure mode, owner
+    // advance callback, POST heartbeat. (pure add — no owner wired yet.)
+    // ====================================================================
+
+    /// A2a capability 2: an owner advance callback that records WHEN it was
+    /// invoked (against the gateway's shared step clock) and returns a fixed
+    /// bool. Lets a test prove the callback runs INLINE before any post-send
+    /// await (I1) and is skipped on the ambiguous arm (I2).
+    struct RecordingAdvance {
+        clock: Arc<AtomicUsize>,
+        calls: AtomicUsize,
+        call_step: AtomicUsize,
+        seen_range: std::sync::Mutex<Option<(u64, u64)>>,
+        ret: bool,
+    }
+
+    impl RecordingAdvance {
+        fn new(clock: Arc<AtomicUsize>, ret: bool) -> Self {
+            Self {
+                clock,
+                calls: AtomicUsize::new(0),
+                call_step: AtomicUsize::new(0),
+                seen_range: std::sync::Mutex::new(None),
+                ret,
+            }
+        }
+        fn invoke(&self, range: (u64, u64)) -> bool {
+            let step = self.clock.fetch_add(1, Ordering::SeqCst);
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.call_step.store(step, Ordering::SeqCst);
+            }
+            *self.seen_range.lock().unwrap() = Some(range);
+            self.ret
+        }
+    }
+
+    /// A2a capability 3: a `PostHeartbeat` that, on `start`, fires `ticks`
+    /// synchronous `renew`s against the live lease (modelling the in-flight
+    /// renew loop) and records the holder/turn it was started with + the post-
+    /// renew deadline. The guard records the gateway step at which it is dropped,
+    /// so a test can prove the controller STOPS the heartbeat before the inline
+    /// commit (#3151).
+    struct RecordingHeartbeat {
+        lease: Arc<dyn DeliveryLease + Send + Sync>,
+        clock: Arc<AtomicUsize>,
+        ticks: u64,
+        started: AtomicUsize,
+        started_holder: std::sync::Mutex<Option<LeaseHolder>>,
+        renewed_deadline: AtomicU64,
+        drop_step: Arc<AtomicUsize>,
+    }
+
+    impl RecordingHeartbeat {
+        fn new(lease: Arc<dyn DeliveryLease + Send + Sync>, clock: Arc<AtomicUsize>) -> Self {
+            Self {
+                lease,
+                clock,
+                ticks: 2,
+                started: AtomicUsize::new(0),
+                started_holder: std::sync::Mutex::new(None),
+                renewed_deadline: AtomicU64::new(0),
+                drop_step: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    struct RecordingHeartbeatGuard {
+        clock: Arc<AtomicUsize>,
+        drop_step: Arc<AtomicUsize>,
+    }
+    impl PostHeartbeatGuard for RecordingHeartbeatGuard {}
+    impl Drop for RecordingHeartbeatGuard {
+        fn drop(&mut self) {
+            self.drop_step
+                .store(self.clock.fetch_add(1, Ordering::SeqCst), Ordering::SeqCst);
+        }
+    }
+
+    impl PostHeartbeat for RecordingHeartbeat {
+        fn start(&self, holder: LeaseHolder, turn: TurnKey) -> Box<dyn PostHeartbeatGuard> {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            *self.started_holder.lock().unwrap() = Some(holder);
+            // Fire the renew loop's ticks now: each pushes the deadline forward,
+            // modelling the in-flight heartbeat keeping the lease fresh.
+            let mut last = 0u64;
+            for i in 1..=self.ticks {
+                last = lease_now_ms().saturating_add(DELIVERY_LEASE_DEADLINE_MS) + i;
+                let renewed = self.lease.renew(holder, turn, last);
+                assert!(
+                    renewed,
+                    "A2a heartbeat: renew must succeed against the live lease the \
+                     controller acquired (holder/turn must match)"
+                );
+            }
+            self.renewed_deadline.store(last, Ordering::SeqCst);
+            Box::new(RecordingHeartbeatGuard {
+                clock: self.clock.clone(),
+                drop_step: self.drop_step.clone(),
+            })
+        }
+    }
+
+    /// Pre-occupy the lease with a DIFFERENT holder so the controller's
+    /// `try_acquire` LOSES — the precondition for both acquire-failure-mode
+    /// tests. Returns the foreign holder/turn/range that owns the cell.
+    fn occupy_lease_with_foreign_holder(lease: &RecordingLease, channel: ChannelId) {
+        let foreign_turn = TurnKey::new(channel, 99, 1);
+        let ok = lease.try_acquire(
+            foreign_turn,
+            LeaseHolder::Watcher { instance_id: 7 },
+            0,
+            64,
+            lease_now_ms().saturating_add(DELIVERY_LEASE_DEADLINE_MS),
+        );
+        assert!(ok, "foreign holder must win the initial acquire");
+    }
+
+    /// A2a capability 1 — `ProceedMarkerless`: when the acquire LOSES, the sink
+    /// behaviour still POSTs (markerless), delegating the advance to the owner
+    /// callback. The controller holds no lease, so it never commits/releases its
+    /// own holder; the send DOES happen and the outcome reflects the callback.
+    #[tokio::test]
+    async fn proceed_markerless_sends_when_acquire_fails() {
+        let channel = ChannelId::new(120);
+        let lease = Arc::new(RecordingLease::new(channel));
+        occupy_lease_with_foreign_holder(&lease, channel);
+        let gateway =
+            ObservingGateway::new(lease.clone() as Arc<dyn DeliveryLease + Send + Sync>, true);
+        let controller = PlaceholderController::default();
+        let clock = Arc::new(AtomicUsize::new(1));
+        // Markerless send still advances via the owner callback (true here).
+        let advance = RecordingAdvance::new(clock.clone(), true);
+        let body = "markerless sink delivery";
+
+        let ctx = TurnOutputCtx {
+            turn: turn_key(channel),
+            owner: RelayOwnerKind::SessionBoundRelay,
+            holder: LeaseHolder::Sink,
+            lease: lease.as_ref(),
+            channel_id: channel,
+            placeholder_controller: &controller,
+            // No placeholder → Replace falls back to a fresh send_message.
+            placeholder: PlaceholderSlot::None,
+            body,
+            send_range: (0, body.len() as u64),
+            plan: OutputPlan::Replace {
+                lifecycle: PlaceholderLifecycle::Completed,
+            },
+            edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
+            fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
+            acquire_failure_mode: AcquireFailureMode::ProceedMarkerless,
+            advance: Some(&|r| advance.invoke(r)),
+            heartbeat: None,
+        };
+
+        let outcome = deliver_turn_output(&gateway, ctx).await;
+        // The send happened (markerless), and the callback advanced → Delivered.
+        match outcome {
+            DeliveryOutcome::Delivered { committed_to } => {
+                assert_eq!(committed_to, body.len() as u64);
+            }
+            other => panic!(
+                "ProceedMarkerless must still deliver, got {}",
+                debug_outcome(&other)
+            ),
+        }
+        assert_ne!(
+            gateway.send_step.load(Ordering::SeqCst),
+            0,
+            "ProceedMarkerless: the transport send MUST run even though acquire lost"
+        );
+        assert_eq!(
+            advance.calls.load(Ordering::SeqCst),
+            1,
+            "markerless path still delegates the advance to the owner callback"
+        );
+        // The controller never committed/released on its OWN holder — the cell
+        // is still held by the FOREIGN holder it lost the acquire to.
+        assert_eq!(
+            lease.commit_calls.load(Ordering::SeqCst),
+            0,
+            "ProceedMarkerless holds no lease → never commits"
+        );
+        assert_eq!(
+            lease.release_calls.load(Ordering::SeqCst),
+            0,
+            "ProceedMarkerless holds no lease → never releases our holder"
+        );
+        assert!(
+            matches!(
+                lease.read(),
+                LeaseSnapshot::Leased {
+                    holder: LeaseHolder::Watcher { instance_id: 7 },
+                    ..
+                }
+            ),
+            "the foreign holder's lease is untouched by a markerless send"
+        );
+    }
+
+    /// A2a capability 1 — `Transient`: when the acquire LOSES, the watcher/bridge
+    /// behaviour does NOT send and returns `Transient` (the A1 default). Decisive
+    /// vs the markerless test: the SOLE difference is the mode, and it flips
+    /// send-happened + outcome.
+    #[tokio::test]
+    async fn transient_mode_does_not_send_when_acquire_fails() {
+        let channel = ChannelId::new(121);
+        let lease = Arc::new(RecordingLease::new(channel));
+        occupy_lease_with_foreign_holder(&lease, channel);
+        let gateway =
+            ObservingGateway::new(lease.clone() as Arc<dyn DeliveryLease + Send + Sync>, true);
+        let controller = PlaceholderController::default();
+        let clock = Arc::new(AtomicUsize::new(1));
+        let advance = RecordingAdvance::new(clock.clone(), true);
+        let body = "watcher loses the acquire";
+
+        let ctx = TurnOutputCtx {
+            turn: turn_key(channel),
+            owner: RelayOwnerKind::Watcher,
+            holder: LeaseHolder::Watcher { instance_id: 1 },
+            lease: lease.as_ref(),
+            channel_id: channel,
+            placeholder_controller: &controller,
+            placeholder: PlaceholderSlot::None,
+            body,
+            send_range: (0, body.len() as u64),
+            plan: OutputPlan::Replace {
+                lifecycle: PlaceholderLifecycle::Completed,
+            },
+            edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
+            fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
+            acquire_failure_mode: AcquireFailureMode::Transient,
+            advance: Some(&|r| advance.invoke(r)),
+            heartbeat: None,
+        };
+
+        let outcome = deliver_turn_output(&gateway, ctx).await;
+        match outcome {
+            DeliveryOutcome::Transient { retry_from_offset } => {
+                assert_eq!(retry_from_offset, 0);
+            }
+            other => panic!(
+                "Transient mode must yield Transient, got {}",
+                debug_outcome(&other)
+            ),
+        }
+        // The decisive divergence: NO send, NO advance callback, NO commit.
+        assert_eq!(
+            gateway.send_step.load(Ordering::SeqCst),
+            0,
+            "Transient mode: a lost acquire must NOT send"
+        );
+        assert_eq!(
+            advance.calls.load(Ordering::SeqCst),
+            0,
+            "Transient mode: a lost acquire must NOT run the advance callback"
+        );
+        assert_eq!(
+            lease.commit_calls.load(Ordering::SeqCst),
+            0,
+            "Transient mode: a lost acquire never commits"
+        );
+    }
+
+    /// A2a capability 2 — the owner advance callback returning `true` commits
+    /// `Delivered` and the callback runs INLINE, STRICTLY BEFORE any post-send
+    /// await (I1). Proven by the shared step clock: the advance call step is
+    /// after the transport send but before the first post-send `edit_message`
+    /// await observation.
+    #[tokio::test]
+    async fn advance_callback_true_commits_delivered_before_post_send_await() {
+        let channel = ChannelId::new(122);
+        let lease = Arc::new(RecordingLease::new(channel));
+        let gateway =
+            ObservingGateway::new(lease.clone() as Arc<dyn DeliveryLease + Send + Sync>, true);
+        let controller = PlaceholderController::default();
+        let placeholder_msg = MessageId::new(55555);
+        let key = placeholder_key(channel, placeholder_msg);
+        prime_active(&controller, &gateway, key.clone()).await;
+        // Share the gateway's clock so the advance call step orders against the
+        // send/post-send-await steps.
+        let clock = gateway.clock_handle();
+        let advance = RecordingAdvance::new(clock, true);
+        let body = "advance gate matched the live inflight";
+
+        let ctx = TurnOutputCtx {
+            turn: turn_key(channel),
+            owner: RelayOwnerKind::SessionBoundRelay,
+            holder: LeaseHolder::Sink,
+            lease: lease.as_ref(),
+            channel_id: channel,
+            placeholder_controller: &controller,
+            placeholder: PlaceholderSlot::Active {
+                message_id: placeholder_msg,
+                key,
+            },
+            body,
+            send_range: (0, body.len() as u64),
+            plan: OutputPlan::Replace {
+                lifecycle: PlaceholderLifecycle::Completed,
+            },
+            edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
+            fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
+            acquire_failure_mode: AcquireFailureMode::Transient,
+            advance: Some(&|r| advance.invoke(r)),
+            heartbeat: None,
+        };
+
+        let outcome = deliver_turn_output(&gateway, ctx).await;
+        match outcome {
+            DeliveryOutcome::Delivered { committed_to } => {
+                assert_eq!(committed_to, body.len() as u64);
+            }
+            other => panic!("advance=true must Deliver, got {}", debug_outcome(&other)),
+        }
+        // The callback saw the confirmed (start, end) range.
+        assert_eq!(
+            *advance.seen_range.lock().unwrap(),
+            Some((0, body.len() as u64)),
+            "the advance callback must receive the controller's confirmed byte range"
+        );
+        // Exactly one Delivered commit (the advance=true arm).
+        assert_eq!(
+            lease.delivered_commit_calls.load(Ordering::SeqCst),
+            1,
+            "advance=true must commit Delivered exactly once"
+        );
+        assert_eq!(
+            lease.not_delivered_commit_calls.load(Ordering::SeqCst),
+            0,
+            "advance=true must not commit NotDelivered"
+        );
+        // I1 ordering: send < advance-call < post-send await.
+        let send_step = gateway.send_step.load(Ordering::SeqCst);
+        let advance_step = advance.call_step.load(Ordering::SeqCst);
+        let post_step = gateway.post_send_await_step.load(Ordering::SeqCst);
+        assert!(
+            send_step < advance_step,
+            "I1: the advance (step {advance_step}) must run AFTER the transport send (step {send_step})"
+        );
+        assert!(
+            advance_step < post_step,
+            "I1: the advance (step {advance_step}) must run BEFORE the post-send await (step {post_step})"
+        );
+    }
+
+    /// A2a capability 2 — the owner advance callback returning `false` (the
+    /// identity gate REFUSED, e.g. inflight cleared during a slow POST) commits
+    /// `NotDelivered` and returns `NotDelivered`; the offset does NOT advance.
+    /// Mirrors the sink's `advanced == false` arm (`session_relay_sink.rs:571-577`).
+    /// Mutation guard: the SOLE difference from the test above is the callback
+    /// bool, and it flips both the outcome and the commit outcome.
+    #[tokio::test]
+    async fn advance_callback_false_returns_not_delivered_without_advancing() {
+        let channel = ChannelId::new(123);
+        let lease = Arc::new(RecordingLease::new(channel));
+        let gateway =
+            ObservingGateway::new(lease.clone() as Arc<dyn DeliveryLease + Send + Sync>, true);
+        let controller = PlaceholderController::default();
+        let placeholder_msg = MessageId::new(66666);
+        let key = placeholder_key(channel, placeholder_msg);
+        prime_active(&controller, &gateway, key.clone()).await;
+        let clock = gateway.clock_handle();
+        let advance = RecordingAdvance::new(clock, false);
+        let body = "advance gate refused: inflight was replaced";
+
+        let ctx = TurnOutputCtx {
+            turn: turn_key(channel),
+            owner: RelayOwnerKind::SessionBoundRelay,
+            holder: LeaseHolder::Sink,
+            lease: lease.as_ref(),
+            channel_id: channel,
+            placeholder_controller: &controller,
+            placeholder: PlaceholderSlot::Active {
+                message_id: placeholder_msg,
+                key,
+            },
+            body,
+            send_range: (0, body.len() as u64),
+            plan: OutputPlan::Replace {
+                lifecycle: PlaceholderLifecycle::Completed,
+            },
+            edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
+            fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
+            acquire_failure_mode: AcquireFailureMode::Transient,
+            advance: Some(&|r| advance.invoke(r)),
+            heartbeat: None,
+        };
+
+        let outcome = deliver_turn_output(&gateway, ctx).await;
+        match outcome {
+            DeliveryOutcome::NotDelivered { committed_from } => {
+                // The offset stayed at the pre-send start (no advance).
+                assert_eq!(committed_from, 0);
+            }
+            other => panic!(
+                "advance=false must yield NotDelivered, got {}",
+                debug_outcome(&other)
+            ),
+        }
+        // The lease was committed NotDelivered (so the watcher reconciliation
+        // re-sends), NOT Delivered — the offset did not advance.
+        assert_eq!(
+            lease.not_delivered_commit_calls.load(Ordering::SeqCst),
+            1,
+            "advance=false must commit NotDelivered exactly once"
+        );
+        assert_eq!(
+            lease.delivered_commit_calls.load(Ordering::SeqCst),
+            0,
+            "advance=false must NEVER commit Delivered"
+        );
+        // The lease is released back to Unleased (commit happened, then release).
+        assert!(
+            matches!(lease.read(), LeaseSnapshot::Unleased),
+            "a committed NotDelivered turn still releases the lease"
+        );
+    }
+
+    /// A2a capability 2 — I2 preserved: the advance callback is NEVER invoked on
+    /// an ambiguous (Unknown) transport. A failed send must not even ask the
+    /// owner whether to advance.
+    #[tokio::test]
+    async fn advance_callback_not_invoked_on_ambiguous_transport() {
+        let channel = ChannelId::new(124);
+        let lease = Arc::new(RecordingLease::new(channel));
+        // transport fails → Unknown.
+        let gateway =
+            ObservingGateway::new(lease.clone() as Arc<dyn DeliveryLease + Send + Sync>, false);
+        let controller = PlaceholderController::default();
+        let clock = Arc::new(AtomicUsize::new(1));
+        let advance = RecordingAdvance::new(clock, true);
+        let body = "ambiguous send, advance must not be consulted";
+
+        let ctx = TurnOutputCtx {
+            turn: turn_key(channel),
+            owner: RelayOwnerKind::SessionBoundRelay,
+            holder: LeaseHolder::Sink,
+            lease: lease.as_ref(),
+            channel_id: channel,
+            placeholder_controller: &controller,
+            placeholder: PlaceholderSlot::None,
+            body,
+            send_range: (0, body.len() as u64),
+            plan: OutputPlan::Replace {
+                lifecycle: PlaceholderLifecycle::Completed,
+            },
+            edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
+            fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
+            acquire_failure_mode: AcquireFailureMode::Transient,
+            advance: Some(&|r| advance.invoke(r)),
+            heartbeat: None,
+        };
+
+        let outcome = deliver_turn_output(&gateway, ctx).await;
+        assert!(
+            matches!(outcome, DeliveryOutcome::Unknown),
+            "ambiguous transport must yield Unknown, got {}",
+            debug_outcome(&outcome)
+        );
+        assert_eq!(
+            advance.calls.load(Ordering::SeqCst),
+            0,
+            "I2: the advance callback must NEVER run on an ambiguous transport"
+        );
+        assert_eq!(
+            lease.commit_calls.load(Ordering::SeqCst),
+            0,
+            "I2: an Unknown transport never commits"
+        );
+    }
+
+    /// A2a capability 3 — the POST heartbeat renews the (held) lease deadline
+    /// while the POST is in flight, is started with the controller's
+    /// (holder, turn), and is STOPPED before the inline commit (#3151). Proven
+    /// by: renew_calls > 0, the cell deadline moved past the acquire deadline,
+    /// and the heartbeat guard's drop step precedes the first observed commit.
+    #[tokio::test]
+    async fn post_heartbeat_renews_held_lease_and_stops_before_commit() {
+        let channel = ChannelId::new(125);
+        let lease = Arc::new(RecordingLease::new(channel));
+        let gateway =
+            ObservingGateway::new(lease.clone() as Arc<dyn DeliveryLease + Send + Sync>, true);
+        let controller = PlaceholderController::default();
+        let placeholder_msg = MessageId::new(77777);
+        let key = placeholder_key(channel, placeholder_msg);
+        prime_active(&controller, &gateway, key.clone()).await;
+        let clock = gateway.clock_handle();
+        let heartbeat =
+            RecordingHeartbeat::new(lease.clone() as Arc<dyn DeliveryLease + Send + Sync>, clock);
+        let body = "long POST kept alive by the heartbeat";
+
+        let ctx = TurnOutputCtx {
+            turn: turn_key(channel),
+            owner: RelayOwnerKind::SessionBoundRelay,
+            holder: LeaseHolder::Sink,
+            lease: lease.as_ref(),
+            channel_id: channel,
+            placeholder_controller: &controller,
+            placeholder: PlaceholderSlot::Active {
+                message_id: placeholder_msg,
+                key,
+            },
+            body,
+            send_range: (0, body.len() as u64),
+            plan: OutputPlan::Replace {
+                lifecycle: PlaceholderLifecycle::Completed,
+            },
+            edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
+            fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
+            acquire_failure_mode: AcquireFailureMode::Transient,
+            advance: None,
+            heartbeat: Some(&heartbeat),
+        };
+
+        let outcome = deliver_turn_output(&gateway, ctx).await;
+        assert!(
+            matches!(outcome, DeliveryOutcome::Delivered { .. }),
+            "delivered with a heartbeat, got {}",
+            debug_outcome(&outcome)
+        );
+        // The heartbeat was started exactly once, on the held path, with the
+        // controller's holder.
+        assert_eq!(
+            heartbeat.started.load(Ordering::SeqCst),
+            1,
+            "the held-lease path starts the POST heartbeat exactly once"
+        );
+        assert_eq!(
+            *heartbeat.started_holder.lock().unwrap(),
+            Some(LeaseHolder::Sink),
+            "the heartbeat must be started with the controller's holder identity"
+        );
+        // The renew(s) actually pushed the lease deadline forward (not a fixed
+        // 60s TTL): renew_calls > 0 and the recorded post-renew deadline is the
+        // one the heartbeat installed.
+        assert!(
+            lease.renew_calls.load(Ordering::SeqCst) >= 1,
+            "the POST heartbeat must renew the lease deadline at least once"
+        );
+        // #3151 ordering: the heartbeat guard was DROPPED (stopped) before the
+        // first commit became observable, so the renew loop cannot race the
+        // commit.
+        let drop_step = heartbeat.drop_step.load(Ordering::SeqCst);
+        let first_commit_step = gateway.first_commit_step.load(Ordering::SeqCst);
+        assert_ne!(drop_step, 0, "the heartbeat guard must have been dropped");
+        assert!(
+            first_commit_step != 0 && drop_step < first_commit_step,
+            "#3151: the heartbeat must STOP (drop_step {drop_step}) before the commit \
+             becomes observable (step {first_commit_step})"
         );
     }
 
@@ -1684,6 +2506,7 @@ mod tests {
     fn debug_outcome(o: &DeliveryOutcome) -> &'static str {
         match o {
             DeliveryOutcome::Delivered { .. } => "Delivered",
+            DeliveryOutcome::NotDelivered { .. } => "NotDelivered",
             DeliveryOutcome::Transient { .. } => "Transient",
             DeliveryOutcome::Unknown => "Unknown",
             DeliveryOutcome::Skipped => "Skipped",
