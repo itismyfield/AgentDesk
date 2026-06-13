@@ -54,6 +54,8 @@
 "src/services/discord/tmux_watcher/placeholder_reclaim.rs" = 106
 "src/services/discord/tmux_watcher/prompt_observe.rs" = 109
 "src/services/discord/tmux_watcher/turn_identity.rs" = 327
+# #3089 A4 watcher short-replace controller cutover sibling, frozen at landed prod LoC.
+"src/services/discord/tmux_watcher/terminal_send.rs" = 466
 # Frozen at its true production LoC once #3028 fixed the prod/test splitter
 # (lifetime/char-literal brace miscount): the first inline `#[cfg(test)] mod`
 # block was over-extended to EOF, so `spawn_turn_bridge` and ~9000 lines of the
