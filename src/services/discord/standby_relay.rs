@@ -64,6 +64,20 @@ pub(in crate::services::discord) fn standby_relay_controller_enabled() -> bool {
     })
 }
 
+/// #3089 A3 (review-fix r2 Medium): pure short-replace cut-over decision.
+/// Routes the standby short-replace branch onto the unified controller IFF the
+/// flag is ON **and** the post-format body is non-empty. The `!formatted.is_empty()`
+/// half is LOAD-BEARING and single-sourced here: legacy
+/// `replace_long_message_raw_with_outcome` treats a zero-chunk (empty) body as
+/// `EditedOriginal` → committed → **true** (no network), whereas the controller
+/// short-circuits an empty body to `Skipped` → **false**. Dropping the empty-body
+/// exclusion would wrongly flip empty bodies true→false, so it is pinned by
+/// `standby_short_replace_should_cutover_pins_both_conditions`. Mirrors A2b's
+/// `sink_guard_lease_range` extraction.
+fn standby_short_replace_should_cutover(controller_enabled: bool, formatted: &str) -> bool {
+    controller_enabled && !formatted.is_empty()
+}
+
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// #2448 graduation: the 900s (15min) cap was the heuristic stop signal —
 /// "after this long the primary turn is presumed dead". Now that
@@ -778,12 +792,13 @@ async fn deliver_response(
                 return true;
             }
             // #3089 A3: route the short-replace branch through the unified
-            // controller behind a flag (default OFF). The nonempty gate mirrors
-            // A2b: `replace_long_message_raw_with_outcome` treats a zero-chunk
-            // (empty) body as `EditedOriginal` (→ true), but the controller
-            // short-circuits an empty body to `Skipped` (→ false), so empty bodies
-            // MUST stay on the legacy path. OFF → the verbatim legacy path below.
-            if standby_relay_controller_enabled() && !formatted.is_empty() {
+            // controller behind a flag (default OFF). The cut-over decision —
+            // including the load-bearing non-empty-body exclusion — lives in the
+            // single-sourced pure fn `standby_short_replace_should_cutover` (see
+            // its doc comment for the empty-body true→false divergence the gate
+            // guards against). OFF or empty body → the verbatim legacy path below.
+            if standby_short_replace_should_cutover(standby_relay_controller_enabled(), &formatted)
+            {
                 let gateway = super::gateway::DiscordGateway::new(
                     http.clone(),
                     shared.clone(),
@@ -1334,6 +1349,7 @@ mod tests {
     mod a3_controller_cutover_tests {
         use super::super::{
             RelayOwnerKind, deliver_short_replace_via_controller, standby_relay_controller_enabled,
+            standby_short_replace_should_cutover,
         };
         use crate::services::discord::formatting::ReplaceLongMessageOutcome;
         use crate::services::discord::gateway::{GatewayFuture, TurnGateway};
@@ -1543,19 +1559,18 @@ mod tests {
             assert_eq!(replace_calls, 1, "the single POST was attempted and failed");
         }
 
-        // #3089 A3 flag-state: the cut-over gate (`standby_relay_controller_enabled()
-        // && !formatted.is_empty()`) must keep the legacy path for (a) flag OFF and
-        // (b) empty bodies. The flag is `OnceLock`-cached + env-driven, default OFF —
-        // under the shared env lock with the env var unset, the first evaluation in
-        // this process is OFF, so the `deliver_response` guard does NOT route to the
-        // controller (the legacy `replace_long_message_raw_with_outcome` runs). The
-        // EMPTY-body half mirrors A2b: an empty body would diverge (controller →
-        // Skipped → false; legacy zero-chunk → EditedOriginal → true), so the
-        // nonempty gate is load-bearing. Dropping `!formatted.is_empty()` flips the
-        // empty-body branch; the empty-body assertion proves the controller's
-        // Skipped → false divergence the gate guards against.
+        // #3089 A3 (review-fix r2): characterizes the two BEHAVIOURS the production
+        // cut-over gate relies on — (a) the flag defaults OFF (deploy no-op) and
+        // (b) the controller diverges from legacy on an empty body (controller →
+        // Skipped → false; legacy zero-chunk → EditedOriginal → true). NOTE: this
+        // test calls `deliver_short_replace_via_controller` DIRECTLY, so it does NOT
+        // exercise the production guard at `deliver_response`; it merely proves WHY
+        // the guard's `!formatted.is_empty()` half must exist. The guard logic
+        // itself (both conditions) is single-sourced in the pure fn
+        // `standby_short_replace_should_cutover` and mutation-pinned by
+        // `standby_short_replace_should_cutover_pins_both_conditions` below.
         #[test]
-        fn flag_default_off_and_empty_body_diverges_so_gate_keeps_legacy() {
+        fn flag_default_off_and_empty_body_diverges_from_legacy() {
             let _lock = crate::config::shared_test_env_lock()
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
@@ -1594,6 +1609,34 @@ mod tests {
             );
             // owner identity is StandbyRelay (cosmetic, but asserted for honesty).
             assert_eq!(RelayOwnerKind::StandbyRelay.as_str(), "standby_relay");
+        }
+
+        // #3089 A3 (review-fix r2 Medium): mutation pin for the PRODUCTION cut-over
+        // gate. The guard at `deliver_response` now calls the single-sourced pure
+        // fn `standby_short_replace_should_cutover`, so the load-bearing
+        // `!formatted.is_empty()` literal lives in EXACTLY ONE place. This test
+        // pins BOTH conditions:
+        //   • dropping `controller_enabled` (mutate body to `!formatted.is_empty()`)
+        //     fails the flag-OFF assertion;
+        //   • dropping `!formatted.is_empty()` (mutate body to `controller_enabled`
+        //     alone) fails the empty-body assertion — the codex r1 finding's exact
+        //     mutation (empty body would wrongly cut over → controller Skip → false
+        //     instead of legacy zero-chunk EditedOriginal → true).
+        #[test]
+        fn standby_short_replace_should_cutover_pins_both_conditions() {
+            assert!(
+                !standby_short_replace_should_cutover(false, "x"),
+                "flag OFF → never cut over (byte-identical legacy path)"
+            );
+            assert!(
+                !standby_short_replace_should_cutover(true, ""),
+                "empty body MUST stay legacy: controller Skips → false, but legacy \
+                 zero-chunk → EditedOriginal → true; cutting over would flip true→false"
+            );
+            assert!(
+                standby_short_replace_should_cutover(true, "x"),
+                "the ONLY cut-over case: flag ON + non-empty body"
+            );
         }
     }
 }
