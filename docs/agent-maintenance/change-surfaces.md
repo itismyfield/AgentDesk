@@ -707,7 +707,7 @@
     children (`send_target`, `send_gate`, `send_api`, `manual_delivery`) to
     `outbound/` while preserving the `health::` re-export API; #1879
     snapshot/mailbox extraction, and #3082 answer-flush-barrier field).
-  - `src/services/discord/health/recovery.rs` (2615 lines; health recovery
+  - `src/services/discord/health/recovery.rs` (2634 lines; health recovery
     extraction surface, split further before adding non-bugfix behavior; +70
     from #3126 stall-watchdog completed-idle false-positive guard tests; +88
     from #3169 stall-watchdog jsonl-mtime liveness guard + tests, closing the
@@ -717,7 +717,10 @@
     minting permanent registry entries for non-existent channels; -4 from
     #3360 moving orphan pending-token auto-heal out to
     `health/relay_auto_heal.rs`; #3361 moved positive stall-watchdog liveness
-    guard state/logging to `health/stall_liveness.rs`).
+    guard state/logging to `health/stall_liveness.rs`; #3410 wired the
+    force-clean watcher-respawn follow-through + always-run cross-tick
+    retry/dead-man (P1-a: no early return on zero candidates), delegating the
+    new behaviour to `health/watcher_respawn.rs`).
   - `src/services/discord/router/message_handler/intake_turn.rs` (3769 lines;
     Discord message intake turn orchestration split from the router message
     handler; bugfix only outside a further extraction plan; +9 from #3082

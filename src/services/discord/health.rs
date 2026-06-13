@@ -25,6 +25,7 @@ mod runtime_resolve;
 mod session_enrichment;
 mod snapshot;
 mod stall_liveness;
+mod watcher_respawn;
 
 // `HeadlessAgentTurnReservation` has no external referent today (callers
 // destructure the reserve/start tuple); kept re-exported for the reserve→start

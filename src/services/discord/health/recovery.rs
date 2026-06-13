@@ -11,7 +11,7 @@ use crate::services::discord::{self as discord, SharedData};
 use crate::services::provider::{CancelToken, ProviderKind};
 
 use super::HealthRegistry;
-use super::{relay_auto_heal, stall_liveness};
+use super::{relay_auto_heal, stall_liveness, watcher_respawn};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeTurnStopResult {
@@ -1513,6 +1513,7 @@ pub(crate) async fn run_stall_watchdog_pass(
 ) -> usize {
     let now_unix_secs = chrono::Utc::now().timestamp();
     stall_liveness::gc_stall_watchdog_liveness_state(now_unix_secs);
+    watcher_respawn::gc_watcher_absence_state(now_unix_secs);
 
     // Multi-bot deployments register several runtimes under one provider
     // name. Sweep *every* runtime's watcher channels (a name-only lookup
@@ -1543,10 +1544,10 @@ pub(crate) async fn run_stall_watchdog_pass(
             }
         }
     }
-    if candidate_channels.is_empty() {
-        return relay_auto_heal::run_orphan_token_auto_heal_pass(registry, provider, &runtimes)
-            .await;
-    }
+    // #3410 P1-a: no early return on empty candidates — the trailing retry +
+    // dead-man are keyed on WATCHER ABSENCE, not on live-watcher candidates, so
+    // they must run even when a force-clean killed the last channel's watcher
+    // (zero candidates next tick); gating them would strand it forever.
     let mut cleaned = 0usize;
     for (channel_id, shared) in candidate_channels {
         // Use the already-selected runtime. A provider-name scan can be
@@ -1849,6 +1850,19 @@ pub(crate) async fn run_stall_watchdog_pass(
             channel_id,
         )
         .await;
+        // #3410: the cleanup above cancelled the watcher and (on the
+        // tmux_alive_relay_dead branch) skipped relay recovery — release the
+        // stale mailbox ownership it left and respawn the watcher on the still-
+        // live tmux session. Whoever kills the watcher owns the respawn.
+        watcher_respawn::complete_force_clean_watcher_recovery(
+            registry,
+            provider,
+            &shared,
+            channel_id,
+            &snapshot,
+            now_unix_secs,
+        )
+        .await;
         shared
             .dispatch_thread_parents
             .retain(|_, thread_id| *thread_id != channel_id);
@@ -1865,6 +1879,11 @@ pub(crate) async fn run_stall_watchdog_pass(
         );
         cleaned += 1;
     }
+    // #3410 cross-tick retry: channels whose force-clean respawn failed dropped
+    // out of the watcher-derived candidate loop (no watcher = not a candidate),
+    // so re-attempt each still-tracked absent channel — never give up after one.
+    watcher_respawn::retry_pending_watcher_respawns(registry, provider, &runtimes, now_unix_secs)
+        .await;
     cleaned + relay_auto_heal::run_orphan_token_auto_heal_pass(registry, provider, &runtimes).await
 }
 

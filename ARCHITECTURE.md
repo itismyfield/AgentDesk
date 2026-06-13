@@ -397,7 +397,8 @@ src/
 │   │   │   ├── runtime_resolve.rs
 │   │   │   ├── session_enrichment.rs
 │   │   │   ├── snapshot.rs
-│   │   │   └── stall_liveness.rs
+│   │   │   ├── stall_liveness.rs
+│   │   │   └── watcher_respawn.rs
 │   │   ├── inflight/
 │   │   │   └── budget.rs
 │   │   ├── outbound/
