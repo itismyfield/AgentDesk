@@ -1122,8 +1122,15 @@ normal test growth is allowed): `src/services/analytics.rs`,
 moved verbatim to `discord/shared_state.rs` next to
 `SessionOverrideState`; still ratcheted at 954 in the frozen baseline).
 `src/services/session_backend.rs` left this list in #3344 (997 -> 1023 prod
-LoC after the shared terminal-usage provenance helper) and is registry-tracked
-again (giant_file_registry.toml, decompose_issue #3405).
+LoC after the shared terminal-usage provenance helper) but #3405 brought it
+back under the threshold (1023 -> 393 prod LoC) by splitting two verbatim
+clusters into child modules: the stream-line state machine
+(`StreamLineState`/`TaskStartInfo`, `process_stream_line`, and the synchronous
+envelope parsers) into `src/services/session_backend/stream_line.rs` (568 prod
+LoC), and the #3344 terminal-usage adoption gate plus the analytics re-parser
+(`adopt_terminal_result_usage`, `extract_turn_analytics_from_output*`) into
+`src/services/session_backend/terminal_usage.rs` (106 prod LoC). It is no
+longer registry-tracked (the giant_file_registry.toml entry was removed).
 
 Same rule: `bugfix` only without a split issue.
 
