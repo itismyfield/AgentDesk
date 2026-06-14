@@ -414,8 +414,18 @@ pub(in crate::services::discord) fn effective_committed_offset(
     if !delivery_record_authority_enabled() {
         return in_memory;
     }
+    // The `tmux` module is `#[cfg(unix)]`; on non-unix targets (windows CI
+    // cross-compile check) there is no wrapper generation file, so treat the
+    // generation as absent (`0`) — `durable_frontier_generation_current`
+    // returns false for `0`, which falls back to the in-memory offset.
+    #[cfg(unix)]
     let current_gen =
         crate::services::discord::tmux::read_generation_file_mtime_ns(tmux_session_name);
+    #[cfg(not(unix))]
+    let current_gen: i64 = {
+        let _ = tmux_session_name;
+        0
+    };
     let durable_end = read_record(provider, channel.get())
         .and_then(|r| r.delivered_frontier)
         .filter(|f| durable_frontier_generation_current(f.generation_mtime_ns, current_gen))

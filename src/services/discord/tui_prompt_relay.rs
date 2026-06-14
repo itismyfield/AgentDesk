@@ -1330,11 +1330,17 @@ async fn claim_tui_direct_synthetic_turn(
         .unwrap_or(0);
     // #3358 round 2: carry the committed frontier forward, but ONLY for the
     // CURRENT wrapper generation (stale → `None` → no content skip).
+    // The `tmux` module is `#[cfg(unix)]`; on non-unix targets (windows CI
+    // cross-compile check) there is no committed frontier to carry forward, so
+    // `None` (no carry-forward) is the correct, behavior-preserving default.
+    #[cfg(unix)]
     let committed_relay_offset = super::tmux::committed_frontier_for_current_generation(
         shared,
         channel_id,
         tmux_session_name,
     );
+    #[cfg(not(unix))]
+    let committed_relay_offset: Option<u64> = None;
     let start_offset =
         synthetic_start_offset_carry_forward(relay_last_offset, committed_relay_offset);
     if start_offset > relay_last_offset {
