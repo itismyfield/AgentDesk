@@ -3933,6 +3933,7 @@ async fn run_codex_idle_response_tail(
         &tmux_session_name,
         &rollout_path,
         start_offset,
+        final_offset,
         &prompt_text,
         response,
         &lease,
@@ -4254,6 +4255,11 @@ async fn relay_tui_idle_response_through_bridge(
     tmux_session_name: &str,
     output_path: &Path,
     start_offset: u64,
+    // #3089 A6b r2 [High]: the tail's authoritative end offset. Plumbed into the
+    // bridge stream as `OutputOffset` ONLY when the A6b flag is ON (OFF-safe — see
+    // `codex_external_input_bridge_stream_messages`) so codex external-input's
+    // `ordered_range` becomes true and the cutover reaches the controller.
+    final_offset: u64,
     prompt_text: &str,
     response: &str,
     lease: &ExternalInputRelayLease,
@@ -4280,9 +4286,7 @@ async fn relay_tui_idle_response_through_bridge(
             provider.as_str()
         ));
     };
-    // #3097: resolve the provider-specific compact threshold so the status
-    // panel reflects the configured value (e.g. `context_compact_percent_claude`)
-    // instead of the hardcoded 0 it used previously.
+    // #3097: resolve the provider-specific compact threshold so the status panel reflects the configured value (e.g. `context_compact_percent_claude`) instead of the hardcoded 0 it used previously.
     let context_compact_percent = super::adk_session::fetch_context_thresholds(shared.api_port)
         .await
         .compact_pct_for(&provider);
@@ -4303,9 +4307,7 @@ async fn relay_tui_idle_response_through_bridge(
         shared.clone(),
         channel_id,
         reference,
-        // #3082 P2-3: a TUI idle-response placeholder is an ACTIVE-turn card,
-        // not a queued "📬" notice — it must not wait on the answer-flush
-        // barrier.
+        // #3082 P2-3: a TUI idle-response placeholder is an ACTIVE-turn card, not a queued "📬" notice — it must not wait on the answer-flush barrier.
         false,
     )
     .await?;
@@ -4354,11 +4356,21 @@ async fn relay_tui_idle_response_through_bridge(
         defer_watcher_resume: false,
         reuse_status_panel_message: false,
         completion_tx: Some(completion_tx),
+        is_external_input_tui_direct: true, // #3089 A6b: scope the controller OR-in
         inflight_state,
     };
 
     spawn_turn_bridge(shared.clone(), Arc::new(CancelToken::new()), rx, bridge);
-    for message in bridge_adapter_stream_messages(response, None) {
+    // #3089 A6b r2 [High]: feed the bridge `[Text?, OutputOffset?(flag-gated), Done]`.
+    // The flag-gated `OutputOffset` advances `tmux_last_offset` to `final_offset` so
+    // codex external-input's `ordered_range` is true and the cutover reaches the
+    // controller; OFF → no `OutputOffset` → byte-identical legacy `NoRange`.
+    for message in
+        super::tui_prompt_relay_controller_cutover::codex_external_input_bridge_stream_messages(
+            response,
+            final_offset,
+        )
+    {
         tx.send(message)
             .map_err(|error| format!("send TUI-direct bridge stream event: {error}"))?;
     }
@@ -4519,6 +4531,7 @@ async fn stream_tui_idle_response_through_bridge(
         defer_watcher_resume: false,
         reuse_status_panel_message: false,
         completion_tx: Some(completion_tx),
+        is_external_input_tui_direct: true, // #3089 A6b: scope the controller OR-in
         inflight_state,
     };
 
@@ -4731,24 +4744,6 @@ fn build_tui_direct_synthetic_inflight_state(
     // overwritten the single shared prompt-anchor slot.
     state.injected_prompt_message_id = Some(user_msg_id.get());
     state
-}
-
-#[cfg(unix)]
-fn bridge_adapter_stream_messages(
-    response: &str,
-    session_id: Option<String>,
-) -> Vec<StreamMessage> {
-    let mut messages = Vec::new();
-    if !response.trim().is_empty() {
-        messages.push(StreamMessage::Text {
-            content: response.to_string(),
-        });
-    }
-    messages.push(StreamMessage::Done {
-        result: response.to_string(),
-        session_id,
-    });
-    messages
 }
 
 #[cfg(unix)]
@@ -7557,22 +7552,11 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn bridge_adapter_emits_bridge_compatible_stream_events() {
-        let messages = bridge_adapter_stream_messages("assistant response", Some("sess-1".into()));
-
-        assert_eq!(messages.len(), 2);
-        assert!(matches!(
-            &messages[0],
-            StreamMessage::Text { content } if content == "assistant response"
-        ));
-        assert!(matches!(
-            &messages[1],
-            StreamMessage::Done { result, session_id }
-                if result == "assistant response" && session_id.as_deref() == Some("sess-1")
-        ));
-    }
+    // #3089 A6b r2 [High]: the codex external-input bridge frame builder moved to
+    // `tui_prompt_relay_controller_cutover::codex_external_input_bridge_stream_messages`
+    // (flag-gated `OutputOffset` plumbing). Its OFF (`[Text, Done]`, byte-identical
+    // legacy) and ON (`[Text, OutputOffset, Done]`, reaches the controller) shapes are
+    // pinned in that sibling's test module under the shared env lock.
 
     // ====================================================================
     // #3256: stream-through of operator external-input prose. These tests pin

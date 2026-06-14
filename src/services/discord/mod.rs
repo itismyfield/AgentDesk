@@ -45,9 +45,7 @@ mod session_relay_sink;
 // #2011 Phase 5.3: standalone JSONL → Discord relay loop on cluster-standby nodes (leader uses tmux_watcher's relay path).
 #[cfg(unix)]
 mod standby_relay;
-// #1074: landing zone for the future recovery-engine module split (restart /
-// runtime / manual_rebind; see `docs/recovery-paths.md`). Named `recovery_paths`
-// to avoid shadowing the `recovery_engine as recovery` alias until the split lands.
+// #1074: landing zone for the future recovery-engine module split (restart / runtime / manual_rebind; see `docs/recovery-paths.md`). Named `recovery_paths` to avoid shadowing the `recovery_engine as recovery` alias until the split lands.
 mod recovery_engine;
 mod recovery_paths;
 mod restart_mode;
@@ -94,6 +92,7 @@ mod tmux_restart_handoff;
 mod tui_direct_abort_marker;
 mod tui_direct_pending_start;
 mod tui_prompt_relay;
+pub(super) mod tui_prompt_relay_controller_cutover; // #3089 A6b: see module doc (closes #3088)
 mod tui_task_card;
 mod turn_bridge;
 mod turn_finalizer;

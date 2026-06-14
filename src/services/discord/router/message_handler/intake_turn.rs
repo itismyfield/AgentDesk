@@ -465,8 +465,7 @@ pub(in crate::services::discord) async fn handle_text_message(
             Some(&context),
         )
     });
-    // #2266: keep the original Discord author (the announce bot, for a
-    // voice-transcript announcement) so the race-loss enqueue path can
+    // #2266: keep the original Discord author (the announce bot, for a voice-transcript announcement) so the race-loss enqueue path can
     // attribute the queued `Intervention` to the announce bot. When the
     // queued turn later re-enters `handle_text_message` via the
     // dispatch/kickoff hooks, the same `announce_bot_id == Some(request_owner)`
@@ -3755,6 +3754,7 @@ pub(in crate::services::discord) async fn handle_text_message(
             defer_watcher_resume,
             reuse_status_panel_message: false,
             completion_tx,
+            is_external_input_tui_direct: false, // #3089 A6b: Discord-origin intake turn
             inflight_state,
         },
     );
