@@ -54,11 +54,27 @@ pub enum PromptReadinessKind {
     Followup,
 }
 
+/// Resolve the Follow-up readiness budget from the live config snapshot,
+/// falling back to the compiled-in 45s default. `config_live_reload::current()`
+/// returns `None` before boot install and in unit tests, so the const stays the
+/// safe fallback. A configured `0` is treated as unset to avoid an
+/// immediate-timeout footgun. See `RuntimeSettingsConfig::followup_prompt_ready_timeout_secs`.
+fn followup_prompt_ready_timeout() -> Duration {
+    crate::config_live_reload::current()
+        .and_then(|cfg| cfg.runtime.followup_prompt_ready_timeout_secs)
+        .filter(|secs| *secs > 0)
+        // Clamp to a generous upper bound (24h) so a bad hot-reload value (e.g.
+        // u64::MAX) cannot overflow `Instant + Duration` at the deadline
+        // computation and panic the readiness wait.
+        .map(|secs| Duration::from_secs(secs.min(86_400)))
+        .unwrap_or(FOLLOWUP_PROMPT_READY_TIMEOUT)
+}
+
 impl PromptReadinessKind {
     fn timeout(self) -> Duration {
         match self {
             Self::FreshTurn => FRESH_PROMPT_READY_TIMEOUT,
-            Self::Followup => FOLLOWUP_PROMPT_READY_TIMEOUT,
+            Self::Followup => followup_prompt_ready_timeout(),
         }
     }
 
@@ -1522,6 +1538,19 @@ fn split_literal_chunks(input: &str, max_chars: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn followup_timeout_falls_back_to_default_without_live_config() {
+        // No config_live_reload::install() runs in unit tests, so current() is
+        // None and the compiled-in 45s default must hold byte-for-byte. The
+        // fresh-turn budget must stay independent.
+        assert_eq!(
+            followup_prompt_ready_timeout(),
+            FOLLOWUP_PROMPT_READY_TIMEOUT
+        );
+        assert_eq!(PromptReadinessKind::Followup.timeout().as_secs(), 45);
+        assert_eq!(PromptReadinessKind::FreshTurn.timeout().as_secs(), 120);
+    }
 
     #[test]
     fn prompt_submit_uses_literal_chunks_then_enter() {
