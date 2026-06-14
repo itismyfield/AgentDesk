@@ -17,6 +17,7 @@ use std::sync::OnceLock;
 
 use super::super::gateway::TurnGateway;
 use super::super::inflight::RelayOwnerKind;
+use super::super::outbound::delivery_record as dr;
 use super::super::outbound::turn_output_controller as toc;
 use super::super::placeholder_controller::{PlaceholderKey, PlaceholderLifecycle};
 use super::super::turn_finalizer::TurnKey;
@@ -260,7 +261,7 @@ pub(super) async fn deliver_short_replace_via_controller(
         );
         true
     };
-    toc::deliver_turn_output(
+    let outcome = toc::deliver_turn_output(
         gateway,
         toc::TurnOutputCtx {
             turn,
@@ -307,7 +308,20 @@ pub(super) async fn deliver_short_replace_via_controller(
             heartbeat: Some(&heartbeat),
         },
     )
-    .await
+    .await;
+    // #3089 B2a: shadow-mirror durable delivered frontier — flag-gated, observe-only,
+    // Delivered-only (I2), OFF=no-op. Keyed by `watcher_owner_channel_id` (the
+    // OFFSET-AUTHORITY channel where `advance_tmux_relay_confirmed_end` advanced
+    // `confirmed_end_offset`), NOT the edit-target `channel_id` — so the durable
+    // frontier and the in-memory authority B2b fuses share one channel key.
+    dr::shadow_mirror_delivered_frontier(
+        shared,
+        provider,
+        watcher_owner_channel_id,
+        (start, end),
+        dr::outcome_is_shadow_delivered(&outcome),
+    );
+    outcome
 }
 
 /// #3089 A5: borrowed `&mut` handles to the site-5 send-arm locals the controller
