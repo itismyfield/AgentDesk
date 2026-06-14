@@ -334,6 +334,7 @@ src/
 │   │   ├── memento_feedback.rs
 │   │   ├── mod.rs
 │   │   ├── session.rs
+│   │   ├── startup_dialog.rs
 │   │   ├── transcript_tail.rs
 │   │   └── tui_relay.rs
 │   ├── cluster/
