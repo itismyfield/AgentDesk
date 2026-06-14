@@ -2470,13 +2470,13 @@ impl SharedData {
             .load(Ordering::Acquire)
     }
 
-    /// Record that this process spawned a watcher during recovery/reattach.
-    /// This is process-local telemetry for `GET /api/channels/:id/watcher-state`
-    /// (#964), not persisted dedupe state and not counted on first-turn attach.
+    /// Record a recovery/reattach watcher spawn and purge the channel footer so the
+    /// dead prior generation's task/subagent slots don't linger as zombies (#3436, #964).
     pub(super) fn record_tmux_watcher_reconnect(&self, channel_id: ChannelId) {
         self.tmux_relay_coord(channel_id)
             .reconnect_count
             .fetch_add(1, Ordering::AcqRel);
+        self.ui.placeholder_live_events.clear_channel(channel_id);
     }
 
     pub(super) fn record_channel_speaker(
