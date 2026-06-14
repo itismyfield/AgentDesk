@@ -10,7 +10,7 @@
 > Turn-owned delivery paths can pass a `CancelToken` so post-cancel sends,
 > fallback retries, split chunks, and headless outbox enqueue are suppressed.
 >
-> Last refreshed: 2026-06-13 (against #3089 A2b r2 — session_relay_sink short-replace cut over to the turn-output controller behind a default-OFF flag; controller now RAII-releases its held lease on future cancel/panic via ControllerLeaseGuard).
+> Last refreshed: 2026-06-14 (against #3461 — `effective_committed_offset` in `outbound/delivery_record.rs` now `#[cfg(unix)]`-gates its tmux generation read with a behavior-preserving `0` fallback on non-unix targets, for cross-platform compile; outbound delivery semantics unchanged on unix).
 >
 > Companion docs: [`docs/discord-outbound-remaining-producers.md`](../discord-outbound-remaining-producers.md) (#1175 closure), [`docs/source-of-truth.md`](../source-of-truth.md).
 
