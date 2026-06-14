@@ -10,7 +10,7 @@ ALTER TABLE IF EXISTS routines
     ADD COLUMN IF NOT EXISTS max_retries INTEGER NOT NULL DEFAULT 0;
 
 ALTER TABLE IF EXISTS routine_runs
-    ADD COLUMN IF NOT EXISTS retry_count INTEGER NOT NULL DEFAULT 0;
+    ADD COLUMN IF NOT EXISTS retry_count INTEGER NOT NULL DEFAULT 0; -- agentdesk-audit: allow-int4 (retry_count is bounded by max_retries; small retry counter, not unbounded growth)
 
 ALTER TABLE IF EXISTS routine_runs
     ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ;
