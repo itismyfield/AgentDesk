@@ -755,8 +755,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         session_id.is_some(),
         prompt_prep_duration_ms
     );
-    // #1085: same session-reuse counter as the foreground path so headless
-    // (background-trigger) turns are reflected in the reuse-rate metric.
+    // #1085: same session-reuse counter as the foreground path so headless (background-trigger) turns are reflected in the reuse-rate metric.
     crate::services::observability::metrics::record_session_entry(
         channel_id.get(),
         provider_label,
@@ -1305,6 +1304,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
             defer_watcher_resume: false,
             reuse_status_panel_message: false,
             completion_tx: None,
+            is_external_input_tui_direct: false, // #3089 A6b: Discord-origin (not external-input)
             inflight_state,
         },
     );

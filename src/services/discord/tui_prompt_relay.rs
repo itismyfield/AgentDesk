@@ -4280,9 +4280,7 @@ async fn relay_tui_idle_response_through_bridge(
             provider.as_str()
         ));
     };
-    // #3097: resolve the provider-specific compact threshold so the status
-    // panel reflects the configured value (e.g. `context_compact_percent_claude`)
-    // instead of the hardcoded 0 it used previously.
+    // #3097: resolve the provider-specific compact threshold so the status panel reflects the configured value (e.g. `context_compact_percent_claude`) instead of the hardcoded 0 it used previously.
     let context_compact_percent = super::adk_session::fetch_context_thresholds(shared.api_port)
         .await
         .compact_pct_for(&provider);
@@ -4303,9 +4301,7 @@ async fn relay_tui_idle_response_through_bridge(
         shared.clone(),
         channel_id,
         reference,
-        // #3082 P2-3: a TUI idle-response placeholder is an ACTIVE-turn card,
-        // not a queued "📬" notice — it must not wait on the answer-flush
-        // barrier.
+        // #3082 P2-3: a TUI idle-response placeholder is an ACTIVE-turn card, not a queued "📬" notice — it must not wait on the answer-flush barrier.
         false,
     )
     .await?;
@@ -4354,6 +4350,7 @@ async fn relay_tui_idle_response_through_bridge(
         defer_watcher_resume: false,
         reuse_status_panel_message: false,
         completion_tx: Some(completion_tx),
+        is_external_input_tui_direct: true, // #3089 A6b: scope the controller OR-in
         inflight_state,
     };
 
@@ -4519,6 +4516,7 @@ async fn stream_tui_idle_response_through_bridge(
         defer_watcher_resume: false,
         reuse_status_panel_message: false,
         completion_tx: Some(completion_tx),
+        is_external_input_tui_direct: true, // #3089 A6b: scope the controller OR-in
         inflight_state,
     };
 

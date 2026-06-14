@@ -772,6 +772,10 @@ pub(super) struct TurnBridgeContext {
     /// response instead of editing an old panel buried in scrollback.
     pub(super) reuse_status_panel_message: bool,
     pub(super) completion_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    /// #3089 A6b: `true` ONLY at the two TUI external-input idle callers; scopes the
+    /// A6b site-5 controller OR-in to external-input (NOT a `request_owner_name`
+    /// string compare). Default `false` for every other bridge caller. See :6096.
+    pub(super) is_external_input_tui_direct: bool,
     pub(super) inflight_state: InflightTurnState,
 }
 
@@ -2366,6 +2370,7 @@ pub(super) fn spawn_turn_bridge(
         let mut new_session_id = bridge.new_session_id.clone();
         let mut new_raw_provider_session_id: Option<String> = None;
         let defer_watcher_resume = bridge.defer_watcher_resume;
+        let is_external_input_tui_direct = bridge.is_external_input_tui_direct; // #3089 A6b: site-5 scope
         let completion_tx = bridge.completion_tx;
         // Guard: ensure completion_tx fires even if the task panics or
         // exits early, preventing the parent from hanging on completion_rx.
@@ -6085,22 +6090,30 @@ pub(super) fn spawn_turn_bridge(
                             }
                         }
                     } else {
-                        // #3089 A5 (flag, default OFF): route short-replace through the
-                        // controller (`terminal_controller_cutover`); OFF → legacy below.
+                        // #3089 A5/A6b (flags, default OFF): route short-replace through the controller (`terminal_controller_cutover`); OFF → legacy below.
                         let bridge_turn = super::turn_finalizer::TurnKey::new(
                             watcher_owner_channel_id,
                             inflight_state.user_msg_id,
                             shared_owned.restart.current_generation,
                         );
                         let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
+                        let ordered_range = tmux_last_offset.is_some_and(|e| e > bridge_start);
+                        // #3089 A5 OR A6b: route short-replace through the controller when the A5 flag is ON (both origins) OR the A6b flag is ON AND this is a TUI external-input turn (closes #3088). The A6b arm reuses the SAME structural derivation and is SCOPED by `is_external_input_tui_direct` — never routes Discord-origin (pinned by the sibling + scoping tests).
+                        use super::tui_prompt_relay_controller_cutover as a6b;
                         let cutover_short_replace =
                             terminal_controller_cutover::bridge_short_replace_cutover_decision(
                                 terminal_controller_cutover::turn_bridge_terminal_controller_enabled(),
                                 can_chain_locally,
                                 &delivery_response,
-                                tmux_last_offset.is_some_and(|e| e > bridge_start),
+                                ordered_range,
                                 true,
-                            );
+                            ) || (is_external_input_tui_direct
+                                && a6b::tui_prompt_relay_short_replace_should_cutover_decision(
+                                    a6b::tui_prompt_relay_controller_enabled(),
+                                    can_chain_locally,
+                                    &delivery_response,
+                                    ordered_range,
+                                ));
                         if cutover_short_replace {
                             let cell = shared_owned.delivery_lease(watcher_owner_channel_id);
                             terminal_controller_cutover::apply_bridge_short_replace_controller(
@@ -6169,8 +6182,7 @@ pub(super) fn spawn_turn_bridge(
                             preserve_inflight_for_cleanup_retry = true;
                             bridge_skip_holder_owns_inflight = true;
                         } else {
-                            // `Held(lease)` → commit via the lease; `NoRange` →
-                            // deliver without a lease (no offset to advance).
+                            // `Held(lease)` → commit via the lease; `NoRange` → deliver without a lease (no offset to advance).
                             let lease = match lease_acquire {
                                 BridgeLeaseAcquire::Held(lease) => Some(lease),
                                 _ => None,
@@ -6183,11 +6195,10 @@ pub(super) fn spawn_turn_bridge(
                                         &delivery_response,
                                     )
                                     .await;
-                                // #2860: the answer reached the channel if the placeholder
-                                // was edited OR a fallback message was posted. A fallback
-                                // posts the full delivery_response as a fresh message and
-                                // reports the edit as non-committed; record it as delivered
-                                // so this turn is not re-delivered by stall-watchdog recovery.
+                                // #2860: delivered if the placeholder was edited OR a fallback
+                                // posted the full delivery_response as a fresh message (edit
+                                // non-committed); record it delivered so stall-watchdog recovery
+                                // does not re-deliver this turn.
                                 let fallback_delivered = matches!(
                                     &replace_outcome,
                                     Ok(super::formatting::ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. })
@@ -6204,9 +6215,7 @@ pub(super) fn spawn_turn_bridge(
                                     Some(turn_id.as_str()),
                                     "turn_bridge_terminal_replace",
                                 );
-                                // #3041 P1-2 / B6: confirmed_end advance flows ONLY
-                                // through the lease commit — `Delivered` on a committed
-                                // replace, `NotDelivered` otherwise (mirrors pre-P1-2).
+                                // #3041 P1-2 / B6: confirmed_end advance flows ONLY through the lease commit — `Delivered` on a committed replace, `NotDelivered` otherwise (mirrors pre-P1-2).
                                 let outcome = if let Some(lease) = lease {
                                     let outcome = if replace_committed {
                                         crate::services::discord::LeaseOutcome::Delivered
@@ -6221,9 +6230,7 @@ pub(super) fn spawn_turn_bridge(
                                     );
                                     replace_committed
                                 } else {
-                                    // NoRange (zero/inverted range or no tmux session):
-                                    // NO new bytes → deliver without a lease and WITHOUT
-                                    // advancing (codex P1-b: no advance outside a commit).
+                                    // NoRange (zero/inverted range or no tmux session): NO new bytes → deliver without a lease and WITHOUT advancing (codex P1-b: no advance outside a commit).
                                     replace_committed
                                 };
                                 if outcome {
@@ -6236,10 +6243,7 @@ pub(super) fn spawn_turn_bridge(
                                 } else {
                                     preserve_inflight_for_cleanup_retry = true;
                                     if fallback_delivered {
-                                        // Mark the whole response delivered: the fallback
-                                        // message carried it; the preserved-inflight save
-                                        // below persists this offset so the turn never
-                                        // re-presents as a never-delivered leak for recovery.
+                                        // Mark the whole response delivered: the fallback carried it; the preserved-inflight save below persists this offset so the turn never re-presents as a never-delivered leak for recovery.
                                         inflight_state.response_sent_offset = full_response.len();
                                     }
                                 }
@@ -6279,11 +6283,7 @@ pub(super) fn spawn_turn_bridge(
                                 channel_id,
                                 error
                             );
-                            // Symmetric with the can_chain_locally failure arm: the
-                            // answer was NOT delivered (enqueue failed) → do NOT let
-                            // finalization clear inflight (it is the only persisted
-                            // full_response). Preserving routes disposition through
-                            // save_inflight_state so recovery can re-deliver.
+                            // Symmetric with the can_chain_locally failure arm: the answer was NOT delivered (enqueue failed) → do NOT let finalization clear inflight (it is the only persisted full_response). Preserving routes disposition through save_inflight_state so recovery can re-deliver.
                             preserve_inflight_for_cleanup_retry = true;
                         }
                     }

@@ -281,11 +281,10 @@ async fn relay_recovered_terminal_text_to_placeholder(
     let delivery = match placeholder {
         Some(placeholder) => {
             use super::recovery_paths::controller_cutover as cc;
-            // #3089 A6a: anchored short-replace via the unified controller behind a
-            // flag (default OFF); the adapter maps the verdict to
-            // `RecoveryRelayOutcome` AND re-runs the #3297 probe, returning the
-            // legacy path's equal. OFF / None / empty → verbatim legacy. Provider is
-            // cosmetic on the markerless `NoLease` path (no marker gates on it).
+            // #3089 A6a: anchored short-replace via the unified controller behind a flag
+            // (default OFF); the adapter maps the verdict to `RecoveryRelayOutcome` AND
+            // re-runs the #3297 probe, returning the legacy path's equal. OFF / None / empty
+            // → verbatim legacy. Provider is cosmetic on the markerless `NoLease` path.
             if cc::recovery_short_replace_should_cutover(
                 cc::recovery_relay_controller_enabled(),
                 true,
@@ -4133,6 +4132,7 @@ pub(super) async fn restore_inflight_turns(
                 defer_watcher_resume: false,
                 reuse_status_panel_message: true,
                 completion_tx: None,
+                is_external_input_tui_direct: false, // #3089 A6b: recovery is not external-input
                 inflight_state: state,
             },
         );
