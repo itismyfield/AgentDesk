@@ -48,6 +48,7 @@ mod intake_turn;
 mod provider_isolation;
 mod tui_followup;
 mod turn_lifecycle;
+mod voice_announcement_scope;
 mod watchdog;
 
 use self::goal_lifecycle::*;

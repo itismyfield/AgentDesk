@@ -460,6 +460,7 @@ src/
 │   │   │   │   ├── session_strategy_lifecycle_tests.rs
 │   │   │   │   ├── tui_followup.rs
 │   │   │   │   ├── turn_lifecycle.rs
+│   │   │   │   ├── voice_announcement_scope.rs
 │   │   │   │   └── watchdog.rs
 │   │   │   ├── authorization.rs
 │   │   │   ├── dispatch_trigger.rs

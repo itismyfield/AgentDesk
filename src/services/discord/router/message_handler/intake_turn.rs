@@ -124,23 +124,6 @@ pub(crate) struct IntakeRequest {
     pub turn_kind: TurnKind,
 }
 
-fn should_drop_unauthorized_voice_announcement(
-    has_stored_voice_announcement: bool,
-    has_legacy_voice_announcement: bool,
-    is_readable_voice_announcement: bool,
-    voice_announcement_resolved: bool,
-    announce_bot_id: Option<u64>,
-    request_owner: UserId,
-) -> bool {
-    if voice_announcement_resolved {
-        return false;
-    }
-
-    has_stored_voice_announcement
-        || (announce_bot_id == Some(request_owner.get())
-            && (has_legacy_voice_announcement || is_readable_voice_announcement))
-}
-
 /// Worker-callable entry point for executing an intake turn. Phase 2-pre.3
 /// of intake-node-routing: this is the public surface a worker node will
 /// invoke after claiming an `intake_outbox` row from its target queue. Pass
@@ -443,43 +426,20 @@ pub(in crate::services::discord) async fn handle_text_message(
     } else {
         None
     };
-    let drop_unauthorized_voice_announcement = should_drop_unauthorized_voice_announcement(
+    // #3464: scope unauthorized voice announcements to the owning agent — a
+    // non-owning agent must not fall through to generic handling and answer
+    // (multi-agent reply storm). Decision + one-shot warn live in
+    // `voice_announcement_scope` (this file is LoC-frozen).
+    if super::voice_announcement_scope::drop_unauthorized_voice_announcement(
         has_stored_voice_announcement,
         has_legacy_voice_announcement,
         is_readable_voice_announcement,
         voice_announcement.is_some(),
         announce_bot_id,
         request_owner,
-    );
-
-    if drop_unauthorized_voice_announcement
-        && has_stored_voice_announcement
-        && announce_bot_id.is_none()
-    {
-        tracing::warn!(
-            channel_id = channel_id.get(),
-            message_id = user_msg_id.get(),
-            author_id = request_owner.get(),
-            "dropping stored voice transcript announcement because announce bot user id is unavailable"
-        );
-        // The message is an announce-bot voice transcript but we cannot
-        // authorize it. Do not fall through to generic text handling, or every
-        // voice-enabled agent that observes the announce message in the shared
-        // voice channel answers it (multi-agent reply storm). Only the owning
-        // agent, which successfully claims the durable metadata, should reply.
-        return Ok(());
-    } else if drop_unauthorized_voice_announcement {
-        tracing::warn!(
-            channel_id = channel_id.get(),
-            message_id = user_msg_id.get(),
-            author_id = request_owner.get(),
-            announce_bot_id = ?announce_bot_id,
-            "ignoring voice transcript announcement without authorized durable metadata"
-        );
-        // Same scoping guard: an unclaimed voice transcript announcement must
-        // not be answered by non-owning agents. The owning agent claims the
-        // durable metadata (`voice_announcement.is_some()`) and proceeds; all
-        // others stop here instead of emitting a generic chat reply.
+        channel_id,
+        user_msg_id,
+    ) {
         return Ok(());
     }
     let is_voice_announcement = voice_announcement.is_some();
@@ -3801,59 +3761,6 @@ pub(in crate::services::discord) async fn handle_text_message(
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod unauthorized_voice_announcement_scope_tests {
-    use super::*;
-
-    #[test]
-    fn human_readable_voice_shape_is_not_dropped() {
-        assert!(!should_drop_unauthorized_voice_announcement(
-            false,
-            false,
-            true,
-            false,
-            Some(100),
-            UserId::new(42),
-        ));
-    }
-
-    #[test]
-    fn announce_bot_readable_without_metadata_is_dropped() {
-        assert!(should_drop_unauthorized_voice_announcement(
-            false,
-            false,
-            true,
-            false,
-            Some(100),
-            UserId::new(100),
-        ));
-    }
-
-    #[test]
-    fn stored_announcement_without_metadata_is_dropped() {
-        assert!(should_drop_unauthorized_voice_announcement(
-            true,
-            false,
-            false,
-            false,
-            None,
-            UserId::new(42),
-        ));
-    }
-
-    #[test]
-    fn resolved_announcement_is_not_dropped() {
-        assert!(!should_drop_unauthorized_voice_announcement(
-            true,
-            true,
-            true,
-            true,
-            Some(100),
-            UserId::new(100),
-        ));
-    }
 }
 
 #[cfg(test)]
