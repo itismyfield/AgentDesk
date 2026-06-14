@@ -172,7 +172,7 @@ pub(in crate::services::discord) fn slash_command_risk(slash_cmd: &str) -> Comma
         // Per-channel session shaping (mirrors text-command tiers).
         "/start" | "/down" | "/cc" | "/skill" | "/meeting" | "/model" | "/fast" | "/goals"
         | "/effort" | "/compact" | "/clear" | "/deletesession" | "/stop" | "/restart"
-        | "/debug" => CommandRisk::Mutating,
+        | "/steer" | "/debug" => CommandRisk::Mutating,
 
         // RCE-equivalent surface.
         // `/deadlock-recover`, `/machine-flip`, and `/stuck-pr-rebase` (issue
@@ -205,4 +205,17 @@ pub(in crate::services::discord) fn risk_tier_summary_for_help(high_risk_enabled
          `shell/tool-grant` — shell/allowed: {shell_state}\n\
          `credential/system` — allowall/adduser/removeuser/escalation: owner-only"
     )
+}
+
+#[cfg(test)]
+mod steer_policy_tests {
+    use super::*;
+
+    #[test]
+    fn steer_is_registered_as_mutating_and_not_high_risk() {
+        // Explicit (not catch-all) registration: /steer is channel-scoped
+        // mutating, allowed for any authorized user, never owner-gated.
+        assert_eq!(slash_command_risk("/steer"), CommandRisk::Mutating);
+        assert!(!slash_command_risk("/steer").is_high_risk());
+    }
 }

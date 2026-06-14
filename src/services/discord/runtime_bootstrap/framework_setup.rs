@@ -215,6 +215,7 @@ pub(super) fn run_bot_build_slash_commands() -> Vec<poise::Command<Data, Error>>
         commands::cmd_goals(),
         commands::cmd_effort(),
         commands::cmd_compact(),
+        commands::cmd_steer(),
         commands::cmd_cost(),
         commands::cmd_context(),
         commands::cmd_adk(),
@@ -298,5 +299,20 @@ async fn audit_or_prune_global_slash_commands(
                 "deleted stale global slash command; guild commands remain authoritative"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod steer_registration_tests {
+    use super::*;
+
+    #[test]
+    fn steer_command_is_registered() {
+        assert!(
+            run_bot_build_slash_commands()
+                .iter()
+                .any(|command| command.name == "steer"),
+            "/steer must be present in the slash command registration vec"
+        );
     }
 }
