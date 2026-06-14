@@ -366,23 +366,44 @@ fn fuse_committed_offset(durable_end: Option<u64>, in_memory: u64) -> u64 {
     }
 }
 
+/// #1270 generation guard (pure, testable): trust the durable frontier to RAISE
+/// the dedup floor ONLY if it was written by the CURRENT wrapper generation. A
+/// stale-high frontier from a PRIOR same-named tmux generation must NOT be
+/// fused — the in-memory generation-reset already zeroed the live offset, and a
+/// mismatched durable value would falsely skip the NEW generation's fresh output
+/// (lost relay). `current_gen == 0` (no/unreadable `.generation` file) → cannot
+/// validate → distrust. Write/read parity: the durable `generation_mtime_ns` is
+/// the coord's `confirmed_end_generation_mtime_ns`, itself set from
+/// `read_generation_file_mtime_ns` at advance time (tmux.rs), so equality holds
+/// within a generation and breaks across one.
+fn durable_frontier_generation_current(durable_mtime: i64, current_gen_mtime: i64) -> bool {
+    current_gen_mtime != 0 && durable_mtime == current_gen_mtime
+}
+
 /// #3089 B2b: the effective "already-committed" offset the dedup/skip gates read.
 /// Flag OFF (default) → the legacy in-memory `committed_relay_offset` verbatim
 /// (no record read → deploy no-op). Flag ON → `max(delivered_frontier.end,
 /// in_memory)` (I3: missing/malformed record → in-memory only, never assume
-/// delivered). The in-memory authority is the relay coord's `confirmed_end_offset`
-/// for `channel`; the durable record is keyed by `(provider, channel)`.
+/// delivered), but ONLY when the durable frontier is from the CURRENT wrapper
+/// generation (#1270 guard — a stale prior-generation frontier is treated as
+/// `None`). The in-memory authority is the relay coord's `confirmed_end_offset`
+/// for `channel`; the durable record is keyed by `(provider, channel)`;
+/// `tmux_session_name` resolves the current generation watermark.
 pub(in crate::services::discord) fn effective_committed_offset(
     shared: &crate::services::discord::SharedData,
     provider: &ProviderKind,
     channel: ChannelId,
+    tmux_session_name: &str,
 ) -> u64 {
     let in_memory = shared.committed_relay_offset(channel);
     if !delivery_record_authority_enabled() {
         return in_memory;
     }
+    let current_gen =
+        crate::services::discord::tmux::read_generation_file_mtime_ns(tmux_session_name);
     let durable_end = read_record(provider, channel.get())
         .and_then(|r| r.delivered_frontier)
+        .filter(|f| durable_frontier_generation_current(f.generation_mtime_ns, current_gen))
         .map(|f| f.range.1);
     fuse_committed_offset(durable_end, in_memory)
 }
@@ -784,5 +805,16 @@ mod tests {
         assert_eq!(fuse_committed_offset(Some(30), 20), 30); // durable raises floor
         assert_eq!(fuse_committed_offset(Some(10), 20), 20); // stale-low durable never lowers
         assert_eq!(fuse_committed_offset(Some(0), 0), 0);
+    }
+
+    #[test]
+    fn generation_guard_distrusts_prior_and_unknown_generations() {
+        // #1270: trust the durable frontier ONLY if its generation_mtime_ns equals
+        // the CURRENT wrapper generation. A prior-generation (stale-high) frontier
+        // must be distrusted → not fused → no false skip of fresh output.
+        assert!(durable_frontier_generation_current(123, 123)); // same generation → trust
+        assert!(!durable_frontier_generation_current(100, 123)); // prior gen → distrust
+        assert!(!durable_frontier_generation_current(123, 0)); // no .generation file → distrust
+        assert!(!durable_frontier_generation_current(0, 0)); // both unknown → distrust
     }
 }

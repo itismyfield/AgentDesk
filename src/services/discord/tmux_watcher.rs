@@ -5475,40 +5475,35 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     "no_inflight_dedup",
                 );
             }
-            // Codex r6 P2: `reset_stale_relay_watermark_if_output_regressed` only
-            // resets when the current EOF is LOWER than the stored watermark. A
-            // respawned same-named wrapper whose fresh JSONL has ALREADY grown
-            // PAST the previous wrapper's watermark would NOT trip that
-            // EOF-regression check, so a fresh no-inflight result whose consumed
-            // end is below the stale watermark would be wrongly suppressed.
-            // Independently reset the watermark when the `.generation` mtime has
-            // CHANGED since the watermark was committed (a fresh wrapper names a
-            // different byte stream). Shared with the idle relay path.
+            // Codex r6 P2: `reset_stale_relay_watermark_if_output_regressed` only resets when the
+            // current EOF is LOWER than the stored watermark. A respawned same-named wrapper whose
+            // fresh JSONL ALREADY grew PAST the prior watermark would NOT trip that EOF-regression
+            // check → fresh output wrongly suppressed. Independently reset when the `.generation`
+            // mtime CHANGED since commit (fresh wrapper = different byte stream). Shared with idle.
             reset_relay_watermark_on_generation_change(
                 &shared,
                 channel_id,
                 &tmux_session_name,
                 "watcher_no_inflight_dedup",
             );
-            // Read-only check against the authority. If the sink (fed by the
-            // idle-JSONL relay or the watcher's own session-bound delegation)
-            // already COMMITTED at/past this turn's END, that range was already
-            // delivered — the watcher skips to avoid the duplicate. The watcher
-            // does NOT claim here (a claim followed by a relay failure would mark
-            // the range delivered while dropping it); it advances the authority
-            // only on a CONFIRMED relay at `advance_watcher_confirmed_end` below.
-            //
-            // Codex r5 P2: compare against this TURN's consumed terminal end, NOT
-            // the whole read batch end (`current_offset`). A batch can contain a
-            // completed turn PLUS trailing JSONL for a later turn —
-            // `process_watcher_lines` stops at the first result, so the turn's
-            // output actually ends at `current_offset - all_data.len()` (the
-            // unprocessed tail), which is exactly what the normal commit path
-            // advances to (`runtime_binding_candidate_offset`). Comparing against
-            // `current_offset` would MISS a prior commit at that smaller consumed
-            // end and re-relay the already-committed terminal.
+            // Read-only check against the authority: if the sink (idle-JSONL relay or the watcher's
+            // own session-bound delegation) already COMMITTED at/past this turn's END, that range
+            // was delivered → skip the duplicate. The watcher does NOT claim here (claim + relay
+            // failure would mark delivered while dropping it); it advances only on a CONFIRMED relay
+            // at `advance_watcher_confirmed_end` below.
+            // Codex r5 P2: compare against this TURN's consumed terminal end, NOT the whole read
+            // batch end (`current_offset`) — a batch can hold a completed turn PLUS a later turn's
+            // trailing JSONL; `process_watcher_lines` stops at the first result, so the turn ends at
+            // `current_offset - all_data.len()` (== the normal commit path's
+            // `runtime_binding_candidate_offset`). Using `current_offset` would MISS a prior commit
+            // at that smaller consumed end and re-relay the already-committed terminal.
             let turn_consumed_offset = terminal_event_consumed_offset(current_offset, &all_data);
-            let committed = dr::effective_committed_offset(&shared, &watcher_provider, channel_id);
+            let committed = dr::effective_committed_offset(
+                &shared,
+                &watcher_provider,
+                channel_id,
+                &tmux_session_name,
+            );
             if committed >= turn_consumed_offset && turn_consumed_offset > turn_data_start_offset {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
@@ -5690,8 +5685,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // `committed` is never strictly between start/end. Reconcile ONLY on the session-bound re-send path; plain watcher-direct unchanged.
         let watcher_resend_range_start = data_start_offset;
         let watcher_resend_range_end = terminal_event_consumed_offset(current_offset, &all_data);
-        let watcher_resend_committed =
-            dr::effective_committed_offset(&shared, &watcher_provider, channel_id); // #3089 B2b
+        let watcher_resend_committed = dr::effective_committed_offset(
+            &shared,
+            &watcher_provider,
+            channel_id,
+            &tmux_session_name,
+        ); // #3089 B2b
         let watcher_resend_reconciled = session_bound_terminal_delivery_attempted
             && watcher_direct_fallback_intended
             && !matches!(
@@ -5699,9 +5698,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 SessionBoundRelayAckOutcome::Delivered
             );
         let watcher_resend_action = if watcher_resend_reconciled {
-            // Self-heal a stale-high authority left by a respawned/truncated
-            // wrapper BEFORE consulting it, exactly as the no-inflight gate and the
-            // idle relay do — so a fresh range is never wrongly skipped (codex P2).
+            // Self-heal a stale-high authority left by a respawned/truncated wrapper BEFORE
+            // consulting it (as the no-inflight gate and idle relay do) → fresh range never skipped (codex P2).
             reset_relay_watermark_on_generation_change(
                 &shared,
                 channel_id,
@@ -5716,22 +5714,24 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             //     NOT re-send this pass (the slow-sink-in-flight duplicate #3151).
             //   * Leased{Sink, expired} → reclaim the dead sink's marker, then
             //     SendFull (committed<end) — the no-black-hole arm.
-            //   * Committed{Sink} → reconcile vs committed offset: committed>=end →
-            //     Skip (delivered), committed<end → SendFull (#3159: a refused/
-            //     NotDelivered commit re-sends, no black-hole).
+            //   * Committed{Sink} → reconcile vs committed offset: committed>=end → Skip
+            //     (delivered), committed<end → SendFull (#3159: refused/NotDelivered re-sends).
             //   * Unleased / non-Sink holder → unchanged (defer to the existing
             //     committed-offset reconciliation).
             let gate_cell = shared.delivery_lease(channel_id);
             let snapshot = gate_cell.read();
-            // #3159 BUG 1 (codex race-1): read `committed` AFTER the lease snapshot.
-            // The sink's CLEAR protocol advances `committed` FIRST, THEN commits the
-            // marker (`Committed{Sink}`). So observing `Committed{Sink}` in `snapshot`
-            // happens-after the sink's committed-offset write; reading `committed`
-            // next is therefore guaranteed to see the advanced value (committed>=end
-            // for a real Delivered commit → Skip). Reading it BEFORE the snapshot
-            // could capture a pre-advance `committed < end` paired with a now-
-            // Committed{Delivered} marker → a spurious SendFull duplicate.
-            let committed = dr::effective_committed_offset(&shared, &watcher_provider, channel_id);
+            // #3159 BUG 1 (codex race-1): read `committed` AFTER the lease snapshot. The sink's
+            // CLEAR protocol advances `committed` FIRST, THEN commits the marker (`Committed{Sink}`),
+            // so observing `Committed{Sink}` happens-after the committed write → reading `committed`
+            // next sees the advanced value (committed>=end for a real Delivered → Skip). Reading it
+            // BEFORE the snapshot could pair a pre-advance `committed < end` with a now-Committed
+            // marker → a spurious SendFull duplicate.
+            let committed = dr::effective_committed_offset(
+                &shared,
+                &watcher_provider,
+                channel_id,
+                &tmux_session_name,
+            );
             let now_ms = crate::services::discord::lease_now_ms();
             let (action, reclaim_expired_sink) = watcher_terminal_resend_action_gated(
                 &snapshot,

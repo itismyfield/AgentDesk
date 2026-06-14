@@ -1310,21 +1310,19 @@ async fn run_idle_jsonl_relay_loop(
                 );
                 continue;
             };
-            // #3017 single output-offset authority: this idle path and the watcher both
-            // read the SAME JSONL (E-13: an inflight-less wake relayed twice). The watcher
-            // is PRIMARY and advances `confirmed_end_offset`; this backstop only CONSULTS
-            // it read-only (committed >= range end → skip) and does NOT advance (codex P1:
-            // `try_send_frame` only QUEUES → committing here could drop the response).
+            // #3017 single output-offset authority: this idle path and the watcher both read
+            // the SAME JSONL (E-13: an inflight-less wake relayed twice). The watcher is PRIMARY
+            // and advances `confirmed_end_offset`; this backstop only CONSULTS it read-only
+            // (committed >= range end → skip), no advance (codex P1: `try_send_frame` only QUEUES).
             let channel = ChannelId::new(channel_id);
             if let Some(shared) = health_registry
                 .shared_for_provider_on_channel(&matched.provider, channel)
                 .await
                 .or(health_registry.shared_for_provider(&matched.provider).await)
             {
-                // Codex P2: a stale-high `confirmed_end_offset` from a previous wrapper
-                // would skip the FRESH file's first bytes (dropped wake). Run the SAME
-                // generation-aware regression reset the watcher uses BEFORE reading the
-                // watermark, so a truncated/respawned JSONL resets it to 0 (fresh wrapper).
+                // Codex P2: a stale-high `confirmed_end_offset` from a previous wrapper would skip
+                // the FRESH file's first bytes (dropped wake). Run the SAME generation-aware
+                // regression reset the watcher uses, so a truncated/respawned JSONL resets to 0.
                 super::tmux::reset_stale_relay_watermark_if_output_regressed(
                     shared.as_ref(),
                     channel,
@@ -1332,17 +1330,21 @@ async fn run_idle_jsonl_relay_loop(
                     len,
                     "idle_jsonl_relay",
                 );
-                // Codex r7 P2: the EOF-regression reset above misses a respawned wrapper
-                // whose fresh JSONL already grew PAST the prior watermark. Apply the same
-                // generation-change reset so a stale watermark doesn't skip fresh output.
+                // Codex r7 P2: the EOF-regression reset misses a respawned wrapper whose fresh
+                // JSONL already grew PAST the prior watermark; the generation-change reset covers it.
                 super::tmux::reset_relay_watermark_on_generation_change(
                     shared.as_ref(),
                     channel,
                     &session_name,
                     "idle_jsonl_relay",
                 );
-                // #3089 B2b: durable-frontier dedup authority (flag OFF → in-memory verbatim).
-                let committed = dr::effective_committed_offset(&shared, &matched.provider, channel);
+                // #3089 B2b: durable-frontier dedup authority (flag OFF → in-memory).
+                let committed = dr::effective_committed_offset(
+                    &shared,
+                    &matched.provider,
+                    channel,
+                    &session_name,
+                );
                 // Classification passed above → consults ONLY the offset-authority dedup branch.
                 match idle_relay_range_action(&payload, start, end, committed, false) {
                     IdleRelayRangeAction::SkipAlreadyRelayed => {
@@ -1359,11 +1361,10 @@ async fn run_idle_jsonl_relay_loop(
                         continue;
                     }
                     IdleRelayRangeAction::SendSuffixFrom(from) => {
-                        // Codex r5 P2 + codex r6 P1 (black-hole): PARTIAL overlap — the
-                        // watcher delivered the `[start, committed)` prefix; deliver ONLY
-                        // the uncommitted suffix in THIS pass (bouncing to a next tick would
-                        // re-read a suffix that lost the `system/init` event → re-classified
-                        // and DROPPED). See `IdleRelayRangeAction::SendSuffixFrom`.
+                        // Codex r5 P2 + codex r6 P1 (black-hole): PARTIAL overlap — the watcher
+                        // delivered the `[start, committed)` prefix; deliver ONLY the uncommitted
+                        // suffix THIS pass (a next-tick bounce would re-read a suffix that lost the
+                        // `system/init` event → re-classified and DROPPED). See `SendSuffixFrom`.
                         let suffix =
                             match read_jsonl_range(&matched.expected_rollout_path, from, end) {
                                 Ok(suffix) => suffix,
@@ -1388,12 +1389,10 @@ async fn run_idle_jsonl_relay_loop(
                         }
                         continue;
                     }
-                    // `committed <= start` → nothing covered → fall through to the
-                    // full-range send below.
+                    // `committed <= start` → nothing covered → fall through to the full-range send.
                     IdleRelayRangeAction::SendFull => {}
-                    // Classification already happened above; this arm is
-                    // unreachable here because we pass `in_new_session_grace =
-                    // false` and the payload already passed the init gate.
+                    // Unreachable here: `in_new_session_grace = false` and the payload already
+                    // passed the init gate (classification happened above).
                     IdleRelayRangeAction::SkipClassified => {}
                 }
             }
