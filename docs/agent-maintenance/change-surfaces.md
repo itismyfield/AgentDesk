@@ -957,7 +957,7 @@
   (supervised-worker registry / leader-only lifecycle).
 - legacy_modules: none — these are shared runtime coordination surfaces.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/config.rs` (2307 lines).
+  - `src/config.rs` (2320 lines).
   - `src/server/mod.rs` (2430 lines).
   - `src/receipt.rs` (1842 lines).
   - `src/github/sync.rs` (1488 lines).
@@ -1063,11 +1063,11 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   separator unified across the streamed `StreamMessage::Text` surface and the
   `final_text` assembly (one shared `push_message_text` boundary writer; the
   newline witness is the single source of truth so the two surfaces mirror).
-- `src/services/codex_tui/input.rs` (1350) — Codex TUI input readiness
+- `src/services/codex_tui/input.rs` (1366) — Codex TUI input readiness
   detector and prompt delivery surface (#2399 hardened the post-turn
   handoff deadline). Treat as giant-file territory; split before adding
   non-bugfix behavior beyond the readiness/cancel contract.
-- `src/services/claude_tui/input.rs` (1485) — Claude TUI input readiness
+- `src/services/claude_tui/input.rs` (1501) — Claude TUI input readiness
   detector, prompt delivery, and cancellation/offset handoff surface. Treat as
   giant-file territory; split before adding non-bugfix behavior beyond the
   readiness/cancel contract. (+191 from the #685/#720 reliability fixes:
