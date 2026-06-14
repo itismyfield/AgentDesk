@@ -153,7 +153,8 @@
 # #3038 S1: +2 (2958 -> 2960) for the two mechanical `.queued_placeholders` ->
 # `.queued.queued_placeholders` re-wires (two extra method-chain lines) forced by
 # the cluster-C extraction. Net program-wide: mod.rs -201.
-"src/services/discord/router/intake_gate.rs" = 2960
+# intake DB-error-log elevation (this PR): 2960 -> 2969.
+"src/services/discord/router/intake_gate.rs" = 2969
 "src/services/discord/formatting.rs" = 2802
 # #3038 run_bot S0/S1: lowered 2802 -> 1918 by adding characterization tests and
 # moving restored_state, queued_placeholders, startup_doctor, orphan_recovery,
