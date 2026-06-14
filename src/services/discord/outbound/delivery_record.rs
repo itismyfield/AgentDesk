@@ -333,6 +333,81 @@ pub(in crate::services::discord) fn delivery_record_shadow_enabled() -> bool {
     })
 }
 
+/// #3089 B2b read-authority flag (`AGENTDESK_DELIVERY_RECORD_AUTHORITY`, OnceLock,
+/// default OFF). When OFF (default) the dedup gates read the legacy in-memory
+/// `committed_relay_offset` verbatim → byte-identical, deploy no-op. When ON the
+/// gates consult the durable `delivered_frontier` (fused with in-memory) so the
+/// "already-relayed → skip" decision survives a restart / cross-actor boundary.
+pub(in crate::services::discord) fn delivery_record_authority_enabled() -> bool {
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let on = std::env::var("AGENTDESK_DELIVERY_RECORD_AUTHORITY")
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase())
+            .is_some_and(|v| v == "1" || v == "true");
+        if on {
+            tracing::info!("  ✓ delivery_record_authority: enabled");
+        }
+        on
+    })
+}
+
+/// Pure fusion (testable): the effective committed offset under the flip. The
+/// durable frontier END can only RAISE the dedup floor above what the in-memory
+/// authority sees (a pre-restart / cross-actor delivery the live atomic missed);
+/// it must NEVER lower it. So fuse with `max` — a missed durable write (the
+/// coverage hazard) can therefore never drop the floor below in-memory and cause
+/// a false skip / lost relay. `None` durable (I3 conservative) → pure in-memory =
+/// exactly today's behavior. Pure-durable-only authority waits for B3 hydration.
+fn fuse_committed_offset(durable_end: Option<u64>, in_memory: u64) -> u64 {
+    match durable_end {
+        Some(end) => end.max(in_memory),
+        None => in_memory,
+    }
+}
+
+/// #1270 generation guard (pure, testable): trust the durable frontier to RAISE
+/// the dedup floor ONLY if it was written by the CURRENT wrapper generation. A
+/// stale-high frontier from a PRIOR same-named tmux generation must NOT be
+/// fused — the in-memory generation-reset already zeroed the live offset, and a
+/// mismatched durable value would falsely skip the NEW generation's fresh output
+/// (lost relay). `current_gen == 0` (no/unreadable `.generation` file) → cannot
+/// validate → distrust. Write/read parity: the durable `generation_mtime_ns` is
+/// the coord's `confirmed_end_generation_mtime_ns`, itself set from
+/// `read_generation_file_mtime_ns` at advance time (tmux.rs), so equality holds
+/// within a generation and breaks across one.
+fn durable_frontier_generation_current(durable_mtime: i64, current_gen_mtime: i64) -> bool {
+    current_gen_mtime != 0 && durable_mtime == current_gen_mtime
+}
+
+/// #3089 B2b: the effective "already-committed" offset the dedup/skip gates read.
+/// Flag OFF (default) → the legacy in-memory `committed_relay_offset` verbatim
+/// (no record read → deploy no-op). Flag ON → `max(delivered_frontier.end,
+/// in_memory)` (I3: missing/malformed record → in-memory only, never assume
+/// delivered), but ONLY when the durable frontier is from the CURRENT wrapper
+/// generation (#1270 guard — a stale prior-generation frontier is treated as
+/// `None`). The in-memory authority is the relay coord's `confirmed_end_offset`
+/// for `channel`; the durable record is keyed by `(provider, channel)`;
+/// `tmux_session_name` resolves the current generation watermark.
+pub(in crate::services::discord) fn effective_committed_offset(
+    shared: &crate::services::discord::SharedData,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    tmux_session_name: &str,
+) -> u64 {
+    let in_memory = shared.committed_relay_offset(channel);
+    if !delivery_record_authority_enabled() {
+        return in_memory;
+    }
+    let current_gen =
+        crate::services::discord::tmux::read_generation_file_mtime_ns(tmux_session_name);
+    let durable_end = read_record(provider, channel.get())
+        .and_then(|r| r.delivered_frontier)
+        .filter(|f| durable_frontier_generation_current(f.generation_mtime_ns, current_gen))
+        .map(|f| f.range.1);
+    fuse_committed_offset(durable_end, in_memory)
+}
+
 /// I2 outcome map (pure, testable): the shadow-write fires ONLY for a confirmed
 /// `Delivered`. Every other outcome means the controller did NOT advance the
 /// offset — `NotDelivered` (identity gate refused), `Transient`/`Unknown`
@@ -716,5 +791,30 @@ mod tests {
         let after = read_record_at(&path).unwrap();
         assert_eq!(after.delivery_lease, Some(sample_lease()));
         assert_eq!(after.delivered_frontier.unwrap().range, (0, 5));
+    }
+
+    // ---- #3089 B2b authority flip (fusion) ----------------------------------
+
+    #[test]
+    fn fuse_committed_offset_conservative_max() {
+        // The durable frontier can only RAISE the dedup floor above in-memory,
+        // never lower it. A missed durable write (None, I3) → pure in-memory =
+        // today's behavior. Mutation target: flipping max→min or dropping the
+        // in-memory fusion would surface here.
+        assert_eq!(fuse_committed_offset(None, 20), 20); // I3: missing → in-memory
+        assert_eq!(fuse_committed_offset(Some(30), 20), 30); // durable raises floor
+        assert_eq!(fuse_committed_offset(Some(10), 20), 20); // stale-low durable never lowers
+        assert_eq!(fuse_committed_offset(Some(0), 0), 0);
+    }
+
+    #[test]
+    fn generation_guard_distrusts_prior_and_unknown_generations() {
+        // #1270: trust the durable frontier ONLY if its generation_mtime_ns equals
+        // the CURRENT wrapper generation. A prior-generation (stale-high) frontier
+        // must be distrusted → not fused → no false skip of fresh output.
+        assert!(durable_frontier_generation_current(123, 123)); // same generation → trust
+        assert!(!durable_frontier_generation_current(100, 123)); // prior gen → distrust
+        assert!(!durable_frontier_generation_current(123, 0)); // no .generation file → distrust
+        assert!(!durable_frontier_generation_current(0, 0)); // both unknown → distrust
     }
 }
