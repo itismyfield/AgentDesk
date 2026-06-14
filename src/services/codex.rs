@@ -2943,13 +2943,21 @@ fn handle_codex_json_line(
                     "agent_message" => {
                         let text = item.get("text").and_then(|v| v.as_str()).unwrap_or("");
                         if !text.is_empty() {
-                            if !final_text.is_empty() {
+                            // #3431: each codex `agent_message` is a COMPLETE block
+                            // (item.completed, never a mid-token delta), so a second+
+                            // message must carry the SAME `\n\n` paragraph separator
+                            // that `final_text` uses — otherwise the bridge consumer
+                            // (`full_response.push_str`) butts two messages together
+                            // (`완료했습니다.#3089`). Mirror the separator into the
+                            // streamed `Text` so the relayed body matches `final_text`.
+                            let separated = if final_text.is_empty() {
+                                text.to_string()
+                            } else {
                                 final_text.push_str("\n\n");
-                            }
+                                format!("\n\n{text}")
+                            };
                             final_text.push_str(text);
-                            let _ = sender.send(StreamMessage::Text {
-                                content: text.to_string(),
-                            });
+                            let _ = sender.send(StreamMessage::Text { content: separated });
                         }
                     }
                     "command_execution" => {
@@ -3656,5 +3664,57 @@ mod remote_dispatch_gate_tests {
             "expected policy refusal, got: {err}"
         );
         assert!(err.contains("#2193"), "refusal must cite the issue: {err}");
+    }
+}
+
+#[cfg(test)]
+mod relay_separator_tests {
+    use super::handle_codex_json_line;
+    use crate::services::agent_protocol::StreamMessage;
+
+    fn agent_message_line(text: &str) -> String {
+        format!(r#"{{"type":"item.completed","item":{{"type":"agent_message","text":"{text}"}}}}"#)
+    }
+
+    #[test]
+    fn codex_second_agent_message_carries_paragraph_separator_3431() {
+        // #3431: the bridge accumulates streamed `Text` via `push_str` with NO
+        // separator, so a 2nd+ codex agent_message must itself carry the `\n\n`
+        // paragraph separator that `final_text` uses — otherwise two complete
+        // messages butt together in the relayed body (`완료했습니다.#3089`). The
+        // FIRST message emits raw text (no leading separator); the SECOND carries
+        // a `\n\n` prefix. `final_text` keeps its own joined form unchanged.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut thread_id = None;
+        let mut final_text = String::new();
+        let started = std::time::Instant::now();
+
+        handle_codex_json_line(
+            &agent_message_line("first"),
+            &tx,
+            &mut thread_id,
+            &mut final_text,
+            started,
+        )
+        .unwrap();
+        handle_codex_json_line(
+            &agent_message_line("second"),
+            &tx,
+            &mut thread_id,
+            &mut final_text,
+            started,
+        )
+        .unwrap();
+        drop(tx);
+
+        let texts: Vec<String> = rx
+            .iter()
+            .filter_map(|m| match m {
+                StreamMessage::Text { content } => Some(content),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["first".to_string(), "\n\nsecond".to_string()]);
+        assert_eq!(final_text, "first\n\nsecond");
     }
 }
