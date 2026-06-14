@@ -426,25 +426,21 @@ pub(in crate::services::discord) async fn handle_text_message(
     } else {
         None
     };
-    if has_stored_voice_announcement && announce_bot_id.is_none() {
-        tracing::warn!(
-            channel_id = channel_id.get(),
-            message_id = user_msg_id.get(),
-            author_id = request_owner.get(),
-            "dropping stored voice transcript announcement because announce bot user id is unavailable"
-        );
-    } else if (has_stored_voice_announcement
-        || has_legacy_voice_announcement
-        || is_readable_voice_announcement)
-        && voice_announcement.is_none()
-    {
-        tracing::warn!(
-            channel_id = channel_id.get(),
-            message_id = user_msg_id.get(),
-            author_id = request_owner.get(),
-            announce_bot_id = ?announce_bot_id,
-            "ignoring voice transcript announcement without authorized durable metadata"
-        );
+    // #3464: scope unauthorized voice announcements to the owning agent — a
+    // non-owning agent must not fall through to generic handling and answer
+    // (multi-agent reply storm). Decision + one-shot warn live in
+    // `voice_announcement_scope` (this file is LoC-frozen).
+    if super::voice_announcement_scope::drop_unauthorized_voice_announcement(
+        has_stored_voice_announcement,
+        has_legacy_voice_announcement,
+        is_readable_voice_announcement,
+        voice_announcement.is_some(),
+        announce_bot_id,
+        request_owner,
+        channel_id,
+        user_msg_id,
+    ) {
+        return Ok(());
     }
     let is_voice_announcement = voice_announcement.is_some();
     let voice_prompt_text = voice_announcement.as_ref().map(|announcement| {
@@ -3766,6 +3762,7 @@ pub(in crate::services::discord) async fn handle_text_message(
 
     Ok(())
 }
+
 #[cfg(test)]
 mod voice_route_tests {
     use super::*;
