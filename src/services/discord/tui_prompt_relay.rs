@@ -11,6 +11,7 @@ use serenity::{ChannelId, MessageId};
 use super::SharedData;
 use super::gateway::{GatewayFuture, TurnGateway};
 use super::inflight::{InflightTurnState, RelayOwnerKind, TurnSource};
+use super::outbound::delivery_record as dr; // #3089 B2c
 use super::turn_bridge::{TurnBridgeContext, spawn_turn_bridge};
 use crate::services::agent_protocol::{RuntimeHandoffKind, StreamMessage};
 use crate::services::claude_tui::hook_server::{HookEventKind, subscribe_hook_events};
@@ -2349,10 +2350,8 @@ fn spawn_claude_idle_response_tail_once(
     prompt_text: String,
     lease: ExternalInputRelayLease,
 ) -> bool {
-    // #3183: never re-relay output the watcher already committed delivery for.
-    // Both spawn paths (the observed-prompt path and the background poll loop)
-    // funnel through here, so clamping once at this choke point covers both.
-    //
+    // #3183: never re-relay output the watcher already committed delivery for. Both spawn paths
+    // (observed-prompt + background poll loop) funnel through here, so clamping once covers both.
     // #3183 codex (CRITICAL outage-safety): `committed_relay_offset` is a
     // PER-CHANNEL watermark, not per-transcript. A stale-high watermark left by a
     // PREVIOUS wrapper (e.g. 5000) would, after a respawn whose fresh transcript
@@ -2360,9 +2359,8 @@ fn spawn_claude_idle_response_tail_once(
     // exactly the relay-loss the idle tail exists to prevent. Run the SAME
     // generation-aware regression resets the watcher / idle-JSONL sink run BEFORE
     // consulting the watermark (session_relay_sink.rs): a truncated/respawned
-    // transcript (EOF below the watermark) or a wrapper-generation change resets
-    // the shared watermark to 0, so the fresh range is relayed. Only a watermark
-    // that genuinely covers THIS transcript's bytes then clamps (dedupe).
+    // transcript (EOF below the watermark) or a wrapper-generation change resets the
+    // watermark to 0, so the fresh range is relayed; only a watermark that genuinely covers THIS transcript clamps (dedupe).
     let transcript_len = std::fs::metadata(&transcript_path)
         .map(|meta| meta.len())
         .unwrap_or(0);
@@ -2379,7 +2377,13 @@ fn spawn_claude_idle_response_tail_once(
         &tmux_session_name,
         "idle_response_tail",
     );
-    let committed_offset = shared.committed_relay_offset(channel_id);
+    // #3089 B2c (#3235): durable-frontier dedup clamp (flag OFF → in-memory) survives restart.
+    let committed_offset = dr::effective_committed_offset(
+        &shared,
+        &ProviderKind::Claude,
+        channel_id,
+        &tmux_session_name,
+    );
     let start_offset = clamp_idle_tail_start_offset_to_committed(start_offset, committed_offset);
     if committed_offset > 0 {
         tracing::debug!(
