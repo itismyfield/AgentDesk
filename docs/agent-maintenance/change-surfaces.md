@@ -893,7 +893,7 @@
     relocated the `require_explicit_bearer_token` /
     `resolve_requesting_agent_id_with_pg` auth/identity helpers to
     `crate::services::kanban`).
-  - `src/server/routes/docs.rs` (5884 lines; +4 from #3293 documenting
+  - `src/server/routes/docs.rs` (5900 lines; +4 from #3293 documenting
     the stale-mailbox repair `purge` body param + registry-purge response
     fields).
   - `src/server/routes/escalation.rs` (1376 lines).
@@ -957,8 +957,8 @@
   (supervised-worker registry / leader-only lifecycle).
 - legacy_modules: none — these are shared runtime coordination surfaces.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/config.rs` (2299 lines).
-  - `src/server/mod.rs` (2427 lines).
+  - `src/config.rs` (2307 lines).
+  - `src/server/mod.rs` (2430 lines).
   - `src/receipt.rs` (1842 lines).
   - `src/github/sync.rs` (1488 lines).
   - `src/reconcile.rs` (1821 lines; periodic reconcile loop covering stale
