@@ -1341,6 +1341,18 @@ pub struct RuntimeSettingsConfig {
     pub github_repo_cache_sec: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limit_stale_sec: Option<u64>,
+    /// Optional override (seconds) for the Follow-up TUI prompt-readiness wait.
+    /// When unset (or `0`), both the Claude and Codex TUI follow-up waits keep
+    /// the compiled-in 45s default (`FOLLOWUP_PROMPT_READY_TIMEOUT`). Read live
+    /// via `config_live_reload::current()` so an `agentdesk.yaml` edit applies
+    /// on the next readiness wait without a restart.
+    ///
+    /// Note: the Claude follow-up wait is still bounded by an independent 900s
+    /// busy-turn ceiling (`PROMPT_READY_ACTIVE_TURN_WAIT_CEILING`), but the Codex
+    /// follow-up wait has no such ceiling, so a very large value lets a long
+    /// prior Codex turn block the follow-up wait for the full configured duration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub followup_prompt_ready_timeout_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub reset_overrides_on_restart: bool,
 }
@@ -1371,6 +1383,7 @@ impl RuntimeSettingsConfig {
             && self.rate_limit_danger_pct.is_none()
             && self.github_repo_cache_sec.is_none()
             && self.rate_limit_stale_sec.is_none()
+            && self.followup_prompt_ready_timeout_secs.is_none()
             && !self.reset_overrides_on_restart
     }
 }
