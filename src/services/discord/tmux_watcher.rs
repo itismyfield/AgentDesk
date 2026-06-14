@@ -2072,18 +2072,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             } else {
                 false
             };
-        // #3107: lazy pane-busy probe — only capture the pane when the cheap
-        // (terminal + no-inflight) prefix is already true and we are about to
-        // suppress, mirroring the SSH-direct / external-lease computations
-        // above. Keeps the `tmux capture-pane` subprocess off the hot path.
+        // #3107: lazy pane-busy probe — capture the pane only when the cheap
+        // (terminal + no-inflight) prefix already holds (keeps `tmux capture-pane` off the hot path).
         let post_terminal_pane_actively_streaming = turn_result_relayed
             && post_terminal_inflight_missing
             && watcher_pane_actively_streaming(&tmux_session_name);
         if post_terminal_pane_actively_streaming {
-            // Self-heal: a live turn lost its inflight and kept producing
-            // post-terminal output. Re-establish a watcher-owned inflight so
-            // the continuation relays and the terminal ack has a target.
-            // Reuse the restored turn's persisted message ids when present.
+            // Self-heal: a live turn lost its inflight but kept streaming post-terminal;
+            // re-establish a watcher-owned inflight (reusing the restored turn's persisted ids).
             let restored_panel = restored_turn
                 .as_ref()
                 .and_then(|turn| turn.status_message_id);
@@ -2099,6 +2095,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 restored_panel,
                 restored_placeholder,
                 restored_injected_prompt_message_id,
+            );
+            // #3078 PR-6: ledger-seed the liveness-reacquired watcher panel.
+            crate::services::discord::watcher_panel_parity::shadow_adopt_liveness_reacquired_panel(
+                &shared,
+                channel_id,
+                &watcher_provider,
+                restored_panel,
+                reacquired,
             );
             if reacquired && !active_stream_inflight_reacquire_logged {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -3170,17 +3174,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             channel_id.get(),
                         )
                         .is_none();
-                    // #3107: only pay for the pane-capture probe when we are
-                    // already about to suppress (inflight is missing) — the
-                    // expensive signal stays off the hot path, mirroring the
-                    // lazy SSH-direct computation in the post-terminal guard.
+                    // #3107: lazy pane-capture probe — only when inflight is
+                    // missing (expensive signal stays off the hot path).
                     let pane_actively_streaming_for_streaming = inflight_missing_for_streaming
                         && watcher_pane_actively_streaming(&tmux_session_name);
                     if inflight_missing_for_streaming && pane_actively_streaming_for_streaming {
-                        // #3107 self-heal: the pane is live but inflight was
-                        // cleared mid-turn — re-establish a watcher-owned
-                        // inflight so this and subsequent edits relay and the
-                        // terminal ack has a target. Idempotent + 1-shot log.
+                        // #3107 self-heal: pane live but inflight cleared mid-turn —
+                        // re-establish a watcher-owned inflight (idempotent + 1-shot log).
                         let reacquired = reacquire_watcher_inflight_for_active_stream(
                             &watcher_provider,
                             channel_id,
@@ -3190,13 +3190,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             status_panel_msg_id,
                             placeholder_msg_id,
                             // #3107 (P2#3, F3): thread the #3099 hourglass anchor
-                            // captured up front (before `restored_turn` was consumed by
-                            // the streaming `.take()`). Previously hardcoded `None`, so a
-                            // hourglass-anchored turn losing its inflight MID-STREAM was
-                            // re-acquired WITHOUT the pinned id — orphaning the `⏳` (the
-                            // `⏳ → ✅` cleanup lost its anchor). Preserving it keeps the
-                            // re-acquired streaming inflight pointing at the ⏳ message.
+                            // (captured before `restored_turn` was `.take()`n) so a
+                            // mid-stream inflight loss keeps the `⏳ → ✅` cleanup anchor.
                             restored_injected_prompt_message_id,
+                        );
+                        // #3078 PR-6: ledger-seed the liveness-reacquired watcher panel.
+                        crate::services::discord::watcher_panel_parity::shadow_adopt_liveness_reacquired_panel(
+                            &shared, channel_id, &watcher_provider, status_panel_msg_id, reacquired,
                         );
                         if reacquired && !active_stream_inflight_reacquire_logged {
                             let ts = chrono::Local::now().format("%H:%M:%S");

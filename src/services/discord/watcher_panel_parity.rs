@@ -131,6 +131,77 @@ pub(in crate::services::discord) async fn assert_watcher_reclaim_parity(
     );
 }
 
+/// EPIC #3078 PR-6 — SHADOW-seed the status panel the watcher liveness self-heal
+/// (`reacquire_watcher_inflight_for_active_stream`) re-binds onto its freshly
+/// minted synthetic (`user_msg_id == 0`) watcher-owned inflight, into the
+/// [`StatusPanelController`](super::status_panel_controller) ledger.
+///
+/// SUBSTRATE, not a decision-parity: the re-acquire merely *reuses* the persisted
+/// `status_message_id`, so re-deriving "which id" here would be the tautology the
+/// PR-4 codex P2 finding warned against (echoing an already-resolved id). PR-6
+/// instead SEEDS the ledger so a LATER faithful parity / execute-cutover can
+/// observe the liveness-recovered panel — mirroring the PR-5 bridge ledger seed.
+///
+/// Uses `seed_live_panel` (NOT `adopt_recovered`): the watcher synthetic key is
+/// REUSED across re-acquisitions, so the seed must OVERWRITE a stale earlier panel
+/// id rather than first-id-wins — otherwise a second same-generation reacquire
+/// would leave the ledger pinned to the prior panel (no controller finalize runs
+/// in the shadow phase to terminalize it between turns).
+///
+/// Zero behaviour change:
+/// - gated on `reacquired`: only the synthetic save that actually WON the
+///   `save_inflight_state_if_absent` race owns the panel; a lost race (a
+///   concurrent intake inflight) must NOT seed a Watcher-owned ledger entry the
+///   watcher does not own.
+/// - v2-gated: the controller actor is spawned but the flag is off, so we skip the
+///   send entirely (mirrors `assert_watcher_reclaim_parity`).
+/// - ledger-only: `seed_live_panel` is fire-and-forget (no Discord IO, no persist;
+///   the PR-1 durable-mirror sink is still dormant), so the legacy liveness path
+///   is byte-for-byte unchanged.
+pub(in crate::services::discord) fn shadow_adopt_liveness_reacquired_panel(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    provider: &ProviderKind,
+    panel_msg_id: Option<MessageId>,
+    reacquired: bool,
+) {
+    seed_liveness_panel_into_ledger(
+        &shared.status_panel_controller,
+        shared.ui.status_panel_v2_enabled,
+        channel_id,
+        provider,
+        panel_msg_id,
+        reacquired,
+    );
+}
+
+/// Testable seam for [`shadow_adopt_liveness_reacquired_panel`]: the full
+/// gate-then-seed logic against an explicit controller + v2 flag (so a directly
+/// spawned v2-on controller can exercise the seed path that a v2-off test
+/// `SharedData` cannot reach). All three gates live here, so a unit test that
+/// removes the seed call fails the positive case.
+fn seed_liveness_panel_into_ledger(
+    controller: &super::status_panel_controller::StatusPanelController,
+    status_panel_v2_enabled: bool,
+    channel_id: ChannelId,
+    provider: &ProviderKind,
+    panel_msg_id: Option<MessageId>,
+    reacquired: bool,
+) {
+    if !reacquired || !status_panel_v2_enabled {
+        return;
+    }
+    let Some(panel) = panel_msg_id else {
+        return;
+    };
+    controller.seed_live_panel(
+        watcher_turn_key(channel_id, 0),
+        provider.clone(),
+        super::status_panel_controller::PanelOwnerKind::Watcher,
+        Some(panel),
+    );
+}
+
 /// EPIC #3078 — the legacy watcher CREATE/ADOPT decision, re-derived from the
 /// SAME RAW inputs the `tmux_watcher.rs` ~7213 branch reads, as the parity
 /// reference. Mirrors that branch order exactly: a persisted (restart-safe) id
@@ -326,5 +397,105 @@ mod tests {
         let shape: WatcherCreateShape = (5099, (None, true, false), (None, false, true));
         assert!(super::WATCHER_CREATE_WARNED.should_warn(shape));
         assert!(!super::WATCHER_CREATE_WARNED.should_warn(shape));
+    }
+
+    /// PR-6 liveness seed, v2-off: the public SharedData wrapper must short-circuit
+    /// BEFORE the controller send even when `reacquired == true` and a panel id is
+    /// present. The default test SharedData has v2 off; completing without panic
+    /// proves the wrapper threads the flag (the seed is purely additive, so
+    /// off == inert).
+    #[tokio::test(flavor = "current_thread")]
+    async fn liveness_seed_v2_off_wrapper_is_inert() {
+        let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+        assert!(!shared.ui.status_panel_v2_enabled);
+        shadow_adopt_liveness_reacquired_panel(
+            &shared,
+            ChannelId::new(4006),
+            &ProviderKind::Claude,
+            Some(MessageId::new(8006)),
+            true,
+        );
+    }
+
+    /// PR-6 liveness seed mechanism (POSITIVE, v2-on): the full helper seam against
+    /// a spawned controller seeds the reacquired watcher panel under the channel-
+    /// only synthetic key, and `current_panel` reads it back. Removing the seed
+    /// call from `seed_liveness_panel_into_ledger` fails this assertion.
+    #[tokio::test(flavor = "current_thread")]
+    async fn liveness_seed_writes_watcher_panel_into_ledger() {
+        let ctl = StatusPanelController::spawn(true);
+        let channel = ChannelId::new(4007);
+        let panel = MessageId::new(7007);
+        seed_liveness_panel_into_ledger(
+            &ctl,
+            true,
+            channel,
+            &ProviderKind::Claude,
+            Some(panel),
+            true,
+        );
+        assert_eq!(
+            ctl.current_panel(watcher_turn_key(channel, 0)).await,
+            Some(panel),
+            "liveness-reacquired watcher panel must seed the controller ledger"
+        );
+    }
+
+    /// PR-6 reused-key OVERWRITE (the Finding-1 fix): a second same-generation
+    /// liveness seed with a DIFFERENT panel must win — `seed_live_panel` overwrites
+    /// the non-terminal entry rather than first-id-wins, so the ledger tracks the
+    /// LATEST liveness panel, never a stale earlier one.
+    #[tokio::test(flavor = "current_thread")]
+    async fn liveness_seed_overwrites_stale_reused_key() {
+        let ctl = StatusPanelController::spawn(true);
+        let channel = ChannelId::new(4008);
+        let panel_a = MessageId::new(7008);
+        let panel_b = MessageId::new(7009);
+        seed_liveness_panel_into_ledger(
+            &ctl,
+            true,
+            channel,
+            &ProviderKind::Claude,
+            Some(panel_a),
+            true,
+        );
+        seed_liveness_panel_into_ledger(
+            &ctl,
+            true,
+            channel,
+            &ProviderKind::Claude,
+            Some(panel_b),
+            true,
+        );
+        assert_eq!(
+            ctl.current_panel(watcher_turn_key(channel, 0)).await,
+            Some(panel_b),
+            "the latest liveness panel must overwrite the stale earlier one"
+        );
+    }
+
+    /// PR-6 gates at the seam (v2-on controller, so a leaked send would be
+    /// observable): `reacquired == false` and `panel == None` each short-circuit
+    /// before the seed — the ledger stays empty.
+    #[tokio::test(flavor = "current_thread")]
+    async fn liveness_seed_reacquired_and_none_gates_are_inert() {
+        let ctl = StatusPanelController::spawn(true);
+        let channel = ChannelId::new(4009);
+        // reacquired == false: a lost save race must not seed.
+        seed_liveness_panel_into_ledger(
+            &ctl,
+            true,
+            channel,
+            &ProviderKind::Claude,
+            Some(MessageId::new(7010)),
+            false,
+        );
+        // panel == None: nothing to seed.
+        seed_liveness_panel_into_ledger(&ctl, true, channel, &ProviderKind::Claude, None, true);
+        assert_eq!(
+            ctl.current_panel(watcher_turn_key(channel, 0)).await,
+            None,
+            "neither a lost reacquire race nor a missing panel may seed the ledger"
+        );
     }
 }
