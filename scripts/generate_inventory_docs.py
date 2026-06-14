@@ -105,6 +105,7 @@ TOP_LEVEL_MODULE_PURPOSES = {
     "compat/": "Centralised home for compatibility/legacy/fallback shims (#1076). Each public item carries a `REMOVE_WHEN` comment so retirement is grep-driven.",
     "app_state.rs": "Shared HTTP route-handler state (`AppState`); lives at crate root below server+services so service-layer handlers reference it without a service→server backflow.",
     "config.rs": "`agentdesk.yaml` parsing, configuration defaults, and shared test env helpers.",
+    "config_live_reload.rs": "Hot-reloads `agentdesk.yaml` without a restart: a debounced `notify` watcher pre-validates edits and atomically swaps a process-global config snapshot, keeping the running config on failure and reporting restart-required infra changes.",
     "credential.rs": "Reads runtime credential files such as Discord bot tokens from the AgentDesk root.",
     "db/": "SQLite access layer and schema authority (`src/db/schema.rs`).",
     "dispatch/": "Dispatch context construction, review metadata, and worktree targeting.",
