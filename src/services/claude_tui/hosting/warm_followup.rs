@@ -381,9 +381,18 @@ fn run_claude_tui_warm_followup_submit_and_stream(
                         "initial_busy_snapshot_prompt_marker_detected": snapshot.prompt_marker_detected,
                         "initial_busy_snapshot_prompt_draft_detected": snapshot.prompt_draft_detected,
                         "wait_outcome": if timed_out { "timeout" } else { "error" },
-                        "wait_error": err,
+                        "wait_error": err.clone(),
+                        "requeue_for_retry": crate::services::claude::claude_tui_followup_requeue_enabled(),
                     }),
                 );
+                // The busy-timeout is PRE-submit: the prompt was never sent to
+                // the pane, so the message can be retried with no double-send.
+                // When requeue is enabled, surface it as a retryable error so the
+                // turn bridge re-queues the inflight message (it holds owner/
+                // msg_id/text); otherwise keep the legacy drop-with-busy-notice.
+                if crate::services::claude::claude_tui_followup_requeue_enabled() {
+                    return ClaudeTuiWarmFollowupSubmitOutcome::Terminal(Err(err));
+                }
                 return ClaudeTuiWarmFollowupSubmitOutcome::Terminal(Ok(()));
             }
         }

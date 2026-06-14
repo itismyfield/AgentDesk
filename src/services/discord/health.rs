@@ -45,8 +45,9 @@ pub use crate::services::discord::outbound::send_gate::{
 pub use headless_turn::HeadlessAgentTurnReservation;
 pub use headless_turn::{
     reserve_headless_agent_turn, reserve_headless_agent_turn_in_dm, start_direct_meeting,
-    start_headless_agent_turn, start_headless_agent_turn_in_dm, start_reserved_headless_agent_turn,
+    start_headless_agent_turn, start_headless_agent_turn_in_dm,
     start_reserved_headless_agent_turn_in_dm,
+    start_reserved_headless_agent_turn_with_owner_channel,
 };
 pub use mailbox::purge_idle_channel_mailbox_registry_entry;
 pub(crate) use recovery::stop_provider_channel_runtime_with_policy;

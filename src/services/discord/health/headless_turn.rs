@@ -96,6 +96,45 @@ pub async fn start_reserved_headless_agent_turn(
     .await
 }
 
+pub async fn start_reserved_headless_agent_turn_with_owner_channel(
+    registry: &HealthRegistry,
+    owner_channel_id: ChannelId,
+    turn_channel_id: ChannelId,
+    owner_provider: ProviderKind,
+    prompt: String,
+    source: Option<String>,
+    metadata: Option<serde_json::Value>,
+    channel_name_hint: Option<String>,
+    reservation: HeadlessAgentTurnReservation,
+) -> Result<router::HeadlessTurnStartOutcome, router::HeadlessTurnStartError> {
+    if reservation.channel_id != turn_channel_id {
+        return Err(router::HeadlessTurnStartError::Internal(format!(
+            "headless turn reservation channel mismatch: reserved {} but starting {}",
+            reservation.channel_id.get(),
+            turn_channel_id.get()
+        )));
+    }
+
+    let expected_turn_id = reservation.turn_id.clone();
+    let shared = resolve_direct_meeting_shared(registry, owner_channel_id, &owner_provider)
+        .await
+        .map_err(router::HeadlessTurnStartError::Internal)?;
+
+    start_reserved_headless_agent_turn_with_shared(
+        shared,
+        turn_channel_id,
+        owner_provider,
+        prompt,
+        source,
+        metadata,
+        channel_name_hint,
+        Some(false),
+        reservation,
+        expected_turn_id,
+    )
+    .await
+}
+
 pub async fn start_headless_agent_turn_in_dm(
     registry: &HealthRegistry,
     owner_channel_id: ChannelId,

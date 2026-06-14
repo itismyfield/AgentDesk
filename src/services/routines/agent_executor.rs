@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use crate::services::discord::health::{
     HealthRegistry, reserve_headless_agent_turn, reserve_headless_agent_turn_in_dm,
-    resolve_bot_http, start_reserved_headless_agent_turn, start_reserved_headless_agent_turn_in_dm,
+    resolve_bot_http, start_reserved_headless_agent_turn_in_dm,
+    start_reserved_headless_agent_turn_with_owner_channel,
 };
 
 use super::runtime::RoutineRunOutcome;
@@ -1025,13 +1026,10 @@ impl RoutineAgentExecutor {
             )
             .await
         } else {
-            let channel_name_hint = primary_channel
-                .chars()
-                .all(|ch| ch.is_ascii_digit())
-                .then_some(None)
-                .unwrap_or_else(|| Some(primary_channel.clone()));
-            start_reserved_headless_agent_turn(
+            let channel_name_hint = Some(routine_agent_session_name(&claimed.name, agent_id));
+            start_reserved_headless_agent_turn_with_owner_channel(
                 registry,
+                channel_id,
                 turn_channel_id,
                 provider.clone(),
                 prompt.to_string(),
@@ -1460,6 +1458,15 @@ fn routine_thread_title(routine_name: &str, agent_id: &str) -> String {
     base.chars().take(90).collect()
 }
 
+fn routine_agent_session_name(routine_name: &str, agent_id: &str) -> String {
+    let base = format!(
+        "routine {} - {}",
+        compact_for_title(agent_id),
+        compact_for_title(routine_name)
+    );
+    base.chars().take(90).collect()
+}
+
 fn compact_for_title(value: &str) -> String {
     let value = value.trim();
     if value.is_empty() {
@@ -1618,12 +1625,17 @@ fn merge_pending_result(
 }
 
 fn with_started_run_routing_metadata(mut result: Value, started_result: Option<&Value>) -> Value {
+    // #730: also propagate `provider` so a routine headless turn carries the
+    // routine agent's resolved provider identity through to the merged result,
+    // alongside the `agent_id`/`attempt_kind` routing keys that upstream now
+    // produces for the durable fallback-retry path.
     const ROUTING_KEYS: &[&str] = &[
         "channel_id",
         "parent_channel_id",
         "discord_thread_id",
         "agent_id",
         "attempt_kind",
+        "provider",
     ];
 
     let Some(started_result) = started_result else {

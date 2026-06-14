@@ -368,7 +368,10 @@ pub(crate) fn tmux_capture_claude_tui_prompt_draft_backspace_budget(
             // Claude keeps submitted prompt lines in the pane history. If the
             // prompt line is followed by rendered assistant/completion output,
             // it is historical text, not an editable composer draft.
-            if tmux_lines_after_claude_prompt_show_completed_history(&recent[index + 1..]) {
+            let after_prompt = &recent[index + 1..];
+            if tmux_lines_after_claude_prompt_show_completed_history(after_prompt)
+                || tmux_lines_after_claude_prompt_show_idle_suggestion_chrome(after_prompt)
+            {
                 return Some(None);
             }
             Some(claude_tui_prompt_draft_backspace_budget_from_line(line))
@@ -1173,7 +1176,7 @@ assistant output
     }
 
     #[test]
-    fn claude_idle_suggestion_prompt_is_not_recoverable_draft_context() {
+    fn claude_idle_suggestion_prompt_is_not_prompt_draft() {
         let capture = "\
 ⏺ TUI-E2E marker
 ✻ Worked for 2s
@@ -1184,7 +1187,11 @@ assistant output
   CLAUDE.md: 1, MCP: 2 │ Tools: 0 done
   ⏵⏵ bypass permissions on";
 
-        assert!(tmux_capture_indicates_claude_tui_prompt_draft(capture));
+        assert!(!tmux_capture_indicates_claude_tui_prompt_draft(capture));
+        assert_eq!(
+            tmux_capture_claude_tui_prompt_draft_backspace_budget(capture),
+            None
+        );
         assert!(tmux_capture_indicates_claude_tui_idle_suggestion(capture));
     }
 

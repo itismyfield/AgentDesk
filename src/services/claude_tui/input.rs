@@ -130,6 +130,7 @@ pub enum TuiInputAction {
     PasteBuffer(String),
     Enter,
     Escape,
+    CtrlU,
     Backspace(usize),
     /// Navigate an interactive Claude TUI selector with a literal arrow key.
     /// Only `Left`/`Right` are accepted so callers cannot smuggle arbitrary
@@ -599,6 +600,9 @@ fn run_actions(
             TuiInputAction::Escape => {
                 crate::services::platform::tmux::send_keys(session_name, &["Escape"])?
             }
+            TuiInputAction::CtrlU => {
+                crate::services::platform::tmux::send_keys(session_name, &["C-u"])?
+            }
             TuiInputAction::ArrowLeft => {
                 crate::services::platform::tmux::send_keys(session_name, &["Left"])?
             }
@@ -723,7 +727,11 @@ fn prompt_submit_settle_for_attempt(attempt: usize) -> Duration {
 
 fn clear_prompt_draft_before_error(session_name: &str, cancel_token: Option<&CancelToken>) {
     let snapshot = prompt_readiness_snapshot(session_name);
-    let mut actions = vec![TuiInputAction::Escape];
+    let mut actions = vec![
+        TuiInputAction::CtrlU,
+        TuiInputAction::Escape,
+        TuiInputAction::CtrlU,
+    ];
     if let Some(count) = claude_prompt_draft_backspace_budget_from_tail(&snapshot.pane_tail) {
         actions.push(TuiInputAction::Backspace(count));
     }
@@ -769,6 +777,7 @@ fn ensure_tmux_success(output: Output, action: &TuiInputAction) -> Result<(), St
         TuiInputAction::PasteBuffer(_) => "paste-buffer",
         TuiInputAction::Enter => "enter",
         TuiInputAction::Escape => "escape",
+        TuiInputAction::CtrlU => "ctrl-u",
         TuiInputAction::ArrowLeft => "arrow-left",
         TuiInputAction::ArrowRight => "arrow-right",
         TuiInputAction::Backspace(_) => "backspace",
@@ -1223,6 +1232,18 @@ fn wait_for_prompt_ready_polling(
                 continue;
             }
             log_prompt_ready_timeout(session_name, readiness, timeout, &snapshot);
+            if prompt_ready_timeout_should_clear_followup_draft(
+                readiness,
+                &snapshot,
+                crate::services::claude::claude_tui_followup_requeue_enabled(),
+            ) {
+                tracing::warn!(
+                    tmux_session_name = session_name,
+                    readiness = readiness.label(),
+                    "claude_tui clearing stranded follow-up prompt draft after readiness timeout so retry can re-inject cleanly"
+                );
+                clear_prompt_draft_before_error(session_name, cancel_token);
+            }
             return Err(format!(
                 "{PROMPT_READY_TIMEOUT_ERROR_PREFIX} {} prompt input readiness after {}s; reason={}; previous_tui_turn_still_running={}; prompt_marker_detected={}; prompt_draft_detected={}; capture_available={}",
                 readiness.label(),
@@ -1331,6 +1352,24 @@ fn prompt_ready_timeout_reason(snapshot: &PromptReadinessSnapshot) -> &'static s
     } else {
         "prompt_marker_not_detected"
     }
+}
+
+/// Whether a readiness timeout should clear a stranded follow-up composer draft
+/// before returning the error, so the requeued retry can re-inject cleanly. Only
+/// fires for follow-ups when requeue is enabled and the pane visibly holds a
+/// real, editable unsent draft (an idle-suggestion tail reports no backspace
+/// budget via `tmux_common`, so it is excluded). Pure for unit-testing.
+fn prompt_ready_timeout_should_clear_followup_draft(
+    readiness: PromptReadinessKind,
+    snapshot: &PromptReadinessSnapshot,
+    requeue_enabled: bool,
+) -> bool {
+    matches!(readiness, PromptReadinessKind::Followup)
+        && requeue_enabled
+        && snapshot.tmux_pane_alive
+        && snapshot.capture_available
+        && snapshot.prompt_draft_detected
+        && claude_prompt_draft_backspace_budget_from_tail(&snapshot.pane_tail).is_some()
 }
 
 fn transcript_idle_confirms_prompt_ready_without_capture(
@@ -2394,6 +2433,65 @@ line 13";
             "prompt_marker_not_detected"
         );
         assert!(base.tmux_pane_alive && !base.prompt_marker_detected);
+    }
+
+    #[test]
+    fn prompt_ready_timeout_clears_only_retryable_followup_drafts() {
+        let draft = PromptReadinessSnapshot {
+            prompt_marker_detected: true,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "\u{276f} unsubmitted follow-up".to_string(),
+        };
+
+        // A real, editable follow-up draft on a live pane with a backspace
+        // budget should be cleared (only when requeue is enabled).
+        assert!(prompt_ready_timeout_should_clear_followup_draft(
+            PromptReadinessKind::Followup,
+            &draft,
+            true
+        ));
+        assert!(!prompt_ready_timeout_should_clear_followup_draft(
+            PromptReadinessKind::FreshTurn,
+            &draft,
+            true
+        ));
+        assert!(!prompt_ready_timeout_should_clear_followup_draft(
+            PromptReadinessKind::Followup,
+            &draft,
+            false
+        ));
+
+        // An idle-suggestion tail is not an editable draft (no backspace
+        // budget), so it must not be cleared.
+        let suggestion_like_draft = PromptReadinessSnapshot {
+            pane_tail: "\
+✻ Worked for 2s
+────────────────────────────────────────────────────────────────────────────
+❯\u{00a0}좋아, 잘 동작하네
+────────────────────────────────────────────────────────────────────────────
+  CLAUDE.md: 1, MCP: 2 │ Tools: 0 done
+  ⏵⏵ bypass permissions on"
+                .to_string(),
+            ..draft.clone()
+        };
+        assert!(!prompt_ready_timeout_should_clear_followup_draft(
+            PromptReadinessKind::Followup,
+            &suggestion_like_draft,
+            true
+        ));
+
+        // A blind capture cannot confirm an editable draft, so do not clear.
+        let no_capture = PromptReadinessSnapshot {
+            capture_available: false,
+            ..draft.clone()
+        };
+        assert!(!prompt_ready_timeout_should_clear_followup_draft(
+            PromptReadinessKind::Followup,
+            &no_capture,
+            true
+        ));
     }
 
     // #2416: wait_for_prompt_ready must be reachable as a public API so the

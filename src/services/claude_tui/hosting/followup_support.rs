@@ -181,9 +181,6 @@ fn claude_tui_snapshot_has_recoverable_prompt_draft(
 ) -> bool {
     snapshot.tmux_pane_alive
         && snapshot.prompt_draft_detected
-        && !crate::services::claude_tui::input::claude_prompt_draft_is_idle_suggestion_tail(
-            &snapshot.pane_tail,
-        )
         && crate::services::claude_tui::input::claude_prompt_draft_backspace_budget_from_tail(
             &snapshot.pane_tail,
         )

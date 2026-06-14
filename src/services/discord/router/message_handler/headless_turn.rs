@@ -57,6 +57,38 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
     .await
 }
 
+fn routine_metadata_role_binding(
+    metadata: Option<&serde_json::Value>,
+    provider: &ProviderKind,
+) -> Option<settings::RoleBinding> {
+    let metadata = metadata?;
+    metadata.get("routine_id")?;
+    let agent_id = metadata
+        .get("agent_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let prompt_file = super::super::super::runtime_store::agentdesk_root()
+        .unwrap_or_default()
+        .join("config")
+        .join("agents")
+        .join(agent_id)
+        .join("IDENTITY.md")
+        .display()
+        .to_string();
+
+    Some(settings::RoleBinding {
+        role_id: agent_id.to_string(),
+        prompt_file,
+        provider: Some(provider.clone()),
+        model: None,
+        reasoning_effort: None,
+        peer_agents_enabled: true,
+        quality_feedback_injection_enabled: true,
+        memory: settings::resolve_memory_settings(None, None),
+    })
+}
+
 #[allow(dead_code)] // #3034: exported voice entry point, wired-but-dormant (no live dispatch yet).
 pub(in crate::services::discord) async fn start_voice_headless_turn(
     ctx: &serenity::Context,
@@ -119,6 +151,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         let settings = shared.settings.read().await;
         (settings.provider.clone(), settings.allowed_tools.clone())
     };
+    let routine_role_binding = routine_metadata_role_binding(metadata.as_ref(), &settings_provider);
     let (early_stale_session_id, early_channel_name) = {
         let data = shared.core.lock().await;
         data.sessions
@@ -135,20 +168,28 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     } else {
         None
     };
-    let early_role_binding = resolve_role_binding(
-        channel_id,
-        early_channel_name
-            .as_deref()
-            .or(channel_name_hint.as_deref())
-            .or(early_resolved_channel_name.as_deref()),
-    )
-    .or_else(|| {
-        early_thread_parent
-            .as_ref()
-            .and_then(|(parent_id, parent_name)| {
-                resolve_role_binding(*parent_id, parent_name.as_deref())
-            })
-    });
+    let early_role_binding = routine_role_binding
+        .clone()
+        .or_else(|| {
+            metadata_parent_channel_id(metadata.as_ref())
+                .and_then(|parent_channel_id| resolve_role_binding(parent_channel_id, None))
+        })
+        .or_else(|| {
+            resolve_role_binding(
+                channel_id,
+                early_channel_name
+                    .as_deref()
+                    .or(channel_name_hint.as_deref())
+                    .or(early_resolved_channel_name.as_deref()),
+            )
+        })
+        .or_else(|| {
+            early_thread_parent
+                .as_ref()
+                .and_then(|(parent_id, parent_name)| {
+                    resolve_role_binding(*parent_id, parent_name.as_deref())
+                })
+        });
     let early_provider = early_role_binding
         .as_ref()
         .and_then(|binding| binding.provider.clone())
@@ -339,12 +380,57 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
             .sessions
             .get(&channel_id)
             .and_then(|session| session.channel_name.as_deref());
-        resolve_role_binding(channel_id, channel_name)
-    };
+        routine_role_binding
+            .clone()
+            .or_else(|| {
+                metadata_parent_channel_id(metadata.as_ref())
+                    .and_then(|parent_channel_id| resolve_role_binding(parent_channel_id, None))
+            })
+            .or_else(|| resolve_role_binding(channel_id, channel_name))
+    }
+    .or_else(|| {
+        early_thread_parent
+            .as_ref()
+            .and_then(|(parent_id, parent_name)| {
+                resolve_role_binding(*parent_id, parent_name.as_deref())
+            })
+    });
     let provider = role_binding
         .as_ref()
         .and_then(|binding| binding.provider.clone())
         .unwrap_or(settings_provider);
+    let routine_metadata_agent_id = metadata
+        .as_ref()
+        .and_then(|value| value.get("agent_id"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if metadata
+        .as_ref()
+        .and_then(|value| value.get("routine_id"))
+        .is_some()
+        && routine_metadata_agent_id
+            .zip(
+                role_binding
+                    .as_ref()
+                    .map(|binding| binding.role_id.as_str()),
+            )
+            .is_some_and(|(metadata_agent_id, role_id)| metadata_agent_id == role_id)
+        && let Some(channel_name_hint) = channel_name_hint
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+    {
+        let mut data = shared.core.lock().await;
+        if let Some(session) = data.sessions.get_mut(&channel_id)
+            && session.channel_name.as_deref() != Some(channel_name_hint.as_str())
+        {
+            session.channel_name = Some(channel_name_hint.clone());
+            session.clear_provider_session();
+            session_id = None;
+            memento_context_loaded = false;
+            session_strategy_reason = "routine_agent_identity_changed";
+        }
+    }
     {
         let channel_name_for_isolation = {
             let data = shared.core.lock().await;
@@ -428,6 +514,38 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         (channel_name, tmux_session_name, category_name)
     };
     let adk_session_key = build_adk_session_key(shared, channel_id, &provider).await;
+    if metadata
+        .as_ref()
+        .and_then(|value| value.get("routine_id"))
+        .is_some()
+        && let (Some(pool), Some(binding), Some(session_key)) = (
+            shared.pg_pool.as_ref(),
+            role_binding.as_ref(),
+            adk_session_key.as_deref(),
+        )
+        && let Err(error) = sqlx::query(
+            "UPDATE sessions
+                SET agent_id = $1,
+                    provider = $2,
+                    session_key = $3
+              WHERE channel_id = $4
+                AND COALESCE(status, '') <> 'closed'",
+        )
+        .bind(&binding.role_id)
+        .bind(provider.as_str())
+        .bind(session_key)
+        .bind(channel_id.get().to_string())
+        .execute(pool)
+        .await
+    {
+        tracing::warn!(
+            channel_id = channel_id.get(),
+            agent_id = %binding.role_id,
+            provider = %provider.as_str(),
+            error = %error,
+            "failed to refresh routine headless session identity"
+        );
+    }
     if session_reset_reason.is_some() {
         if let Some(ref key) = adk_session_key {
             super::super::super::adk_session::clear_provider_session_id(key, shared.api_port).await;
