@@ -56,9 +56,13 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::sync::atomic::Ordering;
 
+use poise::serenity_prelude::ChannelId;
 use serde::{Deserialize, Serialize};
 
+use super::turn_output_controller::DeliveryOutcome;
 use crate::services::discord::runtime_store;
 use crate::services::provider::ProviderKind;
 
@@ -71,7 +75,6 @@ const DELIVERY_RECORDS_DIR: &str = "discord_delivery_records";
 /// fields, deliberately not folded into one state machine: the lease is the
 /// transient in-flight claim (cleared on release), the frontier is the
 /// release-surviving delivered offset (only a `Delivered` outcome writes it).
-#[allow(dead_code)] // #3089 B0: read/written by B1 shadow-write; no caller in B0.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(in crate::services::discord) struct DeliveryRecord {
     /// Live/in-flight claim. CLEARED on release (`clear_lease`); a leftover
@@ -106,7 +109,6 @@ pub(in crate::services::discord) struct DurableLease {
 /// of `confirmed_end_offset`. Written only after a confirmed Discord POST and
 /// the identity-gated inline advance (I1), never the removed pre-sink Part(a)
 /// write. `generation_mtime_ns` guards the #1270 rotation-vs-respawn watermark.
-#[allow(dead_code)] // #3089 B0: constructed by B1's Delivered-only frontier writer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(in crate::services::discord) struct DeliveredCommit {
     pub range: (u64, u64),
@@ -266,7 +268,7 @@ fn write_delivered_frontier_at(path: &Path, frontier: DeliveredCommit) -> Result
     mutate_record_at(path, |record| record.delivered_frontier = Some(frontier))
 }
 
-#[allow(dead_code)] // #3089 B0: called by B1 on a confirmed Delivered commit.
+#[allow(dead_code)] // #3089 B1 uses the `_at` core directly; the provider/channel form is wired in B2.
 pub(in crate::services::discord) fn write_delivered_frontier(
     provider: &ProviderKind,
     channel_id: u64,
@@ -302,6 +304,173 @@ pub(in crate::services::discord) fn delete_record(
         Some(path) => delete_record_at(&path),
         None => false,
     }
+}
+
+// ---------------------------------------------------------------------------
+// #3089 B1 — shadow-write the delivered frontier (observe-only, default OFF).
+//
+// B1 mirrors the in-memory `confirmed_end_offset` authority into the durable
+// sidecar AFTER a confirmed `Delivered` commit, and asserts the durable END
+// tracks it (design §5 / M4 — END is the risky datum). Read-authority STAYS the
+// legacy markers; this is a parallel "shadow" so B2 can later flip to it with
+// confidence. OFF (default) → zero extraction, zero write → behavioral no-op.
+// ---------------------------------------------------------------------------
+
+/// #3089 B1 shadow-write flag (`AGENTDESK_DELIVERY_RECORD_SHADOW`, OnceLock,
+/// default OFF). Telemetry ONLY when enabled (the default-OFF first eval has no
+/// observable side effect — deploy no-op), mirroring the A-phase flag idiom.
+pub(in crate::services::discord) fn delivery_record_shadow_enabled() -> bool {
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let on = std::env::var("AGENTDESK_DELIVERY_RECORD_SHADOW")
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase())
+            .is_some_and(|v| v == "1" || v == "true");
+        if on {
+            tracing::info!("  ✓ delivery_record_shadow: enabled");
+        }
+        on
+    })
+}
+
+/// I2 outcome map (pure, testable): the shadow-write fires ONLY for a confirmed
+/// `Delivered`. Every other outcome means the controller did NOT advance the
+/// offset — `NotDelivered` (identity gate refused), `Transient`/`Unknown`
+/// (ambiguous), `Skipped` (no-op) — so the durable frontier must NOT advance
+/// (I2, the #3143/#3416 class). This pins the owner call-site's outcome decision
+/// (a frozen-file `matches!` was previously untested — broadening it to include
+/// `NotDelivered` slipped through; the variant test now catches it).
+pub(in crate::services::discord) fn outcome_is_shadow_delivered(outcome: &DeliveryOutcome) -> bool {
+    matches!(outcome, DeliveryOutcome::Delivered { .. })
+}
+
+/// I2 gate (pure, testable): shadow-mirror ONLY for a confirmed `Delivered`
+/// outcome AND only when the flag is enabled. Dropping the `is_delivered`
+/// conjunct would let an ambiguous outcome advance the durable frontier — the
+/// exact #3143/#3416 class — so the test pins this conjunction.
+fn should_shadow_mirror(is_delivered: bool, enabled: bool) -> bool {
+    is_delivered && enabled
+}
+
+/// M4 divergence predicate (pure, testable): the durable frontier END must equal
+/// the in-memory `confirmed_end_offset` just advanced. END is the risky datum.
+fn delivered_frontier_end_diverged(durable_end: u64, in_memory_confirmed_end: u64) -> bool {
+    durable_end != in_memory_confirmed_end
+}
+
+/// Path-based core (testable): write the frontier and report whether its END
+/// diverged from the in-memory authority. `Err` only when the durable write
+/// itself failed. Caller invokes this ONLY for a confirmed `Delivered` (I2).
+fn record_delivered_frontier_shadow_at(
+    path: &Path,
+    range: (u64, u64),
+    generation_mtime_ns: i64,
+    attempts: u32,
+    panel_msg_id: Option<u64>,
+    in_memory_confirmed_end: u64,
+) -> Result<bool, String> {
+    write_delivered_frontier_at(
+        path,
+        DeliveredCommit {
+            range,
+            generation_mtime_ns,
+            attempts,
+            panel_msg_id,
+        },
+    )?;
+    Ok(delivered_frontier_end_diverged(
+        range.1,
+        in_memory_confirmed_end,
+    ))
+}
+
+/// provider/channel core: resolve the sidecar path, shadow-write, and emit the
+/// observe-only signals. NEVER panics, NEVER changes delivery (the relay had
+/// incidents; B1 only observes). Caller invokes this ONLY for `Delivered` (I2).
+fn record_delivered_frontier_shadow(
+    provider: &ProviderKind,
+    channel_id: u64,
+    range: (u64, u64),
+    generation_mtime_ns: i64,
+    attempts: u32,
+    panel_msg_id: Option<u64>,
+    in_memory_confirmed_end: u64,
+) {
+    let path = match record_path_or_err(provider, channel_id) {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::error!(
+                provider = provider.as_str(),
+                channel = channel_id,
+                error = %error,
+                "#3089 B1: shadow delivery-record path unavailable (observe-only)"
+            );
+            return;
+        }
+    };
+    match record_delivered_frontier_shadow_at(
+        &path,
+        range,
+        generation_mtime_ns,
+        attempts,
+        panel_msg_id,
+        in_memory_confirmed_end,
+    ) {
+        Ok(false) => {}
+        Ok(true) => tracing::error!(
+            provider = provider.as_str(),
+            channel = channel_id,
+            durable_end = range.1,
+            in_memory_confirmed_end,
+            generation_mtime_ns,
+            "#3089 B1: shadow delivered_frontier END diverged from in-memory confirmed_end_offset (observe-only)"
+        ),
+        Err(error) => tracing::error!(
+            provider = provider.as_str(),
+            channel = channel_id,
+            error = %error,
+            "#3089 B1: shadow delivery-record write failed (observe-only)"
+        ),
+    }
+}
+
+/// Integration wrapper for owner `Delivered` arms. Gated by [`should_shadow_mirror`]
+/// (flag ON AND `is_delivered`, I2). When it fires it extracts the in-memory
+/// authority (`confirmed_end_offset` + `confirmed_end_generation_mtime_ns`) from
+/// the relay coord and the `panel_msg_id`/`attempts` mirror from the fresh
+/// inflight, then shadow-writes. OFF or non-`Delivered` → returns immediately
+/// (no coord/inflight access, no write) → behavioral no-op.
+pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
+    shared: &crate::services::discord::SharedData,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    range: (u64, u64),
+    is_delivered: bool,
+) {
+    if !should_shadow_mirror(is_delivered, delivery_record_shadow_enabled()) {
+        return;
+    }
+    let channel_id = channel.get();
+    let coord = shared.tmux_relay_coord(channel);
+    let in_memory_confirmed_end = coord.confirmed_end_offset.load(Ordering::Acquire);
+    let generation_mtime_ns = coord
+        .confirmed_end_generation_mtime_ns
+        .load(Ordering::Acquire);
+    let fresh = crate::services::discord::inflight::load_inflight_state(provider, channel_id);
+    let attempts = fresh
+        .as_ref()
+        .map(|f| f.recovery_relay_attempts)
+        .unwrap_or(0);
+    let panel_msg_id = fresh.as_ref().and_then(|f| f.status_message_id);
+    record_delivered_frontier_shadow(
+        provider,
+        channel_id,
+        range,
+        generation_mtime_ns,
+        attempts,
+        panel_msg_id,
+        in_memory_confirmed_end,
+    );
 }
 
 #[cfg(test)]
@@ -453,5 +622,99 @@ mod tests {
         //    sidecar dir, not the reaper's target.
         assert!(record.starts_with(runtime_root.join(DELIVERY_RECORDS_DIR)));
         assert_ne!(DELIVERY_RECORDS_DIR, "discord_inflight");
+    }
+
+    // ---- #3089 B1 shadow-write ----------------------------------------------
+
+    #[test]
+    fn outcome_is_shadow_delivered_only_for_delivered() {
+        // I2: ONLY a confirmed Delivered shadow-writes; every non-advancing
+        // outcome (NotDelivered/Transient/Unknown/Skipped) is false. Pins the
+        // sink's frozen-file outcome decision (broadening it to NotDelivered now
+        // fails here).
+        assert!(outcome_is_shadow_delivered(&DeliveryOutcome::Delivered {
+            committed_to: 5,
+            replace_kind: None,
+        }));
+        assert!(!outcome_is_shadow_delivered(
+            &DeliveryOutcome::NotDelivered { committed_from: 5 }
+        ));
+        assert!(!outcome_is_shadow_delivered(&DeliveryOutcome::Transient {
+            retry_from_offset: 0
+        }));
+        assert!(!outcome_is_shadow_delivered(&DeliveryOutcome::Unknown {
+            fell_back: false
+        }));
+        assert!(!outcome_is_shadow_delivered(&DeliveryOutcome::Skipped));
+    }
+
+    #[test]
+    fn should_shadow_mirror_requires_delivered_and_enabled() {
+        // I2: a non-Delivered outcome must NEVER advance the durable frontier,
+        // and OFF is a no-op. Pins the AND of both conjuncts.
+        assert!(should_shadow_mirror(true, true));
+        assert!(!should_shadow_mirror(false, true)); // not delivered → no write (I2)
+        assert!(!should_shadow_mirror(true, false)); // flag OFF → no write
+        assert!(!should_shadow_mirror(false, false));
+    }
+
+    #[test]
+    fn delivered_frontier_end_divergence_predicate() {
+        // M4: END must equal the in-memory authority.
+        assert!(!delivered_frontier_end_diverged(42, 42));
+        assert!(delivered_frontier_end_diverged(42, 41));
+        assert!(delivered_frontier_end_diverged(0, 7));
+    }
+
+    #[test]
+    fn shadow_writes_frontier_and_reports_match() {
+        // flag-ON Delivered path: writes the exact frontier and reports no
+        // divergence when the durable END equals the in-memory authority.
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 11);
+        let diverged =
+            record_delivered_frontier_shadow_at(&path, (3, 10), 111, 2, Some(9), 10).unwrap();
+        assert!(!diverged);
+        let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
+        assert_eq!(
+            written,
+            DeliveredCommit {
+                range: (3, 10),
+                generation_mtime_ns: 111,
+                attempts: 2,
+                panel_msg_id: Some(9),
+            }
+        );
+    }
+
+    #[test]
+    fn shadow_reports_divergence_but_still_writes_and_never_panics() {
+        // A durable-vs-memory END mismatch is observe-only: it reports `true`
+        // (logged upstream) and STILL writes the frontier — no panic.
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 12);
+        let diverged =
+            record_delivered_frontier_shadow_at(&path, (3, 10), 222, 0, None, 9).unwrap();
+        assert!(diverged); // 10 (durable end) != 9 (in-memory)
+        assert_eq!(
+            read_record_at(&path)
+                .unwrap()
+                .delivered_frontier
+                .unwrap()
+                .range,
+            (3, 10)
+        );
+    }
+
+    #[test]
+    fn shadow_write_preserves_existing_lease() {
+        // B1 shadow-writes ONLY the frontier (I2): a pre-existing lease survives.
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 13);
+        upsert_lease_at(&path, sample_lease()).unwrap();
+        record_delivered_frontier_shadow_at(&path, (0, 5), 5, 0, None, 5).unwrap();
+        let after = read_record_at(&path).unwrap();
+        assert_eq!(after.delivery_lease, Some(sample_lease()));
+        assert_eq!(after.delivered_frontier.unwrap().range, (0, 5));
     }
 }

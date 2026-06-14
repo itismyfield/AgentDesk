@@ -20,6 +20,7 @@ use serenity::model::id::{ChannelId, MessageId};
 use super::formatting::{self, ReplaceLongMessageOutcome};
 use super::health::HealthRegistry;
 use super::inflight::{InflightTurnState, RelayOwnerKind, TurnSource};
+use super::outbound::delivery_record as dr;
 use super::outbound::turn_output_controller as toc;
 use super::placeholder_controller::{PlaceholderKey, PlaceholderLifecycle};
 use super::replace_outcome_policy::edit_fail_fallback_disposition;
@@ -603,12 +604,11 @@ impl SessionBoundDiscordRelaySink {
     }
 
     /// #3089 A2b: short-replace via the turn-output controller, behaviourally equal to legacy
-    /// `replace_long_message_raw_with_outcome` — SAME transport, SAME cell as `LeaseHolder::Sink`
-    /// acquired/committed/released ONCE (no double-acquire: `deliver_response` skipped
-    /// `SinkDeliveryLeaseGuard` here), SAME #3151 heartbeat, #2757 `PreserveAlways` fence,
-    /// `CommitOnFallback`, SAME identity-gated advance (FRESH post-POST reload). Confirmed POST →
-    /// `Delivered`; ambiguous → `Err(Transient)` (I2). `Replace { Active }` keeps `post_send_finalize`
-    /// a no-op. `gateway` is a seam (review-fix Medium-1): live = real gateway; the test fakes it.
+    /// `replace_long_message_raw_with_outcome` — SAME transport + `LeaseHolder::Sink` cell (one
+    /// acquire/commit/release, no double-acquire), #3151 heartbeat, #2757 `PreserveAlways`,
+    /// `CommitOnFallback`, identity-gated advance (FRESH post-POST reload): confirmed POST →
+    /// `Delivered`, ambiguous → `Err(Transient)` (I2); `Replace { Active }` → `post_send_finalize`
+    /// no-op. `gateway` seam (review-fix Medium-1): live = real gateway, test fakes it.
     #[allow(clippy::too_many_arguments)]
     async fn deliver_short_replace_via_controller<G: super::gateway::TurnGateway + ?Sized>(
         &self,
@@ -630,12 +630,10 @@ impl SessionBoundDiscordRelaySink {
             shared.restart.current_generation,
         );
         let cell = shared.delivery_lease(channel);
-        // Self-heal like `SinkDeliveryLeaseGuard::acquire`: reclaim an EXPIRED prior holder
-        // before the acquire (a stale dead lease must not force a markerless POST).
+        // Self-heal (`SinkDeliveryLeaseGuard::acquire`): reclaim an EXPIRED prior holder before acquire (a stale dead lease must not force a markerless POST).
         cell.reclaim_if_expired(super::lease_now_ms());
         let heartbeat = SinkPostHeartbeat { cell: cell.clone() };
-        // Identity-gated advance: INLINE before any post-send await (I1), SAME FRESH-reload
-        // gate as `advance_after_confirmed_post` (`true`→`Delivered`, `false`→`NotDelivered`).
+        // Identity-gated advance: INLINE before any post-send await (I1), SAME FRESH-reload gate as `advance_after_confirmed_post` (`true`→`Delivered`, `false`→`NotDelivered`).
         let advance = |_range: (u64, u64)| -> bool {
             let fresh = super::inflight::load_inflight_state(provider, channel_id);
             self.advance_offset_for_confirmed_delegated_terminal(
@@ -680,10 +678,13 @@ impl SessionBoundDiscordRelaySink {
         )
         .await;
 
+        // #3089 B1: shadow-mirror durable delivered frontier — flag-gated, observe-only, Delivered-only (I2), OFF=no-op.
+        let b1_delivered = dr::outcome_is_shadow_delivered(&outcome);
+        dr::shadow_mirror_delivered_frontier(shared, provider, channel, (start, end), b1_delivered);
+
         match outcome {
-            // Confirmed POST (edit OR #2757 fallback): the controller already ran advance +
-            // commit; BOTH map to sink-local `Delivered` (the POST landed — the lease outcome
-            // only steers the watcher). Emit legacy side-effects.
+            // Confirmed POST (edit OR #2757 fallback): controller already ran advance + commit;
+            // BOTH map to sink-local `Delivered` (POST landed; lease outcome only steers the watcher). Emit legacy side-effects.
             toc::DeliveryOutcome::Delivered { .. } | toc::DeliveryOutcome::NotDelivered { .. } => {
                 self.delivered_total.fetch_add(1, Ordering::AcqRel);
                 tracing::info!(
@@ -715,8 +716,7 @@ impl SessionBoundDiscordRelaySink {
                 );
                 Ok(SessionRelayDeliveryOutcome::Delivered)
             }
-            // Ambiguous/failed (PartialContinuationFailure or transport Err): the controller
-            // released without committing (I2 — offset NOT advanced). Surface `Err(Transient)`.
+            // Ambiguous/failed (PartialContinuationFailure / transport Err): controller released without committing (I2 — offset NOT advanced). Surface `Err(Transient)`.
             toc::DeliveryOutcome::Transient { .. }
             | toc::DeliveryOutcome::Unknown { .. }
             | toc::DeliveryOutcome::Skipped => Err(RelaySinkError::Transient(
