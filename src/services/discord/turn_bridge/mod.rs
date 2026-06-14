@@ -6098,22 +6098,25 @@ pub(super) fn spawn_turn_bridge(
                         );
                         let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
                         let ordered_range = tmux_last_offset.is_some_and(|e| e > bridge_start);
-                        // #3089 A5 OR A6b: route short-replace through the controller when the A5 flag is ON (both origins) OR the A6b flag is ON AND this is a TUI external-input turn (closes #3088). The A6b arm reuses the SAME structural derivation and is SCOPED by `is_external_input_tui_direct` — never routes Discord-origin (pinned by the sibling + scoping tests).
+                        // #3089 A5 OR A6b: route short-replace via the controller when A5 is ON (both origins) OR A6b is ON AND this is a TUI external-input turn (closes #3088). The OR-in IS the pure `bridge_short_replace_route_decision` (r2 [Medium]) so the production expression cannot be silently weakened — the `is_external_input_tui_direct &&` scoping is mutation-pinned by `a6b_flag_does_not_route_discord_origin_when_a5_off`.
                         use super::tui_prompt_relay_controller_cutover as a6b;
-                        let cutover_short_replace =
+                        let cutover_short_replace = a6b::bridge_short_replace_route_decision(
                             terminal_controller_cutover::bridge_short_replace_cutover_decision(
                                 terminal_controller_cutover::turn_bridge_terminal_controller_enabled(),
                                 can_chain_locally,
                                 &delivery_response,
                                 ordered_range,
                                 true,
-                            ) || (is_external_input_tui_direct
-                                && a6b::tui_prompt_relay_short_replace_should_cutover_decision(
-                                    a6b::tui_prompt_relay_controller_enabled(),
-                                    can_chain_locally,
-                                    &delivery_response,
-                                    ordered_range,
-                                ));
+                            ),
+                            a6b::tui_prompt_relay_controller_enabled(),
+                            is_external_input_tui_direct,
+                            a6b::tui_prompt_relay_short_replace_should_cutover_decision(
+                                a6b::tui_prompt_relay_controller_enabled(),
+                                can_chain_locally,
+                                &delivery_response,
+                                ordered_range,
+                            ),
+                        );
                         if cutover_short_replace {
                             let cell = shared_owned.delivery_lease(watcher_owner_channel_id);
                             terminal_controller_cutover::apply_bridge_short_replace_controller(
@@ -6150,12 +6153,7 @@ pub(super) fn spawn_turn_bridge(
                             )
                             .await;
                         } else {
-                        // #3041 P1-2 (site 5 — normal bridge terminal replace):
-                        // acquire the shared delivery lease BEFORE delivering so the
-                        // watcher and the bridge serialize. On a B2 Skip the holder
-                        // owns this range/turn → do NOT deliver+advance. (codex P1-a)
-                        // lease on `watcher_owner_channel_id` (shared cell + TurnKey).
-                        // The lease-range gate keeps the acquire off the cut-over set.
+                        // #3041 P1-2 (site 5 — normal bridge terminal replace): acquire the shared delivery lease on `watcher_owner_channel_id` (shared cell + TurnKey) BEFORE delivering so the watcher and the bridge serialize. On a B2 Skip the holder owns this range/turn → do NOT deliver+advance. (codex P1-a) The lease-range gate keeps the acquire off the cut-over set.
                         let lease_acquire = match terminal_controller_cutover::bridge_terminal_lease_range(
                             Some((bridge_start, tmux_last_offset.unwrap_or(0))),
                             cutover_short_replace,

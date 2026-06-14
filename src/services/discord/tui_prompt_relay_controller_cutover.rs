@@ -169,6 +169,78 @@ pub(in crate::services::discord) fn tui_prompt_relay_short_replace_should_cutove
         && will_short_replace
 }
 
+/// #3089 A6b r2 [Medium]: the PRODUCTION site-5 short-replace route decision as a
+/// pure fn, so `turn_bridge/mod.rs` ~6110 IS this expression (not a hand-inlined
+/// copy a mutation could silently weaken). Routes the bridge short-replace onto
+/// the unified controller IFF A5 already decided to (`a5_decision`, both origins)
+/// OR the A6b flag is ON **and** this is an external-input TUI turn
+/// (`is_external_input_tui_direct`) **and** the A6b structural conditions hold
+/// (`a6b_structural` = `tui_prompt_relay_short_replace_should_cutover_decision(..)`).
+///
+/// `is_external_input_tui_direct &&` is LOAD-BEARING: it is the ONLY thing keeping
+/// the A6b flag from routing a Discord-origin bridge turn when A5 is OFF. Dropping
+/// it must fail `a6b_flag_does_not_route_discord_origin_when_a5_off` (mutation-pin).
+pub(in crate::services::discord) fn bridge_short_replace_route_decision(
+    a5_decision: bool,
+    a6b_enabled: bool,
+    is_external_input_tui_direct: bool,
+    a6b_structural: bool,
+) -> bool {
+    a5_decision || (a6b_enabled && is_external_input_tui_direct && a6b_structural)
+}
+
+/// #3089 A6b r2 [High]: the bridge stream the codex external-input idle relay feeds
+/// (`relay_tui_idle_response_through_bridge`). The legacy frame set is `[Text?, Done]`
+/// with NO `OutputOffset`, so the bridge's `tmux_last_offset` stays at the seeded
+/// `start_offset == bridge_start` → `ordered_range` is FALSE → the A6b/A5 site-5
+/// cutover decision can never fire and codex external-input never reaches the
+/// controller (#3088 not actually closed for codex short-replace).
+///
+/// Claude already plumbs the real end offset: its transcript reader emits
+/// `StreamMessage::OutputOffset { offset: final_offset }` frames in real time
+/// (`run_claude_idle_response_tail`), which the bridge applies at
+/// `turn_bridge/mod.rs:4183-4184` to advance `tmux_last_offset` past `bridge_start`
+/// → `ordered_range` TRUE → claude external-input reaches the controller.
+///
+/// OFF-SAFETY (paramount): claude's reader emits `OutputOffset` UNCONDITIONALLY, so
+/// claude's OFF (flags-off) path ALREADY advances the legacy bridge lease/confirmed_end
+/// to `final_offset` — that is claude's established legacy behavior. Codex's legacy
+/// behavior is DIFFERENT: with no `OutputOffset`, `end <= start` routes the legacy
+/// site-5 lease to `BridgeLeaseAcquire::NoRange` (deliver WITHOUT a lease, NO
+/// confirmed_end advance — terminal_delivery.rs:511). Emitting `OutputOffset`
+/// unconditionally for codex would make the OFF path acquire a real lease and advance
+/// confirmed_end to `final_offset` — an OFF-path behavior change (NOT byte-identical).
+/// So the `OutputOffset` is GATED on the A6b flag: it is emitted ONLY when the
+/// controller path will be taken. Flag OFF → `[Text?, Done]` exactly as before
+/// (byte-identical legacy `NoRange`). Flag ON → `[Text?, OutputOffset, Done]` so
+/// `tmux_last_offset` advances to `final_offset`, `ordered_range` becomes TRUE, and
+/// the A6b cutover reaches `apply_bridge_short_replace_controller`.
+#[cfg(unix)]
+pub(in crate::services::discord) fn codex_external_input_bridge_stream_messages(
+    response: &str,
+    final_offset: u64,
+) -> Vec<crate::services::agent_protocol::StreamMessage> {
+    use crate::services::agent_protocol::StreamMessage;
+    let mut messages = Vec::new();
+    if !response.trim().is_empty() {
+        messages.push(StreamMessage::Text {
+            content: response.to_string(),
+        });
+    }
+    // OFF-safe: emit the end offset ONLY when the A6b controller path will be taken,
+    // so the legacy OFF path keeps its byte-identical `NoRange` (no lease, no advance).
+    if tui_prompt_relay_controller_enabled() {
+        messages.push(StreamMessage::OutputOffset {
+            offset: final_offset,
+        });
+    }
+    messages.push(StreamMessage::Done {
+        result: response.to_string(),
+        session_id: None,
+    });
+    messages
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,46 +350,201 @@ mod tests {
         );
     }
 
-    // The integration-level scoping pin (#3088 / the scoping mutation): the
-    // production OR-in at `turn_bridge/mod.rs` ~6096 is
-    // `bridge_short_replace_cutover_decision(A5_flag, ..) || (is_external_input_tui_direct
-    // && tui_prompt_relay_short_replace_should_cutover_decision(A6b_flag, ..))`. With the
-    // A5 flag OFF, the A6b arm is reachable ONLY through the `is_external_input_tui_direct`
-    // gate. This pins BOTH halves of that scoping: (a) the A6b decision wrapper itself
-    // routes when its flag is ON (so external-input WOULD be routed), and (b) the
-    // pure predicate excludes a non-external-input turn — so dropping the
-    // `is_external_input_tui_direct &&` gate (the scoping mutation) would wrongly route
-    // Discord-origin. The full `spawn_turn_bridge` is integration-only; this decision-level
-    // pin is the unit-testable equivalent that the named mutation flips.
+    // #3089 A6b r2 [Medium]: the PRODUCTION OR-in scoping pin. The production
+    // expression at `turn_bridge/mod.rs` ~6110 now IS the pure
+    // `bridge_short_replace_route_decision(a5_decision, a6b_enabled,
+    // is_external_input_tui_direct, a6b_structural)`, so this test exercises the
+    // EXACT production decision (not a hand-inlined copy). With A5 OFF, the A6b arm
+    // is reachable ONLY through the `is_external_input_tui_direct` gate — dropping
+    // `is_external_input_tui_direct &&` from the helper (the scoping mutation) wrongly
+    // routes a Discord-origin turn and MUST fail this test. (Mutation actually
+    // applied+reverted in r2; confirmed it fails.)
     #[test]
     fn a6b_flag_does_not_route_discord_origin_when_a5_off() {
-        // (a) A6b flag ON → the decision wrapper routes (external-input WOULD cut over).
+        // (a) A5 OFF, A6b ON, external-input, structural true → routed (#3088 closure).
         assert!(
-            tui_prompt_relay_short_replace_should_cutover_decision(
-                /* a6b flag */ true,
-                /* can_chain_locally */ true,
-                "short external-input answer",
-                /* ordered_range */ true,
+            bridge_short_replace_route_decision(
+                /* a5_decision */ false, /* a6b_enabled */ true,
+                /* is_external_input_tui_direct */ true, /* a6b_structural */ true,
             ),
-            "A6b-ON decision wrapper routes the external-input short-replace"
+            "A6b-ON/A5-OFF routes an external-input short-replace"
         );
-        // (a') A6b flag OFF → no route at all (deploy no-op).
+        // (b) THE scoping mutation pin: A5 OFF, A6b ON, structural true, but the turn is
+        // Discord-origin (is_external_input == false) → NOT routed. Dropping
+        // `is_external_input_tui_direct &&` from `bridge_short_replace_route_decision`
+        // flips this to `true` → this assertion fails (the mutation is caught).
         assert!(
-            !tui_prompt_relay_short_replace_should_cutover_decision(false, true, "x", true),
-            "A6b-OFF defers (byte-identical legacy)"
-        );
-        // (b) the scoping gate: the pure predicate EXCLUDES a non-external-input turn,
-        // so with A5 OFF a Discord-origin turn (is_external_input == false) is NOT routed
-        // by the A6b flag. Removing `is_external_input` from the conjunction makes this
-        // assertion fail (the scoping mutation).
-        assert!(
-            !tui_prompt_relay_short_replace_should_cutover(
-                /* enabled */ true, /* is_external_input */ false,
-                /* has_anchor_card */ true, /* body_non_empty */ true,
-                /* ordered_range */ true,
+            !bridge_short_replace_route_decision(
+                /* a5_decision */ false, /* a6b_enabled */ true,
+                /* is_external_input_tui_direct */ false, /* a6b_structural */ true,
             ),
             "A6b-ON/A5-OFF must NOT route a Discord-origin (non-external-input) turn"
         );
+        // (c) A5 ON always routes (both origins), independent of the A6b conjuncts —
+        // the A6b arm never weakens the A5 decision.
+        assert!(
+            bridge_short_replace_route_decision(true, false, false, false),
+            "A5-ON routes regardless of the A6b conjuncts"
+        );
+        // (d) all flags OFF → no route (byte-identical legacy / deploy no-op).
+        assert!(
+            !bridge_short_replace_route_decision(false, false, false, false),
+            "all-OFF defers to legacy"
+        );
+        // (e) A6b ON + external-input but structural false → NOT routed (the structural
+        // conjunct is the A6b decision wrapper; it gates the same conditions A5 does).
+        assert!(
+            !bridge_short_replace_route_decision(false, true, true, false),
+            "A6b structural false → no route"
+        );
+    }
+
+    // #3089 A6b r2 [High]: the codex external-input bridge frame builder is flag-gated
+    // and OFF-safe. OFF (the default / deploy state) emits `[Text, Done]` —
+    // byte-identical legacy, NO `OutputOffset`, so the bridge's `tmux_last_offset`
+    // stays at `start_offset == bridge_start`, `ordered_range` is false, and the legacy
+    // site-5 lease takes the `NoRange` no-advance arm. ON emits
+    // `[Text, OutputOffset{final_offset}, Done]` so `tmux_last_offset` advances past
+    // `bridge_start`, `ordered_range` is true, and the cutover reaches
+    // `apply_bridge_short_replace_controller`.
+    //
+    // The flag is a process-cached `OnceLock` set ONLY via the env var, so this test
+    // is env-DRIVEN (NOT env-mutating): the suite runs once OFF and once with
+    // `AGENTDESK_TUI_PROMPT_RELAY_CONTROLLER=1`, and this asserts the shape that
+    // CORRESPONDS to whichever state the OnceLock observed — proving BOTH halves
+    // across the two runs (the OFF run pins byte-identical legacy; the ON run pins the
+    // controller-reaching `OutputOffset`). The shared env lock keeps the read coherent.
+    #[cfg(unix)]
+    #[test]
+    fn codex_bridge_stream_offset_is_flag_gated_off_safe() {
+        use crate::services::agent_protocol::StreamMessage;
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let enabled = tui_prompt_relay_controller_enabled();
+        let messages = codex_external_input_bridge_stream_messages("codex answer", 4242);
+        // The terminal Done always carries the body with session_id None (legacy shape).
+        assert!(matches!(
+            messages.first(),
+            Some(StreamMessage::Text { content }) if content == "codex answer"
+        ));
+        assert!(matches!(
+            messages.last(),
+            Some(StreamMessage::Done { result, session_id })
+                if result == "codex answer" && session_id.is_none()
+        ));
+        let has_offset = messages
+            .iter()
+            .any(|m| matches!(m, StreamMessage::OutputOffset { offset } if *offset == 4242));
+        if enabled {
+            // ON: `[Text, OutputOffset{final_offset}, Done]` → ordered_range becomes true.
+            assert_eq!(messages.len(), 3, "ON: Text + OutputOffset + Done");
+            assert!(
+                has_offset,
+                "ON: OutputOffset carries final_offset so ordered_range (end > start) is true → controller reached"
+            );
+        } else {
+            // OFF: `[Text, Done]` → byte-identical legacy; no OutputOffset → NoRange.
+            assert_eq!(messages.len(), 2, "OFF: byte-identical legacy [Text, Done]");
+            assert!(
+                !has_offset,
+                "OFF must emit NO OutputOffset (legacy ordered_range stays false → NoRange / no advance)"
+            );
+        }
+        // An empty response never emits a Text frame (matches the legacy builder); the
+        // terminal Done is always last, and the flag still gates the OutputOffset
+        // (OFF → `[Done]`; ON → `[OutputOffset, Done]`).
+        let empty = codex_external_input_bridge_stream_messages("   ", 99);
+        assert!(matches!(empty.last(), Some(StreamMessage::Done { .. })));
+        assert!(
+            !empty
+                .iter()
+                .any(|m| matches!(m, StreamMessage::Text { .. }))
+        );
+        assert_eq!(empty.len(), if enabled { 2 } else { 1 });
+    }
+
+    // #3089 A6b r2 [High] END-TO-END regression: prove codex external-input reaches the
+    // controller under A6b-ON/A5-OFF, and STAYS legacy under all-OFF. This models the
+    // bridge's offset bookkeeping EXACTLY: it seeds `tmux_last_offset = start_offset`
+    // (the codex relay seeds `tmux_last_offset: Some(start_offset)`, and `bridge_start =
+    // turn_start_offset = start_offset`), then applies each `OutputOffset` frame the
+    // codex bridge stream emits the SAME way `turn_bridge/mod.rs:4184` does
+    // (`tmux_last_offset = Some(offset)`), recomputes `ordered_range =
+    // tmux_last_offset > bridge_start` (mod.rs:6100), and feeds it through the REAL
+    // production `bridge_short_replace_route_decision` (the site-5 OR-in). Before this
+    // fix the codex stream had NO `OutputOffset`, so `tmux_last_offset` stayed at
+    // `bridge_start` → `ordered_range` false → the decision was false → codex never
+    // reached the controller (the [High] finding).
+    #[cfg(unix)]
+    #[test]
+    fn codex_external_input_reaches_controller_under_a6b_on_a5_off() {
+        use crate::services::agent_protocol::StreamMessage;
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let enabled = tui_prompt_relay_controller_enabled();
+
+        // Bridge bookkeeping: bridge_start == seeded tmux_last_offset == start_offset.
+        const START_OFFSET: u64 = 100;
+        const FINAL_OFFSET: u64 = 360; // the codex tail's authoritative end (> start)
+        let bridge_start = START_OFFSET;
+        let mut tmux_last_offset = START_OFFSET; // the seed (relay_tui_idle..: Some(start_offset))
+
+        // Apply the codex bridge stream's frames the way the bridge loop does: every
+        // OutputOffset advances tmux_last_offset (mod.rs:4183-4184). Text/Done do not.
+        for message in
+            codex_external_input_bridge_stream_messages("short codex answer", FINAL_OFFSET)
+        {
+            if let StreamMessage::OutputOffset { offset } = message {
+                tmux_last_offset = offset;
+            }
+        }
+        // ordered_range = tmux_last_offset > bridge_start (mod.rs:6100).
+        let ordered_range = tmux_last_offset > bridge_start;
+
+        // The A6b structural decision (site-5 wrapper) with A6b ON / external-input.
+        let a6b_structural = tui_prompt_relay_short_replace_should_cutover_decision(
+            enabled,
+            /* can_chain_locally */ true,
+            "short codex answer",
+            ordered_range,
+        );
+        // The PRODUCTION site-5 OR-in with A5 OFF, A6b flag = `enabled`, external-input.
+        let routed = bridge_short_replace_route_decision(
+            /* a5_decision */ false,
+            /* a6b_enabled */ enabled,
+            /* is_external_input_tui_direct */ true,
+            a6b_structural,
+        );
+
+        if enabled {
+            assert_eq!(
+                tmux_last_offset, FINAL_OFFSET,
+                "ON: the OutputOffset advanced tmux_last_offset to final_offset"
+            );
+            assert!(
+                ordered_range,
+                "ON: ordered_range is now TRUE for codex external-input (the [High] fix)"
+            );
+            assert!(
+                routed,
+                "ON: A6b-ON/A5-OFF routes codex external-input to apply_bridge_short_replace_controller"
+            );
+        } else {
+            assert_eq!(
+                tmux_last_offset, START_OFFSET,
+                "OFF: no OutputOffset → tmux_last_offset stays at bridge_start (byte-identical legacy)"
+            );
+            assert!(
+                !ordered_range,
+                "OFF: ordered_range stays false (NoRange legacy arm, no advance)"
+            );
+            assert!(
+                !routed,
+                "OFF: codex external-input stays on the legacy replace_message_with_outcome arm"
+            );
+        }
     }
 
     // ---- controller adapter (fake gateway driving the REAL A5 controller) ---
