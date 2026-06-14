@@ -370,6 +370,11 @@
       "path": "migrations/postgres/0071_sessions_channel_id.sql",
       "sha256": "41d2fe1d89c2d9007b1dcef72ee174b1b61cda0159ea86d0a8ab108fbad1098a",
       "version": 71
+    },
+    {
+      "path": "migrations/postgres/0072_routine_fallback_retry.sql",
+      "sha256": "0b688ac9daf46d45a76ea478cf0414642f4df3fc482f83324827a02ce02b0121",
+      "version": 72
     }
   ],
   "version": 1
