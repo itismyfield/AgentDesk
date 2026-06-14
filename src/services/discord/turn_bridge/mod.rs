@@ -2495,6 +2495,8 @@ pub(super) fn spawn_turn_bridge(
             response_sent_offset,
             &full_response,
             &mut status_panel_dirty,
+            &shared_owned,
+            &provider,
         )
         .await;
 
