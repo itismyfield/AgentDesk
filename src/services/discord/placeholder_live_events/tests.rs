@@ -5273,6 +5273,44 @@ fn write_transcript(lines: &[String]) -> tempfile::NamedTempFile {
     file
 }
 
+/// #3436: a watcher reconnect (`record_tmux_watcher_reconnect`) purges the
+/// channel footer via `clear_channel`, so background task / subagent slots whose
+/// terminal events died with the prior generation do not linger as zombie
+/// spinners. Both unfinished-background slot kinds must be dropped.
+#[test]
+fn clear_channel_purges_unfinished_background_zombie_slots_3436() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_436_001);
+    push_background_bash_task(&events, channel_id, "tailing logs", "toolu_bg_zombie");
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("reviewer".to_string()),
+            desc: Some("never finishes".to_string()),
+            tool_use_id: Some("toolu_sub_zombie".to_string()),
+            background: true,
+        },
+    );
+    let before = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    assert!(
+        before
+            .block
+            .is_some_and(|block| block.contains("tailing logs")),
+        "unfinished background task should render as live before the reconnect"
+    );
+
+    // The prior generation owning these slots is dead; reconnect purges them.
+    events.clear_channel(channel_id);
+
+    assert!(
+        events
+            .render_completion_footer(channel_id, &ProviderKind::Claude, "⠸")
+            .block
+            .is_none(),
+        "post-reconnect footer must drop the dead generation's zombie slots"
+    );
+}
+
 #[test]
 fn rehydration_restores_only_unmatched_starts_after_restart() {
     // Slots present in the live process, then a restart wipes them.
