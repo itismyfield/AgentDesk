@@ -373,7 +373,7 @@
     },
     {
       "path": "migrations/postgres/0072_routine_fallback_retry.sql",
-      "sha256": "0b688ac9daf46d45a76ea478cf0414642f4df3fc482f83324827a02ce02b0121",
+      "sha256": "336477f77b991437c60ed8b559e3bac67369367c0b5c8d95f5f2df98ba3d0b7f",
       "version": 72
     }
   ],
