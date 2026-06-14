@@ -1,5 +1,6 @@
 use super::*;
 use crate::services::discord::InflightTurnState;
+use crate::services::discord::outbound::delivery_record as dr; // #3089 B2b
 use crate::services::discord::replace_outcome_policy::watcher_partial_continuation_retry_plan;
 
 #[path = "tmux_watcher/liveness.rs"]
@@ -5507,7 +5508,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // `current_offset` would MISS a prior commit at that smaller consumed
             // end and re-relay the already-committed terminal.
             let turn_consumed_offset = terminal_event_consumed_offset(current_offset, &all_data);
-            let committed = shared.committed_relay_offset(channel_id);
+            let committed = dr::effective_committed_offset(&shared, &watcher_provider, channel_id);
             if committed >= turn_consumed_offset && turn_consumed_offset > turn_data_start_offset {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
@@ -5680,18 +5681,17 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // #3041 P1-3 (Part b, §3.2): REPLACE the blind re-send. Before re-sending the
         // terminal body after a non-`Delivered` session-bound ACK (the
         // `relay_terminal_ack_timeout` duplicate vector), reconcile against the offset
-        // authority FIRST, over the SAME consumed range
-        // `[data_start_offset, terminal_event_consumed_offset(current_offset, all_data))`.
+        // authority FIRST, over the SAME consumed range `[data_start_offset, terminal_event_consumed_offset(current_offset, all_data))`.
         // Part (a) advances `committed_relay_offset` to the watcher's own `end` on a
         // confirmed sink delivery, so the consult is exact: committed >= end → SKIP (sink
         // delivered; ACK lagged → no duplicate, failure-mode-①); committed < end → re-send
-        // the FULL response (no black-hole). codex BLOCKER 2: NO partial-suffix send (the
-        // render coordinate is not derivable from the JSONL byte offset), and delegation
-        // is all-or-nothing so `committed` is never strictly between start and end.
-        // Reconcile ONLY on the session-bound re-send path; plain watcher-direct unchanged.
+        // the FULL response (no black-hole). codex BLOCKER 2: NO partial-suffix send (render
+        // coordinate not derivable from the JSONL byte offset), delegation all-or-nothing so
+        // `committed` is never strictly between start/end. Reconcile ONLY on the session-bound re-send path; plain watcher-direct unchanged.
         let watcher_resend_range_start = data_start_offset;
         let watcher_resend_range_end = terminal_event_consumed_offset(current_offset, &all_data);
-        let watcher_resend_committed = shared.committed_relay_offset(channel_id);
+        let watcher_resend_committed =
+            dr::effective_committed_offset(&shared, &watcher_provider, channel_id); // #3089 B2b
         let watcher_resend_reconciled = session_bound_terminal_delivery_attempted
             && watcher_direct_fallback_intended
             && !matches!(
@@ -5731,7 +5731,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // for a real Delivered commit → Skip). Reading it BEFORE the snapshot
             // could capture a pre-advance `committed < end` paired with a now-
             // Committed{Delivered} marker → a spurious SendFull duplicate.
-            let committed = shared.committed_relay_offset(channel_id);
+            let committed = dr::effective_committed_offset(&shared, &watcher_provider, channel_id);
             let now_ms = crate::services::discord::lease_now_ms();
             let (action, reclaim_expired_sink) = watcher_terminal_resend_action_gated(
                 &snapshot,

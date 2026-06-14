@@ -1341,9 +1341,9 @@ async fn run_idle_jsonl_relay_loop(
                     &session_name,
                     "idle_jsonl_relay",
                 );
-                let committed = shared.committed_relay_offset(channel);
-                // Classification already passed above → `in_new_session_grace = false`
-                // here consults ONLY the offset-authority dedup branch.
+                // #3089 B2b: durable-frontier dedup authority (flag OFF → in-memory verbatim).
+                let committed = dr::effective_committed_offset(&shared, &matched.provider, channel);
+                // Classification passed above → consults ONLY the offset-authority dedup branch.
                 match idle_relay_range_action(&payload, start, end, committed, false) {
                     IdleRelayRangeAction::SkipAlreadyRelayed => {
                         // Whole range already delivered by the watcher → skip.

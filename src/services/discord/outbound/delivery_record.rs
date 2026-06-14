@@ -333,6 +333,60 @@ pub(in crate::services::discord) fn delivery_record_shadow_enabled() -> bool {
     })
 }
 
+/// #3089 B2b read-authority flag (`AGENTDESK_DELIVERY_RECORD_AUTHORITY`, OnceLock,
+/// default OFF). When OFF (default) the dedup gates read the legacy in-memory
+/// `committed_relay_offset` verbatim → byte-identical, deploy no-op. When ON the
+/// gates consult the durable `delivered_frontier` (fused with in-memory) so the
+/// "already-relayed → skip" decision survives a restart / cross-actor boundary.
+pub(in crate::services::discord) fn delivery_record_authority_enabled() -> bool {
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let on = std::env::var("AGENTDESK_DELIVERY_RECORD_AUTHORITY")
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase())
+            .is_some_and(|v| v == "1" || v == "true");
+        if on {
+            tracing::info!("  ✓ delivery_record_authority: enabled");
+        }
+        on
+    })
+}
+
+/// Pure fusion (testable): the effective committed offset under the flip. The
+/// durable frontier END can only RAISE the dedup floor above what the in-memory
+/// authority sees (a pre-restart / cross-actor delivery the live atomic missed);
+/// it must NEVER lower it. So fuse with `max` — a missed durable write (the
+/// coverage hazard) can therefore never drop the floor below in-memory and cause
+/// a false skip / lost relay. `None` durable (I3 conservative) → pure in-memory =
+/// exactly today's behavior. Pure-durable-only authority waits for B3 hydration.
+fn fuse_committed_offset(durable_end: Option<u64>, in_memory: u64) -> u64 {
+    match durable_end {
+        Some(end) => end.max(in_memory),
+        None => in_memory,
+    }
+}
+
+/// #3089 B2b: the effective "already-committed" offset the dedup/skip gates read.
+/// Flag OFF (default) → the legacy in-memory `committed_relay_offset` verbatim
+/// (no record read → deploy no-op). Flag ON → `max(delivered_frontier.end,
+/// in_memory)` (I3: missing/malformed record → in-memory only, never assume
+/// delivered). The in-memory authority is the relay coord's `confirmed_end_offset`
+/// for `channel`; the durable record is keyed by `(provider, channel)`.
+pub(in crate::services::discord) fn effective_committed_offset(
+    shared: &crate::services::discord::SharedData,
+    provider: &ProviderKind,
+    channel: ChannelId,
+) -> u64 {
+    let in_memory = shared.committed_relay_offset(channel);
+    if !delivery_record_authority_enabled() {
+        return in_memory;
+    }
+    let durable_end = read_record(provider, channel.get())
+        .and_then(|r| r.delivered_frontier)
+        .map(|f| f.range.1);
+    fuse_committed_offset(durable_end, in_memory)
+}
+
 /// I2 outcome map (pure, testable): the shadow-write fires ONLY for a confirmed
 /// `Delivered`. Every other outcome means the controller did NOT advance the
 /// offset — `NotDelivered` (identity gate refused), `Transient`/`Unknown`
@@ -716,5 +770,19 @@ mod tests {
         let after = read_record_at(&path).unwrap();
         assert_eq!(after.delivery_lease, Some(sample_lease()));
         assert_eq!(after.delivered_frontier.unwrap().range, (0, 5));
+    }
+
+    // ---- #3089 B2b authority flip (fusion) ----------------------------------
+
+    #[test]
+    fn fuse_committed_offset_conservative_max() {
+        // The durable frontier can only RAISE the dedup floor above in-memory,
+        // never lower it. A missed durable write (None, I3) → pure in-memory =
+        // today's behavior. Mutation target: flipping max→min or dropping the
+        // in-memory fusion would surface here.
+        assert_eq!(fuse_committed_offset(None, 20), 20); // I3: missing → in-memory
+        assert_eq!(fuse_committed_offset(Some(30), 20), 30); // durable raises floor
+        assert_eq!(fuse_committed_offset(Some(10), 20), 20); // stale-low durable never lowers
+        assert_eq!(fuse_committed_offset(Some(0), 0), 0);
     }
 }
