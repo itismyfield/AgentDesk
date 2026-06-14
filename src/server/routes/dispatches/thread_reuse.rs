@@ -58,9 +58,27 @@ pub async fn link_dispatch_thread(
 
     match dispatch_row {
         Some(row) => {
-            let cid: String = row.try_get("kanban_card_id").unwrap_or_default();
+            let cid: String = match row.try_get("kanban_card_id") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(%error, "[dispatch] failed to read kanban_card_id from row");
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": error.to_string() })),
+                    );
+                }
+            };
             let dispatch_type: Option<String> = row.try_get("dispatch_type").ok().flatten();
-            let to_agent_id: String = row.try_get("to_agent_id").unwrap_or_default();
+            let to_agent_id: String = match row.try_get("to_agent_id") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(%error, "[dispatch] failed to read to_agent_id from row");
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": error.to_string() })),
+                    );
+                }
+            };
 
             if let Err(error) = sqlx::query(
                 "UPDATE task_dispatches
@@ -194,8 +212,26 @@ pub async fn get_card_thread(
 
     match result {
         Some(row) => {
-            let card_id: String = row.try_get("card_id").unwrap_or_default();
-            let card_title: String = row.try_get("card_title").unwrap_or_default();
+            let card_id: String = match row.try_get("card_id") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(%error, "[dispatch] failed to read card_id from row");
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": error.to_string() })),
+                    );
+                }
+            };
+            let card_title: String = match row.try_get("card_title") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(%error, "[dispatch] failed to read card_title from row");
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": error.to_string() })),
+                    );
+                }
+            };
             let github_issue_url: Option<String> = row.try_get("github_issue_url").ok().flatten();
             let github_issue_number: Option<i64> =
                 row.try_get("github_issue_number").ok().flatten();
@@ -203,7 +239,16 @@ pub async fn get_card_thread(
             let deferred_dod_json: Option<String> = row.try_get("deferred_dod_json").ok().flatten();
             let dispatch_type: Option<String> = row.try_get("dispatch_type").ok().flatten();
             let dispatch_title: Option<String> = row.try_get("dispatch_title").ok().flatten();
-            let to_agent_id: String = row.try_get("dispatch_agent_id").unwrap_or_default();
+            let to_agent_id: String = match row.try_get("dispatch_agent_id") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(%error, "[dispatch] failed to read dispatch_agent_id from row");
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": error.to_string() })),
+                    );
+                }
+            };
             let dispatch_context: Option<String> = row.try_get("dispatch_context").ok().flatten();
 
             let primary_channel = resolve_agent_primary_channel_pg(pool, &to_agent_id)
