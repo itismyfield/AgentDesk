@@ -95,7 +95,9 @@
 # #3305: the local-only pass-through lifecycle-skip (kind hoist + note-only return
 # branch + idle-loop skip) is offset by comment dedup in the same root, lowering the
 # frozen baseline 5438 -> 5429 (-9). Locks in the shrink win (#3028 ratchet).
-"src/services/discord/tui_prompt_relay.rs" = 5429
+# windows-tmux cfg fix (#3461): +5 prod LoC for the `#[cfg(not(unix))]`
+# committed-frontier carry-forward fallback (cross-platform compile). 5429 -> 5434.
+"src/services/discord/tui_prompt_relay.rs" = 5434
 # #3038: lowered 4728 -> 4657 (-71) as `SensitivityState` (definition + impl)
 # moved to the `voice_sensitivity` sibling module. Locks in the shrink win.
 # #3038 VoiceBargeInRuntime S1: lowered 4657 -> 4350 (-307) as the STT
