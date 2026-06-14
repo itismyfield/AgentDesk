@@ -2,10 +2,16 @@
 //! channel's already-live turn. Never creates a new turn; non-claude/codex
 //! providers and idle channels are refused with a structured reply.
 
+use poise::CreateReply;
+use poise::serenity_prelude as serenity;
+
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::EnqueueRefusalReason;
 
-use super::super::steering::{SteeringOutcome, SteeringRequest, enqueue_steering, steer_source_id};
+use super::super::steering::{
+    SteerLifecycle, SteeringOutcome, SteeringRequest, enqueue_steering, steer_cancel_custom_id,
+    steer_lifecycle_label, steer_source_id,
+};
 use super::super::{Context, Error, check_auth};
 use super::config::{effective_provider_for_channel, fallback_channel_name_for_feature_toggle};
 
@@ -55,31 +61,86 @@ pub(in crate::services::discord) async fn cmd_steer(
         provider,
         author_id: user_id,
         source_id,
-        instruction,
+        instruction: instruction.clone(),
     };
 
-    let outcome = enqueue_steering(&ctx.data().shared, request).await;
+    // State 1 (REQ-013): show `큐잉중인 입력 : <instruction>` immediately and log
+    // the same label to the AgentDesk console (visible in the tmux pane, REQ-015).
+    let queuing_label = steer_lifecycle_label(SteerLifecycle::Queuing, &instruction);
+    tracing::info!("  [{ts}] 🔀 STEER {queuing_label}");
+    let handle = ctx
+        .send(CreateReply::default().content(queuing_label))
+        .await?;
 
-    let reply = match outcome {
-        SteeringOutcome::Queued => "조종 지시를 현재 진행 중인 턴에 큐잉했습니다.",
+    // Persist under THIS bot instance's provider (same as the normal
+    // soft-intervention enqueue and the cancel path) so a later cancel clears
+    // the same durable queue file. The claude/codex support gate inside
+    // `enqueue_steering` still uses the effective per-channel provider.
+    let outcome = enqueue_steering(&ctx.data().shared, &ctx.data().provider, request).await;
+
+    match outcome {
+        SteeringOutcome::Queued => {
+            // State 2 (REQ-013/REQ-014): `큐잉됨 : <instruction>` + cancel button.
+            // The actual instruction is delivered to the agent's tmux session by
+            // the existing turn-boundary path; nothing is typed into the composer
+            // here (REQ-016).
+            let queued_label = steer_lifecycle_label(SteerLifecycle::Queued, &instruction);
+            let queued_ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!("  [{queued_ts}] 📬 STEER {queued_label}");
+            let cancel_row = serenity::CreateActionRow::Buttons(vec![
+                serenity::CreateButton::new(steer_cancel_custom_id(source_id))
+                    .style(serenity::ButtonStyle::Secondary)
+                    .label("취소"),
+            ]);
+            handle
+                .edit(
+                    ctx,
+                    CreateReply::default()
+                        .content(queued_label)
+                        .components(vec![cancel_row]),
+                )
+                .await?;
+        }
         SteeringOutcome::NoLiveSession => {
-            "진행 중인 턴이 없습니다. `/steer`는 활성 턴에만 사용할 수 있습니다."
+            handle
+                .edit(
+                    ctx,
+                    CreateReply::default().content(
+                        "진행 중인 턴이 없습니다. `/steer`는 활성 턴에만 사용할 수 있습니다.",
+                    ),
+                )
+                .await?;
         }
         SteeringOutcome::Unsupported => {
-            "이 provider는 `/steer`를 지원하지 않습니다 (claude / codex 전용)."
+            handle
+                .edit(
+                    ctx,
+                    CreateReply::default().content(
+                        "이 provider는 `/steer`를 지원하지 않습니다 (claude / codex 전용).",
+                    ),
+                )
+                .await?;
         }
-        SteeringOutcome::Refused { reason } => match reason {
-            EnqueueRefusalReason::SourceIdAlreadyQueued | EnqueueRefusalReason::LastItemDedup => {
-                "중복으로 판단되어 큐잉되지 않았습니다."
-            }
-            EnqueueRefusalReason::ActorUnreachable | EnqueueRefusalReason::MailboxClosed => {
-                "세션 액터에 접근할 수 없어 일시적으로 실패했습니다. 잠시 후 다시 시도하세요."
-            }
-        },
+        SteeringOutcome::Refused { reason } => {
+            let message = match reason {
+                EnqueueRefusalReason::SourceIdAlreadyQueued
+                | EnqueueRefusalReason::LastItemDedup => "중복으로 판단되어 큐잉되지 않았습니다.",
+                EnqueueRefusalReason::ActorUnreachable | EnqueueRefusalReason::MailboxClosed => {
+                    "세션 액터에 접근할 수 없어 일시적으로 실패했습니다. 잠시 후 다시 시도하세요."
+                }
+            };
+            handle
+                .edit(ctx, CreateReply::default().content(message))
+                .await?;
+        }
         SteeringOutcome::DiscordUnavailable | SteeringOutcome::SessionNotFound => {
-            "세션을 확인할 수 없습니다."
+            handle
+                .edit(
+                    ctx,
+                    CreateReply::default().content("세션을 확인할 수 없습니다."),
+                )
+                .await?;
         }
-    };
-    ctx.say(reply).await?;
+    }
     Ok(())
 }

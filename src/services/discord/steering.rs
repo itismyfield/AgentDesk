@@ -9,12 +9,15 @@
 
 use std::time::Instant;
 
-use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+use poise::serenity_prelude::{self as serenity, ChannelId, MessageId, UserId};
 
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::{EnqueueRefusalReason, Intervention, InterventionMode};
 
-use super::{SharedData, mailbox_enqueue_intervention, mailbox_has_active_turn};
+use super::{
+    Data, Error, SharedData, check_auth, mailbox_cancel_soft_intervention,
+    mailbox_enqueue_intervention, mailbox_has_active_turn,
+};
 
 /// Inputs for one `/steer` invocation (current-channel scoped).
 #[derive(Clone, Debug)]
@@ -70,6 +73,91 @@ pub(in crate::services::discord) fn steer_source_id(interaction_id: u64) -> Mess
     MessageId::new(interaction_id)
 }
 
+/// Custom-id prefix for the `/steer` cancel button. The message-component router
+/// in `intake_gate.rs::handle_event` matches on this prefix, mirroring the
+/// idle-recap clear button (`idle_recap_interaction.rs`).
+pub(in crate::services::discord) const STEER_CANCEL_CUSTOM_ID_PREFIX: &str = "steer:cancel:";
+
+/// Build the cancel-button `custom_id` for a steer source id. The source id is
+/// the steer intervention's `message_id` (== the Discord interaction id), so the
+/// cancel handler can target the queued intervention directly.
+pub(in crate::services::discord) fn steer_cancel_custom_id(source_id: MessageId) -> String {
+    format!("{STEER_CANCEL_CUSTOM_ID_PREFIX}{}", source_id.get())
+}
+
+/// True if a message-component `custom_id` belongs to a `/steer` cancel button.
+pub(in crate::services::discord) fn is_steer_cancel_custom_id(custom_id: &str) -> bool {
+    custom_id.starts_with(STEER_CANCEL_CUSTOM_ID_PREFIX)
+}
+
+/// Parse the steer source id out of a cancel `custom_id`. Rejects a missing
+/// prefix, a non-numeric tail, and the zero sentinel so the cancel handler can
+/// never target `MessageId(0)`.
+pub(in crate::services::discord) fn parse_steer_cancel_source_id(
+    custom_id: &str,
+) -> Option<MessageId> {
+    custom_id
+        .strip_prefix(STEER_CANCEL_CUSTOM_ID_PREFIX)
+        .and_then(|tail| tail.parse::<u64>().ok())
+        .filter(|id| *id != 0)
+        .map(MessageId::new)
+}
+
+/// Operator-visible queue lifecycle phase for a `/steer` invocation. The label
+/// is a fixed contract (REQ-013): `<상태> : <instruction>` is rendered
+/// identically in the Discord card and the AgentDesk console (tmux) log so an
+/// operator watching either surface sees the same three states.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::services::discord) enum SteerLifecycle {
+    /// Input is being queued (initial slash reply).
+    Queuing,
+    /// Input has been queued onto the live turn's mailbox.
+    Queued,
+    /// Queued input was cancelled before delivery.
+    Cancelled,
+}
+
+impl SteerLifecycle {
+    fn state_label(self) -> &'static str {
+        match self {
+            SteerLifecycle::Queuing => "큐잉중인 입력",
+            SteerLifecycle::Queued => "큐잉됨",
+            SteerLifecycle::Cancelled => "큐잉이 취소됨",
+        }
+    }
+}
+
+/// Max instruction characters rendered into a lifecycle label. Keeps the Discord
+/// card and the log line bounded; the full instruction is still delivered to the
+/// agent via the existing turn-boundary path (REQ-016).
+const STEER_LABEL_MAX_INSTRUCTION_CHARS: usize = 1500;
+
+/// Render the fixed `<상태> : <instruction>` lifecycle label (REQ-013/REQ-015).
+/// The instruction is truncated for display only.
+pub(in crate::services::discord) fn steer_lifecycle_label(
+    phase: SteerLifecycle,
+    instruction: &str,
+) -> String {
+    format!(
+        "{} : {}",
+        phase.state_label(),
+        truncate_instruction_for_label(instruction)
+    )
+}
+
+fn truncate_instruction_for_label(instruction: &str) -> String {
+    let mut chars = instruction.chars();
+    let head: String = chars
+        .by_ref()
+        .take(STEER_LABEL_MAX_INSTRUCTION_CHARS)
+        .collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
 /// Build the standalone `Soft` intervention for a steer request. Pure; pinned by
 /// unit tests so the never-merged / single-source-id contract can't drift.
 fn build_steer_intervention(request: &SteeringRequest) -> Intervention {
@@ -106,8 +194,19 @@ fn classify_enqueue_result(
 
 /// The single enqueue path for `/steer`. Gates BEFORE enqueue, then reuses the
 /// existing per-channel mailbox. Never creates a new turn.
+///
+/// `request.provider` is the EFFECTIVE per-channel provider and is used only for
+/// the claude/codex support gate. `persist_provider` is the bot instance's own
+/// provider (`Data.provider`) and is what keys the durable queue file. The two
+/// can differ under a cross-provider role override; persistence MUST use
+/// `persist_provider` so it matches the durable path that every other enqueue
+/// path (normal soft-intervention enqueue) and the cancel path
+/// (`mailbox_cancel_soft_intervention`) use. Otherwise a cancel — which always
+/// runs with `Data.provider` — would clear a different file than the enqueue
+/// wrote, resurrecting a cancelled steer on restart.
 pub(in crate::services::discord) async fn enqueue_steering(
     shared: &SharedData,
+    persist_provider: &ProviderKind,
     request: SteeringRequest,
 ) -> SteeringOutcome {
     if !provider_supports_steering(&request.provider) {
@@ -125,13 +224,13 @@ pub(in crate::services::discord) async fn enqueue_steering(
 
     let intervention = build_steer_intervention(&request);
     let outcome =
-        mailbox_enqueue_intervention(shared, &request.provider, request.channel_id, intervention)
+        mailbox_enqueue_intervention(shared, persist_provider, request.channel_id, intervention)
             .await;
 
     if let Some(error) = outcome.persistence_error.as_ref() {
         // In-memory enqueue still succeeded; durable persistence is best-effort.
         tracing::error!(
-            provider = request.provider.as_str(),
+            provider = persist_provider.as_str(),
             channel_id = request.channel_id.get(),
             error = %error,
             "/steer enqueue durable persistence failed (in-memory enqueue unaffected)"
@@ -139,6 +238,92 @@ pub(in crate::services::discord) async fn enqueue_steering(
     }
 
     classify_enqueue_result(outcome.enqueued, outcome.refusal_reason)
+}
+
+/// Interaction handler for the `/steer` cancel button (P1.5). The button's
+/// `custom_id` is `steer:cancel:<source_id>`, where `source_id` is the steer
+/// intervention's `message_id` (== the Discord interaction id). On click we
+/// authorise the user, then call the existing `mailbox_cancel_soft_intervention`
+/// to remove the still-queued intervention before delivery, and edit the card
+/// into the `큐잉이 취소됨 : <instruction>` state. No new cancel core is added —
+/// this mirrors `idle_recap_interaction.rs` and reuses the reaction-cancel path.
+pub(in crate::services::discord) async fn handle_steer_cancel_interaction(
+    ctx: &serenity::Context,
+    component: &serenity::ComponentInteraction,
+    data: &Data,
+) -> Result<(), Error> {
+    // Authorise with the same gate `/steer` uses. Without this, anyone able to
+    // see the card could cancel another operator's steer.
+    let user_id = component.user.id;
+    let user_name = &component.user.name;
+    if !check_auth(user_id, user_name, &data.shared, &data.token).await {
+        let _ = component
+            .create_response(
+                ctx,
+                serenity::CreateInteractionResponse::Message(
+                    serenity::CreateInteractionResponseMessage::new()
+                        .content("Not authorized for this bot.")
+                        .ephemeral(true),
+                ),
+            )
+            .await;
+        return Ok(());
+    }
+
+    let Some(source_id) = parse_steer_cancel_source_id(&component.data.custom_id) else {
+        // Malformed / sentinel id — acknowledge so the client doesn't time out.
+        let _ = component
+            .create_response(ctx, serenity::CreateInteractionResponse::Acknowledge)
+            .await;
+        return Ok(());
+    };
+
+    let channel_id = component.channel_id;
+    // Reuse the existing soft-intervention cancel path (same as reaction-remove).
+    // It removes the queued intervention and fires `apply_queue_exit_feedback`.
+    // Persist under `data.provider` to match the path `/steer` enqueued under.
+    let removed =
+        mailbox_cancel_soft_intervention(&data.shared, &data.provider, channel_id, source_id).await;
+
+    match removed {
+        Some(intervention) => {
+            // State 3 (REQ-013): `큐잉이 취소됨 : <instruction>`. The instruction is
+            // recovered from the removed intervention so the label is exact even
+            // though the custom_id carries only the source id.
+            let cancelled_label =
+                steer_lifecycle_label(SteerLifecycle::Cancelled, &intervention.text);
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] 📭 STEER-CANCEL: {cancelled_label} (channel {})",
+                channel_id.get()
+            );
+            let _ = component
+                .create_response(
+                    ctx,
+                    serenity::CreateInteractionResponse::UpdateMessage(
+                        serenity::CreateInteractionResponseMessage::new()
+                            .content(cancelled_label)
+                            .components(Vec::new()),
+                    ),
+                )
+                .await;
+        }
+        None => {
+            // Already delivered or already cancelled — idempotent. Strip the
+            // button so the stale card cannot be clicked again, but do not claim
+            // a cancellation for an instruction that already reached the agent.
+            let _ = component
+                .create_response(
+                    ctx,
+                    serenity::CreateInteractionResponse::UpdateMessage(
+                        serenity::CreateInteractionResponseMessage::new().components(Vec::new()),
+                    ),
+                )
+                .await;
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -209,5 +394,50 @@ mod tests {
                 reason: EnqueueRefusalReason::ActorUnreachable
             }
         );
+    }
+
+    #[test]
+    fn steer_cancel_custom_id_round_trips() {
+        let id = MessageId::new(123_456_789);
+        let cid = steer_cancel_custom_id(id);
+        assert_eq!(cid, "steer:cancel:123456789");
+        assert!(is_steer_cancel_custom_id(&cid));
+        assert_eq!(parse_steer_cancel_source_id(&cid), Some(id));
+    }
+
+    #[test]
+    fn steer_cancel_custom_id_rejects_foreign_and_zero_and_garbage() {
+        assert!(!is_steer_cancel_custom_id("idle_recap:clear:1"));
+        assert!(!is_steer_cancel_custom_id("agentdesk:model-cancel:1"));
+        assert_eq!(parse_steer_cancel_source_id("steer:cancel:0"), None);
+        assert_eq!(parse_steer_cancel_source_id("steer:cancel:abc"), None);
+        assert_eq!(parse_steer_cancel_source_id("steer:cancel:"), None);
+        assert_eq!(parse_steer_cancel_source_id("nope"), None);
+    }
+
+    #[test]
+    fn steer_lifecycle_label_uses_fixed_three_state_format() {
+        assert_eq!(
+            steer_lifecycle_label(SteerLifecycle::Queuing, "계속 진행해줘"),
+            "큐잉중인 입력 : 계속 진행해줘"
+        );
+        assert_eq!(
+            steer_lifecycle_label(SteerLifecycle::Queued, "계속 진행해줘"),
+            "큐잉됨 : 계속 진행해줘"
+        );
+        assert_eq!(
+            steer_lifecycle_label(SteerLifecycle::Cancelled, "계속 진행해줘"),
+            "큐잉이 취소됨 : 계속 진행해줘"
+        );
+    }
+
+    #[test]
+    fn steer_lifecycle_label_truncates_long_instruction_for_display() {
+        let long = "가".repeat(2_000);
+        let label = steer_lifecycle_label(SteerLifecycle::Queued, &long);
+        assert!(label.starts_with("큐잉됨 : "));
+        assert!(label.ends_with('…'));
+        // Exactly STEER_LABEL_MAX_INSTRUCTION_CHARS instruction chars are kept.
+        assert_eq!(label.chars().filter(|c| *c == '가').count(), 1_500);
     }
 }
