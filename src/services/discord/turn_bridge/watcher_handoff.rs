@@ -382,14 +382,31 @@ pub(super) fn maybe_hand_off_busy_turn_to_watcher(
             RelayOwnerKind::Watcher,
             shared_owned,
         );
-        // Resume the watcher from the bridge's confirmed offset and clear the
-        // delivered flag so it relays the still-producing output (NOT marked
-        // delivered → no suppression). The bridge owned relay for this turn, so
-        // the watcher is paused; unpause it now.
-        if let Some(offset) = tmux_last_offset
+        // Resume the watcher from the bridge's CONFIRMED relay frontier (not the
+        // produced offset) and clear the delivered flag so it relays the still-
+        // unrelayed tail `[confirmed_end, last_offset]` (NOT marked delivered → no
+        // suppression). #3459: seeding the produced `tmux_last_offset` here made the
+        // watcher seek PAST that tail, so it was never relayed and was permanently
+        // lost when the next turn superseded the inflight. Gate on the CURRENT
+        // wrapper generation (#3358 TOCTOU-safe) so a post-restart/rotated frontier
+        // never re-seeds the watcher into a different wrapper's content; fall back
+        // to the produced offset when there is no current-generation frontier or no
+        // unrelayed tail (byte-identical to the pre-#3459 seed in those cases). The
+        // bridge owned relay for this turn, so the watcher is paused; unpause now.
+        if let Some(produced) = tmux_last_offset
             && let Ok(mut guard) = watcher.resume_offset.lock()
         {
-            *guard = Some(offset);
+            let confirmed_frontier = inflight_state
+                .tmux_session_name
+                .as_deref()
+                .and_then(|name| {
+                    crate::services::discord::tmux::committed_frontier_for_current_generation(
+                        shared_owned,
+                        channel_id,
+                        name,
+                    )
+                });
+            *guard = Some(watcher_resume_seed_offset(produced, confirmed_frontier));
         }
         watcher
             .turn_delivered
@@ -405,9 +422,43 @@ pub(super) fn maybe_hand_off_busy_turn_to_watcher(
     }
 }
 
+/// #3459 (pure, testable): the watcher's resume-offset seed at a quiescence-gate
+/// handoff. Resume from the CONFIRMED relay frontier when it lags the PRODUCED
+/// offset (an unrelayed tail `[confirmed, produced]` exists → the watcher reads
+/// it forward and relays it once). Fall back to `produced` when there is no
+/// current-generation frontier (`None`, #3358 gate failed → content-skip-safe) or
+/// when the frontier is not behind (`confirmed >= produced`, no tail) — both
+/// byte-identical to the pre-#3459 seed. Never returns a value above `produced`,
+/// so the watcher can never seek past produced EOF. `#[cfg(unix)]`-gated to match
+/// its sole caller `maybe_hand_off_busy_turn_to_watcher` (no dead code off-unix).
+#[cfg(unix)]
+fn watcher_resume_seed_offset(produced: u64, confirmed_frontier: Option<u64>) -> u64 {
+    confirmed_frontier
+        .filter(|&confirmed| confirmed < produced)
+        .unwrap_or(produced)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #3459 truth table: the handoff resume seed flushes the unrelayed tail by
+    /// resuming from the confirmed frontier ONLY when it lags the produced offset,
+    /// and never seeks past produced EOF. `#[cfg(unix)]` to match the gated helper.
+    #[cfg(unix)]
+    #[test]
+    fn watcher_resume_seed_offset_flushes_tail_else_falls_back() {
+        // Unrelayed tail exists (confirmed < produced) → resume from confirmed so
+        // the watcher reads [confirmed, produced] forward and relays it (#3459 fix).
+        assert_eq!(watcher_resume_seed_offset(376_405, Some(331_575)), 331_575);
+        // No current-generation frontier (#3358 gate failed) → fall back to produced
+        // (content-skip-safe; byte-identical to pre-#3459).
+        assert_eq!(watcher_resume_seed_offset(376_405, None), 376_405);
+        // Frontier not behind (no tail) → fall back to produced (no re-relay).
+        assert_eq!(watcher_resume_seed_offset(376_405, Some(376_405)), 376_405);
+        // Stale-high frontier can never seek the watcher PAST produced EOF.
+        assert_eq!(watcher_resume_seed_offset(376_405, Some(999_999)), 376_405);
+    }
 
     /// #3277 (Defect A) truth table: ONLY a `Done` signal with the relay offset
     /// advanced PAST the turn start proves the turn delivered (and suppresses
