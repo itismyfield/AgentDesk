@@ -352,6 +352,21 @@ pub(in crate::services::discord) fn delivery_record_authority_enabled() -> bool 
     })
 }
 
+/// #3089 B3 / #3416 (pure, testable): the same-turn monotonic guard's enforce
+/// decision. Returns `true` (block the backward inflight write) ONLY when the
+/// durable delivered-frontier authority is ON **and** a same-turn offset moved
+/// backward (`response_sent_offset` or `last_offset`). Authority OFF (default) →
+/// always `false` → the guard stays observe-only and the write proceeds
+/// byte-identically (deploy no-op). Gated by the SAME flag as the read-authority
+/// flip so the single offset authority + its enforcement cut over atomically.
+pub(in crate::services::discord) fn authority_blocks_backward_inflight_write(
+    authority_enabled: bool,
+    response_sent_offset_monotonic: bool,
+    last_offset_monotonic: bool,
+) -> bool {
+    authority_enabled && (!response_sent_offset_monotonic || !last_offset_monotonic)
+}
+
 /// Pure fusion (testable): the effective committed offset under the flip. The
 /// durable frontier END can only RAISE the dedup floor above what the in-memory
 /// authority sees (a pre-restart / cross-actor delivery the live atomic missed);
@@ -731,6 +746,23 @@ mod tests {
         assert!(!should_shadow_mirror(false, true)); // not delivered → no write (I2)
         assert!(!should_shadow_mirror(true, false)); // flag OFF → no write
         assert!(!should_shadow_mirror(false, false));
+    }
+
+    #[test]
+    fn authority_blocks_backward_inflight_write_truth_table() {
+        // #3416 (#3089 B3): ENFORCE only when authority is ON AND a same-turn
+        // offset moved backward. OFF → never blocks (observe-only, no-op deploy).
+        // authority OFF → false regardless of the monotonic flags.
+        assert!(!authority_blocks_backward_inflight_write(
+            false, false, false
+        ));
+        assert!(!authority_blocks_backward_inflight_write(false, true, true));
+        // authority ON, both monotonic OK → permit the write.
+        assert!(!authority_blocks_backward_inflight_write(true, true, true));
+        // authority ON, a backward move on EITHER offset → block (pins the OR).
+        assert!(authority_blocks_backward_inflight_write(true, false, true));
+        assert!(authority_blocks_backward_inflight_write(true, true, false));
+        assert!(authority_blocks_backward_inflight_write(true, false, false));
     }
 
     #[test]

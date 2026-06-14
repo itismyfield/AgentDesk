@@ -48,20 +48,13 @@ pub(super) const RECOVERY_RELAY_RESTART_ATTEMPT_BUDGET: u32 = 3;
 /// legitimately go silent for multiple minutes (long Bash, slow LLM
 /// stream, large Read).
 ///
-/// History: this constant used to be aligned with
-/// `placeholder_sweeper::ABANDON_THRESHOLD_SECS` (then 300s) so the
-/// "definitely stale" gate fired exactly when the sweeper had already
-/// replaced the placeholder with its terminal "abandoned" form. After
-/// #2427 (#2436 / #2437 / #2438) the explicit-signal wires (pane death,
-/// heartbeat-gap inflight sweeper, generation-mismatch bulk invalidate,
-/// TurnCompleted idempotent guard) make the sweeper a pure safety net
-/// — its abandon timer was relaxed to 1800s (30 min). The 300s figure
-/// here is retained because it gates **new** user-message dispatch
-/// (THREAD-GUARD) and the stall-watchdog (#1446): both want to recover
-/// quickly once an explicit signal failed to fire, and the explicit
-/// wires above are expected to clear the cleanup hit within seconds.
-/// False-positive cleanup of a live turn is still much worse than
-/// slightly delayed recovery (issue #1446).
+/// History: aligned with `placeholder_sweeper::ABANDON_THRESHOLD_SECS` (then
+/// 300s) until #2427 (#2436 / #2437 / #2438) added explicit-signal wires (pane
+/// death, heartbeat-gap sweeper, generation-mismatch invalidate, TurnCompleted
+/// guard), relaxing the sweeper to a pure safety net (abandon timer 1800s). 300s
+/// is retained here because it gates **new**-dispatch THREAD-GUARD + the
+/// stall-watchdog (#1446): both want fast recovery once an explicit signal failed
+/// to fire (a false-positive cleanup of a live turn is far worse than delay).
 pub(super) const INFLIGHT_STALENESS_THRESHOLD_SECS: u64 = 300;
 
 /// Build an optional `serenity::MessageId` from a possibly-zero raw inflight id.
@@ -966,7 +959,7 @@ fn validate_inflight_state_for_save(
     path: &Path,
     state: &InflightTurnState,
     code_location: &'static str,
-) {
+) -> bool {
     let offset_in_bounds = state.response_sent_offset <= state.full_response.len()
         && state
             .full_response
@@ -989,10 +982,10 @@ fn validate_inflight_state_for_save(
     );
 
     let Ok(existing_content) = fs::read_to_string(path) else {
-        return;
+        return true;
     };
     let Ok(existing) = serde_json::from_str::<InflightTurnState>(&existing_content) else {
-        return;
+        return true;
     };
 
     // #3154 — OBSERVE-ONLY on the bridge/watcher save path. A legit fresh-turn
@@ -1064,6 +1057,24 @@ fn validate_inflight_state_for_save(
             "path": path.display().to_string(),
         }),
     );
+
+    // #3416 (#3089 B3): observe→ENFORCE under the durable-authority flag (no-op
+    // when OFF); see dr::authority_blocks_backward_inflight_write. The violation
+    // itself was already recorded by the monotonic record_inflight_invariant above.
+    use crate::services::discord::outbound::delivery_record as dr;
+    let authority = dr::delivery_record_authority_enabled();
+    if dr::authority_blocks_backward_inflight_write(
+        authority,
+        monotonic_offset,
+        last_offset_monotonic,
+    ) {
+        tracing::warn!(
+            "#3416 enforce: skipped backward inflight write at {}",
+            path.display()
+        );
+        return false;
+    }
+    true
 }
 
 pub(super) fn save_inflight_state(state: &InflightTurnState) -> Result<(), String> {
@@ -1171,38 +1182,29 @@ fn save_inflight_state_in_root(root: &Path, state: &InflightTurnState) -> Result
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let _lock = lock_inflight_state_path(&path)?;
-    validate_inflight_state_for_save(
+    if !validate_inflight_state_for_save(
         root,
         &path,
         state,
         "src/services/discord/inflight.rs:save_inflight_state_in_root",
-    );
+    ) {
+        return Ok(());
+    }
     let mut updated = state.clone();
     updated.updated_at = now_string();
     let json = serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())?;
     atomic_write(&path, &json)
 }
 
-/// #3107 codex re-review (P1): atomic compare-and-set save. Writes `state`
-/// ONLY when no inflight row currently exists for `(provider, channel_id)`,
-/// returning `true` iff it wrote.
-///
-/// The watcher self-heal re-acquire (`reacquire_watcher_inflight_for_active_stream`)
-/// previously did a non-atomic `load_inflight_state(...).is_some()` preflight
-/// followed by an unconditional `save_inflight_state`. Between the check and
-/// the save the Discord intake path could create a REAL inflight for a brand
-/// new user turn on the same `(provider, channel_id)`; the synthetic
-/// `user_msg_id = 0` re-acquire save would then clobber it and the legitimate
-/// turn would be lost.
-///
-/// This helper closes that window by performing the existence check AND the
-/// write while holding the same `lock_inflight_state_path` sidecar flock that
-/// `save_inflight_state_in_root` / `clear_inflight_state*` already serialize
-/// on. A concurrent intake `save_inflight_state` either ran before us (we see
-/// its row → no-op, intake wins) or after us (it overwrites our synthetic row
-/// with the real turn → intake still wins). The synthetic row is therefore
-/// only ever written when there is genuinely no inflight at the moment of the
-/// atomic write.
+/// #3107 codex re-review (P1): atomic compare-and-set save. Writes `state` ONLY
+/// when no inflight row exists for `(provider, channel_id)`, returning `true` iff
+/// it wrote. The watcher self-heal re-acquire previously did a non-atomic
+/// `load(...).is_some()` preflight + unconditional save: a concurrent intake
+/// could create a REAL inflight in the gap, and the synthetic `user_msg_id = 0`
+/// save would clobber it (lost turn). This closes the window by doing the check
+/// AND write under the same `lock_inflight_state_path` flock the other save/clear
+/// paths serialize on, so the synthetic row is written only when there is
+/// genuinely no inflight at the moment of the atomic write.
 pub(super) fn save_inflight_state_if_absent(state: &InflightTurnState) -> Result<bool, String> {
     let Some(root) = inflight_runtime_root() else {
         return Err("Home directory not found".to_string());
@@ -1260,24 +1262,18 @@ pub(in crate::services::discord) enum GuardedSaveOutcome {
 }
 
 /// #3041 P1-2 (codex P1-2 R3): identity-guarded re-save for the bridge's
-/// delivery-lease `Skip` epilogue. On a Skip the live HOLDER (the watcher)
-/// owns this turn's inflight lifecycle and CLEARS the row on its own success.
-/// The bridge's epilogue must therefore NOT blindly `save_inflight_state`: if
-/// the holder's clear (a `remove_file` under the same sidecar lock) won the
-/// race and the bridge's blind re-save ran second, it would resurrect a STALE
-/// inflight row for an already-delivered turn — recovery then sees it as
-/// delivered and returns WITHOUT clearing, leaking the row indefinitely.
-///
-/// This helper closes that window the same way `clear_inflight_state_if_matches`
-/// (#2427 D-wire) does: read the on-disk row under the lock and only write when
-/// it is STILL present AND its `(user_msg_id, started_at, tmux_session_name)`
-/// identity (plus `turn_start_offset`, when known) matches the turn the bridge
-/// is preserving. If the row is gone (holder delivered → `Missing`) or has been
-/// replaced by a newer turn / restart-or-rebind marker (`IdentityMismatch`), we
-/// no-op instead of resurrecting. When the holder FAILED and did NOT clear, the
-/// row is still present + matching, so we refresh it (`Saved`) and retry
-/// survives. Windows-safe: the `lock_inflight_state_path` sidecar flock + the
-/// `atomic_write` rename are the same primitives the rest of the module uses.
+/// delivery-lease `Skip` epilogue. On a Skip the live HOLDER (watcher) owns the
+/// turn and CLEARS the row on success, so the bridge epilogue must NOT blindly
+/// `save_inflight_state`: if the holder's clear won the race, a blind re-save
+/// would resurrect a STALE row for an already-delivered turn (recovery then sees
+/// it delivered, never clears, leaks the row). This closes the window the same
+/// way `clear_inflight_state_if_matches` (#2427 D-wire) does: under the lock,
+/// write only when the row is STILL present AND its `(user_msg_id, started_at,
+/// tmux_session_name)` identity (+ `turn_start_offset` when known) matches. Gone
+/// (`Missing`) or replaced by a newer turn / restart-rebind marker
+/// (`IdentityMismatch`) → no-op; holder FAILED + didn't clear → still present &
+/// matching → refresh (`Saved`). Same flock + atomic_write primitives as the
+/// rest of the module (Windows-safe).
 pub(in crate::services::discord) fn save_inflight_state_if_matches_identity(
     state: &InflightTurnState,
     expected: &InflightTurnIdentity,
@@ -1339,7 +1335,9 @@ pub(super) fn save_inflight_state_if_matches_identity_in_root(
             return GuardedSaveOutcome::IdentityMismatch;
         }
     }
-    validate_inflight_state_for_save(
+    // #3089 B3: verdict observe-only here — this path already identity/offset-
+    // gates above; the #3416 backward vector is the plain overwrite tails.
+    let _ = validate_inflight_state_for_save(
         root,
         &path,
         state,
@@ -1662,7 +1660,9 @@ fn persist_under_lock(
     state: &InflightTurnState,
     caller: &'static str,
 ) -> Result<(), String> {
-    validate_inflight_state_for_save(root, path, state, caller);
+    if !validate_inflight_state_for_save(root, path, state, caller) {
+        return Ok(());
+    }
     let mut updated = state.clone();
     updated.updated_at = now_string();
     let json = serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())?;
@@ -4355,12 +4355,16 @@ mod stall_recovery_tests {
         fresh.last_offset = 10;
 
         // No panic — different identity is exempt from the monotonic clamp.
-        validate_inflight_state_for_save(
+        // #3089 B3: a permitted save returns `true` (write proceeds). This pins
+        // the happy-path verdict so a mutation flipping the default to `false`
+        // (which would silently drop legit fresh-turn writes) is caught.
+        let permitted = validate_inflight_state_for_save(
             temp.path(),
             &path,
             &fresh,
             "src/services/discord/inflight.rs:test",
         );
+        assert!(permitted);
     }
 
     #[test]
