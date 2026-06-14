@@ -60,6 +60,16 @@ pub struct Config {
         skip_serializing_if = "PromptManifestRetentionConfig::is_default"
     )]
     pub prompt_manifest_retention: PromptManifestRetentionConfig,
+    /// When true (default), the server watches the on-disk config file and
+    /// hot-reloads the hot-swappable settings (routine tunables, thresholds)
+    /// without a restart, mirroring the policies watcher: the candidate file is
+    /// pre-validated (parsed + runtime defaults applied) and only then atomically
+    /// swapped in; a parse/validation failure keeps the running config. Infra
+    /// fields (`server` bind/port/auth, `database`, `data.dir`) are NOT
+    /// hot-swapped — a change to those is applied to the shared snapshot but
+    /// logged as restart-required, since live subsystems bound them at boot.
+    #[serde(default = "default_true")]
+    pub config_hot_reload: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -2100,6 +2110,7 @@ impl Default for Config {
             memory: None,
             mcp: McpConfig::default(),
             prompt_manifest_retention: PromptManifestRetentionConfig::default(),
+            config_hot_reload: default_true(),
         }
         .apply_runtime_defaults()
     }
@@ -2133,6 +2144,22 @@ pub fn load() -> Result<Config> {
     std::fs::create_dir_all(&config.data.dir)?;
 
     Ok(config)
+}
+
+/// The on-disk config path the running server loaded from, resolved with the
+/// same precedence as [`load`] (`$AGENTDESK_CONFIG` → runtime root → cwd → home).
+/// Used by the config file watcher so it reloads from the exact same file the
+/// boot path read. The returned path is the resolved canonical candidate even if
+/// it does not currently exist (matching the graceful resolver).
+pub fn resolved_config_path() -> PathBuf {
+    resolve_graceful_config_path(
+        std::env::var("AGENTDESK_CONFIG")
+            .ok()
+            .map(std::path::PathBuf::from),
+        runtime_root(),
+        std::env::current_dir().ok(),
+        dirs::home_dir(),
+    )
 }
 
 pub fn load_from_path(path: &Path) -> Result<Config> {

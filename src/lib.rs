@@ -93,6 +93,7 @@ pub(crate) mod compat;
 // Config helpers are shared by CLI/server/tests, with some provider-onboarding
 // helpers only called from rollout flows.
 mod config;
+pub(crate) mod config_live_reload;
 pub(crate) mod credential;
 // Database repositories intentionally expose cross-route helpers that are only
 // wired from selected API/maintenance paths.

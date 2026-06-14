@@ -263,6 +263,15 @@ pub(crate) async fn run(
     pg_pool: Option<PgPool>,
 ) -> Result<()> {
     crate::services::dispatches::wait_queue::set_runtime_cluster_config(config.cluster.clone());
+    // Publish the boot config as the shared live snapshot and (when enabled)
+    // start the config-file watcher so hot-swappable settings reload without a
+    // restart, mirroring the policies watcher. The guard is held for the
+    // lifetime of `run`; dropping it on shutdown joins the watcher thread.
+    crate::config_live_reload::install(config.clone());
+    let _config_hot_reload_guard = crate::config_live_reload::start(
+        crate::config::resolved_config_path(),
+        config.config_hot_reload,
+    );
     let pg_pool = match pg_pool {
         Some(pool) => Some(pool),
         None => crate::db::postgres::connect_and_migrate(&config)
@@ -2531,6 +2540,14 @@ async fn routine_runtime_loop(
         tokio::time::interval(std::time::Duration::from_secs(tick_interval_secs.get()));
     loop {
         interval.tick().await;
+        // Per-tick tunables (hot_reload toggle, poll/due-per-tick caps) are read
+        // from the live config snapshot so a config-file edit takes effect on the
+        // next tick without a restart. Boot-bound values (script dirs, store
+        // timezone/checkpoint limits, agent timeout) keep their startup values
+        // because they are already wired into long-lived objects above.
+        let routines_config = crate::config_live_reload::current()
+            .map(|cfg| cfg.routines.clone())
+            .unwrap_or_else(|| routines_config.clone());
         match store.recover_stale_running_runs().await {
             Ok(recovered) if !recovered.is_empty() => {
                 for run in &recovered {
