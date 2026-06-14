@@ -6481,6 +6481,39 @@ pub(super) fn spawn_turn_bridge(
                             "TUI transport error was already delivered; skipping quiescence gate so inflight cleanup can complete"
                         );
                     }
+                    if crate::services::claude::claude_tui_followup_requeue_enabled()
+                        && bridge_pre_submission_tui_prompt_error(&provider, &full_response)
+                    {
+                        // The follow-up never delivered its prompt (pre-submit
+                        // busy-timeout), so re-queue the inflight message to the
+                        // back of the mailbox for a retry instead of dropping it.
+                        super::mailbox_requeue_inflight_for_followup_retry(
+                            &shared_owned,
+                            &provider,
+                            channel_id,
+                            inflight_state.request_owner_user_id,
+                            inflight_state.user_msg_id,
+                            &inflight_state.user_text,
+                        )
+                        .await;
+                        tracing::info!(
+                            provider = %provider.as_str(),
+                            channel = channel_id.get(),
+                            user_msg_id = inflight_state.user_msg_id,
+                            "claude_tui follow-up pre-submit timeout: re-queued inflight message for retry"
+                        );
+                        // The bridge has already finalized the active turn and
+                        // computed its drain decision before this requeue runs, so
+                        // without an explicit kickoff the re-queued retry would sit
+                        // idle until unrelated activity pokes the mailbox. Schedule a
+                        // deferred idle-queue kickoff so it drains once the pane frees.
+                        super::schedule_deferred_idle_queue_kickoff(
+                            shared_owned.clone(),
+                            provider.clone(),
+                            channel_id,
+                            "claude_tui_followup_requeue_inflight",
+                        );
+                    }
                     super::tmux::TuiCompletionGateOutcome::NotGated
                 };
 

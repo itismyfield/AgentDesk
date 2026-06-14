@@ -84,6 +84,21 @@ pub(crate) fn with_claude_tui_session_turn_lock<R>(
     f()
 }
 
+/// Opt-in (default OFF) via env `AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE=1`: when
+/// set, a claude TUI warm follow-up that hits the PRE-submit busy-timeout
+/// surfaces a retryable error so the turn bridge re-queues the inflight message
+/// instead of dropping it. The timeout is pre-submit (the prompt was never sent
+/// to the pane), so the retry cannot double-send. Off by default pending live
+/// validation of the race-path queue dynamics.
+pub(crate) fn claude_tui_followup_requeue_enabled() -> bool {
+    std::env::var("AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE")
+        .map(|value| {
+            let value = value.trim();
+            value == "1" || value.eq_ignore_ascii_case("true")
+        })
+        .unwrap_or(false)
+}
+
 /// Resolve the path to the claude binary.
 pub fn resolve_claude_path() -> Option<String> {
     crate::services::platform::resolve_provider_binary("claude").resolved_path

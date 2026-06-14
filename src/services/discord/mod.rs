@@ -3649,6 +3649,42 @@ async fn mailbox_requeue_intervention_front(
     apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
 }
 
+/// Re-queue the inflight message that a claude TUI follow-up could not submit
+/// because the pane was busy at submit time. The follow-up busy-timeout is
+/// PRE-submit (the prompt was never delivered), so retrying cannot double-send.
+/// Enqueues to the BACK of the channel mailbox — matching
+/// `enqueue_busy_tui_followup_for_retry` — so the message is retried after the
+/// in-flight turn frees the pane rather than hot-looping. No-op for anchorless
+/// (recovery) turns or empty text.
+pub(in crate::services::discord) async fn mailbox_requeue_inflight_for_followup_retry(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    request_owner_user_id: u64,
+    user_msg_id: u64,
+    user_text: &str,
+) {
+    if user_msg_id == 0 || user_text.trim().is_empty() {
+        return;
+    }
+    let message_id = MessageId::new(user_msg_id);
+    let intervention = Intervention {
+        author_id: UserId::new(request_owner_user_id),
+        author_is_bot: false,
+        message_id,
+        source_message_ids: vec![message_id],
+        text: user_text.to_string(),
+        mode: crate::services::turn_orchestrator::InterventionMode::Soft,
+        created_at: std::time::Instant::now(),
+        reply_context: None,
+        has_reply_boundary: false,
+        merge_consecutive: false,
+        pending_uploads: Vec::new(),
+        voice_announcement: None,
+    };
+    let _ = mailbox_enqueue_intervention(shared, provider, channel_id, intervention).await;
+}
+
 async fn mailbox_cancel_soft_intervention(
     shared: &SharedData,
     provider: &ProviderKind,

@@ -22,7 +22,9 @@ agentdesk.routines.register({
     return {
       action: "agent",
       prompt: [
-        "Review this routine checkpoint and report any operational follow-up.",
+        "Review this routine checkpoint using only the fields in this message.",
+        "Do not read files, run commands, browse, or inspect repository state.",
+        "Reply in 1-3 concise bullets with: status, risk, and any operational follow-up.",
         `routine_id: ${ctx.routine.id}`,
         `routine_name: ${ctx.routine.name}`,
         `script_ref: ${ctx.routine.script_ref}`,

@@ -585,6 +585,33 @@ pub async fn start_agent_turn(
         None
     };
 
+    // Security: this endpoint runs the turn as the path agent `:id`. Client
+    // metadata must not be able to rebind the turn to another agent's identity
+    // via the routine `agent_id` field (which `routine_metadata_role_binding`
+    // would otherwise honor with precedence), so reject a mismatch. The
+    // in-process routine executor does not go through this HTTP handler and
+    // sets its own server-trusted metadata.
+    if let Some(metadata_agent_id) = body
+        .metadata
+        .as_ref()
+        .and_then(|value| value.get("agent_id"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        && metadata_agent_id != id.trim()
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "ok": false,
+                "error": format!(
+                    "metadata.agent_id '{metadata_agent_id}' does not match requested agent '{}'",
+                    id.trim()
+                ),
+            })),
+        );
+    }
+
     let Some(pool) = state.pg_pool_ref() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
