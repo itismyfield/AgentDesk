@@ -13,6 +13,14 @@ const PROMPT_READY_DEBUG_TAIL_LINES: usize = 24;
 const PROMPT_READY_DEBUG_TAIL_BYTES: usize = 4096;
 pub const FRESH_PROMPT_READY_TIMEOUT: Duration = Duration::from_secs(120);
 pub const FOLLOWUP_PROMPT_READY_TIMEOUT: Duration = Duration::from_secs(45);
+/// Extends #2416 (don't drop the user's follow-up when the pane is busy): when
+/// the transcript shows the PRIOR turn is still actively streaming
+/// (`TuiTurnState::is_busy`), `wait_for_prompt_ready_polling` treats the per-kind
+/// readiness `timeout` as a *stall* budget and keeps waiting up to this absolute
+/// ceiling, so a long turn no longer makes the next message vanish via
+/// `tui_warm_followup_busy_pre_submit`. The ceiling still bounds a genuinely
+/// wedged pane that never returns to a ready prompt.
+const PROMPT_READY_ACTIVE_TURN_WAIT_CEILING: Duration = Duration::from_secs(900);
 /// Maximum time we let the hook-event fast path block before falling back to
 /// the legacy pane-scrape polling loop. Fresh turns historically need a bit
 /// more headroom (cold start, MCP load) than follow-ups.
@@ -1090,6 +1098,7 @@ fn wait_for_prompt_ready_polling(
 ) -> Result<(), String> {
     let mut wait_interval = Duration::from_millis(100);
     let mut dialog_dismiss_attempts = 0usize;
+    let mut active_turn_extension_logged = false;
     loop {
         check_prompt_cancel(cancel_token)?;
         if transcript_idle_confirms_prompt_ready_without_capture(session_name, transcript_path) {
@@ -1164,11 +1173,54 @@ fn wait_for_prompt_ready_polling(
         }
         if start.elapsed() >= timeout {
             check_prompt_cancel(cancel_token)?;
+            // Extends #2416: a long PRIOR turn must not make us abandon this
+            // follow-up. The loop already resolves ready the instant the
+            // transcript goes Idle, so reaching the wall-clock `timeout` means
+            // the prior turn is still mid-flight. While the transcript confirms
+            // it is actively streaming (is_busy ⇒ Streaming/UserSubmitted; an
+            // Idle/Unknown read does NOT extend), keep waiting up to the absolute
+            // ceiling — the prompt returns once the turn finishes, so the
+            // follow-up is delivered sequentially instead of dropped.
+            let transcript_turn_active = transcript_path.is_some_and(|path| {
+                crate::services::claude_tui::transcript_tail::observe_transcript_turn_state(path)
+                    .is_busy()
+            });
+            if active_turn_warrants_wait_extension(
+                snapshot.tmux_pane_alive,
+                transcript_turn_active,
+                start.elapsed(),
+                PROMPT_READY_ACTIVE_TURN_WAIT_CEILING,
+            ) {
+                if !active_turn_extension_logged {
+                    active_turn_extension_logged = true;
+                    tracing::info!(
+                        tmux_session_name = session_name,
+                        readiness = readiness.label(),
+                        base_timeout_secs = timeout.as_secs(),
+                        ceiling_secs = PROMPT_READY_ACTIVE_TURN_WAIT_CEILING.as_secs(),
+                        "claude_tui readiness wait extended: prior turn still streaming; waiting for it to finish instead of dropping the follow-up"
+                    );
+                }
+                std::thread::sleep(wait_interval);
+                check_prompt_cancel(cancel_token)?;
+                wait_interval = std::cmp::min(wait_interval * 2, Duration::from_millis(1000));
+                continue;
+            }
             log_prompt_ready_timeout(session_name, readiness, timeout, &snapshot);
             return Err(format!(
-                "{PROMPT_READY_TIMEOUT_ERROR_PREFIX} {} prompt input readiness after {}s; reason=prompt_marker_not_detected; previous_tui_turn_still_running=true; capture_available={}",
+                "{PROMPT_READY_TIMEOUT_ERROR_PREFIX} {} prompt input readiness after {}s; reason={}; previous_tui_turn_still_running={}; prompt_marker_detected={}; prompt_draft_detected={}; capture_available={}",
                 readiness.label(),
                 timeout.as_secs(),
+                prompt_ready_timeout_reason(&snapshot),
+                // Mirror the computed value the debug log already records
+                // (`log_prompt_ready_timeout`) instead of the legacy hardcoded
+                // `true`: the pane is known alive here (a dead pane returned
+                // above), so this is `true` only when the pane never looked
+                // ready — i.e. a turn that is plausibly still running. An unsent
+                // draft means the turn ended, so it reports `false`.
+                snapshot.tmux_pane_alive && !snapshot.prompt_marker_detected,
+                snapshot.prompt_marker_detected,
+                snapshot.prompt_draft_detected,
                 snapshot.capture_available
             ));
         }
@@ -1178,12 +1230,91 @@ fn wait_for_prompt_ready_polling(
     }
 }
 
+/// Whether `wait_for_prompt_ready_polling` should keep waiting past the per-kind
+/// readiness `timeout` instead of failing. We only extend when the pane is alive
+/// AND the transcript confirms the prior turn is still actively streaming, and
+/// only up to an absolute `ceiling`. Pure so the policy is unit-testable without
+/// a live tmux pane.
+fn active_turn_warrants_wait_extension(
+    pane_alive: bool,
+    transcript_turn_active: bool,
+    elapsed: Duration,
+    ceiling: Duration,
+) -> bool {
+    pane_alive && transcript_turn_active && elapsed < ceiling
+}
+
+#[cfg(test)]
+mod active_turn_wait_extension_tests {
+    use super::active_turn_warrants_wait_extension;
+    use std::time::Duration;
+
+    #[test]
+    fn extends_only_when_pane_alive_and_turn_active_within_ceiling() {
+        let ceiling = Duration::from_secs(900);
+        let within = Duration::from_secs(60);
+
+        // Prior turn still streaming, pane alive, within ceiling → keep waiting
+        // (the follow-up must not be dropped just because the turn is long).
+        assert!(active_turn_warrants_wait_extension(
+            true, true, within, ceiling
+        ));
+        // Dead pane → never extend (the existing dead-pane error owns that case).
+        assert!(!active_turn_warrants_wait_extension(
+            false, true, within, ceiling
+        ));
+        // Transcript not confirmably active (Idle/Unknown) → do not extend; fail
+        // as before so a genuinely stuck/uncertain pane still times out.
+        assert!(!active_turn_warrants_wait_extension(
+            true, false, within, ceiling
+        ));
+        // At/!past the absolute ceiling → stop waiting even if still streaming.
+        assert!(!active_turn_warrants_wait_extension(
+            true, true, ceiling, ceiling
+        ));
+        assert!(!active_turn_warrants_wait_extension(
+            true,
+            true,
+            ceiling + Duration::from_secs(1),
+            ceiling
+        ));
+    }
+}
+
 fn pane_looks_ready_for_prompt(pane: &str) -> bool {
     crate::services::tmux_common::tmux_capture_indicates_claude_tui_ready_for_input(pane)
 }
 
 fn prompt_marker_confirms_prompt_ready(snapshot: &PromptReadinessSnapshot) -> bool {
     snapshot.prompt_marker_detected && !snapshot.prompt_draft_detected
+}
+
+/// Truthful root-cause attribution for a prompt-readiness timeout, derived from
+/// the final snapshot.
+///
+/// The legacy timeout copy hardcoded `reason=prompt_marker_not_detected` even
+/// when the marker WAS seen (as an unsent composer draft) or the pane capture
+/// failed outright. That sent every readiness-timeout investigation down the
+/// "the prompt never came back" path even when the real cause was a stuck draft
+/// or a blind capture — so the returned error disagreed with the debug log,
+/// which already records the computed signals. We classify by the strongest
+/// evidence present in the snapshot instead.
+fn prompt_ready_timeout_reason(snapshot: &PromptReadinessSnapshot) -> &'static str {
+    if !snapshot.capture_available {
+        // No usable pane capture: the readiness check was blind, so we cannot
+        // claim anything about the marker.
+        "pane_capture_unavailable"
+    } else if snapshot.prompt_draft_detected {
+        // The composer holds an unsent draft (`❯ <text>`), which deliberately
+        // blocks the ready match in `prompt_marker_confirms_prompt_ready`.
+        "prompt_draft_present"
+    } else if snapshot.prompt_marker_detected {
+        // The pane looked ready at least once but never confirmed within the
+        // window (e.g. the ready frame flickered behind transient chrome).
+        "prompt_marker_unconfirmed"
+    } else {
+        "prompt_marker_not_detected"
+    }
 }
 
 fn transcript_idle_confirms_prompt_ready_without_capture(
@@ -2177,11 +2308,63 @@ line 13";
     #[test]
     fn busy_followup_wait_timeout_message_uses_followup_label() {
         let synthetic = format!(
-            "{PROMPT_READY_TIMEOUT_ERROR_PREFIX} follow-up prompt input readiness after 45s; reason=prompt_marker_not_detected; previous_tui_turn_still_running=true; capture_available=true"
+            "{PROMPT_READY_TIMEOUT_ERROR_PREFIX} follow-up prompt input readiness after 45s; reason=prompt_marker_not_detected; previous_tui_turn_still_running=true; prompt_marker_detected=false; prompt_draft_detected=false; capture_available=true"
         );
         assert!(is_prompt_ready_timeout_error(&synthetic));
         assert!(synthetic.contains("follow-up"));
         assert!(synthetic.contains("45s"));
+    }
+
+    // The returned timeout copy must reflect the ACTUAL snapshot, not the legacy
+    // hardcoded `reason=prompt_marker_not_detected; previous_tui_turn_still_running=true`.
+    #[test]
+    fn prompt_ready_timeout_reason_reflects_snapshot() {
+        let base = PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: false,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: String::new(),
+        };
+
+        // No usable capture wins over everything else.
+        let blind = PromptReadinessSnapshot {
+            capture_available: false,
+            prompt_marker_detected: true,
+            prompt_draft_detected: true,
+            ..base.clone()
+        };
+        assert_eq!(
+            prompt_ready_timeout_reason(&blind),
+            "pane_capture_unavailable"
+        );
+
+        // An unsent draft is the cause, and the turn is NOT still running.
+        let draft = PromptReadinessSnapshot {
+            prompt_marker_detected: true,
+            prompt_draft_detected: true,
+            ..base.clone()
+        };
+        assert_eq!(prompt_ready_timeout_reason(&draft), "prompt_draft_present");
+        assert!(!(draft.tmux_pane_alive && !draft.prompt_marker_detected));
+
+        // Marker seen but never confirmed.
+        let unconfirmed = PromptReadinessSnapshot {
+            prompt_marker_detected: true,
+            ..base.clone()
+        };
+        assert_eq!(
+            prompt_ready_timeout_reason(&unconfirmed),
+            "prompt_marker_unconfirmed"
+        );
+
+        // The genuine "prompt never came back" case — and the only one that
+        // reports the turn as plausibly still running.
+        assert_eq!(
+            prompt_ready_timeout_reason(&base),
+            "prompt_marker_not_detected"
+        );
+        assert!(base.tmux_pane_alive && !base.prompt_marker_detected);
     }
 
     // #2416: wait_for_prompt_ready must be reachable as a public API so the
