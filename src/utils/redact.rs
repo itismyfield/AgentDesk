@@ -6,7 +6,15 @@ static AUTH_HEADER_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(authorization\s*:\s*(?:[a-z][a-z0-9._~+/-]*\s+)?)[^\r\n]+").unwrap()
 });
 static ASSIGNMENT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|DATABASE_URL|API[_-]?KEY)[A-Z0-9_]*\s*=\s*)[^\s]+")
+    Regex::new(r"(?i)\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|DATABASE_URL|API[_-]?KEY|PRIVATE[_-]?KEY)[A-Z0-9_]*\s*=\s*)[^\s]+")
+        .unwrap()
+});
+// PEM-encoded private keys span multiple whitespace-separated tokens and lines,
+// so the single-token ASSIGNMENT_RE value capture (`[^\s]+`) cannot mask the
+// whole body. Mask the entire `BEGIN..END ... PRIVATE KEY` block as one unit so
+// no portion of the key material survives in prompt/log paths.
+static PRIVATE_KEY_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?is)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----")
         .unwrap()
 });
 static POSTGRES_DSN_RE: LazyLock<Regex> =
@@ -75,12 +83,16 @@ pub(crate) fn register_common_env_secrets() {
     }
 
     for (key, value) in std::env::vars() {
-        let upper = key.to_ascii_uppercase();
+        // Normalize hyphens to underscores so hyphenated names exported via the
+        // `env 'GITHUB-PRIVATE-KEY=...'` form are matched just like underscore names.
+        let upper = key.to_ascii_uppercase().replace('-', "_");
         if upper.contains("TOKEN")
             || upper.contains("SECRET")
             || upper.contains("PASSWORD")
             || upper.contains("API_KEY")
             || upper.contains("APIKEY")
+            || upper.contains("PRIVATE_KEY")
+            || upper.contains("PRIVATEKEY")
         {
             register_secret_or_dsn(&value);
         }
@@ -88,7 +100,10 @@ pub(crate) fn register_common_env_secrets() {
 }
 
 pub(crate) fn redact_known_secrets(input: &str) -> String {
-    let redacted = POSTGRES_DSN_RE.replace_all(input, |captures: &regex::Captures<'_>| {
+    // Mask whole PEM private-key blocks first so later single-token rules cannot
+    // leave the key body behind, and so the registered-secret pass is unaffected.
+    let redacted = PRIVATE_KEY_BLOCK_RE.replace_all(input, "***");
+    let redacted = POSTGRES_DSN_RE.replace_all(&redacted, |captures: &regex::Captures<'_>| {
         mask_dsn_password(captures.get(0).map(|m| m.as_str()).unwrap_or_default())
     });
     let redacted = AUTH_HEADER_RE.replace_all(&redacted, "${1}***");
@@ -127,7 +142,7 @@ mod tests {
     #[test]
     fn redact_known_secrets_masks_bearer_bot_and_assignments() {
         let redacted = redact_known_secrets(
-            "Authorization: Bearer live-token\nAuthorization: Bot discord-token\nAuthorization: Basic dXNlcjpwYXNz\nauthorization: Digest username=\"u\", nonce=\"nonce-secret\"\nDATABASE_URL=postgres://u:p@h/db\nOPENAI_API_KEY=sk-live",
+            "Authorization: Bearer live-token\nAuthorization: Bot discord-token\nAuthorization: Basic dXNlcjpwYXNz\nauthorization: Digest username=\"u\", nonce=\"nonce-secret\"\nDATABASE_URL=postgres://u:p@h/db\nOPENAI_API_KEY=sk-live\nGITHUB_PRIVATE_KEY=gh-priv-key-secret\nPRIVATE_KEY=pk-secret",
         );
 
         assert!(redacted.contains("Authorization: Bearer ***"));
@@ -136,11 +151,42 @@ mod tests {
         assert!(redacted.contains("authorization: Digest ***"));
         assert!(redacted.contains("DATABASE_URL=***"));
         assert!(redacted.contains("OPENAI_API_KEY=***"));
+        assert!(redacted.contains("GITHUB_PRIVATE_KEY=***"));
+        assert!(redacted.contains("PRIVATE_KEY=***"));
         assert!(!redacted.contains("live-token"));
         assert!(!redacted.contains("discord-token"));
         assert!(!redacted.contains("dXNlcjpwYXNz"));
         assert!(!redacted.contains("nonce-secret"));
         assert!(!redacted.contains("sk-live"));
+        assert!(!redacted.contains("gh-priv-key-secret"));
+        assert!(!redacted.contains("pk-secret"));
+    }
+
+    #[test]
+    fn redact_known_secrets_masks_multiline_pem_private_key_block() {
+        let pem = "context before\nGITHUB_PRIVATE_KEY=-----BEGIN RSA PRIVATE KEY-----\nMIIBVAIBADANBgkqhkiG9w0BAQEF\nAASCAj8wggI7AgEAAoIBAQDLEAK=\n-----END RSA PRIVATE KEY-----\ncontext after";
+        let redacted = redact_known_secrets(pem);
+
+        // The entire key body and PEM armor must be gone, including interior lines.
+        assert!(!redacted.contains("MIIBVAIBADANBgkqhkiG9w0BAQEF"));
+        assert!(!redacted.contains("AASCAj8wggI7AgEAAoIBAQDLEAK="));
+        assert!(!redacted.contains("BEGIN RSA PRIVATE KEY"));
+        assert!(!redacted.contains("END RSA PRIVATE KEY"));
+        // Surrounding non-secret context is preserved.
+        assert!(redacted.contains("context before"));
+        assert!(redacted.contains("context after"));
+        assert!(redacted.contains("GITHUB_PRIVATE_KEY=***"));
+    }
+
+    #[test]
+    fn redact_known_secrets_masks_bare_pem_block_without_assignment() {
+        let pem = "ssh failed: -----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY----- (retrying)";
+        let redacted = redact_known_secrets(pem);
+
+        assert!(!redacted.contains("b3BlbnNzaC1rZXktdjEAAAAA"));
+        assert!(!redacted.contains("OPENSSH PRIVATE KEY"));
+        assert!(redacted.contains("ssh failed: ***"));
+        assert!(redacted.contains("(retrying)"));
     }
 
     #[test]
