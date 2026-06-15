@@ -313,3 +313,92 @@ export function pickPreferredOnboardingDraft(
     ? meaningfulServer
     : meaningfulLocal;
 }
+
+/**
+ * Build the draft to apply when a (newer) SERVER draft was preferred over the
+ * local one. Server drafts are always persisted with bot tokens CLEARED
+ * (redacted) for safety, so applying one verbatim would overwrite the locally
+ * held raw tokens with blanks on the suppressed first sync. Restore each missing
+ * token from the existing local draft FIRST, then fall back to
+ * `/api/onboarding/status` (which returns no per-slot token in production). The
+ * returned draft is a fresh object; inputs are not mutated.
+ */
+export function restoreServerDraftTokens(
+  serverDraft: OnboardingDraft,
+  localDraft: OnboardingDraft | null,
+  statusData: OnboardingStatusResponse,
+  serverHasExistingSetup: boolean,
+): OnboardingDraft {
+  const restored: OnboardingDraft = {
+    ...serverDraft,
+    commandBots: serverDraft.commandBots.map((bot) => ({ ...bot })),
+  };
+
+  if (statusData.owner_id && !restored.ownerId) {
+    restored.ownerId = statusData.owner_id;
+  }
+  if (statusData.guild_id && !restored.selectedGuild) {
+    restored.selectedGuild = statusData.guild_id;
+  }
+
+  // Local raw tokens are the authoritative source for a redacted server draft.
+  if (localDraft) {
+    restored.commandBots = restored.commandBots.map((bot, idx) => {
+      const localBot = localDraft.commandBots[idx];
+      return !bot.token && localBot?.token ? { ...bot, token: localBot.token } : bot;
+    });
+    for (let idx = restored.commandBots.length; idx < localDraft.commandBots.length; idx += 1) {
+      const localBot = localDraft.commandBots[idx];
+      if (localBot?.token) {
+        restored.commandBots = [...restored.commandBots, { ...localBot }];
+      }
+    }
+    if (!restored.announceToken && localDraft.announceToken) {
+      restored.announceToken = localDraft.announceToken;
+    }
+    if (!restored.notifyToken && localDraft.notifyToken) {
+      restored.notifyToken = localDraft.notifyToken;
+    }
+  }
+
+  // Secondary fallback: tokens surfaced by the status endpoint (fresh setups).
+  if (!serverHasExistingSetup) {
+    if (
+      statusData.bot_tokens?.command &&
+      restored.commandBots.length > 0 &&
+      !restored.commandBots[0].token
+    ) {
+      restored.commandBots[0] = {
+        ...restored.commandBots[0],
+        provider: statusData.bot_providers?.command ?? restored.commandBots[0].provider,
+        token: statusData.bot_tokens.command,
+      };
+    }
+    if (statusData.bot_tokens?.command2) {
+      if (restored.commandBots.length < 2) {
+        restored.commandBots = [
+          ...restored.commandBots,
+          {
+            provider: statusData.bot_providers?.command2 ?? "codex",
+            token: statusData.bot_tokens.command2,
+            botInfo: null,
+          },
+        ];
+      } else if (!restored.commandBots[1].token) {
+        restored.commandBots[1] = {
+          ...restored.commandBots[1],
+          provider: statusData.bot_providers?.command2 ?? restored.commandBots[1].provider,
+          token: statusData.bot_tokens.command2,
+        };
+      }
+    }
+    if (statusData.bot_tokens?.announce && !restored.announceToken) {
+      restored.announceToken = statusData.bot_tokens.announce;
+    }
+    if (statusData.bot_tokens?.notify && !restored.notifyToken) {
+      restored.notifyToken = statusData.bot_tokens.notify;
+    }
+  }
+
+  return restored;
+}

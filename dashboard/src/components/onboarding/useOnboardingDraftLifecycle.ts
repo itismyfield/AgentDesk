@@ -9,6 +9,7 @@ import {
   clearOnboardingDraft,
   isMeaningfulOnboardingDraft,
   pickPreferredOnboardingDraft,
+  restoreServerDraftTokens,
   serverDraftToLocalDraft,
   writeOnboardingDraft,
   type AgentDef,
@@ -293,18 +294,14 @@ export function useOnboardingDraftLifecycle({
 
           let draftToApply = preferredDraft;
           if (preferredDraft === serverDraft) {
-            draftToApply = { ...preferredDraft };
-
-            // The backend always redacts bot_tokens to null (see
-            // src/services/onboarding/mod.rs), so only owner/guild can be
-            // restored from server status here. Bot tokens are recovered from
-            // the persisted draft itself, not from status.
-            if (statusData.owner_id && !draftToApply.ownerId) {
-              draftToApply.ownerId = statusData.owner_id;
-            }
-            if (statusData.guild_id && !draftToApply.selectedGuild) {
-              draftToApply.selectedGuild = statusData.guild_id;
-            }
+            // A redacted server draft must not blank out the locally held raw
+            // tokens; restore them from the local draft first, status second.
+            draftToApply = restoreServerDraftTokens(
+              serverDraft,
+              initialDraftRef.current,
+              statusData,
+              serverHasExistingSetup,
+            );
           }
 
           applyDraft({
