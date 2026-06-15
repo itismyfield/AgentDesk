@@ -385,6 +385,7 @@ src/
 │   │   │   ├── restart.rs
 │   │   │   ├── session.rs
 │   │   │   ├── skill.rs
+│   │   │   ├── steer.rs
 │   │   │   ├── text_commands.rs
 │   │   │   ├── tui_passthrough.rs
 │   │   │   └── voice.rs
@@ -600,6 +601,7 @@ src/
 │   │   ├── startup_reclaim.rs
 │   │   ├── status_panel_controller.rs
 │   │   ├── status_panel_orphan_store.rs
+│   │   ├── steering.rs
 │   │   ├── streaming_finalizer.rs
 │   │   ├── task_supervisor.rs
 │   │   ├── tmux.rs
