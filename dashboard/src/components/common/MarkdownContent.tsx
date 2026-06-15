@@ -1,4 +1,4 @@
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 interface Props {
@@ -31,6 +31,17 @@ export default function MarkdownContent({ content, className }: Props) {
     <div className={classes}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
+        urlTransform={(url) => {
+          const lowerUrl = url.trim().toLowerCase();
+          if (lowerUrl.startsWith("discord:")) {
+            // Only allow specific discord protocol formats used in the app, strip others
+            if (/^discord:\/\/discord\.com\/channels\/[^\/]+\/[^\/]+(\/[^\/]+)?$/.test(lowerUrl)) {
+              return url;
+            }
+            return "";
+          }
+          return defaultUrlTransform(url);
+        }}
         components={{
           a: ({ node, ...props }) => {
             const externalProps = isExternalHref(props.href)
