@@ -1550,7 +1550,7 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
     let tracked_changes = tracked_change_summary(adk_cwd);
 
     // Direct finalize_dispatch with retry — single completion authority (#143)
-    if let Some(engine) = &shared.engine {
+    if let Some(engine) = &shared.policy.engine {
         if explicit_work_outcome == Some("noop") {
             if let Some(ref changes) = tracked_changes {
                 let reason = format!(

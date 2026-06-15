@@ -3019,7 +3019,7 @@ mod tests {
             provider: ProviderKind::Claude,
             api_port: 9,
             pg_pool,
-            engine: None,
+            policy: super::super::PolicyRuntime { engine: None },
             health_registry: std::sync::Weak::new(),
             known_slash_commands: tokio::sync::OnceCell::new(),
             inflight_signals: tokio::sync::broadcast::channel(256).0,

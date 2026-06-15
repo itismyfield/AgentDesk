@@ -172,7 +172,7 @@ pub(super) fn run_bot_build_shared_data(
         provider: provider.clone(),
         api_port,
         pg_pool,
-        engine,
+        policy: PolicyRuntime { engine },
         health_registry: Arc::downgrade(health_registry),
         known_slash_commands: tokio::sync::OnceCell::new(),
         // #2448: capacity 256 gives ~hundreds of in-flight turns headroom
