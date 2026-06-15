@@ -115,16 +115,19 @@ pub(super) async fn slot_has_dispatch_thread_history_pg(
     agent_id: &str,
     slot_index: i64,
 ) -> Result<bool, String> {
-    // Use a broad LIKE filter to drastically reduce the number of rows transferred over the network.
-    // We avoid strict JSON string matching or ::jsonb casts in SQL to prevent false negatives from whitespace
-    // and runtime query crashes on malformed legacy JSON data. The exact JSON validation is safely done in Rust.
+    // Use a strictly over-inclusive LIKE filter to reduce the number of rows transferred over the
+    // network without ever dropping a candidate row. We only filter on the slot value itself and
+    // deliberately avoid the literal `slot_index` key text, because legacy rows may store the JSON
+    // key escaped/differently; matching the key text would be a false negative that lets a reused
+    // slot skip reset_slot_thread_before_reuse and resume the wrong thread. We also avoid strict
+    // JSON string matching or ::jsonb casts in SQL to prevent runtime query crashes on malformed
+    // legacy JSON data. The exact JSON validation is safely done in Rust below.
     let rows = sqlx::query(
         "SELECT id, thread_id, context
          FROM task_dispatches
          WHERE to_agent_id = $1
            AND thread_id IS NOT NULL
            AND BTRIM(thread_id) != ''
-           AND context LIKE '%slot_index%'
            AND context LIKE '%' || $2::text || '%'",
     )
     .bind(agent_id)
