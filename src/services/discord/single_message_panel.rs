@@ -470,9 +470,34 @@ fn clamp_footer_panel_text(panel_text: &str) -> String {
     for keep_count in (1..=lines.len()).rev() {
         let prefix = lines[..keep_count].join("\n");
         let candidate = format!("{prefix}\n{TRUNCATION_MARKER}");
-        if candidate.len() <= SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES {
-            return candidate;
+        if candidate.len() > SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES {
+            continue;
         }
+        // #3495: keep the fenced 🖥️ Recent block atomic. A line-wise cut can
+        // sever it — keeping the header (and maybe a ```text opener) while
+        // dropping the body + closing ```. `repair_fence_parity` later strips
+        // the dangling opener but NOT the header above it, leaving a Recent
+        // header with an empty terminal body. So drop the whole incomplete
+        // fenced section here: if the first DROPPED line is a ``` opener, the
+        // kept tail is a bare section header — drop it too; and never return a
+        // prefix whose ``` parity is odd (an unclosed fence). Each rejection
+        // falls back to a shorter prefix.
+        let mut kept = keep_count;
+        while kept > 0
+            && lines
+                .get(kept)
+                .is_some_and(|line| line.trim_start().starts_with("```"))
+        {
+            kept -= 1;
+        }
+        let prefix = lines[..kept].join("\n");
+        if prefix.matches("```").count() % 2 != 0 {
+            continue;
+        }
+        if prefix.is_empty() {
+            return TRUNCATION_MARKER.to_string();
+        }
+        return format!("{prefix}\n{TRUNCATION_MARKER}");
     }
 
     let first_line = lines.first().copied().unwrap_or_default();
@@ -1090,6 +1115,49 @@ mod tests {
             "footer leaked an unterminated fence: {block}"
         );
         assert!(!block.contains("```text") || fences >= 2);
+    }
+
+    /// #3495: when the 600-byte panel clamp severs the fenced 🖥️ Recent block,
+    /// the WHOLE section (header + fence + body) is dropped — Discord must never
+    /// see a bare `🖥️ Recent` header with no terminal body (the intermittent
+    /// "터미널 칸이 사라짐" symptom). When the block fits, it is preserved intact.
+    #[test]
+    fn footer_panel_clamp_drops_severed_recent_section_3495() {
+        // Small leading line so the cut lands inside the Recent section: the
+        // header (+ opener) would survive a naive clamp but its body cannot.
+        let severed = format!(
+            "🟢 진행 중 — Claude (<t:1700000000:R>)\nstreaming line\n🖥️ Recent (mac-book-release)\n```text\n{}\n```",
+            "echo hello\n".repeat(70)
+        );
+        let block = super::compose_footer_status_block("⠸", &severed);
+        assert!(
+            !block.contains("🖥️ Recent"),
+            "severed Recent header left without a terminal body: {block}"
+        );
+        assert_eq!(
+            block.matches("```").count() % 2,
+            0,
+            "footer leaked an unterminated fence: {block}"
+        );
+        assert!(block.len() <= super::super::DISCORD_MSG_LIMIT);
+
+        // Control: a Recent block that fits the budget is preserved intact.
+        let fits =
+            "🟢 진행 중 — Claude (<t:1700000000:R>)\n🖥️ Recent (host)\n```text\necho hi\n```";
+        let kept = super::compose_footer_status_block("⠸", fits);
+        assert!(
+            kept.contains("🖥️ Recent"),
+            "fitting Recent block was dropped: {kept}"
+        );
+        assert!(
+            kept.contains("echo hi"),
+            "fitting Recent body was dropped: {kept}"
+        );
+        assert_eq!(
+            kept.matches("```").count() % 2,
+            0,
+            "fitting block unbalanced: {kept}"
+        );
     }
 
     /// #3394 round 2 (P1): when the response BODY carries an unterminated code
