@@ -143,7 +143,11 @@
 # (restart-gap message recovery — classify/scan/enqueue + its tests) moved
 # verbatim to the capped sibling `catch_up.rs`, lowering the frozen baseline
 # 4979 -> 4243 (-736). Locks in the shrink win (#3028 ratchet down only).
-"src/services/discord/mod.rs" = 4243
+# #3479: the dispatch-policy cluster (monitor-auto-turn origin marker codec,
+# stale-dispatch turn gating + its tests, allowed-turn-sender / bot-user-id
+# resolvers, phase2 recovery predicate) moved verbatim to the capped sibling
+# `dispatch_policy.rs`, lowering the frozen baseline 4243 -> 4074 (-169).
+"src/services/discord/mod.rs" = 4074
 # #3305: the local-only pass-through lifecycle-skip (kind hoist + note-only return
 # branch + idle-loop skip) is offset by comment dedup in the same root, lowering the
 # frozen baseline 5438 -> 5429 (-9). Locks in the shrink win (#3028 ratchet).

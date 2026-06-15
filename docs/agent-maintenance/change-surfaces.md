@@ -1233,8 +1233,10 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   execution are the canonical scheduled JS routine surfaces. Split focused
   helper modules before growing these files again.
 - `src/services/platform/binary_resolver.rs` (1221).
-- `src/services/discord/mod.rs` (now 4243 prod LoC after #3479 item-2 extracted
-  the catch-up subsystem verbatim to `discord/catch_up.rs`; 4965; +34 from #3019 added the
+- `src/services/discord/mod.rs` (now 4074 prod LoC after #3479 item-2 extracted
+  the dispatch-policy cluster verbatim to `discord/dispatch_policy.rs` (-169) on
+  top of the earlier catch-up subsystem extraction to `discord/catch_up.rs`;
+  4965; +34 from #3019 added the
   single-authority `increment_global_active` helper + doc mirroring the
   existing decrement helper — offset by removing 6 inline raw `fetch_add`
   blocks across the relay turn-start sites that now route through it; +12 from
