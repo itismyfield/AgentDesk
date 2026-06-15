@@ -178,13 +178,19 @@ pub async fn complete_issue_announcement_pg(
     let title = event.title.as_deref().unwrap_or(&row.title);
     let content = render_completed_card(title, &row, &event);
     let log_key = format!("issue_announcement:{}:{}", event.repo, event.issue_number);
-    let edit_result = edit_announcement_with_legacy_fallback(
-        &row.channel_id,
-        &row.message_id,
-        &content,
-        &log_key,
-    )
-    .await;
+    let edit_result = match crate::credential::read_bot_token("notify") {
+        Some(token) => send_issue_announcement_message(
+            &token,
+            &row.channel_id,
+            Some(&row.message_id),
+            &content,
+            &log_key,
+            "completed",
+        )
+        .await
+        .map_err(|error| error.to_string()),
+        None => Err("no notify bot token configured".to_string()),
+    };
 
     match edit_result {
         Ok(_) => {
@@ -238,79 +244,6 @@ pub async fn complete_issue_announcement_pg(
             Err(error)
         }
     }
-}
-
-/// Edits an existing issue-announcement message, falling back to the
-/// legacy `announce` token when the message was authored by announce-bot
-/// before the #1448 follow-up moved announcements to `notify`.
-///
-/// Fallback triggers (the announce-only deployment shape is the legacy
-/// reality we have to support during the cutover window):
-/// - `notify` token is not configured (deployment hasn't seeded notify yet)
-/// - `notify` PATCH returns Discord 50005 (cross-bot edit on a message
-///   authored by announce-bot)
-/// - `notify` PATCH returns Discord 50001 or HTTP 403 (notify bot doesn't
-///   yet have access to the legacy announcement channel)
-///
-/// Once all legacy announce-authored rows have closed and notify-bot has
-/// permissions on every announcement channel, both this fallback and the
-/// matching `is_legacy_announce_issue_card` gate in `mod.rs` can be
-/// removed (sunset target 2026-06-01).
-async fn edit_announcement_with_legacy_fallback(
-    channel_id: &str,
-    message_id: &str,
-    content: &str,
-    log_key: &str,
-) -> Result<String, String> {
-    let notify_token = crate::credential::read_bot_token("notify");
-    if let Some(token) = notify_token.as_deref() {
-        match send_issue_announcement_message(
-            token,
-            channel_id,
-            Some(message_id),
-            content,
-            log_key,
-            "completed",
-        )
-        .await
-        {
-            Ok(id) => return Ok(id),
-            Err(error) if should_try_legacy_announce_fallback(&error) => {
-                tracing::info!(
-                    target: "issue_announcements",
-                    "{log_key}: notify edit failed with `{error}`, retrying with announce token"
-                );
-            }
-            Err(error) => return Err(error.to_string()),
-        }
-    }
-    let Some(announce_token) = crate::credential::read_bot_token("announce") else {
-        return Err(if notify_token.is_some() {
-            "notify edit failed and no announce bot token configured for legacy fallback"
-                .to_string()
-        } else {
-            "no notify or announce bot token configured".to_string()
-        });
-    };
-    send_issue_announcement_message(
-        &announce_token,
-        channel_id,
-        Some(message_id),
-        content,
-        log_key,
-        "completed-legacy-fallback",
-    )
-    .await
-    .map_err(|error| error.to_string())
-}
-
-/// Decides whether a notify-side PATCH failure should trigger the
-/// announce-token fallback. The classifier intentionally uses Discord's
-/// typed JSON error code plus HTTP status instead of matching localized or
-/// formatting-sensitive message text.
-fn should_try_legacy_announce_fallback(error: &IssueAnnouncementDeliveryError) -> bool {
-    matches!(error.discord_error_code, Some(50005 | 50001))
-        || error.http_status == Some(reqwest::StatusCode::FORBIDDEN)
 }
 
 async fn resolve_announcement_channel_pg(
@@ -540,39 +473,5 @@ mod tests {
 
         assert!(rendered.contains("✅ **#1331 완료** — Lifecycle"));
         assert!(rendered.contains("> 머지: PR #1410 https://github.com/owner/repo/pull/1410"));
-    }
-
-    #[test]
-    fn legacy_fallback_classifier_uses_typed_http_status_and_discord_code() {
-        let cross_bot = IssueAnnouncementDeliveryError {
-            detail: "cannot edit message".to_string(),
-            http_status: Some(reqwest::StatusCode::BAD_REQUEST),
-            discord_error_code: Some(50005),
-        };
-        assert!(should_try_legacy_announce_fallback(&cross_bot));
-
-        let missing_access = IssueAnnouncementDeliveryError {
-            detail: "missing access".to_string(),
-            http_status: Some(reqwest::StatusCode::BAD_REQUEST),
-            discord_error_code: Some(50001),
-        };
-        assert!(should_try_legacy_announce_fallback(&missing_access));
-
-        let forbidden = IssueAnnouncementDeliveryError {
-            detail: "localized forbidden text".to_string(),
-            http_status: Some(reqwest::StatusCode::FORBIDDEN),
-            discord_error_code: None,
-        };
-        assert!(should_try_legacy_announce_fallback(&forbidden));
-    }
-
-    #[test]
-    fn legacy_fallback_classifier_ignores_detail_text_without_typed_signal() {
-        let string_only = IssueAnnouncementDeliveryError {
-            detail: "Discord 50005 cannot edit a message authored by another user".to_string(),
-            http_status: Some(reqwest::StatusCode::BAD_REQUEST),
-            discord_error_code: None,
-        };
-        assert!(!should_try_legacy_announce_fallback(&string_only));
     }
 }
