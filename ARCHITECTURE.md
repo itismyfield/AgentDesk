@@ -570,6 +570,7 @@ src/
 │   │   ├── agent_handoff.rs
 │   │   ├── agentdesk_config.rs
 │   │   ├── answer_flush_barrier.rs
+│   │   ├── catch_up.rs
 │   │   ├── discord_io.rs
 │   │   ├── formatting.rs
 │   │   ├── gateway.rs
