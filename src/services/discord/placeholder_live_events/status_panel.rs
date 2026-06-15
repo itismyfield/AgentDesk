@@ -13,9 +13,10 @@ use super::session_panel::{SessionPanelSnapshot, render_session_panel_line};
 use super::status_events::{is_schedule_wakeup_tool, parse_eta_secs};
 use super::subagent_summary::render_subagent_done_summary;
 use super::task_panel::{
-    TaskPanelSnapshot, TaskToolSlot, finish_background_task_tool_slot, render_task_panel_line,
-    render_task_tool_slot, take_slot_ordinal, task_tool_slot_is_unfinished_background,
-    upsert_background_task_tool_slot, upsert_task_tool_slot,
+    TaskPanelSnapshot, TaskToolSlot, finish_background_task_tool_slot,
+    force_abort_stuck_background_task_slots, render_task_panel_line, render_task_tool_slot,
+    take_slot_ordinal, task_tool_slot_is_unfinished_background, upsert_background_task_tool_slot,
+    upsert_task_tool_slot,
 };
 use super::workflow_panel::{
     WorkflowAgentSlot, WorkflowSlot, render_workflow_slot, trim_workflow_slot, trim_workflows,
@@ -34,9 +35,8 @@ pub(super) struct SubagentSlot {
     /// #3086: TUI-parity accounting from the finishing `SubagentEnd`; drives the
     /// `Done (N tools · M tokens · Xs)` summary on the render line.
     summary: Option<SubagentSummary>,
-    /// `true` when launched with `run_in_background`. Its immediate Task result is
-    /// only a launch ack (slot keeps running), so an ack-only `SubagentEnd` must
-    /// NOT mark it ✓ — only a genuine completion finalizes it.
+    /// `true` when launched with `run_in_background`: an ack-only `SubagentEnd`
+    /// must NOT mark it ✓ (only a genuine completion finalizes it).
     background: bool,
     /// #3391: monotonic, never-reused per-entry slot id (mirrors
     /// `TaskToolSlot::ordinal`) backing slot-identity subagent eviction.
@@ -94,24 +94,30 @@ pub(super) struct StatusPanelState {
     pub(super) tasks: Vec<TaskToolSlot>,
     pub(super) subagents: Vec<SubagentSlot>,
     pub(super) workflows: Vec<WorkflowSlot>,
-    // #3391: only-advancing counter minting never-reused task/subagent ordinals.
-    next_slot_ordinal: u64,
+    next_slot_ordinal: u64, // #3391: advancing, never-reused task/subagent ordinals.
+    // #3477 item 3: instant the turn entered `Completed` (None until then); vs the
+    // store's `last_recent_event_at` it gates the late-batch 🖥️ Recent freshness.
+    pub(super) completed_at: Option<std::time::Instant>,
 }
 
 impl StatusPanelState {
     /// #3087: on a true session boundary (provider session id delta), clears the
-    /// per-session content slots (subagents/tasks/todos/workflows) and resets the
-    /// status to `Running`, PRESERVING context/token usage + session snapshots and
-    /// the ordinal counter (never cleared).
+    /// per-session content slots and resets status to `Running`, PRESERVING
+    /// context/token usage + session snapshots and the ordinal counter.
     pub(super) fn reset_session_content(&mut self) {
         self.status = DerivedStatus::Running;
         self.todos.clear();
         self.tasks.clear();
         self.subagents.clear();
         self.workflows.clear();
+        self.completed_at = None; // #3477 item 3: drop the stale freshness gate.
     }
 
     pub(super) fn reset_turn_content_preserving_unfinished_footer_residuals(&mut self) -> bool {
+        // #3473: turn-boundary reconciliation — force a TTL-expired stuck
+        // background task to `aborted` BEFORE the retain filter so it is dropped
+        // here instead of sitting ⏳ forever.
+        force_abort_stuck_background_task_slots(&mut self.tasks, std::time::Instant::now());
         let tasks = self
             .tasks
             .iter()
@@ -213,18 +219,16 @@ impl StatusPanelState {
                 summary,
                 ack_only,
             } => {
-                // #3084: close the slot whose Task tool-use id matches the result
-                // (pairs a long-running subagent to its own result among
-                // parallels); fall back to first-unfinished only without an id.
+                // #3084: close the id-matching slot (pairs a long-running subagent
+                // to its own result among parallels); else first-unfinished.
                 let id = tool_use_id.as_deref();
                 let matched = id.and_then(|id| {
                     self.subagents.iter().rposition(|slot| {
                         slot.finished.is_none() && slot.tool_use_id.as_deref() == Some(id)
                     })
                 });
-                // #3086 P1 / #3359: a summary- OR id-bearing ack-only end is safe
-                // only on an exact id match (else mis-marks a running/background
-                // subagent); id-less legacy acks may close only id-less slots.
+                // #3086 P1 / #3359: a summary/id-bearing ack-only end is safe only
+                // on an exact id match; id-less legacy acks close only id-less slots.
                 let has_summary = summary.as_ref().is_some_and(|s| !s.is_empty());
                 let target = match matched {
                     Some(index) => Some(index),
@@ -241,15 +245,13 @@ impl StatusPanelState {
                 };
                 let slot = target.map(|index| &mut self.subagents[index]);
                 if let Some(slot) = slot {
-                    // A background ack-only end is just a launch ack (the slot
-                    // keeps running), so skip finalizing it; a genuine completion
-                    // (`ack_only == false`) and any foreground end still close it.
+                    // A background ack-only end is just a launch ack (slot keeps
+                    // running); a genuine/foreground end still closes it.
                     let finalize = !(ack_only && slot.background);
                     if finalize {
                         slot.finished = Some(success);
                     }
-                    // #3086: attach the TUI-parity Done summary, only when the
-                    // event carries accounting (don't wipe a richer one).
+                    // #3086: attach Done summary only when accounting present.
                     if let Some(summary) = summary.filter(|summary| !summary.is_empty()) {
                         slot.summary = Some(summary);
                     }
@@ -388,6 +390,8 @@ impl StatusPanelState {
                 self.status = DerivedStatus::Completed {
                     kind: CompletedKind::from_background(background),
                 };
+                // #3477 item 3: stamp the late-batch freshness gate.
+                self.completed_at = Some(std::time::Instant::now());
             }
             StatusEvent::Heartbeat => {
                 if matches!(self.status, DerivedStatus::Running) {
@@ -398,8 +402,7 @@ impl StatusPanelState {
     }
 
     /// #3204/#3198: routes a running subagent's live step onto its slot's recent
-    /// line. Prefers the UNFINISHED id-matching slot; an id-bearing no-match is
-    /// dropped (never mis-routed/resurrected).
+    /// line (UNFINISHED id-matching slot; id-bearing no-match dropped).
     fn set_subagent_activity(&mut self, tool_use_id: Option<String>, summary: String) {
         let id = tool_use_id.as_deref();
         let target = self.subagents.iter_mut().rev().find(|slot| {
@@ -443,6 +446,9 @@ pub(super) fn render_status_panel(
     provider: &ProviderKind,
     started_at_unix: i64,
     _heartbeat_at_unix: i64,
+    // #3477 item 3: live batch arrived AFTER `completed_at` → a Completed turn
+    // keeps 🖥️ Recent (late batch not blanked; stale idle block still dropped).
+    live_content_fresh: bool,
 ) -> String {
     let header_status = if matches!(provider, ProviderKind::Codex)
         && matches!(snapshot.status, DerivedStatus::SubagentRunning { .. })
@@ -490,6 +496,23 @@ pub(super) fn render_status_panel(
         sections.push(format!("Plan\n{}", lines.join("\n")));
     }
 
+    // #3477 item 4: 🖥️ Recent renders BEFORE Tasks/Subagents/Workflow (top
+    // signal + shielded from the trailing-section footer-budget drop — item 3).
+    let cluster_config = &crate::config::load_graceful().cluster;
+    let recent_header = render_recent_section_header(
+        snapshot.task.as_ref(),
+        cluster_config.enabled,
+        cluster_config.instance_id.as_deref(),
+    );
+    // #3394 self-contained fenced section (overflow drops it whole). #3477 item 3:
+    // a Completed turn suppresses it only when stale; a fresh late batch shows.
+    let completed = matches!(header_status, DerivedStatus::Completed { .. });
+    if (!completed || live_content_fresh)
+        && let Some(block) = live_block.filter(|block| !block.trim().is_empty())
+    {
+        sections.push(format!("{recent_header}\n{block}"));
+    }
+
     if !snapshot.tasks.is_empty() {
         let lines = snapshot
             .tasks
@@ -498,8 +521,7 @@ pub(super) fn render_status_panel(
             .take(STATUS_PANEL_TASK_LIMIT)
             .map(render_task_tool_slot)
             .collect::<Vec<_>>();
-        // #3404: cap completed entries so they cannot starve the 600-byte footer.
-        let lines = compact_live_panel_terminal_lines(&lines).map_or(lines, |(out, _)| out);
+        let lines = compact_live_panel_terminal_lines(&lines).map_or(lines, |(out, _)| out); // #3404 cap
         sections.push(format!("Tasks\n{}", lines.join("\n")));
     }
 
@@ -511,8 +533,7 @@ pub(super) fn render_status_panel(
             .take(STATUS_PANEL_SUBAGENT_LIMIT)
             .map(render_subagent_slot)
             .collect::<Vec<_>>();
-        // #3404: cap completed entries so the running Subagents stay visible.
-        let lines = compact_live_panel_terminal_lines(&lines).map_or(lines, |(out, _)| out);
+        let lines = compact_live_panel_terminal_lines(&lines).map_or(lines, |(out, _)| out); // #3404 cap
         sections.push(format!("Subagents\n{}", lines.join("\n")));
     }
 
@@ -529,21 +550,6 @@ pub(super) fn render_status_panel(
         }
     }
 
-    let cluster_config = &crate::config::load_graceful().cluster;
-    let cluster_enabled = cluster_config.enabled;
-    let local_instance_id = cluster_config.instance_id.clone();
-    let recent_header = render_recent_section_header(
-        snapshot.task.as_ref(),
-        cluster_enabled,
-        local_instance_id.as_deref(),
-    );
-    // #3394: append the fence-balanced Recent block as a trailing section so the
-    // protected truncation path drops it whole on overflow (never chops its ```).
-    if !matches!(header_status, DerivedStatus::Completed { .. })
-        && let Some(block) = live_block.filter(|block| !block.trim().is_empty())
-    {
-        sections.push(format!("{recent_header}\n{block}"));
-    }
     truncate_status_panel_sections(sections)
 }
 
@@ -551,12 +557,10 @@ fn join_status_panel_sections(sections: &[String]) -> String {
     sections.join("\n\n")
 }
 
-/// #3394: section-wise degradation. A blind char cut of the JOINED panel chops
-/// the trailing fenced section's closing ``` and Discord renders the dangling
-/// fence as literal text. So when the join overflows, DROP whole sections from
-/// the END (Recent first) — never cut inside one; only a lone surviving section
-/// that alone overflows is fence-safe-truncated. The shared `repair_fence_parity`
-/// backstop re-balances every return path.
+/// #3394: section-wise degradation. A char cut of the JOINED panel chops a
+/// trailing fenced section's ``` (rendered as literal text), so on overflow DROP
+/// whole trailing sections; a lone overflowing section is fence-safe-truncated and
+/// `repair_fence_parity` re-balances every return path.
 pub(super) fn truncate_status_panel_sections(mut sections: Vec<String>) -> String {
     use crate::services::discord::single_message_panel::repair_fence_parity;
     while sections.len() > 1
@@ -641,8 +645,7 @@ pub(super) fn render_subagent_slot(slot: &SubagentSlot) -> String {
         line.push_str(" — ");
         line.push_str(&escape_status_panel_markdown(&normalize_summary(recent)));
     }
-    // #3086: append the TUI-parity Done summary on finished slots that carry
-    // accounting (`Done (N tools · M tokens · Xs)`).
+    // #3086: append the TUI-parity Done summary on finished slots with accounting.
     if let Some(summary) = slot
         .summary
         .as_ref()
@@ -653,8 +656,7 @@ pub(super) fn render_subagent_slot(slot: &SubagentSlot) -> String {
         line.push_str(" — ");
         line.push_str(&done);
     }
-    // #3391: reserve marker width then append so a finished line always ENDS WITH
-    // its ✓/✗ (a long desc/summary can no longer swallow it).
+    // #3391: reserve marker width so a finished line always ENDS WITH its ✓/✗.
     match slot.terminal_marker() {
         Some(marker) => truncate_chars_with_marker(&line, marker, EVENT_LINE_MAX_CHARS),
         None => truncate_chars(&line, EVENT_LINE_MAX_CHARS),

@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::Mutex;
+use std::time::Instant;
 
 use poise::serenity_prelude::ChannelId;
 use serde_json::Value;
@@ -68,6 +69,12 @@ pub(in crate::services::discord) use status_events::status_events_from_json;
 pub(in crate::services::discord) struct PlaceholderLiveEvents {
     by_channel: dashmap::DashMap<ChannelId, Mutex<VecDeque<RecentPlaceholderEvent>>>,
     status_by_channel: dashmap::DashMap<ChannelId, Mutex<StatusPanelState>>,
+    // #3477 item 3: monotonic timestamp of the most recent live (Recent/terminal)
+    // event push per channel. Compared against the turn's `completed_at` so a
+    // late output batch that lands AFTER `TurnCompleted` still keeps the 🖥️ Recent
+    // block visible (the completion suppression only hides STALE pre-completion
+    // content, never a fresh late batch).
+    last_recent_event_at: dashmap::DashMap<ChannelId, Instant>,
     // #3404 (codex r1): last logged live-panel compaction counts per channel —
     // the INFO line fires on count CHANGE only, not every render tick, so the
     // log stays usable as a compaction event counter for the relay scan.
@@ -86,6 +93,7 @@ impl PlaceholderLiveEvents {
         self.by_channel.remove(&channel_id);
         self.status_by_channel.remove(&channel_id);
         self.compaction_log_counts.remove(&channel_id);
+        self.last_recent_event_at.remove(&channel_id);
     }
 
     pub(in crate::services::discord) fn clear_channel_preserving_footer_residuals(
@@ -93,6 +101,9 @@ impl PlaceholderLiveEvents {
         channel_id: ChannelId,
     ) {
         self.by_channel.remove(&channel_id);
+        // #3477 item 3: the recent-event ring is gone, so its freshness stamp is
+        // stale — drop it with the ring so the next turn starts un-fresh.
+        self.last_recent_event_at.remove(&channel_id);
         // #3404 (codex r2): a turn reset starts a new compaction episode — re-arm
         // the count-change log gate even when footer residuals survive.
         self.compaction_log_counts.remove(&channel_id);
@@ -126,6 +137,11 @@ impl PlaceholderLiveEvents {
             guard.pop_front();
         }
         guard.push_back(event);
+        drop(guard);
+        // #3477 item 3: stamp the live-content arrival so a render after
+        // `TurnCompleted` can tell a fresh late batch (keep 🖥️ Recent) from a
+        // stale pre-completion block (suppress on a genuinely idle completed turn).
+        self.last_recent_event_at.insert(channel_id, Instant::now());
     }
 
     pub(in crate::services::discord) fn push_many<I>(&self, channel_id: ChannelId, events: I)
@@ -469,12 +485,23 @@ impl PlaceholderLiveEvents {
                 "#3404: compacted delivered terminal slots from the live status panel"
             );
         }
+        // #3477 item 3: a live batch counts as "fresh" when it arrived strictly
+        // after the turn's completion instant. `None` completed_at means the turn
+        // never completed (still running), so any present live content is fresh.
+        let live_content_fresh = match snapshot.completed_at {
+            Some(completed_at) => self
+                .last_recent_event_at
+                .get(&channel_id)
+                .is_some_and(|stamp| *stamp.value() > completed_at),
+            None => true,
+        };
         render_status_panel(
             snapshot,
             self.render_block(channel_id),
             provider,
             started_at_unix,
             heartbeat_at_unix,
+            live_content_fresh,
         )
     }
 

@@ -3,8 +3,8 @@ use serde_json::Value;
 use super::super::formatting::format_tool_input;
 use super::common::{
     EVENT_BLOCK_MAX_CHARS, EVENT_LINE_MAX_CHARS, EVENT_RENDER_LIMIT, first_content_line,
-    is_harness_task_tool_name, is_internal_tool_error, normalize_summary, sanitize_for_code_fence,
-    tool_prefix, truncate_chars, value_to_compact_string,
+    is_harness_task_tool_name, is_internal_tool_error, normalize_summary_multiline,
+    sanitize_for_code_fence, tool_prefix, truncate_chars, value_to_compact_string,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,7 +61,10 @@ impl RecentPlaceholderEvent {
     }
 
     fn new(prefix: impl Into<String>, summary: impl AsRef<str>) -> Option<Self> {
-        let summary = normalize_summary(summary.as_ref());
+        // #3477 item 1: keep up to RECENT_EVENT_MAX_LINES so multi-line TUI output
+        // stays readable in the Recent/terminal block (panel cells still collapse
+        // to one line via `normalize_summary`).
+        let summary = normalize_summary_multiline(summary.as_ref());
         if summary.is_empty() {
             return None;
         }
@@ -72,9 +75,26 @@ impl RecentPlaceholderEvent {
     }
 
     pub(super) fn render_line(&self) -> String {
-        let raw = format!("{} {}", self.prefix, self.summary);
-        let sanitized = sanitize_for_code_fence(raw.trim());
-        truncate_chars(&sanitized, EVENT_LINE_MAX_CHARS)
+        // #3477 item 1: the summary may span several lines. Put the prefix on the
+        // first line and indent the continuation lines so the entry stays visually
+        // grouped inside the fenced block. Each line is sanitized (fence-safe) and
+        // char-clamped individually so one long line cannot blow the budget.
+        let mut lines = self.summary.lines();
+        let first = lines.next().unwrap_or("");
+        let head = truncate_chars(
+            &sanitize_for_code_fence(format!("{} {first}", self.prefix).trim()),
+            EVENT_LINE_MAX_CHARS,
+        );
+        let mut out = head;
+        for cont in lines {
+            let cont = truncate_chars(&sanitize_for_code_fence(cont.trim()), EVENT_LINE_MAX_CHARS);
+            if cont.is_empty() {
+                continue;
+            }
+            out.push_str("\n  ");
+            out.push_str(&cont);
+        }
+        out
     }
 }
 

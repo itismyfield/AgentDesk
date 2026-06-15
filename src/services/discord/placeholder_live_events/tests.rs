@@ -5716,3 +5716,307 @@ fn compaction_log_gate_fires_on_change_only() {
         "turn reset re-arms the gate without an interleaved zero render"
     );
 }
+
+// ===========================================================================
+// #3477 / #3473 — live panel terminal block reorder/blank/multiline + TTL.
+// ===========================================================================
+
+// #3477 item 4: the 🖥️ Recent/terminal block renders BEFORE the Tasks and
+// Subagents sections (it is the most useful at-a-glance signal and, ahead of the
+// bulky sections, is also protected from trailing-section budget drops).
+#[test]
+fn status_panel_recent_block_renders_before_tasks_and_subagents() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_477_001);
+    // A running background task (Tasks section) and a running subagent.
+    events.push_status_event(
+        channel_id,
+        StatusEvent::BackgroundTaskStart {
+            name: "Bash".to_string(),
+            summary: "long build".to_string(),
+            tool_use_id: "bg-1".to_string(),
+        },
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("Explore".to_string()),
+            desc: Some("scan repo".to_string()),
+            tool_use_id: Some("sa-1".to_string()),
+            background: false,
+        },
+    );
+    // A live Recent event.
+    events.push_event(
+        channel_id,
+        RecentPlaceholderEvent::tool_use("Read", &json!({"file_path": "/tmp/x.rs"}).to_string())
+            .unwrap(),
+    );
+
+    let rendered = events.render_status_panel_with_heartbeat(
+        channel_id,
+        &ProviderKind::Claude,
+        1_700_000_000,
+        1_700_000_005,
+    );
+    let recent_at = rendered.find("🖥️ Recent").expect("recent present");
+    let tasks_at = rendered.find("Tasks").expect("tasks present");
+    let subagents_at = rendered.find("Subagents").expect("subagents present");
+    assert!(
+        recent_at < tasks_at,
+        "Recent must precede Tasks: {rendered}"
+    );
+    assert!(
+        recent_at < subagents_at,
+        "Recent must precede Subagents: {rendered}"
+    );
+}
+
+// #3477 item 3: a live output batch that lands AFTER TurnCompleted keeps the
+// 🖥️ Recent block visible (the late batch is not blanked), while a genuinely idle
+// completed turn (no fresh content) still drops its stale block.
+#[test]
+fn status_panel_late_batch_after_completion_keeps_recent_block() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_477_002);
+
+    // Stale pre-completion content, then completion: must be suppressed.
+    events.push_event(
+        channel_id,
+        RecentPlaceholderEvent::tool_use("Bash", &json!({"command": "echo stale"}).to_string())
+            .unwrap(),
+    );
+    events.push_status_event(channel_id, StatusEvent::TurnCompleted { background: false });
+    let idle_completed = events.render_status_panel_with_heartbeat(
+        channel_id,
+        &ProviderKind::Claude,
+        1_700_000_000,
+        1_700_000_010,
+    );
+    assert!(
+        !idle_completed.contains("🖥️ Recent"),
+        "stale block on a genuinely idle completed turn must be dropped: {idle_completed}"
+    );
+
+    // A late output batch arrives AFTER completion: must keep showing Recent.
+    events.push_event(
+        channel_id,
+        RecentPlaceholderEvent::tool_use(
+            "Bash",
+            &json!({"command": "echo LATE_BATCH"}).to_string(),
+        )
+        .unwrap(),
+    );
+    let late = events.render_status_panel_with_heartbeat(
+        channel_id,
+        &ProviderKind::Claude,
+        1_700_000_000,
+        1_700_000_011,
+    );
+    assert!(
+        late.contains("🖥️ Recent"),
+        "a fresh late batch racing TurnCompleted must not be blanked: {late}"
+    );
+    assert!(
+        late.contains("LATE_BATCH"),
+        "late content must render: {late}"
+    );
+}
+
+// #3477 item 1: multi-line tool output stays readable in the Recent/terminal
+// block (multiple lines preserved) instead of collapsing to one run-on line.
+#[test]
+fn recent_block_preserves_multiline_tool_output() {
+    let multiline =
+        "error[E0308]: mismatched types\n  expected `u64`, found `i64`\n  at src/main.rs:10";
+    let event = RecentPlaceholderEvent::tool_error(multiline).expect("event");
+    let rendered = event.render_line();
+    let line_count = rendered.lines().count();
+    assert!(
+        line_count >= 2,
+        "multi-line output must keep multiple lines, got {line_count}: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("E0308"),
+        "first line preserved: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("expected"),
+        "continuation line preserved: {rendered:?}"
+    );
+}
+
+// #3477 item 1: the compact single-line panel cells (Tasks/Subagents) stay
+// one-line — `normalize_summary` (first line only) is unchanged.
+#[test]
+fn normalize_summary_stays_single_line_for_panel_cells() {
+    let collapsed = super::common::normalize_summary("first line\nsecond line\nthird");
+    assert!(
+        !collapsed.contains('\n'),
+        "panel cell must stay single-line: {collapsed:?}"
+    );
+    assert_eq!(collapsed, "first line");
+}
+
+// #3477 item 1: the task-card summary preserves newlines (Discord renders
+// multi-line bold), while still neutralizing the ``` fence hazard.
+#[test]
+fn task_card_summary_preserves_newlines() {
+    let card = super::super::tui_task_card::format_task_notification_card(
+        &super::super::tui_task_card::TaskNotification {
+            status: Some("completed".to_string()),
+            summary: Some("line one\nline two\n```danger```".to_string()),
+            ..Default::default()
+        },
+        1,
+    );
+    assert!(
+        card.contains("line one\nline two"),
+        "newlines preserved: {card}"
+    );
+    assert!(
+        !card.contains("```danger```"),
+        "fence hazard escaped: {card}"
+    );
+}
+
+// #3473: a background task slot stuck past the TTL is force-aborted at the turn
+// boundary so it renders ✗ and is evicted (dropped) — it no longer sits ⏳
+// forever; a fresh slot in the same turn is untouched (normal completion path).
+#[test]
+fn stuck_background_task_slot_force_aborted_at_turn_boundary() {
+    use super::task_panel::{STUCK_BACKGROUND_TASK_TTL, force_abort_stuck_background_task_slots};
+
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_473_001);
+    // A stuck slot whose terminal notification never arrives.
+    events.push_status_event(
+        channel_id,
+        StatusEvent::BackgroundTaskStart {
+            name: "Bash".to_string(),
+            summary: "stuck job".to_string(),
+            tool_use_id: "stuck-1".to_string(),
+        },
+    );
+    // A second, fresh background slot started "now".
+    events.push_status_event(
+        channel_id,
+        StatusEvent::BackgroundTaskStart {
+            name: "Bash".to_string(),
+            summary: "fresh job".to_string(),
+            tool_use_id: "fresh-1".to_string(),
+        },
+    );
+    // Back-date the first slot's creation past the TTL.
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let mut guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let stale_at = std::time::Instant::now()
+            .checked_sub(STUCK_BACKGROUND_TASK_TTL + std::time::Duration::from_secs(60))
+            .expect("monotonic clock far enough past origin");
+        let stuck = guard
+            .tasks
+            .iter_mut()
+            .find(|slot| slot.tool_use_id.as_deref() == Some("stuck-1"))
+            .expect("stuck slot");
+        stuck.created_at = stale_at;
+        // The direct helper aborts exactly the stale slot, not the fresh one.
+        let aborted =
+            force_abort_stuck_background_task_slots(&mut guard.tasks, std::time::Instant::now());
+        assert_eq!(aborted, 1, "only the stale slot is aborted");
+        assert_eq!(
+            guard
+                .tasks
+                .iter()
+                .find(|slot| slot.tool_use_id.as_deref() == Some("stuck-1"))
+                .and_then(|slot| slot.status.as_deref()),
+            Some("aborted")
+        );
+        assert!(
+            guard
+                .tasks
+                .iter()
+                .find(|slot| slot.tool_use_id.as_deref() == Some("fresh-1"))
+                .map(|slot| slot.status.is_none())
+                .unwrap_or(false),
+            "fresh slot must stay in progress"
+        );
+    }
+}
+
+// #3473: the turn-boundary reconciliation (the production call site) drops the
+// stuck slot — it is no longer retained as an unfinished-background residual —
+// while a fresh background slot survives as a residual.
+#[test]
+fn stuck_background_task_slot_dropped_on_turn_boundary_reconciliation() {
+    use super::task_panel::STUCK_BACKGROUND_TASK_TTL;
+
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_473_002);
+    events.push_status_event(
+        channel_id,
+        StatusEvent::BackgroundTaskStart {
+            name: "Bash".to_string(),
+            summary: "stuck job".to_string(),
+            tool_use_id: "stuck-2".to_string(),
+        },
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::BackgroundTaskStart {
+            name: "Bash".to_string(),
+            summary: "fresh job".to_string(),
+            tool_use_id: "fresh-2".to_string(),
+        },
+    );
+    {
+        let entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let mut guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let stale_at = std::time::Instant::now()
+            .checked_sub(STUCK_BACKGROUND_TASK_TTL + std::time::Duration::from_secs(60))
+            .expect("monotonic clock far enough past origin");
+        guard
+            .tasks
+            .iter_mut()
+            .find(|slot| slot.tool_use_id.as_deref() == Some("stuck-2"))
+            .expect("stuck slot")
+            .created_at = stale_at;
+    }
+
+    // Turn boundary: the production reconciliation site.
+    events.clear_channel_preserving_footer_residuals(channel_id);
+
+    let entry = events
+        .status_by_channel
+        .get(&channel_id)
+        .expect("residual state survives because the fresh slot is preserved");
+    let guard = entry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(
+        guard
+            .tasks
+            .iter()
+            .all(|slot| slot.tool_use_id.as_deref() != Some("stuck-2")),
+        "stuck slot must be dropped at the turn boundary: {:?}",
+        guard.tasks
+    );
+    assert!(
+        guard
+            .tasks
+            .iter()
+            .any(|slot| slot.tool_use_id.as_deref() == Some("fresh-2")),
+        "fresh background slot must survive as a residual: {:?}",
+        guard.tasks
+    );
+}
