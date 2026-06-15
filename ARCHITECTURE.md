@@ -508,6 +508,7 @@ src/
 │   │   │   ├── panel_decisions.rs
 │   │   │   ├── placeholder_reclaim.rs
 │   │   │   ├── prompt_observe.rs
+│   │   │   ├── provider_session_persistence.rs
 │   │   │   ├── session_bound_ack.rs
 │   │   │   ├── session_bound_ack_tests.rs
 │   │   │   ├── single_message_footer.rs

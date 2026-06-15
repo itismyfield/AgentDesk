@@ -153,8 +153,12 @@
     (retained for a later phase, not the live watcher path after the R2 revert);
     -1 from #3038 S4 after routing the placeholder/status-panel cluster
     through `shared.ui`; still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (7022 production lines after #3479
-    item-2 moved the orphan status-panel cleanup cluster
+  - `src/services/discord/tmux_watcher.rs` (6939 production lines after #3479
+    item-2 moved the provider-session persistence cluster
+    (`resolve_persistable_provider_session_id`,
+    `persist_watcher_provider_session_id`) verbatim into the `tmux_watcher/`
+    child module `provider_session_persistence.rs` (~101);
+    was 7022 after #3479 item-2 moved the orphan status-panel cleanup cluster
     (`cleanup_orphan_external_input_status_panel`,
     `complete_watcher_status_panel_v2`,
     `refresh_watcher_session_panel_from_lifecycle`) verbatim into the
