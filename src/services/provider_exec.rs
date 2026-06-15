@@ -1,8 +1,8 @@
 //! One-shot provider dispatch (#1100 boundary doc).
 //!
 //! This module is the single execution dispatch point for short-lived,
-//! prompt-in / text-out provider invocations: `execute_simple`,
-//! `execute_simple_with_timeout`, and `execute_structured`. It owns the
+//! prompt-in / text-out provider invocations: `execute_simple_with_timeout`
+//! and `execute_structured`. It owns the
 //! `ProviderKind` → provider-specific helper match, timeout/cancel wiring, and
 //! the small `collect_stream_result` helper.
 //!
@@ -30,12 +30,6 @@ use crate::services::process::kill_pid_tree;
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::provider_cli::ProviderExecutionContext;
 use crate::services::{claude, codex, gemini, opencode, qwen};
-
-pub async fn execute_simple(provider: ProviderKind, prompt: String) -> Result<String, String> {
-    tokio::task::spawn_blocking(move || execute_simple_blocking(provider, prompt, None, None))
-        .await
-        .map_err(|e| format!("Task join error: {}", e))?
-}
 
 pub async fn execute_simple_with_timeout(
     provider: ProviderKind,

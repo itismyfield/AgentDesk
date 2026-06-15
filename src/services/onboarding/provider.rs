@@ -12,6 +12,9 @@ use serde_json::json;
 use crate::services::provider::ProviderKind;
 use crate::services::provider_exec;
 
+const DEFAULT_PROMPT_GENERATION_TIMEOUT_SECS: u64 = 30;
+const OPENCODE_PROMPT_GENERATION_TIMEOUT_SECS: u64 = 90;
+
 // ── Provider Check ──────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -136,13 +139,19 @@ pub async fn generate_prompt(body: GeneratePromptBody) -> (StatusCode, Json<serd
         body.name, body.description
     );
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        provider_exec::execute_simple(provider, instruction),
+    let timeout_secs = match provider {
+        ProviderKind::OpenCode => OPENCODE_PROMPT_GENERATION_TIMEOUT_SECS,
+        _ => DEFAULT_PROMPT_GENERATION_TIMEOUT_SECS,
+    };
+    let result = provider_exec::execute_simple_with_timeout(
+        provider,
+        instruction,
+        std::time::Duration::from_secs(timeout_secs),
+        "onboarding prompt generation".to_string(),
     )
     .await;
 
-    if let Ok(Ok(text)) = result {
+    if let Ok(text) = result {
         if !text.trim().is_empty() {
             return (
                 StatusCode::OK,
