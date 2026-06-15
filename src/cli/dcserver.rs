@@ -1042,11 +1042,28 @@ fn raise_fd_soft_limit(desired: u64) {
         }
         let hard = lim.rlim_max;
         // rlim_max can be RLIM_INFINITY; cap the request at `desired` either way.
-        let target = if hard == libc::RLIM_INFINITY {
+        let hard_capped = if hard == libc::RLIM_INFINITY {
             desired as libc::rlim_t
         } else {
             std::cmp::min(desired as libc::rlim_t, hard)
         };
+        // macOS rejects setrlimit(RLIMIT_NOFILE) with EINVAL when the requested
+        // soft limit exceeds the kernel per-process ceiling (OPEN_MAX, surfaced
+        // via sysconf(_SC_OPEN_MAX), itself derived from kern.maxfilesperproc).
+        // A tmux-inherited soft=256 with an "unlimited" hard limit would push
+        // target=16384 past that ceiling and silently leave the limit at 256.
+        // Clamp to the kernel cap so the raise actually takes effect.
+        #[cfg(target_os = "macos")]
+        let target = {
+            let open_max = libc::sysconf(libc::_SC_OPEN_MAX);
+            if open_max > 0 {
+                std::cmp::min(hard_capped, open_max as libc::rlim_t)
+            } else {
+                hard_capped
+            }
+        };
+        #[cfg(not(target_os = "macos"))]
+        let target = hard_capped;
         if lim.rlim_cur >= target {
             return; // already at or above target
         }

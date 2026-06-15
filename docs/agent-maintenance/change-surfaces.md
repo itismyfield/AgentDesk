@@ -8,7 +8,24 @@
 > [`docs/generated/giant-file-registry.md`](../generated/giant-file-registry.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-06-13 (against #3358 round 2 — synthetic-inflight carry-forward now gated on same-generation evidence: `tmux.rs` re-exports the new `committed_frontier_for_current_generation` reader from `tmux_session_files.rs`, which pairs the per-channel committed watermark with the `.generation` mtime wrapper-identity signal so a stale pre-restart frontier cannot clamp a freshly-reset synthetic forward — the content-skip guard; `tui_prompt_relay.rs::synthetic_start_offset_carry_forward` now takes `Option<u64>` where `None` means no clamp. On top of #3089 completion-footer slice — `tmux.rs` suppression exposure tests strip completion-only footer blocks so internal turns still delete cleanly; generated inventory includes `placeholder_live_events/completion_footer.rs`; on top of #3038 run_bot S5 closing pass).
+> Last refreshed: 2026-06-15 (against `main` @ `9594a4d94`).
+>
+> PR #3456 dcserver-robustness: freeze counts re-synced after the reconcile
+> row-allocation churn reduction (`src/reconcile.rs` now 1816 prod lines) and the
+> OpenCode poisoned-lock recovery (`src/services/opencode.rs` now 1886 prod
+> lines); no new logic added to either giant file, the line deltas are
+> bugfix-only. On top of #3358 round 2 — synthetic-inflight carry-forward now
+> gated on same-generation evidence: `tmux.rs` re-exports the new
+> `committed_frontier_for_current_generation` reader from `tmux_session_files.rs`,
+> which pairs the per-channel committed watermark with the `.generation` mtime
+> wrapper-identity signal so a stale pre-restart frontier cannot clamp a
+> freshly-reset synthetic forward — the content-skip guard;
+> `tui_prompt_relay.rs::synthetic_start_offset_carry_forward` now takes
+> `Option<u64>` where `None` means no clamp. On top of #3089 completion-footer
+> slice — `tmux.rs` suppression exposure tests strip completion-only footer
+> blocks so internal turns still delete cleanly; generated inventory includes
+> `placeholder_live_events/completion_footer.rs`; on top of #3038 run_bot S5
+> closing pass.
 
 ## Read This First
 
@@ -963,7 +980,7 @@
   - `src/server/mod.rs` (2430 lines).
   - `src/receipt.rs` (1842 lines).
   - `src/github/sync.rs` (1488 lines).
-  - `src/reconcile.rs` (1821 lines; periodic reconcile loop covering stale
+  - `src/reconcile.rs` (1816 lines; periodic reconcile loop covering stale
     inflights, orphan uploads, dispatched-session drift, and queue-review
     drift — split before adding non-bugfix behavior).
 - active_callsite_coverage: n/a.
@@ -1040,7 +1057,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   behavior.
 - `src/services/claude.rs` (2948), `src/services/gemini.rs` (1358),
   `src/services/qwen.rs` (2196), `src/services/codex.rs` (3011),
-  `src/services/opencode.rs` (1881), `src/services/provider.rs` (1818) —
+  `src/services/opencode.rs` (1886), `src/services/provider.rs` (1818) —
   provider adapters. (#3034 removed dead non-cancel `execute_command_simple*`
   twins from the claude/codex/gemini adapters and a superseded
   `select_counterpart_from` from provider. #3263 added the Codex max-of-cache

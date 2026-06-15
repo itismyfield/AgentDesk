@@ -2134,7 +2134,7 @@ mod dispatch_delivery_reconcile_tests {
             classify_delivery_kv_guard_mismatches(
                 &mut stats,
                 &mut mismatches,
-                &DeliveryKvGuardRow {
+                DeliveryKvGuardRow {
                     dispatch_id: format!("dispatch-completed-{status}"),
                     reserving_count: 0,
                     notified_count: 1,
@@ -2155,7 +2155,7 @@ mod dispatch_delivery_reconcile_tests {
             classify_delivery_typed_guard_mismatches(
                 &mut typed_stats,
                 &mut typed_mismatches,
-                &DeliveryTypedGuardRow {
+                DeliveryTypedGuardRow {
                     dispatch_id: format!("dispatch-guardless-{status}"),
                     typed_status: status.to_string(),
                     reserved_until: None,

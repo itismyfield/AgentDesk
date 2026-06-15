@@ -4,7 +4,14 @@
 > moving any AgentDesk runtime, worker, dispatch, provider, MCP, merge, or test
 > execution path from one dcserver node to multiple nodes.
 >
-> Last refreshed: 2026-06-12 (against #3038 run_bot S5 closing pass).
+> Last refreshed: 2026-06-15 (against `main` @ `9594a4d94`).
+>
+> PR #3456 made the `src/server/worker_registry.rs` worker-lifecycle log fields
+> consistent: every started / stopped / future-exited / self-fenced /
+> supervisor-shutdown tracing event now emits the same structured spec fields
+> (stage, order, restart, shutdown, owner, health, responsibility, notes), so
+> failover/observability correlation across nodes no longer depends on which
+> lifecycle edge logged it.
 
 ## Read This First
 
