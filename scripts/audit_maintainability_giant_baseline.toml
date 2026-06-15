@@ -89,7 +89,17 @@
 # resolve_bridge_owner_channel) + their tests into the new sibling
 # `turn_bridge/cancel_finalize_policy.rs` (re-exported, so call sites stay
 # byte-identical). Locks in the shrink win (ratchet down only).
-"src/services/discord/turn_bridge/mod.rs" = 6702
+# #3479 Phase-1 rank-4: lowered 6702 -> 6535 (-167) by moving the pure
+# streaming-edit-text + pre-submission/transport TUI prompt-error classifiers
+# (build_turn_bridge_streaming_edit_text, bridge_pre_submission_tui_prompt_error,
+# bridge_tui_transport_error_should_skip_quiescence) into the new sibling
+# `turn_bridge/streaming_edit_text.rs`, and the watcher-orphan spinner-cleanup
+# decision + retry-spawn helpers (should_delete_bridge_created_watcher_orphan_response,
+# should_retry_watcher_orphan_spinner_cleanup, record_watcher_orphan_spinner_cleanup,
+# spawn_watcher_orphan_spinner_cleanup_retry) into
+# `turn_bridge/watcher_orphan_cleanup.rs` (both re-exported, call sites
+# byte-identical). Locks in the shrink win (ratchet down only).
+"src/services/discord/turn_bridge/mod.rs" = 6535
 # #3038 turn_bridge S1 child modules, frozen at landed production LoC.
 "src/services/discord/turn_bridge/headless_delivery.rs" = 415
 "src/services/discord/turn_bridge/status_panel.rs" = 437

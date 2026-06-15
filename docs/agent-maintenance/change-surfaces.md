@@ -801,7 +801,7 @@
     stop-token/tmux binding runtime + PID-exit observation helper (#2426),
     split before adding non-bugfix behavior. #3169: added the
     claude-anonymous-teardown SIGINT suppression guard (death #3)).
-  - `src/services/discord/turn_bridge/mod.rs` (6702 prod lines; the BRIDGE
+  - `src/services/discord/turn_bridge/mod.rs` (6535 prod lines; the BRIDGE
     spawn/turn-lifecycle surface — `spawn_turn_bridge` and the per-channel
     turn loop. Registered giant-file (#3038 decompose target — see
     `giant-file-registry.md`, owner `discord-relay`, deadline 2026-08-31).
@@ -819,6 +819,11 @@
     #3479 Phase-1 rank-3 lowered the root 6811 -> 6702 by moving the pure,
     unit-tested cancel/finalize decision helpers into the sibling
     `cancel_finalize_policy.rs` (re-exported, call sites byte-identical).
+    #3479 Phase-1 rank-4 lowered the root 6702 -> 6535 by moving the pure
+    streaming-edit-text + pre-submission/transport TUI prompt-error classifiers
+    into `streaming_edit_text.rs` and the watcher-orphan spinner-cleanup
+    decision + retry-spawn helpers into `watcher_orphan_cleanup.rs` (both
+    re-exported, call sites byte-identical).
     Hotfile — bugfix only outside the #3038 decompose plan).
   - `src/services/discord/turn_bridge/cancel_finalize_policy.rs` (131 prod
     lines; pure cancel/finalize-policy decisions extracted from `mod.rs` by
@@ -827,6 +832,22 @@
     `should_suppress_headless_delivery_for_cancel`,
     `should_record_final_turn_transcript`, `resolve_bridge_owner_channel` +
     their tests. No IO/async; not a giant-file).
+  - `src/services/discord/turn_bridge/streaming_edit_text.rs` (88 prod lines;
+    pure streaming-edit text + pre-submission/transport TUI prompt-error
+    classifiers extracted from `mod.rs` by #3479 rank-4:
+    `build_turn_bridge_streaming_edit_text`,
+    `bridge_pre_submission_tui_prompt_error`,
+    `bridge_tui_transport_error_should_skip_quiescence` + their tests. No
+    IO/async; not a giant-file).
+  - `src/services/discord/turn_bridge/watcher_orphan_cleanup.rs` (119 prod
+    lines; watcher-orphan spinner-cleanup decision + retry-spawn helpers
+    extracted from `mod.rs` by #3479 rank-4:
+    `should_delete_bridge_created_watcher_orphan_response`,
+    `should_retry_watcher_orphan_spinner_cleanup`,
+    `record_watcher_orphan_spinner_cleanup`,
+    `spawn_watcher_orphan_spinner_cleanup_retry` + their tests. The retry-spawn
+    routes through `task_supervisor`/`placeholder_cleanup` and takes all deps by
+    value; not a giant-file).
   - `src/services/discord/turn_bridge/completion_guard.rs` (1834 lines).
   - `src/services/discord/turn_bridge/tmux_runtime.rs` (1545 lines).
   - `src/services/discord/turn_bridge/terminal_delivery.rs` (604 prod lines;

@@ -530,13 +530,15 @@ src/
 │   │   │   ├── stale_resume.rs
 │   │   │   ├── status_panel.rs
 │   │   │   ├── status_panel_tests.rs
+│   │   │   ├── streaming_edit_text.rs
 │   │   │   ├── terminal_controller_cutover.rs
 │   │   │   ├── terminal_delivery.rs
 │   │   │   ├── tmux_runtime.rs
 │   │   │   ├── turn_analytics.rs
 │   │   │   ├── voice_completion.rs
 │   │   │   ├── voice_completion_tests.rs
-│   │   │   └── watcher_handoff.rs
+│   │   │   ├── watcher_handoff.rs
+│   │   │   └── watcher_orphan_cleanup.rs
 │   │   ├── turn_finalizer/
 │   │   │   └── cleanup.rs
 │   │   ├── voice_barge_in/
