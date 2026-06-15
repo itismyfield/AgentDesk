@@ -1,0 +1,318 @@
+//! #3479 rank-5: pure injected-prompt classification + formatting policy.
+//!
+//! Behavior-preserving extraction of the self-contained classifier/parser
+//! cluster from the `tui_prompt_relay` parent module. Every item here is pure
+//! (no `shared.`/`http.`/async-IO coupling, no module-private static state);
+//! the stateful dedupe/bridge helpers that drive these classifiers stay in the
+//! parent. Items are `pub(super)` and re-imported by the parent via
+//! `use self::injected_prompt_policy::{...}`, so call sites are unchanged.
+
+use super::*;
+
+// #3075: `strip_terminal_controls` and the ASCII `truncate_chars` are shared
+// with the task-card renderer; the single definitions live in `tui_task_card`
+// so the classifier, formatters, and card parser stay in sync. The parent's
+// glob (`use super::*`) does not re-export these `use`-imported names, so the
+// child module imports them directly to keep the moved bodies byte-identical.
+use super::super::tui_task_card::{
+    strip_terminal_controls, truncate_chars_ascii as truncate_chars,
+};
+
+/// Classification of TUI-injected prompt text. Each class drives different
+/// lifecycle handling: human/task turns get active-turn ownership, continuation
+/// banners stay passive, and slash-control echoes use command-kind rendering.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum InjectedPromptClass {
+    HumanTuiDirect,
+    TaskNotificationEvent,
+    SystemContinuation,
+    SlashCommandControl,
+}
+
+impl InjectedPromptClass {
+    /// Whether this class represents a human-driven active turn that should
+    /// receive a `⏳` reaction and claim queue/inflight ownership.
+    pub(super) fn is_human_active_turn(self) -> bool {
+        matches!(self, InjectedPromptClass::HumanTuiDirect)
+    }
+
+    /// Only continuation banners suppress the active-turn lifecycle. Slash
+    /// control echoes are not human turns, but keep the full synthetic lifecycle.
+    pub(super) fn suppresses_user_turn_lifecycle(self) -> bool {
+        matches!(self, InjectedPromptClass::SystemContinuation)
+    }
+
+    /// Every injected class still delivers provider output via the bridge tail.
+    pub(super) fn still_delivers_assistant_output(self) -> bool {
+        true
+    }
+}
+
+/// Pure classifier for injected TUI prompt text. Order is load-bearing:
+/// continuation banners win before task notifications and slash-control echoes.
+pub(super) fn classify_injected_prompt(prompt: &str) -> InjectedPromptClass {
+    if is_system_continuation_prompt(prompt) {
+        InjectedPromptClass::SystemContinuation
+    } else if is_task_notification_prompt(prompt) {
+        InjectedPromptClass::TaskNotificationEvent
+    } else if is_slash_command_control_prompt(prompt) {
+        InjectedPromptClass::SlashCommandControl
+    } else {
+        InjectedPromptClass::HumanTuiDirect
+    }
+}
+
+/// Detects machine slash-control echoes, start-anchored after terminal controls,
+/// SSH-direct wrapper, and one complete leading local-command caveat.
+pub(super) fn is_slash_command_control_prompt(prompt: &str) -> bool {
+    let (normalized, peeled_caveat) = normalize_slash_command_control_prompt(prompt);
+    if peeled_caveat && normalized.is_empty() {
+        return true;
+    }
+    if normalized.starts_with("<command-message>")
+        || normalized.starts_with("<command-name>")
+        || normalized.starts_with("<local-command-stdout>Compacted")
+        || normalized.starts_with("/loop ")
+    {
+        return true;
+    }
+    // Raw `/compact` echo: match the whole slash-token only — the next char must
+    // be whitespace or end-of-string, so neither an embedded quote nor
+    // "/compactfoo" trips it. The bare no-arg "/compact" (EOS) is allowed.
+    if let Some(rest) = normalized.strip_prefix("/compact") {
+        return rest.is_empty() || rest.starts_with(char::is_whitespace);
+    }
+    false
+}
+
+pub(super) fn normalize_slash_command_control_prompt(prompt: &str) -> (String, bool) {
+    let normalized = strip_terminal_controls(prompt);
+    let normalized = normalized.trim_start();
+    let normalized = strip_leading_injection_wrapper(normalized);
+    let normalized = normalized.trim_start();
+    let (normalized, peeled_caveat) = strip_leading_local_command_caveat(normalized);
+    (normalized.trim_start().to_string(), peeled_caveat)
+}
+
+pub(super) fn strip_leading_local_command_caveat(text: &str) -> (&str, bool) {
+    const OPEN: &str = "<local-command-caveat>";
+    const CLOSE: &str = "</local-command-caveat>";
+    if !text.starts_with(OPEN) {
+        return (text, false);
+    }
+    let Some(end) = text.find(CLOSE) else {
+        return (text, false);
+    };
+    (&text[end + CLOSE.len()..], true)
+}
+
+/// Detects the `<task-notification>` auto-turn tag injected by Claude Code /
+/// Codex when a background task reaches a terminal state. Deliberately
+/// CONTAINS-based: the CARD render must fire even for a human prompt that quotes
+/// a notification (it is still classified + rendered, never lost). The terminal
+/// BRIDGE uses the stricter `is_start_anchored_task_notification` instead.
+pub(super) fn is_task_notification_prompt(prompt: &str) -> bool {
+    let trimmed = prompt.trim_start();
+    // Skip a leading terminal-control prefix some injectors prepend before the
+    // tag (strip_terminal_controls is applied for display, not classification).
+    let normalized = strip_terminal_controls(trimmed);
+    let normalized = normalized.trim_start();
+    normalized.contains("<task-notification>") || normalized.contains("<task-notification ")
+}
+
+/// #3393 finding 2: START-ANCHORED gate for the live-panel terminal BRIDGE only.
+/// A REAL machine `<task-notification>` user-record begins with the tag after the
+/// shared normalization pipeline (strip_terminal_controls → trim →
+/// strip_leading_injection_wrapper → trim, mirroring #3100/#3388). A human direct
+/// prompt that merely QUOTES a notification mid-message keeps its CARD render (the
+/// contains-based classifier) but must NOT push terminal StatusEvents — combined
+/// with finding 1's id requirement this closes the false-close attack where a
+/// quoted live tool-use-id would otherwise finalize a real running slot.
+pub(super) fn is_start_anchored_task_notification(prompt: &str) -> bool {
+    let normalized = strip_terminal_controls(prompt);
+    let normalized = normalized.trim_start();
+    let normalized = strip_leading_injection_wrapper(normalized);
+    let normalized = normalized.trim_start();
+    normalized.starts_with("<task-notification>") || normalized.starts_with("<task-notification ")
+}
+
+/// Detects start-anchored compact/session-continuation banners.
+pub(super) fn is_system_continuation_prompt(prompt: &str) -> bool {
+    let normalized = strip_terminal_controls(prompt);
+    let normalized = normalized.trim_start();
+    let normalized = strip_leading_injection_wrapper(normalized);
+    let normalized = normalized.trim_start();
+    const SYSTEM_CONTINUATION_OPENINGS: &[&str] = &[
+        "This session is being continued from a previous conversation",
+        "Please continue the conversation from where we left it off",
+    ];
+    SYSTEM_CONTINUATION_OPENINGS
+        .iter()
+        .any(|opening| normalized.starts_with(opening))
+}
+
+/// Removes a leading SSH-direct wrapper line/fence; mid-body quotes are untouched.
+pub(super) fn strip_leading_injection_wrapper(text: &str) -> &str {
+    const WRAPPER_MARKER: &str = "터미널에 직접 주입된 입력";
+    if !text.starts_with(WRAPPER_MARKER) {
+        return text;
+    }
+    let Some(after_wrapper_line) = text.find('\n').map(|idx| &text[idx + 1..]) else {
+        return text;
+    };
+    let trimmed = after_wrapper_line.trim_start_matches(['\r', '\n']);
+    if let Some(rest) = trimmed.strip_prefix("```") {
+        if let Some(idx) = rest.find('\n') {
+            return &rest[idx + 1..];
+        }
+        return after_wrapper_line;
+    }
+    after_wrapper_line
+}
+
+pub(super) fn format_ssh_direct_prompt_notification(
+    _provider: &str,
+    tmux_session_name: &str,
+    prompt: &str,
+) -> String {
+    let prompt = strip_terminal_controls(prompt);
+    let preview =
+        truncate_chars(prompt.trim(), SSH_DIRECT_PROMPT_PREVIEW_LIMIT).replace("```", "` ` `");
+    format!(
+        "터미널에 직접 주입된 입력 (tmux : `{}`):\n```text\n{}\n```",
+        sanitize_inline_code(tmux_session_name),
+        preview,
+    )
+}
+
+/// Canonical command kind for slash-control dedupe and kind-only notes.
+pub(super) fn slash_command_control_kind(prompt: &str) -> String {
+    let (normalized, _peeled_caveat) = normalize_slash_command_control_prompt(prompt);
+    if let Some(after) = normalized
+        .find("<command-name>")
+        .map(|idx| &normalized[idx + "<command-name>".len()..])
+    {
+        let name = after.split('<').next().unwrap_or("").trim();
+        let name = name.split_whitespace().next().unwrap_or("");
+        if !name.is_empty() {
+            return name.to_string();
+        }
+    }
+    if normalized.starts_with("/loop ") || normalized.starts_with("/loop\t") {
+        return "/loop".to_string();
+    }
+    if let Some(rest) = normalized.strip_prefix("/compact") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return "/compact".to_string();
+        }
+    }
+    if normalized.starts_with("<local-command-stdout>Compacted") {
+        return "/compact".to_string();
+    }
+    if normalized.starts_with('/') {
+        let name = normalized.split_whitespace().next().unwrap_or("");
+        if name.len() > 1 {
+            return name.to_string();
+        }
+    }
+    "slash".to_string()
+}
+
+/// Kind-only slash-control note; `/loop` may include its directive body.
+pub(super) fn format_slash_command_control_note(
+    tmux_session_name: &str,
+    kind: &str,
+    raw_prompt: &str,
+) -> String {
+    let label = match kind {
+        "/loop" => "🔁 자동 점검(/loop)",
+        "/compact" => "🧹 컨텍스트 정리(/compact)",
+        _ => "⚙️ 머신 슬래시 명령",
+    };
+    let header = format!(
+        "{} (tmux : `{}`) — 시스템 주입 (활성 턴 아님)",
+        label,
+        sanitize_inline_code(tmux_session_name),
+    );
+    if kind == "/loop" {
+        if let Some(body) = extract_loop_body(raw_prompt) {
+            let preview = truncate_chars(body.trim(), SSH_DIRECT_PROMPT_PREVIEW_LIMIT)
+                .replace("```", "` ` `");
+            if !preview.is_empty() {
+                return format!("{header}:\n```text\n{preview}\n```");
+            }
+        }
+    }
+    header
+}
+
+pub(super) fn slash_command_control_prompt_is_caveat_only(prompt: &str) -> bool {
+    let (normalized, peeled_caveat) = normalize_slash_command_control_prompt(prompt);
+    peeled_caveat && normalized.is_empty()
+}
+
+/// Pull the human-facing `/loop` directive body from raw echo or command args.
+pub(super) fn extract_loop_body(prompt: &str) -> Option<String> {
+    let normalized = strip_terminal_controls(prompt);
+    let normalized = normalized.trim_start();
+    let normalized = strip_leading_injection_wrapper(normalized);
+    let normalized = normalized.trim_start();
+    if let Some(start) = normalized.find("<command-args>") {
+        let after = &normalized[start + "<command-args>".len()..];
+        if let Some((body, _rest)) = after.split_once("</command-args>") {
+            let body = body.trim();
+            if !body.is_empty() {
+                return Some(body.to_string());
+            }
+        }
+    }
+    for prefix in ["/loop ", "/loop\t"] {
+        if let Some(rest) = normalized.strip_prefix(prefix) {
+            let body = rest.trim();
+            if !body.is_empty() {
+                return Some(body.to_string());
+            }
+        }
+    }
+    None
+}
+
+pub(super) fn should_suppress_local_only_kind_note_after_continuation(
+    kind: &str,
+    last_continuation_at: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    if !matches!(kind, "/compact" | "slash") {
+        return false;
+    }
+    last_continuation_at.is_some_and(|rendered_at| {
+        now.checked_duration_since(rendered_at)
+            .is_none_or(|age| age < COMPACT_REPLAY_KIND_NOTE_SUPPRESSION_WINDOW)
+    })
+}
+
+pub(super) fn format_system_continuation_note(tmux_session_name: &str, prompt: &str) -> String {
+    let prompt = strip_terminal_controls(prompt);
+    let omitted_chars = format_count_with_commas(prompt.trim().chars().count());
+    format!(
+        "🧩 세션 컨텍스트 이어가기 (tmux : `{}`) — 시스템 주입 (활성 턴 아님) (요약 {}자 생략 — 채널 기록과 동일 내용)",
+        sanitize_inline_code(tmux_session_name),
+        omitted_chars,
+    )
+}
+
+pub(super) fn format_count_with_commas(count: usize) -> String {
+    let digits = count.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (idx, ch) in digits.chars().enumerate() {
+        if idx > 0 && (digits.len() - idx) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+pub(super) fn sanitize_inline_code(value: &str) -> String {
+    value.replace('`', "'")
+}

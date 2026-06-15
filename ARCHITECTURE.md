@@ -512,6 +512,8 @@ src/
 │   │   │   ├── deferred_claim.rs
 │   │   │   ├── mod.rs
 │   │   │   └── store.rs
+│   │   ├── tui_prompt_relay/
+│   │   │   └── injected_prompt_policy.rs
 │   │   ├── turn_bridge/
 │   │   │   ├── cancel_finalize_policy.rs
 │   │   │   ├── completion_guard.rs

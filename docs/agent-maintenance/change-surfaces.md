@@ -480,7 +480,7 @@
     namespace cap, with the moved unit tests in sibling `supervisor_relay_tests.rs`
     / `session_bound_ack_tests.rs`. The giant ratchet baseline was lowered
     8223 -> 7485 to lock in the shrink (zero logic change).
-  - `src/services/discord/tui_prompt_relay.rs` (5429 production lines; #3296
+  - `src/services/discord/tui_prompt_relay.rs` (5142 production lines; #3296
     codex r1+r2: the ABORT cleanup hook pins the foreign prior inflight's
     identity — the live row at the record instant, or the worker's LAST-VIEW
     identity when that row just vanished — and persists the marker via
@@ -665,7 +665,29 @@
     command) is OFF the allow-list and keeps the full #3178 lifecycle (fail-safe
     allow-list; an anti-drift test pins the list to the `ClaudeSlashPassthrough`
     variant set). Comment dedup in the same root offsets the new lines, lowering
-    the frozen baseline 5438 -> 5429 (-9, locks in the win).
+    the frozen baseline 5438 -> 5429 (-9, locks in the win). #3479 rank-5
+    (behavior-preserving extraction): the pure injected-prompt
+    classification/formatting cluster (`InjectedPromptClass` + its 3 predicates,
+    `classify_injected_prompt`, the `is_*_prompt` / `is_start_anchored_*`
+    classifiers, the `strip_leading_*` / `normalize_*` parsers,
+    `slash_command_control_kind`, the `format_ssh_direct_prompt_notification` /
+    `format_slash_command_control_note` / `format_system_continuation_note`
+    formatters + their `extract_loop_body` / `format_count_with_commas` /
+    `sanitize_inline_code` / `should_suppress_local_only_kind_note_after_continuation`
+    helpers) moved verbatim to the capped `tui_prompt_relay/injected_prompt_policy.rs`
+    sibling (318 prod LoC, below the giant threshold); names are re-imported via
+    `use self::injected_prompt_policy::{…}` so call sites stay byte-identical and
+    the stateful dedupe/bridge helpers (`slash_command_control_turn_is_first_sighting`,
+    `record_system_continuation_note_rendered`,
+    `local_only_kind_note_suppressed_by_recent_continuation`,
+    `bridge_task_notification_to_live_panel`, `is_local_only_slash_command_prompt`)
+    plus all `#[cfg(test)]` coverage stay in this root. Frozen baseline 5434 -> 5142
+    (-292, locks in the shrink; zero logic change).
+  - `src/services/discord/tui_prompt_relay/injected_prompt_policy.rs` (318 prod
+    lines; #3479 rank-5: pure injected-prompt classification + formatting policy
+    extracted verbatim from `tui_prompt_relay.rs` — no `shared.`/`http.`/async-IO
+    coupling, all items `pub(super)` and re-imported by the parent; below the
+    giant-file threshold).
   - `src/services/discord/idle_recap.rs` (1319 prod lines; idle-recap card
     compose/post/clear surface, registered giant-file (#3036) — bugfix only
     outside an extraction plan. Crossed 1000 prod LoC with #3146 Part 1: the

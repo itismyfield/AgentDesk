@@ -120,7 +120,11 @@
 # frozen baseline 5438 -> 5429 (-9). Locks in the shrink win (#3028 ratchet).
 # windows-tmux cfg fix (#3461): +5 prod LoC for the `#[cfg(not(unix))]`
 # committed-frontier carry-forward fallback (cross-platform compile). 5429 -> 5434.
-"src/services/discord/tui_prompt_relay.rs" = 5434
+# #3479 rank-5 (behavior-preserving extraction): the pure injected-prompt
+# classification/formatting cluster moved verbatim to the capped sibling
+# `tui_prompt_relay/injected_prompt_policy.rs` (318 prod LoC). Lowers the frozen
+# baseline 5434 -> 5142 (-292). Locks in the shrink win (zero logic change).
+"src/services/discord/tui_prompt_relay.rs" = 5142
 # #3038: lowered 4728 -> 4657 (-71) as `SensitivityState` (definition + impl)
 # moved to the `voice_sensitivity` sibling module. Locks in the shrink win.
 # #3038 VoiceBargeInRuntime S1: lowered 4657 -> 4350 (-307) as the STT
