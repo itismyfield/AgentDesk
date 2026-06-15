@@ -5,6 +5,11 @@ use super::super::formatting::{canonical_tool_name, redact_sensitive_for_placeho
 pub(super) const CHANNEL_EVENT_CAPACITY: usize = 20;
 pub(super) const EVENT_RENDER_LIMIT: usize = 5;
 pub(super) const EVENT_LINE_MAX_CHARS: usize = 100;
+// #3477 item 1: the 🖥️ Recent/terminal block keeps up to this many readable
+// lines per event instead of collapsing multi-line TUI output to one run-on
+// line. Compact single-line panel cells (Tasks/Subagents) are unaffected — they
+// keep using `normalize_summary` (first line only).
+pub(super) const RECENT_EVENT_MAX_LINES: usize = 4;
 pub(super) const EVENT_BLOCK_MAX_CHARS: usize = 1500;
 // Status panels are sent as plain message content, so they must stay under
 // Discord's 2000-character content ceiling rather than the 4096-char embed limit.
@@ -132,6 +137,29 @@ pub(super) fn normalize_summary(raw: &str) -> String {
     let redacted = redact_sensitive_for_placeholder(raw);
     let line = first_content_line(&redacted);
     truncate_chars(&line, EVENT_LINE_MAX_CHARS)
+}
+
+/// #3477 item 1: multi-line-preserving normalize for the 🖥️ Recent/terminal
+/// block. Unlike `normalize_summary` (first line only — used by the compact
+/// single-line panel cells), this keeps up to `RECENT_EVENT_MAX_LINES` non-empty
+/// lines so multi-line TUI output renders readably instead of collapsing into a
+/// single run-on line. Each kept line is whitespace-collapsed and individually
+/// truncated to `EVENT_LINE_MAX_CHARS`; lines are joined with `\n`. Redaction is
+/// applied before splitting so secrets cannot survive on a later line.
+pub(super) fn normalize_summary_multiline(raw: &str) -> String {
+    let redacted = redact_sensitive_for_placeholder(raw);
+    let mut kept: Vec<String> = Vec::new();
+    for line in redacted.lines() {
+        let collapsed = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if collapsed.is_empty() {
+            continue;
+        }
+        kept.push(truncate_chars(&collapsed, EVENT_LINE_MAX_CHARS));
+        if kept.len() >= RECENT_EVENT_MAX_LINES {
+            break;
+        }
+    }
+    kept.join("\n")
 }
 
 pub(super) fn first_content_line(raw: &str) -> String {

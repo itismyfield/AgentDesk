@@ -6,6 +6,15 @@ use super::common::{
 const DISPATCH_ID_SHORT_LEN: usize = 8;
 const TASK_PANEL_TITLE_MAX_CHARS: usize = 60;
 
+/// #3473: max age a background task footer slot may sit "in progress" before the
+/// turn-boundary reconciliation force-aborts it. A slot whose terminal
+/// notification never arrives (dcserver restart / `/compact` rebinds tool ids)
+/// would otherwise render its spinner forever. 30 minutes comfortably exceeds any
+/// legitimate background job's silent stretch while still bounding the stuck-slot
+/// lifetime to one turn boundary past the TTL.
+pub(super) const STUCK_BACKGROUND_TASK_TTL: std::time::Duration =
+    std::time::Duration::from_secs(30 * 60);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct TaskPanelSnapshot {
     pub(super) dispatch_id: String,
@@ -96,6 +105,10 @@ pub(super) struct TaskToolSlot {
     /// reused. Backs slot-identity eviction so two slots that render the same
     /// terminal line stay distinct (string-identity eviction collided them).
     pub(super) ordinal: u64,
+    /// #3473: monotonic creation instant, set at upsert. The turn-boundary
+    /// reconciliation force-aborts a background slot older than
+    /// `STUCK_BACKGROUND_TASK_TTL` whose terminal notification never arrived.
+    pub(super) created_at: std::time::Instant,
 }
 
 pub(super) fn clean_task_tool_value(raw: impl AsRef<str>) -> Option<String> {
@@ -138,6 +151,7 @@ pub(super) fn upsert_task_tool_slot(
         tool_use_id: None,
         background: false,
         ordinal: take_slot_ordinal(next_ordinal),
+        created_at: std::time::Instant::now(),
     });
     trim_task_tool_slots(slots);
 }
@@ -171,6 +185,7 @@ pub(super) fn upsert_background_task_tool_slot(
         tool_use_id: Some(tool_use_id),
         background: true,
         ordinal: take_slot_ordinal(next_ordinal),
+        created_at: std::time::Instant::now(),
     });
     trim_task_tool_slots(slots);
 }
@@ -273,6 +288,29 @@ pub(super) fn task_tool_terminal_marker(status: Option<&str>) -> Option<&'static
 
 pub(super) fn task_tool_slot_is_unfinished_background(slot: &TaskToolSlot) -> bool {
     slot.background && task_tool_terminal_marker(slot.status.as_deref()).is_none()
+}
+
+/// #3473: at a turn boundary, force any background task slot that is still
+/// unfinished AND older than `STUCK_BACKGROUND_TASK_TTL` to a terminal `aborted`
+/// status. Its terminal notification never arrived (dcserver restart / `/compact`
+/// rebinds tool ids), so it would otherwise render ⏳ forever; marking it terminal
+/// makes it render ✗ and become eligible for delivered-terminal eviction on the
+/// next ack cycle. Returns the number of slots reconciled (for observability).
+/// `now` is injected so the reconciliation is unit-testable.
+pub(super) fn force_abort_stuck_background_task_slots(
+    slots: &mut [TaskToolSlot],
+    now: std::time::Instant,
+) -> usize {
+    let mut aborted = 0usize;
+    for slot in slots.iter_mut() {
+        if task_tool_slot_is_unfinished_background(slot)
+            && now.saturating_duration_since(slot.created_at) >= STUCK_BACKGROUND_TASK_TTL
+        {
+            slot.status = Some("aborted".to_string());
+            aborted += 1;
+        }
+    }
+    aborted
 }
 
 /// #3391: a task slot carries a terminal mark (✓/✗) iff its status maps to one.

@@ -259,7 +259,11 @@ pub(super) fn format_task_notification_card(note: &TaskNotification, update_coun
     let mut lines = vec![header];
 
     if let Some(summary) = note.summary.as_deref().filter(|s| !s.is_empty()) {
-        lines.push(format!("**{}**", sanitize_oneline(summary)));
+        // #3477 item 1: preserve the summary's newlines so multi-line task
+        // summaries stay readable (Discord renders multi-line bold fine). Still
+        // escapes the ``` fence hazard. The footer/preview slots below keep using
+        // `sanitize_oneline` so they remain compact single-line cells.
+        lines.push(format!("**{}**", sanitize_multiline(summary)));
     }
 
     if let Some(result) = note.result.as_deref().filter(|s| !s.is_empty()) {
@@ -438,6 +442,17 @@ fn sanitize_oneline(value: &str) -> String {
     value
         .replace('\r', " ")
         .replace('\n', " ")
+        .replace("```", "` ` `")
+}
+
+/// #3477 item 1: like `sanitize_oneline` but PRESERVES newlines so multi-line
+/// task summaries render readably (Discord renders multi-line bold fine). Still
+/// neutralizes the ``` code-fence hazard and normalizes lone `\r` to `\n` so the
+/// platform never sees a bare carriage return.
+fn sanitize_multiline(value: &str) -> String {
+    value
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
         .replace("```", "` ` `")
 }
 
