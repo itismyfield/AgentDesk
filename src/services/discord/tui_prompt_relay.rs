@@ -5716,15 +5716,26 @@ mod tests {
         assert!(!is_local_only_slash_command_prompt(
             "/compactX do the thing"
         ));
-        // An UNLISTED command's wrapper — `/model` is a SlashCommandControl but is
-        // NOT on the allow-list, so lifecycle is preserved (fail-safe default).
+        // An UNLISTED command's wrapper — `/loop` is a SlashCommandControl but is
+        // NOT on the allow-list (it starts a model turn), so lifecycle is preserved
+        // (fail-safe default).
+        let loop_wrapper =
+            "<command-message>x</command-message>\n<command-name>/loop</command-name>";
+        assert!(matches!(
+            classify_injected_prompt(loop_wrapper),
+            InjectedPromptClass::SlashCommandControl
+        ));
+        assert!(!is_local_only_slash_command_prompt(loop_wrapper));
+        // #3500: `/model` IS a SlashCommandControl AND local-only (Claude-native,
+        // changes the model with no model turn) — lifecycle is SKIPPED so it does
+        // not strand a synthetic inflight that queues the next real message.
         let model_wrapper =
             "<command-message>x</command-message>\n<command-name>/model</command-name>";
         assert!(matches!(
             classify_injected_prompt(model_wrapper),
             InjectedPromptClass::SlashCommandControl
         ));
-        assert!(!is_local_only_slash_command_prompt(model_wrapper));
+        assert!(is_local_only_slash_command_prompt(model_wrapper));
     }
 
     // #3178: the machine slash-command control trigger now resolves to a stable

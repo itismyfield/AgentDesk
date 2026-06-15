@@ -131,10 +131,27 @@ impl ClaudeSlashPassthrough {
 pub(in crate::services::discord) const LOCAL_ONLY_SLASH_COMMANDS: [&str; 4] =
     ["/effort", "/compact", "/cost", "/context"];
 
-/// #3305: whether `kind` (a canonical `slash_command_control_kind`, e.g. `/compact`)
-/// is a local-completing pass-through command — see [`LOCAL_ONLY_SLASH_COMMANDS`].
+/// #3500: local-completing slash commands that are NOT AgentDesk pass-throughs.
+/// These are Claude-NATIVE commands (e.g. `/model`) the idle relay only OBSERVES
+/// echoed in the pane transcript — they change local state and start NO model
+/// turn, so like [`LOCAL_ONLY_SLASH_COMMANDS`] they must SKIP the turn lifecycle.
+/// Otherwise the post-#3178 "SlashCommandControl == full active turn" rule mints a
+/// synthetic inflight that never finalizes (no model turn to complete it),
+/// stranding the mailbox so the next real message queues — the #3500 bug. They are
+/// intentionally absent from the [`ClaudeSlashPassthrough`] variant set (no
+/// pass-through handler), so they live here rather than in `LOCAL_ONLY_SLASH_COMMANDS`
+/// (which the `local_only_whitelist_matches_passthrough_command_set` anti-drift test
+/// pins to that variant set).
+pub(in crate::services::discord) const OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS: [&str; 1] =
+    ["/model"];
+
+/// #3305/#3500: whether `kind` (a canonical `slash_command_control_kind`, e.g.
+/// `/compact`) is a local-completing command that SKIPS the turn lifecycle — either
+/// an AgentDesk pass-through ([`LOCAL_ONLY_SLASH_COMMANDS`]) or a Claude-native
+/// observation-only command ([`OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS`]).
 pub(in crate::services::discord) fn is_local_only_slash_command_kind(kind: &str) -> bool {
     LOCAL_ONLY_SLASH_COMMANDS.contains(&kind)
+        || OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS.contains(&kind)
 }
 
 fn ultracode_notice() -> &'static str {
@@ -374,6 +391,22 @@ mod tests {
             assert!(is_local_only_slash_command_kind(name));
         }
         assert!(!is_local_only_slash_command_kind("/loop"));
-        assert!(!is_local_only_slash_command_kind("/model"));
+        // #3500: `/model` is local-only (observation-only, Claude-native) but is
+        // intentionally NOT a pass-through variant, so it must stay OUT of
+        // LOCAL_ONLY_SLASH_COMMANDS (the variant-pinned set) — see the dedicated
+        // test below for its local-only behavior.
+        assert!(!LOCAL_ONLY_SLASH_COMMANDS.contains(&"/model"));
+    }
+
+    /// #3500: `/model` (Claude-native model change, no model turn) must be treated
+    /// as local-only so the idle relay SKIPS the turn lifecycle — otherwise it
+    /// strands a synthetic inflight that queues the next real message.
+    #[test]
+    fn model_command_is_observation_only_local() {
+        assert!(is_local_only_slash_command_kind("/model"));
+        assert!(OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS.contains(&"/model"));
+        // Intentionally not a pass-through variant (no handler) → stays out of the
+        // variant-pinned LOCAL_ONLY_SLASH_COMMANDS set.
+        assert!(!LOCAL_ONLY_SLASH_COMMANDS.contains(&"/model"));
     }
 }
