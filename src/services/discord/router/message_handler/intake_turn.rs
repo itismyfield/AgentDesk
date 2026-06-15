@@ -3444,6 +3444,17 @@ pub(in crate::services::discord) async fn handle_text_message(
             .unwrap_or((None, None, None))
     };
     inflight_state.set_worktree_context(worktree_path, worktree_branch, base_commit);
+    // FIX #6 (Codex P2): persist the originating Intervention's follow-up
+    // requeue context so a PRE-submit busy-timeout requeue
+    // (`mailbox_requeue_inflight_for_followup_retry`) can rebuild the retry
+    // Intervention without losing reply context / attachments / voice metadata.
+    inflight_state.set_followup_requeue_context(
+        reply_context.clone(),
+        has_reply_boundary,
+        merge_consecutive,
+        pending_uploads.clone(),
+        voice_announcement.clone(),
+    );
     inflight_state.logical_channel_id = Some(logical_channel_id);
     inflight_state.thread_id = thread_id;
     inflight_state.thread_title = thread_title;

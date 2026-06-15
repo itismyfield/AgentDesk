@@ -3627,27 +3627,32 @@ pub(in crate::services::discord) async fn mailbox_requeue_inflight_for_followup_
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: ChannelId,
-    request_owner_user_id: u64,
-    user_msg_id: u64,
-    user_text: &str,
+    inflight_state: &InflightTurnState,
 ) {
-    if user_msg_id == 0 || user_text.trim().is_empty() {
+    let request_owner_user_id = inflight_state.request_owner_user_id;
+    let user_msg_id = inflight_state.user_msg_id;
+    if user_msg_id == 0 || inflight_state.user_text.trim().is_empty() {
         return;
     }
     let message_id = MessageId::new(user_msg_id);
+    // FIX #6 (Codex P2): rebuild the retry Intervention from the persisted
+    // follow-up requeue context instead of hardcoding empty values, so a
+    // PRE-submit busy-timeout requeue preserves the originating turn's reply
+    // context, attachments, and voice metadata. Legacy rows (pre-v9) default
+    // these to None/empty/false, matching the previous behavior exactly.
     let intervention = Intervention {
         author_id: UserId::new(request_owner_user_id),
         author_is_bot: false,
         message_id,
         source_message_ids: vec![message_id],
-        text: user_text.to_string(),
+        text: inflight_state.user_text.clone(),
         mode: crate::services::turn_orchestrator::InterventionMode::Soft,
         created_at: std::time::Instant::now(),
-        reply_context: None,
-        has_reply_boundary: false,
-        merge_consecutive: false,
-        pending_uploads: Vec::new(),
-        voice_announcement: None,
+        reply_context: inflight_state.followup_reply_context.clone(),
+        has_reply_boundary: inflight_state.followup_has_reply_boundary,
+        merge_consecutive: inflight_state.followup_merge_consecutive,
+        pending_uploads: inflight_state.followup_pending_uploads.clone(),
+        voice_announcement: inflight_state.followup_voice_announcement.clone(),
     };
     let _ = mailbox_enqueue_intervention(shared, provider, channel_id, intervention).await;
 }

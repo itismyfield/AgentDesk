@@ -6491,9 +6491,7 @@ pub(super) fn spawn_turn_bridge(
                             &shared_owned,
                             &provider,
                             channel_id,
-                            inflight_state.request_owner_user_id,
-                            inflight_state.user_msg_id,
-                            &inflight_state.user_text,
+                            &inflight_state,
                         )
                         .await;
                         tracing::info!(

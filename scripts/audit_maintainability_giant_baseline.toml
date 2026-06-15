@@ -137,7 +137,10 @@
 # #3038 S1: +1 (3770 -> 3771) for the mechanical `shared.queued_placeholders` ->
 # `shared.queued.queued_placeholders` re-wire (one extra method-chain line) forced
 # by lifting cluster C into `QueuedPlaceholderState`. Net program-wide: mod.rs -201.
-"src/services/discord/router/message_handler/intake_turn.rs" = 3771
+# FIX #6 (Codex P2): +6 (3771 -> 3777) for the `set_followup_requeue_context`
+# call that persists the originating Intervention's reply/upload/voice context on
+# the follow-up inflight row so a PRE-submit busy-timeout requeue can rebuild it.
+"src/services/discord/router/message_handler/intake_turn.rs" = 3777
 "src/services/discord/meeting_orchestrator.rs" = 3227
 # #3293: +3 for the `registry_purge` child-module declaration (peek +
 # operator-gated idle-entry purge live outside the frozen root); lowered
@@ -184,7 +187,12 @@
 # #3351: +58 for `clear_current_msg_if_matches(_in_root)` — the relay-placeholder
 # compare-and-clear needs the file-private lock/load/persist internals, so it
 # lives here until the inflight split.
-"src/services/discord/inflight.rs" = 2523
+# FIX #6 (Codex P2): +62 (2523 -> 2585) for the five `#[serde(default)]`
+# follow-up requeue context fields on `InflightTurnState` (+ doc comments), the
+# v8->v9 version bump comment, the `set_followup_requeue_context` setter, and the
+# matching defaults in `InflightTurnState::new`, so a PRE-submit busy-timeout
+# requeue rebuilds the retry Intervention without losing reply/upload/voice data.
+"src/services/discord/inflight.rs" = 2585
 # #3038 Phase A: health.rs decomposed into health/ directory modules (root 402
 # prod LoC + 6 sub-1000-LoC submodules) — dropped below the giant threshold, so
 # its ratchet entry is deleted (win; no baseline raises).

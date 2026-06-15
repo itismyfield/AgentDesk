@@ -27,7 +27,17 @@ use crate::services::provider::ProviderKind;
 // `input_fifo_path` alongside ClaudeTui plus the silent-skip recovery branch;
 // old binaries deserialize v8 rows via `#[serde(default)]` (compat window:
 // one release each direction).
-const INFLIGHT_STATE_VERSION: u32 = 8;
+//
+// FIX #6 (Codex P2): bump v8→v9. v9 persists the originating Intervention's
+// follow-up requeue context (`followup_reply_context`,
+// `followup_has_reply_boundary`, `followup_merge_consecutive`,
+// `followup_pending_uploads`, `followup_voice_announcement`) so a follow-up
+// that hit a PRE-submit busy-timeout with requeue enabled can rebuild the
+// retry Intervention faithfully instead of dropping its attachments / reply
+// context / voice metadata. All five fields are `#[serde(default)]`, so v8 rows
+// (and rows written by binaries that pre-date this field) still deserialize and
+// simply yield empty/None — no recovery regression, full compat each direction.
+const INFLIGHT_STATE_VERSION: u32 = 9;
 const INFLIGHT_MAX_AGE_SECS: u64 = 300; // 5 minutes
 const DRAIN_RESTART_MAX_AGE_SECS: u64 = 1800; // 30 minutes
 const HOT_SWAP_HANDOFF_MAX_AGE_SECS: u64 = 900; // 15 minutes
@@ -263,6 +273,31 @@ pub(super) struct InflightTurnState {
     /// `None` for turns with a real `user_msg_id` or legacy rows.
     #[serde(default)]
     pub injected_prompt_message_id: Option<u64>,
+    /// FIX #6 (Codex P2): originating `Intervention::reply_context` for this
+    /// follow-up turn, persisted so a PRE-submit busy-timeout requeue can
+    /// rebuild the retry Intervention without losing the quoted-reply context.
+    /// `#[serde(default)]` → `None` for legacy rows / non-follow-up paths.
+    #[serde(default)]
+    pub followup_reply_context: Option<String>,
+    /// FIX #6: originating `Intervention::has_reply_boundary`. Defaults to
+    /// `false` for legacy rows.
+    #[serde(default)]
+    pub followup_has_reply_boundary: bool,
+    /// FIX #6: originating `Intervention::merge_consecutive`. Defaults to
+    /// `false` for legacy rows.
+    #[serde(default)]
+    pub followup_merge_consecutive: bool,
+    /// FIX #6: originating `Intervention::pending_uploads` (attachment refs).
+    /// Empty for legacy rows / turns without uploads.
+    #[serde(default)]
+    pub followup_pending_uploads: Vec<String>,
+    /// FIX #6: originating `Intervention::voice_announcement` projection.
+    /// `VoiceTranscriptAnnouncement` is already serde-persisted in the durable
+    /// intervention queue, so it round-trips directly here. `None` for
+    /// non-voice turns / legacy rows.
+    #[serde(default)]
+    pub followup_voice_announcement:
+        Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 }
 
 /// Origin of a turn whose state is captured in [`InflightTurnState`]. Pure
@@ -596,6 +631,11 @@ impl InflightTurnState {
             relay_owner_kind: RelayOwnerKind::None,
             turn_source: TurnSource::Managed,
             injected_prompt_message_id: None,
+            followup_reply_context: None,
+            followup_has_reply_boundary: false,
+            followup_merge_consecutive: false,
+            followup_pending_uploads: Vec::new(),
+            followup_voice_announcement: None,
         }
     }
 
@@ -664,6 +704,28 @@ impl InflightTurnState {
         self.worktree_path = worktree_path;
         self.worktree_branch = worktree_branch;
         self.base_commit = base_commit;
+    }
+
+    /// FIX #6 (Codex P2): record the originating `Intervention`'s follow-up
+    /// requeue context so a PRE-submit busy-timeout requeue
+    /// (`mailbox_requeue_inflight_for_followup_retry`) can faithfully rebuild
+    /// the retry Intervention (reply context / attachments / voice metadata)
+    /// instead of dropping it. Called at the follow-up turn-start construction
+    /// site; non-follow-up paths leave the defaults (empty/None), which is
+    /// correct.
+    pub(in crate::services::discord) fn set_followup_requeue_context(
+        &mut self,
+        reply_context: Option<String>,
+        has_reply_boundary: bool,
+        merge_consecutive: bool,
+        pending_uploads: Vec<String>,
+        voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
+    ) {
+        self.followup_reply_context = reply_context;
+        self.followup_has_reply_boundary = has_reply_boundary;
+        self.followup_merge_consecutive = merge_consecutive;
+        self.followup_pending_uploads = pending_uploads;
+        self.followup_voice_announcement = voice_announcement;
     }
 }
 
@@ -2841,6 +2903,81 @@ mod stall_recovery_tests {
         assert_eq!(loaded[0].current_msg_id, 99);
     }
 
+    /// FIX #6 (Codex P2): the follow-up requeue context must survive the
+    /// on-disk JSON round-trip, and rows written WITHOUT the fields (legacy
+    /// v8 / pre-field rows) must deserialize cleanly to empty/None so requeue
+    /// behaves exactly as before for them.
+    #[test]
+    fn followup_requeue_context_round_trips_and_defaults_when_absent() {
+        let temp = TempDir::new().unwrap();
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            42,
+            Some("adk-claude".to_string()),
+            7,
+            8,
+            99,
+            "hello".to_string(),
+            Some("session-1".to_string()),
+            Some("AgentDesk-claude-adk-claude".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        );
+        let announcement = crate::voice::prompt::VoiceTranscriptAnnouncement {
+            transcript: "전투 시스템 고쳐줘".to_string(),
+            user_id: "7".to_string(),
+            utterance_id: "utt-1".to_string(),
+            language: "ko".to_string(),
+            verbose_progress: false,
+            started_at: None,
+            completed_at: None,
+            samples_written: None,
+            control_channel_id: None,
+            stt_mode: None,
+            stt_latency_ms: None,
+        };
+        state.set_followup_requeue_context(
+            Some("quoted reply context".to_string()),
+            true,
+            true,
+            vec!["upload://a.png".to_string(), "upload://b.png".to_string()],
+            Some(announcement.clone()),
+        );
+
+        save_inflight_state_in_root(temp.path(), &state).expect("save inflight state");
+        let loaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].followup_reply_context.as_deref(),
+            Some("quoted reply context")
+        );
+        assert!(loaded[0].followup_has_reply_boundary);
+        assert!(loaded[0].followup_merge_consecutive);
+        assert_eq!(
+            loaded[0].followup_pending_uploads,
+            vec!["upload://a.png".to_string(), "upload://b.png".to_string()]
+        );
+        assert_eq!(loaded[0].followup_voice_announcement, Some(announcement));
+
+        // A JSON row that omits the new fields entirely (legacy v8 / pre-field
+        // shape) must still deserialize, defaulting the follow-up context.
+        let mut value = serde_json::to_value(&state).unwrap();
+        let obj = value.as_object_mut().unwrap();
+        obj.remove("followup_reply_context");
+        obj.remove("followup_has_reply_boundary");
+        obj.remove("followup_merge_consecutive");
+        obj.remove("followup_pending_uploads");
+        obj.remove("followup_voice_announcement");
+        let legacy: InflightTurnState =
+            serde_json::from_value(value).expect("legacy row must deserialize");
+        assert_eq!(legacy.followup_reply_context, None);
+        assert!(!legacy.followup_has_reply_boundary);
+        assert!(!legacy.followup_merge_consecutive);
+        assert!(legacy.followup_pending_uploads.is_empty());
+        assert_eq!(legacy.followup_voice_announcement, None);
+    }
+
     // ---- #3077: typed status-panel ownership write tests ----
 
     /// Seeds a single inflight row in `root` and returns it. `user_msg_id` /
@@ -3416,7 +3553,7 @@ mod stall_recovery_tests {
         let loaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].version, super::INFLIGHT_STATE_VERSION);
-        assert_eq!(loaded[0].version, 8);
+        assert_eq!(loaded[0].version, 9);
         assert_eq!(loaded[0].runtime_kind, Some(RuntimeHandoffKind::ClaudeTui));
         assert_eq!(
             loaded[0].input_fifo_path.as_deref(),
