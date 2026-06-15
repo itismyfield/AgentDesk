@@ -274,7 +274,13 @@
 # #3034 batch-8: +2 for the `#[allow(dead_code)]` on the `RelayMiss` terminal-event
 # variant + its reason comment (handled by the finalizer + tested, not yet emitted
 # in prod; rustfmt keeps the attribute and the comment on separate lines).
-"src/services/discord/turn_finalizer.rs" = 1528
+# #3479 r9: 1528 -> 1337 (-191) by extracting the completion-signal enum + pure
+# derivation (turn_finalizer/completion_signal.rs), the dormant delivery-lease
+# handlers (turn_finalizer/delivery_lease.rs), and the watcher far-backstop
+# tunables + terminal-or-defer verdict pair (turn_finalizer/watcher_backstop.rs)
+# into child modules. Pure move; each child is well under the 1000-prod-LoC
+# giant threshold so no new ratchet/registry entry is needed.
+"src/services/discord/turn_finalizer.rs" = 1337
 "src/services/discord/router/message_handler/headless_turn.rs" = 1462
 # #3038 S2: lowered 1054 -> 954 (-100) as the session-override bookkeeping
 # helpers (fast-mode reset-entry codec + reset-pending probes/clears +

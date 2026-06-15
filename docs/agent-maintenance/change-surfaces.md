@@ -874,13 +874,19 @@
     giant-file-registry [[entry]] was removed. #3038 turn_bridge S1 moved
     `advance_tmux_relay_confirmed_end` here; split the remaining lease wiring
     vs delivery helpers before adding behavior).
-  - `src/services/discord/turn_finalizer.rs` (1526 prod lines; single-authority
+  - `src/services/discord/turn_finalizer.rs` (1337 prod lines; single-authority
     turn-finalize state machine — ledger/actor-loop/reconciler. Crossed the
     giant-file threshold when #3041 P1-0 added the dormant `DeliveryLeaseCell`
     finalizer messages/handlers on top of #3143's `FinalizeContext::monitor()` +
     monitor turn-key/ledger-generation logic; tracked decompose target — see
     `giant-file-registry.md` (owner `discord-finalizer`, deadline 2026-08-31,
-    issue #3016). Bugfix only outside a finalizer-decomposition plan).
+    issue #3016). #3479 r9 split −191 prod lines into the leaf child modules
+    `turn_finalizer/completion_signal.rs` (CompletionSignal enum + pure
+    `completion_signal_from_transcript`), `turn_finalizer/delivery_lease.rs`
+    (dormant `DeliveryLeaseCell` handlers), and
+    `turn_finalizer/watcher_backstop.rs` (watcher far-backstop tunables +
+    terminal-or-defer verdict pair). Bugfix only outside a
+    finalizer-decomposition plan).
   - `src/services/discord/formatting.rs` (2802 lines; net +0 from #3034 scoped
     dead-code allows on the `MonitorHandoffReason::InlineTimeout` /
     `MonitorHandoffStatus::Failed` reserved variants — the two added `#[allow]`
