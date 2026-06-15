@@ -505,9 +505,13 @@ src/
 │   │   │   ├── single_message_footer.rs
 │   │   │   ├── supervisor_relay.rs
 │   │   │   ├── supervisor_relay_tests.rs
+│   │   │   ├── terminal_readiness.rs
+│   │   │   ├── terminal_readiness_tests.rs
 │   │   │   ├── terminal_send.rs
 │   │   │   ├── turn_identity.rs
-│   │   │   └── turn_identity_tests.rs
+│   │   │   ├── turn_identity_tests.rs
+│   │   │   ├── utf8_chunk_decoder.rs
+│   │   │   └── utf8_chunk_decoder_tests.rs
 │   │   ├── tui_direct_abort_marker/
 │   │   │   ├── deferred_claim.rs
 │   │   │   ├── mod.rs

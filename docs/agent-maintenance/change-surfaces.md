@@ -153,13 +153,15 @@
     (retained for a later phase, not the live watcher path after the R2 revert);
     -1 from #3038 S4 after routing the placeholder/status-panel cluster
     through `shared.ui`; still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (7485 production lines after #3479
-    Phase-1 rank-1; was 8122 after #3038 tmux_watcher S1 moved top-level decision
+  - `src/services/discord/tmux_watcher.rs` (7241 production lines after #3479
+    Phase-1 rank-2; was 7485 after #3479 Phase-1 rank-1 and 8122 after #3038
+    tmux_watcher S1 moved top-level decision
     clusters A/B/C/E/F/I/J/K
     into `tmux_watcher/` child modules: `liveness.rs` (301),
     `panel_decisions.rs` (372), `prompt_observe.rs` (109),
     `turn_identity.rs` (327), `completion_gate.rs` (275), and
-    `commit_decisions.rs` (140). #3016 phase-5b2 removed the `mailbox_finalize_owed`
+    `commit_decisions.rs` (140); plus the #3479 rank-2 child modules
+    `utf8_chunk_decoder.rs` (88) and `terminal_readiness.rs` (214). #3016 phase-5b2 removed the `mailbox_finalize_owed`
     swap reads, the watcher-fn flag params, and the `LegacyFlagGated`
     decision variant; #1520 watcher loop extraction + #2427 D/A
     explicit-cleanup wires + #3055 watcher session-panel lifecycle
@@ -479,7 +481,23 @@
     into two files only to keep each within the `tmux_watcher/**` 700-line
     namespace cap, with the moved unit tests in sibling `supervisor_relay_tests.rs`
     / `session_bound_ack_tests.rs`. The giant ratchet baseline was lowered
-    8223 -> 7485 to lock in the shrink (zero logic change).
+    8223 -> 7485 to lock in the shrink (zero logic change). #3479 Phase-1 rank-2
+    then lowered the live root 7485 -> 7241 (-244) by extracting two more cohesive
+    PURE clusters verbatim (pure move, zero logic change) into `tmux_watcher/`
+    child modules — `utf8_chunk_decoder.rs` (the `Utf8ChunkDecoder` +
+    `DecodedUtf8Chunk` streaming UTF-8 chunk decoder that buffers a split trailing
+    multibyte scalar across read boundaries) and `terminal_readiness.rs` (the
+    synchronous terminal-readiness / inflight-classification predicates —
+    `adopt_watcher_terminal_message_ids_from_inflight`,
+    `watcher_inflight_represents_external_input`/`_is_panel_eligible`/
+    `_needs_anchor_lifecycle_cleanup`, `watcher_direct_terminal_should_commit_session_idle`,
+    `watcher_terminal_token_update_status`, the JSONL `ready_for_input` sentinel
+    probes, and the pure `discard_watcher_pending_buffer_after_suppressed_turn`
+    reconciler); the async, `shared`-touching `commit_watcher_direct_terminal_session_idle`
+    that sits BETWEEN the two readiness clusters deliberately STAYS in the root.
+    Moved unit tests live in sibling `utf8_chunk_decoder_tests.rs` /
+    `terminal_readiness_tests.rs`; both child modules sit under the
+    `tmux_watcher/**` 700-line namespace cap.
   - `src/services/discord/tui_prompt_relay.rs` (5142 production lines; #3296
     codex r1+r2: the ABORT cleanup hook pins the foreign prior inflight's
     identity — the live row at the record instant, or the worker's LAST-VIEW

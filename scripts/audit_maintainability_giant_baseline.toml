@@ -55,7 +55,16 @@
 # marker gate, RelaySlotGuard, ACK delivery wait); moved unit tests live in sibling
 # supervisor_relay_tests.rs / session_bound_ack_tests.rs. Split into two child files
 # only to keep each within the tmux_watcher/** 700-line namespace cap.
-"src/services/discord/tmux_watcher.rs" = 7485
+# #3479 Phase-1 rank-2: lowered 7485 -> 7241 by extracting two more cohesive PURE
+# clusters verbatim (pure move, zero logic change) into tmux_watcher/ child modules
+# — utf8_chunk_decoder.rs (Utf8ChunkDecoder + DecodedUtf8Chunk streaming decoder)
+# and terminal_readiness.rs (synchronous terminal-readiness / inflight-classification
+# predicates + the pure buffer/message-id reconcilers). The async, shared-touching
+# commit_watcher_direct_terminal_session_idle (which sits between the two readiness
+# clusters in the root) deliberately STAYS here; moved unit tests live in sibling
+# utf8_chunk_decoder_tests.rs / terminal_readiness_tests.rs (excluded from the
+# production splitter).
+"src/services/discord/tmux_watcher.rs" = 7241
 # #3038 tmux_watcher S1 child modules, frozen at landed production LoC.
 "src/services/discord/tmux_watcher/commit_decisions.rs" = 140
 "src/services/discord/tmux_watcher/completion_gate.rs" = 275
@@ -70,6 +79,12 @@
 # *_tests.rs files (excluded from the production splitter).
 "src/services/discord/tmux_watcher/supervisor_relay.rs" = 393
 "src/services/discord/tmux_watcher/session_bound_ack.rs" = 404
+# #3479 Phase-1 rank-2 child modules (streaming UTF-8 chunk decoder + terminal-
+# readiness predicates / pure buffer reconcilers), frozen at landed production LoC.
+# Both sit under the tmux_watcher/** 700-line namespace cap; their moved unit tests
+# live in sibling *_tests.rs files (excluded from the production splitter).
+"src/services/discord/tmux_watcher/utf8_chunk_decoder.rs" = 88
+"src/services/discord/tmux_watcher/terminal_readiness.rs" = 214
 # #3089 A4 watcher short-replace controller cutover sibling, frozen at landed prod LoC.
 # A4 r2 (codex r1 [High]): +118 for the `apply_watcher_short_replace_result` split
 # + the `DeliveredFallback` write-back arm mirroring the legacy fallback cleanup.

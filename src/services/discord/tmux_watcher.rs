@@ -57,6 +57,21 @@ mod supervisor_relay;
 #[path = "tmux_watcher/session_bound_ack.rs"]
 mod session_bound_ack;
 
+// #3479 Phase-1 rank-2: two more cohesive PURE clusters extracted to sibling
+// submodules (pure move, zero logic change). `utf8_chunk_decoder` holds the
+// streaming UTF-8 chunk decoder; `terminal_readiness` holds the synchronous
+// terminal-readiness / inflight-classification predicates and the pure
+// buffer/message-id reconcilers. The async `shared`-touching
+// `commit_watcher_direct_terminal_session_idle` (which sits between the two
+// readiness clusters in this root) deliberately STAYS here. Items are
+// `pub(super)` there and re-imported here so the watcher loop's call sites stay
+// byte-identical.
+#[path = "tmux_watcher/terminal_readiness.rs"]
+mod terminal_readiness;
+
+#[path = "tmux_watcher/utf8_chunk_decoder.rs"]
+mod utf8_chunk_decoder;
+
 pub(in crate::services::discord) use self::completion_gate::{
     TuiCompletionGateOutcome, run_tui_completion_gate,
 };
@@ -64,104 +79,8 @@ use self::placeholder_reclaim::*;
 use self::session_bound_ack::*;
 use self::single_message_footer::*;
 use self::supervisor_relay::*;
-
-fn adopt_watcher_terminal_message_ids_from_inflight(
-    placeholder_msg_id: &mut Option<serenity::MessageId>,
-    placeholder_from_restored_inflight: &mut bool,
-    status_panel_msg_id: &mut Option<serenity::MessageId>,
-    inflight: &InflightTurnState,
-    tmux_session_name: &str,
-) {
-    if inflight.rebind_origin {
-        return;
-    }
-    let matches_current_watcher_session = inflight
-        .tmux_session_name
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|name| !name.is_empty() && name == tmux_session_name);
-    if !matches_current_watcher_session {
-        return;
-    }
-    let placeholderless_discord_turn = inflight.user_msg_id != 0
-        && inflight.current_msg_id != 0
-        && inflight.current_msg_id == inflight.user_msg_id;
-    if placeholderless_discord_turn {
-        return;
-    }
-    if placeholder_msg_id.is_none() && inflight.current_msg_id != 0 {
-        *placeholder_msg_id = Some(serenity::MessageId::new(inflight.current_msg_id));
-        *placeholder_from_restored_inflight = true;
-    }
-    if status_panel_msg_id.is_none() {
-        *status_panel_msg_id =
-            crate::services::discord::turn_bridge::normalize_status_panel_message_id(
-                inflight.status_message_id.map(serenity::MessageId::new),
-            );
-    }
-}
-
-fn watcher_inflight_represents_external_input(inflight: Option<&InflightTurnState>) -> bool {
-    inflight.is_some_and(|inflight| {
-        matches!(
-            inflight.turn_source,
-            crate::services::discord::inflight::TurnSource::ExternalInput
-                | crate::services::discord::inflight::TurnSource::ExternalAdopted
-        )
-    })
-}
-
-/// status-panel-v2 eligibility for a watcher-driven inflight turn.
-///
-/// SEPARATE from `watcher_inflight_represents_external_input` on purpose: that
-/// shared predicate backs the external-input delivery LEASE and the `⏳` anchor
-/// lifecycle (#3164/#3174), and broadening it there would regress both. The
-/// panel only needs to know whether the watcher should create/update/clean up a
-/// live status panel for this turn, so it ALSO covers the synthetic
-/// monitor/self-paced-loop turns (`TurnSource::MonitorTriggered`, created by
-/// `ensure_monitor_auto_turn_inflight`) — which the lease/anchor sites must
-/// keep ignoring.
-fn watcher_inflight_is_panel_eligible(inflight: Option<&InflightTurnState>) -> bool {
-    inflight.is_some_and(|state| {
-        watcher_inflight_represents_external_input(Some(state))
-            || matches!(
-                state.turn_source,
-                crate::services::discord::inflight::TurnSource::MonitorTriggered
-            )
-    })
-}
-
-/// #3099: an external-input (TUI-direct / task-notification) inflight whose
-/// `user_msg_id == 0` (or a `rebind_origin` synthetic) will be SKIPPED by the
-/// `⏳ → ✅` reaction block (it targets `state.user_msg_id`, and `0` is no real
-/// message). When such a turn completes, the `⏳` was added to a real notify-bot
-/// message tracked by the prompt anchor, so the anchor-lifecycle cleanup must
-/// run instead — otherwise the hourglass goes stale next to a `✅`.
-fn watcher_inflight_needs_anchor_lifecycle_cleanup(inflight: &InflightTurnState) -> bool {
-    watcher_inflight_represents_external_input(Some(inflight))
-        && (inflight.user_msg_id == 0 || inflight.rebind_origin)
-}
-
-fn watcher_direct_terminal_should_commit_session_idle(
-    direct_send_delivered: bool,
-    inflight_present: bool,
-    _external_input_lease_consumed_by_relay: bool,
-    _prompt_anchor_present_before_relay: bool,
-    _external_input_lease_before_relay: bool,
-    _ssh_direct_pending: bool,
-) -> bool {
-    direct_send_delivered && !inflight_present
-}
-
-fn watcher_terminal_token_update_status(
-    watcher_direct_terminal_idle_committed: bool,
-) -> &'static str {
-    if watcher_direct_terminal_idle_committed {
-        crate::db::session_status::IDLE
-    } else {
-        crate::db::session_status::TURN_ACTIVE
-    }
-}
+use self::terminal_readiness::*;
+use self::utf8_chunk_decoder::*;
 
 #[cfg(unix)]
 async fn commit_watcher_direct_terminal_session_idle(
@@ -259,169 +178,6 @@ async fn commit_watcher_direct_terminal_session_idle(
         "watcher-direct terminal response committed session idle"
     );
     true
-}
-
-/// #2442 (H3) — fast-path check for the wrapper's `ready_for_input` JSONL
-/// sentinel in the tail of the session jsonl. Reads only the last ~4 KiB
-/// so it stays O(1) regardless of jsonl size. False negatives just fall
-/// back to the existing 2s `READY_FOR_INPUT_IDLE_PROBE_INTERVAL` cadence,
-/// so partial-line / rotation edge cases are harmless.
-fn jsonl_tail_contains_ready_for_input_sentinel(output_path: &str) -> bool {
-    use std::io::{Read, Seek, SeekFrom};
-
-    const TAIL_WINDOW_BYTES: u64 = 4 * 1024;
-
-    let Ok(mut file) = std::fs::File::open(output_path) else {
-        return false;
-    };
-    let Ok(meta) = file.metadata() else {
-        return false;
-    };
-    let len = meta.len();
-    if len == 0 {
-        return false;
-    }
-    let start = len.saturating_sub(TAIL_WINDOW_BYTES);
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return false;
-    }
-    let mut buf = Vec::with_capacity(TAIL_WINDOW_BYTES as usize);
-    if file.read_to_end(&mut buf).is_err() {
-        return false;
-    }
-    let needle = format!(
-        "\"type\":\"{}\"",
-        crate::services::tmux_common::WRAPPER_READY_FOR_INPUT_EVENT
-    );
-    String::from_utf8_lossy(&buf).contains(&needle)
-}
-
-fn watcher_jsonl_turn_state_ready_for_input(
-    provider: &crate::services::provider::ProviderKind,
-    runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
-    output_path: &str,
-    current_offset: u64,
-) -> Option<bool> {
-    let path = std::path::Path::new(output_path);
-    crate::services::tui_turn_state::jsonl_ready_for_input(
-        provider,
-        runtime_kind,
-        path,
-        Some(current_offset),
-    )
-    .map(crate::services::tui_turn_state::TuiReadyState::is_ready)
-}
-
-fn watcher_session_ready_for_input(
-    tmux_session_name: &str,
-    provider: &crate::services::provider::ProviderKind,
-    output_path: &str,
-    current_offset: u64,
-) -> bool {
-    let runtime_kind =
-        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name)
-            .map(|binding| binding.runtime_kind)
-            .or_else(|| {
-                crate::services::tmux_common::resolve_tmux_runtime_kind_marker(tmux_session_name)
-            });
-    if let Some(ready) = watcher_jsonl_turn_state_ready_for_input(
-        provider,
-        runtime_kind,
-        output_path,
-        current_offset,
-    ) {
-        return ready;
-    }
-    if crate::services::tui_turn_state::pane_ready_fallback_allowed(provider, runtime_kind) {
-        crate::services::provider::tmux_session_ready_for_input(tmux_session_name, provider)
-    } else {
-        false
-    }
-}
-
-fn discard_watcher_pending_buffer_after_suppressed_turn(
-    all_data: &mut String,
-    all_data_start_offset: &mut u64,
-    all_data_fully_mirrored_to_session_relay: &mut bool,
-    all_data_session_bound_relay_ack: &mut Option<SessionBoundRelayAckTarget>,
-    current_offset: u64,
-) {
-    all_data.clear();
-    *all_data_start_offset = current_offset;
-    *all_data_fully_mirrored_to_session_relay = true;
-    *all_data_session_bound_relay_ack = None;
-}
-
-#[derive(Debug, Default)]
-struct Utf8ChunkDecoder {
-    pending: Vec<u8>,
-    pending_start_offset: Option<u64>,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct DecodedUtf8Chunk {
-    start_offset: Option<u64>,
-    text: String,
-}
-
-impl Utf8ChunkDecoder {
-    fn decode(&mut self, chunk: &[u8], chunk_start_offset: u64) -> DecodedUtf8Chunk {
-        if chunk.is_empty() {
-            return DecodedUtf8Chunk {
-                start_offset: None,
-                text: String::new(),
-            };
-        }
-        if self.pending.is_empty() {
-            self.pending_start_offset = Some(chunk_start_offset);
-        }
-        self.pending.extend_from_slice(chunk);
-
-        let start_offset = self.pending_start_offset.unwrap_or(chunk_start_offset);
-        match std::str::from_utf8(&self.pending) {
-            Ok(text) => {
-                let text = text.to_string();
-                self.pending.clear();
-                self.pending_start_offset = None;
-                DecodedUtf8Chunk {
-                    start_offset: Some(start_offset),
-                    text,
-                }
-            }
-            Err(err) if err.error_len().is_none() => {
-                let valid_up_to = err.valid_up_to();
-                if valid_up_to == 0 {
-                    return DecodedUtf8Chunk {
-                        start_offset: None,
-                        text: String::new(),
-                    };
-                }
-                let text = std::str::from_utf8(&self.pending[..valid_up_to])
-                    .expect("valid UTF-8 prefix")
-                    .to_string();
-                self.pending.drain(..valid_up_to);
-                self.pending_start_offset = Some(start_offset.saturating_add(valid_up_to as u64));
-                DecodedUtf8Chunk {
-                    start_offset: Some(start_offset),
-                    text,
-                }
-            }
-            Err(_) => {
-                let text = String::from_utf8_lossy(&self.pending).into_owned();
-                self.pending.clear();
-                self.pending_start_offset = None;
-                DecodedUtf8Chunk {
-                    start_offset: Some(start_offset),
-                    text,
-                }
-            }
-        }
-    }
-
-    fn clear_pending(&mut self) {
-        self.pending.clear();
-        self.pending_start_offset = None;
-    }
 }
 
 /// Resolve the provider session selector to durably persist at turn end.
@@ -7487,25 +7243,21 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
 mod tests {
     use super::{
         FreshIdleFinalizeDecision, SessionBoundRelayAckOutcome, TuiCompletionGateOutcome,
-        Utf8ChunkDecoder, adopt_watcher_terminal_message_ids_from_inflight,
         build_watcher_streaming_edit_text,
         discard_restored_response_seed_before_no_inflight_terminal_relay,
-        discard_watcher_pending_buffer_after_suppressed_turn,
         legacy_wrapper_prompt_candidates_from_pane, mark_watcher_terminal_delivery_committed,
         reacquire_watcher_inflight_for_active_stream, resolve_persistable_provider_session_id,
         should_probe_tmux_liveness, terminal_relay_decision,
         watcher_batch_contains_assistant_event, watcher_batch_contains_relayable_response,
-        watcher_direct_terminal_should_commit_session_idle,
         watcher_fallback_edit_failure_can_delete_original_placeholder,
         watcher_fresh_idle_finalize_decision, watcher_inflight_absence_is_abandonment,
-        watcher_inflight_represents_external_input, watcher_jsonl_turn_state_ready_for_input,
         watcher_output_progressed_recently, watcher_should_clear_stale_terminal_message_ids,
         watcher_should_delete_suppressed_placeholder,
         watcher_should_direct_send_after_session_bound_ack,
         watcher_should_reclaim_orphan_turn_placeholder,
         watcher_should_suppress_streaming_after_bridge_delivery,
         watcher_terminal_commit_side_effects_for_test, watcher_terminal_edit_consumes_placeholder,
-        watcher_terminal_response_for_direct_send, watcher_terminal_token_update_status,
+        watcher_terminal_response_for_direct_send,
     };
     use crate::services::agent_protocol::RuntimeHandoffKind;
     use crate::services::discord::InflightTurnState;
@@ -9362,225 +9114,6 @@ mod tests {
     }
 
     #[test]
-    fn bridge_suppressed_turn_discards_pending_buffer_before_direct_input() {
-        let mut all_data = "{\"type\":\"assistant\",\"message\":\"old\"}\n".to_string();
-        let mut all_data_start_offset = 10;
-        let mut all_data_fully_mirrored_to_session_relay = false;
-        let mut all_data_session_bound_relay_ack = None;
-
-        discard_watcher_pending_buffer_after_suppressed_turn(
-            &mut all_data,
-            &mut all_data_start_offset,
-            &mut all_data_fully_mirrored_to_session_relay,
-            &mut all_data_session_bound_relay_ack,
-            42,
-        );
-
-        assert!(all_data.is_empty());
-        assert_eq!(all_data_start_offset, 42);
-        assert!(all_data_fully_mirrored_to_session_relay);
-        assert!(all_data_session_bound_relay_ack.is_none());
-    }
-
-    #[test]
-    fn terminal_relay_adopts_late_saved_inflight_message_ids() {
-        let mut inflight = InflightTurnState::new(
-            ProviderKind::Claude,
-            123,
-            Some("adk-cc".to_string()),
-            42,
-            1001,
-            2002,
-            "prompt".to_string(),
-            Some("session".to_string()),
-            Some("AgentDesk-claude-adk-cc".to_string()),
-            Some("/tmp/out.jsonl".to_string()),
-            None,
-            0,
-        );
-        inflight.status_message_id = Some(3003);
-
-        let mut placeholder_msg_id = None;
-        let mut placeholder_from_restored_inflight = false;
-        let mut status_panel_msg_id = None;
-
-        adopt_watcher_terminal_message_ids_from_inflight(
-            &mut placeholder_msg_id,
-            &mut placeholder_from_restored_inflight,
-            &mut status_panel_msg_id,
-            &inflight,
-            "AgentDesk-claude-adk-cc",
-        );
-
-        assert_eq!(placeholder_msg_id, Some(MessageId::new(2002)));
-        assert!(placeholder_from_restored_inflight);
-        assert_eq!(status_panel_msg_id, Some(MessageId::new(3003)));
-    }
-
-    #[test]
-    fn terminal_relay_does_not_adopt_synthetic_status_panel_message_id() {
-        let mut inflight = InflightTurnState::new(
-            ProviderKind::Claude,
-            123,
-            Some("adk-cc".to_string()),
-            42,
-            1001,
-            2002,
-            "prompt".to_string(),
-            Some("session".to_string()),
-            Some("AgentDesk-claude-adk-cc".to_string()),
-            Some("/tmp/out.jsonl".to_string()),
-            None,
-            0,
-        );
-        inflight.status_message_id = Some(9_100_000_000_000_000_123);
-
-        let mut placeholder_msg_id = None;
-        let mut placeholder_from_restored_inflight = false;
-        let mut status_panel_msg_id = None;
-
-        adopt_watcher_terminal_message_ids_from_inflight(
-            &mut placeholder_msg_id,
-            &mut placeholder_from_restored_inflight,
-            &mut status_panel_msg_id,
-            &inflight,
-            "AgentDesk-claude-adk-cc",
-        );
-
-        assert_eq!(placeholder_msg_id, Some(MessageId::new(2002)));
-        assert!(placeholder_from_restored_inflight);
-        assert_eq!(status_panel_msg_id, None);
-    }
-
-    #[test]
-    fn terminal_relay_does_not_adopt_inflight_for_other_tmux_session() {
-        let mut inflight = InflightTurnState::new(
-            ProviderKind::Claude,
-            123,
-            Some("adk-cc".to_string()),
-            42,
-            1001,
-            2002,
-            "prompt".to_string(),
-            Some("session".to_string()),
-            Some("AgentDesk-claude-other".to_string()),
-            Some("/tmp/out.jsonl".to_string()),
-            None,
-            0,
-        );
-        inflight.status_message_id = Some(3003);
-
-        let mut placeholder_msg_id = None;
-        let mut placeholder_from_restored_inflight = false;
-        let mut status_panel_msg_id = None;
-
-        adopt_watcher_terminal_message_ids_from_inflight(
-            &mut placeholder_msg_id,
-            &mut placeholder_from_restored_inflight,
-            &mut status_panel_msg_id,
-            &inflight,
-            "AgentDesk-claude-adk-cc",
-        );
-
-        assert_eq!(placeholder_msg_id, None);
-        assert!(!placeholder_from_restored_inflight);
-        assert_eq!(status_panel_msg_id, None);
-    }
-
-    #[test]
-    fn terminal_relay_does_not_adopt_placeholderless_user_message() {
-        let inflight = InflightTurnState::new(
-            ProviderKind::Claude,
-            123,
-            Some("adk-cc".to_string()),
-            42,
-            1001,
-            1001,
-            "prompt".to_string(),
-            Some("session".to_string()),
-            Some("AgentDesk-claude-adk-cc".to_string()),
-            Some("/tmp/out.jsonl".to_string()),
-            None,
-            0,
-        );
-
-        let mut placeholder_msg_id = None;
-        let mut placeholder_from_restored_inflight = false;
-        let mut status_panel_msg_id = None;
-
-        adopt_watcher_terminal_message_ids_from_inflight(
-            &mut placeholder_msg_id,
-            &mut placeholder_from_restored_inflight,
-            &mut status_panel_msg_id,
-            &inflight,
-            "AgentDesk-claude-adk-cc",
-        );
-
-        assert_eq!(placeholder_msg_id, None);
-        assert!(!placeholder_from_restored_inflight);
-        assert_eq!(status_panel_msg_id, None);
-    }
-
-    #[test]
-    fn external_input_lease_is_consumed_only_by_external_input_inflight() {
-        let mut managed = InflightTurnState::new(
-            ProviderKind::Claude,
-            123,
-            Some("adk-cc".to_string()),
-            42,
-            1001,
-            2002,
-            "prompt".to_string(),
-            Some("session".to_string()),
-            Some("AgentDesk-claude-adk-cc".to_string()),
-            Some("/tmp/out.jsonl".to_string()),
-            None,
-            0,
-        );
-        assert!(!watcher_inflight_represents_external_input(Some(&managed)));
-
-        managed.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
-        assert!(watcher_inflight_represents_external_input(Some(&managed)));
-
-        managed.turn_source = crate::services::discord::inflight::TurnSource::ExternalAdopted;
-        assert!(watcher_inflight_represents_external_input(Some(&managed)));
-    }
-
-    #[test]
-    fn watcher_direct_terminal_idle_commit_requires_delivery_without_inflight() {
-        assert!(watcher_direct_terminal_should_commit_session_idle(
-            true, false, true, false, false, false
-        ));
-        assert!(watcher_direct_terminal_should_commit_session_idle(
-            true, false, false, true, false, false
-        ));
-        assert!(watcher_direct_terminal_should_commit_session_idle(
-            true, false, false, false, true, false
-        ));
-        assert!(watcher_direct_terminal_should_commit_session_idle(
-            true, false, false, false, false, true
-        ));
-        assert!(!watcher_direct_terminal_should_commit_session_idle(
-            false, false, true, true, true, true
-        ));
-        assert!(!watcher_direct_terminal_should_commit_session_idle(
-            true, true, true, true, true, true
-        ));
-        assert!(watcher_direct_terminal_should_commit_session_idle(
-            true, false, false, false, false, false
-        ));
-    }
-
-    #[test]
-    fn watcher_direct_terminal_idle_commit_keeps_later_token_update_idle() {
-        assert_eq!(watcher_terminal_token_update_status(true), "idle");
-        assert_eq!(
-            watcher_terminal_token_update_status(false),
-            crate::db::session_status::TURN_ACTIVE
-        );
-    }
-
-    #[test]
     fn legacy_wrapper_pane_prompt_candidates_reconstruct_wrapped_direct_input() {
         let pane = "\
 ▶ Ready for input (type message + Enter)
@@ -9643,117 +9176,6 @@ TUI-E2E-marker ssh-direct
         assert!(!watcher_batch_contains_assistant_event(
             br#"{"type":"result","result":"duplicate terminal text"}"#
         ));
-    }
-
-    #[test]
-    fn claude_watcher_ready_uses_transcript_turn_state_not_pane_prompt() {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(
-            file.path(),
-            concat!(
-                r#"{"type":"user","message":{"content":"review"}}"#,
-                "\n",
-                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}"#,
-                "\n"
-            ),
-        )
-        .unwrap();
-        let len = std::fs::metadata(file.path()).unwrap().len();
-
-        assert_eq!(
-            watcher_jsonl_turn_state_ready_for_input(
-                &crate::services::provider::ProviderKind::Claude,
-                Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui),
-                file.path().to_str().unwrap(),
-                len,
-            ),
-            Some(false)
-        );
-
-        std::fs::write(
-            file.path(),
-            concat!(
-                r#"{"type":"user","message":{"content":"review"}}"#,
-                "\n",
-                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}"#,
-                "\n",
-                r#"{"type":"system","subtype":"turn_duration","sessionId":"s"}"#,
-                "\n"
-            ),
-        )
-        .unwrap();
-        let len = std::fs::metadata(file.path()).unwrap().len();
-
-        assert_eq!(
-            watcher_jsonl_turn_state_ready_for_input(
-                &crate::services::provider::ProviderKind::Claude,
-                Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui),
-                file.path().to_str().unwrap(),
-                len,
-            ),
-            Some(true)
-        );
-    }
-
-    // The transcript holds a fully written terminator envelope
-    // (`system/turn_duration`) and the watcher's `current_offset` lags the
-    // file size by one byte. Pre-fix the watcher would return Busy and the
-    // idle-queue drain would loop indefinitely (the production 9× recurrence
-    // observed on 2026-05-26: `hosted TUI structured turn state is busy`
-    // every 2s after #2789 froze the binding offset across quick-exit
-    // restarts). The strict-terminator override in `jsonl_ready_for_input`
-    // now classifies a fully-parsed terminator envelope as Ready regardless
-    // of the relay's last_offset; partial trailing fragments are still
-    // refused, so this is safe.
-    #[test]
-    fn claude_watcher_ready_treats_complete_terminator_envelope_as_ready() {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(
-            file.path(),
-            r#"{"type":"system","subtype":"turn_duration","sessionId":"s"}"#,
-        )
-        .unwrap();
-        let len = std::fs::metadata(file.path()).unwrap().len();
-
-        assert_eq!(
-            watcher_jsonl_turn_state_ready_for_input(
-                &crate::services::provider::ProviderKind::Claude,
-                Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui),
-                file.path().to_str().unwrap(),
-                len.saturating_sub(1),
-            ),
-            Some(true)
-        );
-    }
-
-    // Race guard at the watcher boundary: a complete terminator envelope is
-    // followed by a partial `{"ty` fragment of the next turn's user line and
-    // the watcher's offset still lags. The strict-terminator predicate must
-    // refuse to fall through the partial line, keeping the watcher non-ready
-    // so we do not race a new turn that has just begun.
-    #[test]
-    fn claude_watcher_ready_keeps_busy_when_partial_user_follows_terminator() {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(
-            file.path(),
-            concat!(
-                r#"{"type":"system","subtype":"turn_duration","sessionId":"s"}"#,
-                "\n",
-                r#"{"ty"#,
-            ),
-        )
-        .unwrap();
-        let len = std::fs::metadata(file.path()).unwrap().len();
-
-        assert_eq!(
-            watcher_jsonl_turn_state_ready_for_input(
-                &crate::services::provider::ProviderKind::Claude,
-                Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui),
-                file.path().to_str().unwrap(),
-                len.saturating_sub(5),
-            ),
-            Some(false)
-        );
     }
 
     #[test]
@@ -10007,40 +9429,6 @@ TUI-E2E-marker ssh-direct
         assert!(
             !watcher_fallback_edit_failure_can_delete_original_placeholder(0, "⠙ Processing...")
         );
-    }
-
-    #[test]
-    fn utf8_decoder_buffers_split_multibyte_scalar_at_chunk_start() {
-        let mut decoder = Utf8ChunkDecoder::default();
-        let payload = "안녕\n";
-        let bytes = payload.as_bytes();
-
-        let first = decoder.decode(&bytes[..1], 20);
-        assert_eq!(first.start_offset, None);
-        assert!(first.text.is_empty());
-
-        let second = decoder.decode(&bytes[1..], 21);
-        assert_eq!(second.start_offset, Some(20));
-        assert_eq!(second.text, payload);
-        assert!(!second.text.contains('\u{FFFD}'));
-    }
-
-    #[test]
-    fn utf8_decoder_preserves_jsonl_when_multibyte_scalar_splits_after_prefix() {
-        let mut decoder = Utf8ChunkDecoder::default();
-        let payload = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"안녕하세요 😀\"}]}}\n";
-        let korean_start = payload.find('안').expect("fixture contains korean text");
-        let split = korean_start + 1;
-        let bytes = payload.as_bytes();
-
-        let first = decoder.decode(&bytes[..split], 100);
-        let second = decoder.decode(&bytes[split..], 100 + split as u64);
-
-        assert_eq!(first.start_offset, Some(100));
-        assert_eq!(second.start_offset, Some(100 + korean_start as u64));
-        assert_eq!(format!("{}{}", first.text, second.text), payload);
-        assert!(!first.text.contains('\u{FFFD}'));
-        assert!(!second.text.contains('\u{FFFD}'));
     }
 
     /// #3041 P1-1 (§3, codex R2 Issue-1): heartbeat-renew lifecycle for the
