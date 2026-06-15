@@ -433,48 +433,14 @@ pub(in crate::services::discord) async fn resolve_notify_bot_user_id(
 
 pub(in crate::services::discord) fn is_allowed_turn_sender(
     allowed_bot_ids: &[u64],
-    announce_bot_id: Option<u64>,
     author_id: u64,
     author_is_bot: bool,
     text: &str,
 ) -> bool {
-    if announce_bot_id.is_some_and(|id| id == author_id) {
-        // Issue announcements moved to notify-bot in the #1448 follow-up,
-        // so live announce-bot traffic is dispatch / PM-decision /
-        // escalation / generic routing — all of which trigger turns.
-        // The transitional block below catches catch-up replays of
-        // pre-deploy announce-authored issue cards (📋/✅) so they
-        // don't spawn spurious turns. Remove once existing announce-bot
-        // announcement messages have aged out of catch-up scan windows
-        // (safe sunset target: 2026-06-01).
-        return !is_legacy_announce_issue_card(text);
-    }
     if allowed_bot_ids.contains(&author_id) {
         return should_process_allowed_bot_turn_text(text);
     }
     !author_is_bot
-}
-
-/// TRANSITIONAL (#1448 follow-up — sunset 2026-06-01): suppresses
-/// pre-deploy announce-bot issue-announcement / completion cards that
-/// reappear during restart catch-up. Live traffic now routes through
-/// notify-bot, which never reaches the announce-bot branch above.
-fn is_legacy_announce_issue_card(text: &str) -> bool {
-    let head = text.trim_start();
-    if head.starts_with("📋 **새 이슈 #") {
-        return true;
-    }
-    if let Some(rest) = head.strip_prefix("✅ **#") {
-        let digits_end = rest
-            .char_indices()
-            .find(|(_, ch)| !ch.is_ascii_digit())
-            .map(|(idx, _)| idx)
-            .unwrap_or(rest.len());
-        if digits_end > 0 && rest[digits_end..].starts_with(" 완료** —") {
-            return true;
-        }
-    }
-    false
 }
 
 pub(in crate::services::discord) fn should_phase2_recover_message(
@@ -3924,7 +3890,6 @@ pub(in crate::services::discord) fn classify_catch_up_message(
     existing_ids: &std::collections::HashSet<u64>,
     max_age_secs: i64,
     allowed_bot_ids: &[u64],
-    announce_bot_id: Option<u64>,
 ) -> CatchUpClassification {
     if !msg.is_processable_kind {
         return CatchUpClassification::SystemKind;
@@ -3943,7 +3908,6 @@ pub(in crate::services::discord) fn classify_catch_up_message(
     }
     if !is_allowed_turn_sender(
         allowed_bot_ids,
-        announce_bot_id,
         msg.author_id,
         msg.author_is_bot,
         &msg.trimmed_text,
@@ -4102,8 +4066,6 @@ async fn catch_up_missed_messages_inner(
             let settings = shared.settings.read().await;
             settings.allowed_bot_ids.clone()
         };
-        let announce_bot_id = resolve_announce_bot_user_id(shared).await;
-
         let mut max_recovered_id: Option<u64> = None;
         let mut stats = CatchUpScanStats::default();
         stats.returned = messages.len();
@@ -4143,7 +4105,6 @@ async fn catch_up_missed_messages_inner(
                 &existing_ids,
                 max_age.as_secs() as i64,
                 &allowed_bot_ids,
-                announce_bot_id,
             );
             // Codex P2 round 2 on #1301: check the cap BEFORE recording the
             // recover, otherwise `stats.recovered` would tally a message we
@@ -4343,7 +4304,6 @@ async fn catch_up_missed_messages_inner(
             let mid = msg.id.get();
             if !is_allowed_turn_sender(
                 &allowed_bot_ids_phase2,
-                announce_bot_id_phase2,
                 msg.author.id.get(),
                 msg.author.bot,
                 text,
@@ -5367,11 +5327,11 @@ mod catch_up_recovery_tests {
         let existing = HashSet::new();
 
         assert_eq!(
-            classify_catch_up_message(&view, Some(current_bot_id), &existing, 300, &[], None),
+            classify_catch_up_message(&view, Some(current_bot_id), &existing, 300, &[]),
             CatchUpClassification::Recover
         );
         assert_eq!(
-            classify_catch_up_message(&view, Some(owner_user_id), &existing, 300, &[], None),
+            classify_catch_up_message(&view, Some(owner_user_id), &existing, 300, &[]),
             CatchUpClassification::SelfAuthored
         );
     }

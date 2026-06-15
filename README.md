@@ -244,7 +244,7 @@ Policies hook into a 3-tier periodic tick system running on a dedicated OS threa
 Each bot identity has a distinct role so message intent stays unambiguous:
 
 - **`announce`** is the authoritative trigger source. It posts dispatch envelopes (`── implementation dispatch ──\nDISPATCH:<uuid>…`), PM/escalation cards, and agent-to-agent messages routed through `/api/discord/send`. Other agent bots accept its messages as turn triggers when its user id is listed under `auth.allowed_bot_ids`.
-- **`notify`** delivers informational notifications — issue announcement cards (`📋 새 이슈 #N`, `✅ #N 완료`) and system alerts. Its user id is intentionally omitted from `allowed_bot_ids`, so its posts never trigger an agent turn (the routing change landed in #1448 follow-up; the message router still suppresses pre-deploy `announce`-authored issue cards via `is_legacy_announce_issue_card` until the catch-up window expires on 2026-06-01).
+- **`notify`** delivers informational notifications — issue announcement cards (`📋 새 이슈 #N`, `✅ #N 완료`) and system alerts. Its user id is intentionally omitted from `allowed_bot_ids`, so its posts never trigger an agent turn (the routing change landed in #1448 follow-up).
 - **Per-provider bots** (`claude`, `codex`, optionally `gemini` / `opencode` / `qwen`) are the user-facing identities humans @-mention in agent channels. A user message in a channel mapped to one of these bots starts a turn for that provider. Each agent can be wired to multiple provider bots — see `agents[].channels` in `agentdesk.yaml` — letting Claude and Codex (or any combination) work side-by-side on the same agent role.
 
 ### Web Dashboard
