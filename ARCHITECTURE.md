@@ -402,7 +402,9 @@ src/
 │   │   │   ├── stall_liveness.rs
 │   │   │   └── watcher_respawn.rs
 │   │   ├── inflight/
-│   │   │   └── budget.rs
+│   │   │   ├── budget.rs
+│   │   │   ├── model.rs
+│   │   │   └── store.rs
 │   │   ├── outbound/
 │   │   │   ├── confirmation.rs
 │   │   │   ├── decision.rs

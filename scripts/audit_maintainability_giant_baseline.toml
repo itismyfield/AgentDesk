@@ -254,7 +254,13 @@
 # v8->v9 version bump comment, the `set_followup_requeue_context` setter, and the
 # matching defaults in `InflightTurnState::new`, so a PRE-submit busy-timeout
 # requeue rebuilds the retry Intervention without losing reply/upload/voice data.
-"src/services/discord/inflight.rs" = 2585
+# #3479 Phase-2 rank-7: behaviour-preserving split — the pure domain model moved
+# to inflight/model.rs (587 prod LoC) and the FS path/flock seam to
+# inflight/store.rs (64 prod LoC). Both sub-1000 (not giants → no registry/doc
+# entry). Lowers 2585 -> 1980 (actual post-split prod LoC). The status-panel
+# guards stay in root: their compare-and-clear still needs the file-private
+# load/persist-under-lock internals, so they cannot move cleanly yet.
+"src/services/discord/inflight.rs" = 1980
 # #3038 Phase A: health.rs decomposed into health/ directory modules (root 402
 # prod LoC + 6 sub-1000-LoC submodules) — dropped below the giant threshold, so
 # its ratchet entry is deleted (win; no baseline raises).
