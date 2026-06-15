@@ -503,6 +503,7 @@ src/
 │   │   │   ├── completion_gate.rs
 │   │   │   ├── completion_gate_tests.rs
 │   │   │   ├── liveness.rs
+│   │   │   ├── orphan_status_panel_cleanup.rs
 │   │   │   ├── panel_decisions.rs
 │   │   │   ├── placeholder_reclaim.rs
 │   │   │   ├── prompt_observe.rs

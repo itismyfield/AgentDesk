@@ -64,7 +64,7 @@
 # clusters in the root) deliberately STAYS here; moved unit tests live in sibling
 # utf8_chunk_decoder_tests.rs / terminal_readiness_tests.rs (excluded from the
 # production splitter).
-"src/services/discord/tmux_watcher.rs" = 7241
+"src/services/discord/tmux_watcher.rs" = 7022
 # #3038 tmux_watcher S1 child modules, frozen at landed production LoC.
 "src/services/discord/tmux_watcher/commit_decisions.rs" = 140
 "src/services/discord/tmux_watcher/completion_gate.rs" = 275
