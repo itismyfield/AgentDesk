@@ -90,12 +90,14 @@ pub async fn start_reserved_headless_agent_turn(
         metadata,
         channel_name_hint,
         None,
+        None,
         reservation,
         expected_turn_id,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn start_reserved_headless_agent_turn_with_owner_channel(
     registry: &HealthRegistry,
     owner_channel_id: ChannelId,
@@ -105,6 +107,11 @@ pub async fn start_reserved_headless_agent_turn_with_owner_channel(
     source: Option<String>,
     metadata: Option<serde_json::Value>,
     channel_name_hint: Option<String>,
+    // #5: When set, this synthetic label drives the routine's DISTINCT tmux
+    // session while `channel_name_hint` carries the agent's REAL primary
+    // channel/alias so workspace resolution succeeds. Non-routine callers pass
+    // `None` for identical behavior.
+    tmux_session_label: Option<String>,
     reservation: HeadlessAgentTurnReservation,
 ) -> Result<router::HeadlessTurnStartOutcome, router::HeadlessTurnStartError> {
     if reservation.channel_id != turn_channel_id {
@@ -128,6 +135,7 @@ pub async fn start_reserved_headless_agent_turn_with_owner_channel(
         source,
         metadata,
         channel_name_hint,
+        tmux_session_label,
         Some(false),
         reservation,
         expected_turn_id,
@@ -179,6 +187,7 @@ pub async fn start_headless_agent_turn_in_dm(
         source,
         metadata,
         channel_name_hint,
+        None,
         Some(true),
         reservation,
         expected_turn_id,
@@ -251,6 +260,7 @@ pub async fn start_reserved_headless_agent_turn_in_dm(
         source,
         metadata,
         channel_name_hint,
+        None,
         Some(true),
         reservation,
         expected_turn_id,
@@ -258,6 +268,7 @@ pub async fn start_reserved_headless_agent_turn_in_dm(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_reserved_headless_agent_turn_with_shared(
     shared: Arc<SharedData>,
     channel_id: ChannelId,
@@ -266,6 +277,11 @@ async fn start_reserved_headless_agent_turn_with_shared(
     source: Option<String>,
     metadata: Option<serde_json::Value>,
     channel_name_hint: Option<String>,
+    // #5: synthetic tmux-session label for routine turns; forwarded to the
+    // router so the routine keeps a distinct tmux session while
+    // `channel_name_hint` stays the real channel for workspace resolution.
+    // `None` for non-routine callers.
+    tmux_session_label: Option<String>,
     is_dm_hint: Option<bool>,
     reservation: HeadlessAgentTurnReservation,
     expected_turn_id: String,
@@ -312,6 +328,7 @@ async fn start_reserved_headless_agent_turn_with_shared(
         source.as_deref(),
         metadata,
         channel_name_hint,
+        tmux_session_label,
         is_dm_hint,
         reservation.inner,
     )
