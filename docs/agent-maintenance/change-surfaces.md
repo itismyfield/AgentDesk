@@ -765,7 +765,7 @@
     stop-token/tmux binding runtime + PID-exit observation helper (#2426),
     split before adding non-bugfix behavior. #3169: added the
     claude-anonymous-teardown SIGINT suppression guard (death #3)).
-  - `src/services/discord/turn_bridge/mod.rs` (6778 prod lines; the BRIDGE
+  - `src/services/discord/turn_bridge/mod.rs` (6702 prod lines; the BRIDGE
     spawn/turn-lifecycle surface — `spawn_turn_bridge` and the per-channel
     turn loop. Registered giant-file (#3038 decompose target — see
     `giant-file-registry.md`, owner `discord-relay`, deadline 2026-08-31).
@@ -780,7 +780,17 @@
     `voice_completion_tests.rs`), `headless_delivery.rs` (415 prod),
     `memory_lifecycle.rs` background-memory observation, `turn_analytics.rs`
     analytics persistence, and `terminal_delivery.rs` confirmed-end advance.
+    #3479 Phase-1 rank-3 lowered the root 6811 -> 6702 by moving the pure,
+    unit-tested cancel/finalize decision helpers into the sibling
+    `cancel_finalize_policy.rs` (re-exported, call sites byte-identical).
     Hotfile — bugfix only outside the #3038 decompose plan).
+  - `src/services/discord/turn_bridge/cancel_finalize_policy.rs` (131 prod
+    lines; pure cancel/finalize-policy decisions extracted from `mod.rs` by
+    #3479: `classify_turn_finished_dispatch_kind`,
+    `is_done_setting_terminal_frame`, `should_finalize_cancel_after_recv`,
+    `should_suppress_headless_delivery_for_cancel`,
+    `should_record_final_turn_transcript`, `resolve_bridge_owner_channel` +
+    their tests. No IO/async; not a giant-file).
   - `src/services/discord/turn_bridge/completion_guard.rs` (1834 lines).
   - `src/services/discord/turn_bridge/tmux_runtime.rs` (1545 lines).
   - `src/services/discord/turn_bridge/terminal_delivery.rs` (604 prod lines;

@@ -66,7 +66,14 @@
 # status-panel, voice-completion, headless-delivery, memory-observation,
 # analytics, and confirmed-end clusters out of the root while leaving the
 # `spawn_turn_bridge` async body byte-identical.
-"src/services/discord/turn_bridge/mod.rs" = 6811
+# #3479 Phase-1 rank-3: lowered 6811 -> 6702 (-109) by moving the pure,
+# unit-tested cancel/finalize decision helpers (classify_turn_finished_dispatch_kind,
+# is_done_setting_terminal_frame, should_finalize_cancel_after_recv,
+# should_suppress_headless_delivery_for_cancel, should_record_final_turn_transcript,
+# resolve_bridge_owner_channel) + their tests into the new sibling
+# `turn_bridge/cancel_finalize_policy.rs` (re-exported, so call sites stay
+# byte-identical). Locks in the shrink win (ratchet down only).
+"src/services/discord/turn_bridge/mod.rs" = 6702
 # #3038 turn_bridge S1 child modules, frozen at landed production LoC.
 "src/services/discord/turn_bridge/headless_delivery.rs" = 415
 "src/services/discord/turn_bridge/status_panel.rs" = 437
