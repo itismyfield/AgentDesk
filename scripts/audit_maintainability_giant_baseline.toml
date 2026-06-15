@@ -140,7 +140,7 @@
 # FIX #6 (Codex P2): +6 (3771 -> 3777) for the `set_followup_requeue_context`
 # call that persists the originating Intervention's reply/upload/voice context on
 # the follow-up inflight row so a PRE-submit busy-timeout requeue can rebuild it.
-"src/services/discord/router/message_handler/intake_turn.rs" = 3777
+"src/services/discord/router/message_handler/intake_turn.rs" = 3769
 "src/services/discord/meeting_orchestrator.rs" = 3227
 # #3293: +3 for the `registry_purge` child-module declaration (peek +
 # operator-gated idle-entry purge live outside the frozen root); lowered
