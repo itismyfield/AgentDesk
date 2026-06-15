@@ -498,7 +498,7 @@
     Moved unit tests live in sibling `utf8_chunk_decoder_tests.rs` /
     `terminal_readiness_tests.rs`; both child modules sit under the
     `tmux_watcher/**` 700-line namespace cap.
-  - `src/services/discord/tui_prompt_relay.rs` (5142 production lines; #3296
+  - `src/services/discord/tui_prompt_relay.rs` (4630 production lines; #3296
     codex r1+r2: the ABORT cleanup hook pins the foreign prior inflight's
     identity — the live row at the record instant, or the worker's LAST-VIEW
     identity when that row just vanished — and persists the marker via
@@ -700,12 +700,38 @@
     `local_only_kind_note_suppressed_by_recent_continuation`,
     `bridge_task_notification_to_live_panel`, `is_local_only_slash_command_prompt`)
     plus all `#[cfg(test)]` coverage stay in this root. Frozen baseline 5434 -> 5142
-    (-292, locks in the shrink; zero logic change).
+    (-292, locks in the shrink; zero logic change). #3479 rank-10 (behavior-preserving
+    extraction): the pure transcript/rollout prompt scanners (the
+    `ClaudeIdleTranscriptScan` / `CodexIdleRolloutScan` enums, the three
+    `scan_*` byte-stream parsers, and the two `*_idle_prompt_observation_should_tail_response`
+    predicates) moved verbatim to `tui_prompt_relay/idle_transcript_scan.rs`, and the
+    Discord-IO/`SharedData`-coupled Claude TUI binding rehydration + dead/orphaned-session
+    eviction pass (`rehydrate_existing_claude_tui_bindings`,
+    `evict_dead_orphaned_claude_tui_mirrors`, `claude_tui_session_is_dead_orphaned`,
+    `pane_is_confirmed_dead_orphaned`, `rehydrated_claude_tui_binding_for_tmux_session`)
+    moved to `tui_prompt_relay/rehydration.rs` (deps reached via `use super::*;`,
+    names re-imported so the call sites + tests stay byte-identical). The sibling
+    helpers shared with non-rehydration code (`claude_tui_runtime_binding_matches_launch`,
+    `resolve_rehydrated_claude_tmux_channel_id`, `parse_claude_tui_launch_script`,
+    `claude_tui_rehydrate_start_offset`, the `ClaudeTuiLaunchInfo` struct, the
+    `DEAD_ORPHANED_PANE_PROBE_*` consts) STAY in this root. Frozen baseline 5142 ->
+    4630 (-512, locks in the shrink; zero logic change).
   - `src/services/discord/tui_prompt_relay/injected_prompt_policy.rs` (318 prod
     lines; #3479 rank-5: pure injected-prompt classification + formatting policy
     extracted verbatim from `tui_prompt_relay.rs` — no `shared.`/`http.`/async-IO
     coupling, all items `pub(super)` and re-imported by the parent; below the
     giant-file threshold).
+  - `src/services/discord/tui_prompt_relay/idle_transcript_scan.rs` (278 prod
+    lines; #3479 rank-10: pure Claude/Codex transcript+rollout prompt scanners
+    extracted verbatim from `tui_prompt_relay.rs` — no `shared.`/`http.`/async-IO
+    coupling, all items `pub(super)` and re-imported by the parent; below the
+    giant-file threshold).
+  - `src/services/discord/tui_prompt_relay/rehydration.rs` (295 prod lines; #3479
+    rank-10: the Discord-IO/`SharedData`-coupled Claude TUI binding rehydration +
+    dead/orphaned-session eviction pass extracted from `tui_prompt_relay.rs`. Free
+    functions taking `&Arc<SharedData>` explicitly (no captured module state), so
+    the move via `use super::*;` is behavior-identical; the five fns are
+    `pub(super)` and re-imported by the parent; below the giant-file threshold).
   - `src/services/discord/idle_recap.rs` (1319 prod lines; idle-recap card
     compose/post/clear surface, registered giant-file (#3036) — bugfix only
     outside an extraction plan. Crossed 1000 prod LoC with #3146 Part 1: the

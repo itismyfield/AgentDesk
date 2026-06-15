@@ -517,7 +517,9 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   └── store.rs
 │   │   ├── tui_prompt_relay/
-│   │   │   └── injected_prompt_policy.rs
+│   │   │   ├── idle_transcript_scan.rs
+│   │   │   ├── injected_prompt_policy.rs
+│   │   │   └── rehydration.rs
 │   │   ├── turn_bridge/
 │   │   │   ├── cancel_finalize_policy.rs
 │   │   │   ├── completion_guard.rs

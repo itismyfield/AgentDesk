@@ -36,6 +36,40 @@ use self::injected_prompt_policy::{
     slash_command_control_prompt_is_caveat_only,
 };
 
+// #3479 rank-10: the pure transcript/rollout prompt scanners live in a capped
+// sibling module. The scan-result enums and helpers are re-imported here so the
+// stateful idle-relay loops in this parent stay byte-identical.
+mod idle_transcript_scan;
+use self::idle_transcript_scan::{
+    ClaudeIdleTranscriptScan, CodexIdleRolloutScan,
+    claude_idle_prompt_observation_should_tail_response,
+    codex_idle_prompt_observation_should_tail_response,
+    scan_claude_idle_transcript_for_last_prompt, scan_claude_idle_transcript_for_prompt,
+    scan_codex_idle_rollout_for_prompt,
+};
+
+// #3479 rank-10: the Discord-IO/SharedData-coupled Claude TUI binding
+// rehydration + dead/orphaned-session eviction pass lives in a capped sibling
+// module. Every dependency is reached via `use super::*;`, so the move stays
+// behavior-identical; the names are re-imported here so the parent's call sites
+// (and the test module) stay byte-identical.
+#[cfg(unix)]
+mod rehydration;
+#[cfg(unix)]
+use self::rehydration::{
+    rehydrate_existing_claude_tui_bindings, rehydrated_claude_tui_binding_for_tmux_session,
+};
+// The dead/orphaned-session predicates and the eviction pass are driven in
+// production only transitively (via `rehydrate_existing_claude_tui_bindings`);
+// at this module's surface they are referenced only by the unit tests, so the
+// re-import is test-gated to keep the non-test lib build free of unused-import
+// warnings while leaving the test call sites byte-identical.
+#[cfg(all(unix, test))]
+use self::rehydration::{
+    claude_tui_session_is_dead_orphaned, evict_dead_orphaned_claude_tui_mirrors,
+    pane_is_confirmed_dead_orphaned,
+};
+
 const SSH_DIRECT_PROMPT_PREVIEW_LIMIT: usize = 1500;
 const CODEX_IDLE_ROLLOUT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const CLAUDE_IDLE_REHYDRATE_POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -2699,254 +2733,6 @@ const DEAD_ORPHANED_PANE_PROBE_SAMPLES: usize = 3;
 #[cfg(unix)]
 const DEAD_ORPHANED_PANE_PROBE_DELAY: Duration = Duration::from_millis(75);
 
-/// #3105 (codex P1 sub-case B): a tmux session whose dedupe mirror still holds a
-/// stale ClaudeTui binding but which is genuinely dead/orphaned — pane gone AND no
-/// LIVE watcher handle owns it — under which it is safe to drop the restored-owner
-/// binding and tombstone the mirror. EXCLUDES sub-case A (a live session whose
-/// registry entry was transiently evicted: pane still live → returns false →
-/// self-heals via `restore_owner_channel_for_tmux_session`). A
-/// `restored_owner_by_tmux_session` entry is NOT proof of life — it is the stale
-/// residue this eviction reclaims. P2: eviction is destructive, so the dead verdict
-/// resists a flake — the pane must read dead across `DEAD_ORPHANED_PANE_PROBE_
-/// SAMPLES` consecutive samples AND the hard `tmux_session_exists` must confirm the
-/// session is gone (a single soft "no live pane" read can NEVER evict).
-#[cfg(unix)]
-fn claude_tui_session_is_dead_orphaned(shared: &Arc<SharedData>, tmux_session_name: &str) -> bool {
-    // A live watcher handle is conclusive proof of life: never evict, never probe.
-    if shared
-        .tmux_watchers
-        .has_live_watcher_handle(tmux_session_name)
-    {
-        return false;
-    }
-    pane_is_confirmed_dead_orphaned(
-        || crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name),
-        || crate::services::tmux_diagnostics::tmux_session_exists(tmux_session_name),
-        DEAD_ORPHANED_PANE_PROBE_SAMPLES,
-        Some(DEAD_ORPHANED_PANE_PROBE_DELAY),
-    )
-}
-
-/// #3105 (codex P2): pure, testable core of the dead/orphaned pane decision (the
-/// caller short-circuits on a live watcher handle first). Conservative so a LIVE
-/// session is NEVER classified dead from a flake: (1) ANY of up to `samples`
-/// `has_live_pane` reads being live ⇒ NOT dead (self-heal preserved); only all-dead
-/// proceeds. (2) Even then the hard `session_exists` (`tmux has-session`) must
-/// confirm the session is gone. Sub-case B (a genuinely-gone session) reads dead on
-/// every sample AND `session_exists` is false ⇒ true ⇒ the WARN spam stops.
-#[cfg(unix)]
-fn pane_is_confirmed_dead_orphaned(
-    mut has_live_pane: impl FnMut() -> bool,
-    session_exists: impl FnOnce() -> bool,
-    samples: usize,
-    inter_probe_delay: Option<Duration>,
-) -> bool {
-    let samples = samples.max(1);
-    for sample in 0..samples {
-        if has_live_pane() {
-            // Any live observation across the window means the session is alive
-            // (or recovered from a flake): never evict.
-            return false;
-        }
-        if sample + 1 < samples {
-            if let Some(delay) = inter_probe_delay {
-                // Blocking sleep is intentional here: this sync core (and the
-                // sync `tmux` subprocess probes it drives) only ever runs off
-                // the Tokio executor — the sole async caller dispatches the
-                // whole rehydrate pass via `spawn_blocking` (#3105 codex P2), so
-                // this never stalls an executor worker.
-                std::thread::sleep(delay);
-            }
-        }
-    }
-    // Every soft probe agreed the pane is dead. Require the hard has-session check
-    // to confirm the session truly does not exist before declaring it orphaned.
-    !session_exists()
-}
-
-/// #3105 (codex P1 sub-case B): evict the stale dedupe mirror for every Claude
-/// TUI runtime binding whose session is dead/orphaned, BEFORE the idle relay
-/// loop iterates the mirror. The relay loop's `for` is driven by
-/// `runtime_bindings_for_kind(ClaudeTui)`; without this pass a dead/orphaned
-/// session (e.g. a thread-suffixed session whose pane no longer exists on this
-/// host) is yielded every iteration, fails authoritative owner resolution, and
-/// re-emits the drift + skip WARN every ~0.5s indefinitely. Tombstoning the
-/// mirror here removes the binding from that iteration set, so the spam stops
-/// after a single bounded incident line. A later legitimate re-registration
-/// (launch-script rehydrate or a fresh watcher) re-populates the mirror, so a
-/// session that comes back relays again.
-///
-/// This pass is independent of `list_session_names()` (which never contains a
-/// session that is gone from this host), which is exactly why the previous
-/// in-`list` dead-pane branch could not reach it.
-#[cfg(unix)]
-fn evict_dead_orphaned_claude_tui_mirrors(shared: &Arc<SharedData>) {
-    for (tmux_session_name, _binding) in
-        crate::services::tui_prompt_dedupe::runtime_bindings_for_kind(RuntimeHandoffKind::ClaudeTui)
-    {
-        if !claude_tui_session_is_dead_orphaned(shared, &tmux_session_name) {
-            continue;
-        }
-        // Drop any leftover restored-owner binding (a dead session must never
-        // resolve an authoritative owner), then tombstone the dedupe mirror.
-        shared
-            .tmux_watchers
-            .clear_restored_owner_for_tmux_session(&tmux_session_name);
-        if crate::services::tui_prompt_dedupe::evict_dead_tmux_mirror(&tmux_session_name) {
-            tracing::warn!(
-                tmux_session_name = %tmux_session_name,
-                provider = "claude",
-                "evicted stale dedupe mirror for dead/orphaned Claude TUI session \
-                 (pane gone, no live watcher); idle relay will no longer re-emit \
-                 per-poll drift/skip warnings for it"
-            );
-        }
-    }
-}
-
-#[cfg(unix)]
-fn rehydrate_existing_claude_tui_bindings(shared: &Arc<SharedData>) {
-    // #3105 (codex P1 sub-case B): tombstone stale mirrors for dead/orphaned
-    // sessions BEFORE anything else, so the per-poll drift/skip WARN spam stops
-    // even when the session is not present in `list_session_names()` at all.
-    evict_dead_orphaned_claude_tui_mirrors(shared);
-
-    let sessions = match crate::services::platform::tmux::list_session_names() {
-        Ok(sessions) => sessions,
-        Err(error) => {
-            tracing::debug!(error = %error, "Claude TUI binding rehydrate skipped; tmux sessions unavailable");
-            return;
-        }
-    };
-
-    for tmux_session_name in sessions {
-        let existing_binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(
-            &tmux_session_name,
-        );
-        // #3018: dedupe lookup here is a diagnostic/mirror rehydration hint only
-        // (subordinate to the freshly resolved channel below), never a routing
-        // authority — the authoritative resolver is owner_channel_for_tmux_session.
-        let existing_channel =
-            crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(&tmux_session_name);
-        let fresh_binding = rehydrated_claude_tui_binding_for_tmux_session(&tmux_session_name);
-        // #3105: prefer the settings-derived (authoritative) channel; only fall
-        // back to the dedupe mirror's last-seen channel for the dedupe binding
-        // refresh below. The mirror's value must NOT be promoted into the
-        // authoritative registry — see the repair gate below.
-        let authoritative_channel = resolve_rehydrated_claude_tmux_channel_id(&tmux_session_name);
-        let channel_id = match authoritative_channel.or(existing_channel) {
-            Some(channel_id) => channel_id,
-            None => continue,
-        };
-        if !crate::services::tmux_diagnostics::tmux_session_has_live_pane(&tmux_session_name) {
-            // #3105: the restored owner binding is only valid for a LIVE session;
-            // drop it once the pane is gone so a dead session can never resolve.
-            shared
-                .tmux_watchers
-                .clear_restored_owner_for_tmux_session(&tmux_session_name);
-            // #3105 (codex P1 sub-case B): a listed-but-dead pane with no live
-            // watcher is orphaned — also tombstone its stale dedupe mirror so the
-            // idle relay loop stops re-emitting the per-poll drift/skip WARN for
-            // it (the dead-pane branch previously only cleared the restored owner
-            // and left the mirror to spam). `clear_restored_owner_*` above already
-            // ran, so the dead-orphaned predicate cannot be masked by a stale
-            // restored owner here.
-            if claude_tui_session_is_dead_orphaned(shared, &tmux_session_name)
-                && crate::services::tui_prompt_dedupe::evict_dead_tmux_mirror(&tmux_session_name)
-            {
-                tracing::warn!(
-                    tmux_session_name = %tmux_session_name,
-                    provider = "claude",
-                    "evicted stale dedupe mirror for dead/orphaned Claude TUI session \
-                     (listed pane dead, no live watcher)"
-                );
-            }
-            continue;
-        }
-        // #3105: self-heal the authoritative tmux-session→channel registry for a
-        // LIVE Claude TUI session that has no live watcher handle (e.g. the slot
-        // was evicted by a compact/restart/rebind and never re-claimed because
-        // the user is typing directly into the pane). Without this the #3018
-        // "registry is the single authority, never fall back to the mirror" rule
-        // turns a transient registry miss into a PERMANENT relay drop. We promote
-        // ONLY the settings-derived channel (authoritative, resolves both base
-        // and thread-suffixed tmux names) — never the dedupe mirror — and emit a
-        // single bounded incident instead of the per-poll drift warning.
-        if let Some(authoritative_channel) = authoritative_channel {
-            let repaired = shared.tmux_watchers.restore_owner_channel_for_tmux_session(
-                &tmux_session_name,
-                ChannelId::new(authoritative_channel),
-            );
-            if repaired {
-                tracing::warn!(
-                    tmux_session_name = %tmux_session_name,
-                    channel_id = authoritative_channel,
-                    provider = "claude",
-                    "repaired authoritative tmux-session→channel registry for live TUI session \
-                     (no live watcher slot); idle relay can route again"
-                );
-            }
-        }
-        if let (Some(existing), Some(_)) = (&existing_binding, existing_channel) {
-            if existing.runtime_kind == RuntimeHandoffKind::ClaudeTui
-                && Path::new(&existing.output_path).exists()
-                && match fresh_binding.as_ref() {
-                    Some(fresh) => claude_tui_runtime_binding_matches_launch(existing, fresh),
-                    None => true,
-                }
-            {
-                continue;
-            }
-        }
-        if let Some(fresh) = fresh_binding {
-            let should_refresh = match existing_binding.as_ref() {
-                Some(existing) => {
-                    !claude_tui_runtime_binding_matches_launch(existing, &fresh)
-                        || !Path::new(&existing.output_path).exists()
-                }
-                None => true,
-            };
-            if should_refresh {
-                crate::services::tui_prompt_dedupe::register_rehydrated_tmux_runtime_binding(
-                    ProviderKind::Claude.as_str(),
-                    &tmux_session_name,
-                    channel_id,
-                    fresh.clone(),
-                );
-                tracing::info!(
-                    tmux_session_name = %tmux_session_name,
-                    channel_id,
-                    transcript_path = %fresh.output_path,
-                    last_offset = fresh.last_offset,
-                    "rehydrated Claude TUI direct relay binding from launch script"
-                );
-                continue;
-            }
-        }
-        if let Some(binding) = existing_binding {
-            if binding.runtime_kind != RuntimeHandoffKind::ClaudeTui {
-                continue;
-            }
-            if Path::new(&binding.output_path).exists() {
-                crate::services::tui_prompt_dedupe::register_rehydrated_tmux_runtime_binding(
-                    ProviderKind::Claude.as_str(),
-                    &tmux_session_name,
-                    channel_id,
-                    binding.clone(),
-                );
-                tracing::info!(
-                    tmux_session_name = %tmux_session_name,
-                    channel_id,
-                    transcript_path = %binding.output_path,
-                    last_offset = binding.last_offset,
-                    "rehydrated Claude TUI direct relay channel binding"
-                );
-            }
-            continue;
-        }
-    }
-}
-
 #[cfg(unix)]
 fn claude_tui_runtime_binding_matches_launch(
     existing: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
@@ -2955,36 +2741,6 @@ fn claude_tui_runtime_binding_matches_launch(
     existing.runtime_kind == RuntimeHandoffKind::ClaudeTui
         && existing.output_path == fresh.output_path
         && existing.session_id == fresh.session_id
-}
-
-#[cfg(unix)]
-fn rehydrated_claude_tui_binding_for_tmux_session(
-    tmux_session_name: &str,
-) -> Option<crate::services::tui_prompt_dedupe::TuiRuntimeBinding> {
-    let launch_script_path = crate::services::tmux_common::resolve_session_temp_path(
-        tmux_session_name,
-        crate::services::tmux_common::CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT,
-    )?;
-    let launch = parse_claude_tui_launch_script(Path::new(&launch_script_path)).ok()?;
-    let transcript_path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
-        &launch.working_dir,
-        &launch.session_id,
-        None,
-    )
-    .ok()?;
-    if !transcript_path.exists() {
-        return None;
-    }
-    let start_offset = claude_tui_rehydrate_start_offset(&transcript_path);
-    Some(crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
-        runtime_kind: RuntimeHandoffKind::ClaudeTui,
-        output_path: transcript_path.display().to_string(),
-        relay_output_path: None,
-        input_fifo_path: None,
-        session_id: Some(launch.session_id),
-        last_offset: start_offset,
-        relay_last_offset: None,
-    })
 }
 
 #[cfg(unix)]
@@ -3600,274 +3356,6 @@ fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
         provider = ProviderKind::Codex.as_str(),
         runtime_kind = RuntimeHandoffKind::CodexTui.as_str(),
     )));
-}
-
-fn codex_idle_prompt_observation_should_tail_response(
-    observation: crate::services::tui_prompt_dedupe::PromptObservation,
-) -> bool {
-    // The turn bridge owns Discord-originated Codex prompts. The idle rollout
-    // relay is only for text typed directly into the Codex TUI; tailing
-    // suppressed Discord/recent duplicates can replay stale prior-turn output
-    // after a newer Discord message has already started.
-    matches!(
-        observation,
-        crate::services::tui_prompt_dedupe::PromptObservation::PublishedSshDirect
-    )
-}
-
-fn claude_idle_prompt_observation_should_tail_response(
-    observation: crate::services::tui_prompt_dedupe::PromptObservation,
-) -> bool {
-    // The turn bridge owns Discord-originated prompts. Claude's idle tail is
-    // only a recovery path for operator text typed directly into the TUI; if
-    // we tail suppressed Discord/recent duplicates here, the bridge-delivered
-    // answer is posted a second time after inflight clears.
-    matches!(
-        observation,
-        crate::services::tui_prompt_dedupe::PromptObservation::PublishedSshDirect
-    )
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum CodexIdleRolloutScan {
-    NoPrompt {
-        offset: u64,
-    },
-    Prompt {
-        prompt: String,
-        line_end_offset: u64,
-    },
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum ClaudeIdleTranscriptScan {
-    NoPrompt {
-        offset: u64,
-    },
-    Prompt {
-        prompt: String,
-        prompt_start_offset: u64,
-        line_end_offset: u64,
-    },
-}
-
-fn scan_claude_idle_transcript_for_prompt(
-    transcript_path: &Path,
-    start_offset: u64,
-) -> Result<ClaudeIdleTranscriptScan, String> {
-    let mut file = std::fs::File::open(transcript_path).map_err(|error| {
-        format!(
-            "open Claude transcript {}: {error}",
-            transcript_path.display()
-        )
-    })?;
-    let file_len = file
-        .metadata()
-        .map_err(|error| {
-            format!(
-                "stat Claude transcript {}: {error}",
-                transcript_path.display()
-            )
-        })?
-        .len();
-    let mut offset = if start_offset > file_len {
-        0
-    } else {
-        start_offset
-    };
-    file.seek(SeekFrom::Start(offset)).map_err(|error| {
-        format!(
-            "seek Claude transcript {}: {error}",
-            transcript_path.display()
-        )
-    })?;
-    let mut reader = std::io::BufReader::new(file);
-    let mut line = String::new();
-
-    loop {
-        line.clear();
-        let line_start_offset = offset;
-        let bytes_read = reader.read_line(&mut line).map_err(|error| {
-            format!(
-                "read Claude transcript {}: {error}",
-                transcript_path.display()
-            )
-        })?;
-        if bytes_read == 0 {
-            return Ok(ClaudeIdleTranscriptScan::NoPrompt { offset });
-        }
-        offset = offset.saturating_add(bytes_read as u64);
-        let Ok(json) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
-            if !line.ends_with('\n') {
-                return Ok(ClaudeIdleTranscriptScan::NoPrompt {
-                    offset: line_start_offset,
-                });
-            }
-            continue;
-        };
-        if let Some(prompt) =
-            crate::services::tui_prompt_dedupe::extract_claude_transcript_user_prompt(&json)
-        {
-            return Ok(ClaudeIdleTranscriptScan::Prompt {
-                prompt,
-                prompt_start_offset: line_start_offset,
-                line_end_offset: offset,
-            });
-        }
-    }
-}
-
-/// #2843 (codex round-2 P1): scan `[start_offset, EOF)` and return the LAST
-/// (newest, closest to EOF) user prompt rather than the first.
-///
-/// The path-change lookback reads a bounded byte window that can contain
-/// several already-finished turns. Selecting the first prompt would re-relay an
-/// old turn (`observe_prompt_by_tmux` only suppresses pending Discord prompts or
-/// recent duplicates, so an older prompt inside the window is misclassified as
-/// SSH-direct and tailed again). The just-typed prompt is always the newest
-/// entry in the window, so returning the last prompt catches the current turn
-/// without replaying stale backlog. Incremental tailing on an unchanged path
-/// keeps first-prompt semantics via [`scan_claude_idle_transcript_for_prompt`].
-fn scan_claude_idle_transcript_for_last_prompt(
-    transcript_path: &Path,
-    start_offset: u64,
-) -> Result<ClaudeIdleTranscriptScan, String> {
-    let mut file = std::fs::File::open(transcript_path).map_err(|error| {
-        format!(
-            "open Claude transcript {}: {error}",
-            transcript_path.display()
-        )
-    })?;
-    let file_len = file
-        .metadata()
-        .map_err(|error| {
-            format!(
-                "stat Claude transcript {}: {error}",
-                transcript_path.display()
-            )
-        })?
-        .len();
-    let mut offset = if start_offset > file_len {
-        0
-    } else {
-        start_offset
-    };
-    file.seek(SeekFrom::Start(offset)).map_err(|error| {
-        format!(
-            "seek Claude transcript {}: {error}",
-            transcript_path.display()
-        )
-    })?;
-    let mut reader = std::io::BufReader::new(file);
-    let mut line = String::new();
-    let mut last_prompt: Option<ClaudeIdleTranscriptScan> = None;
-
-    loop {
-        line.clear();
-        let line_start_offset = offset;
-        let bytes_read = reader.read_line(&mut line).map_err(|error| {
-            format!(
-                "read Claude transcript {}: {error}",
-                transcript_path.display()
-            )
-        })?;
-        if bytes_read == 0 {
-            return Ok(last_prompt.unwrap_or(ClaudeIdleTranscriptScan::NoPrompt { offset }));
-        }
-        offset = offset.saturating_add(bytes_read as u64);
-        let Ok(json) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
-            if !line.ends_with('\n') {
-                // Partial trailing line: stop before consuming it. Return the
-                // newest COMPLETE prompt found so far; otherwise leave the cursor
-                // at the partial line so the next tick re-reads it once complete.
-                //
-                // #2843 (codex round-3/round-4): deferring here — returning the
-                // scan start so a later tick re-picks the newest prompt once the
-                // partial completes — is NOT viable: `resolve_idle_relay_transcript`
-                // re-registers the binding to the fresh path with `last_offset`
-                // pinned at EOF BEFORE this scan runs, so the next tick has
-                // `path_changed == false` and the first-prompt scanner starts at
-                // that pinned EOF, dropping the deferred (current) turn entirely.
-                // Returning the last complete prompt instead never drops the
-                // current turn: the relayed prompt advances the cursor to its
-                // own line end, and any prompt written after it (e.g. one that
-                // was mid-write this tick) is caught on the next tick by the
-                // unchanged-path first-prompt scanner.
-                //
-                // Residual: if the freshly-resolved transcript is one we already
-                // relayed earlier and then returned to (multi-session mtime
-                // flip-back) AND its just-typed prompt is mid-write at scan time,
-                // the last complete prompt can be an already-relayed older turn,
-                // re-surfaced once (bounded by the 30s recent-duplicate dedup in
-                // observe_prompt_by_tmux). Distinguishing that from the dominant
-                // single-session case ([prompt][its streaming response]) needs
-                // per-transcript relayed-offset memory, which is the relay
-                // delivery-lease / cursor-unification consolidation, not #2843.
-                return Ok(last_prompt.unwrap_or(ClaudeIdleTranscriptScan::NoPrompt {
-                    offset: line_start_offset,
-                }));
-            }
-            continue;
-        };
-        if let Some(prompt) =
-            crate::services::tui_prompt_dedupe::extract_claude_transcript_user_prompt(&json)
-        {
-            last_prompt = Some(ClaudeIdleTranscriptScan::Prompt {
-                prompt,
-                prompt_start_offset: line_start_offset,
-                line_end_offset: offset,
-            });
-        }
-    }
-}
-
-fn scan_codex_idle_rollout_for_prompt(
-    rollout_path: &Path,
-    start_offset: u64,
-) -> Result<CodexIdleRolloutScan, String> {
-    let mut file = std::fs::File::open(rollout_path)
-        .map_err(|error| format!("open Codex rollout {}: {error}", rollout_path.display()))?;
-    let file_len = file
-        .metadata()
-        .map_err(|error| format!("stat Codex rollout {}: {error}", rollout_path.display()))?
-        .len();
-    let mut offset = if start_offset > file_len {
-        0
-    } else {
-        start_offset
-    };
-    file.seek(SeekFrom::Start(offset))
-        .map_err(|error| format!("seek Codex rollout {}: {error}", rollout_path.display()))?;
-    let mut reader = std::io::BufReader::new(file);
-    let mut line = String::new();
-
-    loop {
-        line.clear();
-        let line_start_offset = offset;
-        let bytes_read = reader
-            .read_line(&mut line)
-            .map_err(|error| format!("read Codex rollout {}: {error}", rollout_path.display()))?;
-        if bytes_read == 0 {
-            return Ok(CodexIdleRolloutScan::NoPrompt { offset });
-        }
-        offset = offset.saturating_add(bytes_read as u64);
-        let Ok(json) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
-            if !line.ends_with('\n') {
-                return Ok(CodexIdleRolloutScan::NoPrompt {
-                    offset: line_start_offset,
-                });
-            }
-            continue;
-        };
-        if let Some(prompt) =
-            crate::services::tui_prompt_dedupe::extract_codex_rollout_user_prompt(&json)
-        {
-            return Ok(CodexIdleRolloutScan::Prompt {
-                prompt,
-                line_end_offset: offset,
-            });
-        }
-    }
 }
 
 #[cfg(unix)]

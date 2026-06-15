@@ -149,7 +149,14 @@
 # classification/formatting cluster moved verbatim to the capped sibling
 # `tui_prompt_relay/injected_prompt_policy.rs` (318 prod LoC). Lowers the frozen
 # baseline 5434 -> 5142 (-292). Locks in the shrink win (zero logic change).
-"src/services/discord/tui_prompt_relay.rs" = 5142
+# #3479 rank-10 (behavior-preserving extraction): the pure transcript/rollout
+# prompt scanners moved verbatim to `tui_prompt_relay/idle_transcript_scan.rs`
+# (~278 LoC) and the Discord-IO/SharedData-coupled Claude TUI binding
+# rehydration + dead/orphaned-session eviction pass to
+# `tui_prompt_relay/rehydration.rs` (~296 LoC), both reached via re-import so the
+# call sites stay byte-identical. Lowers the frozen baseline 5142 -> 4630 (-512).
+# Locks in the shrink win (zero logic change).
+"src/services/discord/tui_prompt_relay.rs" = 4630
 # #3038: lowered 4728 -> 4657 (-71) as `SensitivityState` (definition + impl)
 # moved to the `voice_sensitivity` sibling module. Locks in the shrink win.
 # #3038 VoiceBargeInRuntime S1: lowered 4657 -> 4350 (-307) as the STT
