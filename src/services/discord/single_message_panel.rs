@@ -3,7 +3,18 @@ use std::sync::{Mutex, OnceLock};
 
 use poise::serenity_prelude::{ChannelId, MessageId};
 
+/// Byte budget for the COMPLETION footer task section (#3089 S3) — the final
+/// turn message keeps a compact task summary. The LIVE streaming panel uses the
+/// larger `SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES` below.
 pub(in crate::services::discord) const SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES: usize = 600;
+/// #3497: byte budget for the LIVE single-message footer panel BODY (🖥️ Recent
+/// terminal block + Tasks/Subagents/Context; excludes the spinner/status header).
+/// Larger than the completion budget so a terminal-heavy turn shows the full
+/// Recent block during streaming instead of a truncated/dropped one. The relay
+/// body auto-uses the remaining message space (`DISCORD_MSG_LIMIT − footer_len −
+/// margin`) and rolls over when longer, so commentary is preserved across
+/// messages rather than starving the terminal panel.
+pub(in crate::services::discord) const SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES: usize = 1200;
 pub(in crate::services::discord) const SINGLE_MESSAGE_PANEL_SPINNER_FRAMES: &[&str] =
     &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 // Residual background agents can legitimately run for about an hour, but a
@@ -453,15 +464,15 @@ fn is_panel_header_status_marker(marker: char) -> bool {
 }
 
 fn clamp_footer_panel_text(panel_text: &str) -> String {
-    if panel_text.len() <= SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES {
+    if panel_text.len() <= SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES {
         return panel_text.to_string();
     }
 
     const TRUNCATION_MARKER: &str = "…";
-    if SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES <= TRUNCATION_MARKER.len() {
+    if SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES <= TRUNCATION_MARKER.len() {
         let safe_end = super::formatting::floor_char_boundary(
             TRUNCATION_MARKER,
-            SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES,
+            SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES,
         );
         return TRUNCATION_MARKER[..safe_end].to_string();
     }
@@ -470,7 +481,7 @@ fn clamp_footer_panel_text(panel_text: &str) -> String {
     for keep_count in (1..=lines.len()).rev() {
         let prefix = lines[..keep_count].join("\n");
         let candidate = format!("{prefix}\n{TRUNCATION_MARKER}");
-        if candidate.len() > SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES {
+        if candidate.len() > SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES {
             continue;
         }
         // #3495: keep the fenced 🖥️ Recent block atomic. A line-wise cut can
@@ -501,7 +512,7 @@ fn clamp_footer_panel_text(panel_text: &str) -> String {
     }
 
     let first_line = lines.first().copied().unwrap_or_default();
-    let first_line_budget = SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES
+    let first_line_budget = SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES
         .saturating_sub(TRUNCATION_MARKER.len())
         .saturating_sub(1);
     let safe_end = super::formatting::floor_char_boundary(first_line, first_line_budget);
@@ -1082,9 +1093,9 @@ mod tests {
     fn footer_panel_over_budget_excludes_merged_header_from_budget_s3() {
         let huge_panel = format!(
             "🟢 진행 중 — Claude (<t:1700000000:R>)\n{}\n{}\n{}",
-            "a".repeat(290),
-            "b".repeat(290),
-            "c".repeat(100)
+            "a".repeat(590),
+            "b".repeat(590),
+            "c".repeat(590)
         );
         let block = super::compose_footer_status_block("⠸", &huge_panel);
         let (header, panel) = block
@@ -1092,9 +1103,9 @@ mod tests {
             .expect("over-budget panel should keep merged header and panel body");
 
         assert_eq!(header, "⠸ 진행 중 — Claude (<t:1700000000:R>)");
-        assert!(panel.len() <= super::SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES);
+        assert!(panel.len() <= super::SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES);
         assert!(panel.ends_with("\n…") || panel == "…");
-        assert!(block.len() > super::SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES);
+        assert!(block.len() > super::SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES);
     }
 
     /// #3394: the footer finalization sink must re-balance fence parity. A panel
@@ -1127,7 +1138,7 @@ mod tests {
         // header (+ opener) would survive a naive clamp but its body cannot.
         let severed = format!(
             "🟢 진행 중 — Claude (<t:1700000000:R>)\nstreaming line\n🖥️ Recent (mac-book-release)\n```text\n{}\n```",
-            "echo hello\n".repeat(70)
+            "echo hello\n".repeat(130)
         );
         let block = super::compose_footer_status_block("⠸", &severed);
         assert!(
@@ -1158,6 +1169,34 @@ mod tests {
             0,
             "fitting block unbalanced: {kept}"
         );
+    }
+
+    /// #3497: the raised 1200B panel budget renders a full ~1000B 🖥️ Recent
+    /// terminal block that the prior 600B budget would have truncated/dropped.
+    #[test]
+    fn footer_panel_budget_shows_recent_block_over_legacy_600_3497() {
+        let recent_body = "L cargo build output line\n".repeat(40); // ~1040B
+        assert!(recent_body.len() > 600 && recent_body.len() < 1100);
+        let panel = format!(
+            "🟢 진행 중 — Claude (<t:1700000000:R>)\n🖥️ Recent (host)\n```text\n{recent_body}```"
+        );
+        let block = super::compose_footer_status_block("⠸", &panel);
+        // The full fenced block survives (not severed by the clamp) under 1200B,
+        // whereas a 600B budget would have dropped the whole Recent section (#3495).
+        assert!(
+            block.contains("🖥️ Recent"),
+            "Recent header dropped under 1200B budget: {block}"
+        );
+        assert!(
+            block.contains("L cargo build output line"),
+            "Recent terminal body truncated under 1200B budget: {block}"
+        );
+        assert_eq!(
+            block.matches("```").count() % 2,
+            0,
+            "unbalanced fence: {block}"
+        );
+        assert!(block.len() <= super::super::DISCORD_MSG_LIMIT);
     }
 
     /// #3394 round 2 (P1): when the response BODY carries an unterminated code
@@ -1262,9 +1301,9 @@ mod tests {
 
     #[test]
     fn footer_panel_truncates_on_line_boundaries_s3() {
-        let second = "a".repeat(250);
-        let third = "b".repeat(250);
-        let fourth = "c".repeat(250);
+        let second = "a".repeat(500);
+        let third = "b".repeat(500);
+        let fourth = "c".repeat(500);
         let panel =
             format!("🟢 진행 중 — Claude (<t:1700000000:R>)\n\n{second}\n{third}\n{fourth}");
         let block = super::compose_footer_status_block("⠸", &panel);
@@ -1275,7 +1314,7 @@ mod tests {
             vec!["", second.as_str(), third.as_str(), "…"]
         );
         assert!(!panel_portion(&block).contains(fourth.as_str()));
-        assert!(panel_portion(&block).len() <= super::SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES);
+        assert!(panel_portion(&block).len() <= super::SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES);
     }
 
     #[test]
@@ -1289,7 +1328,7 @@ mod tests {
         let panel_lines: Vec<&str> = panel.lines().collect();
 
         assert!(std::str::from_utf8(panel.as_bytes()).is_ok());
-        assert!(panel.len() <= super::SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES);
+        assert!(panel.len() <= super::SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES);
         assert_eq!(panel_lines.last().copied(), Some("…"));
         assert_eq!(panel_lines.len(), 2);
         assert!(!panel.contains("Subagents"));
@@ -1306,7 +1345,7 @@ mod tests {
         let status_block = super::compose_footer_status_block("⠸", &huge_panel);
         let merged_header = footer_header(&status_block);
         let max_footer_len =
-            2 + merged_header.len() + 1 + super::SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES;
+            2 + merged_header.len() + 1 + super::SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES;
         let footer = format!("\n\n{status_block}");
         let expected_body_budget = DISCORD_MSG_LIMIT
             .saturating_sub(footer.len() + STREAMING_PLACEHOLDER_MARGIN_BYTES)
