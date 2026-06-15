@@ -194,7 +194,11 @@
 # #3479 r8: lowered 4090 -> 3718 (behavior-preserving extraction of the pure
 # output-path-detect, phase-policy, and jsonl-extract clusters into leaf modules
 # under recovery_engine/; zero logic change, call sites re-imported byte-identical).
-"src/services/discord/recovery_engine.rs" = 3718
+# #3479 item-2: lowered 3718 -> 3607 (behavior-preserving extraction of the
+# terminal-success watcher / recovery start-offset helper cluster into the leaf
+# module recovery_engine/terminal_watcher.rs; zero logic change, externally-called
+# helpers re-imported byte-identical).
+"src/services/discord/recovery_engine.rs" = 3607
 # #3034 batch-8: lowered 3771 -> 3770 (dead-code removal).
 # #3038 S1: +1 (3770 -> 3771) for the mechanical `shared.queued_placeholders` ->
 # `shared.queued.queued_placeholders` re-wire (one extra method-chain line) forced
