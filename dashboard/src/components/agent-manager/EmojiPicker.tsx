@@ -37,14 +37,17 @@ export default function EmojiPicker({
   onChange,
   size = "md",
   "aria-label": ariaLabel,
+  dialogLabel,
 }: {
   value: string;
   onChange: (emoji: string) => void;
   size?: "sm" | "md";
   "aria-label"?: string;
+  dialogLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
   const { t: tr } = useI18n();
 
   useEffect(() => {
@@ -52,8 +55,20 @@ export default function EmojiPicker({
     const handler = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
     };
+    const keyHandler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        setOpen(false);
+        buttonRef.current?.focus();
+      }
+    };
     document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
+    document.addEventListener("keydown", keyHandler, true);
+    return () => {
+      document.removeEventListener("mousedown", handler);
+      document.removeEventListener("keydown", keyHandler, true);
+    };
   }, [open]);
 
   const btnSize = size === "sm" ? "w-10 h-10 text-lg" : "w-14 h-10 text-xl";
@@ -62,11 +77,13 @@ export default function EmojiPicker({
   const handleEmojiSelect = (emoji: string) => {
     onChange(emoji);
     setOpen(false);
+    buttonRef.current?.focus();
   };
 
   return (
     <div className="relative" ref={ref}>
       <button
+        ref={buttonRef}
         type="button"
         onClick={() => setOpen(!open)}
         className={`${btnSize} rounded-lg border flex items-center justify-center transition-all hover:scale-105 hover:shadow-md`}
@@ -85,7 +102,7 @@ export default function EmojiPicker({
       {open && (
         <div
           role="dialog"
-          aria-label={tr({ ko: "이모지 선택", en: "Choose an emoji" })}
+          aria-label={dialogLabel || tr({ ko: "이모지 선택", en: "Choose an emoji" })}
           className="absolute left-0 top-full z-[60] mt-1 overflow-hidden rounded-xl shadow-2xl"
           style={{
             background:
