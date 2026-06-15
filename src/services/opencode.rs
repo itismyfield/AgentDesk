@@ -1,12 +1,14 @@
 //! OpenCode provider backend — `opencode serve` HTTP/SSE integration.
 //!
-//! Architecture: spawns `opencode serve --hostname 127.0.0.1 --port <N>`, drives the
-//! HTTP REST + SSE API, and normalizes events to AgentDesk `StreamMessage`.
+//! Architecture: keeps a loopback `opencode serve` warm per workspace/runtime key,
+//! drives the HTTP REST + SSE API, and normalizes events to AgentDesk `StreamMessage`.
 
 use std::collections::{HashMap, HashSet, hash_map::Entry};
+use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -17,7 +19,7 @@ use serde_json::Value;
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::process::{configure_child_process_group, kill_pid_tree};
-use crate::services::provider::{CancelToken, ProviderKind, cancel_requested, register_child_pid};
+use crate::services::provider::{CancelToken, ProviderKind, cancel_requested};
 use crate::services::remote::RemoteProfile;
 
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -26,6 +28,7 @@ const SSE_READ_TIMEOUT: Duration = Duration::from_secs(120);
 const DISPOSE_TIMEOUT: Duration = Duration::from_secs(5);
 const MESSAGE_RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 const STARTUP_OUTPUT_LIMIT: usize = 8 * 1024;
+const WARM_SERVER_IDLE_TTL: Duration = Duration::from_secs(20 * 60);
 
 #[derive(Debug, Default)]
 struct OpenCodeStartupOutput {
@@ -47,6 +50,10 @@ impl OpenCodeServerProcess {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+
+    fn is_running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
 }
 
 /// Make sure the spawned `opencode serve` child is reaped even when the
@@ -62,6 +69,114 @@ impl Drop for OpenCodeServerProcess {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+#[derive(Clone, Debug, Eq)]
+struct OpenCodeServerKey {
+    bin: String,
+    working_dir: String,
+}
+
+impl PartialEq for OpenCodeServerKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.bin == other.bin && self.working_dir == other.working_dir
+    }
+}
+
+impl Hash for OpenCodeServerKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.bin.hash(state);
+        self.working_dir.hash(state);
+    }
+}
+
+struct OpenCodeWarmServer {
+    key: OpenCodeServerKey,
+    base_url: String,
+    auth: String,
+    startup_output: Arc<Mutex<OpenCodeStartupOutput>>,
+    process: Mutex<OpenCodeServerProcess>,
+    active_sessions: AtomicUsize,
+    last_used: Mutex<Instant>,
+}
+
+impl OpenCodeWarmServer {
+    fn id(&self) -> u32 {
+        let process = self.process.lock().unwrap_or_else(|e| {
+            tracing::warn!("Recovered poisoned lock for OpenCodeWarmServer::process");
+            e.into_inner()
+        });
+        process.id()
+    }
+
+    fn is_running(&self) -> bool {
+        let mut process = self.process.lock().unwrap_or_else(|e| {
+            tracing::warn!("Recovered poisoned lock for OpenCodeWarmServer::process");
+            e.into_inner()
+        });
+        process.is_running()
+    }
+
+    fn mark_used(&self) {
+        let mut last_used = self.last_used.lock().unwrap_or_else(|e| {
+            tracing::warn!("Recovered poisoned lock for OpenCodeWarmServer::last_used");
+            e.into_inner()
+        });
+        *last_used = Instant::now();
+    }
+
+    fn idle_for(&self) -> Duration {
+        let last_used = self.last_used.lock().unwrap_or_else(|e| {
+            tracing::warn!("Recovered poisoned lock for OpenCodeWarmServer::last_used");
+            e.into_inner()
+        });
+        Instant::now().saturating_duration_since(*last_used)
+    }
+
+    fn shutdown(&self) {
+        let mut process = self.process.lock().unwrap_or_else(|e| {
+            tracing::warn!("Recovered poisoned lock for OpenCodeWarmServer::process");
+            e.into_inner()
+        });
+        shutdown_server(&mut process, &self.base_url, &self.auth);
+    }
+}
+
+struct OpenCodeWarmServerLease {
+    server: Arc<OpenCodeWarmServer>,
+}
+
+impl OpenCodeWarmServerLease {
+    fn base_url(&self) -> &str {
+        &self.server.base_url
+    }
+
+    fn auth(&self) -> &str {
+        &self.server.auth
+    }
+
+    fn startup_output(&self) -> Arc<Mutex<OpenCodeStartupOutput>> {
+        self.server.startup_output.clone()
+    }
+
+    fn shared_server(&self) -> Arc<OpenCodeWarmServer> {
+        self.server.clone()
+    }
+}
+
+impl Drop for OpenCodeWarmServerLease {
+    fn drop(&mut self) {
+        self.server.mark_used();
+        self.server.active_sessions.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+type OpenCodeServerPool = HashMap<OpenCodeServerKey, Arc<OpenCodeWarmServer>>;
+
+static OPENCODE_SERVER_POOL: OnceLock<Mutex<OpenCodeServerPool>> = OnceLock::new();
+
+fn opencode_server_pool() -> &'static Mutex<OpenCodeServerPool> {
+    OPENCODE_SERVER_POOL.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 // ---------------------------------------------------------------------------
@@ -216,27 +331,19 @@ fn execute_command_streaming_inner(
         "OpenCode CLI not found — install with: npm install -g opencode-ai".to_string()
     })?;
 
-    let port = allocate_port()?;
-    let password = generate_password();
-    let auth = build_auth_header(&password);
-    let base_url = format!("http://127.0.0.1:{port}");
-
-    let mut server = spawn_server(&bin, &resolution, port, &password, working_dir)?;
-    register_child_pid(cancel_token, server.id());
-
+    let server = acquire_warm_server(&bin, &resolution, working_dir)?;
     let result = run_session(
         prompt,
         system_prompt,
         allowed_tools,
         model_override.as_ref(),
-        &base_url,
-        &auth,
+        server.base_url(),
+        server.auth(),
         &sender,
         cancel_token,
-        Some(server.startup_output.clone()),
+        Some(server.startup_output()),
+        Some(server.shared_server()),
     );
-
-    shutdown_server(&mut server, &base_url, &auth);
 
     match result {
         Ok(()) => Ok(()),
@@ -247,6 +354,108 @@ fn execute_command_streaming_inner(
 // ---------------------------------------------------------------------------
 // Server lifecycle
 // ---------------------------------------------------------------------------
+
+fn pool_working_dir(working_dir: &str) -> String {
+    std::fs::canonicalize(working_dir)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| working_dir.to_string())
+}
+
+fn warm_server_key(bin: &str, working_dir: &str) -> OpenCodeServerKey {
+    OpenCodeServerKey {
+        bin: bin.to_string(),
+        working_dir: pool_working_dir(working_dir),
+    }
+}
+
+fn cleanup_idle_warm_servers(pool: &mut OpenCodeServerPool) {
+    let expired = pool
+        .iter()
+        .filter_map(|(key, server)| {
+            let active = server.active_sessions.load(Ordering::SeqCst);
+            (active == 0 && server.idle_for() >= WARM_SERVER_IDLE_TTL).then(|| key.clone())
+        })
+        .collect::<Vec<_>>();
+
+    for key in expired {
+        if let Some(server) = pool.remove(&key) {
+            tracing::info!(
+                "Disposing idle OpenCode warm server for {} after {}s",
+                key.working_dir,
+                WARM_SERVER_IDLE_TTL.as_secs()
+            );
+            server.shutdown();
+        }
+    }
+}
+
+fn acquire_warm_server(
+    bin: &str,
+    resolution: &crate::services::platform::BinaryResolution,
+    working_dir: &str,
+) -> Result<OpenCodeWarmServerLease, String> {
+    let key = warm_server_key(bin, working_dir);
+    let pool = opencode_server_pool();
+    let mut pool = pool.lock().unwrap_or_else(|e| {
+        tracing::warn!("Recovered poisoned lock for OpenCode server pool");
+        e.into_inner()
+    });
+
+    cleanup_idle_warm_servers(&mut pool);
+
+    if let Some(server) = pool.get(&key).cloned() {
+        if server.is_running()
+            && wait_for_health(&server.base_url, &server.auth, Some(&server.startup_output)).is_ok()
+        {
+            server.active_sessions.fetch_add(1, Ordering::SeqCst);
+            server.mark_used();
+            tracing::debug!(
+                "Reusing OpenCode warm server {} for {}",
+                server.base_url,
+                key.working_dir
+            );
+            return Ok(OpenCodeWarmServerLease { server });
+        }
+
+        tracing::warn!(
+            "Evicting stale OpenCode warm server {} for {}",
+            server.base_url,
+            key.working_dir
+        );
+        pool.remove(&key);
+        server.shutdown();
+    }
+
+    let port = allocate_port()?;
+    let password = generate_password();
+    let auth = build_auth_header(&password);
+    let base_url = format!("http://127.0.0.1:{port}");
+    let server_process = spawn_server(bin, resolution, port, &password, working_dir)?;
+    let startup_output = server_process.startup_output.clone();
+
+    if let Err(error) = wait_for_health(&base_url, &auth, Some(&startup_output)) {
+        let mut server_process = server_process;
+        shutdown_server(&mut server_process, &base_url, &auth);
+        return Err(error);
+    }
+
+    let server = Arc::new(OpenCodeWarmServer {
+        key: key.clone(),
+        base_url,
+        auth,
+        startup_output,
+        process: Mutex::new(server_process),
+        active_sessions: AtomicUsize::new(1),
+        last_used: Mutex::new(Instant::now()),
+    });
+    tracing::info!(
+        "Started OpenCode warm server {} for {}",
+        server.base_url,
+        server.key.working_dir
+    );
+    pool.insert(key, server.clone());
+    Ok(OpenCodeWarmServerLease { server })
+}
 
 fn spawn_server(
     bin: &str,
@@ -376,6 +585,7 @@ fn run_session(
     sender: &Sender<StreamMessage>,
     cancel_token: Option<&CancelToken>,
     startup_output: Option<Arc<Mutex<OpenCodeStartupOutput>>>,
+    warm_server: Option<Arc<OpenCodeWarmServer>>,
 ) -> Result<(), String> {
     // 1. Wait for server to be ready
     wait_for_health(base_url, auth, startup_output.as_ref())?;
@@ -419,7 +629,15 @@ fn run_session(
     // 6. Read SSE stream
     let reader: BufReader<Box<dyn std::io::Read + Send>> =
         BufReader::new(Box::new(sse_response.into_reader()));
-    consume_sse(reader, &session_id, sender, cancel_token, base_url, auth)
+    consume_sse(
+        reader,
+        &session_id,
+        sender,
+        cancel_token,
+        base_url,
+        auth,
+        warm_server,
+    )
 }
 
 fn wait_for_health(
@@ -809,6 +1027,7 @@ fn consume_sse(
     cancel_token: Option<&CancelToken>,
     base_url: &str,
     auth: &str,
+    warm_server: Option<Arc<OpenCodeWarmServer>>,
 ) -> Result<(), String> {
     // Watchdog: when the caller's `CancelToken` fires while we're parked
     // inside `reader.lines()`, the in-loop poll wouldn't notice until the
@@ -832,6 +1051,7 @@ fn consume_sse(
             let watchdog_base_url = base_url.to_string();
             let watchdog_auth = auth.to_string();
             let watchdog_session_id = session_id.to_string();
+            let watchdog_server = warm_server.clone();
             scope.spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
                     if cancel_requested(Some(cancel)) {
@@ -844,20 +1064,26 @@ fn consume_sse(
                         while Instant::now() < kill_deadline && !stop.load(Ordering::Relaxed) {
                             thread::sleep(Duration::from_millis(50));
                         }
-                        // Hard fallback: SSE loop still hasn't exited
-                        // (abort POST stalled, or server-side abort
-                        // didn't propagate). Kill the opencode server
-                        // process tree so the TCP socket drops and
-                        // `read_line` returns regardless of server
-                        // behaviour. PID is registered via
-                        // `register_child_pid` during server startup.
+                        // Hard fallback: if this warm server is not
+                        // shared by another active turn, kill the server
+                        // process tree so the SSE socket drops and
+                        // `read_line` returns. When multiple OpenCode
+                        // turns share the same warm server, killing the
+                        // server would interrupt unrelated sessions, so
+                        // skip the hard-kill fallback and let the bounded
+                        // read timeout surface the cancel/error instead.
                         if !stop.load(Ordering::Relaxed)
-                            && let Some(pid) = *cancel.child_pid.lock().unwrap_or_else(|e| {
-                                tracing::warn!("Recovered poisoned lock for CancelToken::child_pid in OpenCode watchdog");
-                                e.into_inner()
-                            })
+                            && let Some(server) = watchdog_server.as_ref()
                         {
-                            kill_pid_tree(pid);
+                            if server.active_sessions.load(Ordering::SeqCst) <= 1 {
+                                kill_pid_tree(server.id());
+                            } else {
+                                tracing::warn!(
+                                    "Skipping OpenCode hard-kill cancel fallback for shared warm server {} with {} active sessions",
+                                    server.base_url,
+                                    server.active_sessions.load(Ordering::SeqCst)
+                                );
+                            }
                         }
                         return;
                     }
@@ -1884,3 +2110,36 @@ fn send_error(sender: &Sender<StreamMessage>, message: String) -> Result<(), Str
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opencode_warm_server_key_canonicalizes_equivalent_working_dirs() {
+        let cwd = std::env::current_dir().expect("current dir");
+        let key_from_dot = warm_server_key("opencode", ".");
+        let key_from_cwd = warm_server_key("opencode", &cwd.to_string_lossy());
+
+        assert_eq!(key_from_dot, key_from_cwd);
+    }
+
+    #[test]
+    fn opencode_warm_server_key_separates_working_dirs() {
+        let root = std::env::temp_dir().join(format!(
+            "agentdesk-opencode-key-test-{}",
+            std::process::id()
+        ));
+        let first = root.join("first");
+        let second = root.join("second");
+        std::fs::create_dir_all(&first).expect("create first temp dir");
+        std::fs::create_dir_all(&second).expect("create second temp dir");
+
+        let first_key = warm_server_key("opencode", &first.to_string_lossy());
+        let second_key = warm_server_key("opencode", &second.to_string_lossy());
+
+        assert_ne!(first_key, second_key);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
