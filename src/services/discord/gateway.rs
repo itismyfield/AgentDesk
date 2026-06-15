@@ -281,11 +281,25 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
             )
         })?;
         rate_limit_wait(&self.shared, channel_id).await;
+        // #740 steer / robustness: degrade to a normal (non-reply) send when the
+        // referenced message no longer exists. A queued `/steer` intervention
+        // carries the slash *interaction* id as its `message_id` (a dedup/cancel
+        // token, not a real channel message), so replying to it with the Discord
+        // default `fail_if_not_exists=true` would 10008 and bubble an Err up
+        // through `handle_text_message`, requeue-looping the steer so it never
+        // reaches the agent. `fail_if_not_exists(false)` also hardens every other
+        // reply against a since-deleted target.
         channel_id
             .send_message(
                 &self.http,
                 serenity::CreateMessage::new()
-                    .reference_message((reference_channel_id, reference_message_id))
+                    .reference_message(
+                        serenity::MessageReference::from((
+                            reference_channel_id,
+                            reference_message_id,
+                        ))
+                        .fail_if_not_exists(false),
+                    )
                     .content(content)
                     .allowed_mentions(super::http::relay_allowed_mentions()),
             )
