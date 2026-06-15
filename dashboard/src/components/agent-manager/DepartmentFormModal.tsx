@@ -277,7 +277,7 @@ export default function DepartmentFormModal({
       <form
         role="dialog"
         aria-modal="true"
-        aria-label={isEdit ? tr("부서 정보 수정", "Edit Department") : tr("신규 부서 추가", "Add Department")}
+        aria-labelledby="dept-modal-title"
         className="w-full max-w-2xl max-h-full overflow-y-auto rounded-t-3xl p-5 shadow-2xl animate-in fade-in zoom-in-95 duration-200 sm:max-h-[85vh] sm:rounded-[28px] sm:p-6"
         style={{
           background:
@@ -288,8 +288,8 @@ export default function DepartmentFormModal({
       >
         {/* Header */}
         <div className="flex items-center justify-between mb-5">
-          <h3 className="text-base font-bold flex items-center gap-2" style={{ color: "var(--th-text-heading)" }}>
-            <span className="text-lg">{form.icon}</span>
+          <h3 id="dept-modal-title" className="text-base font-bold flex items-center gap-2" style={{ color: "var(--th-text-heading)" }}>
+            <span className="text-lg" aria-hidden="true">{form.icon}</span>
             {isEdit ? tr("부서 정보 수정", "Edit Department") : tr("신규 부서 추가", "Add Department")}
           </h3>
           <SurfaceActionButton
@@ -323,6 +323,7 @@ export default function DepartmentFormModal({
                         ? t({ ko: `선택된 아이콘: ${form.icon}, 아이콘 변경`, en: `Selected icon: ${form.icon}, change icon` })
                         : t({ ko: "아이콘 선택기 열기", en: "Open icon picker" })
                     }
+                    dialogLabel={t({ ko: "아이콘 선택", en: "Choose an icon" })}
                   />
                 </div>
                 <div className="flex-1">
