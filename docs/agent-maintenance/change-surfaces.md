@@ -498,7 +498,7 @@
     Moved unit tests live in sibling `utf8_chunk_decoder_tests.rs` /
     `terminal_readiness_tests.rs`; both child modules sit under the
     `tmux_watcher/**` 700-line namespace cap.
-  - `src/services/discord/tui_prompt_relay.rs` (4630 production lines; #3296
+  - `src/services/discord/tui_prompt_relay.rs` (4458 production lines; #3296
     codex r1+r2: the ABORT cleanup hook pins the foreign prior inflight's
     identity — the live row at the record instant, or the worker's LAST-VIEW
     identity when that row just vanished — and persists the marker via
@@ -715,7 +715,19 @@
     `resolve_rehydrated_claude_tmux_channel_id`, `parse_claude_tui_launch_script`,
     `claude_tui_rehydrate_start_offset`, the `ClaudeTuiLaunchInfo` struct, the
     `DEAD_ORPHANED_PANE_PROBE_*` consts) STAY in this root. Frozen baseline 5142 ->
-    4630 (-512, locks in the shrink; zero logic change).
+    4630 (-512, locks in the shrink; zero logic change). #3479 item-2
+    (behavior-preserving extraction): the live-relay TUI-direct prompt anchor
+    COMPLETION lifecycle (`⏳ → ✅`) cluster — `should_complete_tui_direct_anchor_lifecycle`,
+    the `DeferredAnchorCompletionDrain` enum + `decide_deferred_anchor_completion_drain`
+    drain decision, `complete_tui_direct_prompt_anchor_lifecycle_if_present`,
+    `pinned_anchor_cleanup_target`, and `complete_tui_direct_anchor_lifecycle_for_inflight` —
+    moved verbatim to `tui_prompt_relay/anchor_completion.rs` (deps reached via
+    `use super::*;`, only `super::formatting` becomes `super::super::formatting`).
+    The three helpers reached from sibling discord modules (`tmux_watcher.rs`,
+    `recovery_engine.rs`) are re-exported at `pub(in crate::services::discord)`;
+    the relay-internal drain decision/enum are re-imported privately, so the call
+    sites + tests stay byte-identical. Frozen baseline 4630 -> 4458 (-172, locks in
+    the shrink; zero logic change).
   - `src/services/discord/tui_prompt_relay/injected_prompt_policy.rs` (318 prod
     lines; #3479 rank-5: pure injected-prompt classification + formatting policy
     extracted verbatim from `tui_prompt_relay.rs` — no `shared.`/`http.`/async-IO
@@ -732,6 +744,15 @@
     functions taking `&Arc<SharedData>` explicitly (no captured module state), so
     the move via `use super::*;` is behavior-identical; the five fns are
     `pub(super)` and re-imported by the parent; below the giant-file threshold).
+  - `src/services/discord/tui_prompt_relay/anchor_completion.rs` (213 prod lines;
+    #3479 item-2: the live-relay TUI-direct prompt anchor COMPLETION lifecycle
+    (`⏳ → ✅`) — the visibility gate, the deferred `⏳`-completion drain decision,
+    and the reaction-swap completers (shared-slot + pinned-injected-message paths)
+    — extracted verbatim from `tui_prompt_relay.rs`. Deps reached via
+    `use super::*;` (only `super::formatting` becomes `super::super::formatting`);
+    the three externally-called helpers are `pub(in crate::services::discord)` and
+    re-exported by the parent, the relay-internal drain decision/enum stay
+    `pub(super)`; below the giant-file threshold).
   - `src/services/discord/idle_recap.rs` (1319 prod lines; idle-recap card
     compose/post/clear surface, registered giant-file (#3036) — bugfix only
     outside an extraction plan. Crossed 1000 prod LoC with #3146 Part 1: the
