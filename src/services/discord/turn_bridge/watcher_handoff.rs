@@ -339,6 +339,20 @@ pub(super) fn maybe_hand_off_busy_turn_to_watcher(
                  (JSONL terminator on disk past turn start) — bridge finalizes instead of \
                  handing a finished turn to the watcher"
             );
+            // #3501: the body is PROVEN delivered (JSONL terminator on disk past
+            // turn start, already relayed), so STAMP the inflight delivered before
+            // returning. Otherwise it persists with response_sent_offset=0 +
+            // terminal_delivery_committed=false, and a later dcserver restart
+            // restores it as "undelivered" → the watcher RE-RELAYS the finished
+            // body at the next soft boundary (the #3501 re-relay). Mirrors the
+            // committed-delivery reconciliation in turn_bridge/mod.rs. Only this
+            // proven-COMPLETE branch is stamped; the still-streaming #3268 handoff
+            // below leaves the offset un-advanced, so a delegated turn's tail is
+            // never suppressed.
+            let delivered_len = inflight_state.full_response.len();
+            inflight_state.response_sent_offset = delivered_len;
+            inflight_state.terminal_delivery_committed = true;
+            let _ = save_inflight_state(inflight_state);
             return;
         }
         emit_post_gate_handoff_pending_response_visibility(
