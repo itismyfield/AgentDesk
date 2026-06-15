@@ -999,6 +999,41 @@ mod status_panel_v2_formatter_tests {
     }
 
     #[test]
+    fn format_for_discord_collapses_codex_quad_newline_to_single_blank_3475() {
+        // #3475: codex/adk-cdx bodies arrive with 4-newline paragraph gaps
+        // (agent_message chunks each carry their own \n\n after #3431/#3468).
+        // The final relayed body must collapse to at most one blank visual line,
+        // through the codex-specific formatting entry points.
+        let input = "질문은 코드 기준으로 확인.\n\n\n\n검색상 파일과.\n\n\n\n여기서 분기가 하나.";
+        let expected = "질문은 코드 기준으로 확인.\n\n검색상 파일과.\n\n여기서 분기가 하나.";
+
+        assert_eq!(format_for_discord(input), expected);
+        assert_eq!(
+            format_for_discord_with_provider(input, &ProviderKind::Codex),
+            expected
+        );
+        assert_eq!(
+            format_for_discord_with_status_panel(input, &ProviderKind::Codex),
+            expected
+        );
+        // No 3+ newline run survives in the relayed body.
+        assert!(!format_for_discord(input).contains("\n\n\n"));
+    }
+
+    #[test]
+    fn format_for_discord_preserves_blank_lines_inside_code_block_3475() {
+        // #3475 acceptance: the blank-line collapse must NOT touch code block
+        // contents, so relayed code/tool output keeps its intentional spacing.
+        let input = "before\n```text\nline1\n\n\n\nline2\n```\nafter";
+        let output = format_for_discord(input);
+        assert_eq!(output, input);
+        // Prose around the fence still collapses normally.
+        let mixed = "p1\n\n\n\n```\ncode\n\n\n\nmore\n```\n\n\n\np2";
+        let mixed_out = format_for_discord(mixed);
+        assert_eq!(mixed_out, "p1\n\n```\ncode\n\n\n\nmore\n```\n\np2");
+    }
+
+    #[test]
     fn format_for_discord_removes_trailing_streaming_status_footer() {
         let input = "Final answer\n\n⠋ Processing...";
         let output = format_for_discord_with_provider(input, &ProviderKind::Claude);
@@ -1504,12 +1539,9 @@ pub(super) fn format_for_discord(s: &str) -> String {
             lines.push(line.to_string());
             continue;
         }
-
         let trimmed = line.trim_start();
 
-        // Convert # headers to **bold** (Discord doesn't render headers in bot messages).
-        // Do not inject blank lines around headers; preserve the agent's spacing as-is so
-        // that mobile screens are not wasted by forced double line breaks.
+        // Convert # headers to **bold** (Discord ignores them); keep the agent's spacing as-is.
         if let Some(rest) = trimmed.strip_prefix("### ") {
             lines.push(format!("**{}**", rest));
             continue;
@@ -1523,16 +1555,19 @@ pub(super) fn format_for_discord(s: &str) -> String {
             continue;
         }
 
-        // List items are passed through verbatim. Blank lines around them, if any,
-        // come from the agent and are preserved by the blank-line collapse below.
+        // List items pass through verbatim; surrounding blank lines collapse below.
         lines.push(line.to_string());
     }
 
-    // Collapse consecutive blank lines (max 1)
+    // Collapse consecutive blank lines (max 1); ``` code-block contents stay verbatim (#3475).
     let mut result = String::with_capacity(s.len());
     let mut prev_was_empty = false;
+    let mut in_code_block = false;
     for line in &lines {
-        let is_empty = line.trim().is_empty();
+        if line.trim_start().starts_with("```") {
+            in_code_block = !in_code_block;
+        }
+        let is_empty = !in_code_block && line.trim().is_empty();
         if is_empty {
             if !prev_was_empty && !result.is_empty() {
                 result.push('\n');
