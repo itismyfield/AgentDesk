@@ -119,6 +119,7 @@ pub(crate) use session_relay_sink::run_session_bound_discord_relay_supervisor;
 // #3038 S4: re-export the live-placeholder cluster type so `SharedData`
 // declarations/constructors keep the S1/S2/S3 unqualified surface.
 pub(in crate::services::discord) use shared_state::PlaceholderState;
+pub(in crate::services::discord) use shared_state::PolicyRuntime;
 pub(in crate::services::discord) use shared_state::QueuedPlaceholderState;
 pub(in crate::services::discord) use shared_state::RuntimeHttpCache;
 // #3038 S2: the cluster-D members were `pub(super)` on `SharedData` (visible up
@@ -2305,8 +2306,7 @@ pub(crate) struct SharedData {
     pub(super) api_port: u16,
     /// Shared PostgreSQL pool for PG-backed route and runtime helpers.
     pub(super) pg_pool: Option<sqlx::PgPool>,
-    /// Shared policy engine for direct dispatch finalization.
-    pub(super) engine: Option<crate::engine::PolicyEngine>,
+    pub(in crate::services::discord) policy: PolicyRuntime,
     /// Weak reference to the process-wide health registry so turn handlers can
     /// reach dedicated Discord bot HTTP clients without creating an Arc cycle.
     pub(super) health_registry: std::sync::Weak<health::HealthRegistry>,
@@ -2584,7 +2584,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
         provider: ProviderKind::Claude,
         api_port: 9,
         pg_pool,
-        engine: None,
+        policy: PolicyRuntime { engine: None },
         health_registry: std::sync::Weak::new(),
         known_slash_commands: tokio::sync::OnceCell::new(),
         inflight_signals: tokio::sync::broadcast::channel(256).0,

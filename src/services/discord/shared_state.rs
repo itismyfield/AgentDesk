@@ -69,6 +69,17 @@ pub(in crate::services::discord) struct RuntimeHttpCache {
     pub(in crate::services::discord) cached_bot_token: tokio::sync::OnceCell<String>,
 }
 
+/// #3479 cluster — policy runtime capability.
+///
+/// Groups the shared policy engine used by direct-dispatch finalization. The
+/// field, doc, and type moved verbatim from `discord/mod.rs`; direct readers
+/// all stay inside `discord` (`recovery_engine` +
+/// `turn_bridge::completion_guard`) and reach it via `shared.policy.engine`.
+pub(in crate::services::discord) struct PolicyRuntime {
+    /// Shared policy engine for direct dispatch finalization.
+    pub(in crate::services::discord) engine: Option<crate::engine::PolicyEngine>,
+}
+
 impl SharedData {
     /// Phase 5.2 of intake-node-routing (issue #2009): return an `Arc<Http>`
     /// that the response path (tmux watcher, placeholder updates, message

@@ -1981,7 +1981,7 @@ pub(super) async fn restore_inflight_turns(
                         tracing::warn!(
                             "  [{ts}] ⚠ recovery: refusing to complete work dispatch {did} without assistant response"
                         );
-                    } else if let Some(engine) = &shared.engine {
+                    } else if let Some(engine) = &shared.policy.engine {
                         // #143: Use finalize_dispatch directly with retry.
                         for attempt in 1..=3u8 {
                             match crate::dispatch::finalize_dispatch_with_backends(
@@ -2605,7 +2605,7 @@ pub(super) async fn restore_inflight_turns(
                             tracing::warn!(
                                 "  [{ts}] ⚠ recovery: refusing to complete work dispatch {did} without assistant response"
                             );
-                        } else if let Some(engine) = &shared.engine {
+                        } else if let Some(engine) = &shared.policy.engine {
                             for attempt in 1..=3u8 {
                                 match crate::dispatch::finalize_dispatch_with_backends(
                                     None::<&crate::db::Db>,
@@ -2863,7 +2863,7 @@ pub(super) async fn restore_inflight_turns(
                             tracing::warn!(
                                 "  [{ts}] ⚠ recovery: refusing to complete work dispatch {did} without assistant response"
                             );
-                        } else if let Some(engine) = &shared.engine {
+                        } else if let Some(engine) = &shared.policy.engine {
                             for attempt in 1..=3u8 {
                                 match crate::dispatch::finalize_dispatch_with_backends(
                                     None::<&crate::db::Db>,
