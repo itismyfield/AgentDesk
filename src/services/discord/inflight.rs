@@ -296,8 +296,7 @@ pub(super) struct InflightTurnState {
     /// intervention queue, so it round-trips directly here. `None` for
     /// non-voice turns / legacy rows.
     #[serde(default)]
-    pub followup_voice_announcement:
-        Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
+    pub followup_voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 }
 
 /// Origin of a turn whose state is captured in [`InflightTurnState`]. Pure
