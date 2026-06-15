@@ -153,9 +153,14 @@
     (retained for a later phase, not the live watcher path after the R2 revert);
     -1 from #3038 S4 after routing the placeholder/status-panel cluster
     through `shared.ui`; still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (7241 production lines after #3479
-    Phase-1 rank-2; was 7485 after #3479 Phase-1 rank-1 and 8122 after #3038
-    tmux_watcher S1 moved top-level decision
+  - `src/services/discord/tmux_watcher.rs` (7022 production lines after #3479
+    item-2 moved the orphan status-panel cleanup cluster
+    (`cleanup_orphan_external_input_status_panel`,
+    `complete_watcher_status_panel_v2`,
+    `refresh_watcher_session_panel_from_lifecycle`) verbatim into the
+    `tmux_watcher/` child module `orphan_status_panel_cleanup.rs` (~210);
+    was 7241 after #3479 Phase-1 rank-2, 7485 after #3479 Phase-1 rank-1 and
+    8122 after #3038 tmux_watcher S1 moved top-level decision
     clusters A/B/C/E/F/I/J/K
     into `tmux_watcher/` child modules: `liveness.rs` (301),
     `panel_decisions.rs` (372), `prompt_observe.rs` (109),
