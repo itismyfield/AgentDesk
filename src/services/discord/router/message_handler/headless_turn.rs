@@ -22,11 +22,13 @@ pub(in crate::services::discord) async fn start_headless_turn(
         metadata,
         channel_name_hint,
         None,
+        None,
         reserve_headless_turn(),
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) async fn start_reserved_headless_turn(
     ctx: &serenity::Context,
     channel_id: ChannelId,
@@ -37,6 +39,9 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
     source: Option<&str>,
     metadata: Option<serde_json::Value>,
     channel_name_hint: Option<String>,
+    // #5: synthetic tmux-session label for routine turns (see
+    // `start_reserved_headless_turn_with_owner`); `None` for all other callers.
+    tmux_session_label: Option<String>,
     is_dm_hint: Option<bool>,
     reservation: HeadlessTurnReservation,
 ) -> Result<HeadlessTurnStartOutcome, HeadlessTurnStartError> {
@@ -51,6 +56,7 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
         source,
         metadata,
         channel_name_hint,
+        tmux_session_label,
         is_dm_hint,
         reservation,
     )
@@ -111,12 +117,14 @@ pub(in crate::services::discord) async fn start_voice_headless_turn(
         Some(crate::dispatch::Source::Voice.as_str()),
         metadata,
         channel_name_hint,
+        None,
         Some(false),
         reserve_headless_turn(),
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn start_reserved_headless_turn_with_owner(
     ctx: &serenity::Context,
     channel_id: ChannelId,
@@ -128,6 +136,13 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     source: Option<&str>,
     metadata: Option<serde_json::Value>,
     channel_name_hint: Option<String>,
+    // #5: When set, this synthetic label (e.g. a routine's distinct tmux session
+    // name) drives ONLY the tmux-session naming below, decoupled from
+    // `channel_name_hint`, which must stay the agent's REAL primary
+    // channel/alias so `resolve_workspace`/worktree isolation/dispatch/role and
+    // the routine-identity reset guard keep resolving against the real channel.
+    // Non-routine callers pass `None` and behave exactly as before.
+    tmux_session_label: Option<String>,
     is_dm_hint: Option<bool>,
     reservation: HeadlessTurnReservation,
 ) -> Result<HeadlessTurnStartOutcome, HeadlessTurnStartError> {
@@ -500,8 +515,13 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
             .and_then(|session| session.channel_name.clone())
             .or_else(|| channel_name_hint.clone());
         let tmux_session_name = if provider.uses_managed_tmux_backend() {
-            channel_name
-                .as_ref()
+            // #5: Prefer the synthetic routine label (when supplied) so the
+            // routine keeps its DISTINCT tmux session (#3463: routine-name-first
+            // label avoids two routines on one agent colliding) while
+            // `channel_name` stays the REAL channel for workspace/dispatch/role.
+            tmux_session_label
+                .as_deref()
+                .or(channel_name.as_deref())
                 .map(|name| provider.build_tmux_session_name(name))
         } else {
             None

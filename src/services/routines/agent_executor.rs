@@ -1026,7 +1026,13 @@ impl RoutineAgentExecutor {
             )
             .await
         } else {
-            let channel_name_hint = Some(routine_agent_session_name(&claimed.name, agent_id));
+            // #5: Pass the agent's REAL primary channel/alias as the workspace
+            // hint so `resolve_workspace` resolves for alias/by-name routine
+            // agents, and carry the synthetic routine session name separately as
+            // the tmux-session label so the routine still gets its DISTINCT tmux
+            // session (#3463: routine-name-first avoids cross-routine collision).
+            let channel_name_hint = Some(primary_channel.clone());
+            let tmux_session_label = Some(routine_agent_session_name(&claimed.name, agent_id));
             start_reserved_headless_agent_turn_with_owner_channel(
                 registry,
                 channel_id,
@@ -1036,6 +1042,7 @@ impl RoutineAgentExecutor {
                 Some("routine".to_string()),
                 metadata,
                 channel_name_hint,
+                tmux_session_label,
                 reservation,
             )
             .await
