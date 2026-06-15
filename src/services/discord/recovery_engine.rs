@@ -28,6 +28,33 @@ use std::process::Command;
 #[path = "recovery_engine/status_panel.rs"]
 mod recovery_status_panel;
 
+// #3479 r8: behavior-preserving extraction of pure clusters into leaf modules.
+#[path = "recovery_engine/jsonl_extract.rs"]
+mod jsonl_extract;
+#[path = "recovery_engine/output_path_detect.rs"]
+mod output_path_detect;
+#[path = "recovery_engine/phase_policy.rs"]
+mod phase_policy;
+
+// Re-import moved items so existing call sites stay byte-identical.
+use self::jsonl_extract::{extract_response_from_output, success_result_end_offset_after_offset};
+#[cfg(unix)]
+use self::output_path_detect::{
+    DetectedRebindOutputPath, StaleOutputCandidate, detect_rebind_output_path_from_candidates,
+    parse_lsof_output_candidates,
+};
+use self::phase_policy::{
+    can_fast_path_captured_full_response, recovery_has_post_work_ready_evidence,
+    recovery_phase_after_output_scan, recovery_phase_after_tmux_probe,
+    recovery_phase_for_existing_inflight_rebind, recovery_ready_without_output_already_delivered,
+    recovery_ready_without_output_has_captured_response,
+    recovery_terminal_delivery_already_committed,
+};
+// `extract_response_from_output_pub` is re-exported (not just re-imported) so the
+// `recovery_engine::extract_response_from_output_pub` path stays valid for the
+// turn_bridge / tmux_restart_handoff external callers.
+pub(super) use self::jsonl_extract::extract_response_from_output_pub;
+
 #[cfg(not(unix))]
 fn tmux_session_has_live_pane(_name: &str) -> bool {
     false
@@ -151,10 +178,6 @@ impl RecoveryPhase {
     pub fn from_optional_str(value: Option<&str>) -> Option<Self> {
         value.and_then(Self::from_str)
     }
-}
-
-fn canonical_recovery_phase(phase: RecoveryPhase) -> RecoveryPhase {
-    RecoveryPhase::from_optional_str(Some(phase.as_str())).unwrap_or(phase)
 }
 
 fn recovery_input_fifo_for_runtime(
@@ -1057,78 +1080,6 @@ pub(super) fn save_missing_session_handoff(
     );
 }
 
-fn can_replace_stale_rebind_inflight(state: &inflight::InflightTurnState) -> bool {
-    state.rebind_origin
-        && state.full_response.trim().is_empty()
-        && state.last_watcher_relayed_offset.is_none()
-}
-
-fn can_resume_existing_rebind_inflight(state: &inflight::InflightTurnState) -> bool {
-    !state.rebind_origin
-        && state.request_owner_user_id != 0
-        && state.user_msg_id != 0
-        && state.current_msg_id != 0
-        && state.full_response.trim().is_empty()
-        && state.last_watcher_relayed_offset.is_none()
-}
-
-fn recovery_phase_for_existing_inflight_rebind(
-    state: &inflight::InflightTurnState,
-) -> RecoveryPhase {
-    let phase = match (
-        can_replace_stale_rebind_inflight(state),
-        can_resume_existing_rebind_inflight(state),
-    ) {
-        (true, _) => RecoveryPhase::WatcherReattach,
-        (false, true) => RecoveryPhase::InflightRestore,
-        (false, false) => RecoveryPhase::Pending,
-    };
-    canonical_recovery_phase(phase)
-}
-
-fn can_fast_path_captured_full_response(
-    state: &inflight::InflightTurnState,
-    output_already_completed: bool,
-) -> bool {
-    // Deliberately keep the gate narrow: only real user-authored inflights
-    // with a captured but completely unsent response are eligible, and only
-    // after authoritative completion evidence exists in the output stream.
-    !state.rebind_origin
-        && output_already_completed
-        && !state.full_response.trim().is_empty()
-        && state.response_sent_offset == 0
-        && state.last_watcher_relayed_offset.is_none()
-}
-
-fn recovery_phase_after_output_scan(
-    output_already_completed: bool,
-    tmux_ready_without_new_output: bool,
-) -> RecoveryPhase {
-    let phase = match (output_already_completed, tmux_ready_without_new_output) {
-        (true, _) | (_, true) => RecoveryPhase::Done,
-        (false, false) => RecoveryPhase::Pending,
-    };
-    canonical_recovery_phase(phase)
-}
-
-fn recovery_has_post_work_ready_evidence(state: &inflight::InflightTurnState) -> bool {
-    !state.full_response.trim().is_empty()
-        || state.any_tool_used
-        || state.has_post_tool_text
-        || state
-            .current_tool_line
-            .as_deref()
-            .is_some_and(|line| !line.trim().is_empty())
-        || state
-            .last_tool_name
-            .as_deref()
-            .is_some_and(|name| !name.trim().is_empty())
-        || state
-            .last_tool_summary
-            .as_deref()
-            .is_some_and(|summary| !summary.trim().is_empty())
-}
-
 fn inflight_ready_for_input_without_tui_pane(
     provider: &ProviderKind,
     state: &inflight::InflightTurnState,
@@ -1158,33 +1109,6 @@ fn inflight_or_legacy_tmux_ready_for_input(
         .unwrap_or_else(|| {
             crate::services::provider::tmux_session_ready_for_input(tmux_session_name, provider)
         })
-}
-
-fn recovery_ready_without_output_already_delivered(state: &inflight::InflightTurnState) -> bool {
-    state.response_sent_offset > 0 || state.last_watcher_relayed_offset.is_some()
-}
-
-fn recovery_ready_without_output_has_captured_response(
-    state: &inflight::InflightTurnState,
-) -> bool {
-    !state.full_response.trim().is_empty()
-}
-
-fn recovery_terminal_delivery_already_committed(state: &inflight::InflightTurnState) -> bool {
-    // Planned restart and rebind-origin rows carry their own lifecycle owners:
-    // this fast path is only for stale ordinary turns whose Discord terminal
-    // response was already delivered before recovery tried to re-register them.
-    state.terminal_delivery_completed() && state.restart_mode.is_none() && !state.rebind_origin
-}
-
-fn recovery_phase_after_tmux_probe(can_recover: bool, pane_alive: Option<bool>) -> RecoveryPhase {
-    let phase = match (can_recover, pane_alive) {
-        (false, _) => RecoveryPhase::Done,
-        (true, Some(true)) => RecoveryPhase::WatcherReattach,
-        (true, Some(false)) => RecoveryPhase::InflightRestore,
-        (true, None) => RecoveryPhase::Pending,
-    };
-    canonical_recovery_phase(phase)
 }
 
 fn recovery_worktree_path(state: &inflight::InflightTurnState) -> Option<&str> {
@@ -1480,173 +1404,6 @@ pub(super) async fn reregister_active_turn_from_inflight(
     started
 }
 #[cfg(unix)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DetectedRebindOutputPath {
-    path: String,
-    initial_offset: u64,
-}
-
-#[cfg(unix)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct LsofOutputCandidate {
-    fd: String,
-    raw_path: String,
-    inode: Option<u64>,
-}
-
-#[cfg(unix)]
-impl LsofOutputCandidate {
-    fn normalized_path(&self) -> &str {
-        normalize_lsof_path(&self.raw_path)
-    }
-
-    fn is_deleted(&self) -> bool {
-        self.raw_path.ends_with(" (deleted)")
-    }
-
-    fn as_stale(&self) -> StaleOutputCandidate {
-        StaleOutputCandidate {
-            fd: self.fd.clone(),
-            raw_path: self.raw_path.clone(),
-            inode: self.inode,
-        }
-    }
-}
-
-#[cfg(unix)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct StaleOutputCandidate {
-    fd: String,
-    raw_path: String,
-    inode: Option<u64>,
-}
-
-#[cfg(unix)]
-fn candidate_identity(path: &str) -> Option<(u64, u64)> {
-    let meta = std::fs::metadata(path).ok()?;
-    Some((meta.dev(), meta.ino()))
-}
-
-#[cfg(unix)]
-fn normalize_lsof_path(raw: &str) -> &str {
-    raw.trim_end_matches(" (deleted)")
-}
-
-#[cfg(unix)]
-fn candidate_matches_fallback(fallback_path: &str, candidate_path: &str) -> bool {
-    let Some(fallback_name) = Path::new(fallback_path)
-        .file_name()
-        .and_then(|name| name.to_str())
-    else {
-        return false;
-    };
-    let Some(candidate_name) = Path::new(candidate_path)
-        .file_name()
-        .and_then(|name| name.to_str())
-    else {
-        return false;
-    };
-    let fallback_stem = fallback_name
-        .strip_suffix(".jsonl")
-        .unwrap_or(fallback_name);
-    candidate_name == fallback_name
-        || (candidate_name.starts_with(fallback_stem) && candidate_name.contains(".jsonl"))
-}
-
-#[cfg(unix)]
-fn parse_lsof_output_candidates(stdout: &str) -> Vec<LsofOutputCandidate> {
-    let mut candidates = Vec::new();
-    let mut current_fd: Option<String> = None;
-    let mut current_path: Option<String> = None;
-    let mut current_inode: Option<u64> = None;
-
-    let flush = |candidates: &mut Vec<LsofOutputCandidate>,
-                 current_fd: &mut Option<String>,
-                 current_path: &mut Option<String>,
-                 current_inode: &mut Option<u64>| {
-        if let (Some(fd), Some(raw_path)) = (current_fd.take(), current_path.take()) {
-            candidates.push(LsofOutputCandidate {
-                fd,
-                raw_path,
-                inode: *current_inode,
-            });
-        }
-        *current_inode = None;
-    };
-
-    for line in stdout.lines() {
-        let Some((field, value)) = line.split_at_checked(1) else {
-            continue;
-        };
-        match field {
-            "f" => {
-                flush(
-                    &mut candidates,
-                    &mut current_fd,
-                    &mut current_path,
-                    &mut current_inode,
-                );
-                current_fd = Some(value.to_string());
-            }
-            "i" => current_inode = value.parse::<u64>().ok(),
-            "n" => current_path = Some(value.to_string()),
-            _ => {}
-        }
-    }
-
-    flush(
-        &mut candidates,
-        &mut current_fd,
-        &mut current_path,
-        &mut current_inode,
-    );
-    candidates
-}
-
-#[cfg(unix)]
-fn detect_rebind_output_path_from_candidates(
-    fallback_path: &str,
-    candidates: impl IntoIterator<Item = LsofOutputCandidate>,
-) -> Result<Option<DetectedRebindOutputPath>, StaleOutputCandidate> {
-    let fallback_identity = candidate_identity(fallback_path);
-    let mut first_stale_candidate: Option<StaleOutputCandidate> = None;
-    for candidate in candidates {
-        let candidate_path = candidate.normalized_path();
-        if !candidate_matches_fallback(fallback_path, candidate_path) {
-            continue;
-        }
-        if candidate.is_deleted() {
-            first_stale_candidate.get_or_insert_with(|| candidate.as_stale());
-            continue;
-        }
-        let meta = match std::fs::metadata(candidate_path) {
-            Ok(meta) => meta,
-            Err(_) => {
-                first_stale_candidate.get_or_insert_with(|| candidate.as_stale());
-                continue;
-            }
-        };
-        if candidate.inode.is_some_and(|inode| inode != meta.ino()) {
-            first_stale_candidate.get_or_insert_with(|| candidate.as_stale());
-            continue;
-        };
-        let identity = (meta.dev(), meta.ino());
-        if fallback_identity.is_some() && fallback_identity == Some(identity) {
-            return Ok(None);
-        }
-        return Ok(Some(DetectedRebindOutputPath {
-            path: candidate_path.to_string(),
-            initial_offset: meta.len(),
-        }));
-    }
-    if let Some(stale) = first_stale_candidate {
-        Err(stale)
-    } else {
-        Ok(None)
-    }
-}
-
-#[cfg(unix)]
 fn tmux_pane_pid(tmux_session_name: &str) -> Option<u32> {
     let mut cmd = Command::new("tmux");
     binary_resolver::apply_runtime_path(&mut cmd);
@@ -1693,47 +1450,6 @@ fn detect_live_tmux_output_path(
     };
     let candidates = parse_lsof_output_candidates(&stdout);
     detect_rebind_output_path_from_candidates(fallback_path, candidates)
-}
-
-/// Check whether a **successful** result record exists after the given offset.
-/// Error results are not considered completion — they should not trigger the
-/// recovery completed-turn path (✅ reaction, idle dispatch, etc.).
-fn success_result_end_offset_after_offset(output_path: &str, start_offset: u64) -> Option<u64> {
-    let Ok(bytes) = std::fs::read(output_path) else {
-        return None;
-    };
-    let start = usize::try_from(start_offset)
-        .ok()
-        .map(|offset| offset.min(bytes.len()))
-        .unwrap_or(bytes.len());
-
-    let mut absolute_end = start as u64;
-    for segment in bytes[start..].split_inclusive(|byte| *byte == b'\n') {
-        absolute_end = absolute_end.saturating_add(segment.len() as u64);
-        let line = String::from_utf8_lossy(segment);
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-            continue;
-        };
-        let is_result = value.get("type").and_then(|v| v.as_str()) == Some("result");
-        let is_error = value
-            .get("is_error")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if is_result && !is_error {
-            return Some(absolute_end);
-        }
-    }
-
-    None
-}
-
-/// Extract accumulated assistant text from output JSONL after the given offset.
-fn extract_response_from_output(output_path: &str, start_offset: u64) -> String {
-    extract_response_from_output_pub(output_path, start_offset)
 }
 
 fn extract_turn_analytics_from_output(
@@ -1839,92 +1555,6 @@ async fn persist_recovered_transcript(
             false
         }
     }
-}
-
-/// Public wrapper for turn_bridge fallback recovery.
-///
-/// Mirrors the `resolve_done_response` logic from `turn_bridge.rs`:
-/// when tool_use was seen and no post-tool assistant text followed,
-/// prefer the `result` record over stale pre-tool narration.
-pub(super) fn extract_response_from_output_pub(output_path: &str, start_offset: u64) -> String {
-    let Ok(bytes) = std::fs::read(output_path) else {
-        return String::new();
-    };
-    let start = usize::try_from(start_offset)
-        .ok()
-        .map(|offset| offset.min(bytes.len()))
-        .unwrap_or(bytes.len());
-
-    let mut response = String::new();
-    let mut any_tool_used = false;
-    let mut has_post_tool_text = false;
-    let mut result_text = String::new();
-
-    for line in String::from_utf8_lossy(&bytes[start..]).lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-            continue;
-        };
-        let msg_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        match msg_type {
-            "assistant" => {
-                if let Some(content) = value.get("message").and_then(|m| m.get("content")) {
-                    if let Some(arr) = content.as_array() {
-                        let mut block_has_tool = false;
-                        let mut block_has_text = false;
-                        for block in arr {
-                            match block.get("type").and_then(|t| t.as_str()) {
-                                Some("text") => {
-                                    if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                                        if !text.is_empty() {
-                                            response.push_str(text);
-                                            block_has_text = true;
-                                        }
-                                    }
-                                }
-                                Some("tool_use") => {
-                                    block_has_tool = true;
-                                }
-                                _ => {}
-                            }
-                        }
-                        if block_has_tool {
-                            any_tool_used = true;
-                            // Reset: text in a block that also has tool_use is pre-tool narration
-                            has_post_tool_text = false;
-                        } else if block_has_text && any_tool_used {
-                            has_post_tool_text = true;
-                        }
-                    }
-                }
-            }
-            "result" => {
-                let subtype = value.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
-                if subtype == "success" {
-                    if let Some(r) = value.get("result").and_then(|v| v.as_str()) {
-                        result_text = r.to_string();
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // Apply resolve_done_response logic: if tool was used and no post-tool
-    // assistant text followed, the accumulated response is stale narration —
-    // prefer the authoritative result record.
-    if !result_text.is_empty() {
-        if response.trim().is_empty() {
-            return result_text;
-        }
-        if any_tool_used && !has_post_tool_text {
-            return result_text;
-        }
-    }
-    response
 }
 
 fn output_has_bytes_after_offset(output_path: &str, start_offset: u64) -> bool {

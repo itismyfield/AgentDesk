@@ -741,7 +741,11 @@
     its G1/G2 snapshots from `external_input_relay_lease(...).map(|l| l.generation)`;
     +62 from #3304: slash-command canonical prompt keys for `<command-*>` XML vs
     `/command args` dedupe, plus focused loop skill-expansion regressions).
-  - `src/services/discord/recovery_engine.rs` (4088 lines; #3016 phase-5b2
+  - `src/services/discord/recovery_engine.rs` (3718 lines; #3479 r8 extracted the
+    pure output-path-detect, phase-policy, and jsonl-extract clusters into the
+    sub-1000-prod-LoC leaf modules `recovery_engine/output_path_detect.rs` (177),
+    `recovery_engine/phase_policy.rs` (120), and `recovery_engine/jsonl_extract.rs`
+    (137) — behaviour-preserving move, call sites re-imported byte-identical; #3016 phase-5b2
     dropped the `mailbox_finalize_owed` construction from the three recovery
     watcher-spawn handles; +9 from #3166
     fetching real context thresholds for the recovered-turn status panel; +36 from #3099
