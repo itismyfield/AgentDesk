@@ -444,6 +444,9 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   └── section_dedupe.rs
 │   │   ├── recovery_engine/
+│   │   │   ├── jsonl_extract.rs
+│   │   │   ├── output_path_detect.rs
+│   │   │   ├── phase_policy.rs
 │   │   │   └── status_panel.rs
 │   │   ├── recovery_paths/
 │   │   │   ├── controller_cutover.rs
