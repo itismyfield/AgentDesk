@@ -153,8 +153,9 @@
     (retained for a later phase, not the live watcher path after the R2 revert);
     -1 from #3038 S4 after routing the placeholder/status-panel cluster
     through `shared.ui`; still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (8122 production lines after
-    #3038 tmux_watcher S1 moved top-level decision clusters A/B/C/E/F/I/J/K
+  - `src/services/discord/tmux_watcher.rs` (7485 production lines after #3479
+    Phase-1 rank-1; was 8122 after #3038 tmux_watcher S1 moved top-level decision
+    clusters A/B/C/E/F/I/J/K
     into `tmux_watcher/` child modules: `liveness.rs` (301),
     `panel_decisions.rs` (372), `prompt_observe.rs` (109),
     `turn_identity.rs` (327), `completion_gate.rs` (275), and
@@ -465,7 +466,20 @@
     additions are offset in-file by compressing the #3016-S3 finalize/TOCTOU
     and #1670/#1708 decoupling comment blocks. #3038 tmux_watcher S1 then lowered
     the ratchet baseline to 8122 by moving pure decision clusters into the
-    capped `tmux_watcher/` child modules.
+    capped `tmux_watcher/` child modules. #3479 Phase-1 rank-1 then lowered the
+    live root to 7485 (-738) by extracting the supervisor relay-forward +
+    session-bound terminal-ACK cluster verbatim (pure move, zero logic change)
+    into two cohesive `tmux_watcher/` child modules — `supervisor_relay.rs` (the
+    forward half + the shared `SessionBoundRelayAckTarget`/`SupervisorRelayForward`
+    types + `watcher_terminal_commit_fence`/`terminal_event_consumed_offset`) and
+    `session_bound_ack.rs` (the `SessionBoundRelayAckOutcome` fold, per-sequence
+    ACK snapshot resolvers, the watcher-direct-send gate,
+    `WatcherTerminalResendAction` + the in-flight-sink-marker gate, the
+    `RelaySlotGuard` emission-slot RAII guard, and the ACK delivery wait); split
+    into two files only to keep each within the `tmux_watcher/**` 700-line
+    namespace cap, with the moved unit tests in sibling `supervisor_relay_tests.rs`
+    / `session_bound_ack_tests.rs`. The giant ratchet baseline was lowered
+    8223 -> 7485 to lock in the shrink (zero logic change).
   - `src/services/discord/tui_prompt_relay.rs` (5429 production lines; #3296
     codex r1+r2: the ABORT cleanup hook pins the foreign prior inflight's
     identity — the live row at the record instant, or the worker's LAST-VIEW
