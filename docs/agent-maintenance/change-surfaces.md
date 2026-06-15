@@ -851,10 +851,14 @@
     force-clean watcher-respawn follow-through + always-run cross-tick
     retry/dead-man (P1-a: no early return on zero candidates), delegating the
     new behaviour to `health/watcher_respawn.rs`).
-  - `src/services/discord/router/message_handler/intake_turn.rs` (3769 lines;
+  - `src/services/discord/router/message_handler/intake_turn.rs` (3671 lines;
     Discord message intake turn orchestration split from the router message
     handler; bugfix only outside a further extraction plan; #3464 extracted the
     unauthorized-voice-announcement scope decision to `voice_announcement_scope.rs`;
+    #3479 extracted the voice-transcript announcement route cluster
+    (`claim_voice_transcript_announcement_processing`,
+    `VoiceTranscriptAnnouncementRouteOutcome`,
+    `route_voice_transcript_announcement_once`) to `voice_announcement_route.rs`;
     +9 from #3082
     queued-only answer-flush gate (`is_queued_notice` on the two
     `send_intake_placeholder` call sites: `true` for the race-lost queued card,
