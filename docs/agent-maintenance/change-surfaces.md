@@ -883,7 +883,7 @@
     stop-token/tmux binding runtime + PID-exit observation helper (#2426),
     split before adding non-bugfix behavior. #3169: added the
     claude-anonymous-teardown SIGINT suppression guard (death #3)).
-  - `src/services/discord/turn_bridge/mod.rs` (6535 prod lines; the BRIDGE
+  - `src/services/discord/turn_bridge/mod.rs` (6448 prod lines; the BRIDGE
     spawn/turn-lifecycle surface — `spawn_turn_bridge` and the per-channel
     turn loop. Registered giant-file (#3038 decompose target — see
     `giant-file-registry.md`, owner `discord-relay`, deadline 2026-08-31).

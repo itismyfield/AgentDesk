@@ -546,6 +546,7 @@ src/
 │   │   │   ├── status_panel.rs
 │   │   │   ├── status_panel_tests.rs
 │   │   │   ├── streaming_edit_text.rs
+│   │   │   ├── task_notification_lifecycle.rs
 │   │   │   ├── terminal_controller_cutover.rs
 │   │   │   ├── terminal_delivery.rs
 │   │   │   ├── tmux_runtime.rs

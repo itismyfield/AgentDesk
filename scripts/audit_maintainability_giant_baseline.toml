@@ -114,7 +114,7 @@
 # spawn_watcher_orphan_spinner_cleanup_retry) into
 # `turn_bridge/watcher_orphan_cleanup.rs` (both re-exported, call sites
 # byte-identical). Locks in the shrink win (ratchet down only).
-"src/services/discord/turn_bridge/mod.rs" = 6535
+"src/services/discord/turn_bridge/mod.rs" = 6448
 # #3038 turn_bridge S1 child modules, frozen at landed production LoC.
 "src/services/discord/turn_bridge/headless_delivery.rs" = 415
 "src/services/discord/turn_bridge/status_panel.rs" = 437
