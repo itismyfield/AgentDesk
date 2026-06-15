@@ -295,48 +295,15 @@ export function useOnboardingDraftLifecycle({
           if (preferredDraft === serverDraft) {
             draftToApply = { ...preferredDraft };
 
+            // The backend always redacts bot_tokens to null (see
+            // src/services/onboarding/mod.rs), so only owner/guild can be
+            // restored from server status here. Bot tokens are recovered from
+            // the persisted draft itself, not from status.
             if (statusData.owner_id && !draftToApply.ownerId) {
               draftToApply.ownerId = statusData.owner_id;
             }
             if (statusData.guild_id && !draftToApply.selectedGuild) {
               draftToApply.selectedGuild = statusData.guild_id;
-            }
-
-            if (!serverHasExistingSetup) {
-              if (statusData.bot_tokens?.command || statusData.bot_tokens?.command2) {
-                draftToApply.commandBots = [...draftToApply.commandBots];
-              }
-
-              if (statusData.bot_tokens?.command) {
-                if (draftToApply.commandBots.length > 0 && !draftToApply.commandBots[0].token) {
-                  draftToApply.commandBots[0] = {
-                    ...draftToApply.commandBots[0],
-                    provider: statusData.bot_providers?.command ?? draftToApply.commandBots[0].provider,
-                    token: statusData.bot_tokens.command,
-                  };
-                }
-              }
-              if (statusData.bot_tokens?.command2) {
-                if (draftToApply.commandBots.length < 2) {
-                  draftToApply.commandBots.push({
-                    provider: statusData.bot_providers?.command2 ?? "codex",
-                    token: statusData.bot_tokens.command2,
-                    botInfo: null,
-                  });
-                } else if (!draftToApply.commandBots[1].token) {
-                  draftToApply.commandBots[1] = {
-                    ...draftToApply.commandBots[1],
-                    provider: statusData.bot_providers?.command2 ?? draftToApply.commandBots[1].provider,
-                    token: statusData.bot_tokens.command2,
-                  };
-                }
-              }
-              if (statusData.bot_tokens?.announce && !draftToApply.announceToken) {
-                draftToApply.announceToken = statusData.bot_tokens.announce;
-              }
-              if (statusData.bot_tokens?.notify && !draftToApply.notifyToken) {
-                draftToApply.notifyToken = statusData.bot_tokens.notify;
-              }
             }
           }
 
