@@ -68,14 +68,13 @@ fn routine_metadata_role_binding(
         .and_then(|value| value.as_str())
         .map(str::trim)
         .filter(|value| !value.is_empty())?;
-    let prompt_file = super::super::super::runtime_store::agentdesk_root()
-        .unwrap_or_default()
-        .join("config")
-        .join("agents")
-        .join(agent_id)
-        .join("IDENTITY.md")
-        .display()
-        .to_string();
+    // Resolve the agent's configured prompt path instead of hardcoding
+    // IDENTITY.md under config/agents: `default_prompt_path` reads the managed
+    // agents root and falls back to the legacy `<id>.prompt.md` layout, so
+    // agents on either layout still get their role prompt for routine turns
+    // (#3463). Falls back to the canonical IDENTITY.md path when unset.
+    let prompt_file = crate::services::discord::agentdesk_config::default_prompt_path(agent_id)
+        .unwrap_or_default();
 
     Some(settings::RoleBinding {
         role_id: agent_id.to_string(),
@@ -524,12 +523,21 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
             adk_session_key.as_deref(),
         )
         && let Err(error) = sqlx::query(
+            // Scope to the live session row for this channel. `status` never
+            // takes the literal 'closed' (closure is tracked by `closed_at`; the
+            // 4-state column is turn_active/awaiting_*/idle/disconnected/aborted),
+            // so the old `status <> 'closed'` guard matched EVERY row for the
+            // channel and rewrote the UNIQUE `session_key` on all of them —
+            // corrupting stale rows or hitting the session_key unique constraint.
+            // Restrict to non-closed rows and never overwrite a different
+            // session's key (only stamp an unset key or refresh this same key).
             "UPDATE sessions
                 SET agent_id = $1,
                     provider = $2,
                     session_key = $3
               WHERE channel_id = $4
-                AND COALESCE(status, '') <> 'closed'",
+                AND closed_at IS NULL
+                AND (session_key IS NULL OR session_key = $3)",
         )
         .bind(&binding.role_id)
         .bind(provider.as_str())
