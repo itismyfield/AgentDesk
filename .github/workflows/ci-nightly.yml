@@ -25,7 +25,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "22.15"
+          node-version: "22"
           cache: npm
           cache-dependency-path: dashboard/package-lock.json
 
@@ -258,7 +258,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "22.15"
+          node-version: "22"
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
