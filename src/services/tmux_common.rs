@@ -50,11 +50,18 @@ fn tmux_lines_after_claude_prompt_show_completed_history(lines: &[&str]) -> bool
 
 fn tmux_lines_after_claude_prompt_show_idle_suggestion_chrome(lines: &[&str]) -> bool {
     let busy = lines.iter().any(|line| {
-        let lower = trim_prompt_line(line).to_ascii_lowercase();
+        let trimmed = trim_prompt_line(line);
+        let lower = trimmed.to_ascii_lowercase();
         lower.contains("esc to interrupt")
             || lower.contains("processing")
             || lower.contains("thinking")
             || lower.contains("running")
+            // `Tools: 0 done` is a freshly-submitted, still-starting turn (no tools
+            // run yet), NOT idle chrome. Without this, a just-submitted prompt
+            // followed by a separator + the `bypass permissions` banner would
+            // satisfy `idle_footer` (via the banner) and read as ready, letting a
+            // follow-up inject into a turn that has not produced output yet (#3463).
+            || trimmed.contains("Tools: 0 done")
     });
     if busy {
         return false;

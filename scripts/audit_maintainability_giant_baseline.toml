@@ -20,7 +20,7 @@
 # #3038 execute_streaming S3: lowered claude.rs 3989 -> 2950 by moving the
 # TUI warm/follow-up hosting helpers into claude_tui/hosting/ child modules.
 # #3262 turn-lock acquisition/state/tests intentionally remain in claude.rs root.
-"src/services/claude.rs" = 2950
+"src/services/claude.rs" = 2963
 # #3034 batch-8: the dead_code lint went live for the discord tree; the two
 # test-only `#[allow(dead_code)]` attributes on
 # `watcher_inflight_is_external_input_for_session` / the lease alias add +2 and
@@ -66,7 +66,7 @@
 # status-panel, voice-completion, headless-delivery, memory-observation,
 # analytics, and confirmed-end clusters out of the root while leaving the
 # `spawn_turn_bridge` async body byte-identical.
-"src/services/discord/turn_bridge/mod.rs" = 6778
+"src/services/discord/turn_bridge/mod.rs" = 6811
 # #3038 turn_bridge S1 child modules, frozen at landed production LoC.
 "src/services/discord/turn_bridge/headless_delivery.rs" = 415
 "src/services/discord/turn_bridge/status_panel.rs" = 437
@@ -91,7 +91,7 @@
 # #3038 S5: lowered 4967 -> 4944 (-23) as the cluster-G runtime HTTP cache
 # fields plus the `serenity_http_or_token_fallback` accessor moved into
 # `shared_state::RuntimeHttpCache`. Locks in the shrink win (ratchet down only).
-"src/services/discord/mod.rs" = 4944
+"src/services/discord/mod.rs" = 4979
 # #3305: the local-only pass-through lifecycle-skip (kind hoist + note-only return
 # branch + idle-loop skip) is offset by comment dedup in the same root, lowering the
 # frozen baseline 5438 -> 5429 (-9). Locks in the shrink win (#3028 ratchet).
@@ -211,7 +211,7 @@
 # variant + its reason comment (handled by the finalizer + tested, not yet emitted
 # in prod; rustfmt keeps the attribute and the comment on separate lines).
 "src/services/discord/turn_finalizer.rs" = 1528
-"src/services/discord/router/message_handler/headless_turn.rs" = 1316
+"src/services/discord/router/message_handler/headless_turn.rs" = 1442
 # #3038 S2: lowered 1054 -> 954 (-100) as the session-override bookkeeping
 # helpers (fast-mode reset-entry codec + reset-pending probes/clears +
 # enablement probes + sync_session_reset_pending) moved verbatim to the

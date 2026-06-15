@@ -217,7 +217,7 @@ fn resolve_bot_token(bot_name: &str, bot: &crate::config::BotConfig) -> Option<S
         .or_else(|| crate::credential::read_bot_token(bot_name))
 }
 
-fn default_prompt_path(role_id: &str) -> Option<String> {
+pub(crate) fn default_prompt_path(role_id: &str) -> Option<String> {
     let root = crate::config::runtime_root()?;
     let agents_root = crate::runtime_layout::managed_agents_root(&root);
     let canonical = agents_root.join(role_id).join("IDENTITY.md");
