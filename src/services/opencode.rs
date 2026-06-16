@@ -19,7 +19,7 @@ use serde_json::Value;
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::process::{configure_child_process_group, kill_pid_tree};
-use crate::services::provider::{CancelToken, ProviderKind, cancel_requested};
+use crate::services::provider::{CancelToken, ProviderKind, cancel_requested, register_child_pid};
 use crate::services::remote::RemoteProfile;
 
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -167,7 +167,16 @@ impl OpenCodeWarmServerLease {
 impl Drop for OpenCodeWarmServerLease {
     fn drop(&mut self) {
         self.server.mark_used();
-        self.server.active_sessions.fetch_sub(1, Ordering::SeqCst);
+        // `fetch_sub` returns the *previous* value, so a result of `1` means
+        // this drop took `active_sessions` to `0` — i.e. the final lease was
+        // released. Without an `acquire_warm_server` call to drive
+        // `cleanup_idle_warm_servers`, an idle warm `opencode serve` process
+        // would otherwise stay resident indefinitely after `WARM_SERVER_IDLE_TTL`.
+        // Schedule a one-shot disposal sweep so the last turn's cleanup does
+        // not depend on a future acquire.
+        if self.server.active_sessions.fetch_sub(1, Ordering::SeqCst) == 1 {
+            schedule_idle_disposal();
+        }
     }
 }
 
@@ -332,6 +341,12 @@ fn execute_command_streaming_inner(
     })?;
 
     let server = acquire_warm_server(&bin, &resolution, working_dir)?;
+    // Register the warm server's PID on the caller's CancelToken so timeout
+    // callers (which only have `CancelToken.child_pid` to kill) can interrupt a
+    // turn that is blocked before `run_session` installs the SSE cancel
+    // watchdog. The watchdog itself prefers the shared-server Arc, but this
+    // keeps the historical PID-based cancel path working during startup.
+    register_child_pid(cancel_token, server.shared_server().id());
     let result = run_session(
         prompt,
         system_prompt,
@@ -389,6 +404,25 @@ fn cleanup_idle_warm_servers(pool: &mut OpenCodeServerPool) {
     }
 }
 
+/// Schedule a one-shot idle-disposal sweep `WARM_SERVER_IDLE_TTL` from now.
+///
+/// Called when the final lease on a warm server drops, so an idle
+/// `opencode serve` process is reclaimed even when no further
+/// `acquire_warm_server` ever runs. The sweep re-checks `active_sessions`
+/// and `idle_for` under the pool lock, so a server that was re-acquired in
+/// the meantime is left untouched.
+fn schedule_idle_disposal() {
+    thread::spawn(|| {
+        thread::sleep(WARM_SERVER_IDLE_TTL);
+        let pool = opencode_server_pool();
+        let mut pool = pool.lock().unwrap_or_else(|e| {
+            tracing::warn!("Recovered poisoned lock for OpenCode server pool");
+            e.into_inner()
+        });
+        cleanup_idle_warm_servers(&mut pool);
+    });
+}
+
 fn acquire_warm_server(
     bin: &str,
     resolution: &crate::services::platform::BinaryResolution,
@@ -403,10 +437,32 @@ fn acquire_warm_server(
 
     cleanup_idle_warm_servers(&mut pool);
 
+    // Whether the freshly spawned server (if we end up spawning one) should be
+    // published into the pool. It is set to `false` only when an existing
+    // unhealthy server still has active sessions: in that case we must not
+    // disturb the pooled entry, so this acquire gets a private, non-pooled
+    // server whose process is reclaimed via `Arc` drop once its lease ends.
+    let mut publish_spawn = true;
+
     if let Some(server) = pool.get(&key).cloned() {
-        if server.is_running()
-            && wait_for_health(&server.base_url, &server.auth, Some(&server.startup_output)).is_ok()
-        {
+        // Release the pool lock before probing health. `is_running` and
+        // `wait_for_health` can block for up to `HEALTH_TIMEOUT` (30s) on a
+        // wedged server; holding the global pool mutex across that window
+        // would stall every other OpenCode request — including unrelated
+        // working directories that could spawn their own server.
+        drop(pool);
+
+        let healthy = server.is_running()
+            && wait_for_health(&server.base_url, &server.auth, Some(&server.startup_output))
+                .is_ok();
+
+        // Re-acquire the pool lock to commit the reuse-or-evict decision.
+        let mut pool = opencode_server_pool().lock().unwrap_or_else(|e| {
+            tracing::warn!("Recovered poisoned lock for OpenCode server pool");
+            e.into_inner()
+        });
+
+        if healthy {
             server.active_sessions.fetch_add(1, Ordering::SeqCst);
             server.mark_used();
             tracing::debug!(
@@ -417,13 +473,39 @@ fn acquire_warm_server(
             return Ok(OpenCodeWarmServerLease { server });
         }
 
-        tracing::warn!(
-            "Evicting stale OpenCode warm server {} for {}",
-            server.base_url,
-            key.working_dir
-        );
-        pool.remove(&key);
-        server.shutdown();
+        // Unhealthy server. Only evict/shutdown when no other turn is using
+        // it; killing a server with active sessions would interrupt those
+        // in-flight turns as collateral damage.
+        if server.active_sessions.load(Ordering::SeqCst) == 0 {
+            // Confirm the pool still holds the same instance before removing,
+            // so we don't evict a replacement inserted while the lock was
+            // released.
+            if pool
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(current, &server))
+            {
+                pool.remove(&key);
+            }
+            tracing::warn!(
+                "Evicting stale OpenCode warm server {} for {}",
+                server.base_url,
+                key.working_dir
+            );
+            server.shutdown();
+        } else {
+            // Leave the active (but unhealthy) entry pooled and give this
+            // acquire a private server instead of publishing over it.
+            publish_spawn = false;
+            tracing::warn!(
+                "OpenCode warm server {} for {} failed health probe but has {} active sessions; spawning a private server for this turn instead of evicting",
+                server.base_url,
+                key.working_dir,
+                server.active_sessions.load(Ordering::SeqCst)
+            );
+        }
+        drop(pool);
+    } else {
+        drop(pool);
     }
 
     let port = allocate_port()?;
@@ -453,8 +535,42 @@ fn acquire_warm_server(
         server.base_url,
         server.key.working_dir
     );
-    pool.insert(key, server.clone());
-    Ok(OpenCodeWarmServerLease { server })
+
+    if !publish_spawn {
+        // The pooled entry is unhealthy but still serving other turns, so we
+        // intentionally do not register this server. Its process is reclaimed
+        // when the returned lease (and the cancel watchdog's clone) drop the
+        // last `Arc`, via `OpenCodeServerProcess::drop`.
+        return Ok(OpenCodeWarmServerLease { server });
+    }
+
+    // Re-acquire the pool lock to publish the freshly spawned server. The lock
+    // was released across `spawn_server`/`wait_for_health`, so another acquire
+    // may have raced us and already published a healthy server for this key.
+    let mut pool = opencode_server_pool().lock().unwrap_or_else(|e| {
+        tracing::warn!("Recovered poisoned lock for OpenCode server pool");
+        e.into_inner()
+    });
+    match pool.entry(key) {
+        Entry::Occupied(existing) => {
+            // Another thread won the race. Reuse their server (taking a lease)
+            // and discard ours to avoid leaking an orphaned `opencode serve`.
+            let winner = existing.get().clone();
+            winner.active_sessions.fetch_add(1, Ordering::SeqCst);
+            winner.mark_used();
+            drop(pool);
+            tracing::info!(
+                "Discarding duplicate OpenCode warm server {} after losing startup race",
+                server.base_url
+            );
+            server.shutdown();
+            Ok(OpenCodeWarmServerLease { server: winner })
+        }
+        Entry::Vacant(slot) => {
+            slot.insert(server.clone());
+            Ok(OpenCodeWarmServerLease { server })
+        }
+    }
 }
 
 fn spawn_server(
