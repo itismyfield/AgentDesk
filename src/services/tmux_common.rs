@@ -214,6 +214,31 @@ pub(crate) fn tmux_capture_indicates_claude_tui_busy(capture: &str) -> bool {
     }) || tmux_recent_lines_show_claude_tui_active_work(recent)
 }
 
+/// #3521: `true` when the Claude TUI pane shows a BACKGROUND AGENT still pending — the
+/// `✻ Waiting for N background agent(s) to finish` footer, or a fresh `Backgrounded agent`
+/// spawn line. Distinct from `tmux_capture_indicates_claude_tui_busy`: a detached background
+/// agent leaves the FOREGROUND turn JSONL-idle (no `esc to interrupt`, no spinner) while it
+/// keeps running, so the completion gate must treat this as not-yet-idle to keep the live
+/// footer/turn alive — otherwise the turn finalizes and the panel vanishes mid-run (#3521).
+/// Markers are TUI chrome (`waiting for` + `background agent`, or `backgrounded agent`),
+/// anchored tightly so assistant body text that merely mentions a "background agent" (e.g.
+/// the voice handoff line) does NOT trip a false keep-alive.
+pub(crate) fn tmux_capture_indicates_claude_tui_background_agent_pending(capture: &str) -> bool {
+    let non_empty = capture
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect::<Vec<_>>();
+    if non_empty.is_empty() {
+        return false;
+    }
+    let start = non_empty.len().saturating_sub(CLAUDE_TUI_ACTIVE_SCAN_LINES);
+    non_empty[start..].iter().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        (lower.contains("waiting for") && lower.contains("background agent"))
+            || lower.contains("backgrounded agent")
+    })
+}
+
 /// `true` when `line` is a Claude TUI spinner progress footer: a leading spinner
 /// glyph (the rotating set the TUI cycles through) directly followed by a work
 /// verb. Anchoring the verb to the spinner glyph is what distinguishes the TUI
@@ -1351,6 +1376,26 @@ another line of prior output";
         assert!(!tmux_capture_indicates_claude_tui_busy(capture));
         assert!(!tmux_capture_indicates_claude_tui_actively_streaming(
             capture
+        ));
+    }
+
+    #[test]
+    fn background_agent_pending_detects_chrome_not_body_text() {
+        // #3521: the `✻ Waiting for N background agent to finish` footer and the
+        // `Backgrounded agent` spawn line ARE detected (keep the turn/footer alive);
+        // foreground-idle panes and assistant prose merely mentioning a background
+        // agent are NOT (no false keep-alive → no stuck turn).
+        assert!(tmux_capture_indicates_claude_tui_background_agent_pending(
+            "⏺ reading docs\n✻ Waiting for 1 background agent to finish\n❯ "
+        ));
+        assert!(tmux_capture_indicates_claude_tui_background_agent_pending(
+            "⏺ Agent(read story)\n  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)\n❯ "
+        ));
+        assert!(!tmux_capture_indicates_claude_tui_background_agent_pending(
+            "⏺ done.\n❯ \n  🤖 Opus"
+        ));
+        assert!(!tmux_capture_indicates_claude_tui_background_agent_pending(
+            "I will hand that to the background agent.\n❯ "
         ));
     }
 
