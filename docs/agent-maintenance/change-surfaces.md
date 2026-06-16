@@ -952,7 +952,31 @@
     `spawn_watcher_orphan_spinner_cleanup_retry` + their tests. The retry-spawn
     routes through `task_supervisor`/`placeholder_cleanup` and takes all deps by
     value; not a giant-file).
-  - `src/services/discord/turn_bridge/completion_guard.rs` (1834 lines).
+  - `src/services/discord/turn_bridge/completion_guard.rs` (872 prod lines; no
+    longer a giant-file after #3479 verbatim-extracted two leaf child modules
+    under `completion_guard/` (1834 -> 872 prod). It now holds the
+    review/verdict/decision extractors + `guard_review_dispatch_completion`, the
+    `fail_dispatch_*` retry policy, and the `complete_work_dispatch_on_turn_end`
+    orchestrator; the moved children are re-exported back so
+    `turn_bridge/mod.rs` paths are unchanged. Its giant-file-registry
+    `grandfathered` path and ratchet baseline were retired/win-locked).
+  - `src/services/discord/turn_bridge/completion_guard/completion_postgres.rs`
+    (530 prod lines; runtime-Postgres last-resort dispatch completion/failure
+    paths + auto-queue reconciliation + dispatch-followup/reconcile-marker
+    plumbing extracted from `completion_guard.rs` by #3479:
+    `runtime_pg_complete_dispatch_with_result`,
+    `runtime_pg_fail_dispatch_with_result`, the `runtime_pg_*_linked_auto_queue`
+    helpers, `runtime_db_fallback_complete_with_result`,
+    `streaming_final_complete_dispatch_with_result`,
+    `queue_dispatch_followup_with_handles`, `store_reconcile_marker_with_handles`
+    + their tests. Direct sqlx IO; not a giant-file).
+  - `src/services/discord/turn_bridge/completion_guard/completion_context.rs`
+    (462 prod lines; work-dispatch completion-context + commit attribution
+    extracted from `completion_guard.rs` by #3479: `extract_commit_sha_from_output`,
+    the `DispatchCompletionHints` lookup/parse helpers,
+    `work_dispatch_completion_context`, `build_work_dispatch_completion_result`,
+    and the `noop`/tracked-change context builders. Reads git history + Postgres
+    completion hints; not a giant-file).
   - `src/services/discord/turn_bridge/tmux_runtime.rs` (1545 lines).
   - `src/services/discord/turn_bridge/terminal_delivery.rs` (604 prod lines;
     no longer a giant-file after the #3028 splitter fix corrected its inline

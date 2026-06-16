@@ -535,6 +535,9 @@ src/
 │   │   │   ├── launch_script.rs
 │   │   │   └── rehydration.rs
 │   │   ├── turn_bridge/
+│   │   │   ├── completion_guard/
+│   │   │   │   ├── completion_context.rs
+│   │   │   │   └── completion_postgres.rs
 │   │   │   ├── cancel_finalize_policy.rs
 │   │   │   ├── completion_guard.rs
 │   │   │   ├── context_window.rs
