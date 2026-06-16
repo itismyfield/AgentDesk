@@ -529,6 +529,7 @@ src/
 │   │   │   ├── anchor_completion.rs
 │   │   │   ├── idle_transcript_scan.rs
 │   │   │   ├── injected_prompt_policy.rs
+│   │   │   ├── launch_script.rs
 │   │   │   └── rehydration.rs
 │   │   ├── turn_bridge/
 │   │   │   ├── cancel_finalize_policy.rs

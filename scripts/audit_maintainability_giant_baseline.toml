@@ -171,7 +171,13 @@
 # the giant threshold), reached via re-import so the call sites stay
 # byte-identical. Lowers the frozen baseline 4630 -> 4458 (-172). Locks in the
 # shrink win (zero logic change).
-"src/services/discord/tui_prompt_relay.rs" = 4458
+# #3479 launch-script (behavior-preserving extraction): the Claude TUI
+# launch-*script* parsing cluster (`ClaudeTuiLaunchInfo`, `parse_claude_tui_launch_script`
+# + `_content`, and the `shell_words_from_line` single-quote splitter) moved
+# verbatim to `tui_prompt_relay/launch_script.rs` (107 prod LoC, below the giant
+# threshold), reached via re-import so the call sites stay byte-identical. Lowers
+# the frozen baseline 4458 -> 4376 (-82). Locks in the shrink win (zero logic change).
+"src/services/discord/tui_prompt_relay.rs" = 4376
 # #3038: lowered 4728 -> 4657 (-71) as `SensitivityState` (definition + impl)
 # moved to the `voice_sensitivity` sibling module. Locks in the shrink win.
 # #3038 VoiceBargeInRuntime S1: lowered 4657 -> 4350 (-307) as the STT

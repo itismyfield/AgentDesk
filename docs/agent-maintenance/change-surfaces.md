@@ -507,7 +507,7 @@
     Moved unit tests live in sibling `utf8_chunk_decoder_tests.rs` /
     `terminal_readiness_tests.rs`; both child modules sit under the
     `tmux_watcher/**` 700-line namespace cap.
-  - `src/services/discord/tui_prompt_relay.rs` (4458 production lines; #3296
+  - `src/services/discord/tui_prompt_relay.rs` (4376 production lines; #3296
     codex r1+r2: the ABORT cleanup hook pins the foreign prior inflight's
     identity — the live row at the record instant, or the worker's LAST-VIEW
     identity when that row just vanished — and persists the marker via
@@ -721,9 +721,10 @@
     moved to `tui_prompt_relay/rehydration.rs` (deps reached via `use super::*;`,
     names re-imported so the call sites + tests stay byte-identical). The sibling
     helpers shared with non-rehydration code (`claude_tui_runtime_binding_matches_launch`,
-    `resolve_rehydrated_claude_tmux_channel_id`, `parse_claude_tui_launch_script`,
-    `claude_tui_rehydrate_start_offset`, the `ClaudeTuiLaunchInfo` struct, the
-    `DEAD_ORPHANED_PANE_PROBE_*` consts) STAY in this root. Frozen baseline 5142 ->
+    `resolve_rehydrated_claude_tmux_channel_id`, `claude_tui_rehydrate_start_offset`, the
+    `DEAD_ORPHANED_PANE_PROBE_*` consts) STAY in this root (`parse_claude_tui_launch_script`
+    + the `ClaudeTuiLaunchInfo` struct later moved to `tui_prompt_relay/launch_script.rs`
+    in #3479 launch-script, see below). Frozen baseline 5142 ->
     4630 (-512, locks in the shrink; zero logic change). #3479 item-2
     (behavior-preserving extraction): the live-relay TUI-direct prompt anchor
     COMPLETION lifecycle (`⏳ → ✅`) cluster — `should_complete_tui_direct_anchor_lifecycle`,
@@ -762,6 +763,18 @@
     the three externally-called helpers are `pub(in crate::services::discord)` and
     re-exported by the parent, the relay-internal drain decision/enum stay
     `pub(super)`; below the giant-file threshold).
+  - `src/services/discord/tui_prompt_relay/launch_script.rs` (107 prod lines;
+    #3479 launch-script: the Claude TUI launch-*script* parsing helpers — the
+    parsed `ClaudeTuiLaunchInfo` record, `parse_claude_tui_launch_script` +
+    `parse_claude_tui_launch_script_content`, and the minimal single-quote
+    `shell_words_from_line` shell-word splitter — extracted verbatim from
+    `tui_prompt_relay.rs` (all `#[cfg(unix)]`). Deps reached via `use super::*;`;
+    `parse_claude_tui_launch_script` + the `ClaudeTuiLaunchInfo` record are `pub(super)`
+    and `parse_claude_tui_launch_script` is re-imported by the parent so the
+    `claude_tui_launch_context` caller and the sibling `rehydration` module keep
+    byte-identical call sites, while the module-internal
+    `parse_claude_tui_launch_script_content` + `shell_words_from_line` stay private;
+    below the giant-file threshold).
   - `src/services/discord/idle_recap.rs` (1319 prod lines; idle-recap card
     compose/post/clear surface, registered giant-file (#3036) — bugfix only
     outside an extraction plan. Crossed 1000 prod LoC with #3146 Part 1: the
