@@ -335,7 +335,10 @@
 # no longer a prod-giant; the entry stays ratcheted at the landed value so a
 # re-expansion past it fails the gate (runtime_bootstrap.rs precedent, #3038).
 "src/services/discord/commands/config.rs" = 954
-"src/services/discord/commands/diagnostics.rs" = 1026
+# #3479: diagnostics.rs decomposed into commands/diagnostics/ directory modules
+# (root commands/diagnostics/mod.rs 389 prod LoC + sub-1000-LoC
+# commands/diagnostics/reports.rs) — dropped below the giant threshold, so its
+# ratchet entry is deleted (win; no baseline raises).
 
 # #3038 slice 1: decision_route.rs (4392 prod LoC) was decomposed into a
 # 139-line module root + 8 directory modules. #3038 review-decision S1 lowers

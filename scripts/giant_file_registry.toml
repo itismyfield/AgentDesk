@@ -88,7 +88,11 @@ grandfathered_baseline_paths = [
   # prod-giant, so it is removed from `grandfathered` and from the baseline
   # guard here (win-locked: a re-expanded config.rs cannot be
   # re-grandfathered — it would have to land as a full [[entry]] or shrink).
-  "src/services/discord/commands/diagnostics.rs",
+  # commands/diagnostics.rs dropped to 389 prod LoC in #3479 (report builders +
+  # snapshot/labeling helpers moved to commands/diagnostics/reports.rs); no
+  # longer a prod-giant, so it is removed from the frozen baseline as well as
+  # `grandfathered` (win-locked: a re-expanded diagnostics cannot be
+  # re-grandfathered — it would have to land as a full [[entry]] or shrink).
   "src/services/discord/commands/text_commands.rs",
   "src/services/discord/formatting.rs",
   # health.rs was decomposed in #3038 Phase A (2293 prod LoC -> 402-line module
@@ -195,7 +199,12 @@ grandfathered = [
   # prod-giant, so it is removed from `grandfathered` and from the baseline
   # guard here (win-locked: a re-expanded config.rs cannot be
   # re-grandfathered — it would have to land as a full [[entry]] or shrink).
-  "src/services/discord/commands/diagnostics.rs",
+  # commands/diagnostics.rs was decomposed in #3479 (1022 prod LoC -> 389-line
+  # module root commands/diagnostics/mod.rs + sub-1000-LoC commands/diagnostics/
+  # reports.rs); no longer a prod-giant, so it is removed from `grandfathered`
+  # and from the baseline guard above (win-locked: a re-expanded diagnostics
+  # cannot be re-grandfathered — it would have to land as a full [[entry]] or
+  # shrink). The split outputs stay sub-threshold and are not ratcheted.
   "src/services/discord/commands/text_commands.rs",
   "src/services/discord/formatting.rs",
   # health.rs was decomposed in #3038 Phase A (2293 prod LoC -> 402-line

@@ -1041,7 +1041,7 @@
     iteration-loop helpers; tracked decompose target — see
     `giant-file-registry.md` (owner `automation-pipeline`, deadline
     2026-08-31, #3036)).
-  - `src/services/discord/{commands/text_commands.rs, commands/diagnostics.rs,
+  - `src/services/discord/{commands/text_commands.rs,
     discord_config_audit.rs, router/intake_gate.rs, inflight.rs}`
     (all 1000+ production lines).
 - active_callsite_coverage: n/a.
@@ -1060,6 +1060,17 @@
 - 2026-05-18 refresh: #2558 removed dead watcher/placeholder cleanup parameters
   and retained a warning log for pause/epoch placeholder delete failures; no
   new watcher ownership path was introduced.
+- 2026-06-16 refresh: #3479 decomposed `commands/diagnostics.rs` (1022 prod
+  LoC) verbatim into the `commands/diagnostics/` directory module — the root
+  `src/services/discord/commands/diagnostics/mod.rs` (389 production lines;
+  metrics/health/sessions/status/inflight/queue/adk-phase/debug slash commands +
+  the Gemini session helpers) re-exports the report builders from the new
+  `src/services/discord/commands/diagnostics/reports.rs` (651 production lines;
+  `build_health_report`/`build_status_report`/`build_inflight_report`/
+  `build_queue_report` plus the snapshot-normalization and runtime-labeling
+  helpers they consume). Behavior-preserving move; both files are sub-giant, so
+  diagnostics graduates from the giant-file registry/baseline. No runtime or
+  ownership path changed.
 - tests: `src/high_risk_recovery.rs` cancel/recovery suites.
 - related_issues: #964, #1112, #1138, #1222, #1223, #1283.
 
