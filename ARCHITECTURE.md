@@ -356,6 +356,7 @@ src/
 │   ├── codex_tui/
 │   │   ├── input.rs
 │   │   ├── mod.rs
+│   │   ├── rollout_index.rs
 │   │   ├── rollout_tail.rs
 │   │   └── session.rs
 │   ├── discord/

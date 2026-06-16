@@ -30,11 +30,11 @@
 //! # Rollback
 //!
 //! The cache is gated by `RuntimeSettingsConfig::codex_rollout_index_cache_enabled`
-//! (default ON, hot-reloadable). When disabled, [`cached_rollout_files_under`]
-//! and [`cached_rollout_session_meta`] fall through to the direct
-//! [`rollout_files_under`] scan / direct header read, exactly reproducing the
-//! legacy behaviour with zero cache state. Tests can also force the cold path
-//! with [`reset_cache_for_tests`].
+//! (default ON, hot-reloadable). When disabled, [`cached_indexed_rollouts`]
+//! falls through to the direct [`rollout_files_under`] scan plus
+//! [`read_rollout_session_meta`] header reads, exactly reproducing the legacy
+//! behaviour with zero cache state. Tests can also force the cold path with
+//! [`reset_cache_for_tests`].
 
 use serde_json::Value;
 use std::collections::HashMap;
