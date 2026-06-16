@@ -11,6 +11,9 @@ use sqlx::{PgPool, Row, postgres::PgRow};
 use std::net::SocketAddr;
 
 use crate::db::session_status::is_active_status;
+use crate::server::routes::active_session_audit::{
+    self, ActiveSessionAuditReport, ActiveSessionAuditSettings, RawSessionRow,
+};
 use crate::services::discord::health;
 use crate::services::disk_monitor;
 use crate::services::provider::ProviderKind;
@@ -190,6 +193,11 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             serde_json::to_value(discord_snapshot).unwrap_or_else(|_| serde_json::json!({}));
         if detailed {
             enrich_mailbox_session_state(&mut json, state).await;
+            // #stale-running-session-reconciler-audit: read-only DB active-session
+            // mismatch audit. Detail-only (never on public GET), additive block,
+            // no DB/session/runtime mutation. Runs AFTER mailbox enrichment so it
+            // is off the hot public health path (REQ-003/REQ-004).
+            json["active_session_audit"] = build_active_session_audit(state).await.to_json();
         }
         let mut degraded_reasons = json["degraded_reasons"]
             .as_array()
@@ -680,6 +688,105 @@ async fn enrich_mailbox_session_state(json: &mut serde_json::Value, state: &AppS
             mailbox["session_active_dispatch_id"] = serde_json::Value::Null;
         }
     }
+}
+
+/// Build the read-only `active_session_audit` block for `/api/health/detail`.
+///
+/// Reads audit settings live from `config_live_reload::current()` (hot-reload,
+/// no restart) with compiled-in fallbacks. When disabled by config it returns
+/// the empty `enabled:false` block WITHOUT issuing the DB query (rollback path).
+/// Otherwise it runs ONE bounded `SELECT` (`LIMIT` = max_candidates) against the
+/// existing `sessions` columns and classifies the rows with the pure
+/// [`active_session_audit`] classifier. No UPDATE/INSERT/DELETE, no tmux probe.
+async fn build_active_session_audit(state: &AppState) -> ActiveSessionAuditReport {
+    let runtime = crate::config_live_reload::current().map(|cfg| {
+        (
+            cfg.runtime.active_session_audit_enabled,
+            cfg.runtime.active_session_audit_stale_secs,
+            cfg.runtime.active_session_audit_max_candidates,
+        )
+    });
+    let (enabled_override, stale_override, cap_override) = runtime.unwrap_or((None, None, None));
+    let settings =
+        ActiveSessionAuditSettings::from_overrides(enabled_override, stale_override, cap_override);
+
+    if !settings.enabled {
+        return ActiveSessionAuditReport::disabled(settings.stale_secs);
+    }
+
+    let Some(pool) = state.pg_pool_ref() else {
+        return ActiveSessionAuditReport::disabled(settings.stale_secs);
+    };
+
+    let (rows, raw_matches_total) =
+        load_active_session_audit_rows(pool, settings.max_candidates).await;
+    let mut resolver = crate::services::session_activity::SessionActivityResolver::new();
+    active_session_audit::classify_active_session_audit(
+        &rows,
+        &mut resolver,
+        settings,
+        raw_matches_total,
+        chrono::Utc::now(),
+    )
+}
+
+/// One bounded `SELECT` for raw active-like sessions (`turn_active`, legacy
+/// `working`, OR a non-empty `active_dispatch_id`). Read-only. Returns the
+/// capped rows and the total raw-match count (capped at `LIMIT`, used only for
+/// the `truncated` flag). Duplicate rows are not possible because each row is a
+/// distinct `sessions` row; precedence dedup of the raw signal happens in the
+/// classifier.
+async fn load_active_session_audit_rows(
+    pool: &PgPool,
+    max_candidates: u64,
+) -> (Vec<RawSessionRow>, usize) {
+    let limit = max_candidates.min(i64::MAX as u64) as i64;
+    let query = sqlx::query(
+        "SELECT session_key, provider, status, active_dispatch_id, last_heartbeat, thread_channel_id
+           FROM sessions
+          WHERE status IN ('turn_active', 'working')
+             OR COALESCE(btrim(active_dispatch_id), '') <> ''
+          ORDER BY last_heartbeat DESC NULLS LAST, id DESC
+          LIMIT $1",
+    )
+    .bind(limit);
+    let rows = match query.fetch_all(pool).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::debug!(
+                event = "active_session_audit_query_failed",
+                error = %error,
+                "active-session audit query failed; emitting empty candidate set"
+            );
+            return (Vec::new(), 0);
+        }
+    };
+    let mapped: Vec<RawSessionRow> = rows
+        .iter()
+        .map(|row| RawSessionRow {
+            session_key: row.try_get("session_key").ok(),
+            provider: row.try_get("provider").ok(),
+            status: row.try_get("status").ok(),
+            active_dispatch_id: row.try_get("active_dispatch_id").ok(),
+            last_heartbeat: pg_timestamp_to_rfc3339(row, "last_heartbeat"),
+            thread_channel_id: row.try_get("thread_channel_id").ok(),
+        })
+        .collect();
+    let total = mapped.len();
+    (mapped, total)
+}
+
+/// Read a (possibly `timestamptz`/`timestamp`/`text`) heartbeat column into a
+/// string the audit classifier + `SessionActivityResolver` can parse. Falls back
+/// across representations so schema variance does not panic the read.
+fn pg_timestamp_to_rfc3339(row: &PgRow, column: &str) -> Option<String> {
+    if let Ok(Some(ts)) = row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(column) {
+        return Some(ts.to_rfc3339());
+    }
+    if let Ok(Some(naive)) = row.try_get::<Option<chrono::NaiveDateTime>, _>(column) {
+        return Some(naive.format("%Y-%m-%d %H:%M:%S").to_string());
+    }
+    row.try_get::<Option<String>, _>(column).ok().flatten()
 }
 
 /// GET /api/health — public safe health summary.
@@ -1700,7 +1807,12 @@ mod tests {
             "providers": [{"name": "codex", "connected": true}],
             "mailboxes": [{"channel_id": 123, "has_cancel_token": true}],
             "config_audit": {"warnings": ["secret-ish path"]},
-            "degraded_reasons": ["provider:codex:pending_queue_depth:2"]
+            "degraded_reasons": ["provider:codex:pending_queue_depth:2"],
+            "active_session_audit": {
+                "enabled": true,
+                "candidate_count": 1,
+                "candidates": [{"session_key": "host/mini:codex-1", "confidence": 0.8}]
+            }
         }));
 
         assert_eq!(public["status"], "degraded");
@@ -1712,6 +1824,8 @@ mod tests {
         assert!(public.get("mailboxes").is_none());
         assert!(public.get("config_audit").is_none());
         assert!(public.get("degraded_reasons").is_none());
+        // TEST-004: the detail-only audit block is dropped from public health.
+        assert!(public.get("active_session_audit").is_none());
     }
 
     #[test]

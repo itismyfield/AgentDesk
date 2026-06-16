@@ -202,6 +202,7 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── tuning_aggregate.rs
 │   │   │   └── verdict_route.rs
+│   │   ├── active_session_audit.rs
 │   │   ├── agents.rs
 │   │   ├── agents_crud.rs
 │   │   ├── agents_setup.rs
