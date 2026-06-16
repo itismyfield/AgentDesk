@@ -240,12 +240,24 @@ pub(in crate::services::discord) async fn run_tui_completion_gate(
                 let tmux_session_name = tmux_session_name.to_string();
                 let inflight = inflight.clone();
                 move || {
-                    matched_session_structured_ready_for_input(
+                    let jsonl_ready = matched_session_structured_ready_for_input(
                         &provider,
                         inflight.as_ref(),
                         &tmux_session_name,
                     )
-                    .is_some_and(crate::services::tui_turn_state::TuiReadyState::is_ready)
+                    .is_some_and(crate::services::tui_turn_state::TuiReadyState::is_ready);
+                    // #3521: a detached background agent leaves the foreground JSONL idle while
+                    // it keeps running; hold the turn (and its live footer panel) open until the
+                    // pane no longer shows the `Waiting for N background agent` chrome — otherwise
+                    // the turn finalizes and the panel vanishes mid-run. Capture failure => not
+                    // pending => complete normally (no stuck turn; STALL-WATCHDOG backstops a
+                    // forever-pending agent, completion-footer TTL caps animation at ~1h).
+                    jsonl_ready
+                        && !crate::services::platform::tmux::capture_pane(&tmux_session_name, 0)
+                            .map(|pane| {
+                                crate::services::tmux_common::tmux_capture_indicates_claude_tui_background_agent_pending(&pane)
+                            })
+                            .unwrap_or(false)
                 }
             }),
         )
