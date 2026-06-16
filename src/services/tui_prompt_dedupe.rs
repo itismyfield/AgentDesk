@@ -247,6 +247,38 @@ pub fn register_provider_session(
     );
 }
 
+/// Reverse lookup: resolve the provider session id that maps to `tmux_session_name`
+/// for `provider`, if one was registered (and has not expired). `register_provider_session`
+/// records the forward `provider_session_id -> tmux_session_name` mapping at
+/// launch; this scans it for the entry whose value matches the tmux session.
+///
+/// #tui-hook-ttl-buffer key-match fix: the Claude hook relay buffers under the
+/// PROVIDER session UUID (`config.session_id`), but the readiness layer only
+/// knows the tmux session name. Callers use this to claim the SAME key the hooks
+/// buffered under instead of the tmux fallback (which the buffer never used for a
+/// hosted Claude launch). Returns `None` when no mapping is known, in which case
+/// the caller should fall back to the tmux session name.
+pub fn provider_session_for_tmux(provider: &str, tmux_session_name: &str) -> Option<String> {
+    let provider = normalize_provider(provider);
+    let tmux_session_name = tmux_session_name.trim();
+    if provider.is_empty() || tmux_session_name.is_empty() {
+        return None;
+    }
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.purge_expired();
+    // The forward map can in principle hold multiple provider session ids that
+    // pointed at the same tmux session over time; `purge_expired` has already
+    // dropped stale ones, so prefer the most recently recorded survivor.
+    state
+        .tmux_by_provider_session
+        .iter()
+        .filter(|(promptkey, timed)| {
+            promptkey.provider == provider && timed.value == tmux_session_name
+        })
+        .max_by_key(|(_, timed)| timed.recorded_at)
+        .map(|(promptkey, _)| promptkey.key.clone())
+}
+
 pub fn register_tmux_channel(tmux_session_name: &str, channel_id: u64) {
     let tmux_session_name = tmux_session_name.trim();
     if tmux_session_name.is_empty() || channel_id == 0 {
@@ -1574,6 +1606,50 @@ mod tests {
     fn reset_state() {
         let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
         *state = TuiPromptDedupeState::default();
+    }
+
+    // #tui-hook-ttl-buffer key-match: the reverse lookup must resolve the
+    // provider session UUID for a tmux session (the readiness layer only knows
+    // the tmux name, but the hooks buffer under the provider UUID), and must
+    // stay provider-isolated even when two providers share a tmux name.
+    #[test]
+    fn provider_session_for_tmux_resolves_reverse_mapping() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        register_provider_session("claude", "uuid-claude-1", "tmux-shared");
+        register_provider_session("codex", "uuid-codex-1", "tmux-shared");
+
+        // Resolves the right provider's UUID for the shared tmux name.
+        assert_eq!(
+            provider_session_for_tmux("claude", "tmux-shared"),
+            Some("uuid-claude-1".to_string())
+        );
+        assert_eq!(
+            provider_session_for_tmux("codex", "tmux-shared"),
+            Some("uuid-codex-1".to_string())
+        );
+        // No mapping for an unknown tmux session => None (caller falls back to
+        // the tmux name as the registry key).
+        assert_eq!(provider_session_for_tmux("claude", "tmux-unknown"), None);
+        // Empty inputs are rejected.
+        assert_eq!(provider_session_for_tmux("claude", ""), None);
+        assert_eq!(provider_session_for_tmux("", "tmux-shared"), None);
+    }
+
+    #[test]
+    fn provider_session_for_tmux_prefers_most_recent_mapping() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        // A relaunch of the same tmux session under a new provider UUID must
+        // resolve to the newest UUID (the prior turn's hooks have expired/moved).
+        register_provider_session("claude", "uuid-old", "tmux-relaunch");
+        register_provider_session("claude", "uuid-new", "tmux-relaunch");
+        assert_eq!(
+            provider_session_for_tmux("claude", "tmux-relaunch"),
+            Some("uuid-new".to_string())
+        );
     }
 
     // U-14 Provider-keyed channel isolation: registering the same tmux name

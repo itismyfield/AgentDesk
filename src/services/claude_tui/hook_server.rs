@@ -319,18 +319,31 @@ async fn receive_hook(
     // early signals). This is a parallel buffer — it does NOT gate, drop, or
     // reorder the broadcast send below; the Codex `try_recv()` observer path
     // and `/tui/wait` broadcast subscribers are unchanged. Delivery is a single
-    // in-memory mutex section (O(buffer length for the key)); no I/O. The
-    // registry is fed for EVERY accepted event (including empty Stop) because
-    // claim/replay and the unclaimed-Stop diagnostic both need the full Stop
-    // signal — the empty-payload broadcast filter is intentionally bypassed
-    // here, mirroring the Stop exemption above.
+    // in-memory mutex section (O(buffer length for the key)); no I/O.
+    //
+    // The buffering gate MIRRORS the broadcast gate (`should_drop_broadcast`):
+    // we never buffer anything the live broadcast intentionally drops, so a late
+    // registry replay can never surface an event the live `/tui/wait` path would
+    // not have seen. Concretely this means:
+    //   * `stop_flush_injected` Stops are NOT buffered. That Stop is suppressed
+    //     because it only exists to inject required memento feedback and must not
+    //     be treated as turn completion; buffering it would let a later
+    //     `/tui/wait` return `matched:stop:registry` for it and finish the turn
+    //     before Claude processes the feedback.
+    //   * informational empty-payload NON-Stop events are NOT buffered. They only
+    //     echo `session_id`/`provider`/`event`, so a token wait could otherwise
+    //     match those identifiers via `payload_contains` and return
+    //     `matched:token:registry` for an event the live path filtered out.
+    //   * empty-body Stop / SubagentStop events ARE still buffered (the broadcast
+    //     gate exempts them) so the early-Stop race and unclaimed-Stop diagnostic
+    //     keep working — only the feedback-injected Stop above is excluded.
     //
     // Keyed by (provider, session_id): session_id is already the provider
     // session id when the hook reported one, else the tmux session name passed
     // via the query string — exactly the REQ-001 fallback. Including the
     // provider in the key keeps Claude and Codex isolated even when they share
     // a tmux session name.
-    if crate::services::claude_tui::hook_registry::registry_enabled() {
+    if !should_drop_broadcast && crate::services::claude_tui::hook_registry::registry_enabled() {
         if let Some(key) = crate::services::claude_tui::hook_registry::RegistryKey::new(
             &event.provider,
             Some(event.session_id.as_str()),
@@ -973,6 +986,152 @@ mod tests {
         let key = RegistryKey::new("claude", Some(session), None).unwrap();
         let replayed = global().claim_once(key);
         assert_eq!(replayed.len(), 1, "registry must buffer the early Stop");
+        assert_eq!(replayed[0].kind, HookEventKind::Stop);
+    }
+
+    /// #tui-hook-ttl-buffer (buffering gate mirrors the broadcast gate): a
+    /// feedback-injected Stop (one that produces a `memento_tool_feedback_flush`)
+    /// must NOT be buffered in the registry. That Stop is suppressed from the
+    /// broadcast / prompt-ready because it only exists to inject required memento
+    /// feedback; buffering it would let a later `/tui/wait` return
+    /// `matched:stop:registry` and finish the turn before Claude processes the
+    /// feedback.
+    #[tokio::test]
+    async fn feedback_injected_stop_is_not_buffered() {
+        use crate::services::claude_tui::hook_registry::{RegistryKey, global};
+
+        let session = "sess-feedback-injected-stop";
+        if let Some(key) = RegistryKey::new("claude", Some(session), None) {
+            let _ = global().claim_once(key);
+        }
+
+        let state = HookServerState::new();
+        let app = hook_receiver_router_with_state(state);
+
+        // 1) Arm a pending memento feedback flush: a recall PostToolUse with no
+        //    matching tool feedback leaves an unknown pending search.
+        let post = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/hooks/claude/PostToolUse?session_id={session}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"hook_event_name":"PostToolUse","tool_name":"mcp__memento__recall"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(post.status(), StatusCode::ACCEPTED);
+
+        // 2) A Stop with no `stop_hook_active` now triggers a feedback flush; the
+        //    response carries `memento_tool_feedback_flush`.
+        let stop = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/hooks/claude/Stop?session_id={session}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"hook_event_name":"Stop"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stop.status(), StatusCode::ACCEPTED);
+        let body = axum::body::to_bytes(stop.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            value.get("memento_tool_feedback_flush").is_some(),
+            "the Stop must be a feedback-injected flush for this test to be meaningful"
+        );
+
+        // The feedback-injected Stop must NOT have been buffered. (The priming
+        // PostToolUse is a normal non-noise event and MAY be buffered; we assert
+        // specifically that no Stop / SubagentStop landed in the buffer.)
+        let key = RegistryKey::new("claude", Some(session), None).unwrap();
+        let buffered = global().claim_once(key);
+        assert!(
+            !buffered
+                .iter()
+                .any(|e| matches!(e.kind, HookEventKind::Stop | HookEventKind::SubagentStop)),
+            "feedback-injected Stop must not be buffered in the registry"
+        );
+    }
+
+    /// #tui-hook-ttl-buffer (buffering gate): an informational empty-payload
+    /// NON-Stop event (the kind the broadcast drops because it only echoes
+    /// identifiers) must NOT be buffered, so a later `until=token` wait cannot
+    /// match those identifiers and return `matched:token:registry` for an event
+    /// the live path filtered out.
+    #[tokio::test]
+    async fn informational_empty_payload_non_stop_is_not_buffered() {
+        use crate::services::claude_tui::hook_registry::{RegistryKey, global};
+
+        let session = "sess-noise-non-stop";
+        if let Some(key) = RegistryKey::new("claude", Some(session), None) {
+            let _ = global().claim_once(key);
+        }
+
+        let state = HookServerState::new();
+        let app = hook_receiver_router_with_state(state);
+
+        // A Notification whose body only re-states identifiers is broadcast-noise.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/hooks/claude/Notification?session_id={session}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"session_id":"{session}","provider":"claude","event":"Notification"}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        let key = RegistryKey::new("claude", Some(session), None).unwrap();
+        assert!(
+            global().claim_once(key).is_empty(),
+            "informational empty-payload non-Stop must not be buffered"
+        );
+    }
+
+    /// An empty-body Stop (the common Claude TUI case) is NOT broadcast-noise and
+    /// MUST still be buffered so the early-Stop race rescue keeps working.
+    #[tokio::test]
+    async fn empty_body_stop_is_still_buffered() {
+        use crate::services::claude_tui::hook_registry::{RegistryKey, global};
+
+        let session = "sess-empty-stop-buffered";
+        if let Some(key) = RegistryKey::new("claude", Some(session), None) {
+            let _ = global().claim_once(key);
+        }
+
+        let state = HookServerState::new();
+        let app = hook_receiver_router_with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/hooks/claude/Stop?session_id={session}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"hook_event_name":"Stop"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        let key = RegistryKey::new("claude", Some(session), None).unwrap();
+        let replayed = global().claim_once(key);
+        assert_eq!(replayed.len(), 1, "empty-body Stop must still be buffered");
         assert_eq!(replayed[0].kind, HookEventKind::Stop);
     }
 

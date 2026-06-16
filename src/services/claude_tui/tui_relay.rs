@@ -260,15 +260,22 @@ async fn handle_wait(Json(req): Json<WaitRequest>) -> Json<Value> {
 
     let started = Instant::now();
 
-    // #tui-hook-ttl-buffer (REQ-002/REQ-005/REQ-006): claim the registry key
-    // BEFORE subscribing to the broadcast so a Stop that landed in the early
-    // window (after the previous turn drained the channel but before this wait
-    // subscribed) is replayed exactly once instead of being lost. This is the
-    // additive event source the PRD migrates `/tui/wait` onto; the broadcast
-    // subscription below remains the live path and the fallback. Claiming also
-    // cancels any unclaimed-Stop diagnostic timer for the key. When the
-    // registry is disabled via the rollback flag, this block is a no-op and the
-    // behaviour reverts to the pure broadcast wait.
+    // #tui-hook-ttl-buffer (REQ-002/REQ-005/REQ-006): SUBSCRIBE to the broadcast
+    // BEFORE attempting the registry claim. The claim only sees events buffered
+    // up to the moment it runs; a Stop that arrives AFTER the claim but BEFORE we
+    // subscribe would otherwise be fed to the registry (for a later request) with
+    // no live subscriber here, leaving this wait to time out. Subscribing first
+    // guarantees any post-claim event is delivered to the broadcast loop below,
+    // so the only events the claim must rescue are the ones already buffered when
+    // it runs — closing the missed-event window in both directions.
+    let mut rx = subscribe_hook_events();
+
+    // Now claim the registry key for events that landed in the early window
+    // (after the previous turn drained the channel but before this subscriber
+    // existed). `claim_matching_once` consumes ONLY the matching event and leaves
+    // any non-matching buffered events for a later waiter. When the registry is
+    // disabled via the rollback flag, this is a no-op and the behaviour reverts
+    // to the pure broadcast wait.
     if let Some(early) = try_claim_registry_match(
         req.provider.as_deref(),
         req.session_id.as_deref(),
@@ -293,7 +300,6 @@ async fn handle_wait(Json(req): Json<WaitRequest>) -> Json<Value> {
         );
     }
 
-    let mut rx = subscribe_hook_events();
     let deadline = tokio::time::sleep(timeout);
     tokio::pin!(deadline);
 
@@ -376,15 +382,23 @@ fn try_claim_registry_match(
     let provider = want_provider.map(str::trim).filter(|p| !p.is_empty())?;
     let session_id = want_session_id.map(str::trim).filter(|s| !s.is_empty())?;
     let key = hook_registry::RegistryKey::new(provider, Some(session_id), None)?;
-    // claim_once drains the fresh buffer AND drops the key so the next turn
-    // re-buffers early Stops instead of seeing them delivered "live" and lost.
-    let replayed = hook_registry::global().claim_once(key);
-    // Return the newest matching event (registry preserves arrival order, so the
-    // last matching entry is the freshest Stop / token hit).
-    replayed
-        .into_iter()
-        .rev()
-        .find(|event| event_matches(event, want_provider, want_session_id, until_mode, token))
+    // `claim_matching_once` consumes ONLY the freshest event satisfying THIS
+    // wait's filter and re-buffers every other fresh event, so a buffered Stop or
+    // a different `until=token` payload is not discarded for a later waiter on the
+    // same session. (The old `claim_once` drained the whole buffer up front and
+    // dropped unmatched events.) The closure is the same predicate the live
+    // broadcast loop applies, keeping registry replay and live waits consistent.
+    let until_mode = until_mode.to_string();
+    let token = token.map(str::to_string);
+    hook_registry::global().claim_matching_once(key, |event| {
+        event_matches(
+            event,
+            want_provider,
+            want_session_id,
+            &until_mode,
+            token.as_deref(),
+        )
+    })
 }
 
 fn event_matches(
@@ -651,6 +665,79 @@ mod tests {
         assert!(try_claim_registry_match(Some("claude"), Some(session), "stop", None).is_none());
         // The codex wait does see it.
         assert!(try_claim_registry_match(Some("codex"), Some(session), "stop", None).is_some());
+    }
+
+    /// Do-not-discard-unmatched-events: a `until=token` wait whose token does not
+    /// match the buffered events must NOT drain/discard them — a subsequent Stop
+    /// wait for the same session must still be able to replay the buffered Stop.
+    #[test]
+    fn try_claim_registry_match_does_not_discard_unmatched_events() {
+        use crate::services::claude_tui::hook_registry::{RegistryKey, global};
+        let provider = "claude";
+        let session = "wait-no-discard";
+        if let Some(k) = RegistryKey::new(provider, Some(session), None) {
+            let _ = global().claim_once(k);
+        }
+        let key = RegistryKey::new(provider, Some(session), None).unwrap();
+        // Buffer a Stop with an empty body (no token).
+        global().deliver(
+            key,
+            make_event(provider, session, HookEventKind::Stop, json!({})),
+        );
+
+        // A token wait with a non-matching token finds nothing.
+        let token_miss =
+            try_claim_registry_match(Some(provider), Some(session), "token", Some("absent-token"));
+        assert!(
+            token_miss.is_none(),
+            "non-matching token wait matches nothing"
+        );
+
+        // The buffered Stop must still be claimable by a later Stop wait — the
+        // failed token wait must not have discarded it.
+        let stop_hit = try_claim_registry_match(Some(provider), Some(session), "stop", None);
+        assert!(
+            stop_hit.is_some(),
+            "unmatched token wait must not discard the buffered Stop"
+        );
+    }
+
+    /// A token wait consumes only the matching token payload and leaves a buffered
+    /// Stop for a subsequent Stop wait on the same session.
+    #[test]
+    fn try_claim_registry_match_token_leaves_stop_for_later_wait() {
+        use crate::services::claude_tui::hook_registry::{RegistryKey, global};
+        let provider = "claude";
+        let session = "wait-token-then-stop";
+        if let Some(k) = RegistryKey::new(provider, Some(session), None) {
+            let _ = global().claim_once(k);
+        }
+        let key = RegistryKey::new(provider, Some(session), None).unwrap();
+        global().deliver(
+            key.clone(),
+            make_event(
+                provider,
+                session,
+                HookEventKind::Notification,
+                json!({ "text": "needle-42 present" }),
+            ),
+        );
+        global().deliver(
+            key,
+            make_event(provider, session, HookEventKind::Stop, json!({})),
+        );
+
+        // Token wait consumes only the token payload.
+        let token_hit =
+            try_claim_registry_match(Some(provider), Some(session), "token", Some("needle-42"));
+        assert!(token_hit.is_some(), "token payload must be claimable");
+
+        // The Stop is still buffered and claimable.
+        let stop_hit = try_claim_registry_match(Some(provider), Some(session), "stop", None);
+        assert!(
+            stop_hit.is_some(),
+            "the Stop must survive a token-mode claim on the same session"
+        );
     }
 
     #[test]

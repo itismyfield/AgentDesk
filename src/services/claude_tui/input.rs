@@ -78,25 +78,47 @@ fn followup_prompt_ready_timeout() -> Duration {
 /// when the buffered events are not Stop kinds — in which case the caller falls
 /// through to the existing Notify fast path and polling fallback unchanged.
 ///
-/// Note: this keys by the tmux session name (the only id the readiness layer
-/// knows). It therefore only rescues early Stops whose hooks were delivered
-/// keyed by the tmux session; Stops keyed by a provider session UUID are still
-/// covered by the existing Notify + polling path, so no signal is lost.
+/// Key-match (REQ-001): for a hosted Claude launch the hook relay buffers under
+/// the PROVIDER session UUID (`config.session_id`, passed to the relay as
+/// `--session-id`), while the readiness layer only knows the tmux session name.
+/// Claiming `(claude, tmux_name)` would therefore MISS the buffered
+/// `(claude, provider_session_uuid)` Stop and the early-Stop race this block
+/// exists to rescue would still fall through. We resolve the provider session id
+/// for this tmux session via the launch-time mapping in `tui_prompt_dedupe` and
+/// claim that SAME key the hooks buffered under; we fall back to the tmux session
+/// name (REQ-001 fallback) when no mapping is known (e.g. a relay that reported
+/// only the tmux name).
+///
+/// `claim_matching_once` consumes ONLY a Stop / SubagentStop and re-buffers any
+/// other fresh buffered events (e.g. a token payload a concurrent `/tui/wait`
+/// until=token might still want), so the readiness wait does not discard
+/// unrelated buffered events. The consumed Stop cannot replay into a later turn
+/// (single-consumption).
 fn claude_registry_stop_already_buffered(session_name: &str) -> bool {
     use crate::services::claude_tui::hook_registry;
     use crate::services::claude_tui::hook_server::HookEventKind;
     if !hook_registry::registry_enabled() {
         return false;
     }
-    let Some(key) = hook_registry::RegistryKey::new("claude", Some(session_name), None) else {
+    // Prefer the provider session UUID the relay actually buffers under; fall
+    // back to the tmux session name when no launch mapping is recorded.
+    let provider_session_id =
+        crate::services::tui_prompt_dedupe::provider_session_for_tmux("claude", session_name);
+    let Some(key) = hook_registry::RegistryKey::new(
+        "claude",
+        provider_session_id.as_deref(),
+        Some(session_name),
+    ) else {
         return false;
     };
-    hook_registry::global().claim_once(key).iter().any(|event| {
-        matches!(
-            event.kind,
-            HookEventKind::Stop | HookEventKind::SubagentStop
-        )
-    })
+    hook_registry::global()
+        .claim_matching_once(key, |event| {
+            matches!(
+                event.kind,
+                HookEventKind::Stop | HookEventKind::SubagentStop
+            )
+        })
+        .is_some()
 }
 
 impl PromptReadinessKind {
@@ -880,10 +902,11 @@ fn wait_for_prompt_ready_inner(
     // additive event source for an early Stop that landed before this wait
     // began. The global `prompt_ready_notify()` used by the fast path below is
     // edge-triggered, so a Stop fired in the gap between the prior turn and this
-    // wait would otherwise be lost and force a full polling fallback. We only
-    // consume a FRESH (unexpired) Stop keyed by `(claude, tmux_session_name)` —
-    // the key the readiness layer actually knows — and claim_once drains it so
-    // it can never replay into a later turn (REQ-002/REQ-003).
+    // wait would otherwise be lost and force a full polling fallback. We consume
+    // a FRESH (unexpired) Stop keyed by the PROVIDER session UUID the hooks
+    // buffer under (resolved from the tmux session, with the tmux name as the
+    // REQ-001 fallback), and `claim_matching_once` removes only that Stop so it
+    // can never replay into a later turn (REQ-002/REQ-003).
     //
     // CRITICAL (verifier top regression risk — "stale Stop contaminates a new
     // turn"): a buffered Stop is treated like an edge-triggered Notify wake, NOT

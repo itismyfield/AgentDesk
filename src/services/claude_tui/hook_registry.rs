@@ -56,6 +56,19 @@ pub const DEFAULT_HOOK_BUFFER_TTL: Duration = Duration::from_secs(30);
 /// (`tui_unclaimed_stop_delay_ms=2000`).
 pub const DEFAULT_UNCLAIMED_STOP_DELAY: Duration = Duration::from_millis(2000);
 
+/// Hard cap on the number of buffered events retained per `(provider, session)`
+/// key. The hook receiver accepts bodies up to 8 MiB and the per-key buffer is
+/// otherwise unbounded within the TTL window, so a busy or noisy session could
+/// accumulate arbitrary memory before its events expire. When the cap is hit we
+/// drop the OLDEST buffered event (front of the Vec) to make room for the new
+/// one: replay/claim only cares about the freshest Stop / token hit (callers
+/// scan newest-first), so evicting the stale front never loses the signal a
+/// fresh wait is looking for. A dropped-for-capacity event is counted into
+/// `expired_total` (it is, semantically, dropped before its TTL the same way an
+/// expired event is). Keeping this bounded also bounds total registry memory at
+/// `keys * MAX_BUFFERED_EVENTS_PER_KEY` buffered events.
+pub const MAX_BUFFERED_EVENTS_PER_KEY: usize = 64;
+
 /// Composite registry key. Provider is always part of the key so the same id
 /// (a shared tmux session name) under two providers never cross-leaks. The
 /// `session_key` is the provider session id when known, else the tmux session
@@ -196,6 +209,16 @@ pub struct HookRegistry {
     /// 0 in production, since `snapshot` only sums per-key counters for *live*
     /// keys and the transient one-shot consumer leaves none behind.
     replayed_once_total: AtomicU64,
+    /// Cumulative diagnostic counters absorbed from keys that have been EVICTED
+    /// from the live map (an empty unclaimed key dropped by `snapshot`, or a key
+    /// removed by `claim_once`). Without these, evicting an empty key to bound
+    /// map growth (REQ — "drop expired empty registry keys") would silently reset
+    /// the advertised cumulative totals. `snapshot` folds these in alongside the
+    /// surviving per-key counters so the reported totals stay monotonic.
+    evicted_buffered_total: AtomicU64,
+    evicted_expired_total: AtomicU64,
+    evicted_unclaimed_stop_total: AtomicU64,
+    evicted_empty_stop_total: AtomicU64,
 }
 
 impl HookRegistry {
@@ -205,7 +228,26 @@ impl HookRegistry {
             ttl,
             unclaimed_stop_delay,
             replayed_once_total: AtomicU64::new(0),
+            evicted_buffered_total: AtomicU64::new(0),
+            evicted_expired_total: AtomicU64::new(0),
+            evicted_unclaimed_stop_total: AtomicU64::new(0),
+            evicted_empty_stop_total: AtomicU64::new(0),
         }
+    }
+
+    /// Absorb a to-be-evicted key's cumulative diagnostic counters into the
+    /// registry-level totals so dropping the key (to bound map growth) does not
+    /// reset the advertised monotonic totals. `replayed_total` is handled
+    /// separately by the callers that actually replay.
+    fn absorb_evicted_counters(&self, state: &KeyState) {
+        self.evicted_buffered_total
+            .fetch_add(state.buffered_total, Ordering::Relaxed);
+        self.evicted_expired_total
+            .fetch_add(state.expired_total, Ordering::Relaxed);
+        self.evicted_unclaimed_stop_total
+            .fetch_add(state.unclaimed_stop_total, Ordering::Relaxed);
+        self.evicted_empty_stop_total
+            .fetch_add(state.empty_stop_total, Ordering::Relaxed);
     }
 
     /// Deliver an event into the registry. If a listener has claimed the key
@@ -250,6 +292,15 @@ impl HookRegistry {
             });
         }
 
+        // Bound the per-key buffer: if at capacity, drop the OLDEST event to make
+        // room. Claim/replay scans newest-first, so the freshest Stop / token hit
+        // is preserved; only stale front entries are evicted. Count the eviction
+        // as an expiry (it is dropped-before-TTL the same way).
+        if state.buffer.len() >= MAX_BUFFERED_EVENTS_PER_KEY {
+            let overflow = state.buffer.len() + 1 - MAX_BUFFERED_EVENTS_PER_KEY;
+            state.buffer.drain(0..overflow);
+            state.expired_total += overflow as u64;
+        }
         state.buffer.push(BufferedEvent {
             event,
             buffered_at: now,
@@ -302,15 +353,21 @@ impl HookRegistry {
         keys.remove(key);
     }
 
-    /// One-shot claim used by short-lived consumers (e.g. `/tui/wait`): drain
-    /// the fresh buffer exactly once AND immediately drop the listener state so
-    /// the key returns to buffering mode for the next turn. This is the
-    /// claim+unregister pair as a single atomic-ish operation; it gives
-    /// single-consumption of the current turn's early events while keeping the
-    /// registry useful for the next turn's early-Stop race (REQ-002 + REQ-003).
-    /// Dropping the key resets its per-key counters; the global `snapshot`
-    /// aggregates only live keys, so a transient consumer that claims and leaves
-    /// does not inflate the long-lived diagnostic totals.
+    /// One-shot claim used by short-lived consumers: drain the fresh buffer
+    /// exactly once AND immediately drop the listener state so the key returns to
+    /// buffering mode for the next turn. This is the claim+unregister pair as a
+    /// single atomic-ish operation; it gives single-consumption of the current
+    /// turn's early events while keeping the registry useful for the next turn's
+    /// early-Stop race (REQ-002 + REQ-003). Dropping the key resets its per-key
+    /// counters (absorbed at the registry level so the totals stay monotonic).
+    ///
+    /// Test-only: production consumers (`/tui/wait`, the readiness wait) migrated
+    /// to [`claim_matching_once`], which consumes only the matching event and
+    /// re-buffers the rest so an unrelated waiter's buffered events are not
+    /// discarded. The unconditional drain remains exercised by the unit tests
+    /// that pin the REQ-002/REQ-003 single-consumption + replay-counting
+    /// semantics.
+    #[cfg(test)]
     pub fn claim_once(&self, key: RegistryKey) -> Vec<HookEvent> {
         let now = Instant::now();
         let mut keys = self.lock();
@@ -322,14 +379,76 @@ impl HookRegistry {
             .into_iter()
             .map(|buffered| buffered.event)
             .collect();
-        // The key (and its per-key `replayed_total`) is dropped here, so record
-        // the replay at the registry level — otherwise the advertised
-        // `replayed_total` diagnostic would always read 0 in production.
+        // The key (and its per-key counters) is dropped here, so record the
+        // replay and absorb the cumulative diagnostics at the registry level —
+        // otherwise the advertised totals would lose this key's history.
         if !drained.is_empty() {
             self.replayed_once_total
                 .fetch_add(drained.len() as u64, Ordering::Relaxed);
         }
+        self.absorb_evicted_counters(&state);
         drained
+    }
+
+    /// One-shot claim that consumes ONLY the events matching `wants`, leaving
+    /// every other fresh (unexpired) buffered event in place for a later waiter
+    /// to replay. Returns the newest matching event, or `None` when nothing
+    /// matches.
+    ///
+    /// This is the selective variant of `claim_once` used by `/tui/wait`. The
+    /// plain `claim_once` drains and drops the whole key, which discards buffered
+    /// Stops / token payloads that a *different* waiter (e.g. one waiting on a
+    /// different `until=token`) should still be able to replay. Here we:
+    ///   1. sweep expired events,
+    ///   2. remove and return the freshest event satisfying `wants`,
+    ///   3. re-buffer every non-matching fresh event under the key (preserving
+    ///      arrival order and the unclaimed-Stop diagnostic),
+    /// so a non-matching buffered event is never lost to an unrelated wait.
+    /// Unlike `claim_once` this does NOT mark the key claimed: the registry stays
+    /// in buffering mode for the next turn's early-Stop race.
+    pub fn claim_matching_once<F>(&self, key: RegistryKey, wants: F) -> Option<HookEvent>
+    where
+        F: Fn(&HookEvent) -> bool,
+    {
+        let now = Instant::now();
+        let mut keys = self.lock();
+        let state = keys.get_mut(&key)?;
+        Self::sweep_state(state, self.ttl, now);
+
+        // Find the newest matching event (scan from the back; arrival order is
+        // preserved in the Vec). Remove exactly that one and keep the rest.
+        let matched_idx = state
+            .buffer
+            .iter()
+            .rposition(|buffered| wants(&buffered.event));
+        let matched = match matched_idx {
+            Some(idx) => {
+                let removed = state.buffer.remove(idx);
+                state.replayed_total += 1;
+                self.replayed_once_total.fetch_add(1, Ordering::Relaxed);
+                // Consuming a Stop claims it: cancel the unclaimed-Stop diagnostic
+                // timer so a later turn's diagnostic does not report this
+                // now-claimed Stop as still pending.
+                if matches!(
+                    removed.event.kind,
+                    HookEventKind::Stop | HookEventKind::SubagentStop
+                ) {
+                    state.unclaimed_stop = None;
+                }
+                Some(removed.event)
+            }
+            None => None,
+        };
+
+        // If the buffer is now empty and the key has nothing else to retain, drop
+        // it to bound map growth (mirrors the snapshot eviction policy); its
+        // cumulative counters are absorbed at the registry level.
+        if state.buffer.is_empty() && !state.claimed && state.unclaimed_stop.is_none() {
+            if let Some(removed) = keys.remove(&key) {
+                self.absorb_evicted_counters(&removed);
+            }
+        }
+        matched
     }
 
     /// Per-key diagnostic for the retained unclaimed Stop, or `None` when none is
@@ -368,13 +487,30 @@ impl HookRegistry {
     }
 
     /// Build an additive observability snapshot. Sweeps every key first so the
-    /// reported buffered count excludes expired events. O(total buffered).
+    /// reported buffered count excludes expired events, then EVICTS keys that
+    /// swept clean and carry no live listener / retained Stop — without this an
+    /// unclaimed session that fired one hook and was never claimed would leave an
+    /// empty `KeyState` (and be counted by `keys_tracked`) forever, so a
+    /// long-running dcserver would accumulate one map entry per unique session
+    /// (REQ — "drop expired empty registry keys"). The evicted keys' cumulative
+    /// counters are absorbed at the registry level first so the advertised totals
+    /// stay monotonic. O(total buffered).
     pub fn snapshot(&self) -> HookRegistrySnapshot {
         let now = Instant::now();
         let mut keys = self.lock();
         let mut snap = HookRegistrySnapshot::default();
-        for state in keys.values_mut() {
+        keys.retain(|_, state| {
             Self::sweep_state(state, self.ttl, now);
+            // A key is droppable once it has nothing left to replay: no buffered
+            // events, no claimed listener, and no retained unclaimed Stop. Such a
+            // key can only ever be re-created lazily on the next deliver/claim, so
+            // dropping it here is safe and bounds map growth.
+            let droppable =
+                state.buffer.is_empty() && !state.claimed && state.unclaimed_stop.is_none();
+            if droppable {
+                self.absorb_evicted_counters(state);
+                return false;
+            }
             snap.buffered_event_count += state.buffer.len();
             if state.claimed {
                 snap.claimed_keys += 1;
@@ -387,11 +523,17 @@ impl HookRegistry {
             snap.expired_total += state.expired_total;
             snap.unclaimed_stop_total += state.unclaimed_stop_total;
             snap.empty_stop_total += state.empty_stop_total;
-        }
+            true
+        });
         snap.keys_tracked = keys.len();
-        // Fold in replays delivered by `claim_once`, whose keys are already gone
-        // from the live map (so their per-key `replayed_total` was dropped).
+        // Fold in replays delivered by `claim_once`, plus the cumulative counters
+        // absorbed from every evicted key (claim_once removals + empty-key
+        // sweeps), whose per-key counters are already gone from the live map.
         snap.replayed_total += self.replayed_once_total.load(Ordering::Relaxed);
+        snap.buffered_total += self.evicted_buffered_total.load(Ordering::Relaxed);
+        snap.expired_total += self.evicted_expired_total.load(Ordering::Relaxed);
+        snap.unclaimed_stop_total += self.evicted_unclaimed_stop_total.load(Ordering::Relaxed);
+        snap.empty_stop_total += self.evicted_empty_stop_total.load(Ordering::Relaxed);
         snap
     }
 
@@ -823,6 +965,169 @@ mod tests {
         // survives; a second claim_once replays nothing and does not double-count.
         assert!(reg.claim_once(k).is_empty());
         assert_eq!(reg.snapshot().replayed_total, 2);
+    }
+
+    // -------- bounded buffers (per-key cap, drop-oldest) --------
+
+    #[test]
+    fn buffer_is_bounded_per_key_and_drops_oldest() {
+        let reg = registry();
+        let k = key("claude", "sid");
+        // Push well past the cap with token-bearing payloads so each is distinct.
+        let total = MAX_BUFFERED_EVENTS_PER_KEY + 10;
+        for i in 0..total {
+            reg.deliver(
+                k.clone(),
+                event(
+                    "claude",
+                    "sid",
+                    HookEventKind::Notification,
+                    json!({ "seq": i }),
+                ),
+            );
+        }
+        // The buffer never exceeds the cap.
+        assert_eq!(reg.buffered_len(&k), MAX_BUFFERED_EVENTS_PER_KEY);
+        let drained = reg.claim_once(k);
+        assert_eq!(drained.len(), MAX_BUFFERED_EVENTS_PER_KEY);
+        // The OLDEST entries were dropped: the freshest event survives, the
+        // earliest does not.
+        let seqs: Vec<i64> = drained
+            .iter()
+            .filter_map(|e| e.payload.get("seq").and_then(|v| v.as_i64()))
+            .collect();
+        assert_eq!(*seqs.last().unwrap(), (total - 1) as i64);
+        assert_eq!(
+            *seqs.first().unwrap(),
+            (total - MAX_BUFFERED_EVENTS_PER_KEY) as i64
+        );
+        // Capacity drops are counted as expirations (dropped-before-TTL).
+        let snap = reg.snapshot();
+        assert_eq!(snap.expired_total, 10);
+        assert_eq!(snap.buffered_total, total as u64);
+    }
+
+    // -------- empty expired key eviction (snapshot) --------
+
+    #[test]
+    fn snapshot_evicts_empty_unclaimed_keys_but_keeps_totals() {
+        // TTL 0 => the single buffered event expires immediately, so after the
+        // sweep the key is empty/unclaimed and must be dropped from the map.
+        let reg = HookRegistry::new(Duration::from_millis(0), Duration::from_millis(2000));
+        let k = key("claude", "sid");
+        reg.deliver(
+            k.clone(),
+            event("claude", "sid", HookEventKind::Stop, json!({})),
+        );
+        let snap = reg.snapshot();
+        assert_eq!(
+            snap.keys_tracked, 0,
+            "an empty, swept-clean, unclaimed key must be evicted"
+        );
+        // Cumulative counters survive the eviction (absorbed at registry level).
+        assert_eq!(snap.buffered_total, 1);
+        assert!(snap.expired_total >= 1);
+        assert_eq!(snap.unclaimed_stop_total, 1);
+        assert_eq!(snap.empty_stop_total, 1);
+        // A second snapshot does not double-count the absorbed totals.
+        let snap2 = reg.snapshot();
+        assert_eq!(snap2.buffered_total, 1);
+        assert_eq!(snap2.unclaimed_stop_total, 1);
+        assert_eq!(snap2.keys_tracked, 0);
+    }
+
+    #[test]
+    fn snapshot_keeps_keys_with_live_buffer_or_retained_stop() {
+        let reg = registry();
+        let k = key("claude", "sid");
+        // A live (unexpired) Stop must NOT be evicted — it has a retained
+        // unclaimed Stop and a buffered event.
+        reg.deliver(
+            k.clone(),
+            event("claude", "sid", HookEventKind::Stop, json!({})),
+        );
+        let snap = reg.snapshot();
+        assert_eq!(snap.keys_tracked, 1);
+        assert_eq!(snap.keys_with_unclaimed_stop, 1);
+    }
+
+    // -------- claim_matching_once: re-buffer non-matching events --------
+
+    #[test]
+    fn claim_matching_once_consumes_only_match_and_rebuffers_rest() {
+        let reg = registry();
+        let k = key("claude", "sid");
+        // A non-Stop token payload plus a Stop are buffered.
+        reg.deliver(
+            k.clone(),
+            event(
+                "claude",
+                "sid",
+                HookEventKind::Notification,
+                json!({ "text": "TOKEN-XYZ here" }),
+            ),
+        );
+        reg.deliver(
+            k.clone(),
+            event("claude", "sid", HookEventKind::Stop, json!({})),
+        );
+        // A Stop waiter consumes ONLY the Stop.
+        let matched = reg.claim_matching_once(k.clone(), |e| {
+            matches!(e.kind, HookEventKind::Stop | HookEventKind::SubagentStop)
+        });
+        assert!(matched.is_some());
+        assert_eq!(matched.unwrap().kind, HookEventKind::Stop);
+        // The non-matching token payload is still buffered for a later token wait.
+        assert_eq!(reg.buffered_len(&k), 1);
+        let token_match = reg.claim_matching_once(k.clone(), |e| {
+            e.payload
+                .get("text")
+                .and_then(|v| v.as_str())
+                .is_some_and(|t| t.contains("TOKEN-XYZ"))
+        });
+        assert!(
+            token_match.is_some(),
+            "the re-buffered token payload must remain replayable"
+        );
+        // Now the buffer is drained and the empty key is evicted.
+        assert_eq!(reg.buffered_len(&k), 0);
+    }
+
+    #[test]
+    fn claim_matching_once_no_match_keeps_buffer_intact() {
+        let reg = registry();
+        let k = key("claude", "sid");
+        reg.deliver(
+            k.clone(),
+            event("claude", "sid", HookEventKind::Stop, json!({})),
+        );
+        // A token waiter that does not match must not discard the buffered Stop.
+        let matched =
+            reg.claim_matching_once(k.clone(), |e| matches!(e.kind, HookEventKind::SessionStart));
+        assert!(matched.is_none());
+        assert_eq!(reg.buffered_len(&k), 1, "unmatched claim must not discard");
+        // A subsequent Stop waiter can still replay it.
+        let stop = reg.claim_matching_once(k, |e| {
+            matches!(e.kind, HookEventKind::Stop | HookEventKind::SubagentStop)
+        });
+        assert!(stop.is_some());
+    }
+
+    #[test]
+    fn claim_matching_once_cancels_unclaimed_stop_diagnostic() {
+        let reg = registry();
+        let k = key("claude", "sid");
+        reg.deliver(
+            k.clone(),
+            event("claude", "sid", HookEventKind::Stop, json!({})),
+        );
+        assert!(reg.unclaimed_stop_diagnostic(&k).is_some());
+        let _ = reg.claim_matching_once(k.clone(), |e| {
+            matches!(e.kind, HookEventKind::Stop | HookEventKind::SubagentStop)
+        });
+        // Consuming the Stop cancels its unclaimed diagnostic (and the now-empty
+        // key is evicted, so the diagnostic reports None).
+        assert!(reg.unclaimed_stop_diagnostic(&k).is_none());
     }
 
     // -------- config defaults / clamping / rollback flag --------
