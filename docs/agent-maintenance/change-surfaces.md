@@ -1317,7 +1317,7 @@
   (supervised-worker registry / leader-only lifecycle).
 - legacy_modules: none — these are shared runtime coordination surfaces.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/config.rs` (2378 lines).
+  - `src/config.rs` (2479 lines).
   - `src/server/mod.rs` (2430 lines).
   - `src/receipt.rs` (1842 lines).
   - `src/github/sync.rs` (1488 lines).
@@ -1417,7 +1417,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   `src/services/claude_tui/hosting/` child modules, ratchets claude.rs at 2950
   production LoC, and leaves the #3262 turn-lock machinery in the claude.rs
   root.)
-- `src/services/codex_tui/rollout_tail.rs` (1776) — Codex TUI rollout tail
+- `src/services/codex_tui/rollout_tail.rs` (1756) — Codex TUI rollout tail
   parsing and resume identity surface; split before adding non-bugfix behavior
   beyond the #2169 session identity fix and the #3343 message-boundary
   separator unified across the streamed `StreamMessage::Text` surface and the
