@@ -507,7 +507,7 @@
     Moved unit tests live in sibling `utf8_chunk_decoder_tests.rs` /
     `terminal_readiness_tests.rs`; both child modules sit under the
     `tmux_watcher/**` 700-line namespace cap.
-  - `src/services/discord/tui_prompt_relay.rs` (4376 production lines; #3296
+  - `src/services/discord/tui_prompt_relay.rs` (4301 production lines; #3296
     codex r1+r2: the ABORT cleanup hook pins the foreign prior inflight's
     identity — the live row at the record instant, or the worker's LAST-VIEW
     identity when that row just vanished — and persists the marker via
@@ -775,6 +775,20 @@
     byte-identical call sites, while the module-internal
     `parse_claude_tui_launch_script_content` + `shell_words_from_line` stay private;
     below the giant-file threshold).
+  - `src/services/discord/tui_prompt_relay/idle_offset_resolution.rs` (100 prod
+    lines; #3479: the idle-tail transcript start-offset resolution helpers — the
+    #3154 timestamp-anchor choke point `resolve_idle_tail_start_offset`, the
+    `claude_idle_response_start_offset_after_timestamp` timestamp scan, the
+    stale-high `normalize_transcript_fallback_offset` guard, and the #3183
+    `clamp_idle_tail_start_offset_to_committed` committed-offset clamp — extracted
+    verbatim from `tui_prompt_relay.rs` (all `#[cfg(unix)]`). Deps reached via
+    `use super::*;`; `resolve_idle_tail_start_offset` +
+    `clamp_idle_tail_start_offset_to_committed` are `pub(super)` re-imported by the
+    parent's prod call sites, `claude_idle_response_start_offset_after_timestamp`
+    is `pub(super)` re-imported only under `#[cfg(all(unix, test))]` (its prod
+    callers are now child-internal), and the module-internal
+    `normalize_transcript_fallback_offset` stays private; below the giant-file
+    threshold).
   - `src/services/discord/idle_recap.rs` (idle-recap card compose/post/clear
     surface; #3479 dropped it below the giant-file threshold by extracting the
     scrollback/summarizer and token-context-display clusters into the two
