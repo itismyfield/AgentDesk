@@ -810,9 +810,14 @@
     nested `usage` on the success result frame so watcher-owned codex turns
     persist token telemetry — never the session-cumulative
     `info.total_token_usage`).
-  - `src/services/tui_prompt_dedupe.rs` (1356 lines; shared TUI prompt
+  - `src/services/tui_prompt_dedupe.rs` (1393 lines; shared TUI prompt
     fingerprinting/dedupe state for hook and rollout relay paths, bugfix only
-    outside an extraction plan; +88 from #3041 P1-4 codex: a per-record
+    outside an extraction plan; +37 from #3527: `is_discord_relayed_user_prompt`
+    skips re-observed `[User: … (ID: …)]` Discord-relay lines (whole-string scan —
+    context like `[External Recall]` may precede the marker and the legacy pane
+    observer collapses blocks mid-line) in the observation candidate filter so a
+    quiescence-timeout re-observation never mints a spurious synthetic turn (notice
+    + orphan panel); +88 from #3041 P1-4 codex: a per-record
     `generation: u64` nonce on `ExternalInputRelayLease` (process-global
     `AtomicU64`, stamped in `record_external_input_turn_lease` which now returns
     the recorded lease) plus the `clear_external_input_relay_lease_if_generation_matches`

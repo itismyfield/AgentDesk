@@ -759,7 +759,14 @@ fn observe_prompt_candidates_by_tmux_inner(
     let mut candidates = Vec::new();
     for prompt in prompts {
         let prompt = prompt.trim();
-        if prompt.is_empty() || is_synthetic_tui_user_prompt(prompt) {
+        // #3527: skip AgentDesk's own `[User: … (ID: …)]` Discord-relay lines so a
+        // re-observation (after the discord-originated ledger entry was consumed)
+        // never publishes a spurious SSH-direct turn. Treated like other synthetic
+        // prompts → candidates stay empty → `PromptObservation::Ignored`.
+        if prompt.is_empty()
+            || is_synthetic_tui_user_prompt(prompt)
+            || is_discord_relayed_user_prompt(prompt)
+        {
             continue;
         }
         if !candidates
@@ -1121,6 +1128,36 @@ fn is_synthetic_tui_user_prompt(prompt: &str) -> bool {
     prompt.starts_with("[Shared Agent Knowledge]\n")
         || prompt.starts_with("[Proactive Memory Guidance]\n")
         || prompt == "No response requested."
+}
+
+/// #3527: `[User: <author> (ID: <digits>)] …` is AgentDesk's OWN Discord→TUI
+/// relay format (`discord/router/response_format.rs`), never an external SSH/cron
+/// injection — so the observer must not mint a synthetic turn for a re-observed
+/// one (the discord-originated ledger only suppresses the first, consumed/
+/// TTL-bounded sighting; a quiescence-timeout re-observation slips through).
+///
+/// The marker can be PRECEDED by prepended context (`[External Recall]`, reply/
+/// upload context, …) AND can be collapsed mid-line: the legacy pane observer
+/// (`tmux_watcher/prompt_observe.rs`) submits `join("")` / `join(" ")` /
+/// `join("\n")` variants of one block, so a line-anchored check would miss the
+/// collapsed ones (codex #3527). Scan the WHOLE string: find `[User: `, then any
+/// following `(ID: <digits>)]` (author may itself contain parens).
+fn is_discord_relayed_user_prompt(prompt: &str) -> bool {
+    let Some(user_at) = prompt.find("[User: ") else {
+        return false;
+    };
+    let mut tail = &prompt[user_at + "[User: ".len()..];
+    while let Some(id_at) = tail.find("(ID: ") {
+        let after_id = &tail[id_at + "(ID: ".len()..];
+        if let Some(close) = after_id.find(")]") {
+            let digits = &after_id[..close];
+            if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                return true;
+            }
+        }
+        tail = &tail[id_at + "(ID: ".len()..];
+    }
+    false
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2083,6 +2120,78 @@ mod tests {
         assert!(
             !external_input_relay_lease_present("claude", "tmux-c", 42),
             "a candidate matching a Discord-origin prompt must not create an ExternalInput lease"
+        );
+    }
+
+    #[test]
+    fn discord_relayed_user_prompt_format_is_recognized_3527() {
+        // AgentDesk's own `[User: <author> (ID: <digits>)]` relay lines — author
+        // may contain parens; prefix may be followed by a newline (multi-line).
+        assert!(is_discord_relayed_user_prompt(
+            "[User: 0hbujang (ID: 343742347365974026)] A부턱ㄱ"
+        ));
+        assert!(is_discord_relayed_user_prompt(
+            "[User: Alice (ops) team (ID: 77)] deploy it"
+        ));
+        assert!(is_discord_relayed_user_prompt(
+            "[User: Bob (ID: 5)]\nmultiline\nbody"
+        ));
+        // genuine external / cron / SSH injections carry no `[User: (ID:)]` prefix
+        assert!(!is_discord_relayed_user_prompt(
+            "/relay-scan — supervise relays"
+        ));
+        assert!(!is_discord_relayed_user_prompt(
+            "just typed directly via ssh"
+        ));
+        assert!(!is_discord_relayed_user_prompt("[User: no id here] text"));
+        assert!(!is_discord_relayed_user_prompt(
+            "[User: x (ID: abc)] non-numeric"
+        ));
+        assert!(!is_discord_relayed_user_prompt(""));
+        // codex #3527: the `[User:]` chunk may be PRECEDED by prepended context
+        // ([External Recall], reply/upload context, Codex reuse wrappers) — the
+        // marker is not necessarily on the first line, so every line is scanned.
+        assert!(is_discord_relayed_user_prompt(
+            "[External Recall]\n- prior context\n\n[User: Alice (ID: 77)] deploy it"
+        ));
+        assert!(is_discord_relayed_user_prompt(
+            "[Reply context] ...\n[User: 0hbujang (ID: 343742347365974026)] hi"
+        ));
+        // codex #3527 r2: the legacy pane observer submits join("")/join(" ")
+        // collapsed variants of one block, so the marker can be MID-LINE — the
+        // whole-string scan must catch those too, not just the newline variant.
+        assert!(is_discord_relayed_user_prompt(
+            "[External Recall]- prior context[User: Alice (ID: 77)] deploy it"
+        ));
+        assert!(is_discord_relayed_user_prompt(
+            "[External Recall] - prior context  [User: Alice (ID: 77)] deploy it"
+        ));
+        // author containing parens, collapsed mid-line
+        assert!(is_discord_relayed_user_prompt(
+            "ctx [User: Alice (ops) team (ID: 77)] deploy it"
+        ));
+    }
+
+    #[test]
+    fn observe_skips_discord_relayed_user_line_without_ledger_3527() {
+        // #3527: a re-observed `[User:]` relay line WITHOUT a discord-originated
+        // ledger entry (simulating a quiescence-timeout re-observation after the
+        // entry was consumed/expired) must NOT publish an SSH-direct turn and must
+        // not record an ExternalInput lease — otherwise it posts a spurious 직접
+        // 주입 notice + orphan placeholder panel.
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+        assert_eq!(
+            observe_prompt_by_tmux(
+                "claude",
+                "tmux-3527",
+                "[User: 0hbujang (ID: 343742347365974026)] A부턱ㄱ"
+            ),
+            PromptObservation::Ignored
+        );
+        assert!(
+            !external_input_relay_lease_present("claude", "tmux-3527", 42),
+            "a [User:] relay re-observation must not create an ExternalInput lease (#3527)"
         );
     }
 
