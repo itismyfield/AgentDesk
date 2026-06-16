@@ -258,6 +258,14 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             )));
         }
 
+        // Resident OpenCode warm-pool diagnostics (additive, read-only). The
+        // reasons worsen status to Degraded only; the per-server array is
+        // detailed-only and the count summary is public-safe.
+        for reason in opencode_warm_pool_degraded_reasons() {
+            status = status.worsen(health::HealthStatus::Degraded);
+            degraded_reasons.push(reason);
+        }
+
         // Startup doctor warnings are boot/recovery diagnostics, not proof
         // that the current runtime is unhealthy. Keep them on a separate
         // startup axis so deploy/restart gates that read runtime health do
@@ -304,6 +312,9 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
         }
         if let Some(report) = pipeline_override_report.clone() {
             json["pipeline_overrides"] = report;
+        }
+        if let Some(opencode_block) = opencode_warm_pool_json(detailed) {
+            json["opencode"] = opencode_block;
         }
 
         // feature: rate-limit-aware-dispatch-gate (REQ-004). Aggregate,
@@ -372,6 +383,9 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
         }
         if detailed {
             json["active_session_audit"] = build_active_session_audit(state).await.to_json();
+        }
+        if let Some(opencode_block) = opencode_warm_pool_json(detailed) {
+            json["opencode"] = opencode_block;
         }
         let json = if detailed {
             with_latest_startup_doctor(json, true)
@@ -503,6 +517,17 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
     let startup_status = json.get("startup_status").cloned();
     let startup_degraded = json.get("startup_degraded").cloned();
     let startup_degraded_reasons = json.get("startup_degraded_reasons").cloned();
+    // Public OpenCode summary is count-only and never includes the per-server
+    // `warm_servers` array, pids, ports, or startup tails (spec C-3). The
+    // upstream `opencode_warm_pool_json(false)` already produced a count-only
+    // object for the public path; defensively strip `warm_servers` if present.
+    let opencode_public = json.get("opencode").map(|block| {
+        serde_json::json!({
+            "warm_server_count": block.get("warm_server_count").cloned().unwrap_or(serde_json::json!(0)),
+            "warm_server_active_sessions": block.get("warm_server_active_sessions").cloned().unwrap_or(serde_json::json!(0)),
+            "warm_server_suspicious_count": block.get("warm_server_suspicious_count").cloned().unwrap_or(serde_json::json!(0)),
+        })
+    });
     let degraded = status.as_str().is_some_and(|status| status != "healthy");
     let mut public = serde_json::json!({
         "ok": !degraded,
@@ -523,6 +548,9 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
     }
     if let Some(startup_degraded_reasons) = startup_degraded_reasons {
         public["startup_degraded_reasons"] = startup_degraded_reasons;
+    }
+    if let Some(opencode_public) = opencode_public {
+        public["opencode"] = opencode_public;
     }
     public
 }
@@ -846,6 +874,60 @@ fn pg_timestamp_to_rfc3339(row: &PgRow, column: &str) -> Option<String> {
         return Some(naive.format("%Y-%m-%d %H:%M:%S").to_string());
     }
     row.try_get::<Option<String>, _>(column).ok().flatten()
+}
+
+/// Build the additive `opencode` warm-pool diagnostics block.
+///
+/// `detailed=true` (authenticated/local) includes the full redacted per-server
+/// snapshot array; public callers get count-only aggregates. Returns `None`
+/// when no resident warm servers exist so the field is omitted entirely
+/// (cold-start safe — spec C-6/C-7). Snapshot collection performs no network
+/// probes and copies pool data under short locks (REQ-002).
+fn opencode_warm_pool_json(detailed: bool) -> Option<serde_json::Value> {
+    let snapshots = crate::services::opencode::warm_server_snapshots();
+    if snapshots.is_empty() {
+        return None;
+    }
+    let count = snapshots.len() as u64;
+    let active_sessions: u64 = snapshots.iter().map(|s| s.active_sessions as u64).sum();
+    let suspicious_count = snapshots
+        .iter()
+        .filter(|s| s.suspicious_active_leak)
+        .count() as u64;
+    let mut block = serde_json::json!({
+        "warm_server_count": count,
+        "warm_server_active_sessions": active_sessions,
+        "warm_server_suspicious_count": suspicious_count,
+    });
+    if detailed {
+        block["warm_servers"] =
+            serde_json::to_value(&snapshots).unwrap_or_else(|_| serde_json::json!([]));
+    }
+    Some(block)
+}
+
+/// Additive `degraded_reasons` for the resident warm pool (REQ-004). These are
+/// classified by the existing `classify_degraded_reason` table and are distinct
+/// from the fresh-serve / MCP doctor checks.
+fn opencode_warm_pool_degraded_reasons() -> Vec<serde_json::Value> {
+    let snapshots = crate::services::opencode::warm_server_snapshots();
+    let mut reasons = Vec::new();
+    let suspicious = snapshots
+        .iter()
+        .filter(|s| s.suspicious_active_leak)
+        .count();
+    if suspicious > 0 {
+        reasons.push(serde_json::json!(format!(
+            "opencode_warm_server:suspicious_active_leak:{suspicious}"
+        )));
+    }
+    let stopped = snapshots.iter().filter(|s| !s.running).count();
+    if stopped > 0 {
+        reasons.push(serde_json::json!(format!(
+            "opencode_warm_server:stopped_resident:{stopped}"
+        )));
+    }
+    reasons
 }
 
 /// GET /api/health — public safe health summary.
@@ -1893,6 +1975,40 @@ mod tests {
         assert!(ACTIVE_SESSION_AUDIT_QUERY.contains("instance_id IS NULL OR instance_id = $2"));
         assert!(ACTIVE_SESSION_AUDIT_QUERY.contains("thread_channel_id, channel_id"));
         assert!(!ACTIVE_SESSION_AUDIT_QUERY.contains("COALESCE(thread_channel_id, channel_id)"));
+    }
+
+    /// [TEST-003] public health omits the per-server OpenCode warm_servers
+    /// array but may keep the count-only summary; no pid/port/tail leaks.
+    #[test]
+    fn public_health_json_omits_opencode_warm_server_array() {
+        let public = public_health_json(json!({
+            "status": "healthy",
+            "version": "0.1.2",
+            "db": true,
+            "dashboard": true,
+            "opencode": {
+                "warm_server_count": 2,
+                "warm_server_active_sessions": 3,
+                "warm_server_suspicious_count": 1,
+                "warm_servers": [
+                    {"pid": 12345, "port": 54321, "key_hash": "abcdef0123456789",
+                     "startup_output_tail": "secret leak", "base_url": "http://127.0.0.1:54321"}
+                ]
+            }
+        }));
+
+        let opencode = public.get("opencode").expect("opencode summary present");
+        assert_eq!(opencode["warm_server_count"], 2);
+        assert_eq!(opencode["warm_server_active_sessions"], 3);
+        assert_eq!(opencode["warm_server_suspicious_count"], 1);
+        // The per-server array and all sensitive fields are gone.
+        assert!(opencode.get("warm_servers").is_none());
+        let text = public.to_string();
+        assert!(!text.contains("12345"));
+        assert!(!text.contains("54321"));
+        assert!(!text.contains("startup_output_tail"));
+        assert!(!text.contains("base_url"));
+        assert!(!text.contains("abcdef0123456789"));
     }
 
     #[test]

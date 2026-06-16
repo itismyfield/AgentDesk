@@ -96,6 +96,28 @@ pub(crate) fn classify_degraded_reason(raw: &str) -> ClassifiedReason {
             summary: format!("provider {provider} is recovering {count} channel(s)"),
             next_step: "wait for recovery or inspect stale recovery markers".to_string(),
         },
+        ["opencode_warm_server", "suspicious_active_leak", count] => ClassifiedReason {
+            raw: raw.to_string(),
+            subsystem: "provider_runtime",
+            severity: Severity::Warning,
+            fix_safety: FixSafety::ReadOnly,
+            security_exposure: SecurityExposure::OperationalMetadata,
+            summary: format!(
+                "{count} resident OpenCode warm server(s) show suspicious active-session evidence"
+            ),
+            next_step: "inspect opencode.warm_servers[] in /api/health/detail; this is evidence-only, no repair runs in P0".to_string(),
+        },
+        ["opencode_warm_server", "stopped_resident", count] => ClassifiedReason {
+            raw: raw.to_string(),
+            subsystem: "provider_runtime",
+            severity: Severity::Warning,
+            fix_safety: FixSafety::ReadOnly,
+            security_exposure: SecurityExposure::OperationalMetadata,
+            summary: format!(
+                "{count} resident OpenCode warm server(s) have a stopped process and will be evicted on next reuse"
+            ),
+            next_step: "inspect opencode.warm_servers[] running/pid fields in /api/health/detail".to_string(),
+        },
         ["dispatch_outbox_oldest_pending_age", age] => ClassifiedReason {
             raw: raw.to_string(),
             subsystem: "dispatch_outbox",
@@ -228,6 +250,7 @@ pub(crate) fn is_loopback_base_url(base: &str) -> bool {
 
 #[cfg(test)]
 mod health_classification_tests {
+    use super::super::contract::{FixSafety, Severity};
     use super::{LATEST_STARTUP_DOCTOR_ENDPOINT, classify_degraded_reason};
 
     #[test]
@@ -254,6 +277,26 @@ mod health_classification_tests {
 
         let reason_invalid = classify_degraded_reason("disk_low_free_bytes:invalid");
         assert_eq!(reason_invalid.summary, "disk has low free bytes: invalid");
+    }
+
+    /// [TEST-004] resident warm-pool reason codes classify to provider_runtime
+    /// (Warning/ReadOnly) and are NOT the generic catch-all, and are distinct
+    /// from the fresh-serve probe check.
+    #[test]
+    fn opencode_warm_server_reason_codes_classify_without_serve_overlap() {
+        let leak = classify_degraded_reason("opencode_warm_server:suspicious_active_leak:2");
+        assert_eq!(leak.subsystem, "provider_runtime");
+        assert_eq!(leak.severity, Severity::Warning);
+        assert_eq!(leak.fix_safety, FixSafety::ReadOnly);
+        assert!(leak.summary.contains('2'));
+        // Not the generic catch-all (which echoes the raw string as summary).
+        assert_ne!(leak.summary, leak.raw);
+
+        let stopped = classify_degraded_reason("opencode_warm_server:stopped_resident:1");
+        assert_eq!(stopped.subsystem, "provider_runtime");
+        assert_eq!(stopped.severity, Severity::Warning);
+        assert_eq!(stopped.fix_safety, FixSafety::ReadOnly);
+        assert_ne!(stopped.summary, stopped.raw);
     }
 
     #[test]
