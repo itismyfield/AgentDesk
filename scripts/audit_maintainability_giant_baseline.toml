@@ -309,7 +309,7 @@
 # notify-outbox subsystem — build/enqueue/reconcile/parse/rollback).
 # suppressed-label noise, user report 2026-06-12: +38 for provider-aware
 # status/footer stripping in the placeholder suppression decisions.
-"src/services/discord/tmux.rs" = 2049
+"src/services/discord/tmux.rs" = 2057
 # completion_guard.rs decomposed in #3479 (1834 -> 872 prod LoC); dropped below
 # the giant threshold, so its ratchet baseline is retired (no longer tracked).
 # #3034 batch-8: lowered 1781 -> 1753 (deleted the dead `assistant_turns` turn-cap

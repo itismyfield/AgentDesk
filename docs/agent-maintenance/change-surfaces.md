@@ -135,7 +135,7 @@
     lifecycle extraction surface from #1435; split further before adding new
     lifecycle behavior; #3016 phase-5b2 dropped the `mailbox_finalize_owed`
     construction from the watcher-spawn handle).
-  - `src/services/discord/tmux.rs` (2049 lines after #2558 dead-code sweep;
+  - `src/services/discord/tmux.rs` (2057 lines after #2558 dead-code sweep;
     +1 from #3384 restored-seed undelivered-body discard guard;
     +38 for suppressed-label noise, user report 2026-06-12: provider-aware
     status/footer stripping in the placeholder suppression decisions;
@@ -152,7 +152,9 @@
     finalizer actor's `CommitDelivery`/`ReleaseDelivery` handlers are DORMANT
     (retained for a later phase, not the live watcher path after the R2 revert);
     -1 from #3038 S4 after routing the placeholder/status-panel cluster
-    through `shared.ui`; still giant-file territory).
+    through `shared.ui`; +8 from #3533 ActiveBridgeTurnGuard restart-boundary
+    preserve fix (no SUPPRESSED_INTERNAL_LABEL on an already-delivered duplicate);
+    still giant-file territory).
   - `src/services/discord/tmux_watcher.rs` (6922 production lines after the #3479
     SPC-shadow removal deleted the dead `StatusPanelController` watcher
     shadow-parity calls — 2x `shadow_adopt_liveness_reacquired_panel` +

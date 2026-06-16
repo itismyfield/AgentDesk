@@ -686,9 +686,17 @@ fn decide_placeholder_suppression(
             ) {
                 SuppressedPlaceholderAction::None => PlaceholderSuppressDecision::None,
                 SuppressedPlaceholderAction::Delete => PlaceholderSuppressDecision::Delete,
-                SuppressedPlaceholderAction::Edit(content) => {
-                    PlaceholderSuppressDecision::Edit(content)
-                }
+                // #3533: this duplicate-relay guard fires because a bridge turn
+                // already owns delivery, so an exposed body was/will be delivered by
+                // it — preserve it (strip the live spinner) instead of stamping
+                // SUPPRESSED_INTERNAL_LABEL (wrong on the restart-straddling turn).
+                SuppressedPlaceholderAction::Edit(_) => PlaceholderSuppressDecision::Preserve {
+                    reason: "active-bridge-duplicate-delivered",
+                    cleaned_body: strip_placeholder_indicators_for_preserve(
+                        ctx.last_edit_text,
+                        ctx.provider,
+                    ),
+                },
             }
         }
         PlaceholderSuppressOrigin::TaskNotificationTerminal => {
@@ -1214,6 +1222,69 @@ mod placeholder_suppression_tests {
                 TEST_SESSION
             ),
             SuppressedPlaceholderAction::Edit(SUPPRESSED_RESTART_LABEL.to_string())
+        );
+    }
+
+    fn active_bridge_ctx<'a>(
+        placeholder: &'a str,
+        response_sent_offset: usize,
+        reattach_offset_match: bool,
+    ) -> PlaceholderSuppressContext<'a> {
+        PlaceholderSuppressContext {
+            origin: PlaceholderSuppressOrigin::ActiveBridgeTurnGuard,
+            provider: &ProviderKind::Claude,
+            placeholder_msg_id: Some(MessageId::new(1)),
+            response_sent_offset,
+            last_edit_text: placeholder,
+            inflight_state: None,
+            has_active_turn: false,
+            tmux_session_name: TEST_SESSION,
+            task_notification_kind: None,
+            reattach_offset_match,
+        }
+    }
+
+    #[test]
+    fn active_bridge_exposed_body_preserves_instead_of_internal_label() {
+        // #3533: a duplicate-relay guard on an already-exposed body (e.g. the
+        // in-flight turn that straddled a dcserver restart, reattach NOT matched)
+        // must PRESERVE the delivered body, never stamp SUPPRESSED_INTERNAL_LABEL.
+        let placeholder = body_with_footer("visible assistant body");
+        let ctx = active_bridge_ctx(&placeholder, 0, false);
+
+        let PlaceholderSuppressDecision::Preserve {
+            reason,
+            cleaned_body,
+        } = decide_placeholder_suppression(&ctx)
+        else {
+            panic!("active bridge duplicate of an exposed body should preserve, not label");
+        };
+        assert_eq!(reason, "active-bridge-duplicate-delivered");
+        assert_eq!(cleaned_body, "visible assistant body");
+        assert!(!cleaned_body.contains(SUPPRESSED_INTERNAL_LABEL));
+        assert!(!cleaned_body.contains("진행 중 — Claude"));
+    }
+
+    #[test]
+    fn active_bridge_offset_exposed_empty_text_preserves() {
+        // response_sent_offset > 0 (already-delivered bytes) with no residual text
+        // is the bare restart-boundary signal — still preserve, never label.
+        let ctx = active_bridge_ctx("", 1, false);
+        assert!(matches!(
+            decide_placeholder_suppression(&ctx),
+            PlaceholderSuppressDecision::Preserve { .. }
+        ));
+    }
+
+    #[test]
+    fn active_bridge_unexposed_placeholder_still_deletes() {
+        // No body and no sent offset → nothing to preserve; deleting the bare
+        // spinner placeholder is unchanged behavior.
+        let placeholder = footer_only_placeholder();
+        let ctx = active_bridge_ctx(&placeholder, 0, false);
+        assert_eq!(
+            decide_placeholder_suppression(&ctx),
+            PlaceholderSuppressDecision::Delete
         );
     }
 }
