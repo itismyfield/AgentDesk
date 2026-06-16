@@ -375,9 +375,18 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
         };
         let health_status =
             serde_json::to_value(health_state).unwrap_or_else(|_| serde_json::json!("unhealthy"));
-        // `ok`/`fully_recovered` track full health: a degraded warm pool keeps
-        // the server HTTP-ready but is not "ok".
+        // `ok` tracks full health: a degraded warm pool keeps the server
+        // HTTP-ready but is not "ok".
         let healthy = health_state == health::HealthStatus::Healthy;
+        // `fully_recovered` tracks the startup/recovery (server_up) axis, NOT
+        // live runtime degradation — mirroring `compute_fully_recovered` in the
+        // registry branch, whose doc explicitly excludes warm-pool health. A
+        // degraded warm pool must not flip `fully_recovered` to false here, or
+        // the standalone branch would be asymmetric with the registry branch
+        // (where warm-pool reasons never touch `fully_recovered`). In
+        // standalone mode the only non-warm-pool degradation is
+        // `db_unavailable`, so the recovery axis is exactly `server_up`.
+        let fully_recovered = server_up;
         let mut json = serde_json::json!({
             "status": health_status,
             "ok": healthy,
@@ -385,7 +394,7 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             "db": server_up,
             "dashboard": dashboard_ok,
             "server_up": server_up,
-            "fully_recovered": healthy,
+            "fully_recovered": fully_recovered,
             "deferred_hooks": 0,
             "outbox_age": outbox_age,
             "queue_depth": 0,
