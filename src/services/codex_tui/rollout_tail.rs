@@ -8,6 +8,11 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::provider::{CancelToken, ReadOutputResult, cancel_requested};
+// REQ-006: share the single rollout discovery primitive so `session.rs` and
+// `rollout_tail.rs` do not maintain two divergent directory walkers. Tailing
+// semantics are unchanged — callers here still apply their own cwd/session/mtime
+// filters after discovery.
+use super::rollout_index::rollout_files_under;
 
 const DEFAULT_ROLLOUT_WAIT_SECS: u64 = 30;
 /// Fallback EOF drain budget for rollouts that do NOT emit an explicit
@@ -688,31 +693,6 @@ fn latest_rollout_for_cwd_and_session_since(
         }
     }
     best.map(|(_, path)| path)
-}
-
-fn rollout_files_under(root: &Path) -> Vec<PathBuf> {
-    let mut stack = vec![root.to_path_buf()];
-    let mut files = Vec::new();
-    while let Some(path) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&path) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(".jsonl"))
-            {
-                files.push(path);
-            }
-        }
-    }
-    files
 }
 
 fn rollout_session_cwd_matches(path: &Path, cwd: &Path) -> bool {
