@@ -445,7 +445,8 @@ mod explicit_decode_fallback_tests {
 
     #[test]
     fn returns_value_on_success() {
-        let result: Result<f64, anyhow::Error> = decode_with_fallback("some_column", 42.0, || Ok(12.5));
+        let result: Result<f64, anyhow::Error> =
+            decode_with_fallback("some_column", 42.0, || Ok(12.5));
         assert_eq!(result.unwrap(), 12.5);
     }
 
