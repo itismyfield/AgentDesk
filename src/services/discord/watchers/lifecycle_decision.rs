@@ -163,12 +163,24 @@ pub(super) fn missing_inflight_fallback_observation(
     }
 }
 
+/// #3534: only flush a post-terminal-success continuation when genuinely-new
+/// bytes arrived this read batch (`new_output_observed` = `current_offset >
+/// data_start_offset`). A zero-width re-entry re-parses the carried `all_data`
+/// into a `full_response` that was ALREADY delivered on the prior (advancing)
+/// pass; flushing it re-posts the prior turn's answer as a NEW Discord message
+/// (the #3268-handoff duplicate-relay regression, where `response_sent_offset`
+/// re-seeds to 0 so the whole carried body looks unsent). The legitimate #1137
+/// trailing-output case always advances the offset, so it still flushes.
 pub(super) fn should_flush_post_terminal_success_continuation(
     terminal_success_seen: bool,
     found_result: bool,
+    new_output_observed: bool,
     full_response: &str,
 ) -> bool {
-    terminal_success_seen && !found_result && !full_response.trim().is_empty()
+    terminal_success_seen
+        && !found_result
+        && new_output_observed
+        && !full_response.trim().is_empty()
 }
 
 pub(super) fn should_resume_watcher_after_turn(
@@ -250,5 +262,49 @@ mod tests {
         assert!(!should_resume_watcher_after_turn(true, false, false));
         assert!(!should_resume_watcher_after_turn(false, true, true));
         assert!(should_resume_watcher_after_turn(false, true, false));
+    }
+
+    #[test]
+    fn continuation_flush_suppressed_for_zero_width_carried_response() {
+        // #3534 THE BUG: terminal success already relayed, this iteration found
+        // no fresh result, the carried full_response is non-empty BUT no new
+        // bytes arrived this batch (current_offset == data_start_offset). The
+        // body was already delivered on the prior advancing pass — must NOT
+        // re-flush it as a new Discord message.
+        assert!(!should_flush_post_terminal_success_continuation(
+            /* terminal_success_seen */ true,
+            /* found_result */ false,
+            /* new_output_observed */ false,
+            /* full_response */ "already-delivered multi-part answer",
+        ));
+    }
+
+    #[test]
+    fn continuation_flush_fires_for_genuine_trailing_output() {
+        // #1137 regression guard: codex/claude emitting trailing output AFTER
+        // terminal-success advances the offset, so new_output_observed is true
+        // — the continuation flush MUST still fire.
+        assert!(should_flush_post_terminal_success_continuation(
+            true,
+            false,
+            true,
+            "trailing post-terminal output",
+        ));
+    }
+
+    #[test]
+    fn continuation_flush_requires_all_preconditions() {
+        // No terminal success yet -> no flush, even with new output.
+        assert!(!should_flush_post_terminal_success_continuation(
+            false, false, true, "body"
+        ));
+        // Already found this iteration's result -> no flush.
+        assert!(!should_flush_post_terminal_success_continuation(
+            true, true, true, "body"
+        ));
+        // Blank body -> no flush even with new output observed.
+        assert!(!should_flush_post_terminal_success_continuation(
+            true, false, true, "   "
+        ));
     }
 }

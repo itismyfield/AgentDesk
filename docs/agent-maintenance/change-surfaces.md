@@ -155,7 +155,11 @@
     through `shared.ui`; +8 from #3533 ActiveBridgeTurnGuard restart-boundary
     preserve fix (no SUPPRESSED_INTERNAL_LABEL on an already-delivered duplicate);
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (6922 production lines after the #3479
+  - `src/services/discord/tmux_watcher.rs` (6923 production lines; +1 from #3534
+    gating the post-terminal-success continuation flush on
+    `new_output_observed` (`current_offset > data_start_offset`) so a zero-width
+    re-entry never re-relays an already-delivered carried body as a NEW message;
+    was 6922 after the #3479
     SPC-shadow removal deleted the dead `StatusPanelController` watcher
     shadow-parity calls — 2x `shadow_adopt_liveness_reacquired_panel` +
     `assert_watcher_create_parity`; legacy reacquire/create/edit IO unchanged —
