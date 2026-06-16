@@ -1011,6 +1011,40 @@ async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
                 tracing::warn!("[rate-limit-sync] Gemini rate_limit fetch failed: {e}");
             }
         }
+
+        // feature: rate-limit-aware-dispatch-gate — refresh the process-wide
+        // in-memory pressure + agent→provider snapshots that the auto-queue
+        // dispatch gate reads O(1) off the hot path (no DB on dispatch).
+        refresh_dispatch_gate_snapshots(pg_pool.as_ref()).await;
+    }
+}
+
+/// Rebuild the in-memory snapshots consumed by
+/// `crate::services::dispatch_gate` from the freshly-synced `rate_limit_cache`
+/// and the current agent/channel bindings. Runs off the hot dispatch path (once
+/// per ~120s rate-limit tick), so any DB cost here never touches activation.
+async fn refresh_dispatch_gate_snapshots(pg_pool: &PgPool) {
+    let now = chrono::Utc::now().timestamp();
+    let payloads =
+        crate::services::analytics::build_rate_limit_provider_payloads_pg(pg_pool, now).await;
+    let pressure = crate::services::dispatch_gate::pressure_snapshot_from_payloads(&payloads);
+    crate::services::dispatch_gate::set_provider_pressure_snapshot(pressure);
+
+    match crate::db::agents::load_all_agent_channel_bindings_pg(pg_pool).await {
+        Ok(bindings) => {
+            let mut agent_provider = std::collections::HashMap::new();
+            for (agent_id, binding) in bindings {
+                if let Some(provider) = binding.resolved_primary_provider_kind() {
+                    agent_provider.insert(agent_id, provider.as_str().to_string());
+                }
+            }
+            crate::services::dispatch_gate::set_agent_provider_snapshot(agent_provider);
+        }
+        Err(error) => {
+            tracing::warn!(
+                "[rate-limit-sync] failed to refresh agent→provider snapshot for dispatch gate: {error}"
+            );
+        }
     }
 }
 

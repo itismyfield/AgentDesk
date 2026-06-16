@@ -59,6 +59,11 @@ pub(crate) async fn activate_with_deps_pg(
         Err(response) => return response,
     };
     let mut dispatched = Vec::new();
+    // feature: rate-limit-aware-dispatch-gate — additive per-entry defer
+    // details surfaced on the activate/dispatch-next response. Each element is
+    // `{entry_id, ...ProviderPressureDecision fields}`. Never mutates entry
+    // status; deferred entries stay `pending`.
+    let mut deferred_entries: Vec<serde_json::Value> = Vec::new();
 
     let mut new_dispatches_this_activate = 0_i64;
     for group in &groups_to_dispatch {
@@ -264,6 +269,39 @@ pub(crate) async fn activate_with_deps_pg(
                 entry_log_ctx.clone(),
                 "[auto-queue] entry {entry_id} is no longer pending before slot allocation; concurrent activate likely claimed it"
             );
+            continue;
+        }
+
+        // feature: rate-limit-aware-dispatch-gate (REQ-002). Evaluate provider
+        // pressure AFTER the still_pending recheck and BEFORE slot allocation.
+        // This is an O(1), lock-cheap, DB-free read of the in-memory pressure
+        // snapshot (refreshed off the hot path by rate_limit_sync_loop). On a
+        // `defer` decision we create NO slot, NO dispatch row, perform NO status
+        // mutation (the entry stays `pending` and resumes on the next activation
+        // once pressure clears), and surface an additive defer detail. The
+        // gate-enabled flag is read live each iteration via config_live_reload,
+        // so a concurrent disable simply falls through to normal dispatch on the
+        // next entry — no half-gated state.
+        let gate_decision = crate::services::dispatch_gate::evaluate_agent_provider_pressure(
+            &agent_id,
+            chrono::Utc::now().timestamp(),
+        );
+        if gate_decision.verdict.is_defer() {
+            crate::auto_queue_log!(
+                info,
+                "activate_deferred_due_to_rate_limit_pg",
+                entry_log_ctx.clone(),
+                "[auto-queue] deferring entry {entry_id} for {agent_id}: provider {:?} at {:?}% (danger {}%), entry stays pending",
+                gate_decision.provider,
+                gate_decision.utilization_pct,
+                gate_decision.danger_pct
+            );
+            let mut detail =
+                serde_json::to_value(&gate_decision).unwrap_or_else(|_| serde_json::json!({}));
+            if let Some(map) = detail.as_object_mut() {
+                map.insert("entry_id".to_string(), serde_json::json!(entry_id));
+            }
+            deferred_entries.push(detail);
             continue;
         }
 
@@ -573,7 +611,15 @@ pub(crate) async fn activate_with_deps_pg(
         dispatched.push(deps.entry_json_pg(pool, &entry_id).await);
     }
 
-    match finalize_activate_run_and_build_response(pool, &run_id, &run_log_ctx, dispatched).await {
+    match finalize_activate_run_and_build_response(
+        pool,
+        &run_id,
+        &run_log_ctx,
+        dispatched,
+        deferred_entries,
+    )
+    .await
+    {
         Ok(response) | Err(response) => response,
     }
 }
@@ -1142,6 +1188,7 @@ async fn finalize_activate_run_and_build_response(
     run_id: &str,
     run_log_ctx: &AutoQueueLogContext<'_>,
     dispatched: Vec<serde_json::Value>,
+    deferred_entries: Vec<serde_json::Value>,
 ) -> Result<ActivateResponse, ActivateResponse> {
     let remaining = match sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*)::BIGINT
@@ -1280,16 +1327,27 @@ async fn finalize_activate_run_and_build_response(
     .await
     .unwrap_or(0);
 
-    Ok((
-        StatusCode::OK,
-        Json(json!({
-            "dispatched": dispatched,
-            "count": dispatched.len(),
-            "active_groups": active_group_count,
-            "active_turn_count": active_turn_count_after,
-            "pending_groups": pending_group_count,
-        })),
-    ))
+    // feature: rate-limit-aware-dispatch-gate (REQ-004). `deferred_entries` and
+    // `deferred_count` are ADDITIVE fields: existing keys
+    // (dispatched/count/active_groups/active_turn_count/pending_groups) are
+    // unchanged and never removed/retyped. The fields are only attached when at
+    // least one entry was gated, so the response shape is byte-identical to the
+    // pre-feature contract on the common no-deferral path.
+    let mut body = json!({
+        "dispatched": dispatched,
+        "count": dispatched.len(),
+        "active_groups": active_group_count,
+        "active_turn_count": active_turn_count_after,
+        "pending_groups": pending_group_count,
+    });
+    if !deferred_entries.is_empty() {
+        if let Some(map) = body.as_object_mut() {
+            map.insert("deferred_count".to_string(), json!(deferred_entries.len()));
+            map.insert("deferred_entries".to_string(), json!(deferred_entries));
+        }
+    }
+
+    Ok((StatusCode::OK, Json(body)))
 }
 
 fn activate_fallback_capacity_reached(
