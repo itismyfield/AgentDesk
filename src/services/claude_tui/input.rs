@@ -70,6 +70,35 @@ fn followup_prompt_ready_timeout() -> Duration {
         .unwrap_or(FOLLOWUP_PROMPT_READY_TIMEOUT)
 }
 
+/// #tui-hook-ttl-buffer (REQ-006): claim the Claude hook registry key for this
+/// tmux session and report whether a fresh Stop / SubagentStop was already
+/// buffered. `claim_once` drains and drops the key so the consumed Stop cannot
+/// replay into a later turn (single-consumption). Returns `false` when the
+/// registry is disabled by the rollback flag, when no key/event matches, or
+/// when the buffered events are not Stop kinds — in which case the caller falls
+/// through to the existing Notify fast path and polling fallback unchanged.
+///
+/// Note: this keys by the tmux session name (the only id the readiness layer
+/// knows). It therefore only rescues early Stops whose hooks were delivered
+/// keyed by the tmux session; Stops keyed by a provider session UUID are still
+/// covered by the existing Notify + polling path, so no signal is lost.
+fn claude_registry_stop_already_buffered(session_name: &str) -> bool {
+    use crate::services::claude_tui::hook_registry;
+    use crate::services::claude_tui::hook_server::HookEventKind;
+    if !hook_registry::registry_enabled() {
+        return false;
+    }
+    let Some(key) = hook_registry::RegistryKey::new("claude", Some(session_name), None) else {
+        return false;
+    };
+    hook_registry::global().claim_once(key).iter().any(|event| {
+        matches!(
+            event.kind,
+            HookEventKind::Stop | HookEventKind::SubagentStop
+        )
+    })
+}
+
 impl PromptReadinessKind {
     fn timeout(self) -> Duration {
         match self {
@@ -846,6 +875,43 @@ fn wait_for_prompt_ready_inner(
     check_prompt_cancel(cancel_token)?;
     let timeout = readiness.timeout();
     let start = Instant::now();
+
+    // #tui-hook-ttl-buffer (REQ-006): consult the in-memory hook registry as an
+    // additive event source for an early Stop that landed before this wait
+    // began. The global `prompt_ready_notify()` used by the fast path below is
+    // edge-triggered, so a Stop fired in the gap between the prior turn and this
+    // wait would otherwise be lost and force a full polling fallback. We only
+    // consume a FRESH (unexpired) Stop keyed by `(claude, tmux_session_name)` —
+    // the key the readiness layer actually knows — and claim_once drains it so
+    // it can never replay into a later turn (REQ-002/REQ-003).
+    //
+    // CRITICAL (verifier top regression risk — "stale Stop contaminates a new
+    // turn"): a buffered Stop is treated like an edge-triggered Notify wake, NOT
+    // as an unconditional ready signal. We REQUIRE the pane snapshot to confirm
+    // the prompt marker (the same gate the Notify fast path applies via its
+    // post-event snapshot) before returning ready. A stale Stop whose pane is
+    // still mid-turn therefore does NOT short-circuit; it falls through to the
+    // normal Notify + polling path. The rollback flag turns the whole block off.
+    if claude_registry_stop_already_buffered(session_name) {
+        check_prompt_cancel(cancel_token)?;
+        let snapshot = prompt_readiness_snapshot(session_name);
+        if prompt_marker_confirms_prompt_ready(&snapshot) {
+            tracing::debug!(
+                tmux_session_name = session_name,
+                readiness = readiness.label(),
+                elapsed_ms = start.elapsed().as_millis() as u64,
+                "claude_tui prompt ready via buffered hook registry Stop confirmed by pane marker (early-Stop race avoided)"
+            );
+            return Ok(());
+        }
+        // Buffered Stop did not correspond to a ready pane (stale / mid-turn) —
+        // fall through to the existing Notify fast path and polling fallback.
+        tracing::debug!(
+            tmux_session_name = session_name,
+            readiness = readiness.label(),
+            "claude_tui buffered hook registry Stop did not confirm pane readiness; using standard fast path"
+        );
+    }
 
     if transcript_idle_confirms_prompt_ready_without_capture(session_name, transcript_path) {
         tracing::info!(

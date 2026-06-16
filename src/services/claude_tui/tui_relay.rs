@@ -259,6 +259,40 @@ async fn handle_wait(Json(req): Json<WaitRequest>) -> Json<Value> {
     }
 
     let started = Instant::now();
+
+    // #tui-hook-ttl-buffer (REQ-002/REQ-005/REQ-006): claim the registry key
+    // BEFORE subscribing to the broadcast so a Stop that landed in the early
+    // window (after the previous turn drained the channel but before this wait
+    // subscribed) is replayed exactly once instead of being lost. This is the
+    // additive event source the PRD migrates `/tui/wait` onto; the broadcast
+    // subscription below remains the live path and the fallback. Claiming also
+    // cancels any unclaimed-Stop diagnostic timer for the key. When the
+    // registry is disabled via the rollback flag, this block is a no-op and the
+    // behaviour reverts to the pure broadcast wait.
+    if let Some(early) = try_claim_registry_match(
+        req.provider.as_deref(),
+        req.session_id.as_deref(),
+        &until_mode,
+        token.as_deref(),
+    ) {
+        let summary = json!({
+            "provider": early.provider,
+            "session_id": early.session_id,
+            "kind": early.kind.as_str(),
+            "received_at": early.received_at,
+        });
+        return Json(
+            serde_json::to_value(WaitResponse {
+                ok: true,
+                matched: true,
+                reason: format!("matched:{until_mode}:registry"),
+                event: Some(summary),
+                waited_ms: started.elapsed().as_millis(),
+            })
+            .unwrap_or_else(|_| json!({ "ok": true, "matched": true })),
+        );
+    }
+
     let mut rx = subscribe_hook_events();
     let deadline = tokio::time::sleep(timeout);
     tokio::pin!(deadline);
@@ -315,6 +349,42 @@ async fn handle_wait(Json(req): Json<WaitRequest>) -> Json<Value> {
             }
         }
     }
+}
+
+/// #tui-hook-ttl-buffer: claim the registry key for this wait and return the
+/// newest buffered event that already satisfies the wait filter, if any. The
+/// claim drains the key's fresh buffer exactly once (single-consumption) and
+/// cancels any unclaimed-Stop diagnostic timer, so a stale event cannot be
+/// replayed into a later turn.
+///
+/// A key is only formed when BOTH a provider and a session_id are supplied —
+/// the registry key requires a concrete session id (provider session id or the
+/// tmux fallback), and `/tui/wait` callers that omit `session_id` intentionally
+/// accept "any session", which the registry (per-key) cannot represent. Those
+/// callers fall through to the broadcast wait unchanged. Returns `None` when
+/// the registry is disabled, no key can be formed, or no buffered event matches.
+fn try_claim_registry_match(
+    want_provider: Option<&str>,
+    want_session_id: Option<&str>,
+    until_mode: &str,
+    token: Option<&str>,
+) -> Option<HookEvent> {
+    use crate::services::claude_tui::hook_registry;
+    if !hook_registry::registry_enabled() {
+        return None;
+    }
+    let provider = want_provider.map(str::trim).filter(|p| !p.is_empty())?;
+    let session_id = want_session_id.map(str::trim).filter(|s| !s.is_empty())?;
+    let key = hook_registry::RegistryKey::new(provider, Some(session_id), None)?;
+    // claim_once drains the fresh buffer AND drops the key so the next turn
+    // re-buffers early Stops instead of seeing them delivered "live" and lost.
+    let replayed = hook_registry::global().claim_once(key);
+    // Return the newest matching event (registry preserves arrival order, so the
+    // last matching entry is the freshest Stop / token hit).
+    replayed
+        .into_iter()
+        .rev()
+        .find(|event| event_matches(event, want_provider, want_session_id, until_mode, token))
 }
 
 fn event_matches(
@@ -517,6 +587,70 @@ mod tests {
         let event = make_event("claude", "abc", HookEventKind::UserPromptSubmit, json!({}));
         assert!(!event_matches(&event, None, None, "token", None));
         assert!(!event_matches(&event, None, None, "token", Some("")));
+    }
+
+    // -------- #tui-hook-ttl-buffer: registry-backed early-Stop claim --------
+
+    /// REQ-002/REQ-006: an early Stop buffered in the registry (before `/tui/wait`
+    /// subscribed to the broadcast) is returned by `try_claim_registry_match`
+    /// without waiting for a new broadcast event. The claim is single-shot —
+    /// a second call returns nothing (stale Stop cannot wake a later turn).
+    #[test]
+    fn try_claim_registry_match_returns_buffered_early_stop_once() {
+        use crate::services::claude_tui::hook_registry::{RegistryKey, global};
+        let provider = "claude";
+        let session = "wait-early-stop";
+        // Clean slate.
+        if let Some(k) = RegistryKey::new(provider, Some(session), None) {
+            let _ = global().claim_once(k);
+        }
+        let key = RegistryKey::new(provider, Some(session), None).unwrap();
+        global().deliver(
+            key,
+            make_event(provider, session, HookEventKind::Stop, json!({})),
+        );
+
+        let matched = try_claim_registry_match(Some(provider), Some(session), "stop", None);
+        assert!(matched.is_some(), "buffered early Stop must be claimed");
+        assert_eq!(matched.unwrap().kind, HookEventKind::Stop);
+
+        // Single-consumption: a second claim finds nothing.
+        let second = try_claim_registry_match(Some(provider), Some(session), "stop", None);
+        assert!(
+            second.is_none(),
+            "claimed Stop must not replay to a later wait"
+        );
+    }
+
+    /// REQ-005: a `/tui/wait` caller that omits `session_id` accepts "any
+    /// session", which the per-key registry cannot represent — so it falls
+    /// through to the broadcast wait (registry returns `None`).
+    #[test]
+    fn try_claim_registry_match_skips_when_no_session_id() {
+        assert!(try_claim_registry_match(Some("claude"), None, "stop", None).is_none());
+        assert!(try_claim_registry_match(None, Some("sid"), "stop", None).is_none());
+    }
+
+    /// Cross-provider isolation at the wait seam: a Stop buffered for
+    /// (codex, ABC) must not be claimable by a (claude, ABC) wait.
+    #[test]
+    fn try_claim_registry_match_isolates_providers() {
+        use crate::services::claude_tui::hook_registry::{RegistryKey, global};
+        let session = "wait-iso-ABC";
+        for p in ["claude", "codex"] {
+            if let Some(k) = RegistryKey::new(p, Some(session), None) {
+                let _ = global().claim_once(k);
+            }
+        }
+        let codex_key = RegistryKey::new("codex", Some(session), None).unwrap();
+        global().deliver(
+            codex_key,
+            make_event("codex", session, HookEventKind::Stop, json!({})),
+        );
+        // A claude wait for the same session id must not see the codex Stop.
+        assert!(try_claim_registry_match(Some("claude"), Some(session), "stop", None).is_none());
+        // The codex wait does see it.
+        assert!(try_claim_registry_match(Some("codex"), Some(session), "stop", None).is_some());
     }
 
     #[test]

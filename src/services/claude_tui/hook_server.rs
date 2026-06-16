@@ -313,6 +313,33 @@ async fn receive_hook(
                 event.kind,
                 HookEventKind::Stop | HookEventKind::SubagentStop
             ));
+    // #tui-hook-ttl-buffer: additively feed the in-memory hook registry so a
+    // hook that lands before its consumer claims the key is not lost (the
+    // broadcast and `prompt_ready_notify` above are edge-triggered and drop
+    // early signals). This is a parallel buffer — it does NOT gate, drop, or
+    // reorder the broadcast send below; the Codex `try_recv()` observer path
+    // and `/tui/wait` broadcast subscribers are unchanged. Delivery is a single
+    // in-memory mutex section (O(buffer length for the key)); no I/O. The
+    // registry is fed for EVERY accepted event (including empty Stop) because
+    // claim/replay and the unclaimed-Stop diagnostic both need the full Stop
+    // signal — the empty-payload broadcast filter is intentionally bypassed
+    // here, mirroring the Stop exemption above.
+    //
+    // Keyed by (provider, session_id): session_id is already the provider
+    // session id when the hook reported one, else the tmux session name passed
+    // via the query string — exactly the REQ-001 fallback. Including the
+    // provider in the key keeps Claude and Codex isolated even when they share
+    // a tmux session name.
+    if crate::services::claude_tui::hook_registry::registry_enabled() {
+        if let Some(key) = crate::services::claude_tui::hook_registry::RegistryKey::new(
+            &event.provider,
+            Some(event.session_id.as_str()),
+            None,
+        ) {
+            crate::services::claude_tui::hook_registry::global().deliver(key, event.clone());
+        }
+    }
+
     if should_drop_broadcast {
         tracing::debug!(
             provider,
@@ -902,6 +929,51 @@ mod tests {
                 "non-completion events must be eligible for the empty-payload drop"
             );
         }
+    }
+
+    /// #tui-hook-ttl-buffer (REQ-005 / overlap invariant): delivering a hook
+    /// through the receiver must BOTH buffer it in the registry AND keep the
+    /// broadcast firing for observers (the Codex `try_recv` path). The registry
+    /// is additive — it does not gate or drop the broadcast. We claim_once the
+    /// registry key after the request to prove the early Stop was buffered, and
+    /// confirm the broadcast subscriber still saw the same Stop.
+    #[tokio::test]
+    async fn receiver_feeds_registry_and_preserves_broadcast() {
+        use crate::services::claude_tui::hook_registry::{RegistryKey, global};
+
+        let session = "sess-registry-broadcast";
+        // Start from a clean key so a neighbour test cannot pollute this one.
+        if let Some(key) = RegistryKey::new("claude", Some(session), None) {
+            let _ = global().claim_once(key);
+        }
+
+        let state = HookServerState::new();
+        let mut rx = state.subscribe();
+        let app = hook_receiver_router_with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/hooks/claude/Stop?session_id={session}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"hook_event_name":"Stop"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        // Broadcast observer still sees the Stop (Codex path preserved).
+        let broadcast_event = rx.recv().await.unwrap();
+        assert_eq!(broadcast_event.kind, HookEventKind::Stop);
+        assert_eq!(broadcast_event.session_id, session);
+
+        // Registry buffered the same Stop for a late claimer.
+        let key = RegistryKey::new("claude", Some(session), None).unwrap();
+        let replayed = global().claim_once(key);
+        assert_eq!(replayed.len(), 1, "registry must buffer the early Stop");
+        assert_eq!(replayed[0].kind, HookEventKind::Stop);
     }
 
     #[test]

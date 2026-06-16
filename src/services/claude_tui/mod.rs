@@ -1,4 +1,5 @@
 pub mod hook_bundle;
+pub mod hook_registry;
 pub mod hook_relay;
 pub mod hook_server;
 #[cfg(test)]

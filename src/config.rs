@@ -1370,6 +1370,28 @@ pub struct RuntimeSettingsConfig {
     /// the compiled-in 50 default; clamped to `1..=500` when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_session_audit_max_candidates: Option<u64>,
+    /// TTL (seconds) for the in-memory TUI hook registry buffer. A hook that has
+    /// been buffered longer than this is swept and never replayed to a claiming
+    /// listener, so a stale Stop from a previous turn cannot wake a fresh turn.
+    /// When unset (or `0`) the compiled-in 30s default
+    /// (`hook_registry::DEFAULT_HOOK_BUFFER_TTL`) is used. Read live via
+    /// `config_live_reload::current()` so an `agentdesk.yaml` edit applies to the
+    /// next process; the runtime section is hot-reloadable (not restart-required).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tui_hook_buffer_ttl_secs: Option<u64>,
+    /// Diagnostic delay (milliseconds) before an unclaimed Stop in the TUI hook
+    /// registry is considered "elapsed". Diagnostic-only in P0 — it never
+    /// triggers a transcript sync or finalization. When unset (or `0`) the
+    /// compiled-in 2000ms default (`hook_registry::DEFAULT_UNCLAIMED_STOP_DELAY`)
+    /// is used. Hot-reloadable via the runtime section.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tui_unclaimed_stop_delay_ms: Option<u64>,
+    /// Rollback switch for the TUI hook registry buffering layer. Defaults to ON
+    /// (`None` => enabled). Set to `false` in `agentdesk.yaml` to stop feeding
+    /// the registry from the hook receiver, leaving the legacy broadcast +
+    /// polling path exactly as before. Hot-reloadable (no restart required).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tui_hook_registry_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub reset_overrides_on_restart: bool,
 }
@@ -1404,7 +1426,67 @@ impl RuntimeSettingsConfig {
             && self.active_session_audit_enabled.is_none()
             && self.active_session_audit_stale_secs.is_none()
             && self.active_session_audit_max_candidates.is_none()
+            && self.tui_hook_buffer_ttl_secs.is_none()
+            && self.tui_unclaimed_stop_delay_ms.is_none()
+            && self.tui_hook_registry_enabled.is_none()
             && !self.reset_overrides_on_restart
+    }
+}
+
+#[cfg(test)]
+mod runtime_hook_registry_config_tests {
+    use super::*;
+
+    // #tui-hook-ttl-buffer: the new runtime keys participate in `is_empty` so a
+    // config that sets only one of them still serializes the `runtime` section
+    // (otherwise the `skip_serializing_if = "RuntimeSettingsConfig::is_empty"`
+    // on the parent would drop the operator's override on a round-trip).
+    #[test]
+    fn hook_registry_keys_count_toward_is_empty() {
+        assert!(RuntimeSettingsConfig::default().is_empty());
+
+        let ttl_only = RuntimeSettingsConfig {
+            tui_hook_buffer_ttl_secs: Some(45),
+            ..RuntimeSettingsConfig::default()
+        };
+        assert!(!ttl_only.is_empty());
+
+        let delay_only = RuntimeSettingsConfig {
+            tui_unclaimed_stop_delay_ms: Some(3000),
+            ..RuntimeSettingsConfig::default()
+        };
+        assert!(!delay_only.is_empty());
+
+        // The rollback flag also keeps the section alive when set to either bool.
+        let disabled = RuntimeSettingsConfig {
+            tui_hook_registry_enabled: Some(false),
+            ..RuntimeSettingsConfig::default()
+        };
+        assert!(!disabled.is_empty());
+    }
+
+    // The keys survive a YAML round-trip with their types intact, and an absent
+    // section deserializes to `None` (defaults applied by the consumer).
+    #[test]
+    fn hook_registry_keys_round_trip_through_yaml() {
+        let yaml = "tui_hook_buffer_ttl_secs: 60\n\
+                    tui_unclaimed_stop_delay_ms: 1500\n\
+                    tui_hook_registry_enabled: false\n";
+        let parsed: RuntimeSettingsConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.tui_hook_buffer_ttl_secs, Some(60));
+        assert_eq!(parsed.tui_unclaimed_stop_delay_ms, Some(1500));
+        assert_eq!(parsed.tui_hook_registry_enabled, Some(false));
+
+        let reserialized = serde_yaml::to_string(&parsed).unwrap();
+        let reparsed: RuntimeSettingsConfig = serde_yaml::from_str(&reserialized).unwrap();
+        assert_eq!(reparsed, parsed);
+
+        // Absent keys default to None so the consumer falls back to the
+        // compiled-in defaults (None-safe handling).
+        let empty: RuntimeSettingsConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(empty.tui_hook_buffer_ttl_secs, None);
+        assert_eq!(empty.tui_unclaimed_stop_delay_ms, None);
+        assert_eq!(empty.tui_hook_registry_enabled, None);
     }
 }
 
