@@ -39,6 +39,7 @@
 //!    decide whether to trigger a transcript sync; P0 never syncs or finalizes.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -189,6 +190,12 @@ pub struct HookRegistry {
     keys: Mutex<HashMap<RegistryKey, KeyState>>,
     ttl: Duration,
     unclaimed_stop_delay: Duration,
+    /// Cumulative events replayed by `claim_once`, accumulated at the registry
+    /// level because `claim_once` drops the key (and its per-key counters) on
+    /// every call. Without this the advertised `replayed_total` would always be
+    /// 0 in production, since `snapshot` only sums per-key counters for *live*
+    /// keys and the transient one-shot consumer leaves none behind.
+    replayed_once_total: AtomicU64,
 }
 
 impl HookRegistry {
@@ -197,6 +204,7 @@ impl HookRegistry {
             keys: Mutex::new(HashMap::new()),
             ttl,
             unclaimed_stop_delay,
+            replayed_once_total: AtomicU64::new(0),
         }
     }
 
@@ -310,10 +318,18 @@ impl HookRegistry {
             return Vec::new();
         };
         Self::sweep_state(&mut state, self.ttl, now);
-        std::mem::take(&mut state.buffer)
+        let drained: Vec<HookEvent> = std::mem::take(&mut state.buffer)
             .into_iter()
             .map(|buffered| buffered.event)
-            .collect()
+            .collect();
+        // The key (and its per-key `replayed_total`) is dropped here, so record
+        // the replay at the registry level — otherwise the advertised
+        // `replayed_total` diagnostic would always read 0 in production.
+        if !drained.is_empty() {
+            self.replayed_once_total
+                .fetch_add(drained.len() as u64, Ordering::Relaxed);
+        }
+        drained
     }
 
     /// Per-key diagnostic for the retained unclaimed Stop, or `None` when none is
@@ -373,6 +389,9 @@ impl HookRegistry {
             snap.empty_stop_total += state.empty_stop_total;
         }
         snap.keys_tracked = keys.len();
+        // Fold in replays delivered by `claim_once`, whose keys are already gone
+        // from the live map (so their per-key `replayed_total` was dropped).
+        snap.replayed_total += self.replayed_once_total.load(Ordering::Relaxed);
         snap
     }
 
@@ -428,10 +447,16 @@ static GLOBAL: LazyLock<HookRegistry> = LazyLock::new(|| {
     HookRegistry::new(ttl, delay)
 });
 
-/// Read the live TTL / unclaimed-Stop-delay overrides from the hot-reloadable
-/// runtime config, falling back to the compiled defaults. A configured `0` is
-/// treated as unset to avoid an immediate-expiry footgun. Clamped so a bad
-/// hot-reload value cannot overflow `Instant + Duration`.
+/// Read the TTL / unclaimed-Stop-delay overrides from the runtime config,
+/// falling back to the compiled defaults. A configured `0` is treated as unset
+/// to avoid an immediate-expiry footgun. Clamped so a bad value cannot overflow
+/// `Instant + Duration`.
+///
+/// NOTE: although this reads from the live config, it is called exactly once —
+/// when `GLOBAL` is first initialised — so the resulting durations are frozen on
+/// the immutable `HookRegistry` for the life of the process. Editing
+/// `tui_hook_buffer_ttl_secs` / `tui_unclaimed_stop_delay_ms` therefore requires
+/// a restart; only `registry_enabled()` is re-read per hook.
 pub fn current_registry_durations() -> (Duration, Duration) {
     let cfg = crate::config_live_reload::current();
     let ttl = cfg
@@ -767,6 +792,37 @@ mod tests {
         assert!(value.get("buffered_event_count").is_some());
         assert!(value.get("unclaimed_stop_total").is_some());
         assert!(value.get("replayed_total").is_some());
+    }
+
+    #[test]
+    fn claim_once_replay_is_counted_in_replayed_total() {
+        // Regression: the production one-shot consumer (`claim_once`) removes the
+        // key — and with it the per-key `replayed_total` — so the advertised
+        // aggregate must be tracked at the registry level. Before this fix the
+        // diagnostic always reported 0 in production.
+        let reg = registry();
+        let k = key("claude", "sid");
+        reg.deliver(
+            k.clone(),
+            event("claude", "sid", HookEventKind::SessionStart, json!({})),
+        );
+        reg.deliver(
+            k.clone(),
+            event("claude", "sid", HookEventKind::Stop, json!({})),
+        );
+
+        let replayed = reg.claim_once(k.clone());
+        assert_eq!(replayed.len(), 2, "claim_once replays both buffered events");
+
+        let snap = reg.snapshot();
+        assert_eq!(
+            snap.replayed_total, 2,
+            "claim_once replays must be reflected in the advertised replayed_total"
+        );
+        // The key is gone after the one-shot claim, but the cumulative counter
+        // survives; a second claim_once replays nothing and does not double-count.
+        assert!(reg.claim_once(k).is_empty());
+        assert_eq!(reg.snapshot().replayed_total, 2);
     }
 
     // -------- config defaults / clamping / rollback flag --------

@@ -1374,22 +1374,34 @@ pub struct RuntimeSettingsConfig {
     /// been buffered longer than this is swept and never replayed to a claiming
     /// listener, so a stale Stop from a previous turn cannot wake a fresh turn.
     /// When unset (or `0`) the compiled-in 30s default
-    /// (`hook_registry::DEFAULT_HOOK_BUFFER_TTL`) is used. Read live via
-    /// `config_live_reload::current()` so an `agentdesk.yaml` edit applies to the
-    /// next process; the runtime section is hot-reloadable (not restart-required).
+    /// (`hook_registry::DEFAULT_HOOK_BUFFER_TTL`) is used.
+    ///
+    /// NOT hot-reloadable: this value is captured ONCE when the process-global
+    /// `hook_registry::GLOBAL` is first accessed (effectively at process start)
+    /// and stored on the immutable `HookRegistry.ttl`. Editing it in
+    /// `agentdesk.yaml` takes effect only on the next process start (restart
+    /// required). Only `tui_hook_registry_enabled` is read live per-hook.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tui_hook_buffer_ttl_secs: Option<u64>,
     /// Diagnostic delay (milliseconds) before an unclaimed Stop in the TUI hook
     /// registry is considered "elapsed". Diagnostic-only in P0 — it never
     /// triggers a transcript sync or finalization. When unset (or `0`) the
     /// compiled-in 2000ms default (`hook_registry::DEFAULT_UNCLAIMED_STOP_DELAY`)
-    /// is used. Hot-reloadable via the runtime section.
+    /// is used.
+    ///
+    /// NOT hot-reloadable: like `tui_hook_buffer_ttl_secs`, this is captured ONCE
+    /// when `hook_registry::GLOBAL` is first accessed (process start) and stored
+    /// on the immutable `HookRegistry.unclaimed_stop_delay`. Editing it in
+    /// `agentdesk.yaml` takes effect only on the next process start (restart
+    /// required). Only `tui_hook_registry_enabled` is genuinely hot-reloadable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tui_unclaimed_stop_delay_ms: Option<u64>,
     /// Rollback switch for the TUI hook registry buffering layer. Defaults to ON
     /// (`None` => enabled). Set to `false` in `agentdesk.yaml` to stop feeding
     /// the registry from the hook receiver, leaving the legacy broadcast +
-    /// polling path exactly as before. Hot-reloadable (no restart required).
+    /// polling path exactly as before. Genuinely hot-reloadable (no restart
+    /// required): `registry_enabled()` reads it live per-hook. This is the ONLY
+    /// live-reloadable key of the three TUI hook registry settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tui_hook_registry_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "is_false")]

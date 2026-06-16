@@ -328,6 +328,7 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   └── warm_followup.rs
 │   │   ├── hook_bundle.rs
+│   │   ├── hook_registry.rs
 │   │   ├── hook_relay.rs
 │   │   ├── hook_server.rs
 │   │   ├── hook_server_memento_tests.rs
