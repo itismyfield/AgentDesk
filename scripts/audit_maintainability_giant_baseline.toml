@@ -67,7 +67,7 @@
 # #3479 SPC-shadow removal: lowered 6939 -> 6922 (deleted the dead StatusPanelController
 # shadow-parity calls — 2x shadow_adopt_liveness_reacquired_panel + assert_watcher_create_parity;
 # legacy reacquire/create/edit IO unchanged).
-"src/services/discord/tmux_watcher.rs" = 6922
+"src/services/discord/tmux_watcher.rs" = 6923
 # #3038 tmux_watcher S1 child modules, frozen at landed production LoC.
 "src/services/discord/tmux_watcher/commit_decisions.rs" = 140
 "src/services/discord/tmux_watcher/completion_gate.rs" = 275
