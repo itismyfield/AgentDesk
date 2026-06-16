@@ -110,7 +110,8 @@ grandfathered_baseline_paths = [
   "src/services/discord/tmux.rs",
   "src/services/discord/tmux_watcher.rs",
   "src/services/discord/tui_prompt_relay.rs",
-  "src/services/discord/turn_bridge/completion_guard.rs",
+  # completion_guard.rs decomposed in #3479 (-> 872 prod LoC); win-locked out of
+  # both `grandfathered` and this frozen baseline (see note in `grandfathered`).
   "src/services/discord/turn_bridge/tmux_runtime.rs",
   "src/services/discord/watchers/lifecycle.rs",
   "src/services/discord_config_audit.rs",
@@ -215,7 +216,12 @@ grandfathered = [
   "src/services/discord/tmux.rs",
   "src/services/discord/tmux_watcher.rs",
   "src/services/discord/tui_prompt_relay.rs",
-  "src/services/discord/turn_bridge/completion_guard.rs",
+  # completion_guard.rs was decomposed in #3479 (1834 prod LoC -> 872-line
+  # module root + completion_guard/{completion_postgres,completion_context}.rs,
+  # both sub-1000-LoC); no longer a prod-giant, so it is removed here AND from
+  # the frozen baseline above (win-locked: a re-expanded completion_guard.rs
+  # cannot be re-grandfathered). The split outputs stay sub-threshold and are
+  # not ratcheted.
   "src/services/discord/turn_bridge/tmux_runtime.rs",
   "src/services/discord/watchers/lifecycle.rs",
   "src/services/discord_config_audit.rs",
