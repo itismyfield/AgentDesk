@@ -48,6 +48,7 @@ const RUNTIME_CONFIG_KEYS: &[&str] = &[
     "rateLimitDangerPct",
     "githubRepoCacheSec",
     "rateLimitStaleSec",
+    "dispatchRateLimitGateEnabled",
 ];
 
 /// Known individual `kv_meta` config keys surfaced to the dashboard and policy helpers.
@@ -844,6 +845,11 @@ fn runtime_config_yaml_overrides(config: &crate::config::Config) -> Map<String, 
         "rateLimitStaleSec",
         config.runtime.rate_limit_stale_sec,
     );
+    insert_runtime_bool(
+        &mut overrides,
+        "dispatchRateLimitGateEnabled",
+        config.runtime.dispatch_rate_limit_gate_enabled,
+    );
     overrides
 }
 
@@ -867,6 +873,7 @@ fn runtime_config_defaults_map(config: &crate::config::Config) -> Map<String, Va
         "rateLimitDangerPct": 95,
         "githubRepoCacheSec": 300,
         "rateLimitStaleSec": 600,
+        "dispatchRateLimitGateEnabled": true,
     })
     .as_object()
     .cloned()

@@ -1416,6 +1416,18 @@ pub struct RuntimeSettingsConfig {
     /// next lookup without a restart; not part of the restart-required set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_rollout_index_cache_enabled: Option<bool>,
+    /// Rate-limit-aware dispatch gate toggle (feature:
+    /// rate-limit-aware-dispatch-gate). When `Some(true)` or unset (`None` —
+    /// the safe default is ON), auto-queue activation defers a pending entry
+    /// whose target provider is at/above `rate_limit_danger_pct` utilization in
+    /// the live in-memory rate-limit snapshot, instead of creating a doomed
+    /// dispatch. The entry stays `pending` (never `skipped`) and resumes
+    /// automatically once pressure clears. Read live via
+    /// `config_live_reload::current()` so an `agentdesk.yaml` edit applies on
+    /// the next activation without a restart. Set to `false` to disable the
+    /// gate cleanly (every activation then falls through to normal dispatch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_rate_limit_gate_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub reset_overrides_on_restart: bool,
 }
@@ -1454,6 +1466,7 @@ impl RuntimeSettingsConfig {
             && self.tui_unclaimed_stop_delay_ms.is_none()
             && self.tui_hook_registry_enabled.is_none()
             && self.codex_rollout_index_cache_enabled.is_none()
+            && self.dispatch_rate_limit_gate_enabled.is_none()
             && !self.reset_overrides_on_restart
     }
 }

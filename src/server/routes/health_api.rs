@@ -306,6 +306,17 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             json["pipeline_overrides"] = report;
         }
 
+        // feature: rate-limit-aware-dispatch-gate (REQ-004). Aggregate,
+        // credential-free dispatch-gate counters (no API tokens, no provider
+        // credentials, no raw cache rows — only counts, the active threshold,
+        // and the last-defer timestamp). Added on the `detailed` axis only;
+        // `public_health_json` is an explicit allowlist so this never leaks on
+        // the public `/api/health` endpoint. Additive: a NEW diagnostic block,
+        // not a new `degraded_reasons` category.
+        json["rate_limit_dispatch_gate"] =
+            serde_json::to_value(crate::services::dispatch_gate::diagnostics())
+                .unwrap_or_else(|_| serde_json::json!({}));
+
         let http_status = if status.is_http_ready() {
             StatusCode::OK
         } else {
