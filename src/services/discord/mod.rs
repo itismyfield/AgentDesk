@@ -64,7 +64,6 @@ pub mod runtime_store;
 pub(crate) mod session_identity;
 mod session_runtime;
 pub(crate) mod settings;
-mod shadow_parity_warn;
 pub(crate) mod shared_memory;
 // #3038 S1/S2: extracted SharedData field clusters (named sub-structs + their
 // dedicated inherent impls). See `shared_state::QueuedPlaceholderState` and
@@ -80,10 +79,7 @@ pub(in crate::services::discord) mod task_supervisor;
 #[cfg(unix)]
 mod tmux;
 #[cfg(unix)]
-mod watcher_panel_parity;
-#[cfg(unix)]
 pub(crate) use tmux::write_spawn_nonce;
-mod status_panel_controller;
 #[cfg(unix)]
 mod tmux_error_detect;
 #[cfg(unix)]
@@ -1887,14 +1883,6 @@ pub(crate) struct SharedData {
     /// side-effects) as an atomic, exactly-once unit. Bridge/watcher terminals
     /// submit terminal events here instead of finalizing inline.
     pub(in crate::services::discord) turn_finalizer: Arc<turn_finalizer::TurnFinalizer>,
-    /// EPIC #3078 — single-authority status panel controller (PR-1, DORMANT).
-    /// Peer of `turn_finalizer`: owns the user-visible panel message lifecycle
-    /// (create → stream → finalize → reclaim) with one authority. Spawned next
-    /// to the finalizer but NOT yet routed through by any call site, so it is
-    /// inert until later #3078 routing PRs wire `ensure_created`/`stream_update`/
-    /// `finalize`/`reclaim`. The actor task is gated on `status_panel_v2_enabled`.
-    pub(in crate::services::discord) status_panel_controller:
-        Arc<status_panel_controller::StatusPanelController>,
     /// Intake-level dedup cache: prevents the same message from starting two turns
     /// when duplicate bot dispatches arrive nearly simultaneously.
     /// Key: dedup key (dispatch_id or channel+author+text hash).
@@ -2207,7 +2195,6 @@ pub(super) fn make_shared_data_for_tests_with_storage(
             shutdown_counted: std::sync::atomic::AtomicBool::new(false),
         },
         turn_finalizer: turn_finalizer::TurnFinalizer::spawn(),
-        status_panel_controller: status_panel_controller::StatusPanelController::spawn(false),
         intake_dedup: dashmap::DashMap::new(),
         dispatch_thread_parents: dashmap::DashMap::new(),
         voice_barge_in: Arc::new(voice_barge_in::VoiceBargeInRuntime::disabled()),

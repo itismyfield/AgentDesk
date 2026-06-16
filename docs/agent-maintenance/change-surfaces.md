@@ -153,8 +153,11 @@
     (retained for a later phase, not the live watcher path after the R2 revert);
     -1 from #3038 S4 after routing the placeholder/status-panel cluster
     through `shared.ui`; still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (6939 production lines after #3479
-    item-2 moved the provider-session persistence cluster
+  - `src/services/discord/tmux_watcher.rs` (6922 production lines after the #3479
+    SPC-shadow removal deleted the dead `StatusPanelController` watcher
+    shadow-parity calls — 2x `shadow_adopt_liveness_reacquired_panel` +
+    `assert_watcher_create_parity`; legacy reacquire/create/edit IO unchanged —
+    and after #3479 item-2 moved the provider-session persistence cluster
     (`resolve_persistable_provider_session_id`,
     `persist_watcher_provider_session_id`) verbatim into the `tmux_watcher/`
     child module `provider_session_persistence.rs` (~101);
@@ -850,7 +853,11 @@
     its G1/G2 snapshots from `external_input_relay_lease(...).map(|l| l.generation)`;
     +62 from #3304: slash-command canonical prompt keys for `<command-*>` XML vs
     `/command args` dedupe, plus focused loop skill-expansion regressions).
-  - `src/services/discord/recovery_engine.rs` (3330 lines; #3479 extracted the
+  - `src/services/discord/recovery_engine.rs` (3276 lines; the #3479 SPC-shadow
+    removal deleted the dead `StatusPanelController` recovery-completion shadow
+    block + `assert_recovery_completion_parity` fn + its dead test, leaving the
+    legacy `completion_target` let-else and `complete_status_panel_v2_with_http`
+    IO unchanged; #3479 also extracted the
     recovered-turn analytics + transcript-persistence cluster
     (`extract_turn_analytics_from_output` wrapper, `recovered_turn_duration_ms`,
     `lookup_turn_finished_dispatch_kind`, `recovered_transcript_turn_id`,
@@ -873,12 +880,9 @@
     watcher-spawn handles; +9 from #3166
     fetching real context thresholds for the recovered-turn status panel; +36 from #3099
     task-notification anchor `⏳` cleanup for `user_msg_id == 0` recovery; +4
-    from the #3099 re-review pinned-injected-message-id cleanup target; +55 from
-    #3078 PR-2 routing recovery completion through `StatusPanelController` behind
-    a shadow parity check (the controller adopts the recovered panel id and its
-    chosen completion id is asserted equal to the legacy
-    `recovery_status_panel_message_id_for_completion` result; the legacy path
-    still executes the Discord IO, so behaviour is unchanged); +4 from #3017
+    from the #3099 re-review pinned-injected-message-id cleanup target; net ±0
+    from #3078 PR-2 (recovery-completion shadow-parity routing, added then
+    reverted by the #3479 SPC-shadow-substrate removal); +4 from #3017
     routing the recovery terminal through the single-authority finalizer
     (`submit_terminal` + `FinalizeContext::monitor`) instead of inline
     `mailbox_finish_turn`; +60 from #3248 gap-1 adding

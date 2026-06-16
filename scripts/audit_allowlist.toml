@@ -59,10 +59,11 @@ direct_discord_sends = [
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:9b9526b38f0691a8",
   # #3089 S2: existing status-panel-v2 response-placeholder send moved out of
   # turn_bridge/mod.rs into the bridge footer helper while preserving behavior.
-  # #3078 PR-5: re-fingerprinted (same `gateway.send_message` placeholder call;
-  # context hash shifted only by the added `shared`/`provider` params + the new
-  # `shadow_register_bridge_panel` helper above it — no new direct send).
-  "src/services/discord/turn_bridge/single_message_footer.rs#direct_discord_sends:28b96a6bc14411ce",
+  # #3479 SPC-shadow removal: re-fingerprinted (same `gateway.send_message`
+  # placeholder call; context hash shifted only by deleting the dead
+  # `shadow_register_bridge_panel` helper above it + renaming the now-unused
+  # `shared`/`provider` params to `_shared`/`_provider` — no new direct send).
+  "src/services/discord/turn_bridge/single_message_footer.rs#direct_discord_sends:d2d9f46d97bfa069",
   # #3038 turn_bridge S1: status-panel completion direct gateway calls moved
   # verbatim from turn_bridge/mod.rs to turn_bridge/status_panel.rs.
   "src/services/discord/turn_bridge/status_panel.rs#direct_discord_sends:8806b21b9432ae8a",

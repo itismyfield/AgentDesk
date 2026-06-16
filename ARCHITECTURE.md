@@ -641,14 +641,12 @@ src/
 │   │   ├── session_relay_sink.rs
 │   │   ├── session_runtime.rs
 │   │   ├── settings.rs
-│   │   ├── shadow_parity_warn.rs
 │   │   ├── shared_memory.rs
 │   │   ├── shared_state.rs
 │   │   ├── single_message_panel.rs
 │   │   ├── stall_recovery.rs
 │   │   ├── standby_relay.rs
 │   │   ├── startup_reclaim.rs
-│   │   ├── status_panel_controller.rs
 │   │   ├── status_panel_orphan_store.rs
 │   │   ├── steering.rs
 │   │   ├── streaming_finalizer.rs
@@ -675,8 +673,7 @@ src/
 │   │   ├── voice_config_cache.rs
 │   │   ├── voice_id_sequences.rs
 │   │   ├── voice_routing.rs
-│   │   ├── voice_sensitivity.rs
-│   │   └── watcher_panel_parity.rs
+│   │   └── voice_sensitivity.rs
 │   ├── dispatches/
 │   │   ├── discord_delivery/
 │   │   │   ├── guard.rs

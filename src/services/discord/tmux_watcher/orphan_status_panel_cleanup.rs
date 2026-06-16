@@ -47,15 +47,6 @@ pub(super) async fn cleanup_orphan_external_input_status_panel(
     let Some(panel_msg_id) = *status_panel_msg_id else {
         return true;
     };
-    // EPIC #3078 PR-4 — SHADOW parity: the controller's chosen reclaim target
-    // must equal `panel_msg_id`; legacy deletes + clears the real id below.
-    crate::services::discord::watcher_panel_parity::assert_watcher_reclaim_parity(
-        shared,
-        channel_id,
-        provider,
-        panel_msg_id,
-    )
-    .await;
     let outcome = delete_nonterminal_placeholder(
         http,
         channel_id,
@@ -150,12 +141,6 @@ pub(super) async fn complete_watcher_status_panel_v2(
     if !watcher_should_complete_separate_status_panel(shared.ui.status_panel_v2_enabled) {
         return true;
     }
-    // EPIC #3078: completion parity is DEFERRED to the controller execute-cutover
-    // PR. A faithful check must replicate the SendFallback path (legacy completes
-    // with a concrete id when `status_panel_msg_id` is None, turn_bridge/mod.rs),
-    // which requires the controller to independently compute the completion id
-    // from raw inputs — not the resolved output. PR-4 ships only the faithful
-    // RECLAIM shadow-parity (see cleanup_orphan_external_input_status_panel).
     crate::services::discord::turn_bridge::complete_status_panel_v2_with_http(
         shared,
         http,

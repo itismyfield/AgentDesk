@@ -53,36 +53,6 @@ pub(super) fn bridge_should_complete_separate_status_panel(status_panel_v2_enabl
     bridge_separate_status_panel_enabled(status_panel_v2_enabled)
 }
 
-/// EPIC #3078 PR-5 — SHADOW-register a freshly bound bridge status panel into the
-/// [`StatusPanelController`](crate::services::discord::status_panel_controller)
-/// ledger so a later faithful parity check (and the eventual execute-cutover) can
-/// observe the bridge's panel id for this turn. v2-gated (the controller actor is
-/// only spawned when status-panel-v2 is on); ledger-only — PR-1 left the durable-
-/// mirror sink dormant, so this does NOT touch inflight persistence or any Discord
-/// IO and the legacy bridge path is byte-for-byte unchanged.
-pub(super) fn shadow_register_bridge_panel(
-    shared: &Arc<SharedData>,
-    channel_id: ChannelId,
-    user_msg_id: u64,
-    panel_id: MessageId,
-    provider: &crate::services::provider::ProviderKind,
-) {
-    if !shared.ui.status_panel_v2_enabled {
-        return;
-    }
-    let key = crate::services::discord::turn_finalizer::TurnKey::new(
-        channel_id,
-        user_msg_id,
-        crate::services::discord::runtime_store::load_generation(),
-    );
-    shared.status_panel_controller.adopt_recovered(
-        key,
-        provider.clone(),
-        crate::services::discord::status_panel_controller::PanelOwnerKind::Bridge,
-        Some(panel_id),
-    );
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn maybe_create_bridge_separate_status_panel_response<G: TurnGateway + ?Sized>(
     single_message_panel_footer_mode: bool,
@@ -98,8 +68,8 @@ pub(super) async fn maybe_create_bridge_separate_status_panel_response<G: TurnGa
     response_sent_offset: usize,
     full_response: &str,
     status_panel_dirty: &mut bool,
-    shared: &Arc<SharedData>,
-    provider: &crate::services::provider::ProviderKind,
+    _shared: &Arc<SharedData>,
+    _provider: &crate::services::provider::ProviderKind,
 ) {
     if !bridge_should_create_separate_status_panel(
         single_message_panel_footer_mode,
@@ -122,14 +92,6 @@ pub(super) async fn maybe_create_bridge_separate_status_panel_response<G: TurnGa
             } else {
                 *status_panel_msg_id = Some(*current_msg_id);
                 inflight_state.status_message_id = Some(current_msg_id.get());
-                // #3078 PR-5: mirror the bound panel id into the controller ledger.
-                shadow_register_bridge_panel(
-                    shared,
-                    channel_id,
-                    inflight_state.user_msg_id,
-                    *current_msg_id,
-                    provider,
-                );
             }
             *current_msg_id = response_msg_id;
             *bridge_created_response_placeholder_msg_id = Some(response_msg_id);
@@ -503,47 +465,5 @@ mod tests {
 
         assert!(rendered.len() <= DISCORD_MSG_LIMIT);
         assert!(rendered.contains("\n\n"));
-    }
-
-    /// #3078 PR-5: with status-panel-v2 OFF the shadow registration is inert — it
-    /// returns before any controller interaction (the actor is not spawned), so the
-    /// legacy bridge path is untouched and nothing panics/hangs.
-    #[test]
-    fn shadow_register_bridge_panel_v2_off_is_inert() {
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        assert!(!shared.ui.status_panel_v2_enabled);
-        shadow_register_bridge_panel(
-            &shared,
-            ChannelId::new(30_785_001),
-            42,
-            MessageId::new(9001),
-            &ProviderKind::Claude,
-        );
-    }
-
-    /// #3078 PR-5: the ledger path the shadow registration drives — adopting a
-    /// bridge-created panel id makes the controller report it as the turn's current
-    /// panel, so a later faithful parity / execute-cutover can observe it.
-    #[tokio::test(flavor = "current_thread")]
-    async fn controller_adopt_seeds_bridge_panel_into_ledger() {
-        use crate::services::discord::status_panel_controller::{
-            PanelOwnerKind, StatusPanelController,
-        };
-        use crate::services::discord::turn_finalizer::TurnKey;
-
-        let ctl = StatusPanelController::spawn(true);
-        let key = TurnKey::new(ChannelId::new(30_785_002), 42, 0);
-        let panel = MessageId::new(9002);
-        ctl.adopt_recovered(
-            key,
-            ProviderKind::Claude,
-            PanelOwnerKind::Bridge,
-            Some(panel),
-        );
-        assert_eq!(
-            ctl.current_panel(key).await,
-            Some(panel),
-            "controller ledger must reflect the bridge-adopted panel id"
-        );
     }
 }

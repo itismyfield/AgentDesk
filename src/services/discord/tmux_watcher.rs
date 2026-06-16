@@ -812,14 +812,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 restored_placeholder,
                 restored_injected_prompt_message_id,
             );
-            // #3078 PR-6: ledger-seed the liveness-reacquired watcher panel.
-            crate::services::discord::watcher_panel_parity::shadow_adopt_liveness_reacquired_panel(
-                &shared,
-                channel_id,
-                &watcher_provider,
-                restored_panel,
-                reacquired,
-            );
             if reacquired && !active_stream_inflight_reacquire_logged {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(
@@ -1910,10 +1902,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             // mid-stream inflight loss keeps the `⏳ → ✅` cleanup anchor.
                             restored_injected_prompt_message_id,
                         );
-                        // #3078 PR-6: ledger-seed the liveness-reacquired watcher panel.
-                        crate::services::discord::watcher_panel_parity::shadow_adopt_liveness_reacquired_panel(
-                            &shared, channel_id, &watcher_provider, status_panel_msg_id, reacquired,
-                        );
                         if reacquired && !active_stream_inflight_reacquire_logged {
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             tracing::warn!(
@@ -2277,11 +2265,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 }
                             }
                         }
-                        // EPIC #3078: faithful create/adopt shadow-parity. `panel_present`
-                        // is `false` here (the enclosing gate requires `status_panel_msg_id
-                        // .is_none()`), so the controller re-derives the SAME decision from
-                        // the raw inputs the legacy branch above read. Legacy still executes.
-                        crate::services::discord::watcher_panel_parity::assert_watcher_create_parity(&shared, channel_id, shared.ui.status_panel_v2_enabled, false, panel_eligible_turn, persisted_panel_msg_id);
                     }
 
                     loop {
