@@ -120,27 +120,49 @@ pub fn drill_down_link(agent_id: &str) -> String {
 /// Format a Discord-bound alert message for `regression`. Includes
 /// agent id, metric label, expected (baseline) vs actual (current),
 /// sample sizes, and a drill-down link as required by DoD.
-pub fn explicit_decode_fallback<'r, T, R>(row: &'r R, column: &str, default_val: T) -> Result<T>
+/// Decode `column` from `row`, surfacing genuine decode faults instead of
+/// silently substituting a default (see [`decode_with_fallback`] for the
+/// fail-closed rationale). The name is retained for API stability; the
+/// "fallback" now applies only to the sqlx-native `Ok(None)` returned for a
+/// SQL `NULL` decoded into an `Option<T>` target — never to a `ColumnDecode`.
+pub fn explicit_decode_fallback<'r, T, R>(row: &'r R, column: &str) -> Result<T>
 where
     R: Row,
     T: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
     for<'a> &'a str: sqlx::ColumnIndex<R>,
 {
-    decode_with_fallback(column, default_val, || row.try_get(column))
+    decode_with_fallback(column, || row.try_get(column))
 }
 
-fn decode_with_fallback<T, F>(column: &str, default_val: T, decode: F) -> Result<T>
+/// Decode a column, distinguishing a *legitimately absent / optional* value
+/// from a *genuine decode failure*.
+///
+/// IMPORTANT — fail-closed contract: a [`sqlx::Error::ColumnDecode`] means the
+/// column was present but its bytes could not be decoded into `T` (type
+/// mismatch, malformed payload, or an unexpected SQL `NULL` decoded into a
+/// non-`Option` target). Silently swallowing that into `default_val` would let
+/// a real data fault masquerade as "metric absent / insufficient samples" and
+/// **suppress** the very regression alert this module exists to emit
+/// (fail-OPEN). We therefore propagate `ColumnDecode` as an error so
+/// [`compute_regressions`] surfaces the fault instead of hiding a regression.
+///
+/// Legitimately-absent optional columns are *not* affected: a SQL `NULL`
+/// decoded into an `Option<T>` target is `Ok(None)` at the sqlx layer and never
+/// reaches the `ColumnDecode` arm, so the existing `None` / `0` defaults for
+/// genuinely-missing data are preserved for the success path.
+fn decode_with_fallback<T, F>(column: &str, decode: F) -> Result<T>
 where
     F: FnOnce() -> std::result::Result<T, sqlx::Error>,
 {
     match decode() {
         Ok(val) => Ok(val),
-        Err(sqlx::Error::ColumnDecode { .. }) => {
+        Err(e @ sqlx::Error::ColumnDecode { .. }) => {
             tracing::warn!(
                 column = column,
-                "[quality] explicit fallback on column decode error"
+                error = %e,
+                "[quality] column decode error surfaced (fail-closed; not suppressing regression)"
             );
-            Ok(default_val)
+            Err(anyhow!("decode {}: {}", column, e))
         }
         Err(e) => Err(anyhow!("decode {}: {}", column, e)),
     }
@@ -210,10 +232,10 @@ pub async fn compute_regressions(pool: &PgPool) -> Result<Vec<Regression>> {
             .try_get("agent_id")
             .map_err(|error| anyhow!("decode agent_id: {error}"))?;
 
-        let turn_7d: Option<f64> = explicit_decode_fallback(&row, "turn_success_rate_7d", None)?;
-        let turn_30d: Option<f64> = explicit_decode_fallback(&row, "turn_success_rate_30d", None)?;
-        let turn_s7: i64 = explicit_decode_fallback(&row, "turn_sample_size_7d", 0)?;
-        let turn_s30: i64 = explicit_decode_fallback(&row, "turn_sample_size_30d", 0)?;
+        let turn_7d: Option<f64> = explicit_decode_fallback(&row, "turn_success_rate_7d")?;
+        let turn_30d: Option<f64> = explicit_decode_fallback(&row, "turn_success_rate_30d")?;
+        let turn_s7: i64 = explicit_decode_fallback(&row, "turn_sample_size_7d")?;
+        let turn_s30: i64 = explicit_decode_fallback(&row, "turn_sample_size_30d")?;
         if let Some(reg) = build_regression(
             &agent_id,
             QualityMetric::TurnSuccessRate,
@@ -225,10 +247,10 @@ pub async fn compute_regressions(pool: &PgPool) -> Result<Vec<Regression>> {
             out.push(reg);
         }
 
-        let review_7d: Option<f64> = explicit_decode_fallback(&row, "review_pass_rate_7d", None)?;
-        let review_30d: Option<f64> = explicit_decode_fallback(&row, "review_pass_rate_30d", None)?;
-        let review_s7: i64 = explicit_decode_fallback(&row, "review_sample_size_7d", 0)?;
-        let review_s30: i64 = explicit_decode_fallback(&row, "review_sample_size_30d", 0)?;
+        let review_7d: Option<f64> = explicit_decode_fallback(&row, "review_pass_rate_7d")?;
+        let review_30d: Option<f64> = explicit_decode_fallback(&row, "review_pass_rate_30d")?;
+        let review_s7: i64 = explicit_decode_fallback(&row, "review_sample_size_7d")?;
+        let review_s30: i64 = explicit_decode_fallback(&row, "review_sample_size_30d")?;
         if let Some(reg) = build_regression(
             &agent_id,
             QualityMetric::ReviewPassRate,
@@ -445,14 +467,29 @@ mod explicit_decode_fallback_tests {
 
     #[test]
     fn returns_value_on_success() {
-        let result: Result<f64, anyhow::Error> =
-            decode_with_fallback("some_column", 42.0, || Ok(12.5));
+        let result: Result<f64, anyhow::Error> = decode_with_fallback("some_column", || Ok(12.5));
         assert_eq!(result.unwrap(), 12.5);
     }
 
+    /// A sqlx-native SQL `NULL` decoded into an `Option<T>` target arrives as
+    /// `Ok(None)` (not a `ColumnDecode`), so a *legitimately absent* optional
+    /// column is still honoured as the natural `None` default — preserving the
+    /// existing behaviour for genuinely-missing data.
     #[test]
-    fn returns_default_on_column_decode_error() {
-        let result: Result<f64, anyhow::Error> = decode_with_fallback("some_column", 42.0, || {
+    fn preserves_none_for_legitimately_absent_optional_column() {
+        let result: Result<Option<f64>, anyhow::Error> =
+            decode_with_fallback("some_column", || Ok(None));
+        assert_eq!(result.unwrap(), None);
+    }
+
+    /// Regression guard for the fail-OPEN bug: a genuine `ColumnDecode` (type
+    /// mismatch / malformed payload / unexpected NULL into a non-`Option`
+    /// sample count) must surface as an error and MUST NOT be silently
+    /// swallowed into a default — otherwise a real decode fault would be
+    /// treated as "metric absent" and suppress the regression alert.
+    #[test]
+    fn fails_closed_on_column_decode_error() {
+        let result: Result<f64, anyhow::Error> = decode_with_fallback("some_column", || {
             Err(sqlx::Error::ColumnDecode {
                 index: "some_column".to_string(),
                 source: Box::new(std::io::Error::new(
@@ -462,12 +499,19 @@ mod explicit_decode_fallback_tests {
             })
         });
 
-        assert_eq!(result.unwrap(), 42.0);
+        // The default (42.0) must NOT be returned — the fault must surface.
+        assert!(
+            result.is_err(),
+            "ColumnDecode must not be swallowed into a default that hides a regression"
+        );
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("decode some_column"));
+        assert!(error.contains("mock decode error"));
     }
 
     #[test]
     fn fails_closed_on_other_errors() {
-        let result: Result<f64, anyhow::Error> = decode_with_fallback("some_column", 42.0, || {
+        let result: Result<f64, anyhow::Error> = decode_with_fallback("some_column", || {
             Err(sqlx::Error::ColumnNotFound("missing".to_string()))
         });
 
