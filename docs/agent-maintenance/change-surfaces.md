@@ -836,7 +836,12 @@
     its G1/G2 snapshots from `external_input_relay_lease(...).map(|l| l.generation)`;
     +62 from #3304: slash-command canonical prompt keys for `<command-*>` XML vs
     `/command args` dedupe, plus focused loop skill-expansion regressions).
-  - `src/services/discord/recovery_engine.rs` (3424 lines; #3479 item-2 extracted
+  - `src/services/discord/recovery_engine.rs` (3330 lines; #3479 extracted the
+    recovered-turn analytics + transcript-persistence cluster
+    (`extract_turn_analytics_from_output` wrapper, `recovered_turn_duration_ms`,
+    `lookup_turn_finished_dispatch_kind`, `recovered_transcript_turn_id`,
+    `persist_recovered_transcript`) into the leaf `recovery_engine/analytics_transcript.rs`,
+    re-imported byte-identical; earlier #3479 item-2 extracted
     the inflight-state derivation helper cluster (handoff message, ready-for-input
     probes, worktree path/branch/info derivation, spawn-cwd) into the
     sub-1000-prod-LoC leaf module `recovery_engine/state_extractors.rs` (~150) —

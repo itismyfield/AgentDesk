@@ -451,6 +451,7 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   └── section_dedupe.rs
 │   │   ├── recovery_engine/
+│   │   │   ├── analytics_transcript.rs
 │   │   │   ├── jsonl_extract.rs
 │   │   │   ├── output_path_detect.rs
 │   │   │   ├── phase_policy.rs

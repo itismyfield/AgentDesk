@@ -42,6 +42,8 @@ mod terminal_watcher;
 // #3479 item-2: behavior-preserving extraction of the inflight-state derivation
 // helper cluster (handoff message, ready-for-input probes, worktree info /
 // spawn-cwd derivation) into a leaf module.
+#[path = "recovery_engine/analytics_transcript.rs"]
+mod analytics_transcript;
 #[path = "recovery_engine/state_extractors.rs"]
 mod state_extractors;
 
@@ -85,6 +87,15 @@ use self::state_extractors::{
 // `recovery_engine::save_missing_session_handoff` path stays valid for the
 // `recovery_paths::restart` external caller.
 pub(super) use self::state_extractors::save_missing_session_handoff;
+// #3479: re-import the analytics + transcript helpers so root call sites stay
+// byte-identical. `recovered_transcript_turn_id` is gated on cfg(test) — the root
+// reaches it only from its unit test (prod calls it inside analytics_transcript).
+#[cfg(test)]
+use self::analytics_transcript::recovered_transcript_turn_id;
+use self::analytics_transcript::{
+    extract_turn_analytics_from_output, lookup_turn_finished_dispatch_kind,
+    persist_recovered_transcript, recovered_turn_duration_ms,
+};
 
 #[cfg(not(unix))]
 fn tmux_session_has_live_pane(_name: &str) -> bool {
@@ -1280,111 +1291,6 @@ fn detect_live_tmux_output_path(
     };
     let candidates = parse_lsof_output_candidates(&stdout);
     detect_rebind_output_path_from_candidates(fallback_path, candidates)
-}
-
-fn extract_turn_analytics_from_output(
-    output_path: &str,
-    start_offset: u64,
-) -> (Option<String>, Option<TurnTokenUsage>) {
-    crate::services::session_backend::extract_turn_analytics_from_output(output_path, start_offset)
-}
-
-fn recovered_turn_duration_ms(started_at: Option<&str>) -> Option<i64> {
-    let started_at = started_at?.trim();
-    if started_at.is_empty() {
-        return None;
-    }
-    let parsed = chrono::NaiveDateTime::parse_from_str(started_at, "%Y-%m-%d %H:%M:%S").ok()?;
-    let elapsed = chrono::Local::now().naive_local() - parsed;
-    Some(elapsed.num_milliseconds().max(0))
-}
-
-async fn lookup_turn_finished_dispatch_kind(dispatch_id: Option<&str>) -> Option<String> {
-    let dispatch_id = dispatch_id?;
-    let body = super::internal_api::lookup_dispatch_info(dispatch_id)
-        .await
-        .ok()?;
-    super::turn_bridge::classify_turn_finished_dispatch_kind(
-        body.get("dispatch_context")
-            .and_then(|value| value.as_str()),
-        body.get("dispatch_type").and_then(|value| value.as_str()),
-    )
-    .map(str::to_string)
-}
-
-/// Build the transcript turn id for a recovered turn. A message-less recovery
-/// turn (`user_msg_id == 0`, e.g. TUI-direct) must NOT key on `discord:<ch>:0`
-/// (collides across every such turn → overwrite, Codex P2 r2) NOR purely on the
-/// session (repeated message-less turns upsert-overwrite, Codex P2 r3): instead
-/// append a PER-TURN discriminator — the JSONL start offset, falling back to the
-/// `started_at` timestamp when no offset is recorded.
-fn recovered_transcript_turn_id(
-    channel_id: u64,
-    user_msg_id: u64,
-    session_key: Option<&str>,
-    turn_start_offset: Option<u64>,
-    started_at: &str,
-) -> String {
-    if user_msg_id != 0 {
-        return format!("discord:{channel_id}:{user_msg_id}");
-    }
-    // Per-turn discriminator: stable for THIS turn, distinct across turns.
-    let turn_discriminator = match turn_start_offset {
-        Some(offset) => format!("off{offset}"),
-        None => format!("at{}", started_at.replace([' ', ':'], "-")),
-    };
-    match session_key {
-        Some(key) => format!("discord:{channel_id}:session:{key}:{turn_discriminator}"),
-        None => format!("discord:{channel_id}:recovery:{turn_discriminator}"),
-    }
-}
-
-async fn persist_recovered_transcript(
-    db: Option<&crate::db::Db>,
-    pg_pool: Option<&sqlx::PgPool>,
-    provider: &ProviderKind,
-    state: &inflight::InflightTurnState,
-    dispatch_id: Option<&str>,
-    assistant_message: &str,
-) -> bool {
-    let assistant_message = assistant_message.trim();
-    if assistant_message.is_empty() {
-        return false;
-    }
-
-    let turn_id = recovered_transcript_turn_id(
-        state.channel_id,
-        state.user_msg_id,
-        state.session_key.as_deref(),
-        state.turn_start_offset,
-        &state.started_at,
-    );
-    let channel_id_text = state.channel_id.to_string();
-    match crate::db::session_transcripts::persist_turn_db(
-        db,
-        pg_pool,
-        crate::db::session_transcripts::PersistSessionTranscript {
-            turn_id: &turn_id,
-            session_key: state.session_key.as_deref(),
-            channel_id: Some(channel_id_text.as_str()),
-            agent_id: None,
-            provider: Some(provider.as_str()),
-            dispatch_id,
-            user_message: &state.user_text,
-            assistant_message,
-            events: &[],
-            duration_ms: None,
-        },
-    )
-    .await
-    {
-        Ok(_) => true,
-        Err(e) => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!("  [{ts}] ⚠ recovery: failed to persist session transcript: {e}");
-            false
-        }
-    }
 }
 
 pub(super) async fn restore_inflight_turns(
