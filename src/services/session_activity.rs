@@ -115,6 +115,40 @@ impl SessionActivityResolver {
         )
     }
 
+    /// DB/heartbeat-only liveness resolution that NEVER spawns a tmux probe.
+    ///
+    /// Used by the read-only active-session audit on `/api/health/detail`, which
+    /// is contractually an off-hot-path DB/evidence pass: it must not block the
+    /// request on synchronous tmux (`has_live_pane` / pane-readiness) probes for
+    /// local session keys. Every host (local or remote) is resolved via
+    /// heartbeat recency only, so an unknown/stale heartbeat reads as not-live.
+    pub fn resolve_db_only(
+        &mut self,
+        session_key: Option<&str>,
+        raw_status: Option<&str>,
+        active_dispatch_id: Option<&str>,
+        last_heartbeat: Option<&str>,
+    ) -> EffectiveSessionState {
+        let now = Utc::now();
+        // Empty alias set ⇒ no key is treated as local ⇒ the local-host branch
+        // (the only tmux-probing branch) is never taken; heartbeat recency is the
+        // sole liveness signal. The closures are unreachable but required by the
+        // shared signature.
+        let no_local_aliases: HashSet<String> = HashSet::new();
+        let mut never_live = |_tmux_name: &str| false;
+        let mut never_ready = |_tmux_name: &str| false;
+        resolve_effective_state_with(
+            &no_local_aliases,
+            session_key,
+            raw_status,
+            active_dispatch_id,
+            last_heartbeat,
+            now,
+            &mut never_live,
+            &mut never_ready,
+        )
+    }
+
     fn local_host_aliases(&mut self) -> &HashSet<String> {
         if self.local_host_aliases.is_none() {
             self.local_host_aliases = Some(load_local_host_aliases());
@@ -242,4 +276,65 @@ fn heartbeat_is_recent(last_heartbeat: Option<&str>, now: DateTime<Utc>) -> bool
     parsed
         .map(|value| (now - value).num_seconds() <= REMOTE_HEARTBEAT_GRACE_SECS)
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ts(secs_ago: i64) -> String {
+        (Utc::now() - chrono::Duration::seconds(secs_ago))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string()
+    }
+
+    /// `resolve_db_only` must NOT take the local-host (tmux-probing) branch even
+    /// for a key whose host matches a local alias: it resolves via heartbeat
+    /// recency only, so a recent heartbeat reads as working without any tmux probe.
+    #[test]
+    fn resolve_db_only_uses_heartbeat_not_tmux_for_local_keys() {
+        let mut resolver = SessionActivityResolver::new();
+        // Force a local alias so `resolve` (the non-db path) would tmux-probe.
+        resolver.local_host_aliases = Some(HashSet::from(["localbox".to_string()]));
+
+        let recent = resolver.resolve_db_only(
+            Some("localbox:codex-chan-1"),
+            Some("turn_active"),
+            Some("dispatch-1"),
+            Some(&ts(5)),
+        );
+        assert!(
+            recent.is_working,
+            "recent heartbeat ⇒ working via heartbeat path, no tmux probe"
+        );
+
+        let stale = resolver.resolve_db_only(
+            Some("localbox:codex-chan-1"),
+            Some("turn_active"),
+            Some("dispatch-1"),
+            Some(&ts(900)),
+        );
+        assert!(
+            !stale.is_working,
+            "stale heartbeat ⇒ not working (db-only verdict)"
+        );
+
+        // Crucially, no tmux probe cache entry was ever populated.
+        assert!(resolver.tmux_live_cache.is_empty());
+        assert!(resolver.tmux_ready_cache.is_empty());
+    }
+
+    /// An unknown heartbeat in db-only mode reads as not-live (cannot prove fresh).
+    #[test]
+    fn resolve_db_only_unknown_heartbeat_is_not_working() {
+        let mut resolver = SessionActivityResolver::new();
+        let state = resolver.resolve_db_only(
+            Some("localbox:codex-chan-2"),
+            Some("turn_active"),
+            Some("dispatch-2"),
+            None,
+        );
+        assert!(!state.is_working);
+        assert!(resolver.tmux_live_cache.is_empty());
+    }
 }

@@ -741,12 +741,16 @@ async fn load_active_session_audit_rows(
     max_candidates: u64,
 ) -> (Vec<RawSessionRow>, usize) {
     let limit = max_candidates.min(i64::MAX as u64) as i64;
+    // Surface the staleness-relevant rows FIRST so the LIMIT keeps the candidates
+    // that matter: NULL/unknown heartbeats (can't be proven fresh) come first,
+    // then the OLDEST heartbeats. Ordering newest-first would let stale/zombie
+    // rows beyond the cap escape the audit entirely — the opposite of intent.
     let query = sqlx::query(
         "SELECT session_key, provider, status, active_dispatch_id, last_heartbeat, thread_channel_id
            FROM sessions
           WHERE status IN ('turn_active', 'working')
              OR COALESCE(btrim(active_dispatch_id), '') <> ''
-          ORDER BY last_heartbeat DESC NULLS LAST, id DESC
+          ORDER BY last_heartbeat ASC NULLS FIRST, id ASC
           LIMIT $1",
     )
     .bind(limit);
@@ -772,8 +776,42 @@ async fn load_active_session_audit_rows(
             thread_channel_id: row.try_get("thread_channel_id").ok(),
         })
         .collect();
-    let total = mapped.len();
-    (mapped, total)
+    // `truncated` must reflect the PRE-LIMIT raw-match count, not `mapped.len()`
+    // (which is capped at `LIMIT`). Compute it with a matching COUNT over the same
+    // predicate. If the returned rows are fewer than the cap, nothing was omitted
+    // and we can skip the extra round-trip; otherwise count the raw matches.
+    let raw_matches_total = if (mapped.len() as i64) < limit {
+        mapped.len()
+    } else {
+        count_active_session_audit_rows(pool)
+            .await
+            .unwrap_or(mapped.len())
+    };
+    (mapped, raw_matches_total)
+}
+
+/// Pre-LIMIT raw-match count over the same predicate as
+/// [`load_active_session_audit_rows`]. Read-only; used only to compute the
+/// `truncated` flag accurately when the capped query fills to `LIMIT`.
+async fn count_active_session_audit_rows(pool: &PgPool) -> Option<usize> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+           FROM sessions
+          WHERE status IN ('turn_active', 'working')
+             OR COALESCE(btrim(active_dispatch_id), '') <> ''",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|error| {
+        tracing::debug!(
+            event = "active_session_audit_count_failed",
+            error = %error,
+            "active-session audit count query failed; using capped row count"
+        );
+        error
+    })
+    .ok()?;
+    Some(count.max(0) as usize)
 }
 
 /// Read a (possibly `timestamptz`/`timestamp`/`text`) heartbeat column into a
