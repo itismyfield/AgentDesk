@@ -1,3 +1,4 @@
+pub mod active_session_audit;
 pub mod agents;
 mod agents_crud;
 mod agents_setup;

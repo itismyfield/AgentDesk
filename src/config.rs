@@ -1353,6 +1353,23 @@ pub struct RuntimeSettingsConfig {
     /// prior Codex turn block the follow-up wait for the full configured duration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub followup_prompt_ready_timeout_secs: Option<u64>,
+    /// Master rollback flag for the read-only DB active-session mismatch audit
+    /// surfaced on `/api/health/detail` (`active_session_audit` block). When
+    /// unset it defaults to ON; `Some(false)` makes the audit report
+    /// `enabled:false` with empty candidates and skips the DB query entirely.
+    /// Read live via `config_live_reload::current()` so an `agentdesk.yaml` edit
+    /// applies on the next `/api/health/detail` call without a restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_session_audit_enabled: Option<bool>,
+    /// Minimum seconds since `last_heartbeat` before a raw-active session can be
+    /// flagged by the active-session mismatch audit (post-restart/long-turn
+    /// grace). Unset (or `0`) falls back to the compiled-in 120s default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_session_audit_stale_secs: Option<u64>,
+    /// Hard cap on audit candidate rows AND the SQL `LIMIT`. Unset falls back to
+    /// the compiled-in 50 default; clamped to `1..=500` when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_session_audit_max_candidates: Option<u64>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub reset_overrides_on_restart: bool,
 }
@@ -1384,6 +1401,9 @@ impl RuntimeSettingsConfig {
             && self.github_repo_cache_sec.is_none()
             && self.rate_limit_stale_sec.is_none()
             && self.followup_prompt_ready_timeout_secs.is_none()
+            && self.active_session_audit_enabled.is_none()
+            && self.active_session_audit_stale_secs.is_none()
+            && self.active_session_audit_max_candidates.is_none()
             && !self.reset_overrides_on_restart
     }
 }
