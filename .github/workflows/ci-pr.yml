@@ -693,7 +693,6 @@ jobs:
           fetch-depth: 0
 
       - name: Large file guard
-        if: ${{ needs.changes.outputs.ci_relax_safe == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
