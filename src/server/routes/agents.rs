@@ -304,6 +304,25 @@ pub async fn agent_diag(
             "oldest_child_spawned_at": oldest_child_spawned_at,
             "children": child_inventory,
             "tui_prompt_readiness": tui_prompt_readiness,
+            // #tui-hook-ttl-buffer (TSK-P1-003 surfaced early per the missing
+            // output-schema contract): additive, process-global snapshot of the
+            // in-memory hook registry. New top-level field — existing diag
+            // consumers are unaffected. Shape is `HookRegistrySnapshot`
+            // (keys_tracked, buffered_event_count, claimed_keys, *_total
+            // counters, keys_with_unclaimed_stop). `null` only if serialization
+            // fails (it cannot for this plain struct).
+            "hook_registry": serde_json::to_value(
+                crate::services::claude_tui::hook_registry::global_snapshot()
+            ).ok(),
+            // #tui-hook-ttl-buffer (REQ-004): per-session unclaimed-Stop
+            // diagnostic for THIS key. `null` when no Stop is retained unclaimed
+            // for the session, when no key can be formed, or when the registry is
+            // disabled. Diagnostic only — nothing finalizes/syncs on it in P0.
+            "hook_unclaimed_stop": hook_unclaimed_stop_json(
+                session.provider.as_deref(),
+                tmux_name.as_deref(),
+                session.provider_session_id.as_deref(),
+            ),
             "last_tool": last_tool.map(|event| json!({
                 "tool_name": event.tool_name,
                 "summary": event.summary,
@@ -381,6 +400,34 @@ fn tui_prompt_readiness_json(
     _provider_session_id: Option<&str>,
 ) -> Option<Value> {
     None
+}
+
+/// #tui-hook-ttl-buffer (REQ-004): per-session unclaimed-Stop diagnostic for the
+/// diag payload. The hook receiver keys the registry by the `session_id` it
+/// observed (the provider session id when the hook reported one, else the tmux
+/// session name passed via the query string), so we probe both candidate keys —
+/// provider session id first, then tmux name — and return the first retained
+/// unclaimed Stop. Platform-independent (no tmux capture). `None` when the
+/// registry is disabled, no key can be formed, or no Stop is retained.
+fn hook_unclaimed_stop_json(
+    provider: Option<&str>,
+    tmux_name: Option<&str>,
+    provider_session_id: Option<&str>,
+) -> Option<Value> {
+    use crate::services::claude_tui::hook_registry;
+    if !hook_registry::registry_enabled() {
+        return None;
+    }
+    let provider = provider.map(str::trim).filter(|value| !value.is_empty())?;
+    let registry = hook_registry::global();
+    // Probe provider session id first, then the tmux fallback — whichever key
+    // the hook actually used wins.
+    [provider_session_id, tmux_name]
+        .into_iter()
+        .flatten()
+        .filter_map(|candidate| hook_registry::RegistryKey::new(provider, Some(candidate), None))
+        .find_map(|key| registry.unclaimed_stop_diagnostic(&key))
+        .and_then(|diag| serde_json::to_value(diag).ok())
 }
 
 #[cfg(unix)]
