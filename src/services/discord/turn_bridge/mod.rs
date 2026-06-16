@@ -21,6 +21,18 @@ mod turn_analytics;
 mod voice_completion;
 mod watcher_handoff;
 mod watcher_orphan_cleanup;
+// #3479: the pure response-delivery + transcript-event helpers (the transcript
+// event-recording filter, the response-after-offset slice, the terminal delivery
+// sanitization+fallback builder, and the full-terminal-replay predicate) moved
+// verbatim to a capped sibling module. All four are `pub(super)` and re-imported
+// below so this parent's call sites (and the inline test modules) stay
+// byte-identical; deps are reached via `use super::*;` (the two discord-level
+// `super::` refs become `super::super::` from the child).
+mod response_delivery;
+use response_delivery::{
+    done_result_requires_full_terminal_replay, push_transcript_event,
+    response_portion_after_offset, terminal_delivery_response_after_offset,
+};
 
 use super::gateway::TurnGateway;
 use super::restart_report::{RestartCompletionReport, clear_restart_report, save_restart_report};
@@ -472,68 +484,6 @@ mod ready_drain_unit_tests {
 
         assert!(matches!(received, StreamMessage::TmuxReady { .. }));
     }
-}
-
-fn push_transcript_event(events: &mut Vec<SessionTranscriptEvent>, event: SessionTranscriptEvent) {
-    let has_payload = !event.content.trim().is_empty()
-        || event
-            .summary
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-        || event
-            .tool_name
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty());
-    if has_payload
-        || matches!(
-            event.kind,
-            SessionTranscriptEventKind::Thinking
-                | SessionTranscriptEventKind::Result
-                | SessionTranscriptEventKind::Error
-                | SessionTranscriptEventKind::Task
-                | SessionTranscriptEventKind::System
-        )
-    {
-        events.push(event);
-    }
-}
-
-fn response_portion_after_offset(full_response: &str, response_sent_offset: usize) -> &str {
-    full_response.get(response_sent_offset..).unwrap_or("")
-}
-
-fn terminal_delivery_response_after_offset(
-    full_response: &str,
-    response_sent_offset: usize,
-    empty_response_notice: Option<&str>,
-) -> String {
-    let raw_response =
-        response_portion_after_offset(full_response, response_sent_offset).to_string();
-    let stripped_response =
-        super::response_sanitizer::strip_leading_tui_response_chrome(&raw_response);
-    if !raw_response.trim().is_empty() && stripped_response.trim().is_empty() {
-        return String::new();
-    }
-    let mut delivery_response = stripped_response;
-    if delivery_response.trim().is_empty()
-        && let Some(notice) = empty_response_notice
-    {
-        delivery_response = notice.to_string();
-    }
-    delivery_response
-}
-
-fn done_result_requires_full_terminal_replay(
-    full_response: &str,
-    result: &str,
-    response_sent_offset: usize,
-    streamed_assistant_text_this_turn: bool,
-) -> bool {
-    response_sent_offset > 0
-        && streamed_assistant_text_this_turn
-        && result.len() > super::DISCORD_MSG_LIMIT
-        && !result.trim().is_empty()
-        && full_response.trim() == result.trim()
 }
 
 #[cfg(test)]
