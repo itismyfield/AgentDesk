@@ -15,7 +15,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::process::{configure_child_process_group, kill_pid_tree};
@@ -29,6 +31,26 @@ const DISPOSE_TIMEOUT: Duration = Duration::from_secs(5);
 const MESSAGE_RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 const STARTUP_OUTPUT_LIMIT: usize = 8 * 1024;
 const WARM_SERVER_IDLE_TTL: Duration = Duration::from_secs(20 * 60);
+
+// ---------------------------------------------------------------------------
+// Resident warm-pool diagnostics (read-only, additive). See spec section C.
+// ---------------------------------------------------------------------------
+
+/// Max length of the redacted, detailed-only startup output tail exposed in
+/// `/api/health/detail`. The public payload never includes this field.
+const SNAPSHOT_STARTUP_TAIL_LIMIT: usize = 256;
+
+/// REQ-006: conservative active-session leak threshold. A real fan-out can keep
+/// several concurrent leases on one warm server, so we only treat an elevated
+/// lease count as *suspicious evidence* when the server is also dead or has been
+/// idle past [`SNAPSHOT_LEAK_IDLE_SECS`]. This is evidence-only and never
+/// mutates the pool (no kill, no `active_sessions` decrement).
+const SNAPSHOT_ACTIVE_LEAK_THRESHOLD: u32 = 8;
+
+/// REQ-006: a warm server with an elevated lease count is only flagged once it
+/// has also been idle this long (or has a dead process). Avoids flagging normal
+/// in-use multi-session reuse.
+const SNAPSHOT_LEAK_IDLE_SECS: u64 = 300;
 
 #[derive(Debug, Default)]
 struct OpenCodeStartupOutput {
@@ -140,6 +162,212 @@ impl OpenCodeWarmServer {
         });
         shutdown_server(&mut process, &self.base_url, &self.auth);
     }
+}
+
+/// Read-only, redacted diagnostic view of a resident warm `opencode serve`
+/// process. See spec section C-1 for the field contract. ADDITIVE only — never
+/// stores `auth` or `base_url`, so credentials cannot leak through this type.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct OpenCodeWarmServerHealth {
+    /// P0 snapshot never performs a network probe, so this is `false` unless a
+    /// deep doctor profile explicitly fills it in later.
+    pub probed: bool,
+    /// `None` when not probed; deep doctor MAY set `Some(bool)`.
+    pub ok: Option<bool>,
+}
+
+/// Redacted, read-only snapshot of one resident warm server (REQ-001).
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct OpenCodeWarmServerSnapshot {
+    /// `sha256(bin \0 working_dir)` truncated to 16 hex chars. Stable per key,
+    /// never reveals the path.
+    pub key_hash: String,
+    /// Binary file name only (e.g. `opencode`); never the full path.
+    pub bin_basename: String,
+    /// Working-dir last path component only; never the full path.
+    pub working_dir_basename: String,
+    /// OS pid of the resident child. Detailed/local callers only.
+    pub pid: u32,
+    /// Loopback port parsed from base_url. Detailed/local callers only.
+    pub port: Option<u32>,
+    /// Current lease count.
+    pub active_sessions: u32,
+    /// Seconds since `last_used`.
+    pub idle_secs: u64,
+    /// Alias of `idle_secs` for clients keying on "last used".
+    pub last_used_secs: u64,
+    /// Process still alive (`try_wait()==Ok(None)`).
+    pub running: bool,
+    /// Health probe state. Always `{probed:false, ok:null}` for the P0 snapshot.
+    pub health: OpenCodeWarmServerHealth,
+    /// `sha256` (16 hex chars) of the full retained startup output, or `None`.
+    pub startup_output_tail_hash: Option<String>,
+    /// DETAILED/local only: bounded + scrubbed tail of startup output. Callers
+    /// MUST strip this before serving the public payload.
+    pub startup_output_tail: Option<String>,
+    /// REQ-006 evidence-only flag; never triggers a mutation.
+    pub suspicious_active_leak: bool,
+}
+
+impl OpenCodeWarmServerSnapshot {
+    /// Public-safe subset (spec C-3): drops pid, port, basenames, key_hash, and
+    /// the startup tail. The public `/api/health` path uses aggregate counts
+    /// (see `opencode_warm_pool_json`) rather than per-server objects, so this
+    /// per-server projection is reserved for redaction tests and future use.
+    #[cfg(test)]
+    pub fn redacted_public(&self) -> serde_json::Value {
+        serde_json::json!({
+            "active_sessions": self.active_sessions,
+            "idle_secs": self.idle_secs,
+            "running": self.running,
+            "suspicious_active_leak": self.suspicious_active_leak,
+        })
+    }
+}
+
+fn sha256_hex16(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(16);
+    for byte in digest.iter().take(8) {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+fn basename_of(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| path.to_string())
+}
+
+fn port_from_base_url(base_url: &str) -> Option<u32> {
+    base_url
+        .rsplit(':')
+        .next()
+        .and_then(|tail| tail.split('/').next())
+        .and_then(|port| port.parse::<u32>().ok())
+}
+
+/// Scrub obvious credential material from a startup-output line before it is
+/// exposed in the DETAILED tail. Conservative: redacts the value portion of
+/// known secret-bearing tokens. The public payload never carries this tail at
+/// all, so this is defense-in-depth for the authenticated/local surface.
+fn scrub_startup_secrets(raw: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    // When the previous token was an auth scheme marker (`Basic`/`Bearer`), the
+    // immediately following token is its opaque credential value and must be
+    // redacted too.
+    let mut redact_next = false;
+    for token in raw.split(' ') {
+        if redact_next {
+            out.push("[REDACTED]".to_string());
+            redact_next = false;
+            continue;
+        }
+        let lower = token.to_ascii_lowercase();
+        if let Some(eq) = token.find('=') {
+            let key_lower = token[..eq].to_ascii_lowercase();
+            if key_lower.contains("password")
+                || key_lower.contains("secret")
+                || key_lower.contains("token")
+                || key_lower.contains("auth")
+            {
+                out.push(format!("{}=[REDACTED]", &token[..eq]));
+                continue;
+            }
+        }
+        if lower == "basic" || lower == "bearer" {
+            // Keep the scheme marker for readability but redact its value next.
+            out.push(token.to_string());
+            redact_next = true;
+            continue;
+        }
+        out.push(token.to_string());
+    }
+    out.join(" ")
+}
+
+fn snapshot_startup_tail(
+    output: &Arc<Mutex<OpenCodeStartupOutput>>,
+) -> (Option<String>, Option<String>) {
+    let compact = summarize_startup_output(output);
+    if compact.is_empty() {
+        return (None, None);
+    }
+    let hash = sha256_hex16(&compact);
+    let scrubbed = scrub_startup_secrets(&compact);
+    // Take a bounded tail by char boundary.
+    let tail = if scrubbed.chars().count() > SNAPSHOT_STARTUP_TAIL_LIMIT {
+        let skip = scrubbed.chars().count() - SNAPSHOT_STARTUP_TAIL_LIMIT;
+        scrubbed.chars().skip(skip).collect::<String>()
+    } else {
+        scrubbed
+    };
+    (Some(hash), Some(tail))
+}
+
+fn compute_suspicious_active_leak(active_sessions: u32, idle_secs: u64, running: bool) -> bool {
+    if active_sessions <= SNAPSHOT_ACTIVE_LEAK_THRESHOLD {
+        return false;
+    }
+    !running || idle_secs >= SNAPSHOT_LEAK_IDLE_SECS
+}
+
+impl OpenCodeWarmServer {
+    /// Build a redacted snapshot of this resident server. Holds only this
+    /// server's per-field locks for single-field copies; performs NO network
+    /// I/O and NO `wait_for_health` (REQ-002, spec C-2/C-9). Caller must have
+    /// already released the pool lock.
+    fn snapshot(&self) -> OpenCodeWarmServerSnapshot {
+        let key_input = format!("{}\u{0}{}", self.key.bin, self.key.working_dir);
+        let key_hash = sha256_hex16(&key_input);
+        let running = self.is_running();
+        let pid = self.id();
+        let active_sessions = self.active_sessions.load(Ordering::SeqCst) as u32;
+        let idle_secs = self.idle_for().as_secs();
+        let (startup_output_tail_hash, startup_output_tail) =
+            snapshot_startup_tail(&self.startup_output);
+        let suspicious_active_leak =
+            compute_suspicious_active_leak(active_sessions, idle_secs, running);
+        OpenCodeWarmServerSnapshot {
+            key_hash,
+            bin_basename: basename_of(&self.key.bin),
+            working_dir_basename: basename_of(&self.key.working_dir),
+            pid,
+            port: port_from_base_url(&self.base_url),
+            active_sessions,
+            idle_secs,
+            last_used_secs: idle_secs,
+            running,
+            health: OpenCodeWarmServerHealth {
+                probed: false,
+                ok: None,
+            },
+            startup_output_tail_hash,
+            startup_output_tail,
+            suspicious_active_leak,
+        }
+    }
+}
+
+/// Collect redacted diagnostics for every resident warm server (REQ-001/002).
+///
+/// Clones the `Arc<OpenCodeWarmServer>` handles out of the pool under the pool
+/// lock, then RELEASES the pool lock before computing per-server snapshots, so
+/// the hot dispatch path is never blocked by snapshot work. No network probes.
+pub fn warm_server_snapshots() -> Vec<OpenCodeWarmServerSnapshot> {
+    let servers: Vec<Arc<OpenCodeWarmServer>> = {
+        let pool = opencode_server_pool().lock().unwrap_or_else(|e| {
+            tracing::warn!("Recovered poisoned lock for OpenCode server pool (snapshot)");
+            e.into_inner()
+        });
+        pool.values().cloned().collect()
+    };
+    servers.iter().map(|server| server.snapshot()).collect()
 }
 
 struct OpenCodeWarmServerLease {
@@ -2301,5 +2529,147 @@ mod tests {
         assert_ne!(first_key, second_key);
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    // -----------------------------------------------------------------------
+    // Resident warm-pool diagnostics (REQ-001..REQ-006)
+    // -----------------------------------------------------------------------
+
+    fn fake_snapshot() -> OpenCodeWarmServerSnapshot {
+        let key_input = "/usr/local/bin/opencode\u{0}/Users/dev/projects/myapp";
+        OpenCodeWarmServerSnapshot {
+            key_hash: sha256_hex16(key_input),
+            bin_basename: basename_of("/usr/local/bin/opencode"),
+            working_dir_basename: basename_of("/Users/dev/projects/myapp"),
+            pid: 12345,
+            port: port_from_base_url("http://127.0.0.1:54321"),
+            active_sessions: 1,
+            idle_secs: 42,
+            last_used_secs: 42,
+            running: true,
+            health: OpenCodeWarmServerHealth {
+                probed: false,
+                ok: None,
+            },
+            startup_output_tail_hash: Some(sha256_hex16("stdout=server listening")),
+            startup_output_tail: Some("stdout=server listening".to_string()),
+            suspicious_active_leak: false,
+        }
+    }
+
+    /// [TEST-001] snapshot includes pid/active/idle/running/last_used and
+    /// redacts key fields; serialized JSON carries no auth/base_url.
+    #[test]
+    fn warm_server_snapshot_redacts_key_fields_and_reports_state() {
+        let snap = fake_snapshot();
+        assert_eq!(snap.pid, 12345);
+        assert_eq!(snap.active_sessions, 1);
+        assert_eq!(snap.idle_secs, 42);
+        assert_eq!(snap.last_used_secs, snap.idle_secs);
+        assert!(snap.running);
+        assert_eq!(snap.port, Some(54321));
+
+        // key_hash is exactly 16 lowercase hex chars and reveals no path.
+        assert_eq!(snap.key_hash.len(), 16);
+        assert!(snap.key_hash.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(!snap.key_hash.contains('/'));
+
+        // Basenames carry no path separators / no full path.
+        assert_eq!(snap.bin_basename, "opencode");
+        assert_eq!(snap.working_dir_basename, "myapp");
+        assert!(!snap.working_dir_basename.contains('/'));
+
+        let json = serde_json::to_value(&snap).expect("serialize snapshot");
+        let text = json.to_string();
+        assert!(!text.contains("Authorization"));
+        assert!(!text.contains("Basic "));
+        assert!(!text.contains("base_url"));
+        assert!(!text.contains("/usr/local/bin"));
+        assert!(!text.contains("/Users/dev"));
+        // The serialized object must not have an `auth` field at all.
+        assert!(json.get("auth").is_none());
+    }
+
+    /// [TEST-002] default health probe is `probed=false` (no network I/O).
+    #[test]
+    fn warm_server_snapshot_default_health_is_unprobed() {
+        let snap = fake_snapshot();
+        assert!(!snap.health.probed);
+        assert_eq!(snap.health.ok, None);
+        let json = serde_json::to_value(&snap).expect("serialize");
+        assert_eq!(json["health"]["probed"], serde_json::json!(false));
+        assert_eq!(json["health"]["ok"], serde_json::Value::Null);
+    }
+
+    /// [TEST-005] secrets never appear in startup tail (scrub) and the tail is
+    /// bounded to <=256 chars.
+    #[test]
+    fn warm_server_snapshot_scrubs_secret_in_startup_tail() {
+        let raw = "stdout=starting OPENCODE_SERVER_PASSWORD=hunter2supersecret Authorization: Basic Zm9vOmJhcg==";
+        let scrubbed = scrub_startup_secrets(raw);
+        assert!(!scrubbed.contains("hunter2supersecret"));
+        assert!(!scrubbed.contains("Zm9vOmJhcg=="));
+        assert!(scrubbed.contains("OPENCODE_SERVER_PASSWORD=[REDACTED]"));
+
+        // Bounded tail: a very long output is truncated to <=256 chars.
+        let long = "x ".repeat(400);
+        let output = Arc::new(Mutex::new(OpenCodeStartupOutput {
+            stdout: long,
+            stderr: String::new(),
+        }));
+        let (hash, tail) = snapshot_startup_tail(&output);
+        assert!(hash.is_some());
+        let tail = tail.expect("tail");
+        assert!(tail.chars().count() <= SNAPSHOT_STARTUP_TAIL_LIMIT);
+    }
+
+    /// [TEST-006] empty pool is cold-start safe: returns empty, no panic.
+    #[test]
+    fn warm_server_snapshots_empty_pool_is_cold_start_safe() {
+        // The global pool starts empty in the unit-test process; even if other
+        // tests touched it, this asserts the collection never panics and the
+        // public redaction of an empty set is an empty Vec equivalent.
+        let snaps = warm_server_snapshots();
+        // Each snapshot, if any exist from other tests, must be well-formed.
+        for snap in &snaps {
+            assert_eq!(snap.key_hash.len(), 16);
+        }
+        // The redacted public subset of a fabricated server omits sensitive keys.
+        let pubv = fake_snapshot().redacted_public();
+        assert!(pubv.get("pid").is_none());
+        assert!(pubv.get("port").is_none());
+        assert!(pubv.get("key_hash").is_none());
+        assert!(pubv.get("startup_output_tail").is_none());
+    }
+
+    /// [TEST-007] REQ-006 leak detection is evidence-only and uses the
+    /// dead-or-idle conjunction.
+    #[test]
+    fn suspicious_active_leak_threshold_is_evidence_only() {
+        // At or below threshold: never suspicious regardless of state.
+        assert!(!compute_suspicious_active_leak(
+            SNAPSHOT_ACTIVE_LEAK_THRESHOLD,
+            10_000,
+            false
+        ));
+        // Above threshold but actively running and recently used: NOT flagged
+        // (normal in-use multi-session reuse).
+        assert!(!compute_suspicious_active_leak(
+            SNAPSHOT_ACTIVE_LEAK_THRESHOLD + 1,
+            0,
+            true
+        ));
+        // Above threshold AND process dead: flagged.
+        assert!(compute_suspicious_active_leak(
+            SNAPSHOT_ACTIVE_LEAK_THRESHOLD + 1,
+            0,
+            false
+        ));
+        // Above threshold AND idle past the window: flagged.
+        assert!(compute_suspicious_active_leak(
+            SNAPSHOT_ACTIVE_LEAK_THRESHOLD + 1,
+            SNAPSHOT_LEAK_IDLE_SECS,
+            true
+        ));
     }
 }
