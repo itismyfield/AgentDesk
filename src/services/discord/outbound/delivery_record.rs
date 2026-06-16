@@ -433,6 +433,45 @@ pub(in crate::services::discord) fn effective_committed_offset(
     fuse_committed_offset(durable_end, in_memory)
 }
 
+/// #3520: durable delivered-frontier END for the CURRENT tmux generation, INDEPENDENT of
+/// the `delivery_record_authority_enabled()` read-authority flag. A watcher-direct re-send
+/// whose consumed byte range is entirely `<=` this value is a warm-followup / restored-seed
+/// re-mirror of already-delivered text and must be suppressed (otherwise it re-posts the
+/// prior turn's answer as a NEW message at the same prompt anchor — #3520). Returns 0 when
+/// the frontier is absent or belongs to a stale generation, so a caller never suppresses
+/// genuinely-new content (no message loss).
+pub(in crate::services::discord) fn delivered_frontier_end_current_generation(
+    provider: &ProviderKind,
+    channel: ChannelId,
+    tmux_session_name: &str,
+) -> u64 {
+    #[cfg(unix)]
+    let current_gen =
+        crate::services::discord::tmux::read_generation_file_mtime_ns(tmux_session_name);
+    #[cfg(not(unix))]
+    let current_gen: i64 = {
+        let _ = tmux_session_name;
+        0
+    };
+    delivered_frontier_end_for_generation(
+        read_record(provider, channel.get()).and_then(|r| r.delivered_frontier),
+        current_gen,
+    )
+}
+
+/// Pure core of [`delivered_frontier_end_current_generation`] (testable): the frontier END
+/// when it belongs to `current_gen`, else 0 (absent / stale generation => 0 => the caller
+/// suppresses nothing, so no genuinely-new message can be lost).
+fn delivered_frontier_end_for_generation(
+    frontier: Option<DeliveredCommit>,
+    current_gen: i64,
+) -> u64 {
+    frontier
+        .filter(|f| durable_frontier_generation_current(f.generation_mtime_ns, current_gen))
+        .map(|f| f.range.1)
+        .unwrap_or(0)
+}
+
 /// I2 outcome map (pure, testable): the shadow-write fires ONLY for a confirmed
 /// `Delivered`. Every other outcome means the controller did NOT advance the
 /// offset — `NotDelivered` (identity gate refused), `Transient`/`Unknown`
@@ -858,5 +897,28 @@ mod tests {
         assert!(!durable_frontier_generation_current(100, 123)); // prior gen → distrust
         assert!(!durable_frontier_generation_current(123, 0)); // no .generation file → distrust
         assert!(!durable_frontier_generation_current(0, 0)); // both unknown → distrust
+    }
+
+    #[test]
+    fn delivered_frontier_end_for_generation_3520() {
+        // #3520 safety: the watcher-direct re-mirror guard suppresses ONLY when the durable
+        // frontier belongs to the CURRENT generation. Absent / stale-generation => 0 => the
+        // caller suppresses nothing, so a genuinely-new answer can never be dropped.
+        let commit = DeliveredCommit {
+            range: (0, 500),
+            generation_mtime_ns: 123,
+            attempts: 0,
+            panel_msg_id: None,
+        };
+        assert_eq!(delivered_frontier_end_for_generation(None, 123), 0); // absent → 0
+        assert_eq!(
+            delivered_frontier_end_for_generation(Some(commit.clone()), 123),
+            500
+        ); // current generation → frontier end
+        assert_eq!(
+            delivered_frontier_end_for_generation(Some(commit.clone()), 100),
+            0
+        ); // stale generation → 0
+        assert_eq!(delivered_frontier_end_for_generation(Some(commit), 0), 0); // no .generation file → 0
     }
 }

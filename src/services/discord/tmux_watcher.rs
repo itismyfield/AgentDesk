@@ -4530,20 +4530,20 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             response_sent_offset,
             session_bound_fallback_uses_full_body,
         );
-        let has_direct_terminal_response = !direct_terminal_response.trim().is_empty();
-        // #2838 (relay-stability P0-1): count the primary duplicate-emit vector.
-        // The 10s session-bound terminal ACK timed out yet the watcher proceeds
-        // to direct-send, so the StreamRelay sink may have actually posted (just
-        // lagged the committed-sequence metric) and this re-sends the same
-        // answer. Rising counts here are the signal that the dual-authority
-        // terminal-delivery lease (P1) is overdue.
-        //
-        // #3042: keep recording the timeout even when the ownerless-timeout
-        // suppression above turns off the watcher-direct fallback — the ACK
-        // genuinely timed out and that is the observability signal we must not
-        // lose (the post-restart restore_inflight gap shows up precisely as
-        // ownerless `TimedOut`). Gate on the raw outcome plus the original
-        // should_direct_send intent rather than the (now-suppressed) fallback.
+        // #3520: skip a watcher-direct NEW-MESSAGE re-mirror already within the durable delivered frontier (same gen; absent=>0=>no suppress, no loss). NEW-message anchor path ONLY (placeholder_msg_id none) — the placeholder-edit arm must keep its already-delivered body, never delete it via the empty-body cleanup (codex BLOCKER).
+        let has_direct_terminal_response = !direct_terminal_response.trim().is_empty()
+            && !(watcher_direct_fallback_after_session_bound_ack
+                && placeholder_msg_id.is_none()
+                && watcher_resend_range_end
+                    <= dr::delivered_frontier_end_current_generation(
+                        &watcher_provider,
+                        channel_id,
+                        &tmux_session_name,
+                    ));
+        // #2838/#3042 (relay-stability P0-1): count the primary duplicate-emit vector — a
+        // session-bound terminal ACK that timed out while the watcher direct-sends (sink may
+        // have already posted; rising counts ⇒ P1 dual-authority lease overdue). Gate on the
+        // raw `TimedOut` + original `should_direct_send` intent (records even when the ownerless-timeout suppression turned the fallback off).
         if relay_decision.should_direct_send
             && matches!(
                 session_bound_ack_outcome,
