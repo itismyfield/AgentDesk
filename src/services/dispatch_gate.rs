@@ -22,9 +22,16 @@
 //!   `UnknownAllow` (never blocks unrelated providers, never panics).
 //! * Gemini's unknown utilization (used==0, no reset) degrades to
 //!   `UnknownAllow`.
-//! * The gate enable flag and the danger threshold are read live from
-//!   `config_live_reload::current()` (hot-reload, no restart), so disabling the
-//!   gate cleanly resumes dispatch on the next activation.
+//! * The gate enable flag and the gate-specific danger threshold are read live
+//!   on every activation. The activation path resolves them from the **persisted
+//!   runtime-config** (`kv_meta`, written by `PUT /api/settings/runtime-config`)
+//!   first, then falls back to the `config_live_reload::current()` YAML snapshot,
+//!   then to the compiled-in defaults. This is what makes the dashboard/API
+//!   rollback switch actually take effect at runtime (the persisted toggle never
+//!   reaches the YAML live snapshot — see [`evaluate_agent_provider_pressure_with_overrides`]).
+//! * The gate uses its OWN danger threshold (`dispatch_rate_limit_gate_danger_pct`,
+//!   default 100 — defer only when a provider is fully rate-limited), which is
+//!   independent of the dashboard's `rate_limit_danger_pct` (default 95).
 //! * Output is a serializable [`ProviderPressureDecision`] with stable reason
 //!   codes — never string parsing in route handlers, never the terminal
 //!   auto-queue `skipped` status.
@@ -36,10 +43,13 @@ use std::sync::{OnceLock, RwLock};
 use serde::Serialize;
 use serde_json::Value;
 
-/// Default danger threshold (utilization %) used when no runtime override is
-/// configured. Mirrors the dashboard `rateLimitDangerPct` default (95) so the
-/// gate and the dashboard agree on what "danger" means.
-pub const DEFAULT_DANGER_PCT: u64 = 95;
+/// Default GATE danger threshold (utilization %) used when no runtime override
+/// is configured. The dispatch gate defers ONLY when a provider is fully
+/// rate-limited (utilization at/above 100), so this is intentionally distinct
+/// from the dashboard `rateLimitDangerPct` default (95): the gate has its own
+/// `dispatch_rate_limit_gate_danger_pct` knob and never reuses
+/// `rate_limit_danger_pct`, leaving other consumers of that field unaffected.
+pub const DEFAULT_DANGER_PCT: u64 = 100;
 
 /// Default staleness window (seconds). A cache row older than this is treated as
 /// stale and degrades to `UnknownAllow`. Mirrors the dashboard
@@ -166,6 +176,18 @@ static GATE_DEFERRALS: AtomicU64 = AtomicU64::new(0);
 static GATE_BYPASSES: AtomicU64 = AtomicU64::new(0);
 /// Unix-seconds timestamp of the last `defer` decision (0 == never).
 static LAST_DEFER_AT: AtomicU64 = AtomicU64::new(0);
+/// Unix-seconds timestamp of the last process-local snapshot refresh (0 ==
+/// never). Used by [`refresh_snapshots_if_stale`] to throttle the on-activation
+/// refresh that keeps NON-leader serving nodes populated (the leader-only
+/// `rate_limit_sync_loop` does not run on followers).
+static LAST_SNAPSHOT_REFRESH_AT: AtomicU64 = AtomicU64::new(0);
+
+/// Minimum interval (seconds) between process-local snapshot refreshes triggered
+/// off the activation path. The leader's `rate_limit_sync_loop` already refreshes
+/// every ~120s; this matches that cadence so a follower's lazy refresh reads the
+/// shared DB cache (no provider credentials) at most once per window and never
+/// adds per-entry DB cost to the dispatch loop.
+pub const SNAPSHOT_REFRESH_MIN_INTERVAL_SEC: i64 = 120;
 
 /// Aggregate, credential-free diagnostics for `/api/health/detail`. Counts are
 /// process-lifetime, in-memory only (no DB, no token data).
@@ -195,6 +217,93 @@ pub fn set_provider_pressure_snapshot(snapshot: HashMap<String, ProviderPressure
 pub fn set_agent_provider_snapshot(snapshot: HashMap<String, String>) {
     let lock = agent_provider_map();
     *lock.write().unwrap_or_else(|p| p.into_inner()) = snapshot;
+}
+
+/// Clear the in-memory agent_id -> provider snapshot. Called when an
+/// agent->provider refresh fails after a previous successful refresh so the gate
+/// fails OPEN (unresolved provider -> allow) instead of gating on a stale
+/// mapping. (P2 review fix — server/mod.rs:1047.)
+pub fn clear_agent_provider_snapshot() {
+    let lock = agent_provider_map();
+    lock.write().unwrap_or_else(|p| p.into_inner()).clear();
+}
+
+/// Rebuild the in-memory pressure + agent->provider snapshots from the shared
+/// `rate_limit_cache` DB rows and the current agent/channel bindings.
+///
+/// This reads ONLY the shared DB cache (no provider credentials, no live API
+/// calls), so it is safe to run on EVERY serving node — not just the leader.
+/// The leader's `rate_limit_sync_loop` calls it after refreshing the cache; the
+/// activation path calls it (throttled, via [`refresh_snapshots_if_stale`]) so
+/// non-leader nodes — where `RateLimitSync` never runs — still have populated
+/// snapshots and the gate is not silently a no-op there. (P2 review fix —
+/// server/mod.rs:1018.)
+///
+/// Fails open on every error: a payload/binding load failure leaves the gate
+/// allowing dispatch rather than deferring on stale state. In particular, when
+/// the agent->provider refresh fails after a previous success, the agent
+/// snapshot is CLEARED so an agent moved off a pressured provider is not held by
+/// a stale mapping. (P2 review fix — server/mod.rs:1047.)
+pub async fn refresh_snapshots_from_db(pg_pool: &sqlx::PgPool, now: i64) {
+    let payloads =
+        crate::services::analytics::build_rate_limit_provider_payloads_pg(pg_pool, now).await;
+    let pressure = pressure_snapshot_from_payloads(&payloads);
+    set_provider_pressure_snapshot(pressure);
+
+    match crate::db::agents::load_all_agent_channel_bindings_pg(pg_pool).await {
+        Ok(bindings) => {
+            let mut agent_provider = HashMap::new();
+            for (agent_id, binding) in bindings {
+                if let Some(provider) = binding.resolved_primary_provider_kind() {
+                    agent_provider.insert(agent_id, provider.as_str().to_string());
+                }
+            }
+            set_agent_provider_snapshot(agent_provider);
+        }
+        Err(error) => {
+            // Fail open: drop the (now possibly stale) agent->provider mapping so
+            // a moved agent is treated as unresolved (allow) instead of gated on
+            // an outdated provider alongside a freshly-replaced pressure snapshot.
+            clear_agent_provider_snapshot();
+            tracing::warn!(
+                "[dispatch-gate] failed to refresh agent->provider snapshot; cleared stale mapping to fail open: {error}"
+            );
+        }
+    }
+}
+
+/// Refresh the process-local snapshots from the shared DB cache iff the last
+/// refresh was more than [`SNAPSHOT_REFRESH_MIN_INTERVAL_SEC`] ago (or has never
+/// run). Returns `true` when a refresh was performed.
+///
+/// Called from the auto-queue activation path on whichever node serves
+/// `POST /api/queue/dispatch-next`. On the leader this is a cheap no-op (the sync
+/// loop already refreshed within the window); on a follower it populates the
+/// snapshots the gate reads. The throttle keeps the dispatch loop DB-free in the
+/// common case. `now` is unix seconds.
+pub async fn refresh_snapshots_if_stale(pg_pool: &sqlx::PgPool, now: i64) -> bool {
+    let last = LAST_SNAPSHOT_REFRESH_AT.load(Ordering::Relaxed) as i64;
+    if last != 0 && now.saturating_sub(last) < SNAPSHOT_REFRESH_MIN_INTERVAL_SEC {
+        return false;
+    }
+    // Claim the window before doing the work so concurrent activations on the
+    // same node do not all refresh at once (best-effort; a rare double refresh
+    // is harmless — it only re-reads the shared DB cache).
+    if now > 0 {
+        LAST_SNAPSHOT_REFRESH_AT.store(now as u64, Ordering::Relaxed);
+    }
+    refresh_snapshots_from_db(pg_pool, now).await;
+    true
+}
+
+/// Mark the process-local snapshots as freshly refreshed as of `now` (unix
+/// seconds) without doing any DB work. The leader's `rate_limit_sync_loop` calls
+/// this after it refreshes the snapshots so the activation-path throttle in
+/// [`refresh_snapshots_if_stale`] does not redundantly re-refresh on the leader.
+pub fn mark_snapshots_refreshed(now: i64) {
+    if now > 0 {
+        LAST_SNAPSHOT_REFRESH_AT.store(now as u64, Ordering::Relaxed);
+    }
 }
 
 /// Build a [`ProviderPressureSnapshot`] from a single provider's cache-payload
@@ -306,21 +415,36 @@ pub fn pressure_snapshot_from_payloads(
     map
 }
 
-/// Read the live gate-enabled flag. Defaults to `true` (gate ON) when the live
-/// config snapshot is unavailable or the field is unset (`None`). Reading the
-/// in-memory `config_live_reload` snapshot is lock-cheap and does NOT touch the
-/// database, so this is safe on the hot path.
+/// Read the gate-enabled flag from the YAML live config snapshot. Defaults to
+/// `true` (gate ON) when the live config snapshot is unavailable or the field is
+/// unset (`None`). Reading the in-memory `config_live_reload` snapshot is
+/// lock-cheap and does NOT touch the database, so this is safe on the hot path.
+///
+/// NOTE: this reads ONLY the YAML live snapshot — it does NOT see a toggle
+/// persisted via `PUT /api/settings/runtime-config` (which lands in `kv_meta`,
+/// never the YAML snapshot). The activation path resolves the persisted value
+/// first and passes it via [`evaluate_agent_provider_pressure_with_overrides`];
+/// this function is the YAML fallback used when no persisted override exists and
+/// by the diagnostics block.
 pub fn gate_enabled() -> bool {
     crate::config_live_reload::current()
         .and_then(|config| config.runtime.dispatch_rate_limit_gate_enabled)
         .unwrap_or(true)
 }
 
-/// Read the live danger threshold (utilization %). Falls back to
-/// [`DEFAULT_DANGER_PCT`] when unset.
+/// Read the gate-specific danger threshold (utilization %) from the YAML live
+/// config snapshot. Falls back to [`DEFAULT_DANGER_PCT`] (100) when unset. Uses
+/// the dedicated `dispatch_rate_limit_gate_danger_pct` knob — NOT
+/// `rate_limit_danger_pct` — so the dashboard's 95% danger coloring and any
+/// other `rate_limit_danger_pct` consumer are unaffected by the gate threshold.
+///
+/// Like [`gate_enabled`], this reads ONLY the YAML snapshot; the persisted
+/// runtime-config override is resolved on the activation path and passed
+/// explicitly via [`evaluate_agent_provider_pressure_with_overrides`].
 pub fn danger_pct() -> u64 {
     crate::config_live_reload::current()
-        .and_then(|config| config.runtime.rate_limit_danger_pct)
+        .and_then(|config| config.runtime.dispatch_rate_limit_gate_danger_pct)
+        .map(u64::from)
         .unwrap_or(DEFAULT_DANGER_PCT)
 }
 
@@ -388,6 +512,24 @@ pub fn evaluate_provider_pressure(
     };
 
     if util >= danger_pct {
+        // The busiest bucket's reset timestamp is already in the past: the
+        // pressure window the cached utilization describes has expired, so the
+        // provider is (almost certainly) no longer rate-limited. Do NOT hold the
+        // entry pending on this stale utilization until the next ~120s sync tick;
+        // fail open and let dispatch proceed. (P2 review fix — dispatch_gate.rs)
+        if let Some(reset_at) = snapshot.busy_reset_at
+            && reset_at <= now
+        {
+            let mut decision = ProviderPressureDecision::allow(
+                PressureReasonCode::StaleTelemetry,
+                provider_owned,
+                danger_pct,
+            );
+            decision.utilization_pct = Some(util);
+            decision.cache_age_sec = Some(cache_age);
+            decision.estimated_reset_at = Some(reset_at);
+            return decision;
+        }
         ProviderPressureDecision {
             verdict: PressureVerdict::Defer,
             reason_code: PressureReasonCode::DangerThreshold,
@@ -423,14 +565,46 @@ pub fn resolve_agent_provider(agent_id: &str) -> Option<String> {
 /// Hot-path entry point used by auto-queue activation. Performs an O(1),
 /// lock-cheap, DB-free evaluation for the given agent and records diagnostics.
 ///
+/// Resolves the enable flag and gate danger threshold from the YAML live config
+/// snapshot only. Prefer [`evaluate_agent_provider_pressure_with_overrides`] on
+/// the activation path so a toggle persisted via `PUT
+/// /api/settings/runtime-config` (which lands in `kv_meta`, not the YAML
+/// snapshot) is honored at runtime.
+///
 /// Fails open on every ambiguity: gate disabled, unresolved provider, missing /
 /// stale / malformed / unsupported / unknown telemetry all return `Allow`.
+///
+/// The activation path now calls
+/// [`evaluate_agent_provider_pressure_with_overrides`] directly (to honor the
+/// persisted runtime-config). This YAML-only convenience entry point is retained
+/// as the stable public API used by the unit tests and any future caller that
+/// has no persisted overrides to pass.
+#[allow(dead_code)]
 pub fn evaluate_agent_provider_pressure(agent_id: &str, now: i64) -> ProviderPressureDecision {
+    evaluate_agent_provider_pressure_with_overrides(agent_id, now, None, None)
+}
+
+/// Hot-path entry point with explicit, caller-resolved overrides for the
+/// gate-enabled flag and the gate danger threshold.
+///
+/// The activation path passes the values it read from the **persisted
+/// runtime-config** (`kv_meta`) so the dashboard/API rollback switch (and a
+/// persisted danger-threshold change) actually take effect at runtime — the
+/// persisted value never reaches `config_live_reload::current()`, so reading the
+/// YAML snapshot alone would silently ignore an API toggle. Each override falls
+/// back to the YAML snapshot value (then the compiled default) when `None`.
+pub fn evaluate_agent_provider_pressure_with_overrides(
+    agent_id: &str,
+    now: i64,
+    enabled_override: Option<bool>,
+    danger_override: Option<u64>,
+) -> ProviderPressureDecision {
     GATE_EVALUATIONS.fetch_add(1, Ordering::Relaxed);
 
-    let danger = danger_pct();
+    let danger = danger_override.unwrap_or_else(danger_pct);
+    let enabled = enabled_override.unwrap_or_else(gate_enabled);
 
-    if !gate_enabled() {
+    if !enabled {
         return ProviderPressureDecision::allow(
             PressureReasonCode::GateDisabled,
             resolve_agent_provider(agent_id),
@@ -462,6 +636,31 @@ pub fn evaluate_agent_provider_pressure(agent_id: &str, now: i64) -> ProviderPre
     decision
 }
 
+/// Resolve the gate-enabled flag and gate danger threshold from the persisted
+/// runtime-config (`kv_meta` `runtime-config` JSON, written by
+/// `PUT /api/settings/runtime-config`). Returns `(enabled_override,
+/// danger_override)` where each is `Some` only when the operator has persisted an
+/// explicit value; `None` lets the caller fall back to the YAML live snapshot
+/// and then the compiled defaults.
+///
+/// This is the bridge that makes the runtime rollback switch work: the persisted
+/// toggle never reaches `config_live_reload::current()`, so the gate must read it
+/// from `kv_meta` (mirroring `effective_max_entry_retries`). Runs off the
+/// activation path's existing pool read; on any parse/DB error it returns
+/// `(None, None)` (fail back to YAML/defaults, never blocks).
+pub fn persisted_runtime_overrides(runtime_config: Option<&Value>) -> (Option<bool>, Option<u64>) {
+    let Some(value) = runtime_config else {
+        return (None, None);
+    };
+    let enabled = value
+        .get("dispatchRateLimitGateEnabled")
+        .and_then(Value::as_bool);
+    let danger = value
+        .get("dispatchRateLimitGateDangerPct")
+        .and_then(Value::as_u64);
+    (enabled, danger)
+}
+
 /// Record that a manual/force dispatch path intentionally bypassed the gate
 /// (REQ-005). In-memory counter only; never blocks the bypass.
 ///
@@ -478,7 +677,16 @@ pub fn record_gate_bypass() {
 }
 
 /// Build the credential-free diagnostics block for `/api/health/detail`.
-pub fn diagnostics() -> DispatchGateDiagnostics {
+///
+/// `enabled_override` / `danger_override` let the caller report the EFFECTIVE
+/// values the gate actually uses on the activation path — i.e. the persisted
+/// runtime-config (`kv_meta`) values, which never reach the YAML live snapshot.
+/// Pass `None` for each to fall back to the YAML snapshot then the compiled
+/// defaults (the same precedence the gate uses).
+pub fn diagnostics_with_overrides(
+    enabled_override: Option<bool>,
+    danger_override: Option<u64>,
+) -> DispatchGateDiagnostics {
     let providers_tracked = pressure_map()
         .read()
         .unwrap_or_else(|p| p.into_inner())
@@ -488,8 +696,8 @@ pub fn diagnostics() -> DispatchGateDiagnostics {
         value => Some(value as i64),
     };
     DispatchGateDiagnostics {
-        enabled: gate_enabled(),
-        danger_pct: danger_pct(),
+        enabled: enabled_override.unwrap_or_else(gate_enabled),
+        danger_pct: danger_override.unwrap_or_else(danger_pct),
         evaluations: GATE_EVALUATIONS.load(Ordering::Relaxed),
         deferrals: GATE_DEFERRALS.load(Ordering::Relaxed),
         bypasses: GATE_BYPASSES.load(Ordering::Relaxed),
@@ -677,10 +885,14 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner())
     }
 
+    /// Installs a live config snapshot for the gate tests. `danger` drives the
+    /// GATE-specific threshold (`dispatch_rate_limit_gate_danger_pct`) — NOT the
+    /// dashboard `rate_limit_danger_pct` — since that is what the gate reads.
     fn install_runtime(enabled: Option<bool>, danger: Option<u64>, stale: Option<u64>) {
         let mut config = crate::config::Config::default();
         config.runtime.dispatch_rate_limit_gate_enabled = enabled;
-        config.runtime.rate_limit_danger_pct = danger;
+        config.runtime.dispatch_rate_limit_gate_danger_pct =
+            danger.map(|value| value.min(u8::MAX as u64) as u8);
         config.runtime.rate_limit_stale_sec = stale;
         crate::config_live_reload::install(config);
     }
@@ -766,7 +978,10 @@ mod tests {
 
     #[test]
     fn default_when_gate_flag_unset_is_enabled() {
-        // REQ-003: None gate flag defaults to ON (gate enabled).
+        // REQ-003 + JOB-1: None gate flag defaults to ON (gate enabled) and the
+        // gate danger threshold defaults to 100 (defer only when a provider is
+        // fully rate-limited), so a fully-utilized provider still defers by
+        // default.
         let _guard = global_gate_test_guard();
         let now = 10_000;
         set_agent_provider_snapshot(HashMap::from([(
@@ -775,15 +990,38 @@ mod tests {
         )]));
         set_provider_pressure_snapshot(HashMap::from([(
             "claude".to_string(),
-            snap(Some(99), None, now - 10, false, false),
+            snap(Some(100), None, now - 10, false, false),
         )]));
         install_runtime(None, None, None);
         assert!(gate_enabled());
         assert_eq!(danger_pct(), DEFAULT_DANGER_PCT);
+        assert_eq!(DEFAULT_DANGER_PCT, 100);
         assert_eq!(
             evaluate_agent_provider_pressure("agent-d", now).verdict,
             PressureVerdict::Defer
         );
+    }
+
+    #[test]
+    fn default_gate_threshold_does_not_defer_below_full() {
+        // JOB-1: at the default gate threshold (100), a provider at 99% (which
+        // the dashboard would color "danger" at 95) must NOT defer — the gate
+        // only holds entries when the provider is fully rate-limited.
+        let _guard = global_gate_test_guard();
+        let now = 10_000;
+        set_agent_provider_snapshot(HashMap::from([(
+            "agent-d99".to_string(),
+            "claude".to_string(),
+        )]));
+        set_provider_pressure_snapshot(HashMap::from([(
+            "claude".to_string(),
+            snap(Some(99), None, now - 10, false, false),
+        )]));
+        install_runtime(Some(true), None, Some(600));
+        let decision = evaluate_agent_provider_pressure("agent-d99", now);
+        assert_eq!(decision.verdict, PressureVerdict::Allow);
+        assert_eq!(decision.reason_code, PressureReasonCode::BelowDanger);
+        assert_eq!(decision.danger_pct, 100);
     }
 
     #[test]
@@ -805,5 +1043,142 @@ mod tests {
         let before = GATE_BYPASSES.load(Ordering::Relaxed);
         record_gate_bypass();
         assert_eq!(GATE_BYPASSES.load(Ordering::Relaxed), before + 1);
+    }
+
+    // P2 review fix — expired reset window must not keep deferring on stale
+    // utilization.
+    #[test]
+    fn over_danger_but_reset_in_past_allows_as_stale() {
+        // Fresh row (within stale window), utilization above danger, but the
+        // busiest bucket's reset timestamp is already in the past -> the pressure
+        // window has expired -> allow (stale), do not hold the entry pending.
+        let s = snap(Some(100), Some(900), 1_000, false, false);
+        let decision = evaluate_provider_pressure("claude", Some(&s), 100, 600, 1_100);
+        assert_eq!(decision.verdict, PressureVerdict::Allow);
+        assert_eq!(decision.reason_code, PressureReasonCode::StaleTelemetry);
+        assert_eq!(decision.utilization_pct, Some(100));
+        assert_eq!(decision.estimated_reset_at, Some(900));
+    }
+
+    #[test]
+    fn over_danger_with_reset_in_future_still_defers() {
+        // Same as above but the reset is in the future -> the pressure window is
+        // still open -> defer.
+        let s = snap(Some(100), Some(5_000), 1_000, false, false);
+        let decision = evaluate_provider_pressure("claude", Some(&s), 100, 600, 1_100);
+        assert_eq!(decision.verdict, PressureVerdict::Defer);
+        assert_eq!(decision.reason_code, PressureReasonCode::DangerThreshold);
+    }
+
+    #[test]
+    fn over_danger_without_reset_still_defers() {
+        // No reset timestamp at all -> cannot prove the window expired -> defer.
+        let s = snap(Some(100), None, 1_000, false, false);
+        let decision = evaluate_provider_pressure("claude", Some(&s), 100, 600, 1_100);
+        assert_eq!(decision.verdict, PressureVerdict::Defer);
+    }
+
+    // P1 review fix — persisted runtime overrides honored.
+    #[test]
+    fn persisted_overrides_parse_enable_and_threshold() {
+        let cfg = json!({
+            "dispatchRateLimitGateEnabled": false,
+            "dispatchRateLimitGateDangerPct": 80,
+        });
+        let (enabled, danger) = persisted_runtime_overrides(Some(&cfg));
+        assert_eq!(enabled, Some(false));
+        assert_eq!(danger, Some(80));
+
+        // Missing keys -> None (fall back to YAML/defaults).
+        let (enabled, danger) = persisted_runtime_overrides(Some(&json!({})));
+        assert_eq!(enabled, None);
+        assert_eq!(danger, None);
+
+        let (enabled, danger) = persisted_runtime_overrides(None);
+        assert_eq!(enabled, None);
+        assert_eq!(danger, None);
+    }
+
+    #[test]
+    fn persisted_disable_override_resumes_dispatch_even_when_yaml_enables() {
+        // The persisted runtime toggle (kv_meta) MUST win over the YAML live
+        // snapshot: YAML says enabled, the persisted override says disabled ->
+        // the gate must allow (rollback switch works at runtime).
+        let _guard = global_gate_test_guard();
+        let now = 10_000;
+        set_agent_provider_snapshot(HashMap::from([(
+            "agent-p".to_string(),
+            "claude".to_string(),
+        )]));
+        set_provider_pressure_snapshot(HashMap::from([(
+            "claude".to_string(),
+            snap(Some(100), Some(20_000), now - 10, false, false),
+        )]));
+        install_runtime(Some(true), Some(100), Some(600));
+
+        // No override -> YAML enables -> defer.
+        assert_eq!(
+            evaluate_agent_provider_pressure_with_overrides("agent-p", now, None, None).verdict,
+            PressureVerdict::Defer
+        );
+        // Persisted disable override -> allow (gate_disabled).
+        let resumed =
+            evaluate_agent_provider_pressure_with_overrides("agent-p", now, Some(false), None);
+        assert_eq!(resumed.verdict, PressureVerdict::Allow);
+        assert_eq!(resumed.reason_code, PressureReasonCode::GateDisabled);
+    }
+
+    #[test]
+    fn persisted_threshold_override_changes_defer_decision() {
+        // The persisted gate danger threshold (kv_meta) MUST win over the YAML
+        // snapshot: util 99 with persisted threshold 95 -> defer; with the
+        // default 100 (no override) -> allow.
+        let _guard = global_gate_test_guard();
+        let now = 10_000;
+        set_agent_provider_snapshot(HashMap::from([(
+            "agent-t".to_string(),
+            "claude".to_string(),
+        )]));
+        set_provider_pressure_snapshot(HashMap::from([(
+            "claude".to_string(),
+            snap(Some(99), Some(20_000), now - 10, false, false),
+        )]));
+        install_runtime(Some(true), None, Some(600));
+
+        // Default threshold (100) -> 99 below danger -> allow.
+        assert_eq!(
+            evaluate_agent_provider_pressure_with_overrides("agent-t", now, None, None).verdict,
+            PressureVerdict::Allow
+        );
+        // Persisted threshold 95 -> 99 at/above danger -> defer.
+        let gated = evaluate_agent_provider_pressure_with_overrides("agent-t", now, None, Some(95));
+        assert_eq!(gated.verdict, PressureVerdict::Defer);
+        assert_eq!(gated.danger_pct, 95);
+    }
+
+    // P2 review fix — fail open when the agent->provider snapshot is cleared.
+    #[test]
+    fn cleared_agent_provider_snapshot_fails_open() {
+        let _guard = global_gate_test_guard();
+        install_runtime(Some(true), Some(100), Some(600));
+        let now = 10_000;
+        set_agent_provider_snapshot(HashMap::from([(
+            "agent-c".to_string(),
+            "claude".to_string(),
+        )]));
+        set_provider_pressure_snapshot(HashMap::from([(
+            "claude".to_string(),
+            snap(Some(100), Some(20_000), now - 10, false, false),
+        )]));
+        // Populated mapping + full pressure -> defer.
+        assert_eq!(
+            evaluate_agent_provider_pressure("agent-c", now).verdict,
+            PressureVerdict::Defer
+        );
+        // Simulate a failed agent->provider refresh clearing the stale mapping.
+        clear_agent_provider_snapshot();
+        let resumed = evaluate_agent_provider_pressure("agent-c", now);
+        assert_eq!(resumed.verdict, PressureVerdict::Allow);
+        assert_eq!(resumed.reason_code, PressureReasonCode::ProviderUnresolved);
     }
 }

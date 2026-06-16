@@ -1428,6 +1428,18 @@ pub struct RuntimeSettingsConfig {
     /// gate cleanly (every activation then falls through to normal dispatch).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch_rate_limit_gate_enabled: Option<bool>,
+    /// Gate-specific danger threshold (utilization %) for the rate-limit-aware
+    /// dispatch gate (feature: rate-limit-aware-dispatch-gate). This is a
+    /// SEPARATE knob from `rate_limit_danger_pct` (which drives the dashboard's
+    /// "danger" coloring at 95): the operator wants the dispatch gate to defer
+    /// ONLY when a provider is fully rate-limited (utilization at/above 100),
+    /// so the gate defaults to 100 here and never touches `rate_limit_danger_pct`
+    /// — other consumers of `rate_limit_danger_pct` are unaffected. When unset
+    /// (`None`), the gate uses the compiled-in default of 100. Read live (via
+    /// the persisted runtime-config / `config_live_reload::current()`) so an
+    /// edit applies on the next activation without a restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_rate_limit_gate_danger_pct: Option<u8>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub reset_overrides_on_restart: bool,
 }
@@ -1467,6 +1479,7 @@ impl RuntimeSettingsConfig {
             && self.tui_hook_registry_enabled.is_none()
             && self.codex_rollout_index_cache_enabled.is_none()
             && self.dispatch_rate_limit_gate_enabled.is_none()
+            && self.dispatch_rate_limit_gate_danger_pct.is_none()
             && !self.reset_overrides_on_restart
     }
 }

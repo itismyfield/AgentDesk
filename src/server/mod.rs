@@ -1023,29 +1023,18 @@ async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
 /// `crate::services::dispatch_gate` from the freshly-synced `rate_limit_cache`
 /// and the current agent/channel bindings. Runs off the hot dispatch path (once
 /// per ~120s rate-limit tick), so any DB cost here never touches activation.
+///
+/// Note: `RateLimitSync` is leader-only, so this leader-side refresh only keeps
+/// the leader's snapshots warm. Non-leader serving nodes refresh their own
+/// process-local snapshots lazily from the shared DB cache on the activation
+/// path (`dispatch_gate::refresh_snapshots_if_stale`), so the gate is populated
+/// on every node — not silently a no-op on followers.
 async fn refresh_dispatch_gate_snapshots(pg_pool: &PgPool) {
     let now = chrono::Utc::now().timestamp();
-    let payloads =
-        crate::services::analytics::build_rate_limit_provider_payloads_pg(pg_pool, now).await;
-    let pressure = crate::services::dispatch_gate::pressure_snapshot_from_payloads(&payloads);
-    crate::services::dispatch_gate::set_provider_pressure_snapshot(pressure);
-
-    match crate::db::agents::load_all_agent_channel_bindings_pg(pg_pool).await {
-        Ok(bindings) => {
-            let mut agent_provider = std::collections::HashMap::new();
-            for (agent_id, binding) in bindings {
-                if let Some(provider) = binding.resolved_primary_provider_kind() {
-                    agent_provider.insert(agent_id, provider.as_str().to_string());
-                }
-            }
-            crate::services::dispatch_gate::set_agent_provider_snapshot(agent_provider);
-        }
-        Err(error) => {
-            tracing::warn!(
-                "[rate-limit-sync] failed to refresh agent→provider snapshot for dispatch gate: {error}"
-            );
-        }
-    }
+    crate::services::dispatch_gate::refresh_snapshots_from_db(pg_pool, now).await;
+    // Record the refresh so the activation-path throttle treats the leader's
+    // snapshots as fresh and does not redundantly re-read the cache here.
+    crate::services::dispatch_gate::mark_snapshots_refreshed(now);
 }
 
 #[cfg(test)]
