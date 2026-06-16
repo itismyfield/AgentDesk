@@ -216,23 +216,31 @@ fn recommend_repair_path(
     confidence: f64,
 ) -> RecommendedRepairPath {
     // Queued-but-not-started / low confidence must NOT be auto-recommended for a
-    // mutating repair (would risk corrupting queue state). `working` with no
-    // dispatch id is the queued-but-not-started shape here.
+    // mutating repair (would risk corrupting queue state).
     if confidence < HIGH_CONFIDENCE_THRESHOLD {
         return RecommendedRepairPath::None;
     }
-    // Raw says active but there is no orphan dispatch token → the mailbox/session
-    // row is the stale artifact; the existing stale-mailbox-repair clears it.
     if !row.active_dispatch_present() {
+        // Legacy `working` with no dispatch id is the queued-but-not-started
+        // shape: the turn was never actually dispatched, so a mutating repair
+        // (stale-mailbox clear) could wipe queue/session state for work that has
+        // not started. Route these to `none` even at high confidence.
+        if source == RawActiveSource::Working {
+            return RecommendedRepairPath::None;
+        }
+        // Otherwise raw is active (turn_active) with no orphan dispatch token →
+        // the mailbox/session row is the stale artifact; stale-mailbox-repair
+        // clears it.
         return RecommendedRepairPath::StaleMailbox;
     }
-    // A dispatch id is present but the provider runtime / live turn is missing
-    // (resolver says disconnected or not working) → relay recovery owns this.
-    if effective.status == crate::db::session_status::DISCONNECTED || !effective.is_working {
+    // A dispatch id is present but the resolver positively reports the provider
+    // runtime / live turn is GONE (disconnected) → relay recovery owns this.
+    if effective.status == crate::db::session_status::DISCONNECTED {
         return RecommendedRepairPath::RelayRecovery;
     }
-    // Liveness inconclusive but raw-active persists past grace → stall watchdog.
-    let _ = source;
+    // Dispatch id present, not disconnected, but liveness is inconclusive and the
+    // raw-active state has persisted past grace (the stalled-turn case) → the
+    // stall watchdog owns re-establishing or aborting the stuck turn.
     RecommendedRepairPath::StallWatchdog
 }
 
@@ -277,7 +285,10 @@ pub(super) fn classify_active_session_audit(
         let Some(source) = row.raw_active_source() else {
             continue;
         };
-        let effective = resolver.resolve(
+        // DB/heartbeat-only: this audit is an off-hot-path read on
+        // /api/health/detail and MUST NOT block the request on synchronous tmux
+        // probes (has_live_pane / pane readiness) for local session keys.
+        let effective = resolver.resolve_db_only(
             row.session_key.as_deref(),
             row.status.as_deref(),
             row.active_dispatch_id.as_deref(),
@@ -346,8 +357,13 @@ pub(super) fn classify_active_session_audit(
         .filter(|candidate| candidate.confidence >= HIGH_CONFIDENCE_THRESHOLD)
         .count() as u64;
     let candidate_count = candidates.len() as u64;
-    let truncated =
-        raw_matches_total > candidates.len() && raw_matches_total as u64 >= settings.max_candidates;
+    // `truncated` means the cap omitted raw active-like rows the classifier never
+    // examined: i.e. the pre-LIMIT raw-match count exceeds the rows actually
+    // fetched/scanned (`rows.len()`, capped at `max_candidates`). It is NOT a
+    // function of how many of those rows survived classification, so a fully
+    // candidate-producing capped batch correctly reports `truncated = true` and a
+    // sub-cap batch with resolver-filtered rows correctly reports `false`.
+    let truncated = raw_matches_total > rows.len();
 
     ActiveSessionAuditReport {
         enabled: true,
@@ -404,12 +420,130 @@ mod tests {
         );
         assert!(candidate.evidence["heartbeat_known"].as_bool().unwrap());
         assert!(candidate.stale_for_secs >= 800);
-        // Dispatch present + stale heartbeat + not working ⇒ relay_recovery.
+        // Dispatch present + stale heartbeat + not working, but the resolver does
+        // NOT positively report disconnected (raw status is turn_active, so the
+        // DB-only verdict is idle) ⇒ the stalled-turn case ⇒ stall_watchdog.
         assert_eq!(
             candidate.recommended_repair_path,
-            RecommendedRepairPath::RelayRecovery
+            RecommendedRepairPath::StallWatchdog
         );
         assert!(candidate.confidence >= HIGH_CONFIDENCE_THRESHOLD);
+    }
+
+    /// A dispatch-bearing row whose raw status is `disconnected` but still carries
+    /// an orphan dispatch token resolves to relay_recovery (the resolver
+    /// positively reports the runtime is gone). Guards the relay_recovery branch.
+    #[test]
+    fn active_session_audit_disconnected_with_dispatch_recommends_relay_recovery() {
+        let row = RawSessionRow {
+            session_key: Some("remote-host/farbox:codex-disc".to_string()),
+            provider: Some("codex".to_string()),
+            status: Some(crate::db::session_status::DISCONNECTED.to_string()),
+            active_dispatch_id: Some("dispatch-disc".to_string()),
+            last_heartbeat: Some(stale_ts(900)),
+            thread_channel_id: Some("1490000000000000010".to_string()),
+        };
+        let effective = EffectiveSessionState {
+            status: crate::db::session_status::DISCONNECTED,
+            active_dispatch_id: None,
+            is_working: false,
+        };
+        // High confidence: stale (+0.20), not working (+0.20), dispatch present.
+        let confidence = confidence_score(true, true, true, false);
+        assert!(confidence >= HIGH_CONFIDENCE_THRESHOLD);
+        assert_eq!(
+            recommend_repair_path(
+                &row,
+                RawActiveSource::ActiveDispatchId,
+                &effective,
+                confidence
+            ),
+            RecommendedRepairPath::RelayRecovery
+        );
+    }
+
+    /// The stalled-turn case: a dispatch-bearing, high-confidence, not-working
+    /// candidate that is NOT disconnected reaches stall_watchdog (regression for
+    /// the previously-unreachable branch).
+    #[test]
+    fn active_session_audit_stalled_turn_recommends_stall_watchdog() {
+        let row = RawSessionRow {
+            session_key: Some("remote-host/farbox:codex-stall".to_string()),
+            provider: Some("codex".to_string()),
+            status: Some("turn_active".to_string()),
+            active_dispatch_id: Some("dispatch-stall".to_string()),
+            last_heartbeat: Some(stale_ts(900)),
+            thread_channel_id: Some("1490000000000000011".to_string()),
+        };
+        let effective = EffectiveSessionState {
+            status: crate::db::session_status::IDLE,
+            active_dispatch_id: None,
+            is_working: false,
+        };
+        let confidence = confidence_score(true, true, true, false);
+        assert!(confidence >= HIGH_CONFIDENCE_THRESHOLD);
+        assert_eq!(
+            recommend_repair_path(
+                &row,
+                RawActiveSource::ActiveDispatchId,
+                &effective,
+                confidence
+            ),
+            RecommendedRepairPath::StallWatchdog
+        );
+    }
+
+    /// Queued-but-not-started (`working` status, no dispatch id) at HIGH confidence
+    /// must map to `none`, never the mutating stale-mailbox path. Regression for
+    /// the queued-but-not-started shape (P2).
+    #[test]
+    fn active_session_audit_queued_high_confidence_maps_to_none() {
+        let row = RawSessionRow {
+            session_key: Some("remote-host/farbox:codex-queued-hc".to_string()),
+            provider: Some("codex".to_string()),
+            status: Some("working".to_string()),
+            active_dispatch_id: None,
+            last_heartbeat: Some(stale_ts(900)),
+            thread_channel_id: Some("1490000000000000012".to_string()),
+        };
+        let effective = EffectiveSessionState {
+            status: crate::db::session_status::IDLE,
+            active_dispatch_id: None,
+            is_working: false,
+        };
+        // stale (+0.20), not working (+0.20), missing dispatch (+0.20) ⇒ 1.0.
+        let confidence = confidence_score(true, true, true, true);
+        assert!(confidence >= HIGH_CONFIDENCE_THRESHOLD);
+        assert_eq!(
+            recommend_repair_path(&row, RawActiveSource::Working, &effective, confidence),
+            RecommendedRepairPath::None
+        );
+    }
+
+    /// A `turn_active` row with no dispatch id at high confidence is a genuine
+    /// stale mailbox artifact (distinct from the queued `working` shape) and maps
+    /// to stale_mailbox.
+    #[test]
+    fn active_session_audit_turn_active_no_dispatch_maps_to_stale_mailbox() {
+        let row = RawSessionRow {
+            session_key: Some("remote-host/farbox:codex-sm".to_string()),
+            provider: Some("codex".to_string()),
+            status: Some("turn_active".to_string()),
+            active_dispatch_id: None,
+            last_heartbeat: Some(stale_ts(900)),
+            thread_channel_id: Some("1490000000000000013".to_string()),
+        };
+        let effective = EffectiveSessionState {
+            status: crate::db::session_status::IDLE,
+            active_dispatch_id: None,
+            is_working: false,
+        };
+        let confidence = confidence_score(true, true, true, true);
+        assert!(confidence >= HIGH_CONFIDENCE_THRESHOLD);
+        assert_eq!(
+            recommend_repair_path(&row, RawActiveSource::TurnActive, &effective, confidence),
+            RecommendedRepairPath::StaleMailbox
+        );
     }
 
     /// A live, recent foreground turn must not be flagged. The resolver reports a
