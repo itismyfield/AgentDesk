@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::process::{configure_child_process_group, kill_pid_tree};
-use crate::services::provider::{CancelToken, ProviderKind, cancel_requested, register_child_pid};
+use crate::services::provider::{CancelToken, ProviderKind, cancel_requested};
 use crate::services::remote::RemoteProfile;
 
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -361,6 +361,23 @@ fn compute_suspicious_active_leak(active_sessions: u32, _idle_secs: u64, running
     !running
 }
 
+/// Whether a warm `opencode serve` process may be hard-killed (process-tree
+/// SIGKILL) to satisfy a single turn's cancel/timeout. A warm server is shared
+/// across co-resident turns, so the kill is only safe when the requesting turn
+/// is the *sole* active session; otherwise the SIGKILL would tear the server
+/// out from under unrelated live SSE streams.
+///
+/// This predicate is the **only** guard protecting co-resident sessions: the
+/// shared server PID is intentionally never registered on a `CancelToken`
+/// (see `execute_command_streaming_inner`), because the generic kill sinks
+/// (`provider_exec` timeout, `cancel_active_token` teardown) fire
+/// unconditionally and a register-time `active_sessions <= 1` check is a TOCTOU
+/// — a second turn can attach right after registration. The in-stream cancel
+/// watchdog re-evaluates this predicate at kill time, which is race-safe.
+fn warm_server_hard_kill_allowed(active_sessions: usize) -> bool {
+    active_sessions <= 1
+}
+
 impl OpenCodeWarmServer {
     /// Build a redacted snapshot of this resident server. Holds only this
     /// server's per-field locks for single-field copies; performs NO network
@@ -613,30 +630,22 @@ fn execute_command_streaming_inner(
     })?;
 
     let server = acquire_warm_server(&bin, &resolution, working_dir)?;
-    // Register the warm server's PID on the caller's CancelToken so timeout
-    // callers (which only have `CancelToken.child_pid` to kill) can interrupt a
-    // turn that is blocked before `run_session` installs the SSE cancel
-    // watchdog. The watchdog itself prefers the shared-server Arc, but this
-    // keeps the historical PID-based cancel path working during startup.
-    //
-    // Crucially, only register the PID when this turn is the *sole* active
-    // session on the server. The generic provider_exec timeout path calls
-    // `kill_pid_tree(child_pid)` unconditionally on timeout, so registering a
-    // shared `opencode serve` PID would let a single turn's timeout kill the
-    // warm server out from under every other concurrent streaming turn —
-    // defeating the warm-pool's whole purpose. When the server is shared, leave
-    // `child_pid` unset: the in-stream cancel watchdog (which guards its
-    // hard-kill fallback on `active_sessions <= 1`) plus `abort_session` are the
-    // only mechanisms allowed to terminate the turn, and neither disturbs the
-    // co-resident sessions.
-    if server
-        .shared_server()
-        .active_sessions
-        .load(Ordering::SeqCst)
-        <= 1
-    {
-        register_child_pid(cancel_token, server.shared_server().id());
-    }
+    // The shared `opencode serve` PID is deliberately NOT registered on the
+    // caller's CancelToken. Every generic cancel/timeout sink kills
+    // `CancelToken.child_pid` *unconditionally* — the provider_exec timeout
+    // path (`kill_pid_tree(child_pid)`) and the Discord `cancel_active_token`
+    // teardown both fire without re-reading `active_sessions`. A register-time
+    // `active_sessions <= 1` guard does not make this safe: the count is only
+    // valid at registration, and a second co-resident turn can attach to the
+    // same warm server immediately afterward (active_sessions 1 -> 2). The
+    // first turn's later timeout/stop would then SIGKILL the shared server out
+    // from under the second turn's live SSE stream — a TOCTOU that defeats the
+    // warm pool's whole purpose. Closing it at the source (never handing the
+    // shared PID to an unconditional killer) is robust against every present
+    // and future kill sink. Cancellation is handled race-safely by the
+    // in-stream watchdog in `run_session` — which re-checks
+    // `active_sessions <= 1` at kill time (see `warm_server_hard_kill_allowed`)
+    // — plus cooperative `abort_session`; neither disturbs co-resident sessions.
     let result = run_session(
         prompt,
         system_prompt,
@@ -1497,13 +1506,14 @@ fn consume_sse(
                         if !stop.load(Ordering::Relaxed)
                             && let Some(server) = watchdog_server.as_ref()
                         {
-                            if server.active_sessions.load(Ordering::SeqCst) <= 1 {
+                            let active = server.active_sessions.load(Ordering::SeqCst);
+                            if warm_server_hard_kill_allowed(active) {
                                 kill_pid_tree(server.id());
                             } else {
                                 tracing::warn!(
                                     "Skipping OpenCode hard-kill cancel fallback for shared warm server {} with {} active sessions",
                                     server.base_url,
-                                    server.active_sessions.load(Ordering::SeqCst)
+                                    active
                                 );
                             }
                         }
@@ -2546,6 +2556,18 @@ fn send_error(sender: &Sender<StreamMessage>, message: String) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warm_server_hard_kill_vetoed_when_co_resident() {
+        // Sole session (or under-counted) -> hard-kill permitted.
+        assert!(warm_server_hard_kill_allowed(0));
+        assert!(warm_server_hard_kill_allowed(1));
+        // Co-resident turns share the warm server -> hard-kill must be vetoed
+        // so a single turn's cancel/timeout cannot SIGKILL the shared
+        // `opencode serve` out from under another turn's live SSE stream.
+        assert!(!warm_server_hard_kill_allowed(2));
+        assert!(!warm_server_hard_kill_allowed(8));
+    }
 
     #[test]
     fn opencode_warm_server_key_canonicalizes_equivalent_working_dirs() {
