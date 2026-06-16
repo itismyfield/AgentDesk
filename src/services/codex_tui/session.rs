@@ -1,8 +1,7 @@
-use serde_json::Value;
-use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use super::rollout_index::cached_indexed_rollouts;
 use super::rollout_tail::default_codex_sessions_dir;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,19 +158,23 @@ fn fresh(
     }
 }
 
+/// Resolve the rollout candidates matching `requested_id` + `cwd` under
+/// `sessions_root`, applying the exact legacy filters (TUI-compatible
+/// `session_meta`, requested session id, canonical cwd equality). The directory
+/// walk + header parse are served by the cache-backed
+/// [`cached_indexed_rollouts`] (REQ-001/REQ-006); the per-candidate filtering
+/// and `(modified, len)` projection are unchanged from the legacy scan so
+/// selection semantics (REQ-002/REQ-003) are byte-for-byte identical.
 fn matching_rollout_candidates(
     sessions_root: &Path,
     cwd: &Path,
     requested_id: &str,
 ) -> Vec<RolloutCandidate> {
     let canonical_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-    rollout_files_under(sessions_root)
+    cached_indexed_rollouts(sessions_root)
         .into_iter()
-        .filter_map(|path| {
-            let metadata = std::fs::metadata(&path).ok()?;
-            let modified = metadata.modified().ok()?;
-            let len = metadata.len();
-            let session = read_rollout_session_meta(&path)?;
+        .filter_map(|item| {
+            let session = item.meta?;
             if !session.is_tui_compatible() {
                 return None;
             }
@@ -184,97 +187,12 @@ fn matching_rollout_candidates(
                 return None;
             }
             Some(RolloutCandidate {
-                path,
-                modified,
-                len,
+                path: item.path,
+                modified: item.modified,
+                len: item.len,
             })
         })
         .collect()
-}
-
-fn rollout_files_under(root: &Path) -> Vec<PathBuf> {
-    let mut stack = vec![root.to_path_buf()];
-    let mut files = Vec::new();
-    while let Some(path) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&path) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(".jsonl"))
-            {
-                files.push(path);
-            }
-        }
-    }
-    files
-}
-
-#[derive(Debug, Clone)]
-struct RolloutSessionMeta {
-    id: String,
-    cwd: PathBuf,
-    source: Option<String>,
-    originator: Option<String>,
-}
-
-impl RolloutSessionMeta {
-    fn is_tui_compatible(&self) -> bool {
-        // Codex direct TUI can safely resume sessions recorded by the
-        // interactive CLI. Older AgentDesk codex-exec rollouts share the same
-        // JSONL directory and UUID shape, but resuming them through the TUI can
-        // leave no fresh rollout transcript for the tailer to follow.
-        !self.source.as_deref().is_some_and(|value| value == "exec")
-            && !self
-                .originator
-                .as_deref()
-                .is_some_and(|value| value == "codex_exec")
-    }
-}
-
-fn read_rollout_session_meta(path: &Path) -> Option<RolloutSessionMeta> {
-    let file = std::fs::File::open(path).ok()?;
-    let reader = std::io::BufReader::new(file);
-    for line in reader.lines().map_while(Result::ok).take(20) {
-        let Ok(json) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        if json.get("type").and_then(Value::as_str) != Some("session_meta") {
-            continue;
-        }
-        let Some(payload) = json.get("payload") else {
-            continue;
-        };
-        let Some(id) = payload.get("id").and_then(Value::as_str).map(str::trim) else {
-            continue;
-        };
-        let Some(cwd) = payload.get("cwd").and_then(Value::as_str).map(str::trim) else {
-            continue;
-        };
-        if id.is_empty() || cwd.is_empty() {
-            return None;
-        }
-        return Some(RolloutSessionMeta {
-            id: id.to_string(),
-            cwd: PathBuf::from(cwd),
-            source: payload
-                .get("source")
-                .and_then(Value::as_str)
-                .map(ToString::to_string),
-            originator: payload
-                .get("originator")
-                .and_then(Value::as_str)
-                .map(ToString::to_string),
-        });
-    }
-    None
 }
 
 #[cfg(test)]
@@ -492,5 +410,105 @@ mod tests {
         assert!(selection.resume);
         assert_eq!(selection.candidate_count, 2);
         assert_eq!(selection.rollout_path.as_deref(), Some(second.as_path()));
+    }
+
+    // TEST-002 / TEST-004 (REQ-001/REQ-002): resolving twice for the same root is
+    // a warm-cache lookup the second time; a newer rollout created in between must
+    // still be selected (the directory mtime bumps the tree signature). This pins
+    // the high-severity "stale cache resumes an older rollout" risk.
+    #[test]
+    fn warm_lookup_picks_up_newer_rollout_after_first_resolve() {
+        super::super::rollout_index::reset_cache_for_tests();
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let first = write_rollout(
+            dir.path(),
+            "old/rollout-a.jsonl",
+            "sess-1",
+            cwd.path(),
+            "old",
+        );
+
+        // Cold resolve: selects the only candidate and warms the cache.
+        let cold = resolve_codex_tui_session(Some("sess-1"), cwd.path(), Some(dir.path()), false);
+        assert_eq!(cold.rollout_path.as_deref(), Some(first.as_path()));
+        assert_eq!(cold.candidate_count, 1);
+
+        // A newer rollout under a new leaf directory appears.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let newer = write_rollout(
+            dir.path(),
+            "new/rollout-b.jsonl",
+            "sess-1",
+            cwd.path(),
+            "new",
+        );
+
+        // Warm resolve: signature changed, so the index rebuilds and the newer
+        // rollout is selected — no stale hit.
+        let warm = resolve_codex_tui_session(Some("sess-1"), cwd.path(), Some(dir.path()), false);
+        assert!(warm.resume);
+        assert_eq!(warm.candidate_count, 2);
+        assert_eq!(
+            warm.rollout_path.as_deref(),
+            Some(newer.as_path()),
+            "warm lookup must select the newest rollout, not the cached older one"
+        );
+    }
+
+    // TEST-006 (REQ-006): the shared discovery primitive used by both `session.rs`
+    // (via the index) and `rollout_tail.rs` agrees with a direct scan on which
+    // files are rollout candidates.
+    #[test]
+    fn shared_discovery_primitive_matches_direct_scan() {
+        super::super::rollout_index::reset_cache_for_tests();
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let a = write_rollout(dir.path(), "2026/05/rollout-a.jsonl", "s1", cwd.path(), "");
+        let b = write_rollout(dir.path(), "2026/06/rollout-b.jsonl", "s2", cwd.path(), "");
+        std::fs::write(dir.path().join("2026/05/ignore.txt"), "x").unwrap();
+
+        let mut via_primitive = super::super::rollout_index::rollout_files_under(dir.path());
+        via_primitive.sort();
+        let mut via_index: Vec<_> =
+            super::super::rollout_index::cached_indexed_rollouts(dir.path())
+                .into_iter()
+                .map(|item| item.path)
+                .collect();
+        via_index.sort();
+        let mut expected = vec![a, b];
+        expected.sort();
+
+        assert_eq!(via_primitive, expected);
+        assert_eq!(via_index, expected);
+    }
+
+    // TEST-003 (REQ-003): a non-TUI (codex_exec) rollout discovered by the index
+    // is still excluded by the resolver filters, so the cache change does not
+    // alter selection semantics.
+    #[test]
+    fn indexed_lookup_still_excludes_codex_exec_rollouts() {
+        super::super::rollout_index::reset_cache_for_tests();
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        write_rollout_with_source(
+            dir.path(),
+            "rollout-exec.jsonl",
+            "sess-1",
+            cwd.path(),
+            "exec",
+            "codex_exec",
+        );
+        let tui = write_rollout(dir.path(), "rollout-tui.jsonl", "sess-1", cwd.path(), "");
+
+        let selection =
+            resolve_codex_tui_session(Some("sess-1"), cwd.path(), Some(dir.path()), false);
+
+        assert!(selection.resume);
+        assert_eq!(
+            selection.candidate_count, 1,
+            "codex_exec rollout must remain excluded even through the index"
+        );
+        assert_eq!(selection.rollout_path.as_deref(), Some(tui.as_path()));
     }
 }

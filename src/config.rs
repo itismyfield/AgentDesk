@@ -1404,6 +1404,18 @@ pub struct RuntimeSettingsConfig {
     /// live-reloadable key of the three TUI hook registry settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tui_hook_registry_enabled: Option<bool>,
+    /// Enable the in-process Codex rollout discovery index cache used by the
+    /// Codex TUI resume / follow-up readiness paths
+    /// (`codex_tui::rollout_index`). The cache avoids re-walking
+    /// `~/.codex/sessions` and re-reading rollout headers on every lookup.
+    ///
+    /// Defaults ON when unset (`None`). Set to `false` to force the legacy
+    /// per-lookup recursive scan + header read — the built-in rollback for the
+    /// `codex-rollout-index-cache` feature. Read live via
+    /// `config_live_reload::current()` so an `agentdesk.yaml` edit applies on the
+    /// next lookup without a restart; not part of the restart-required set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_rollout_index_cache_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub reset_overrides_on_restart: bool,
 }
@@ -1441,6 +1453,7 @@ impl RuntimeSettingsConfig {
             && self.tui_hook_buffer_ttl_secs.is_none()
             && self.tui_unclaimed_stop_delay_ms.is_none()
             && self.tui_hook_registry_enabled.is_none()
+            && self.codex_rollout_index_cache_enabled.is_none()
             && !self.reset_overrides_on_restart
     }
 }
