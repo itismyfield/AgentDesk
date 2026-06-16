@@ -922,10 +922,14 @@
     message handler; bugfix only outside a further extraction plan).
   - `src/services/discord/meeting_orchestrator.rs` (3222 lines after #3034
     dead-code sweep removed `is_meeting_channel`).
-  - `src/services/discord/turn_bridge/tmux_runtime.rs` (1545 lines; provider
-    stop-token/tmux binding runtime + PID-exit observation helper (#2426),
-    split before adding non-bugfix behavior. #3169: added the
-    claude-anonymous-teardown SIGINT suppression guard (death #3)).
+  - `src/services/discord/turn_bridge/tmux_runtime.rs` (964 prod lines; provider
+    stop-token/tmux binding runtime + the async interrupt/cancel/hard-stop
+    orchestration + session-teardown. #3169: the claude-anonymous-teardown
+    SIGINT suppression guard (death #3) lives in the `interrupt_policy` child.
+    #3479 decomposed the giant 1545 -> 964 by moving three cohesive, verbatim
+    clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
+    `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
+    giant-file. Bugfix only outside a further extraction plan).
   - `src/services/discord/turn_bridge/mod.rs` (6448 prod lines; the BRIDGE
     spawn/turn-lifecycle surface — `spawn_turn_bridge` and the per-channel
     turn loop. Registered giant-file (#3038 decompose target — see
@@ -998,7 +1002,32 @@
     `work_dispatch_completion_context`, `build_work_dispatch_completion_result`,
     and the `noop`/tracked-change context builders. Reads git history + Postgres
     completion hints; not a giant-file).
-  - `src/services/discord/turn_bridge/tmux_runtime.rs` (1545 lines).
+  - `src/services/discord/turn_bridge/tmux_runtime.rs` (964 prod lines; no longer
+    a giant-file after #3479 — see the description above and the three child
+    entries below).
+  - `src/services/discord/turn_bridge/tmux_runtime/interrupt_policy.rs` (225 prod
+    lines; pure provider turn-interrupt policy decisions + value types extracted
+    verbatim from `tmux_runtime.rs` by #3479: `ProviderTurnInterruptPlan`,
+    `ProviderTurnInterruptOutcome`, `interrupt_sigint_target_missing` (#3029 A),
+    `provider_turn_interrupt_plan`, `fallback_sigint_pid_for_provider` (#3021),
+    the `#3207` claude session-preserving delivery selection
+    (`ClaudeTurnInterruptDelivery` / `claude_turn_interrupt_delivery` /
+    `build_claude_interrupt_control_line`), and the `#3169`
+    `ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON` sentinel +
+    `claude_teardown_sigint_suppressed` + their tests. No IO/async; not a
+    giant-file).
+  - `src/services/discord/turn_bridge/tmux_runtime/process_table.rs` (248 prod
+    lines; `ps`-backed process-table discovery extracted verbatim from
+    `tmux_runtime.rs` by #3479: `ProcessRow`, `provider_cli_pid_in_tmux`,
+    `pane_foreground_is_provider_wrapper`, `select_provider_pid_in_pane`, the
+    descendant-walk/command-match scoring helpers, the wrapper-FIFO writer
+    (`write_line_to_wrapper_fifo`), and the `send_sigint` primitive. Depends only
+    on `platform::tmux::pane_pid` + `libc`/`std`; not a giant-file).
+  - `src/services/discord/turn_bridge/tmux_runtime/pid_exit.rs` (176 prod lines;
+    the `#2426` OS-level PID-exit observation family extracted verbatim from
+    `tmux_runtime.rs` by #3479: `wait_for_pid_exit` (kqueue `NOTE_EXIT` on macOS,
+    `pidfd_open`+`poll` on Linux, bounded-sleep fallback) + its tests. Depends
+    only on `libc`/`std`/`tokio`; not a giant-file).
   - `src/services/discord/turn_bridge/terminal_delivery.rs` (604 prod lines;
     no longer a giant-file after the #3028 splitter fix corrected its inline
     `#[cfg(test)] mod` accounting (previously miscounted as 1341 prod). Its

@@ -312,7 +312,10 @@
 # #3034 batch-8: +1 for a test-only `#[allow(dead_code)]` on
 # `session_bound_terminal_delivery_route_decision` (#3041 route decision, tested).
 "src/services/discord/session_relay_sink.rs" = 1731
-"src/services/discord/turn_bridge/tmux_runtime.rs" = 1545
+# #3479: turn_bridge/tmux_runtime.rs decomposed into tmux_runtime/ directory
+# modules (root tmux_runtime.rs 964 prod LoC + sub-1000-LoC
+# tmux_runtime/{interrupt_policy,process_table,pid_exit}.rs) — dropped below the
+# giant threshold, so its ratchet entry is deleted (win; no baseline raises).
 "src/services/discord/commands/text_commands.rs" = 1493
 # terminal_delivery.rs dropped to 504 prod LoC after the #3028 splitter fix
 # (its inline test mod was previously miscounted as production), so it is no

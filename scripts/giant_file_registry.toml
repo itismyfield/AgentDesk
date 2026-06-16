@@ -116,7 +116,13 @@ grandfathered_baseline_paths = [
   "src/services/discord/tui_prompt_relay.rs",
   # completion_guard.rs decomposed in #3479 (-> 872 prod LoC); win-locked out of
   # both `grandfathered` and this frozen baseline (see note in `grandfathered`).
-  "src/services/discord/turn_bridge/tmux_runtime.rs",
+  # turn_bridge/tmux_runtime.rs dropped to 964 prod LoC in #3479 (the pure
+  # interrupt-policy decisions, the ps-backed process-table discovery, and the
+  # OS-level PID-exit observation moved verbatim into tmux_runtime/ child
+  # modules); no longer a prod-giant, so it is removed from the frozen baseline
+  # as well as `grandfathered` below (win-locked: a re-expanded tmux_runtime
+  # cannot be re-grandfathered — it would have to land as a full [[entry]] or
+  # shrink). The split outputs stay sub-threshold and are not ratcheted.
   "src/services/discord/watchers/lifecycle.rs",
   "src/services/discord_config_audit.rs",
   "src/services/dispatched_sessions.rs",
@@ -231,7 +237,12 @@ grandfathered = [
   # the frozen baseline above (win-locked: a re-expanded completion_guard.rs
   # cannot be re-grandfathered). The split outputs stay sub-threshold and are
   # not ratcheted.
-  "src/services/discord/turn_bridge/tmux_runtime.rs",
+  # turn_bridge/tmux_runtime.rs was decomposed in #3479 (1545 prod LoC -> 964-line
+  # module root + sub-1000-LoC tmux_runtime/{interrupt_policy,process_table,
+  # pid_exit}.rs); no longer a prod-giant, so it is removed from `grandfathered`
+  # and from the baseline guard above (win-locked: a re-expanded tmux_runtime
+  # cannot be re-grandfathered — it would have to land as a full [[entry]] or
+  # shrink). The split outputs stay sub-threshold and are not ratcheted.
   "src/services/discord/watchers/lifecycle.rs",
   "src/services/discord_config_audit.rs",
   "src/services/dispatched_sessions.rs",
