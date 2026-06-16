@@ -411,8 +411,8 @@
   `crate::services::discord::` path substitutions (8) and the `pub(super)`
   visibility needed by the root re-import; the `run_bot` body, the builder's
   side-effecting initializer order (`load_queue_exit_placeholder_clears` ↔
-  `load_generation` ↔ `TurnFinalizer::spawn` ↔ `StatusPanelController::spawn`
-  ↔ `broadcast::channel`), and the standby-before-lease call order are
+  `load_generation` ↔ `TurnFinalizer::spawn` ↔ `broadcast::channel`), and the
+  standby-before-lease call order are
   unchanged. Worker-local module move only: no multinode ownership,
   singleton, or lease assumption changes.
 - #3038 SharedData S3: `runtime_bootstrap.rs` gained restart-lifecycle
@@ -591,21 +591,13 @@
   removed flag was a per-handle in-process atomic, and the surviving authority (the
   per-process actor-owned ledger) is unchanged. No new multinode
   ownership/singleton/lease assumption.
-- #3078 (status-panel controller — faithful watcher CREATE/ADOPT shadow-parity):
-  completes the create/adopt sub-step PR-4 deferred. `status_panel_controller.rs`
-  gains a **pure** `watcher_create_parity_decision` (a `WatcherCreateDecision`
-  re-derived from the SAME raw inputs the legacy
-  `watcher_should_create_external_input_status_panel` branch reads — no actor
-  round-trip, no ledger read, no IO); `watcher_panel_parity.rs` gains the
-  `assert_watcher_create_parity` shadow check (independent legacy derivation +
-  `debug_assert`/bounded-warn, legacy still executes the real create/adopt IO);
-  `tmux_watcher.rs` adds a single net-zero hook at the deferred-comment seam
-  (production LoC held at the 9598 freeze, generated docs unchanged). The
-  controller stays a **per-process** in-memory actor on `SharedData` (peer of
-  `TurnFinalizer`); the parity decision reads only the watcher's process-local
-  raw inputs and the still-dormant ledger, performs no Discord IO, acquires no
-  lease, and changes no leader/standby ownership. Behaviour-preserving (shadow
-  only). No new multinode ownership/singleton/lease assumption.
+- #3078 (status-panel controller shadow-parity): **SUPERSEDED — removed in #3479.**
+  The `StatusPanelController` cutover was frozen 2026-06-12 and superseded by
+  #3089 M1 (single-message footer; the "one owner" goal was met there); the
+  dormant shadow-parity substrate (`status_panel_controller.rs`,
+  `watcher_panel_parity.rs`, `shadow_parity_warn.rs`) was deleted. It had only
+  ever been a per-process in-memory shadow performing no Discord IO, so no
+  multinode ownership/singleton/lease assumption was introduced or removed.
 - #3231 (worktree GC 강화 — `storage.worktree_orphan_sweep`): extends the hourly
   orphan sweep with (A) a GUID-primary resumable keep-set + a runtime naming
   whitelist that protects manual dev worktrees, and (B) a one-level recursion into

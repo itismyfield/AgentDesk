@@ -110,10 +110,9 @@ impl TurnKey {
         }
     }
 
-    /// The literal full-identity key for this turn. Shared with the
-    /// `StatusPanelController` (#3078), which keys its panel ledger on the same
-    /// `LedgerKey` so the panel and finalize ledgers collapse channel-only
-    /// (`user_msg_id == 0`) recovery/orphan terminals onto the same live entry.
+    /// The literal full-identity key for this turn. The finalize ledger keys on
+    /// this `LedgerKey` so channel-only (`user_msg_id == 0`) recovery/orphan
+    /// terminals collapse onto the same live entry.
     pub(in crate::services::discord) fn exact_key(&self) -> LedgerKey {
         LedgerKey {
             channel_id: self.channel_id,
@@ -124,8 +123,7 @@ impl TurnKey {
 }
 
 /// The exact ledger match: channel + restart generation + user message id.
-/// Full identity so sequential same-channel turns never collide. Shared with
-/// the `StatusPanelController` (#3078) so both ledgers key turns identically.
+/// Full identity so sequential same-channel turns never collide.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(in crate::services::discord) struct LedgerKey {
     pub(in crate::services::discord) channel_id: ChannelId,
@@ -165,10 +163,9 @@ fn ledger_has_live_watcher_pending(
     })
 }
 
-/// Channel-only collapse over an explicit candidate set. The finalizer keeps
-/// its in-line `HashMap` walk above; the `StatusPanelController` (#3078) passes
-/// its own `(LedgerKey, is_terminal)` pairs here so the identical
-/// finalized-guard / single-live-entry semantics apply to the panel ledger
+/// Channel-only collapse over an explicit candidate set: callers pass their own
+/// `(LedgerKey, is_terminal)` pairs and get the identical finalized-guard /
+/// single-live-entry semantics as the finalizer's in-line `HashMap` walk above,
 /// without duplicating the subtle ambiguity rule.
 ///
 /// - A real `user_msg_id` uses its exact key.

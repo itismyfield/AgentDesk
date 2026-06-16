@@ -64,7 +64,10 @@
 # clusters in the root) deliberately STAYS here; moved unit tests live in sibling
 # utf8_chunk_decoder_tests.rs / terminal_readiness_tests.rs (excluded from the
 # production splitter).
-"src/services/discord/tmux_watcher.rs" = 6939
+# #3479 SPC-shadow removal: lowered 6939 -> 6922 (deleted the dead StatusPanelController
+# shadow-parity calls — 2x shadow_adopt_liveness_reacquired_panel + assert_watcher_create_parity;
+# legacy reacquire/create/edit IO unchanged).
+"src/services/discord/tmux_watcher.rs" = 6922
 # #3038 tmux_watcher S1 child modules, frozen at landed production LoC.
 "src/services/discord/tmux_watcher/commit_decisions.rs" = 140
 "src/services/discord/tmux_watcher/completion_gate.rs" = 275
@@ -224,7 +227,10 @@
 # probes, worktree path/branch/info derivation, spawn-cwd — into the leaf module
 # recovery_engine/state_extractors.rs; zero logic change, `save_missing_session_handoff`
 # re-exported and root-called helpers re-imported byte-identical).
-"src/services/discord/recovery_engine.rs" = 3330
+# #3479 SPC-shadow removal: lowered 3330 -> 3276 (deleted the dead StatusPanelController
+# recovery-completion shadow block + assert_recovery_completion_parity fn + its dead test;
+# legacy completion_target let-else and complete_status_panel_v2_with_http IO unchanged).
+"src/services/discord/recovery_engine.rs" = 3276
 # #3034 batch-8: lowered 3771 -> 3770 (dead-code removal).
 # #3038 S1: +1 (3770 -> 3771) for the mechanical `shared.queued_placeholders` ->
 # `shared.queued.queued_placeholders` re-wire (one extra method-chain line) forced

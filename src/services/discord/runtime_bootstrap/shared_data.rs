@@ -1,7 +1,7 @@
 use super::*;
 
 /// Build all owned `SharedData` fields and wrap in an `Arc`. Side-effecting
-/// initializers (`TurnFinalizer::spawn`, `StatusPanelController::spawn`,
+/// initializers (`TurnFinalizer::spawn`,
 /// `runtime_store::load_generation`, `load_queue_exit_placeholder_clears`,
 /// the `inflight_signals` broadcast channel) run here in the exact same order
 /// as the original inline struct literal. `bot_settings`, `initial_skills`,
@@ -80,13 +80,12 @@ pub(super) fn run_bot_build_shared_data(
         // #3038 S3: wrapped at the first-member position with member
         // expressions byte-identical. The three trailing members
         // (`global_finalizing` / `shutdown_remaining` / `shutdown_counted`)
-        // move textually above the TurnFinalizer/StatusPanelController spawn
+        // move textually above the TurnFinalizer spawn
         // calls, but all three are side-effect-free initializers (parameter
         // move, `Arc::clone`, const constructor), so the relative order of
         // every side-effecting initializer
         // (`load_queue_exit_placeholder_clears` ↔ `load_generation` ↔
-        // `Instant::now` ↔ `TurnFinalizer::spawn` ↔
-        // `StatusPanelController::spawn` ↔ `broadcast::channel`) is
+        // `Instant::now` ↔ `TurnFinalizer::spawn` ↔ `broadcast::channel`) is
         // preserved.
         restart: RestartLifecycle {
             recovering_channels: dashmap::DashMap::new(),
@@ -104,10 +103,6 @@ pub(super) fn run_bot_build_shared_data(
             shutdown_counted: std::sync::atomic::AtomicBool::new(false),
         },
         turn_finalizer: crate::services::discord::turn_finalizer::TurnFinalizer::spawn(),
-        status_panel_controller:
-            crate::services::discord::status_panel_controller::StatusPanelController::spawn(
-                status_panel_v2_enabled,
-            ),
         intake_dedup: dashmap::DashMap::new(),
         dispatch_thread_parents: dashmap::DashMap::new(),
         bot_connected: std::sync::atomic::AtomicBool::new(false),

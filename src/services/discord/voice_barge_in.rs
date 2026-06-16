@@ -2986,8 +2986,6 @@ mod tests {
                 shutdown_counted: std::sync::atomic::AtomicBool::new(false),
             },
             turn_finalizer: super::super::turn_finalizer::TurnFinalizer::spawn(),
-            status_panel_controller:
-                super::super::status_panel_controller::StatusPanelController::spawn(false),
             intake_dedup: dashmap::DashMap::new(),
             dispatch_thread_parents: dashmap::DashMap::new(),
             voice_barge_in: Arc::new(VoiceBargeInRuntime::disabled()),
