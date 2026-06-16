@@ -213,7 +213,12 @@
 # terminal-success watcher / recovery start-offset helper cluster into the leaf
 # module recovery_engine/terminal_watcher.rs; zero logic change, externally-called
 # helpers re-imported byte-identical).
-"src/services/discord/recovery_engine.rs" = 3607
+# #3479 item-2: lowered 3607 -> 3424 (behavior-preserving extraction of the
+# inflight-state derivation helper cluster — handoff message, ready-for-input
+# probes, worktree path/branch/info derivation, spawn-cwd — into the leaf module
+# recovery_engine/state_extractors.rs; zero logic change, `save_missing_session_handoff`
+# re-exported and root-called helpers re-imported byte-identical).
+"src/services/discord/recovery_engine.rs" = 3424
 # #3034 batch-8: lowered 3771 -> 3770 (dead-code removal).
 # #3038 S1: +1 (3770 -> 3771) for the mechanical `shared.queued_placeholders` ->
 # `shared.queued.queued_placeholders` re-wire (one extra method-chain line) forced

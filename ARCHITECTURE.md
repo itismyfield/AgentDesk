@@ -449,6 +449,7 @@ src/
 │   │   │   ├── jsonl_extract.rs
 │   │   │   ├── output_path_detect.rs
 │   │   │   ├── phase_policy.rs
+│   │   │   ├── state_extractors.rs
 │   │   │   ├── status_panel.rs
 │   │   │   └── terminal_watcher.rs
 │   │   ├── recovery_paths/

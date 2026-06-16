@@ -797,7 +797,12 @@
     its G1/G2 snapshots from `external_input_relay_lease(...).map(|l| l.generation)`;
     +62 from #3304: slash-command canonical prompt keys for `<command-*>` XML vs
     `/command args` dedupe, plus focused loop skill-expansion regressions).
-  - `src/services/discord/recovery_engine.rs` (3607 lines; #3479 item-2 extracted
+  - `src/services/discord/recovery_engine.rs` (3424 lines; #3479 item-2 extracted
+    the inflight-state derivation helper cluster (handoff message, ready-for-input
+    probes, worktree path/branch/info derivation, spawn-cwd) into the
+    sub-1000-prod-LoC leaf module `recovery_engine/state_extractors.rs` (~150) —
+    behaviour-preserving move, `save_missing_session_handoff` re-exported and
+    root-called helpers re-imported byte-identical; #3479 item-2 also extracted
     the terminal-success watcher / recovery start-offset helper cluster into the
     sub-1000-prod-LoC leaf module `recovery_engine/terminal_watcher.rs` (137) —
     behaviour-preserving move, externally-called helpers re-imported byte-identical;
