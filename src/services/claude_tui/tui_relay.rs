@@ -27,6 +27,7 @@
 use std::{sync::Arc, time::Duration};
 
 use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::time::Instant;
@@ -131,6 +132,21 @@ pub struct WaitRequest {
     /// any provider matches.
     #[serde(default)]
     pub provider: Option<String>,
+    /// Optional turn-boundary lower bound (RFC3339 / ISO-8601 wall-clock).
+    ///
+    /// #tui-hook-ttl-buffer: a `/tui/wait` MUST NOT be satisfied by a Stop (or
+    /// token) hook that arrived *before* the caller's turn began, otherwise a
+    /// previous turn's still-buffered (un-claimed, within-TTL) Stop can wake a
+    /// brand-new wait. `WaitRequest` itself carries no turn id, so the caller —
+    /// which is the only party that knows when it submitted the turn — passes the
+    /// turn-start wall clock here. Any buffered/broadcast event with
+    /// `received_at < not_before` is then rejected by `event_matches`, applied
+    /// uniformly to both the registry-replay claim and the live broadcast loop.
+    ///
+    /// Optional and additive: callers that omit it keep the prior behaviour
+    /// (any in-TTL event matches), so this is backward compatible.
+    #[serde(default)]
+    pub not_before: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -281,6 +297,7 @@ async fn handle_wait(Json(req): Json<WaitRequest>) -> Json<Value> {
         req.session_id.as_deref(),
         &until_mode,
         token.as_deref(),
+        req.not_before,
     ) {
         let summary = json!({
             "provider": early.provider,
@@ -335,6 +352,7 @@ async fn handle_wait(Json(req): Json<WaitRequest>) -> Json<Value> {
                     req.session_id.as_deref(),
                     &until_mode,
                     token.as_deref(),
+                    req.not_before,
                 ) {
                     continue;
                 }
@@ -374,6 +392,7 @@ fn try_claim_registry_match(
     want_session_id: Option<&str>,
     until_mode: &str,
     token: Option<&str>,
+    not_before: Option<DateTime<Utc>>,
 ) -> Option<HookEvent> {
     use crate::services::claude_tui::hook_registry;
     if !hook_registry::registry_enabled() {
@@ -397,6 +416,7 @@ fn try_claim_registry_match(
             want_session_id,
             &until_mode,
             token.as_deref(),
+            not_before,
         )
     })
 }
@@ -407,7 +427,19 @@ fn event_matches(
     want_session_id: Option<&str>,
     until_mode: &str,
     token: Option<&str>,
+    not_before: Option<DateTime<Utc>>,
 ) -> bool {
+    // #tui-hook-ttl-buffer (turn-boundary gate): reject any event that arrived
+    // before the caller's turn started. This is the lower bound that stops a
+    // previous turn's still-buffered Stop from satisfying a new wait. Applied
+    // first so it gates BOTH the registry-replay claim and the live broadcast
+    // loop (both funnel through this predicate). Callers that omit `not_before`
+    // keep the prior any-in-TTL-event behaviour.
+    if let Some(min) = not_before {
+        if event.received_at < min {
+            return false;
+        }
+    }
     if let Some(provider) = want_provider {
         if !provider.trim().is_empty() && !event.provider.eq_ignore_ascii_case(provider.trim()) {
             return false;
@@ -549,33 +581,54 @@ mod tests {
     #[test]
     fn stop_event_matches_default() {
         let event = make_event("claude", "abc", HookEventKind::Stop, json!({}));
-        assert!(event_matches(&event, None, None, "stop", None));
+        assert!(event_matches(&event, None, None, "stop", None, None));
     }
 
     #[test]
     fn subagent_stop_also_matches_stop_mode() {
         let event = make_event("claude", "abc", HookEventKind::SubagentStop, json!({}));
-        assert!(event_matches(&event, None, None, "stop", None));
+        assert!(event_matches(&event, None, None, "stop", None, None));
     }
 
     #[test]
     fn unrelated_event_does_not_match_stop() {
         let event = make_event("claude", "abc", HookEventKind::UserPromptSubmit, json!({}));
-        assert!(!event_matches(&event, None, None, "stop", None));
+        assert!(!event_matches(&event, None, None, "stop", None, None));
     }
 
     #[test]
     fn provider_filter_rejects_mismatch() {
         let event = make_event("codex", "abc", HookEventKind::Stop, json!({}));
-        assert!(!event_matches(&event, Some("claude"), None, "stop", None));
-        assert!(event_matches(&event, Some("codex"), None, "stop", None));
+        assert!(!event_matches(
+            &event,
+            Some("claude"),
+            None,
+            "stop",
+            None,
+            None
+        ));
+        assert!(event_matches(
+            &event,
+            Some("codex"),
+            None,
+            "stop",
+            None,
+            None
+        ));
     }
 
     #[test]
     fn session_id_filter_rejects_mismatch() {
         let event = make_event("claude", "abc", HookEventKind::Stop, json!({}));
-        assert!(!event_matches(&event, None, Some("xyz"), "stop", None));
-        assert!(event_matches(&event, None, Some("abc"), "stop", None));
+        assert!(!event_matches(
+            &event,
+            None,
+            Some("xyz"),
+            "stop",
+            None,
+            None
+        ));
+        assert!(event_matches(&event, None, Some("abc"), "stop", None, None));
     }
 
     #[test]
@@ -591,16 +644,100 @@ mod tests {
             None,
             None,
             "token",
-            Some("marker-XYZ")
+            Some("marker-XYZ"),
+            None,
         ));
-        assert!(!event_matches(&event, None, None, "token", Some("absent")));
+        assert!(!event_matches(
+            &event,
+            None,
+            None,
+            "token",
+            Some("absent"),
+            None
+        ));
     }
 
     #[test]
     fn token_mode_requires_non_empty_token() {
         let event = make_event("claude", "abc", HookEventKind::UserPromptSubmit, json!({}));
-        assert!(!event_matches(&event, None, None, "token", None));
-        assert!(!event_matches(&event, None, None, "token", Some("")));
+        assert!(!event_matches(&event, None, None, "token", None, None));
+        assert!(!event_matches(&event, None, None, "token", Some(""), None));
+    }
+
+    // -------- #tui-hook-ttl-buffer: turn-boundary lower bound (`not_before`) ----
+
+    /// A Stop that arrived BEFORE the caller's turn began (`received_at <
+    /// not_before`) must NOT satisfy the wait — this is the turn-boundary gate
+    /// that stops a previous turn's still-buffered, un-claimed, within-TTL Stop
+    /// from waking a brand-new `/tui/wait`. The same predicate gates both the
+    /// registry-replay claim and the live broadcast loop, so closing it here
+    /// closes the stale-Stop replay race deferred from the earlier fix pass.
+    #[test]
+    fn stale_stop_before_turn_start_is_rejected_by_not_before() {
+        let turn_start = Utc::now();
+        // Stop from the *previous* turn: stamped one second before the boundary.
+        let mut stale = make_event("claude", "abc", HookEventKind::Stop, json!({}));
+        stale.received_at = turn_start - chrono::Duration::seconds(1);
+
+        // Without a lower bound the stale Stop matches (legacy behaviour).
+        assert!(event_matches(&stale, None, None, "stop", None, None));
+        // With the turn boundary it is rejected: it predates this turn.
+        assert!(!event_matches(
+            &stale,
+            None,
+            None,
+            "stop",
+            None,
+            Some(turn_start),
+        ));
+    }
+
+    /// A Stop that arrives at or after the turn boundary still satisfies the
+    /// wait — `not_before` only rejects strictly-older events, so a fresh Stop
+    /// (including one stamped exactly at the boundary) is honoured.
+    #[test]
+    fn fresh_stop_at_or_after_turn_start_still_matches_with_not_before() {
+        let turn_start = Utc::now();
+
+        // Exactly at the boundary: inclusive, must match.
+        let mut at_boundary = make_event("claude", "abc", HookEventKind::Stop, json!({}));
+        at_boundary.received_at = turn_start;
+        assert!(event_matches(
+            &at_boundary,
+            None,
+            None,
+            "stop",
+            None,
+            Some(turn_start),
+        ));
+
+        // After the boundary: must match.
+        let mut after = make_event("claude", "abc", HookEventKind::Stop, json!({}));
+        after.received_at = turn_start + chrono::Duration::seconds(1);
+        assert!(event_matches(
+            &after,
+            None,
+            None,
+            "stop",
+            None,
+            Some(turn_start),
+        ));
+    }
+
+    /// `WaitRequest::not_before` is optional and additive: a request body that
+    /// omits it deserializes to `None`, preserving the prior any-in-TTL-event
+    /// behaviour for existing callers.
+    #[test]
+    fn wait_request_not_before_defaults_to_none() {
+        let req: WaitRequest =
+            serde_json::from_value(json!({ "session_name": "s" })).expect("deserialize");
+        assert!(req.not_before.is_none());
+
+        let req: WaitRequest = serde_json::from_value(
+            json!({ "session_name": "s", "not_before": "2026-06-16T00:00:00Z" }),
+        )
+        .expect("deserialize with not_before");
+        assert!(req.not_before.is_some());
     }
 
     // -------- #tui-hook-ttl-buffer: registry-backed early-Stop claim --------
@@ -624,12 +761,12 @@ mod tests {
             make_event(provider, session, HookEventKind::Stop, json!({})),
         );
 
-        let matched = try_claim_registry_match(Some(provider), Some(session), "stop", None);
+        let matched = try_claim_registry_match(Some(provider), Some(session), "stop", None, None);
         assert!(matched.is_some(), "buffered early Stop must be claimed");
         assert_eq!(matched.unwrap().kind, HookEventKind::Stop);
 
         // Single-consumption: a second claim finds nothing.
-        let second = try_claim_registry_match(Some(provider), Some(session), "stop", None);
+        let second = try_claim_registry_match(Some(provider), Some(session), "stop", None, None);
         assert!(
             second.is_none(),
             "claimed Stop must not replay to a later wait"
@@ -641,8 +778,8 @@ mod tests {
     /// through to the broadcast wait (registry returns `None`).
     #[test]
     fn try_claim_registry_match_skips_when_no_session_id() {
-        assert!(try_claim_registry_match(Some("claude"), None, "stop", None).is_none());
-        assert!(try_claim_registry_match(None, Some("sid"), "stop", None).is_none());
+        assert!(try_claim_registry_match(Some("claude"), None, "stop", None, None).is_none());
+        assert!(try_claim_registry_match(None, Some("sid"), "stop", None, None).is_none());
     }
 
     /// Cross-provider isolation at the wait seam: a Stop buffered for
@@ -662,9 +799,13 @@ mod tests {
             make_event("codex", session, HookEventKind::Stop, json!({})),
         );
         // A claude wait for the same session id must not see the codex Stop.
-        assert!(try_claim_registry_match(Some("claude"), Some(session), "stop", None).is_none());
+        assert!(
+            try_claim_registry_match(Some("claude"), Some(session), "stop", None, None).is_none()
+        );
         // The codex wait does see it.
-        assert!(try_claim_registry_match(Some("codex"), Some(session), "stop", None).is_some());
+        assert!(
+            try_claim_registry_match(Some("codex"), Some(session), "stop", None, None).is_some()
+        );
     }
 
     /// Do-not-discard-unmatched-events: a `until=token` wait whose token does not
@@ -686,8 +827,13 @@ mod tests {
         );
 
         // A token wait with a non-matching token finds nothing.
-        let token_miss =
-            try_claim_registry_match(Some(provider), Some(session), "token", Some("absent-token"));
+        let token_miss = try_claim_registry_match(
+            Some(provider),
+            Some(session),
+            "token",
+            Some("absent-token"),
+            None,
+        );
         assert!(
             token_miss.is_none(),
             "non-matching token wait matches nothing"
@@ -695,7 +841,7 @@ mod tests {
 
         // The buffered Stop must still be claimable by a later Stop wait — the
         // failed token wait must not have discarded it.
-        let stop_hit = try_claim_registry_match(Some(provider), Some(session), "stop", None);
+        let stop_hit = try_claim_registry_match(Some(provider), Some(session), "stop", None, None);
         assert!(
             stop_hit.is_some(),
             "unmatched token wait must not discard the buffered Stop"
@@ -728,12 +874,17 @@ mod tests {
         );
 
         // Token wait consumes only the token payload.
-        let token_hit =
-            try_claim_registry_match(Some(provider), Some(session), "token", Some("needle-42"));
+        let token_hit = try_claim_registry_match(
+            Some(provider),
+            Some(session),
+            "token",
+            Some("needle-42"),
+            None,
+        );
         assert!(token_hit.is_some(), "token payload must be claimable");
 
         // The Stop is still buffered and claimable.
-        let stop_hit = try_claim_registry_match(Some(provider), Some(session), "stop", None);
+        let stop_hit = try_claim_registry_match(Some(provider), Some(session), "stop", None, None);
         assert!(
             stop_hit.is_some(),
             "the Stop must survive a token-mode claim on the same session"
