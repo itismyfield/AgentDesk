@@ -1,5 +1,7 @@
 # Discord Outbound Migration — Coverage Map (#1006 v3 / #1280 / #1436 / #1457)
 
+Last refreshed: 2026-06-16 (against `main` @ `8ec7336e32eb6ef89e1143fab2543f2fc644ebac`)
+
 > Implementation refresh for #1457 / #2368 / #2533 / #2535: v3 delivery now
 > covers dispatch outbox, review followups, issue announcements, monitoring
 > status, meeting notifications, short manual/DM notifications, gateway

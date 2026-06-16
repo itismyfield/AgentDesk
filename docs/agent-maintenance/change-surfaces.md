@@ -84,7 +84,7 @@
   pre-migration giant-file territory.
 - do_not_edit_without_migration_plan:
   - `src/engine/mod.rs` (1265 lines, giant-file).
-  - `src/engine/ops/db_ops.rs` (1111 lines, giant-file).
+  - `src/engine/ops/db_ops.rs` (1134 lines, giant-file).
   - `src/engine/loader.rs` (1332 lines, giant-file) — engine loader / QuickJS
     validator surface; split before adding non-bugfix behavior.
   - `src/pipeline.rs` (1314 lines, giant-file).
