@@ -954,7 +954,7 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6239 prod lines; the BRIDGE
+  - `src/services/discord/turn_bridge/mod.rs` (6189 prod lines; the BRIDGE
     spawn/turn-lifecycle surface — `spawn_turn_bridge` and the per-channel
     turn loop. #3479 extracted the task/session-panel line rendering +
     active-placeholder-card helpers into the `panel_lifecycle.rs` leaf.
@@ -1003,6 +1003,14 @@
     `spawn_watcher_orphan_spinner_cleanup_retry` + their tests. The retry-spawn
     routes through `task_supervisor`/`placeholder_cleanup` and takes all deps by
     value; not a giant-file).
+  - `src/services/discord/turn_bridge/response_delivery.rs` (74 prod lines; pure
+    response-delivery + transcript-event helpers extracted verbatim from `mod.rs`
+    by #3479: `push_transcript_event`, `response_portion_after_offset`,
+    `terminal_delivery_response_after_offset`,
+    `done_result_requires_full_terminal_replay`. All `pub(super)` and re-imported
+    so the parent call sites + inline tests stay byte-identical; the two
+    discord-level `super::` refs (`response_sanitizer`, `DISCORD_MSG_LIMIT`)
+    deepened to `super::super::`; no IO/async; not a giant-file).
   - `src/services/discord/turn_bridge/completion_guard.rs` (872 prod lines; no
     longer a giant-file after #3479 verbatim-extracted two leaf child modules
     under `completion_guard/` (1834 -> 872 prod). It now holds the
