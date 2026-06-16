@@ -930,9 +930,11 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6448 prod lines; the BRIDGE
+  - `src/services/discord/turn_bridge/mod.rs` (6239 prod lines; the BRIDGE
     spawn/turn-lifecycle surface — `spawn_turn_bridge` and the per-channel
-    turn loop. Registered giant-file (#3038 decompose target — see
+    turn loop. #3479 extracted the task/session-panel line rendering +
+    active-placeholder-card helpers into the `panel_lifecycle.rs` leaf.
+    Registered giant-file (#3038 decompose target — see
     `giant-file-registry.md`, owner `discord-relay`, deadline 2026-08-31).
     It surfaced as a giant only after #3028 fixed the prod/test splitter: an
     unterminated char-literal scan on a Rust lifetime (`&'a self`) inside the
