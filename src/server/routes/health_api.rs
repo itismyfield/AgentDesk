@@ -313,9 +313,14 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
         // `public_health_json` is an explicit allowlist so this never leaks on
         // the public `/api/health` endpoint. Additive: a NEW diagnostic block,
         // not a new `degraded_reasons` category.
+        let (gate_enabled_override, gate_danger_override) =
+            load_dispatch_gate_runtime_overrides(state.pg_pool_ref()).await;
         json["rate_limit_dispatch_gate"] =
-            serde_json::to_value(crate::services::dispatch_gate::diagnostics())
-                .unwrap_or_else(|_| serde_json::json!({}));
+            serde_json::to_value(crate::services::dispatch_gate::diagnostics_with_overrides(
+                gate_enabled_override,
+                gate_danger_override,
+            ))
+            .unwrap_or_else(|_| serde_json::json!({}));
 
         let http_status = if status.is_http_ready() {
             StatusCode::OK
@@ -620,6 +625,27 @@ async fn load_pipeline_override_report_pg(pg_pool: Option<&PgPool>) -> Option<se
         .ok()
         .flatten()?;
     serde_json::from_str(&raw).ok()
+}
+
+/// Read the dispatch-gate enable flag and gate danger threshold persisted via
+/// `PUT /api/settings/runtime-config` (`kv_meta` `runtime-config` JSON) so the
+/// diagnostics block reports the EFFECTIVE values the gate uses, not the
+/// YAML-only fallback. Returns `(None, None)` when no pool / no override.
+async fn load_dispatch_gate_runtime_overrides(
+    pg_pool: Option<&PgPool>,
+) -> (Option<bool>, Option<u64>) {
+    let Some(pool) = pg_pool else {
+        return (None, None);
+    };
+    let runtime_config =
+        sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
+            .bind("runtime-config")
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+    crate::services::dispatch_gate::persisted_runtime_overrides(runtime_config.as_ref())
 }
 
 async fn load_channel_session_state(

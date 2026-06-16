@@ -65,6 +65,40 @@ pub(crate) async fn activate_with_deps_pg(
     // status; deferred entries stay `pending`.
     let mut deferred_entries: Vec<serde_json::Value> = Vec::new();
 
+    // feature: rate-limit-aware-dispatch-gate.
+    //
+    // (1) P2 — populate the gate snapshots on EVERY serving node. `RateLimitSync`
+    // is leader-only, so on a follower the process-local pressure/agent maps are
+    // never filled by the sync loop. Refresh them here (throttled to ~120s) from
+    // the SHARED DB cache — read-only, no provider credentials — so the gate is
+    // not silently a no-op on whichever node serves `dispatch-next`.
+    //
+    // (2) P1 — honor the PERSISTED runtime toggle/threshold. The enable flag and
+    // gate danger threshold set via `PUT /api/settings/runtime-config` land in
+    // `kv_meta` and never reach `config_live_reload::current()`, so we read the
+    // persisted `runtime-config` here (mirroring `effective_max_entry_retries`)
+    // and pass the values into the gate. On a missing/error read the overrides
+    // are `None` and the gate falls back to the YAML snapshot then the compiled
+    // defaults (enabled, 100%). Both reads happen once per activate, off the
+    // per-entry loop.
+    {
+        let now = chrono::Utc::now().timestamp();
+        crate::services::dispatch_gate::refresh_snapshots_if_stale(pool, now).await;
+    }
+    let (gate_enabled_override, gate_danger_override) = {
+        let runtime_config = match load_kv_meta_value_pg(pool, "runtime-config") {
+            Ok(raw) => raw.and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok()),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "[auto-queue] failed to load persisted runtime-config for dispatch gate; falling back to YAML/defaults"
+                );
+                None
+            }
+        };
+        crate::services::dispatch_gate::persisted_runtime_overrides(runtime_config.as_ref())
+    };
+
     let mut new_dispatches_this_activate = 0_i64;
     for group in &groups_to_dispatch {
         // #2034 + #2048 F4: cap on TOTAL active turns. Refresh from DB at
@@ -275,17 +309,27 @@ pub(crate) async fn activate_with_deps_pg(
         // feature: rate-limit-aware-dispatch-gate (REQ-002). Evaluate provider
         // pressure AFTER the still_pending recheck and BEFORE slot allocation.
         // This is an O(1), lock-cheap, DB-free read of the in-memory pressure
-        // snapshot (refreshed off the hot path by rate_limit_sync_loop). On a
-        // `defer` decision we create NO slot, NO dispatch row, perform NO status
-        // mutation (the entry stays `pending` and resumes on the next activation
-        // once pressure clears), and surface an additive defer detail. The
-        // gate-enabled flag is read live each iteration via config_live_reload,
-        // so a concurrent disable simply falls through to normal dispatch on the
-        // next entry — no half-gated state.
-        let gate_decision = crate::services::dispatch_gate::evaluate_agent_provider_pressure(
-            &agent_id,
-            chrono::Utc::now().timestamp(),
-        );
+        // snapshot (refreshed off the hot path by rate_limit_sync_loop / lazily
+        // on this serving node). On a `defer` decision we create NO slot, NO
+        // dispatch row, perform NO status mutation (the entry stays `pending` and
+        // resumes on the next activation once pressure clears), and surface an
+        // additive defer detail.
+        //
+        // The enable flag and gate danger threshold are resolved from the
+        // PERSISTED runtime-config (kv_meta, written by
+        // PUT /api/settings/runtime-config) — read once per activate above — so a
+        // dashboard/API rollback toggle (and a persisted danger-threshold change)
+        // takes effect at runtime. The persisted value never reaches the YAML
+        // live snapshot, so the gate must honor kv_meta here; on a missing/error
+        // read the overrides are `None` and the gate falls back to the YAML
+        // snapshot then the compiled defaults (enabled, 100%).
+        let gate_decision =
+            crate::services::dispatch_gate::evaluate_agent_provider_pressure_with_overrides(
+                &agent_id,
+                chrono::Utc::now().timestamp(),
+                gate_enabled_override,
+                gate_danger_override,
+            );
         if gate_decision.verdict.is_defer() {
             crate::auto_queue_log!(
                 info,
