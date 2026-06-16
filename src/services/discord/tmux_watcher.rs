@@ -1187,6 +1187,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             should_flush_post_terminal_success_continuation(
                 turn_result_relayed,
                 found_result,
+                current_offset > data_start_offset,
                 &full_response,
             );
         if post_terminal_success_continuation_flush {
