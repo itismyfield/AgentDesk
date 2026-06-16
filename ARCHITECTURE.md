@@ -403,6 +403,9 @@ src/
 │   │   │   ├── snapshot.rs
 │   │   │   ├── stall_liveness.rs
 │   │   │   └── watcher_respawn.rs
+│   │   ├── idle_recap/
+│   │   │   ├── context_display.rs
+│   │   │   └── scrollback.rs
 │   │   ├── inflight/
 │   │   │   ├── budget.rs
 │   │   │   ├── model.rs

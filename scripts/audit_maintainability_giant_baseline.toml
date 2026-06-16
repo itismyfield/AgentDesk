@@ -296,9 +296,9 @@
 # its ratchet entry is deleted (win; no baseline raises).
 # #3034 batch-8: lowered 2333 -> 2332 (dropped `assistant_turns` construction site).
 "src/services/discord/watchers/lifecycle.rs" = 2332
-# #3034 batch-8: +1 for a test-only `#[allow(dead_code)]` on
-# `clear_idle_recap_for_channel_with` (test seam; prod wrappers removed).
-"src/services/discord/idle_recap.rs" = 1320
+# #3479: idle_recap.rs decomposed (scrollback + context_display submodules) —
+# dropped below the giant threshold, so its ratchet entry is deleted (win; no
+# baseline raises).
 # #3034 batch-8: lowered 2241 -> 2011 (deleted the dead #826/#897/#898 bg-trigger
 # notify-outbox subsystem — build/enqueue/reconcile/parse/rollback).
 # suppressed-label noise, user report 2026-06-12: +38 for provider-aware

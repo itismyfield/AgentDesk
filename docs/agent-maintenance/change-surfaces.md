@@ -775,13 +775,34 @@
     byte-identical call sites, while the module-internal
     `parse_claude_tui_launch_script_content` + `shell_words_from_line` stay private;
     below the giant-file threshold).
-  - `src/services/discord/idle_recap.rs` (1319 prod lines; idle-recap card
-    compose/post/clear surface, registered giant-file (#3036) — bugfix only
-    outside an extraction plan. Crossed 1000 prod LoC with #3146 Part 1: the
-    shared capture-at-claim + CAS clear helpers, the `channel_has_active_turn`
+  - `src/services/discord/idle_recap.rs` (idle-recap card compose/post/clear
+    surface; #3479 dropped it below the giant-file threshold by extracting the
+    scrollback/summarizer and token-context-display clusters into the two
+    submodules below, so it is no longer a registered giant — its registry entry
+    and ratchet baseline were removed. Remaining surface: the
+    snapshot/compose/post/clear/CAS lifecycle, the `channel_has_active_turn`
     mailbox/inflight probe, and the `post_recheck_action` seam that skips/undoes
-    a recap post when a turn raced the compose window. Split compose vs
-    lifecycle/clear submodules before adding behavior).
+    a recap post when a turn raced the compose window).
+  - `src/services/discord/idle_recap/scrollback.rs` (#3479 scrollback: the tmux
+    `capture-pane` tail capture, the `claude-e` transcript-tail fallback
+    (`capture_transcript_scrollback` + the unit-testable `extract_transcript_tail_text`
+    / `parse_transcript_line_text` workers), and the Haiku `summarize_with_haiku`
+    call — extracted verbatim from `idle_recap.rs`. Deps reached via `use super::*;`;
+    `capture_tmux_scrollback` / `capture_transcript_scrollback` / `summarize_with_haiku`
+    are re-exported by the parent so the `server::routes::idle_recap` caller keeps
+    byte-identical `idle_recap::<fn>` call sites, while the parsing workers stay
+    `pub(super)` for the parent's in-file tests; below the giant-file threshold).
+  - `src/services/discord/idle_recap/context_display.rs` (#3479 context display:
+    the live/latest-turn/session token selection state machine
+    (`select_recap_context` + `RecapContextDisplay`), the freshness and
+    provider-match guards, and the `format_token_count` / `format_korean_duration`
+    formatters — extracted verbatim from `idle_recap.rs`. Deps reached via
+    `use super::*;`; `select_recap_context` / `RecapContextDisplay` /
+    `format_token_count` / `format_korean_duration` / `provider_session_ids` /
+    `normalized_text` are `pub(super)` and re-imported by the parent so
+    `compose_recap_header` and `attach_live_context_usage` keep byte-identical
+    call sites, while the rest of the selection helpers stay module-private;
+    below the giant-file threshold).
   - `src/services/codex_tmux_wrapper.rs` (1289 lines; Codex tmux wrapper JSON
     event parser and relay bridge for native Codex session events — bugfix only
     outside an extraction plan; +65 from #3275: capture per-call
