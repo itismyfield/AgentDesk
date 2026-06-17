@@ -27,6 +27,7 @@ pub enum RoutineAction {
         prompt: String,
         dm_user_id: Option<String>,
         checkpoint: Option<Value>,
+        last_result: Option<String>,
         next_due_at: Option<DateTime<Utc>>,
     },
 }
@@ -131,6 +132,8 @@ pub fn validate_routine_action(value: Value) -> Result<RoutineAction> {
                     "dmUserId",
                     "dm_user_id",
                     "checkpoint",
+                    "lastResult",
+                    "last_result",
                     "nextDueAt",
                     "next_due_at",
                 ],
@@ -143,6 +146,7 @@ pub fn validate_routine_action(value: Value) -> Result<RoutineAction> {
                 prompt,
                 dm_user_id: optional_discord_snowflake_alias(obj, "dmUserId", "dm_user_id")?,
                 checkpoint: optional_value(obj, "checkpoint"),
+                last_result: optional_string_alias(obj, "lastResult", "last_result")?,
                 next_due_at: optional_datetime_alias(obj, "nextDueAt", "next_due_at")?,
             })
         }
@@ -290,11 +294,13 @@ mod tests {
                 prompt,
                 dm_user_id,
                 checkpoint,
+                last_result,
                 next_due_at,
             } => {
                 assert_eq!(prompt, "summarize current queue");
                 assert_eq!(dm_user_id, None);
                 assert_eq!(checkpoint, Some(json!({"cursor": 3})));
+                assert_eq!(last_result, None);
                 assert!(next_due_at.is_some());
             }
             other => panic!("unexpected action: {other:?}"),
@@ -302,6 +308,35 @@ mod tests {
 
         let err = RoutineAction::validate(json!({"action": "agent", "prompt": "   "})).unwrap_err();
         assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn validates_agent_action_with_last_result() {
+        // Regression for #3563: dispatch-label routines (e.g.
+        // dependency-update-watcher) return `{action:"agent", ...,
+        // lastResult:"...dispatched"}`. Both the camelCase and snake_case
+        // spellings must validate into RoutineAction::Agent rather than being
+        // rejected by reject_unknown_keys (which previously persisted the
+        // rejection error as last_result via fail_run, surfacing in GET
+        // /api/routines).
+        for key in ["lastResult", "last_result"] {
+            let action = RoutineAction::validate(json!({
+                "action": "agent",
+                "prompt": "run dependency update check",
+                key: "dependency update check dispatched"
+            }))
+            .unwrap();
+            match action {
+                RoutineAction::Agent { last_result, .. } => {
+                    assert_eq!(
+                        last_result.as_deref(),
+                        Some("dependency update check dispatched"),
+                        "{key} alias must populate last_result"
+                    );
+                }
+                other => panic!("unexpected action: {other:?}"),
+            }
+        }
     }
 
     #[test]
