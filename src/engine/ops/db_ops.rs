@@ -518,6 +518,52 @@ fn strip_prefix_ci<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
     }
 }
 
+fn scan_double_quoted_identifier(sql: &str, start: usize) -> Option<(&str, String, usize)> {
+    let bytes = sql.as_bytes();
+    if bytes.get(start).copied() != Some(b'"') {
+        return None;
+    }
+
+    let mut idx = start + 1;
+    let mut ident = String::new();
+    while idx < bytes.len() {
+        if bytes[idx] == b'"' {
+            if bytes.get(idx + 1).copied() == Some(b'"') {
+                ident.push('"');
+                idx += 2;
+                continue;
+            }
+            let end = idx + 1;
+            return Some((&sql[start..end], ident, end));
+        }
+
+        let ch = sql[idx..].chars().next()?;
+        ident.push(ch);
+        idx += ch.len_utf8();
+    }
+
+    None
+}
+
+fn is_quoted_identifier_alias(sql: &str, quote_start: usize) -> bool {
+    previous_sql_word(sql, quote_start).is_some_and(|word| word.eq_ignore_ascii_case("as"))
+}
+
+fn previous_sql_word(sql: &str, before: usize) -> Option<&str> {
+    let bytes = sql.as_bytes();
+    let mut end = before.min(bytes.len());
+    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+
+    let mut start = end;
+    while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+        start -= 1;
+    }
+
+    (start < end).then_some(&sql[start..end])
+}
+
 fn translate_sqlite_rowid(sql: &str) -> String {
     let mut result = String::with_capacity(sql.len());
     let bytes = sql.as_bytes();
@@ -526,7 +572,6 @@ fn translate_sqlite_rowid(sql: &str) -> String {
     enum ScanState {
         Normal,
         SingleQuoted,
-        DoubleQuoted,
         LineComment,
         BlockComment { depth: usize },
         DollarQuoted { delimiter: String },
@@ -544,9 +589,19 @@ fn translate_sqlite_rowid(sql: &str) -> String {
                     continue;
                 }
                 if bytes[idx] == b'"' {
-                    result.push('"');
-                    state = ScanState::DoubleQuoted;
-                    idx += 1;
+                    if let Some((raw, ident, next_idx)) = scan_double_quoted_identifier(sql, idx) {
+                        if ident.eq_ignore_ascii_case("rowid")
+                            && !is_quoted_identifier_alias(sql, idx)
+                        {
+                            result.push_str("ctid");
+                        } else {
+                            result.push_str(raw);
+                        }
+                        idx = next_idx;
+                    } else {
+                        result.push('"');
+                        idx += 1;
+                    }
                     continue;
                 }
                 if sql[idx..].starts_with("--") {
@@ -600,19 +655,6 @@ fn translate_sqlite_rowid(sql: &str) -> String {
                     result.push('\'');
                     if bytes.get(idx + 1).copied() == Some(b'\'') {
                         result.push('\'');
-                        idx += 2;
-                    } else {
-                        idx += 1;
-                        state = ScanState::Normal;
-                    }
-                    continue;
-                }
-            }
-            ScanState::DoubleQuoted => {
-                if bytes[idx] == b'"' {
-                    result.push('"');
-                    if bytes.get(idx + 1).copied() == Some(b'"') {
-                        result.push('"');
                         idx += 2;
                     } else {
                         idx += 1;
@@ -1329,7 +1371,7 @@ mod tests {
         assert!(
             prepared
                 .sql
-                .contains("SELECT ctid, td.ctid, \"rowid\", 'rowid' AS literal")
+                .contains("SELECT ctid, td.ctid, ctid, 'rowid' AS literal")
         );
         assert!(prepared.sql.contains("ORDER BY td.ctid DESC, ctid DESC"));
         assert!(prepared.params.is_empty());
@@ -1340,7 +1382,7 @@ mod tests {
         let sql = r#"SELECT "rowid""suffix", "rowid" FROM task_dispatches"#;
         let prepared = prepare_policy_sql_for_pg(sql, &[]).expect("render rowid");
 
-        assert!(prepared.sql.contains(r#""rowid""suffix", "rowid""#));
+        assert!(prepared.sql.contains(r#""rowid""suffix", ctid"#));
     }
 
     #[test]
@@ -1349,6 +1391,15 @@ mod tests {
         let prepared = prepare_policy_sql_for_pg(sql, &[]).expect("render rowid alias");
 
         assert!(prepared.sql.contains(r#"1 AS "rowid", ctid"#));
+        assert!(prepared.sql.contains("ORDER BY ctid"));
+    }
+
+    #[test]
+    fn prepare_policy_sql_for_pg_rewrites_quoted_rowid_expressions() {
+        let sql = r#"SELECT td."rowid" FROM task_dispatches td ORDER BY "rowid""#;
+        let prepared = prepare_policy_sql_for_pg(sql, &[]).expect("render quoted rowid");
+
+        assert!(prepared.sql.contains("SELECT td.ctid"));
         assert!(prepared.sql.contains("ORDER BY ctid"));
     }
 

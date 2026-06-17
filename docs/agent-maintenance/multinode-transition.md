@@ -58,6 +58,9 @@
 - 2026-06-17 audit note (#3548): PR analyzer hygiene guard work is confined to
   `scripts/analyze_prs.py`; gateway lease, startup order, worker ownership, and
   singleton assumptions are unchanged.
+- 2026-06-17 audit note (#3546): SQLite rowid compatibility work is confined to
+  `src/engine/ops/db_ops.rs`; gateway lease, startup order, worker ownership,
+  and singleton assumptions are unchanged.
 - invariants: `singleton_on_leader`,
   `heartbeat_capability_registry_routing`.
 - allowed_changes: `bugfix` only before #876/#877. New gateway, reconnect,
