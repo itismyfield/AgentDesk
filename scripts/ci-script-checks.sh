@@ -78,7 +78,8 @@ echo "=== Portable deployable path lint ==="
 python3 scripts/check-portable-paths.py
 python3 -m unittest \
   tests.test_portable_path_lint \
-  tests.test_install_bootstrap_portable
+  tests.test_install_bootstrap_portable \
+  tests.test_analyze_prs
 
 echo "=== Generate inventory docs (also gates giant-file registry, #3036) ==="
 # The generator hard-fails (exit 2) on giant-file registry drift: unregistered
