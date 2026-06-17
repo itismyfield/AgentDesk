@@ -17,6 +17,8 @@
 //! calls them): `stale_mailbox` → `/api/health/stale-mailbox-repair`,
 //! `relay_recovery` → `/api/health/relay-recovery`, `stall_watchdog` →
 //! `spawn_stall_watchdog`.
+//! `stale_mailbox` is recommended only for thread-backed rows because the
+//! existing repair handler intentionally matches `sessions.thread_channel_id`.
 
 use serde::Serialize;
 
@@ -90,6 +92,7 @@ pub struct RawSessionRow {
     pub active_dispatch_id: Option<String>,
     pub last_heartbeat: Option<String>,
     pub thread_channel_id: Option<String>,
+    pub channel_id: Option<String>,
 }
 
 impl RawSessionRow {
@@ -113,6 +116,26 @@ impl RawSessionRow {
             return Some(RawActiveSource::Working);
         }
         None
+    }
+
+    fn has_thread_channel(&self) -> bool {
+        self.thread_channel_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+    }
+
+    fn audit_channel_id(&self) -> Option<String> {
+        self.thread_channel_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .or_else(|| {
+                self.channel_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+            })
+            .map(ToOwned::to_owned)
     }
 }
 
@@ -228,10 +251,14 @@ fn recommend_repair_path(
         if source == RawActiveSource::Working {
             return RecommendedRepairPath::None;
         }
-        // Otherwise raw is active (turn_active) with no orphan dispatch token →
-        // the mailbox/session row is the stale artifact; stale-mailbox-repair
-        // clears it.
-        return RecommendedRepairPath::StaleMailbox;
+        // Otherwise raw is active (turn_active) with no orphan dispatch token.
+        // Recommend stale-mailbox only for thread-backed rows: the existing
+        // repair path matches `sessions.thread_channel_id`, so recommending it
+        // for a channel_id-only session would be a no-op that keeps reappearing.
+        if row.has_thread_channel() {
+            return RecommendedRepairPath::StaleMailbox;
+        }
+        return RecommendedRepairPath::None;
     }
     // A dispatch id is present but the resolver positively reports the provider
     // runtime / live turn is GONE (disconnected) → relay recovery owns this.
@@ -338,11 +365,12 @@ pub(super) fn classify_active_session_audit(
                 .map(str::trim)
                 .is_some_and(|s| s.eq_ignore_ascii_case(LEGACY_WORKING)),
             "matched_active_dispatch_id": dispatch_present,
+            "thread_channel_id_present": row.has_thread_channel(),
         });
 
         candidates.push(ActiveSessionMismatchAuditCandidate {
             session_key: row.session_key.clone(),
-            channel_id: row.thread_channel_id.clone(),
+            channel_id: row.audit_channel_id(),
             provider: row.provider.clone(),
             raw_active_source: source,
             effective_state: effective.status.to_string(),
@@ -401,6 +429,7 @@ mod tests {
             active_dispatch_id: Some("dispatch-9".to_string()),
             last_heartbeat: Some(stale_ts(900)),
             thread_channel_id: Some("1490000000000000001".to_string()),
+            channel_id: None,
         }];
         let mut resolver = SessionActivityResolver::new();
         let settings = ActiveSessionAuditSettings::from_overrides(None, None, None);
@@ -442,6 +471,7 @@ mod tests {
             active_dispatch_id: Some("dispatch-disc".to_string()),
             last_heartbeat: Some(stale_ts(900)),
             thread_channel_id: Some("1490000000000000010".to_string()),
+            channel_id: None,
         };
         let effective = EffectiveSessionState {
             status: crate::db::session_status::DISCONNECTED,
@@ -474,6 +504,7 @@ mod tests {
             active_dispatch_id: Some("dispatch-stall".to_string()),
             last_heartbeat: Some(stale_ts(900)),
             thread_channel_id: Some("1490000000000000011".to_string()),
+            channel_id: None,
         };
         let effective = EffectiveSessionState {
             status: crate::db::session_status::IDLE,
@@ -505,6 +536,7 @@ mod tests {
             active_dispatch_id: None,
             last_heartbeat: Some(stale_ts(900)),
             thread_channel_id: Some("1490000000000000012".to_string()),
+            channel_id: None,
         };
         let effective = EffectiveSessionState {
             status: crate::db::session_status::IDLE,
@@ -532,6 +564,7 @@ mod tests {
             active_dispatch_id: None,
             last_heartbeat: Some(stale_ts(900)),
             thread_channel_id: Some("1490000000000000013".to_string()),
+            channel_id: None,
         };
         let effective = EffectiveSessionState {
             status: crate::db::session_status::IDLE,
@@ -543,6 +576,37 @@ mod tests {
         assert_eq!(
             recommend_repair_path(&row, RawActiveSource::TurnActive, &effective, confidence),
             RecommendedRepairPath::StaleMailbox
+        );
+    }
+
+    /// A non-thread fixed-channel session is still surfaced with its channel id,
+    /// but stale-mailbox is not recommended because that repair path only updates
+    /// rows by `thread_channel_id`.
+    #[test]
+    fn active_session_audit_channel_only_session_maps_to_none_not_stale_mailbox() {
+        let rows = vec![RawSessionRow {
+            session_key: Some("remote-host/farbox:codex-channel-only".to_string()),
+            provider: Some("codex".to_string()),
+            status: Some("turn_active".to_string()),
+            active_dispatch_id: None,
+            last_heartbeat: Some(stale_ts(900)),
+            thread_channel_id: None,
+            channel_id: Some("1490000000000000014".to_string()),
+        }];
+        let mut resolver = SessionActivityResolver::new();
+        let settings = ActiveSessionAuditSettings::from_overrides(None, None, None);
+        let report = classify_active_session_audit(&rows, &mut resolver, settings, 1, now());
+
+        assert_eq!(report.candidate_count, 1);
+        let candidate = &report.candidates[0];
+        assert_eq!(candidate.channel_id.as_deref(), Some("1490000000000000014"));
+        assert_eq!(
+            candidate.recommended_repair_path,
+            RecommendedRepairPath::None
+        );
+        assert_eq!(
+            candidate.evidence["thread_channel_id_present"].as_bool(),
+            Some(false)
         );
     }
 
@@ -559,6 +623,7 @@ mod tests {
             // Heartbeat within the remote grace ⇒ resolver says working.
             last_heartbeat: Some(stale_ts(5)),
             thread_channel_id: Some("1490000000000000002".to_string()),
+            channel_id: None,
         }];
         let mut resolver = SessionActivityResolver::new();
         let settings = ActiveSessionAuditSettings::from_overrides(None, None, None);
@@ -582,6 +647,7 @@ mod tests {
             active_dispatch_id: None,
             last_heartbeat: Some(stale_ts(100)),
             thread_channel_id: Some("1490000000000000003".to_string()),
+            channel_id: None,
         }];
         let mut resolver = SessionActivityResolver::new();
         // Audit grace of 600s: heartbeat 100s ago is inside grace ⇒ excluded.
@@ -610,6 +676,7 @@ mod tests {
             // a missing dispatch unless confidence is high.
             last_heartbeat: None,
             thread_channel_id: Some("1490000000000000004".to_string()),
+            channel_id: None,
         }];
         let mut resolver = SessionActivityResolver::new();
         let settings = ActiveSessionAuditSettings::from_overrides(None, None, None);
@@ -639,6 +706,7 @@ mod tests {
             active_dispatch_id: Some("d-1".to_string()),
             last_heartbeat: None,
             thread_channel_id: Some("1490000000000000009".to_string()),
+            channel_id: None,
         };
         // confidence = 0.40 + 0 (hb unknown) + 0.20 (not working) + 0 (dispatch
         // present) = 0.60 < 0.75 ⇒ none.
@@ -707,6 +775,7 @@ mod tests {
             active_dispatch_id: Some("d-dedup".to_string()),
             last_heartbeat: Some(stale_ts(900)),
             thread_channel_id: Some("1490000000000000005".to_string()),
+            channel_id: None,
         }];
         let mut resolver = SessionActivityResolver::new();
         // Cap of 1, and report raw_matches_total > returned ⇒ truncated.

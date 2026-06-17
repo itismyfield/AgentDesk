@@ -21,6 +21,18 @@ use crate::services::provider::ProviderKind;
 use super::AppState;
 
 const OUTBOX_AGE_DEGRADED_SECS: i64 = 60;
+const ACTIVE_SESSION_AUDIT_QUERY: &str =
+    "SELECT session_key, provider, status, active_dispatch_id, last_heartbeat,
+                thread_channel_id, channel_id
+           FROM sessions
+          WHERE parent_session_id IS NULL
+            AND (NULLIF($2, '') IS NULL OR instance_id IS NULL OR instance_id = $2)
+            AND (
+                status IN ('turn_active', 'working')
+                OR COALESCE(btrim(active_dispatch_id), '') <> ''
+            )
+          ORDER BY last_heartbeat ASC NULLS FIRST, id ASC
+          LIMIT $1";
 
 struct DispatchOutboxStats {
     pending: i64,
@@ -721,8 +733,9 @@ async fn build_active_session_audit(state: &AppState) -> ActiveSessionAuditRepor
         return ActiveSessionAuditReport::disabled(settings.stale_secs);
     };
 
+    let local_instance_id = state.cluster_instance_id.as_deref();
     let (rows, raw_matches_total) =
-        load_active_session_audit_rows(pool, settings.max_candidates).await;
+        load_active_session_audit_rows(pool, settings.max_candidates, local_instance_id).await;
     let mut resolver = crate::services::session_activity::SessionActivityResolver::new();
     active_session_audit::classify_active_session_audit(
         &rows,
@@ -742,23 +755,18 @@ async fn build_active_session_audit(state: &AppState) -> ActiveSessionAuditRepor
 async fn load_active_session_audit_rows(
     pool: &PgPool,
     max_candidates: u64,
+    local_instance_id: Option<&str>,
 ) -> (Vec<RawSessionRow>, usize) {
     let capped = max_candidates.min(i64::MAX as u64) as usize;
     let limit = max_candidates.saturating_add(1).min(i64::MAX as u64) as i64;
+    let local_instance_id = local_instance_id.map(str::trim).unwrap_or("");
     // Surface the staleness-relevant rows FIRST so the LIMIT keeps the candidates
     // that matter: NULL/unknown heartbeats (can't be proven fresh) come first,
     // then the OLDEST heartbeats. Ordering newest-first would let stale/zombie
     // rows beyond the cap escape the audit entirely — the opposite of intent.
-    let query = sqlx::query(
-        "SELECT session_key, provider, status, active_dispatch_id, last_heartbeat,
-                COALESCE(thread_channel_id, channel_id) AS audit_channel_id
-           FROM sessions
-          WHERE status IN ('turn_active', 'working')
-             OR COALESCE(btrim(active_dispatch_id), '') <> ''
-          ORDER BY last_heartbeat ASC NULLS FIRST, id ASC
-          LIMIT $1",
-    )
-    .bind(limit);
+    let query = sqlx::query(ACTIVE_SESSION_AUDIT_QUERY)
+        .bind(limit)
+        .bind(local_instance_id);
     let rows = match query.fetch_all(pool).await {
         Ok(rows) => rows,
         Err(error) => {
@@ -780,7 +788,8 @@ async fn load_active_session_audit_rows(
             status: row.try_get("status").ok(),
             active_dispatch_id: row.try_get("active_dispatch_id").ok(),
             last_heartbeat: pg_timestamp_to_rfc3339(row, "last_heartbeat"),
-            thread_channel_id: row.try_get("audit_channel_id").ok(),
+            thread_channel_id: row.try_get("thread_channel_id").ok(),
+            channel_id: row.try_get("channel_id").ok(),
         })
         .collect();
     (mapped, raw_matches_seen)
@@ -1627,8 +1636,8 @@ pub async fn senddm_handler(
 #[cfg(test)]
 mod tests {
     use super::{
-        RegistryPurgeDecision, discord_control_endpoints_allowed, public_health_json,
-        registry_purge_decision, stale_mailbox_repair_applied,
+        ACTIVE_SESSION_AUDIT_QUERY, RegistryPurgeDecision, discord_control_endpoints_allowed,
+        public_health_json, registry_purge_decision, stale_mailbox_repair_applied,
     };
     use axum::{
         body::Body,
@@ -1836,6 +1845,14 @@ mod tests {
         assert!(public.get("degraded_reasons").is_none());
         // TEST-004: the detail-only audit block is dropped from public health.
         assert!(public.get("active_session_audit").is_none());
+    }
+
+    #[test]
+    fn active_session_audit_query_filters_foreign_and_background_rows() {
+        assert!(ACTIVE_SESSION_AUDIT_QUERY.contains("parent_session_id IS NULL"));
+        assert!(ACTIVE_SESSION_AUDIT_QUERY.contains("instance_id IS NULL OR instance_id = $2"));
+        assert!(ACTIVE_SESSION_AUDIT_QUERY.contains("thread_channel_id, channel_id"));
+        assert!(!ACTIVE_SESSION_AUDIT_QUERY.contains("COALESCE(thread_channel_id, channel_id)"));
     }
 
     #[test]
