@@ -618,7 +618,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                         // dispatch_thread_parents hasn't been populated yet).
                         let (wt_info, provider_isolation_applied) = {
                             let is_thread =
-                                shared.dispatch_thread_parents.contains_key(&channel_id)
+                                shared.dispatch.thread_parents.contains_key(&channel_id)
                                     || super::super::super::resolve_thread_parent(http, channel_id)
                                         .await
                                         .is_some();
@@ -912,7 +912,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                             "  [{ts}] 🔄 Review dispatch in reused thread: overriding role to alt channel {}",
                             alt_ch
                         );
-                        shared.dispatch_role_overrides.insert(channel_id, alt_ch);
+                        shared.dispatch.role_overrides.insert(channel_id, alt_ch);
                     }
                 }
                 channel_id
@@ -947,7 +947,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                                 cache,
                             )
                             .await;
-                        shared.dispatch_thread_parents.insert(channel_id, tid);
+                        shared.dispatch.thread_parents.insert(channel_id, tid);
                         // For review dispatches reusing an implementation thread,
                         // override role/model to use the counter-model channel.
                         if is_counter_model_dispatch {
@@ -957,7 +957,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                                     "  [{ts}] 🔄 Review dispatch reusing thread: overriding role to alt channel {}",
                                     alt_ch
                                 );
-                                shared.dispatch_role_overrides.insert(tid, alt_ch);
+                                shared.dispatch.role_overrides.insert(tid, alt_ch);
                             }
                         }
                         Some(tid)
@@ -1013,7 +1013,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                                     cache,
                                 )
                                 .await;
-                            shared.dispatch_thread_parents.insert(channel_id, thread.id);
+                            shared.dispatch.thread_parents.insert(channel_id, thread.id);
                             super::super::link_dispatch_thread(
                                 shared.api_port,
                                 did,
@@ -1175,7 +1175,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     let role_binding = {
         // For cross-channel dispatch reuse (e.g. review in implementation thread),
         // resolve role from the override channel instead of the thread's parent.
-        if let Some(override_ch) = shared.dispatch_role_overrides.get(&channel_id) {
+        if let Some(override_ch) = shared.dispatch.role_overrides.get(&channel_id) {
             let alt_ch = *override_ch;
             resolve_role_binding(alt_ch, None)
         } else {
@@ -1195,7 +1195,7 @@ pub(in crate::services::discord) async fn handle_text_message(
 
     // For cross-channel dispatch reuse, override the provider so the turn
     // executes via the counter-model CLI (e.g. Codex reviews Claude's work).
-    let provider = if shared.dispatch_role_overrides.contains_key(&channel_id) {
+    let provider = if shared.dispatch.role_overrides.contains_key(&channel_id) {
         role_binding
             .as_ref()
             .and_then(|rb| rb.provider.clone())
@@ -2815,7 +2815,8 @@ pub(in crate::services::discord) async fn handle_text_message(
         .and_then(super::super::super::adk_session::parse_thread_channel_id_from_name)
         .or_else(|| {
             shared
-                .dispatch_thread_parents
+                .dispatch
+                .thread_parents
                 .contains_key(&channel_id)
                 .then_some(channel_id.get())
         });

@@ -109,7 +109,8 @@ fn resolve_dispatch_role_model(
     channel_id: serenity::ChannelId,
 ) -> Option<String> {
     let override_channel = shared
-        .dispatch_role_overrides
+        .dispatch
+        .role_overrides
         .get(&channel_id)
         .map(|value| *value)?;
     resolve_role_binding(override_channel, None).and_then(|binding| binding.model)
@@ -129,7 +130,8 @@ pub(in crate::services::discord) async fn effective_provider_for_channel(
     };
     let channel_name = session_channel_name.as_deref().or(channel_name_hint);
     shared
-        .dispatch_role_overrides
+        .dispatch
+        .role_overrides
         .get(&channel_id)
         .map(|value| *value)
         .and_then(|override_channel| resolve_role_binding(override_channel, None))

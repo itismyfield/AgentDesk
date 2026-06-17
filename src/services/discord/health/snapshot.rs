@@ -228,11 +228,13 @@ async fn relay_thread_proof_for_channel(
     current_channel_has_live_evidence: bool,
 ) -> RelayThreadProofSnapshot {
     let thread_channel_id = shared
-        .dispatch_thread_parents
+        .dispatch
+        .thread_parents
         .get(&channel_id)
         .map(|entry| entry.value().get());
     let parent_channel_id = shared
-        .dispatch_thread_parents
+        .dispatch
+        .thread_parents
         .iter()
         .find_map(|entry| (*entry.value() == channel_id).then_some(entry.key().get()));
 
@@ -429,9 +431,10 @@ async fn watcher_state_snapshot_for_shared(
         .tmux_session
         .as_deref()
         .or(mailbox_cancel_tmux_session.as_deref());
-    let has_thread_proof = shared.dispatch_thread_parents.contains_key(&channel)
+    let has_thread_proof = shared.dispatch.thread_parents.contains_key(&channel)
         || shared
-            .dispatch_thread_parents
+            .dispatch
+            .thread_parents
             .iter()
             .any(|entry| *entry.value() == channel);
     if !session.attached

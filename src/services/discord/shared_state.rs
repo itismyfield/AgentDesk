@@ -408,6 +408,33 @@ pub(in crate::services) struct SessionOverrideState {
         dashmap::DashMap<MessageId, ModelPickerPendingState>,
 }
 
+/// #3479 Item 3 — dispatch intake/routing state.
+///
+/// Groups the three cohesive per-dispatch routing maps that together decide
+/// whether an incoming bot message starts a new turn, is deduped, or is routed
+/// into an existing dispatch thread / counter-model channel. Field declarations,
+/// docs, and types moved verbatim from `discord/mod.rs`; the members keep their
+/// original `pub(super)` (== `pub(in crate::services)`) visibility, and call
+/// sites use `shared.dispatch.<original field name>`.
+pub(in crate::services) struct DispatchRoutingState {
+    /// Intake-level dedup cache: prevents the same message from starting two turns
+    /// when duplicate bot dispatches arrive nearly simultaneously.
+    /// Key: dedup key (dispatch_id or channel+author+text hash).
+    /// Value: (first-seen Instant, was_thread_context).
+    pub(in crate::services) intake_dedup: dashmap::DashMap<String, (std::time::Instant, bool)>,
+    /// Maps parent channel → active dispatch thread channel.
+    /// When a dispatch creates a thread, the parent is recorded here so that
+    /// subsequent bot messages to the parent are queued instead of starting
+    /// a parallel turn.  Cleared when the dispatch thread turn completes.
+    pub(in crate::services) thread_parents: dashmap::DashMap<ChannelId, ChannelId>,
+    /// Per-thread role/model override for cross-channel dispatch reuse.
+    /// When a review dispatch reuses an implementation thread, this maps
+    /// thread_channel_id → alt_channel_id so role_binding and model_for_turn
+    /// resolve from the counter-model channel instead of the thread's parent.
+    /// Cleared when the turn completes.
+    pub(in crate::services) role_overrides: dashmap::DashMap<ChannelId, ChannelId>,
+}
+
 // #3038 cluster D — free-function helpers that exclusively own
 // [`SessionOverrideState`]. Moved verbatim from `commands/config.rs` (which
 // re-exports them so every `super::config::*` importer and unqualified call

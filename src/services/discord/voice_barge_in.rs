@@ -2986,8 +2986,11 @@ mod tests {
                 shutdown_counted: std::sync::atomic::AtomicBool::new(false),
             },
             turn_finalizer: super::super::turn_finalizer::TurnFinalizer::spawn(),
-            intake_dedup: dashmap::DashMap::new(),
-            dispatch_thread_parents: dashmap::DashMap::new(),
+            dispatch: super::super::DispatchRoutingState {
+                intake_dedup: dashmap::DashMap::new(),
+                thread_parents: dashmap::DashMap::new(),
+                role_overrides: dashmap::DashMap::new(),
+            },
             voice_barge_in: Arc::new(VoiceBargeInRuntime::disabled()),
             voice_pairings: Arc::new(
                 super::super::voice_routing::VoiceChannelPairingStore::load_default(),
@@ -3004,7 +3007,6 @@ mod tests {
                 session_reset_pending: dashmap::DashSet::new(),
                 model_picker_pending: dashmap::DashMap::new(),
             },
-            dispatch_role_overrides: dashmap::DashMap::new(),
             last_message_ids: dashmap::DashMap::new(),
             catch_up_retry_pending: dashmap::DashMap::new(),
             turn_start_times: dashmap::DashMap::new(),

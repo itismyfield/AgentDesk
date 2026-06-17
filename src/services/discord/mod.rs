@@ -132,6 +132,9 @@ pub(in crate::services::discord) use shared_state::RuntimeHttpCache;
 // #3038 S2: the cluster-D members were `pub(super)` on `SharedData` (visible up
 // to `crate::services`), so the group type is re-exported with that same scope.
 pub(in crate::services) use shared_state::SessionOverrideState;
+// #3479 Item 3: the cluster members were `pub(super)` on `SharedData` (visible
+// up to `crate::services`), so the group type is re-exported with that scope.
+pub(in crate::services) use shared_state::DispatchRoutingState;
 // #3038 S3: same scope rationale as S2 — the cluster-E members were
 // `pub(super)` on `SharedData` (visible up to `crate::services`).
 pub(in crate::services) use shared_state::RestartLifecycle;
@@ -1883,16 +1886,11 @@ pub(crate) struct SharedData {
     /// side-effects) as an atomic, exactly-once unit. Bridge/watcher terminals
     /// submit terminal events here instead of finalizing inline.
     pub(in crate::services::discord) turn_finalizer: Arc<turn_finalizer::TurnFinalizer>,
-    /// Intake-level dedup cache: prevents the same message from starting two turns
-    /// when duplicate bot dispatches arrive nearly simultaneously.
-    /// Key: dedup key (dispatch_id or channel+author+text hash).
-    /// Value: (first-seen Instant, was_thread_context).
-    pub(super) intake_dedup: dashmap::DashMap<String, (std::time::Instant, bool)>,
-    /// Maps parent channel → active dispatch thread channel.
-    /// When a dispatch creates a thread, the parent is recorded here so that
-    /// subsequent bot messages to the parent are queued instead of starting
-    /// a parallel turn.  Cleared when the dispatch thread turn completes.
-    pub(super) dispatch_thread_parents: dashmap::DashMap<ChannelId, ChannelId>,
+    /// #3479 Item 3 — dispatch intake/routing state: the intake dedup cache, the
+    /// parent→dispatch-thread map, and the per-thread role/model override map.
+    /// Field declarations and docs live on `shared_state::DispatchRoutingState`;
+    /// call sites access the members via `shared.dispatch.<original field name>`.
+    pub(super) dispatch: DispatchRoutingState,
     /// Runtime bridge from songbird receive events and STT transcript sidecars
     /// into live playback cuts, explicit-stop cancellation, and deferred prompts.
     pub(in crate::services::discord) voice_barge_in: Arc<voice_barge_in::VoiceBargeInRuntime>,
@@ -1912,12 +1910,6 @@ pub(crate) struct SharedData {
     /// `shared_state::SessionOverrideState`; call sites access the members via
     /// `shared.overrides.<original field name>`.
     pub(super) overrides: SessionOverrideState,
-    /// Per-thread role/model override for cross-channel dispatch reuse.
-    /// When a review dispatch reuses an implementation thread, this maps
-    /// thread_channel_id → alt_channel_id so role_binding and model_for_turn
-    /// resolve from the counter-model channel instead of the thread's parent.
-    /// Cleared when the turn completes.
-    pub(super) dispatch_role_overrides: dashmap::DashMap<ChannelId, ChannelId>,
     /// Per-channel last processed message ID — used for startup catch-up polling.
     pub(super) last_message_ids: dashmap::DashMap<ChannelId, u64>,
     /// Channels where catch-up stopped because the intervention queue was at
@@ -2195,8 +2187,11 @@ pub(super) fn make_shared_data_for_tests_with_storage(
             shutdown_counted: std::sync::atomic::AtomicBool::new(false),
         },
         turn_finalizer: turn_finalizer::TurnFinalizer::spawn(),
-        intake_dedup: dashmap::DashMap::new(),
-        dispatch_thread_parents: dashmap::DashMap::new(),
+        dispatch: DispatchRoutingState {
+            intake_dedup: dashmap::DashMap::new(),
+            thread_parents: dashmap::DashMap::new(),
+            role_overrides: dashmap::DashMap::new(),
+        },
         voice_barge_in: Arc::new(voice_barge_in::VoiceBargeInRuntime::disabled()),
         voice_pairings: Arc::new(voice_routing::VoiceChannelPairingStore::load_default()),
         bot_connected: std::sync::atomic::AtomicBool::new(false),
@@ -2211,7 +2206,6 @@ pub(super) fn make_shared_data_for_tests_with_storage(
             session_reset_pending: dashmap::DashSet::new(),
             model_picker_pending: dashmap::DashMap::new(),
         },
-        dispatch_role_overrides: dashmap::DashMap::new(),
         last_message_ids: dashmap::DashMap::new(),
         catch_up_retry_pending: dashmap::DashMap::new(),
         turn_start_times: dashmap::DashMap::new(),
@@ -2240,7 +2234,8 @@ fn queue_persistence_context(
         provider,
         &shared.token_hash,
         shared
-            .dispatch_role_overrides
+            .dispatch
+            .role_overrides
             .get(&channel_id)
             .map(|override_id| override_id.value().get()),
     )
@@ -3436,7 +3431,7 @@ async fn mailbox_restart_drain_all(
         .restart_drain_all(
             provider,
             &shared.token_hash,
-            &shared.dispatch_role_overrides,
+            &shared.dispatch.role_overrides,
         )
         .await;
     for failure in &result.persistence_errors {
