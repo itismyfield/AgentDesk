@@ -37,6 +37,11 @@ def _meaningful_field_value(value):
     normalized = value.strip().strip("-–—").strip()
     return bool(normalized) and normalized.casefold() not in {"n/a", "none", "todo", "tbd", "na"}
 
+def _is_top_level_field_label(line):
+    if line[:1] in {" ", "\t"}:
+        return False
+    return re.match(r"^(?:[-*]\s*)?[a-z0-9 /_-]+\s*:(?:\s.*)?$", line.strip(), re.I)
+
 def has_non_empty_body_field(body, labels):
     for label in labels:
         pattern = re.compile(
@@ -55,7 +60,7 @@ def has_non_empty_body_field(body, labels):
                 # Next field label is a boundary whether or not it carries a
                 # value: an empty `- Risk:` must not borrow the value of a
                 # following populated field (e.g. `- Rollback notes: revert`).
-                if re.match(r"^(?:[-*]\s*)?[a-z0-9 /_-]+\s*:(?:\s.*)?$", stripped, re.I):
+                if _is_top_level_field_label(next_line):
                     break
                 if _meaningful_field_value(stripped):
                     return True

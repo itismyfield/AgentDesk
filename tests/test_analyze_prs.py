@@ -32,6 +32,17 @@ class PrAnalyzerBodyFieldTests(unittest.TestCase):
         self.assertTrue(has_non_empty_body_field(body, ["risk", "risk assessment"]))
         self.assertTrue(has_non_empty_body_field(body, ["rollback notes", "rollback"]))
 
+    def test_indented_key_value_lines_count_as_field_content(self):
+        body = """
+- Risk:
+  - Impact: low
+- Rollback notes:
+  Command: git revert HEAD
+"""
+
+        self.assertTrue(has_non_empty_body_field(body, ["risk", "risk assessment"]))
+        self.assertTrue(has_non_empty_body_field(body, ["rollback notes", "rollback"]))
+
 
 class PrAnalyzerDuplicateGuardTests(unittest.TestCase):
     def test_unchecked_template_duplicate_guard_is_not_acknowledgement(self):
