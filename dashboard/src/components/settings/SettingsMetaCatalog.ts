@@ -1,4 +1,5 @@
 import { useCallback, useMemo } from "react";
+import type { RuntimeConfigMap } from "../../api";
 import type { CompanySettings, VoiceConfigResponse } from "../../types";
 import {
   CATEGORIES,
@@ -24,8 +25,8 @@ type UseSettingsMetaCatalogArgs = {
   configEntries: ConfigEntry[];
   language: CompanySettings["language"];
   panelQuery: string;
-  rcDefaults: Record<string, number>;
-  rcValues: Record<string, number>;
+  rcDefaults: RuntimeConfigMap;
+  rcValues: RuntimeConfigMap;
   settings: CompanySettings;
   theme: CompanySettings["theme"];
   tr: (ko: string, en: string) => string;
@@ -168,9 +169,15 @@ export function useSettingsMetaCatalog({
     () =>
       CATEGORIES.flatMap((category) =>
         category.fields.map<SettingRowMeta>((field) => {
-          const current = rcValues[field.key] ?? rcDefaults[field.key] ?? 0;
-          const def = rcDefaults[field.key] ?? 0;
+          const fallback = field.inputKind === "toggle" ? false : 0;
+          const current = rcValues[field.key] ?? rcDefaults[field.key] ?? fallback;
+          const def = rcDefaults[field.key] ?? fallback;
           const overrideActive = current !== def;
+          const range =
+            field.inputKind === "toggle" || field.min === undefined || field.max === undefined || field.step === undefined
+              ? undefined
+              : { min: field.min, max: field.max, step: field.step };
+          const rangeText = range ? ` · ${range.min}-${range.max}${field.unit ?? ""}` : "";
           return {
             key: field.key,
             group: "runtime",
@@ -182,11 +189,11 @@ export function useSettingsMetaCatalog({
             flags: overrideActive ? ["live_override"] : [],
             labelKo: field.labelKo,
             labelEn: field.labelEn,
-            hintKo: `${field.descriptionKo} · ${field.min}-${field.max}${field.unit}`,
-            hintEn: `${field.descriptionEn} · ${field.min}-${field.max}${field.unit}`,
-            inputKind: "number",
+            hintKo: `${field.descriptionKo}${rangeText}`,
+            hintEn: `${field.descriptionEn}${rangeText}`,
+            inputKind: field.inputKind ?? "number",
             valueUnit: field.unit,
-            numericRange: { min: field.min, max: field.max, step: field.step },
+            numericRange: range,
             restartNoteKo: "저장 즉시 반영, 재시작 없이 다음 폴링 주기에 적용됩니다.",
             restartNoteEn: "Applies on the next poll without restart.",
           };

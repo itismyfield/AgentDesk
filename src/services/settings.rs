@@ -249,6 +249,7 @@ impl SettingsConfigPatchResponse {
 pub struct RuntimeConfigResponse {
     pub current: Map<String, Value>,
     pub defaults: Map<String, Value>,
+    pub explicit_keys: Vec<String>,
 }
 
 impl SettingsService {
@@ -427,8 +428,19 @@ impl SettingsService {
                 current.insert(key.clone(), value.clone());
             }
         }
+        let mut explicit_keys = saved
+            .as_object()
+            .map(explicit_runtime_config_keys)
+            .unwrap_or_default()
+            .into_iter()
+            .collect::<Vec<_>>();
+        explicit_keys.sort();
 
-        Ok(RuntimeConfigResponse { current, defaults })
+        Ok(RuntimeConfigResponse {
+            current,
+            defaults,
+            explicit_keys,
+        })
     }
 
     pub async fn put_runtime_config(&self, body: Value) -> ServiceResult<SettingsOkResponse> {
@@ -921,11 +933,8 @@ pub(crate) fn explicit_runtime_config_keys(values: &Map<String, Value>) -> HashS
 }
 
 fn with_explicit_runtime_config_keys(mut values: Map<String, Value>) -> Map<String, Value> {
-    let mut keys = values
-        .keys()
-        .filter(|key| RUNTIME_CONFIG_KEYS.contains(&key.as_str()))
-        .cloned()
-        .collect::<Vec<_>>();
+    let explicit_keys = explicit_runtime_config_keys(&values);
+    let mut keys = explicit_keys.into_iter().collect::<Vec<_>>();
     keys.sort();
     values.insert(
         RUNTIME_CONFIG_EXPLICIT_KEYS_META.to_string(),
@@ -1045,8 +1054,21 @@ fn seeded_runtime_config_map(
         .map(explicit_runtime_config_keys)
         .unwrap_or_default();
 
+    let has_explicit_meta = saved_obj
+        .as_ref()
+        .is_some_and(|obj| obj.contains_key(RUNTIME_CONFIG_EXPLICIT_KEYS_META));
     let mut current = if config.runtime.reset_overrides_on_restart {
         defaults.clone()
+    } else if has_explicit_meta {
+        let mut seeded = defaults.clone();
+        if let Some(saved_obj) = saved_obj.as_ref() {
+            for key in &explicit_keys {
+                if let Some(value) = saved_obj.get(key) {
+                    seeded.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        seeded
     } else {
         saved_obj.clone().unwrap_or_else(|| defaults.clone())
     };
@@ -1175,6 +1197,67 @@ mod tests {
                 .get(RUNTIME_CONFIG_EXPLICIT_KEYS_META)
                 .and_then(Value::as_array)
                 .is_some_and(|keys| keys.len() == 3)
+        );
+    }
+
+    #[test]
+    fn seeded_runtime_config_rebases_non_explicit_saved_values() {
+        let mut saved_obj = runtime_config_defaults_map(&crate::config::Config::default());
+        saved_obj.insert("dispatchRateLimitGateEnabled".to_string(), json!(true));
+        saved_obj.insert("dispatchRateLimitGateDangerPct".to_string(), json!(100));
+        saved_obj.insert("rateLimitStaleSec".to_string(), json!(600));
+        saved_obj.insert(
+            RUNTIME_CONFIG_EXPLICIT_KEYS_META.to_string(),
+            json!(["rateLimitStaleSec"]),
+        );
+        let mut config = crate::config::Config::default();
+        config.runtime.dispatch_rate_limit_gate_enabled = Some(false);
+        config.runtime.dispatch_rate_limit_gate_danger_pct = Some(95);
+        config.runtime.rate_limit_stale_sec = Some(900);
+
+        let seeded = seeded_runtime_config_map(Some(saved_obj), &config);
+
+        assert_eq!(
+            seeded.get("dispatchRateLimitGateEnabled"),
+            Some(&json!(false)),
+            "non-explicit full-dashboard save values must not freeze YAML/default gate settings"
+        );
+        assert_eq!(
+            seeded.get("dispatchRateLimitGateDangerPct"),
+            Some(&json!(95)),
+            "non-explicit gate threshold follows YAML/default baseline"
+        );
+        assert_eq!(
+            seeded.get("rateLimitStaleSec"),
+            Some(&json!(600)),
+            "explicit API override still wins over YAML"
+        );
+    }
+
+    #[test]
+    fn explicit_runtime_config_keys_respects_payload_metadata() {
+        let mut values = runtime_config_defaults_map(&crate::config::Config::default());
+        values.insert(
+            RUNTIME_CONFIG_EXPLICIT_KEYS_META.to_string(),
+            json!(["rateLimitStaleSec"]),
+        );
+
+        let keys = explicit_runtime_config_keys(&values);
+
+        assert_eq!(keys.len(), 1);
+        assert!(keys.contains("rateLimitStaleSec"));
+        assert!(!keys.contains("dispatchRateLimitGateEnabled"));
+    }
+
+    #[test]
+    fn explicit_runtime_config_keys_without_metadata_is_empty() {
+        let values = runtime_config_defaults_map(&crate::config::Config::default());
+
+        let keys = explicit_runtime_config_keys(&values);
+
+        assert!(
+            keys.is_empty(),
+            "full saved runtime-config values are not explicit unless the metadata says so"
         );
     }
 }

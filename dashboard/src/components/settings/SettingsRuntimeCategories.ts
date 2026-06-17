@@ -4,10 +4,11 @@ export interface ConfigField {
   labelEn: string;
   descriptionKo: string;
   descriptionEn: string;
-  unit: string;
-  min: number;
-  max: number;
-  step: number;
+  inputKind?: "number" | "toggle";
+  unit?: string;
+  min?: number;
+  max?: number;
+  step?: number;
 }
 
 export const CATEGORIES: Array<{
@@ -140,6 +141,25 @@ export const CATEGORIES: Array<{
         unit: "",
         min: 1,
         max: 10,
+        step: 1,
+      },
+      {
+        key: "dispatchRateLimitGateEnabled",
+        labelKo: "Rate Limit 디스패치 게이트",
+        labelEn: "Rate limit dispatch gate",
+        descriptionKo: "Provider rate limit이 포화 상태일 때 auto-queue dispatch 생성을 보류합니다.",
+        descriptionEn: "Defers auto-queue dispatch creation while the target provider is saturated.",
+        inputKind: "toggle",
+      },
+      {
+        key: "dispatchRateLimitGateDangerPct",
+        labelKo: "디스패치 게이트 기준",
+        labelEn: "Dispatch gate threshold",
+        descriptionKo: "이 사용률 이상이면 rate-limit 디스패치 게이트가 entry를 보류합니다.",
+        descriptionEn: "Defers entries when provider utilization is at or above this percentage.",
+        unit: "%",
+        min: 80,
+        max: 100,
         step: 1,
       },
     ],

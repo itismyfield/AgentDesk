@@ -12,6 +12,7 @@ import type {
   SettingsActionStyles,
   SettingsTr,
 } from "./SettingsPanelTypes";
+import type { RuntimeConfigValue } from "../../api";
 
 interface SettingsRuntimePanelProps extends Pick<
   SettingsActionStyles,
@@ -20,7 +21,7 @@ interface SettingsRuntimePanelProps extends Pick<
   activeRuntimeCategoryId: string;
   inputStyle: CSSProperties;
   onCategoryChange: (categoryId: string) => void;
-  onRuntimeChange: (key: string, value: number) => void;
+  onRuntimeChange: (key: string, value: RuntimeConfigValue) => void;
   onRuntimeReset: (key: string) => void;
   onRuntimeSave: () => Promise<void>;
   panelQueryNormalized: string;
@@ -75,6 +76,23 @@ export function SettingsRuntimePanel({
                 .map((meta) => {
                   const field = category.fields.find((item) => item.key === meta.key);
                   if (!field) return renderSettingRow(meta);
+                  if (field.inputKind === "toggle") {
+                    const isDefault = meta.effectiveValue === meta.defaultValue;
+                    const trailingMeta = !isDefault ? (
+                      <button
+                        type="button"
+                        onClick={() => onRuntimeReset(field.key)}
+                        className={subtleButtonClass}
+                        style={subtleButtonStyle}
+                      >
+                        {tr("기본값 복원", "Reset to default")}
+                      </button>
+                    ) : null;
+                    return renderSettingRow(meta, { trailingMeta });
+                  }
+                  const min = field.min ?? 0;
+                  const max = field.max ?? 100;
+                  const step = field.step ?? 1;
                   const value = Number(meta.effectiveValue) || 0;
                   const defaultValue = Number(meta.defaultValue) || 0;
                   const isDefault = value === defaultValue;
@@ -82,9 +100,9 @@ export function SettingsRuntimePanel({
                     <div className="flex items-center gap-2">
                       <input
                         type="range"
-                        min={field.min}
-                        max={field.max}
-                        step={field.step}
+                        min={min}
+                        max={max}
+                        step={step}
                         value={value}
                         onChange={(event) => onRuntimeChange(field.key, Number(event.target.value))}
                         className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full"
@@ -92,13 +110,13 @@ export function SettingsRuntimePanel({
                       />
                       <input
                         type="number"
-                        min={field.min}
-                        max={field.max}
-                        step={field.step}
+                        min={min}
+                        max={max}
+                        step={step}
                         value={value}
                         onChange={(event) => {
                           const next = Number(event.target.value);
-                          if (Number.isFinite(next) && next >= field.min && next <= field.max) {
+                          if (Number.isFinite(next) && next >= min && next <= max) {
                             onRuntimeChange(field.key, next);
                           }
                         }}
