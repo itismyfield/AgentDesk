@@ -776,3 +776,11 @@
   or PG lease boundaries; each reported repair action still targets the existing
   node-local/runtime owner. No new multinode ownership, singleton, or lease
   assumption is introduced.
+- #3543 follow-up (OpenCode warm-server race/timeout hardening):
+  `opencode.rs` now marks a warm server as retiring before the exclusive
+  hard-kill fallback and rejects new leases on retiring servers; pre-SSE
+  `/session` and `/prompt_async` REST calls use bounded request timeouts.
+  This remains a worker-local provider process pool on the node that owns the
+  OpenCode turn. It adds no durable queue, cross-node read, leader-only side
+  effect, or PG lease assumption, so multinode ownership semantics are
+  unchanged.
