@@ -53,7 +53,10 @@ def has_non_empty_body_field(body, labels):
                     continue
                 if stripped.startswith("#"):
                     break
-                if re.match(r"^(?:[-*]\s*)?[a-z0-9 /_-]+\s*:\s*$", stripped, re.I):
+                # Next field label is a boundary whether or not it carries a
+                # value: an empty `- Risk:` must not borrow the value of a
+                # following populated field (e.g. `- Rollback notes: revert`).
+                if re.match(r"^(?:[-*]\s*)?[a-z0-9 /_-]+\s*:(?:\s.*)?$", stripped, re.I):
                     break
                 if _meaningful_field_value(stripped):
                     return True
