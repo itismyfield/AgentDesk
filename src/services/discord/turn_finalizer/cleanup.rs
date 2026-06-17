@@ -215,10 +215,11 @@ pub(super) async fn already_finalized_active_state(
     super::super::saturating_decrement_global_active(shared);
     super::super::clear_watchdog_deadline_override(key.channel_id.get()).await;
     shared
-        .dispatch_thread_parents
+        .dispatch
+        .thread_parents
         .retain(|_, thread| *thread != key.channel_id);
     if !finish.has_pending {
-        shared.dispatch_role_overrides.remove(&key.channel_id);
+        shared.dispatch.role_overrides.remove(&key.channel_id);
     }
 }
 

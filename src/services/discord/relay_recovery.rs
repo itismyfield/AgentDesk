@@ -651,13 +651,14 @@ async fn apply_relay_recovery_decision(
     match decision.action {
         RelayRecoveryActionKind::ClearStaleThreadProof => {
             let channel = ChannelId::new(decision.channel_id);
-            let before = shared.dispatch_thread_parents.len();
+            let before = shared.dispatch.thread_parents.len();
             shared
-                .dispatch_thread_parents
+                .dispatch
+                .thread_parents
                 .retain(|parent, thread| *parent != channel && *thread != channel);
             RelayRecoveryApplyResult {
                 status: "applied",
-                removed_thread_proofs: before.saturating_sub(shared.dispatch_thread_parents.len()),
+                removed_thread_proofs: before.saturating_sub(shared.dispatch.thread_parents.len()),
                 removed_mailbox_token: false,
                 post_mailbox_has_cancel_token: None,
                 post_mailbox_queue_depth: None,
@@ -717,12 +718,13 @@ async fn apply_relay_recovery_decision(
                 }
                 super::clear_watchdog_deadline_override(channel.get()).await;
                 shared
-                    .dispatch_thread_parents
+                    .dispatch
+                    .thread_parents
                     .retain(|_, thread| *thread != channel);
                 shared.restart.recovering_channels.remove(&channel);
                 shared.turn_start_times.remove(&channel);
                 if !finish.has_pending {
-                    shared.dispatch_role_overrides.remove(&channel);
+                    shared.dispatch.role_overrides.remove(&channel);
                 }
                 if let Some((_, watcher)) = shared.tmux_watchers.remove(&channel) {
                     watcher.cancel.store(true, Ordering::Relaxed);
@@ -1410,7 +1412,7 @@ mod tests {
         let (registry, shared) = registry_with_shared(provider.clone()).await;
         let parent = ChannelId::new(3_360_003);
         let thread = ChannelId::new(3_360_004);
-        shared.dispatch_thread_parents.insert(parent, thread);
+        shared.dispatch.thread_parents.insert(parent, thread);
 
         let response = auto_apply_relay_recovery_for_shared(
             &registry,
@@ -1433,7 +1435,7 @@ mod tests {
             Some("auto_heal_action_not_allowed")
         );
         assert!(
-            shared.dispatch_thread_parents.contains_key(&parent),
+            shared.dispatch.thread_parents.contains_key(&parent),
             "auto orphan cleanup must not apply other recovery action kinds"
         );
     }

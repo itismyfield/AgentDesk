@@ -65,7 +65,8 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
                     continue;
                 }
                 shared_for_tmux2
-                    .dispatch_role_overrides
+                    .dispatch
+                    .role_overrides
                     .insert(*thread_channel_id, *alt_channel_id);
             }
             if !restored_overrides.is_empty() {

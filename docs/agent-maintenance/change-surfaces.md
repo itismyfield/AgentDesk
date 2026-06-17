@@ -919,7 +919,7 @@
     children (`send_target`, `send_gate`, `send_api`, `manual_delivery`) to
     `outbound/` while preserving the `health::` re-export API; #1879
     snapshot/mailbox extraction, and #3082 answer-flush-barrier field).
-  - `src/services/discord/health/recovery.rs` (2634 lines; health recovery
+  - `src/services/discord/health/recovery.rs` (2637 lines; +3 from #3479 item-3 `shared.dispatch.<field>` nesting; health recovery
     extraction surface, split further before adding non-bugfix behavior; +70
     from #3126 stall-watchdog completed-idle false-positive guard tests; +88
     from #3169 stall-watchdog jsonl-mtime liveness guard + tests, closing the
@@ -933,7 +933,7 @@
     force-clean watcher-respawn follow-through + always-run cross-tick
     retry/dead-man (P1-a: no early return on zero candidates), delegating the
     new behaviour to `health/watcher_respawn.rs`).
-  - `src/services/discord/router/message_handler/intake_turn.rs` (3671 lines;
+  - `src/services/discord/router/message_handler/intake_turn.rs` (3672 lines; +1 from #3479 item-3 `shared.dispatch.<field>` nesting;
     Discord message intake turn orchestration split from the router message
     handler; bugfix only outside a further extraction plan; #3464 extracted the
     unauthorized-voice-announcement scope decision to `voice_announcement_scope.rs`;
@@ -1414,7 +1414,11 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   execution are the canonical scheduled JS routine surfaces. Split focused
   helper modules before growing these files again.
 - `src/services/platform/binary_resolver.rs` (1221).
-- `src/services/discord/mod.rs` (now 4074 prod LoC after #3479 item-2 extracted
+- `src/services/discord/mod.rs` (now 4056 prod LoC after #3479 item-3 extracted
+  the dispatch intake/routing cluster (`intake_dedup` + `dispatch_thread_parents`
+  + `dispatch_role_overrides`) verbatim to `discord/shared_state.rs` as
+  `DispatchRoutingState` (-18; call sites use `shared.dispatch.<field>`); 4074
+  after #3479 item-2 extracted
   the dispatch-policy cluster verbatim to `discord/dispatch_policy.rs` (-169) on
   top of the earlier catch-up subsystem extraction to `discord/catch_up.rs`;
   4965; +34 from #3019 added the

@@ -456,7 +456,8 @@ async fn hydrate_pending_queue_from_disk(
         discord::mailbox_hydrate_pending_queue_from_disk(shared, provider, channel_id).await;
     if let Some(alt_channel_id) = result.restored_override {
         shared
-            .dispatch_role_overrides
+            .dispatch
+            .role_overrides
             .insert(channel_id, alt_channel_id);
     }
     result
@@ -605,13 +606,14 @@ async fn apply_runtime_hard_stop_cleanup(
 
     discord::clear_watchdog_deadline_override(channel_id.get()).await;
     shared
-        .dispatch_thread_parents
+        .dispatch
+        .thread_parents
         .retain(|_, thread| *thread != channel_id);
     shared.restart.recovering_channels.remove(&channel_id);
     shared.turn_start_times.remove(&channel_id);
 
     if !finish.has_pending {
-        shared.dispatch_role_overrides.remove(&channel_id);
+        shared.dispatch.role_overrides.remove(&channel_id);
     }
 
     if stop_watcher && let Some((_, watcher)) = shared.tmux_watchers.remove(&channel_id) {
@@ -1864,7 +1866,8 @@ pub(crate) async fn run_stall_watchdog_pass(
         )
         .await;
         shared
-            .dispatch_thread_parents
+            .dispatch
+            .thread_parents
             .retain(|_, thread_id| *thread_id != channel_id);
         if let Some(user_msg_id) = pending_hourglass_user_msg_id
             && let Ok(http) = super::resolve_bot_http(registry, provider.as_str()).await

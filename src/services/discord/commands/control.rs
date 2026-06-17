@@ -373,7 +373,7 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
         }
     }
 
-    shared.dispatch_role_overrides.remove(&channel_id);
+    shared.dispatch.role_overrides.remove(&channel_id);
 
     clear_fast_mode_reset_pending_for_channel(shared, channel_id);
     clear_codex_goals_reset_pending_for_channel(shared, channel_id);
