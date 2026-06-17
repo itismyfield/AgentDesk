@@ -258,6 +258,7 @@ impl HookRegistry {
     pub fn deliver(&self, key: RegistryKey, event: HookEvent) -> DeliverOutcome {
         let now = Instant::now();
         let mut keys = self.lock();
+        self.sweep_empty_keys_locked(&mut keys, now);
         let state = keys.entry(key).or_default();
         Self::sweep_state(state, self.ttl, now);
 
@@ -538,6 +539,19 @@ impl HookRegistry {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<RegistryKey, KeyState>> {
         self.keys.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn sweep_empty_keys_locked(&self, keys: &mut HashMap<RegistryKey, KeyState>, now: Instant) {
+        keys.retain(|_, state| {
+            Self::sweep_state(state, self.ttl, now);
+            let droppable =
+                state.buffer.is_empty() && !state.claimed && state.unclaimed_stop.is_none();
+            if droppable {
+                self.absorb_evicted_counters(state);
+                return false;
+            }
+            true
+        });
     }
 
     /// Drop expired entries from a key's buffer and clear an expired unclaimed
@@ -1033,6 +1047,26 @@ mod tests {
         assert_eq!(snap2.buffered_total, 1);
         assert_eq!(snap2.unclaimed_stop_total, 1);
         assert_eq!(snap2.keys_tracked, 0);
+    }
+
+    #[test]
+    fn deliver_sweeps_expired_empty_keys_without_snapshot() {
+        let reg = HookRegistry::new(Duration::from_millis(0), Duration::from_millis(2000));
+        let stale = key("claude", "stale");
+        reg.deliver(
+            stale.clone(),
+            event("claude", "stale", HookEventKind::Stop, json!({})),
+        );
+        let fresh = key("claude", "fresh");
+        reg.deliver(
+            fresh.clone(),
+            event("claude", "fresh", HookEventKind::Notification, json!({})),
+        );
+
+        let snap = reg.snapshot();
+        assert_eq!(snap.keys_tracked, 0);
+        assert_eq!(snap.buffered_total, 2);
+        assert!(snap.expired_total >= 2);
     }
 
     #[test]

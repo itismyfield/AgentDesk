@@ -438,6 +438,11 @@ fn try_claim_registry_match(
     if !hook_registry::registry_enabled() {
         return None;
     }
+    // Registry replay must be tied to a concrete turn lower-bound. Without it,
+    // a previous turn's still-in-TTL Stop/token payload for the same provider
+    // session can satisfy the next wait before the live broadcast path sees any
+    // new assistant output.
+    let not_before = not_before?;
     let provider = want_provider.map(str::trim).filter(|p| !p.is_empty())?;
     let session_id = want_session_id.map(str::trim).filter(|s| !s.is_empty())?;
     let key = hook_registry::RegistryKey::new(provider, Some(session_id), None)?;
@@ -450,15 +455,36 @@ fn try_claim_registry_match(
     let until_mode = until_mode.to_string();
     let token = token.map(str::to_string);
     hook_registry::global().claim_matching_once(key, |event| {
-        event_matches(
+        event_matches_registry_replay(
             event,
             want_provider,
             want_session_id,
             &until_mode,
             token.as_deref(),
-            not_before,
+            Some(not_before),
         )
     })
+}
+
+fn event_matches_registry_replay(
+    event: &HookEvent,
+    want_provider: Option<&str>,
+    want_session_id: Option<&str>,
+    until_mode: &str,
+    token: Option<&str>,
+    not_before: Option<DateTime<Utc>>,
+) -> bool {
+    if until_mode == "token" && matches!(event.kind, HookEventKind::UserPromptSubmit) {
+        return false;
+    }
+    event_matches(
+        event,
+        want_provider,
+        want_session_id,
+        until_mode,
+        token,
+        not_before,
+    )
 }
 
 fn event_matches(
@@ -644,6 +670,10 @@ mod tests {
         }
     }
 
+    fn replay_lower_bound() -> Option<DateTime<Utc>> {
+        Some(Utc::now() - chrono::Duration::seconds(1))
+    }
+
     #[test]
     fn stop_event_matches_default() {
         let event = make_event("claude", "abc", HookEventKind::Stop, json!({}));
@@ -827,15 +857,56 @@ mod tests {
             make_event(provider, session, HookEventKind::Stop, json!({})),
         );
 
-        let matched = try_claim_registry_match(Some(provider), Some(session), "stop", None, None);
+        let matched = try_claim_registry_match(
+            Some(provider),
+            Some(session),
+            "stop",
+            None,
+            replay_lower_bound(),
+        );
         assert!(matched.is_some(), "buffered early Stop must be claimed");
         assert_eq!(matched.unwrap().kind, HookEventKind::Stop);
 
         // Single-consumption: a second claim finds nothing.
-        let second = try_claim_registry_match(Some(provider), Some(session), "stop", None, None);
+        let second = try_claim_registry_match(
+            Some(provider),
+            Some(session),
+            "stop",
+            None,
+            replay_lower_bound(),
+        );
         assert!(
             second.is_none(),
             "claimed Stop must not replay to a later wait"
+        );
+    }
+
+    #[test]
+    fn try_claim_registry_match_requires_turn_lower_bound() {
+        use crate::services::claude_tui::hook_registry::{RegistryKey, global};
+        let provider = "claude";
+        let session = "wait-requires-bound";
+        if let Some(k) = RegistryKey::new(provider, Some(session), None) {
+            let _ = global().claim_once(k);
+        }
+        let key = RegistryKey::new(provider, Some(session), None).unwrap();
+        global().deliver(
+            key,
+            make_event(provider, session, HookEventKind::Stop, json!({})),
+        );
+
+        assert!(
+            try_claim_registry_match(Some(provider), Some(session), "stop", None, None).is_none()
+        );
+        assert!(
+            try_claim_registry_match(
+                Some(provider),
+                Some(session),
+                "stop",
+                None,
+                replay_lower_bound(),
+            )
+            .is_some()
         );
     }
 
@@ -844,8 +915,14 @@ mod tests {
     /// through to the broadcast wait (registry returns `None`).
     #[test]
     fn try_claim_registry_match_skips_when_no_session_id() {
-        assert!(try_claim_registry_match(Some("claude"), None, "stop", None, None).is_none());
-        assert!(try_claim_registry_match(None, Some("sid"), "stop", None, None).is_none());
+        assert!(
+            try_claim_registry_match(Some("claude"), None, "stop", None, replay_lower_bound())
+                .is_none()
+        );
+        assert!(
+            try_claim_registry_match(None, Some("sid"), "stop", None, replay_lower_bound())
+                .is_none()
+        );
     }
 
     /// Cross-provider isolation at the wait seam: a Stop buffered for
@@ -866,11 +943,25 @@ mod tests {
         );
         // A claude wait for the same session id must not see the codex Stop.
         assert!(
-            try_claim_registry_match(Some("claude"), Some(session), "stop", None, None).is_none()
+            try_claim_registry_match(
+                Some("claude"),
+                Some(session),
+                "stop",
+                None,
+                replay_lower_bound(),
+            )
+            .is_none()
         );
         // The codex wait does see it.
         assert!(
-            try_claim_registry_match(Some("codex"), Some(session), "stop", None, None).is_some()
+            try_claim_registry_match(
+                Some("codex"),
+                Some(session),
+                "stop",
+                None,
+                replay_lower_bound(),
+            )
+            .is_some()
         );
     }
 
@@ -898,7 +989,7 @@ mod tests {
             Some(session),
             "token",
             Some("absent-token"),
-            None,
+            replay_lower_bound(),
         );
         assert!(
             token_miss.is_none(),
@@ -907,7 +998,13 @@ mod tests {
 
         // The buffered Stop must still be claimable by a later Stop wait — the
         // failed token wait must not have discarded it.
-        let stop_hit = try_claim_registry_match(Some(provider), Some(session), "stop", None, None);
+        let stop_hit = try_claim_registry_match(
+            Some(provider),
+            Some(session),
+            "stop",
+            None,
+            replay_lower_bound(),
+        );
         assert!(
             stop_hit.is_some(),
             "unmatched token wait must not discard the buffered Stop"
@@ -945,15 +1042,74 @@ mod tests {
             Some(session),
             "token",
             Some("needle-42"),
-            None,
+            replay_lower_bound(),
         );
         assert!(token_hit.is_some(), "token payload must be claimable");
 
         // The Stop is still buffered and claimable.
-        let stop_hit = try_claim_registry_match(Some(provider), Some(session), "stop", None, None);
+        let stop_hit = try_claim_registry_match(
+            Some(provider),
+            Some(session),
+            "stop",
+            None,
+            replay_lower_bound(),
+        );
         assert!(
             stop_hit.is_some(),
             "the Stop must survive a token-mode claim on the same session"
+        );
+    }
+
+    #[test]
+    fn try_claim_registry_match_token_ignores_prompt_submit_payload() {
+        use crate::services::claude_tui::hook_registry::{RegistryKey, global};
+        let provider = "claude";
+        let session = "wait-token-prompt-submit";
+        if let Some(k) = RegistryKey::new(provider, Some(session), None) {
+            let _ = global().claim_once(k);
+        }
+        let key = RegistryKey::new(provider, Some(session), None).unwrap();
+        global().deliver(
+            key.clone(),
+            make_event(
+                provider,
+                session,
+                HookEventKind::UserPromptSubmit,
+                json!({ "prompt": "marker-from-user-prompt" }),
+            ),
+        );
+        global().deliver(
+            key,
+            make_event(
+                provider,
+                session,
+                HookEventKind::Notification,
+                json!({ "text": "marker-from-assistant" }),
+            ),
+        );
+
+        let prompt_submit = try_claim_registry_match(
+            Some(provider),
+            Some(session),
+            "token",
+            Some("marker-from-user-prompt"),
+            replay_lower_bound(),
+        );
+        assert!(
+            prompt_submit.is_none(),
+            "registry replay must not satisfy token waits from prompt-submit echo"
+        );
+
+        let assistant_token = try_claim_registry_match(
+            Some(provider),
+            Some(session),
+            "token",
+            Some("marker-from-assistant"),
+            replay_lower_bound(),
+        );
+        assert!(
+            assistant_token.is_some(),
+            "non-prompt-submit token payload remains claimable"
         );
     }
 
