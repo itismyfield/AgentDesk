@@ -27,7 +27,10 @@ pub(in crate::services::discord) use self::queued_placeholders::{
     delete_stale_queued_placeholder_cards, delete_stale_queued_placeholder_cards_with,
     filter_restored_queued_placeholders,
 };
-use self::shared_data::run_bot_build_shared_data;
+use self::shared_data::{
+    ProcessLifecycleCounters, RestoredSessionState, RuntimeServices, UiFeatureFlags,
+    run_bot_build_shared_data,
+};
 use self::shutdown::{run_bot_run_gateway_backend, run_bot_spawn_sigterm_handler};
 #[cfg(test)]
 use self::voice::voice_auto_join_provider_map;
@@ -162,25 +165,33 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
 
     let shared = run_bot_build_shared_data(
         bot_settings,
-        initial_skills,
         &provider,
-        &token_hash,
-        &voice_barge_in,
-        global_active,
-        global_finalizing,
-        &shutdown_remaining,
-        &health_registry,
-        pg_pool,
-        engine,
-        api_port,
-        placeholder_live_events_enabled,
-        status_panel_v2_enabled,
-        &restored_model_overrides,
-        &restored_fast_mode_channels,
-        &restored_fast_mode_reset_entries,
-        &restored_fast_mode_reset_channels,
-        &restored_codex_goals_channels,
-        &restored_codex_goals_reset_channels,
+        RuntimeServices {
+            initial_skills,
+            token_hash: token_hash.clone(),
+            api_port,
+            voice_barge_in: voice_barge_in.clone(),
+            health_registry: health_registry.clone(),
+            pg_pool,
+            engine,
+        },
+        ProcessLifecycleCounters {
+            global_active,
+            global_finalizing,
+            shutdown_remaining: shutdown_remaining.clone(),
+        },
+        UiFeatureFlags {
+            placeholder_live_events_enabled,
+            status_panel_v2_enabled,
+        },
+        RestoredSessionState {
+            model_overrides: &restored_model_overrides,
+            fast_mode_channels: &restored_fast_mode_channels,
+            fast_mode_reset_entries: &restored_fast_mode_reset_entries,
+            fast_mode_reset_channels: &restored_fast_mode_reset_channels,
+            codex_goals_channels: &restored_codex_goals_channels,
+            codex_goals_reset_channels: &restored_codex_goals_reset_channels,
+        },
     );
     super::tui_prompt_relay::spawn_tui_prompt_relay(shared.clone(), provider.clone());
 
@@ -728,25 +739,33 @@ mod restart_lifecycle_characterization_tests {
         let health_registry = Arc::new(health::HealthRegistry::new());
         run_bot_build_shared_data(
             DiscordBotSettings::default(),
-            Vec::new(),
             &ProviderKind::Claude,
-            "s3-restart-characterization-token-hash",
-            &voice,
-            Arc::new(AtomicUsize::new(0)),
-            Arc::new(AtomicUsize::new(0)),
-            shutdown_remaining,
-            &health_registry,
-            None,
-            None,
-            9,
-            false,
-            false,
-            &[],
-            &[],
-            &[],
-            &[],
-            &[],
-            &[],
+            RuntimeServices {
+                initial_skills: Vec::new(),
+                token_hash: "s3-restart-characterization-token-hash".to_string(),
+                api_port: 9,
+                voice_barge_in: voice,
+                health_registry,
+                pg_pool: None,
+                engine: None,
+            },
+            ProcessLifecycleCounters {
+                global_active: Arc::new(AtomicUsize::new(0)),
+                global_finalizing: Arc::new(AtomicUsize::new(0)),
+                shutdown_remaining: shutdown_remaining.clone(),
+            },
+            UiFeatureFlags {
+                placeholder_live_events_enabled: false,
+                status_panel_v2_enabled: false,
+            },
+            RestoredSessionState {
+                model_overrides: &[],
+                fast_mode_channels: &[],
+                fast_mode_reset_entries: &[],
+                fast_mode_reset_channels: &[],
+                codex_goals_channels: &[],
+                codex_goals_reset_channels: &[],
+            },
         )
     }
 

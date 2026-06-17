@@ -1106,7 +1106,7 @@
     `finalize_stale_streaming_footer` / `text_ends_with_streaming_footer` shared
     terminal-idle reconciliation helpers + their unit tests).
   - `src/services/discord/prompt_builder/` (directory, refactored).
-  - `src/services/discord/runtime_bootstrap.rs` (274 production lines after
+  - `src/services/discord/runtime_bootstrap.rs` (285 production lines after #3479 item-3 grouped the 20 builder args into 6 param structs; was 274 after
     #3038 run_bot S0/S5; characterization tests pin the startup-doctor barrier,
     restored settings filters, queued-placeholder filtering/deletion, and
     gateway intents, then the low-risk clusters moved verbatim into
@@ -1115,7 +1115,7 @@
     `session_gc.rs` (102 prod / 69 test), `framework_setup.rs` (287),
     `spawns.rs` (229), `recovery_flush.rs` (357), `voice.rs` (140),
     `gateway_lease.rs` (190), `shutdown.rs` (207), `intake.rs` (63),
-    `shared_data.rs` (176, the `run_bot_build_shared_data` builder plus its
+    `shared_data.rs` (236, the `run_bot_build_shared_data` builder + its 4 #3479 param structs plus its
     side-effect-order doc), and `gateway_runtime.rs` (147, the leader runtime
     tail from restored logging through backend event-loop entry).
     The namespace is capped at 700 prod lines per child module in
