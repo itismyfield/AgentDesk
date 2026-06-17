@@ -72,10 +72,12 @@ pub(super) async fn run_bot_framework_setup(
     super::spawns::run_bot_spawn_skills_hot_reload(&shared_for_tmux, &provider_for_setup);
 
     // #799: MCP credential watcher (Claude only).
-    // Watches ~/.claude/.credentials.json and ~/.claude/mcp.json and posts
-    // a one-line notification to all active Claude sessions when one of
-    // them changes, so the operator can run /restart to pick up
-    // newly-authenticated MCP servers without losing context.
+    // Watches ~/.claude.json and ~/.claude/.mcp.json (the MCP server registries)
+    // and posts a one-line notification to all active Claude sessions when the
+    // registered server set changes, so the operator can run /restart to pick up
+    // newly-authenticated MCP servers without losing context. The OAuth token file
+    // (~/.claude/.credentials.json) is intentionally not watched (#3554) — its
+    // refresh churn is not an MCP change.
     if matches!(provider_for_setup, ProviderKind::Claude) {
         let mcp_cfg = crate::config::load_graceful().mcp;
         if mcp_cfg.watch_credentials {

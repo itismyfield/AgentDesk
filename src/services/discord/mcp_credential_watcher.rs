@@ -1,13 +1,17 @@
-//! Watches the Claude CLI MCP credential / config files and posts a one-line
-//! notification to every active Claude session when one of them changes.
+//! Watches the Claude CLI MCP config files and posts a one-line notification to
+//! every active Claude session when the registered MCP server set changes.
 //!
 //! Watched paths (relative to `$CLAUDE_CONFIG_DIR` if set, otherwise `$HOME`):
 //! - `.claude.json` — top-level Claude Code config (MCP server registrations live here per docs)
 //! - `.claude/.mcp.json` — project-scoped MCP config (matches the existing repo lookup
 //!   in `mcp_config::resolve_claude_user_mcp_config_path`)
-//! - `.claude/.credentials.json` — auth tokens for OAuth-backed MCP servers (Linux-style;
-//!   on macOS Claude Code stores OAuth tokens in Keychain, but we still watch the file
-//!   in case it exists or gets created)
+//!
+//! We deliberately do NOT watch `.claude/.credentials.json` (#3554): it holds the
+//! Claude Code OAuth login token, which is rewritten on every routine access-token
+//! refresh. Presence-only tracking treated each refresh as an MCP change and
+//! spammed a useless `/restart` notification. The authoritative signal for a new
+//! OAuth-backed MCP server is its registration landing in `.claude.json`/`.mcp.json`,
+//! which the `mcpServers` content diff below already detects.
 //!
 //! Background: Claude CLI attaches MCP servers at boot and never hot-reloads
 //! them. When the operator authenticates a new MCP server (e.g. memento)
@@ -39,10 +43,13 @@ struct CredentialChange {
     timestamp: SystemTime,
 }
 
+/// Snapshot of a watched file's MCP-relevant content. Kept as a single-variant
+/// enum (rather than a bare `String`) so a future watched-file kind can be added
+/// without rippling the `Option<FileSnapshot>` plumbing. `.credentials.json` used
+/// to add a second variant; it was dropped in #3554.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FileSnapshot {
     Config(String),
-    CredentialsPresent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,30 +65,28 @@ impl McpConfigDiff {
     }
 }
 
+/// One human-readable line describing what changed in a watched file. Single
+/// variant since #3554 (the `.credentials.json` "created/updated/removed" variant
+/// was removed); kept as an enum to leave room for future summary kinds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FileChangeSummary {
     Config { file: String, diff: McpConfigDiff },
-    Credentials { file: String, detail: &'static str },
 }
 
 impl FileChangeSummary {
     fn render(&self) -> String {
-        match self {
-            Self::Config { file, diff } => {
-                let mut parts = Vec::new();
-                if !diff.added.is_empty() {
-                    parts.push(prefix_names("+", &diff.added));
-                }
-                if !diff.removed.is_empty() {
-                    parts.push(prefix_names("-", &diff.removed));
-                }
-                if !diff.changed.is_empty() {
-                    parts.push(prefix_names("변경 ", &diff.changed));
-                }
-                format!("{file}: {}", parts.join(", "))
-            }
-            Self::Credentials { file, detail } => format!("{file}: {detail}"),
+        let Self::Config { file, diff } = self;
+        let mut parts = Vec::new();
+        if !diff.added.is_empty() {
+            parts.push(prefix_names("+", &diff.added));
         }
+        if !diff.removed.is_empty() {
+            parts.push(prefix_names("-", &diff.removed));
+        }
+        if !diff.changed.is_empty() {
+            parts.push(prefix_names("변경 ", &diff.changed));
+        }
+        format!("{file}: {}", parts.join(", "))
     }
 }
 
@@ -102,22 +107,10 @@ fn snapshot_existing_files(paths: &[PathBuf]) -> HashMap<PathBuf, Option<FileSna
 
 fn snapshot_file(path: &Path) -> std::io::Result<Option<FileSnapshot>> {
     match std::fs::read_to_string(path) {
-        Ok(contents) => {
-            if is_credentials_file(path) {
-                Ok(Some(FileSnapshot::CredentialsPresent))
-            } else {
-                Ok(Some(FileSnapshot::Config(canonical_mcp_config(&contents))))
-            }
-        }
+        Ok(contents) => Ok(Some(FileSnapshot::Config(canonical_mcp_config(&contents)))),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
     }
-}
-
-fn is_credentials_file(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name == ".credentials.json")
 }
 
 fn canonical_mcp_config(contents: &str) -> String {
@@ -188,20 +181,8 @@ fn summarize_change(
     let file = path
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("credential file")
+        .unwrap_or("mcp config")
         .to_string();
-    if is_credentials_file(path) {
-        let detail = match (previous, current) {
-            (None, Some(FileSnapshot::CredentialsPresent)) => "created",
-            (Some(FileSnapshot::CredentialsPresent), None) => "removed",
-            (Some(FileSnapshot::CredentialsPresent), Some(FileSnapshot::CredentialsPresent)) => {
-                "updated"
-            }
-            _ => return None,
-        };
-        return Some(FileChangeSummary::Credentials { file, detail });
-    }
-
     let diff = diff_mcp_config(previous, current);
     if diff.is_empty() {
         return None;
@@ -280,7 +261,7 @@ impl CredentialNotifyDedupe {
     }
 }
 
-/// Resolve the credential files we should watch. Returns the (existing-or-not)
+/// Resolve the MCP config files we should watch. Returns the (existing-or-not)
 /// candidate paths so that creation events are also picked up.
 pub(super) fn credential_paths() -> Vec<PathBuf> {
     let override_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
@@ -288,8 +269,9 @@ pub(super) fn credential_paths() -> Vec<PathBuf> {
 }
 
 /// Pure helper for tests. Honors `CLAUDE_CONFIG_DIR` when present; otherwise
-/// falls back to the user's home directory. Returns paths covering both the
-/// top-level Claude config and the project/credentials files under `.claude/`.
+/// falls back to the user's home directory. Returns the MCP config files under
+/// the Claude config root. The OAuth token file (`.claude/.credentials.json`) is
+/// intentionally excluded — see the module-level docs (#3554).
 pub(super) fn credential_paths_with_overrides(
     override_dir: Option<PathBuf>,
     home: Option<PathBuf>,
@@ -301,11 +283,7 @@ pub(super) fn credential_paths_with_overrides(
         None => return Vec::new(),
     };
     let claude_subdir = base.join(".claude");
-    vec![
-        base.join(".claude.json"),
-        claude_subdir.join(".mcp.json"),
-        claude_subdir.join(".credentials.json"),
-    ]
+    vec![base.join(".claude.json"), claude_subdir.join(".mcp.json")]
 }
 
 /// Spawn the credential watcher. Runs forever in a dedicated background task.
@@ -438,8 +416,8 @@ pub(super) fn spawn_watcher(
                 return;
             };
             // Drain any backlog inside the debounce window so we send at most one
-            // notification per burst of file events (e.g. credential rotation that
-            // touches both files in quick succession).
+            // notification per burst of file events (e.g. an editor rewriting both
+            // config files in quick succession).
             tokio::time::sleep(debounce).await;
             let mut changes = vec![first_change];
             while let Ok(change) = rx.try_recv() {
@@ -456,7 +434,7 @@ pub(super) fn spawn_watcher(
                 }
                 None => {
                     tracing::debug!(
-                        "MCP credential file touched but no mcpServers/credentials change — skipping broadcast"
+                        "MCP config file touched but no mcpServers change — skipping broadcast"
                     );
                 }
             }
@@ -507,4 +485,116 @@ async fn broadcast_credential_change(
     tracing::info!(
         "MCP credential watcher: broadcast complete (delivered={delivered}, dedupe-suppressed={suppressed})"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_snapshot(json: &str) -> FileSnapshot {
+        FileSnapshot::Config(canonical_mcp_config(json))
+    }
+
+    #[test]
+    fn watched_paths_exclude_oauth_token_file() {
+        // #3554: the OAuth token file is rewritten on every access-token refresh and
+        // carries no MCP signal, so it must not be watched.
+        let paths = credential_paths_with_overrides(None, Some(PathBuf::from("/home/u")));
+        let rendered: Vec<String> = paths
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            rendered.iter().any(|p| p.ends_with("/home/u/.claude.json")),
+            "{rendered:?}"
+        );
+        assert!(
+            rendered.iter().any(|p| p.ends_with(".claude/.mcp.json")),
+            "{rendered:?}"
+        );
+        assert!(
+            !rendered.iter().any(|p| p.ends_with(".credentials.json")),
+            "token file must not be watched: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn claude_config_dir_override_reroots_watched_paths() {
+        let paths = credential_paths_with_overrides(
+            Some(PathBuf::from("/cfg")),
+            Some(PathBuf::from("/home/u")),
+        );
+        assert_eq!(paths.len(), 2);
+        assert!(paths.iter().all(|p| p.starts_with("/cfg")), "{paths:?}");
+    }
+
+    #[test]
+    fn added_mcp_server_is_reported() {
+        let prev = config_snapshot(r#"{"mcpServers":{}}"#);
+        let curr = config_snapshot(r#"{"mcpServers":{"memento":{"command":"x"}}}"#);
+        let summary = summarize_change(
+            &PathBuf::from("/home/u/.claude.json"),
+            Some(&prev),
+            Some(&curr),
+        )
+        .expect("adding a server should notify");
+        assert_eq!(summary.render(), ".claude.json: +memento");
+    }
+
+    #[test]
+    fn removed_mcp_server_is_reported() {
+        let prev = config_snapshot(r#"{"mcpServers":{"memento":{"command":"x"}}}"#);
+        let curr = config_snapshot(r#"{"mcpServers":{}}"#);
+        let summary = summarize_change(
+            &PathBuf::from("/home/u/.claude.json"),
+            Some(&prev),
+            Some(&curr),
+        )
+        .expect("removing a server should notify");
+        assert_eq!(summary.render(), ".claude.json: -memento");
+    }
+
+    #[test]
+    fn changed_mcp_server_config_is_reported() {
+        let prev = config_snapshot(r#"{"mcpServers":{"memento":{"command":"old"}}}"#);
+        let curr = config_snapshot(r#"{"mcpServers":{"memento":{"command":"new"}}}"#);
+        let summary = summarize_change(
+            &PathBuf::from("/home/u/.claude.json"),
+            Some(&prev),
+            Some(&curr),
+        )
+        .expect("editing a server config should notify");
+        assert_eq!(summary.render(), ".claude.json: 변경 memento");
+    }
+
+    #[test]
+    fn unchanged_mcp_servers_produce_no_summary() {
+        let snap = config_snapshot(r#"{"mcpServers":{"memento":{"command":"x"}}}"#);
+        let same = snap.clone();
+        assert!(
+            summarize_change(
+                &PathBuf::from("/home/u/.claude.json"),
+                Some(&snap),
+                Some(&same)
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn token_file_rotation_produces_no_summary() {
+        // Even if a stray event for a token-shaped JSON reaches summarize_change, it
+        // has no mcpServers, so a rewrite (refresh) canonicalizes identically -> silence.
+        let before = config_snapshot(r#"{"claudeAiOauth":{"accessToken":"old"}}"#);
+        let after = config_snapshot(r#"{"claudeAiOauth":{"accessToken":"new"}}"#);
+        assert_eq!(before, after);
+        assert!(
+            summarize_change(
+                &PathBuf::from("/home/u/.claude/.credentials.json"),
+                Some(&before),
+                Some(&after),
+            )
+            .is_none()
+        );
+    }
 }
