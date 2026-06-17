@@ -630,7 +630,8 @@ async fn load_pipeline_override_report_pg(pg_pool: Option<&PgPool>) -> Option<se
 /// Read the dispatch-gate enable flag and gate danger threshold persisted via
 /// `PUT /api/settings/runtime-config` (`kv_meta` `runtime-config` JSON) so the
 /// diagnostics block reports the EFFECTIVE values the gate uses, not the
-/// YAML-only fallback. Returns `(None, None)` when no pool / no override.
+/// YAML-only fallback. Returns `(None, None)` for the displayed settings when
+/// no pool / no override exists.
 async fn load_dispatch_gate_runtime_overrides(
     pg_pool: Option<&PgPool>,
 ) -> (Option<bool>, Option<u64>) {
@@ -645,7 +646,9 @@ async fn load_dispatch_gate_runtime_overrides(
             .ok()
             .flatten()
             .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
-    crate::services::dispatch_gate::persisted_runtime_overrides(runtime_config.as_ref())
+    let (enabled, danger, _stale) =
+        crate::services::dispatch_gate::persisted_runtime_overrides(runtime_config.as_ref());
+    (enabled, danger)
 }
 
 async fn load_channel_session_state(

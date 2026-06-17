@@ -1166,17 +1166,94 @@ fn parse_header_i64(headers: &reqwest::header::HeaderMap, name: &str) -> Option<
     headers.get(name)?.to_str().ok()?.parse().ok()
 }
 
-/// Parse ISO 8601 reset timestamp from header into unix epoch seconds.
+/// Parse reset timestamp from a rate-limit header into unix epoch seconds.
+///
+/// Anthropic returns RFC3339 timestamps. OpenAI commonly returns relative
+/// durations such as `1s` or `6m0s`, so accept both forms.
 fn parse_header_reset(headers: &reqwest::header::HeaderMap, name: &str) -> i64 {
     headers
         .get(name)
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| {
-            chrono::DateTime::parse_from_rfc3339(s)
-                .ok()
-                .map(|dt| dt.timestamp())
-        })
+        .and_then(|s| parse_rate_limit_reset_value(s, chrono::Utc::now().timestamp()))
         .unwrap_or(0)
+}
+
+fn parse_rate_limit_reset_value(value: &str, now: i64) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|dt| dt.timestamp())
+        .or_else(|| parse_rate_limit_duration_seconds(value).map(|seconds| now + seconds))
+}
+
+fn parse_rate_limit_duration_seconds(value: &str) -> Option<i64> {
+    let input = value.trim();
+    if input.is_empty() {
+        return None;
+    }
+    if let Ok(seconds) = input.parse::<i64>() {
+        return Some(seconds.max(0));
+    }
+
+    let mut total = 0.0_f64;
+    let mut number = String::new();
+    let mut consumed = false;
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch.is_ascii_digit() || ch == '.' {
+            number.push(ch);
+            index += 1;
+            continue;
+        }
+        if number.is_empty() {
+            return None;
+        }
+        let amount = number.parse::<f64>().ok()?;
+        number.clear();
+        let multiplier = match ch {
+            'd' => 86_400.0,
+            'h' => 3_600.0,
+            'm' => {
+                if chars.get(index + 1) == Some(&'s') {
+                    index += 1;
+                    0.001
+                } else {
+                    60.0
+                }
+            }
+            's' => 1.0,
+            _ => return None,
+        };
+        total += amount * multiplier;
+        consumed = true;
+        index += 1;
+    }
+
+    if !number.is_empty() || !consumed {
+        return None;
+    }
+    Some(total.ceil().max(0.0) as i64)
+}
+
+#[cfg(test)]
+mod rate_limit_header_tests {
+    use super::{parse_rate_limit_duration_seconds, parse_rate_limit_reset_value};
+
+    #[test]
+    fn parses_openai_relative_reset_duration() {
+        assert_eq!(parse_rate_limit_duration_seconds("6m0s"), Some(360));
+        assert_eq!(parse_rate_limit_duration_seconds("1s"), Some(1));
+        assert_eq!(parse_rate_limit_reset_value("500ms", 1_000), Some(1_001));
+    }
+
+    #[test]
+    fn parses_rfc3339_reset_timestamp() {
+        assert_eq!(
+            parse_rate_limit_reset_value("2026-06-17T00:00:00Z", 1_000),
+            Some(1_781_654_400)
+        );
+    }
 }
 
 /// Fetch Claude usage via OAuth API (subscription-based, no API key needed).
@@ -1221,9 +1298,11 @@ async fn fetch_claude_oauth_usage(token: &str) -> Result<Vec<serde_json::Value>,
                 "seven_day_sonnet" => "7d Sonnet",
                 _ => key,
             };
-            // Convert utilization (0-100 float) to used/limit format for consistency
+            // Convert utilization (0-100 float) to used/limit format for
+            // consistency, but keep the precise value so the dispatch gate does
+            // not round 99.5% into a false 100% saturation.
             let limit = 100i64;
-            let used = utilization.round() as i64;
+            let used = utilization.floor().clamp(0.0, 100.0) as i64;
             let reset_ts = chrono::DateTime::parse_from_rfc3339(resets_at)
                 .map(|dt| dt.timestamp())
                 .unwrap_or(0);
@@ -1233,6 +1312,7 @@ async fn fetch_claude_oauth_usage(token: &str) -> Result<Vec<serde_json::Value>,
                 "limit": limit,
                 "used": used,
                 "remaining": limit - used,
+                "utilization": utilization,
                 "reset": reset_ts,
             }));
         }

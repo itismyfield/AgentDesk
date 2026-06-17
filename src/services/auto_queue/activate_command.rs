@@ -85,7 +85,7 @@ pub(crate) async fn activate_with_deps_pg(
         let now = chrono::Utc::now().timestamp();
         crate::services::dispatch_gate::refresh_snapshots_if_stale(pool, now).await;
     }
-    let (gate_enabled_override, gate_danger_override) = {
+    let (gate_enabled_override, gate_danger_override, gate_stale_override) = {
         let runtime_config = match load_kv_meta_value_pg(pool, "runtime-config") {
             Ok(raw) => raw.and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok()),
             Err(error) => {
@@ -329,6 +329,7 @@ pub(crate) async fn activate_with_deps_pg(
                 chrono::Utc::now().timestamp(),
                 gate_enabled_override,
                 gate_danger_override,
+                gate_stale_override,
             );
         if gate_decision.verdict.is_defer() {
             crate::auto_queue_log!(

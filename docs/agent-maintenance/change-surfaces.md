@@ -1234,7 +1234,7 @@
   its query/command/view/FSM behavior lives under
   `src/services/auto_queue/{query,command,view,fsm,phase_gate}.rs` plus
   smaller route-delegation slices.
-  `src/services/auto_queue/activate_command.rs` (1456 lines, post-#1444
+  `src/services/auto_queue/activate_command.rs` (1457 lines, post-#1444
   idempotency-guard expansion + #3038 phase-helper decomposition) is the
   canonical activate/dispatch-next command surface; it is intentionally above
   the giant-file threshold and tracked here. The `activate_with_deps_pg`
@@ -1318,7 +1318,7 @@
 - legacy_modules: none — these are shared runtime coordination surfaces.
 - do_not_edit_without_migration_plan (giant-file):
   - `src/config.rs` (2346 lines).
-  - `src/server/mod.rs` (2453 lines).
+  - `src/server/mod.rs` (2514 lines).
   - `src/receipt.rs` (1842 lines).
   - `src/github/sync.rs` (1488 lines).
   - `src/reconcile.rs` (1816 lines; periodic reconcile loop covering stale
@@ -1383,14 +1383,14 @@ Line counts are *production* LoC (the `Prod` column in `module-inventory.md`,
 which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync.
 
 - `src/services/auto_queue.rs` (1546) and
-  `src/services/auto_queue/activate_command.rs` (1456); auto-queue route
+  `src/services/auto_queue/activate_command.rs` (1457); auto-queue route
   behavior is split across `src/services/auto_queue/*` slices, with
   `activate_command.rs` now giant-file territory.
   `src/services/auto_queue/cancel_run.rs` (1032) is also giant-file territory;
   split before further non-bugfix growth.
 - `src/services/onboarding/mod.rs` (2936),
   `src/services/dispatched_sessions.rs` (1328), and
-  `src/services/settings.rs` (1024) — service-layer route support surfaces
+  `src/services/settings.rs` (1029) — service-layer route support surfaces
   split out of the large dashboard route modules. (`src/services/onboarding.rs`
   and `src/services/api_friction.rs` have been removed/decomposed.)
 - `src/services/dispatches/outbox_route.rs` (1089) — dispatch outbox route
@@ -1440,7 +1440,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   helpers before adding non-bugfix behavior. (+5 from #3169 exposing the idle-
   kill `latest_runtime_activity_unix_nanos` jsonl-mtime probe to the stall-
   watchdog liveness guard.)
-- `src/services/settings.rs` (1024) — settings domain service extracted from
+- `src/services/settings.rs` (1029) — settings domain service extracted from
   the route layer in #1519. Keep follow-up changes bugfix-only unless the file
   is split further.
 - `src/services/routines/{store.rs (2844), migrated.rs (1286),

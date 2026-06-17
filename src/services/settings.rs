@@ -1002,6 +1002,7 @@ fn seeded_runtime_config_map(
 ) -> Map<String, Value> {
     let defaults = runtime_config_defaults_map(config);
     let yaml_overrides = runtime_config_yaml_overrides(config);
+    let has_yaml_overrides = !yaml_overrides.is_empty();
 
     let mut current = if config.runtime.reset_overrides_on_restart {
         defaults.clone()
@@ -1015,7 +1016,11 @@ fn seeded_runtime_config_map(
         }
     }
 
-    if config.runtime.reset_overrides_on_restart || saved_obj.is_none() || current != defaults {
+    if config.runtime.reset_overrides_on_restart
+        || saved_obj.is_none()
+        || has_yaml_overrides
+        || current != defaults
+    {
         current
     } else {
         saved_obj.unwrap_or(current)
@@ -1059,5 +1064,26 @@ mod tests {
         let value =
             serde_json::to_value(SettingsOkResponse::ok()).expect("serialize settings ok response");
         assert_eq!(value, json!({"ok": true}));
+    }
+
+    #[test]
+    fn seeded_runtime_config_applies_yaml_overrides_over_seeded_defaults() {
+        let saved_obj = runtime_config_defaults_map(&crate::config::Config::default());
+        let mut config = crate::config::Config::default();
+        config.runtime.dispatch_rate_limit_gate_enabled = Some(false);
+        config.runtime.dispatch_rate_limit_gate_danger_pct = Some(95);
+        config.runtime.rate_limit_stale_sec = Some(900);
+
+        let seeded = seeded_runtime_config_map(Some(saved_obj), &config);
+
+        assert_eq!(
+            seeded.get("dispatchRateLimitGateEnabled"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            seeded.get("dispatchRateLimitGateDangerPct"),
+            Some(&json!(95))
+        );
+        assert_eq!(seeded.get("rateLimitStaleSec"), Some(&json!(900)));
     }
 }
