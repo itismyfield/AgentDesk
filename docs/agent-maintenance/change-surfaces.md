@@ -860,7 +860,7 @@
     nested `usage` on the success result frame so watcher-owned codex turns
     persist token telemetry — never the session-cumulative
     `info.total_token_usage`).
-  - `src/services/tui_prompt_dedupe.rs` (1569 lines; shared TUI prompt
+  - `src/services/tui_prompt_dedupe.rs` (1601 lines; shared TUI prompt
     fingerprinting/dedupe state for hook and rollout relay paths, bugfix only
     outside an extraction plan; +176 from #3540: stable JSONL entry-identity
     (`uuid`) dedup — `extract_claude_transcript_user_prompt_with_entry_id`
