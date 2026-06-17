@@ -546,12 +546,21 @@ fn translate_sqlite_rowid(sql: &str) -> String {
             result.push(ch);
             idx += 1;
 
-            let start = idx;
-            while idx < chars.len() && chars[idx] != '"' {
+            let mut token = String::new();
+            while idx < chars.len() {
+                if chars[idx] == '"' {
+                    if idx + 1 < chars.len() && chars[idx + 1] == '"' {
+                        token.push('"');
+                        token.push('"');
+                        idx += 2;
+                        continue;
+                    }
+                    break;
+                }
+                token.push(chars[idx]);
                 idx += 1;
             }
 
-            let token: String = chars[start..idx].iter().collect();
             if token.eq_ignore_ascii_case("rowid") {
                 result.push_str("ctid");
             } else {
@@ -1265,6 +1274,14 @@ mod tests {
         );
         assert!(prepared.sql.contains("ORDER BY td.ctid DESC, ctid DESC"));
         assert!(prepared.params.is_empty());
+    }
+
+    #[test]
+    fn prepare_policy_sql_for_pg_preserves_escaped_quote_identifiers() {
+        let sql = r#"SELECT "rowid""suffix", "rowid" FROM task_dispatches"#;
+        let prepared = prepare_policy_sql_for_pg(sql, &[]).expect("render rowid");
+
+        assert!(prepared.sql.contains(r#""rowid""suffix", "ctid""#));
     }
 
     #[test]
