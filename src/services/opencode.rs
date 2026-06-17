@@ -29,6 +29,7 @@ const HEALTH_POLL_MS: u64 = 250;
 const SSE_READ_TIMEOUT: Duration = Duration::from_secs(120);
 const DISPOSE_TIMEOUT: Duration = Duration::from_secs(5);
 const MESSAGE_RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
+const SESSION_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const STARTUP_OUTPUT_LIMIT: usize = 8 * 1024;
 const WARM_SERVER_IDLE_TTL: Duration = Duration::from_secs(20 * 60);
 
@@ -118,6 +119,7 @@ struct OpenCodeWarmServer {
     startup_output: Arc<Mutex<OpenCodeStartupOutput>>,
     process: Mutex<OpenCodeServerProcess>,
     active_sessions: AtomicUsize,
+    retiring: AtomicBool,
     last_used: Mutex<Instant>,
 }
 
@@ -160,6 +162,18 @@ impl OpenCodeWarmServer {
             e.into_inner()
         });
         shutdown_server(&mut process, &self.base_url, &self.auth);
+    }
+
+    fn try_acquire_lease(&self) -> bool {
+        let acquired = try_acquire_warm_server_session(&self.active_sessions, &self.retiring);
+        if acquired {
+            self.mark_used();
+        }
+        acquired
+    }
+
+    fn try_begin_exclusive_hard_kill(&self) -> Result<(), usize> {
+        try_begin_exclusive_warm_server_hard_kill(&self.active_sessions, &self.retiring)
     }
 }
 
@@ -376,6 +390,38 @@ fn compute_suspicious_active_leak(active_sessions: u32, _idle_secs: u64, running
 /// watchdog re-evaluates this predicate at kill time, which is race-safe.
 fn warm_server_hard_kill_allowed(active_sessions: usize) -> bool {
     active_sessions <= 1
+}
+
+fn try_acquire_warm_server_session(active_sessions: &AtomicUsize, retiring: &AtomicBool) -> bool {
+    if retiring.load(Ordering::SeqCst) {
+        return false;
+    }
+    active_sessions.fetch_add(1, Ordering::SeqCst);
+    if retiring.load(Ordering::SeqCst) {
+        active_sessions.fetch_sub(1, Ordering::SeqCst);
+        return false;
+    }
+    true
+}
+
+fn try_begin_exclusive_warm_server_hard_kill(
+    active_sessions: &AtomicUsize,
+    retiring: &AtomicBool,
+) -> Result<(), usize> {
+    if retiring
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err(active_sessions.load(Ordering::SeqCst));
+    }
+
+    let active = active_sessions.load(Ordering::SeqCst);
+    if warm_server_hard_kill_allowed(active) {
+        Ok(())
+    } else {
+        retiring.store(false, Ordering::SeqCst);
+        Err(active)
+    }
 }
 
 impl OpenCodeWarmServer {
@@ -774,9 +820,7 @@ fn acquire_warm_server(
             .get(&key)
             .is_some_and(|current| Arc::ptr_eq(current, &server));
 
-        if healthy && still_pooled {
-            server.active_sessions.fetch_add(1, Ordering::SeqCst);
-            server.mark_used();
+        if healthy && still_pooled && server.try_acquire_lease() {
             tracing::debug!(
                 "Reusing OpenCode warm server {} for {}",
                 server.base_url,
@@ -843,6 +887,7 @@ fn acquire_warm_server(
         startup_output,
         process: Mutex::new(server_process),
         active_sessions: AtomicUsize::new(1),
+        retiring: AtomicBool::new(false),
         last_used: Mutex::new(Instant::now()),
     });
     tracing::info!(
@@ -867,19 +912,28 @@ fn acquire_warm_server(
         e.into_inner()
     });
     match pool.entry(key) {
-        Entry::Occupied(existing) => {
+        Entry::Occupied(mut existing) => {
             // Another thread won the race. Reuse their server (taking a lease)
             // and discard ours to avoid leaking an orphaned `opencode serve`.
             let winner = existing.get().clone();
-            winner.active_sessions.fetch_add(1, Ordering::SeqCst);
-            winner.mark_used();
-            drop(pool);
-            tracing::info!(
-                "Discarding duplicate OpenCode warm server {} after losing startup race",
-                server.base_url
-            );
-            server.shutdown();
-            Ok(OpenCodeWarmServerLease { server: winner })
+            if winner.try_acquire_lease() {
+                drop(pool);
+                tracing::info!(
+                    "Discarding duplicate OpenCode warm server {} after losing startup race",
+                    server.base_url
+                );
+                server.shutdown();
+                Ok(OpenCodeWarmServerLease { server: winner })
+            } else {
+                existing.insert(server.clone());
+                drop(pool);
+                tracing::info!(
+                    "Replacing retiring OpenCode warm server with {} for {}",
+                    server.base_url,
+                    server.key.working_dir
+                );
+                Ok(OpenCodeWarmServerLease { server })
+            }
         }
         Entry::Vacant(slot) => {
             slot.insert(server.clone());
@@ -1105,7 +1159,9 @@ fn wait_for_health(
 }
 
 fn create_session(base_url: &str, auth: &str) -> Result<String, String> {
-    let response = ureq::post(&format!("{base_url}/session"))
+    let agent = session_request_agent();
+    let response = agent
+        .post(&format!("{base_url}/session"))
         .set("Authorization", auth)
         .set("Content-Type", "application/json")
         .send_json(serde_json::json!({}))
@@ -1134,7 +1190,9 @@ fn send_prompt(
 ) -> Result<(), String> {
     let body = build_prompt_body(prompt, system_prompt, allowed_tools, model);
 
-    let resp = ureq::post(&format!("{base_url}/session/{session_id}/prompt_async"))
+    let agent = session_request_agent();
+    let resp = agent
+        .post(&format!("{base_url}/session/{session_id}/prompt_async"))
         .set("Authorization", auth)
         .set("Content-Type", "application/json")
         .send_json(body)
@@ -1146,6 +1204,13 @@ fn send_prompt(
     } else {
         Err(format!("prompt_async returned unexpected status: {status}"))
     }
+}
+
+fn session_request_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(2))
+        .timeout(SESSION_REQUEST_TIMEOUT)
+        .build()
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -1506,10 +1571,10 @@ fn consume_sse(
                         if !stop.load(Ordering::Relaxed)
                             && let Some(server) = watchdog_server.as_ref()
                         {
-                            let active = server.active_sessions.load(Ordering::SeqCst);
-                            if warm_server_hard_kill_allowed(active) {
+                            if server.try_begin_exclusive_hard_kill().is_ok() {
                                 kill_pid_tree(server.id());
                             } else {
+                                let active = server.active_sessions.load(Ordering::SeqCst);
                                 tracing::warn!(
                                     "Skipping OpenCode hard-kill cancel fallback for shared warm server {} with {} active sessions",
                                     server.base_url,
@@ -2567,6 +2632,40 @@ mod tests {
         // `opencode serve` out from under another turn's live SSE stream.
         assert!(!warm_server_hard_kill_allowed(2));
         assert!(!warm_server_hard_kill_allowed(8));
+    }
+
+    #[test]
+    fn retiring_warm_server_rejects_new_lease_without_incrementing() {
+        let active = AtomicUsize::new(1);
+        let retiring = AtomicBool::new(true);
+
+        assert!(!try_acquire_warm_server_session(&active, &retiring));
+        assert_eq!(active.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn hard_kill_marks_retiring_only_for_exclusive_session() {
+        let active = AtomicUsize::new(1);
+        let retiring = AtomicBool::new(false);
+
+        assert!(try_begin_exclusive_warm_server_hard_kill(&active, &retiring).is_ok());
+        assert!(retiring.load(Ordering::SeqCst));
+        assert!(!try_acquire_warm_server_session(&active, &retiring));
+        assert_eq!(active.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn hard_kill_veto_clears_retiring_for_shared_session() {
+        let active = AtomicUsize::new(2);
+        let retiring = AtomicBool::new(false);
+
+        assert_eq!(
+            try_begin_exclusive_warm_server_hard_kill(&active, &retiring),
+            Err(2)
+        );
+        assert!(!retiring.load(Ordering::SeqCst));
+        assert!(try_acquire_warm_server_session(&active, &retiring));
+        assert_eq!(active.load(Ordering::SeqCst), 3);
     }
 
     #[test]
