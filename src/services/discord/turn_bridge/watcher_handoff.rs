@@ -108,20 +108,39 @@ pub(super) fn genuinely_live_watcher_for_relay(
 /// turn, not merely be alive.
 ///
 /// True ONLY when the transcript completion signal is `Done` (terminator
-/// PROVEN on disk) AND the bridge's confirmed relay offset advanced past the
-/// turn's start offset (so the terminator belongs to THIS turn, not a stale
-/// one from before the turn's user line was appended). Everything else —
-/// `PausedLive`, `Unknown` (non-JSONL runtimes), or missing/unadvanced
-/// offsets — returns `false` and keeps the #3268 handoff byte-for-byte
-/// (fail-open). In the proven case the bridge finalizing is not premature:
-/// it is the CORRECT completion handling.
+/// PROVEN on disk) AND the transcript itself GREW past the turn's start offset
+/// (so the terminator + the response body belong to THIS turn, not a stale one
+/// from before the turn's user line was appended). Everything else —
+/// `PausedLive`, `Unknown` (non-JSONL runtimes), or a transcript that did not
+/// grow past the start offset — returns `false` and keeps the #3268 handoff
+/// byte-for-byte (fail-open). In the proven case the bridge finalizing is not
+/// premature: it is the CORRECT completion handling.
+///
+/// #3540 (warm-followup strand): the #3277 gate originally compared the racy
+/// `tmux_last_offset` against `turn_start_offset`. Both are seeded to the SAME
+/// `inflight_offset` at turn start (`InflightTurnState::new` ←
+/// `intake_turn.rs`'s `Some(inflight_offset)`), and a warm-followup turn only
+/// advances `tmux_last_offset` via the trailing `RuntimeReady{last_offset}`.
+/// When that ready signal misses the 250 ms drain window the offset stays at
+/// `inflight_offset`, so `last > start` is `false` even though the producer
+/// already wrote the WHOLE response (terminator + body) to the transcript →
+/// the gate fails open → the #3268 handoff strands the finished turn behind a
+/// "in progress" placeholder. The non-racy fact is on disk: the transcript
+/// EOF. `inflight_offset` IS that transcript file's byte length stat-ed at
+/// turn start (`std::fs::metadata(output_path).len()`), and `transcript_eof`
+/// here re-stats the SAME `output_path`, so both live in one byte-space.
+/// Comparing `transcript_eof > turn_start_offset` therefore asks the exact,
+/// non-racy question "did the producer append (and terminate) this turn's
+/// response past where the turn began?". A rotated/truncated transcript shrinks
+/// its EOF below `turn_start_offset`, so the comparison stays `false` and the
+/// handoff fails open (conservative: only an EOF that DEFINITELY grew proves
+/// delivery).
 pub(super) fn busy_turn_already_proven_delivered(
     signal: CompletionSignal,
-    tmux_last_offset: Option<u64>,
+    transcript_eof: Option<u64>,
     turn_start_offset: u64,
 ) -> bool {
-    signal == CompletionSignal::Done
-        && tmux_last_offset.is_some_and(|last| last > turn_start_offset)
+    signal == CompletionSignal::Done && transcript_eof.is_some_and(|eof| eof > turn_start_offset)
 }
 
 /// #3281: which empty-terminal-response visibility event (if any) applies to
@@ -308,14 +327,31 @@ pub(super) fn maybe_hand_off_busy_turn_to_watcher(
     ) && let Some(watcher) = shared_owned.tmux_watchers.get(&watcher_owner_channel_id)
     {
         // #3277 (Defect A): a turn whose JSONL terminator is ALREADY on disk
-        // (and whose relay offset advanced past the turn start) has nothing
-        // left for the watcher to relay — handing it off parks the watcher at
-        // EOF and strands the channel until the far-backstop. Keep the bridge
-        // finalize instead (the pre-#3268 path; correct, not premature, for a
+        // (and whose transcript grew past the turn start) has nothing left for
+        // the watcher to relay — handing it off parks the watcher at EOF and
+        // strands the channel until the far-backstop. Keep the bridge finalize
+        // instead (the pre-#3268 path; correct, not premature, for a
         // proven-complete turn). Read failures / Unknown / PausedLive /
         // missing offsets all fall through to the #3268 handoff (fail-open);
         // this gate-timeout path already spent 3s, so one transcript tail
         // read is negligible.
+        //
+        // #3540 (warm-followup strand): the growth check now uses the
+        // transcript's on-disk EOF, NOT the racy `tmux_last_offset`. A
+        // warm-followup turn whose trailing `RuntimeReady{last_offset}` missed
+        // the 250 ms drain window leaves `tmux_last_offset == turn_start_offset`
+        // even though the producer already wrote the whole response — the old
+        // `tmux_last_offset > start` comparison was `false` there and fell open
+        // to the handoff, stranding the finished turn. `turn_start_offset` is
+        // `output_path`'s byte length stat-ed at turn start, so re-stat the SAME
+        // `output_path` for a byte-space-matched EOF. A read failure → `None` →
+        // fall through to the #3268 handoff (fail-open, unchanged). A
+        // rotated/truncated transcript shrinks the EOF below the start offset,
+        // so `eof > start` stays `false` and the handoff still fails open.
+        let transcript_eof = inflight_state
+            .output_path
+            .as_deref()
+            .and_then(|path| std::fs::metadata(path).map(|m| m.len()).ok());
         if let (Some(output_path), Some(turn_start_offset)) = (
             inflight_state.output_path.as_deref(),
             inflight_state.turn_start_offset,
@@ -325,7 +361,7 @@ pub(super) fn maybe_hand_off_busy_turn_to_watcher(
                 inflight_state.runtime_kind,
                 std::path::Path::new(output_path),
             ),
-            tmux_last_offset,
+            transcript_eof,
             turn_start_offset,
         ) {
             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -335,9 +371,11 @@ pub(super) fn maybe_hand_off_busy_turn_to_watcher(
                 watcher_owner_channel = watcher_owner_channel_id.get(),
                 turn_start_offset,
                 tmux_last_offset = tmux_last_offset.unwrap_or(0),
-                "  [{ts}] 👁 #3277: quiescence timeout but the turn is PROVEN delivered \
-                 (JSONL terminator on disk past turn start) — bridge finalizes instead of \
-                 handing a finished turn to the watcher"
+                transcript_eof = transcript_eof.unwrap_or(0),
+                "  [{ts}] 👁 #3277/#3540: quiescence timeout but the turn is PROVEN delivered \
+                 (JSONL terminator on disk + transcript grew past turn start) — bridge \
+                 finalizes instead of handing a finished turn to the watcher (warm-followup: \
+                 disk EOF, not racy tmux_last_offset)"
             );
             // #3501: the body is PROVEN delivered (JSONL terminator on disk past
             // turn start, already relayed), so STAMP the inflight delivered before
@@ -474,32 +512,54 @@ mod tests {
         assert_eq!(watcher_resume_seed_offset(376_405, Some(999_999)), 376_405);
     }
 
-    /// #3277 (Defect A) truth table: ONLY a `Done` signal with the relay offset
-    /// advanced PAST the turn start proves the turn delivered (and suppresses
-    /// the #3268 handoff). Every other combination fails open — the handoff to
-    /// a genuinely-live watcher proceeds exactly as before #3277.
+    /// #3277 (Defect A) + #3540 (warm-followup strand) truth table: ONLY a
+    /// `Done` signal whose TRANSCRIPT EOF grew PAST the turn start proves the
+    /// turn delivered (and suppresses the #3268 handoff). Every other
+    /// combination fails open — the handoff to a genuinely-live watcher proceeds
+    /// exactly as before #3277. #3540: the growth fact is read from the
+    /// transcript's on-disk EOF (`std::fs::metadata(output_path).len()`), NOT
+    /// the racy `tmux_last_offset`, so a warm-followup whose trailing
+    /// `RuntimeReady{last_offset}` was late still finalizes when the producer
+    /// already wrote the response.
     #[test]
     fn busy_turn_proven_delivered_truth_table() {
-        // Done + offset advanced past turn start → PROVEN: no handoff.
+        // Done + transcript EOF grew past turn start → PROVEN: no handoff.
         assert!(busy_turn_already_proven_delivered(
             CompletionSignal::Done,
             Some(37_154),
             17_737,
         ));
-        // Done but offset did NOT advance (== start): the terminator could be
-        // the PRIOR turn's — not proven, hand off (fail-open).
+        // #3540 warm-followup: the producer wrote the WHOLE response — the
+        // transcript EOF (929_166) grew well past `turn_start_offset` (886_134,
+        // the `inflight_offset` both `turn_start_offset` AND the racy
+        // `tmux_last_offset` were seeded to). Under the pre-#3540 gate the racy
+        // `tmux_last_offset` was still parked at 886_134 (its trailing
+        // `RuntimeReady` missed the 250 ms drain window) → `886_134 > 886_134`
+        // was `false` → fail-open → the #3268 handoff stranded the finished turn
+        // behind an "in progress" placeholder. Reading the non-racy disk EOF
+        // proves delivery → finalize, no handoff, no strand.
+        assert!(busy_turn_already_proven_delivered(
+            CompletionSignal::Done,
+            Some(929_166),
+            886_134,
+        ));
+        // Done but the transcript did NOT grow (EOF == start): the producer
+        // appended nothing past the turn start, so the terminator on disk is the
+        // PRIOR turn's — a genuinely unfinished turn. Not proven, hand off
+        // (fail-open) so the live watcher carries the still-streaming body.
         assert!(!busy_turn_already_proven_delivered(
             CompletionSignal::Done,
-            Some(17_737),
-            17_737,
+            Some(886_134),
+            886_134,
         ));
-        // Done but no confirmed offset at all → not proven.
+        // Done but the transcript could not be stat-ed (read failure → None) →
+        // not proven, fall through to the #3268 handoff (fail-open, unchanged).
         assert!(!busy_turn_already_proven_delivered(
             CompletionSignal::Done,
             None,
             17_737,
         ));
-        // Still live (no terminator) → never proven, regardless of offsets.
+        // Still live (no terminator) → never proven, regardless of the EOF.
         assert!(!busy_turn_already_proven_delivered(
             CompletionSignal::PausedLive,
             Some(37_154),
@@ -511,7 +571,10 @@ mod tests {
             Some(37_154),
             17_737,
         ));
-        // Done but offset BEHIND turn start (stale/rotated transcript) → not proven.
+        // Done but transcript EOF BEHIND turn start (rotated/truncated transcript
+        // shrank it below where the turn began) → not proven (conservative
+        // fail-open: only a transcript that DEFINITELY grew proves delivery, so a
+        // rotation that mixed byte-spaces can never spuriously finalize).
         assert!(!busy_turn_already_proven_delivered(
             CompletionSignal::Done,
             Some(100),
@@ -519,7 +582,7 @@ mod tests {
         ));
         // #3281 cold-start variant: /clear cold-start intake records
         // turn_start_offset = 0 (the transcript did not exist yet), so a Done
-        // terminator with ANY advanced relay offset is proven — the #3268
+        // terminator with ANY non-zero transcript EOF is proven — the #3268
         // handoff stays suppressed, `bridge_output_owner` stays `None`, and
         // the bridge delivers `full_response` directly.
         assert!(busy_turn_already_proven_delivered(

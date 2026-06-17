@@ -728,6 +728,22 @@ async fn run_worker_inner(
                     // pinning the last-view foreign identity (codex r2).
                     abort_cleanup_fn(&shared, &record, last_foreign_identity.clone()).await;
                     delete(&record);
+                    // #3540 (B′ — defense-in-depth, NO EVICT): the pending gate is
+                    // now released (`delete` above), but a follow-up the user sent
+                    // while this synthetic start was deferring is still parked in
+                    // the mailbox queue behind a QUEUE-ACK. If the FOREIGN inflight
+                    // we were deferring on is a phantom (#3540 root cause: a
+                    // watermark-reset re-claim whose commit will never arrive), the
+                    // queued follow-up would otherwise stay parked until the
+                    // ABORT_MARKER_TTL sweep. Kick the EXISTING mailbox dispatch
+                    // path once so the follow-up promotes promptly. This clears /
+                    // resets / deletes NO inflight — `kickoff_idle_queues` routes
+                    // through `mailbox_try_start_turn_kinded`, which (a) starts a
+                    // fresh turn if the slot is genuinely free, or (b) MERGES into a
+                    // still-live prior turn (worst case = normal merge, zero live
+                    // loss). The phantom row, if any, is reaped later by its own
+                    // commit/finalize or the bounded ⏳ sweep — never evicted here.
+                    promote_queued_follow_up_after_abort(&shared, &record);
                     return;
                 }
                 tracing::warn!(
@@ -929,6 +945,68 @@ fn record_deferred_claim_marker_if_watcher_owned(record: &TuiDirectPendingStart)
         &record.tmux_session_name,
     );
 }
+
+/// #3540 (B′): after the terminal backstop ABORT has run `abort_cleanup_fn` and
+/// `delete(&record)` (pending gate released), kick the EXISTING mailbox dispatch
+/// path ONCE so a follow-up parked behind a QUEUE-ACK promotes promptly instead
+/// of waiting out the bounded ⏳ sweep when the deferred-on FOREIGN inflight was
+/// a phantom.
+///
+/// NO-EVICT INVARIANT (load-bearing): this function does NOT clear / reset /
+/// `save_inflight(empty)` / delete ANY inflight row. It only schedules
+/// [`super::schedule_deferred_idle_queue_kickoff`], the same idempotent
+/// queued-dispatch entrypoint the post-turn / catch-up paths already use. That
+/// kickoff routes through `mailbox_try_start_turn_kinded`, which either starts a
+/// fresh turn (slot genuinely free) or MERGES the follow-up into a still-live
+/// prior turn — so even if the deferred-on row is in fact a live turn, the worst
+/// case is a normal merge with ZERO live-turn loss. The serialization is the
+/// channel lock the worker already holds (this runs before its `return`, under
+/// `_guard`); the kickoff's own work is detached, so no new lock-order risk.
+/// Fail-soft: an unparseable provider only warns — the ABORT path is otherwise
+/// unchanged (pre-#3540 behavior: the follow-up waits for the sweep).
+fn promote_queued_follow_up_after_abort(shared: &Arc<SharedData>, record: &TuiDirectPendingStart) {
+    let Some(provider) = crate::services::provider::ProviderKind::from_str(&record.provider) else {
+        tracing::warn!(
+            provider = %record.provider,
+            channel_id = record.channel_id,
+            anchor_message_id = record.anchor_message_id,
+            "tui_direct_pending_start: unparseable provider; skipping post-abort queue promote (fail-open — follow-up still drains via the bounded sweep) (#3540)"
+        );
+        return;
+    };
+    let channel_id = poise::serenity_prelude::ChannelId::new(record.channel_id);
+    tracing::info!(
+        provider = provider.as_str(),
+        channel_id = record.channel_id,
+        anchor_message_id = record.anchor_message_id,
+        "tui_direct_pending_start: post-abort queue promote — kicking the existing mailbox dispatch once so a queued follow-up is not parked until the ⏳ sweep; NO inflight is cleared/reset/deleted (#3540 B′)"
+    );
+    #[cfg(test)]
+    {
+        // Test seam: record that the promote fired exactly once without spawning
+        // the real detached kickoff task (which would leak past the test and, with
+        // a test `shared`, has no cached ctx/token to act on anyway). Production
+        // (below) takes the real path.
+        POST_ABORT_PROMOTE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _ = (shared, channel_id, &provider);
+        return;
+    }
+    #[cfg(not(test))]
+    super::schedule_deferred_idle_queue_kickoff(
+        shared.clone(),
+        provider,
+        channel_id,
+        "tui_direct_pending_start backstop abort follow-up promote (#3540)",
+    );
+}
+
+/// #3540 (B′) test seam: counts `promote_queued_follow_up_after_abort` firings so
+/// the ABORT-path regression test can assert it ran EXACTLY ONCE while the claim
+/// (inflight write) NEVER ran — proving the queue is promoted without evicting or
+/// clearing any inflight row.
+#[cfg(test)]
+static POST_ABORT_PROMOTE_CALLS: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
 
 /// #3350 issue-3: the observer INLINE-claim wiring, separated so a unit test
 /// can pin it — `relay_observed_prompt` must record the #3303 DeferredClaim
@@ -1519,6 +1597,125 @@ mod tests {
         reset_present_for_tests();
     }
 
+    /// #3540 (B′ — NO-EVICT queue promote): after the terminal backstop ABORT
+    /// the worker must kick the EXISTING mailbox dispatch ONCE so a follow-up
+    /// parked behind a QUEUE-ACK promotes promptly — WITHOUT touching any
+    /// inflight. Proven by: (1) the claim (the ONLY inflight-write seam in the
+    /// worker) NEVER runs, so no row is created/cleared/reset/deleted; (2) the
+    /// promote seam fires EXACTLY ONCE; (3) it fires AFTER abort_cleanup +
+    /// record-delete (the pending gate is released first). This is the
+    /// defense-in-depth that breaks the phantom-inflight → infinite QUEUE-ACK
+    /// stall while structurally guaranteeing zero live-turn loss (worst case in
+    /// production is a normal merge inside `mailbox_try_start_turn_kinded`).
+    // Sync test + explicit block_on: the std-mutex test-env guards live only in
+    // this sync scope and never span an await, so no await_holding_lock allow is
+    // needed (#3034 ratchet stays frozen at its baseline).
+    #[test]
+    fn backstop_abort_promotes_queued_follow_up_without_evicting_inflight() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let _guard = worker_test_lock();
+        // Isolate the durable store root to a per-test temp dir (under the crate
+        // env lock) so this test's persist/delete never races other tests'
+        // store reads on the shared default root.
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let temp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        reset_present_for_tests();
+        POST_ABORT_PROMOTE_CALLS.store(0, Ordering::SeqCst);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("test runtime");
+        rt.block_on(async move {
+            let shared = super::super::make_shared_data_for_tests();
+
+            // FOREIGN prior inflight stays live across the WHOLE budget (the #3540
+            // phantom: a watermark-reset re-claim whose commit never arrives — but
+            // observationally indistinguishable from a slow live turn, so we must
+            // NOT evict it).
+            let view: ViewFn = Box::new(move |_shared, _record| {
+                Box::pin(async move {
+                    Some(PriorTurnObservation {
+                        view: PriorTurnView {
+                            inflight_present: true,
+                            inflight_is_own_anchor: false,
+                            mailbox_blocking_turn_present: true,
+                            mailbox_turn_is_own_anchor: false,
+                            runtime_binding_present: true,
+                        },
+                        foreign_inflight_identity: Some((
+                            1516634295270117460,
+                            "2026-06-17 11:43:13".to_string(),
+                        )),
+                    })
+                })
+            });
+
+            // The claim is the ONLY inflight-write seam in the worker; if the B′
+            // promote ever reached for an evict/clear it would have to go through a
+            // claim-like write. We assert it stays at zero — structural no-evict.
+            let claim_calls = Arc::new(AtomicU32::new(0));
+            let claim_calls_for_fn = claim_calls.clone();
+            let claim: ClaimFn = Box::new(move |_shared, _record| {
+                let calls = claim_calls_for_fn.clone();
+                Box::pin(async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    true
+                })
+            });
+
+            let rec = record("claude", 14, 140);
+            persist(&rec).unwrap();
+            assert!(pending_synthetic_start_present("claude", 14));
+
+            let (abort_cleanup, abort_cleanup_calls, _) = recording_abort_cleanup();
+            let handle = tokio::spawn(run_worker(shared.clone(), rec, view, claim, abort_cleanup));
+
+            for _ in 0..(PENDING_START_MAX_BACKSTOP_CYCLES + 1) {
+                tokio::time::advance(PENDING_START_BACKSTOP + PENDING_START_POLL * 2).await;
+                tokio::task::yield_now().await;
+            }
+            handle.await.unwrap();
+
+            assert_eq!(
+                claim_calls.load(Ordering::SeqCst),
+                0,
+                "#3540 B′: the claim (the worker's only inflight-write seam) must \
+             NEVER run on the ABORT path — the foreign/phantom row is left \
+             untouched (NO evict). RED if the promote path tries to overwrite/clear \
+             an inflight to make room for the follow-up."
+            );
+            assert_eq!(
+                abort_cleanup_calls.load(Ordering::SeqCst),
+                1,
+                "#3540 B′: the abort reconcile hook still runs exactly once (the \
+             #3282/#3296 marker), preserving the existing ⏳ reconcile path."
+            );
+            assert!(
+                !pending_synthetic_start_present("claude", 14),
+                "#3540 B′: the pending gate is released (record deleted) so the \
+             follow-up is no longer blocked by intake_gate."
+            );
+            assert_eq!(
+                POST_ABORT_PROMOTE_CALLS.load(Ordering::SeqCst),
+                1,
+                "#3540 B′: the post-abort queue promote must fire EXACTLY ONCE after \
+             the record is deleted, so a follow-up parked behind a QUEUE-ACK is \
+             dispatched promptly instead of waiting out the bounded ⏳ sweep. RED \
+             if the ABORT branch returns without kicking the mailbox dispatch."
+            );
+        });
+
+        POST_ABORT_PROMOTE_CALLS.store(0, Ordering::SeqCst);
+        reset_present_for_tests();
+    }
+
     /// P2-2 (b): the claim returns `false` (transient — another turn briefly
     /// owns the mailbox). The worker MUST retain the durable record (never lose a
     /// Discord-submitted prompt) and retry; once the claim later succeeds it
@@ -1923,6 +2120,13 @@ mod tests {
         use std::sync::atomic::Ordering;
 
         let _guard = worker_test_lock();
+        // The watcher-owned marker decision reads the PROCESS-GLOBAL dedupe lease
+        // (`record_lease` → `external_input_relay_lease`); hold `TEST_LOCK` so a
+        // concurrent dedupe-state test cannot wipe the lease mid-claim and turn
+        // the watcher-owned marker into a no-op (cross-lock race, #3540).
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let _env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1994,6 +2198,11 @@ mod tests {
     #[test]
     fn bridge_owned_claim_records_no_marker() {
         let _guard = worker_test_lock();
+        // Holds the dedupe `TEST_LOCK` because this test seeds + reads the
+        // process-global relay lease (#3540 cross-lock race guard).
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let _env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -2036,6 +2245,11 @@ mod tests {
     #[test]
     fn reclaim_overwrites_stale_abort_marker_with_own_identity() {
         let _guard = worker_test_lock();
+        // Holds the dedupe `TEST_LOCK` because this test seeds + reads the
+        // process-global relay lease (#3540 cross-lock race guard).
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let _env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -2093,6 +2307,11 @@ mod tests {
     #[test]
     fn generalized_helper_skips_non_watcher_lease() {
         let _guard = worker_test_lock();
+        // Holds the dedupe `TEST_LOCK` because this test seeds + reads the
+        // process-global relay lease (#3540 cross-lock race guard).
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let _env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -2122,6 +2341,11 @@ mod tests {
     #[test]
     fn generalized_helper_records_marker_for_watcher_lease_and_own_row() {
         let _guard = worker_test_lock();
+        // Holds the dedupe `TEST_LOCK` because this test seeds + reads the
+        // process-global relay lease (#3540 cross-lock race guard).
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let _env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());

@@ -2559,20 +2559,29 @@ fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
                     ClaudeIdleTranscriptScan::Prompt {
                         prompt,
                         line_end_offset,
+                        entry_id,
                         ..
                     } => {
                         let observed_at = chrono::Utc::now();
+                        // #3540: pass the entry's STABLE identity so an
+                        // already-relayed prompt re-encountered after a watermark
+                        // reset / jsonl head rotation is suppressed by identity
+                        // (`SuppressedReplayedEntry`) and never mints a phantom
+                        // synthetic inflight. `entry_id == None` falls back to the
+                        // content-keyed 30s recent-observed dedup (pre-#3540).
                         let observation =
-                            crate::services::tui_prompt_dedupe::observe_prompt_by_tmux_at(
+                            crate::services::tui_prompt_dedupe::observe_prompt_by_tmux_with_entry_id_at(
                                 ProviderKind::Claude.as_str(),
                                 &tmux_session_name,
                                 &prompt,
+                                entry_id.as_deref(),
                                 observed_at,
                             );
                         tracing::info!(
                             tmux_session_name = %tmux_session_name,
                             channel_id = channel_id.get(),
                             observation = ?observation,
+                            entry_id = entry_id.as_deref().unwrap_or(""),
                             "Claude idle transcript relay observed prompt"
                         );
                         advance_claude_tmux_runtime_binding_offset(
@@ -6942,6 +6951,7 @@ mod tests {
                 prompt: text,
                 line_end_offset,
                 prompt_start_offset,
+                ..
             } => {
                 assert_eq!(text, "after compact");
                 assert_eq!(line_end_offset, prompt.len() as u64);
@@ -7132,6 +7142,7 @@ mod tests {
                 prompt: "direct claude prompt".to_string(),
                 prompt_start_offset: before.len() as u64,
                 line_end_offset: (before.len() + prompt.len()) as u64,
+                entry_id: None,
             }
         );
         assert_eq!(
@@ -7162,6 +7173,7 @@ mod tests {
                 prompt: "real prompt".to_string(),
                 prompt_start_offset: (meta.len() + synthetic.len()) as u64,
                 line_end_offset: (meta.len() + synthetic.len() + prompt.len()) as u64,
+                entry_id: None,
             }
         );
     }
@@ -7202,6 +7214,7 @@ mod tests {
                 prompt: "old finished turn".to_string(),
                 prompt_start_offset: 0,
                 line_end_offset: old_prompt.len() as u64,
+                entry_id: None,
             }
         );
         // Last-prompt scan returns the just-typed prompt instead.
@@ -7211,6 +7224,7 @@ mod tests {
                 prompt: "just typed prompt".to_string(),
                 prompt_start_offset: (old_prompt.len() + old_answer.len()) as u64,
                 line_end_offset: (old_prompt.len() + old_answer.len() + new_prompt.len()) as u64,
+                entry_id: None,
             }
         );
     }
@@ -7253,6 +7267,7 @@ mod tests {
                 prompt: "complete prompt".to_string(),
                 prompt_start_offset: 0,
                 line_end_offset: prompt.len() as u64,
+                entry_id: None,
             }
         );
 
@@ -7267,8 +7282,114 @@ mod tests {
                 prompt: "next prompt".to_string(),
                 prompt_start_offset: prompt.len() as u64,
                 line_end_offset: (prompt.len() + next.len()) as u64,
+                entry_id: None,
             }
         );
+    }
+
+    /// #3540: the watermark-reset / jsonl-head-rotation re-scan must NOT mint a
+    /// phantom synthetic inflight. End-to-end at the scan→observe seam:
+    ///   1. scan a transcript whose `user` entry carries a stable `uuid`;
+    ///   2. feed (prompt, entry_id) to the relay observer → it relays
+    ///      (`PublishedSshDirect`) and records the uuid;
+    ///   3. simulate a head rotation: rewrite the transcript so the SAME entry
+    ///      survives at a SHIFTED offset (head clipped) — its uuid is unchanged;
+    ///   4. re-scan from offset 0 (watermark reset) and feed the same entry_id to
+    ///      the observer → it is suppressed by IDENTITY
+    ///      (`SuppressedReplayedEntry`), so the scanner's
+    ///      `claude_idle_prompt_observation_should_tail_response` is FALSE and no
+    ///      external-turn lease / synthetic claim is taken.
+    #[test]
+    fn watermark_reset_rescan_of_relayed_entry_does_not_resynthesize_turn() {
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap();
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let transcript = dir.path().join("transcript.jsonl");
+        let uuid = "1516634295270117460-uuid";
+        let head = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"earlier answer\"}]},\"sessionId\":\"s1\"}\n";
+        let prompt_line = format!(
+            "{{\"type\":\"user\",\"uuid\":\"{uuid}\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"deploy to make=live\"}}]}},\"sessionId\":\"s1\"}}\n"
+        );
+        std::fs::write(&transcript, format!("{head}{prompt_line}")).expect("write transcript");
+
+        // ---- (1)/(2): first scan + observe → relays, records uuid. ----
+        let scan = scan_claude_idle_transcript_for_prompt(&transcript, 0).expect("first scan");
+        let (prompt, entry_id) = match scan {
+            ClaudeIdleTranscriptScan::Prompt {
+                prompt, entry_id, ..
+            } => (prompt, entry_id),
+            other => panic!("expected Prompt, got {other:?}"),
+        };
+        assert_eq!(prompt, "deploy to make=live");
+        assert_eq!(entry_id.as_deref(), Some(uuid));
+        let first = crate::services::tui_prompt_dedupe::observe_prompt_by_tmux_with_entry_id_at(
+            ProviderKind::Claude.as_str(),
+            "tmux-3540",
+            &prompt,
+            entry_id.as_deref(),
+            chrono::Utc::now(),
+        );
+        assert_eq!(
+            first,
+            crate::services::tui_prompt_dedupe::PromptObservation::PublishedSshDirect,
+            "the freshly-typed prompt relays on first sighting"
+        );
+        assert!(
+            claude_idle_prompt_observation_should_tail_response(first),
+            "first sighting tails the response (mints the external turn)"
+        );
+
+        // ---- (3): head rotation — same entry survives at a SHIFTED offset. ----
+        let new_head = "{\"type\":\"system\",\"subtype\":\"init\",\"sessionId\":\"s1\"}\n{\"type\":\"system\",\"subtype\":\"compact\",\"sessionId\":\"s1\"}\n";
+        std::fs::write(&transcript, format!("{new_head}{prompt_line}"))
+            .expect("rewrite transcript (rotation)");
+
+        // ---- (4): watermark reset → re-scan from 0, same uuid → suppressed. ----
+        let rescan = scan_claude_idle_transcript_for_prompt(&transcript, 0).expect("re-scan");
+        let (re_prompt, re_entry_id) = match rescan {
+            ClaudeIdleTranscriptScan::Prompt {
+                prompt,
+                entry_id,
+                prompt_start_offset,
+                ..
+            } => {
+                assert_eq!(
+                    prompt_start_offset,
+                    new_head.len() as u64,
+                    "the surviving entry is at a SHIFTED offset after head rotation"
+                );
+                (prompt, entry_id)
+            }
+            other => panic!("expected Prompt, got {other:?}"),
+        };
+        assert_eq!(
+            re_entry_id.as_deref(),
+            Some(uuid),
+            "uuid survives the rotation"
+        );
+        let second = crate::services::tui_prompt_dedupe::observe_prompt_by_tmux_with_entry_id_at(
+            ProviderKind::Claude.as_str(),
+            "tmux-3540",
+            &re_prompt,
+            re_entry_id.as_deref(),
+            chrono::Utc::now(),
+        );
+        assert_eq!(
+            second,
+            crate::services::tui_prompt_dedupe::PromptObservation::SuppressedReplayedEntry,
+            "#3540: the already-relayed entry re-encountered after a watermark \
+             reset / head rotation is suppressed by identity"
+        );
+        assert!(
+            !claude_idle_prompt_observation_should_tail_response(second),
+            "#3540 (the fix): a suppressed-replayed entry does NOT tail a \
+             response, so no external-turn lease / synthetic claim is taken — the \
+             phantom synthetic inflight is never created"
+        );
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
     }
 
     #[cfg(unix)]

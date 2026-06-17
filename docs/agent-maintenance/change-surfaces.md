@@ -516,7 +516,7 @@
     Moved unit tests live in sibling `utf8_chunk_decoder_tests.rs` /
     `terminal_readiness_tests.rs`; both child modules sit under the
     `tmux_watcher/**` 700-line namespace cap.
-  - `src/services/discord/tui_prompt_relay.rs` (4301 production lines; #3296
+  - `src/services/discord/tui_prompt_relay.rs` (4310 production lines; #3296
     codex r1+r2: the ABORT cleanup hook pins the foreign prior inflight's
     identity — the live row at the record instant, or the worker's LAST-VIEW
     identity when that row just vanished — and persists the marker via
@@ -746,7 +746,22 @@
     `recovery_engine.rs`) are re-exported at `pub(in crate::services::discord)`;
     the relay-internal drain decision/enum are re-imported privately, so the call
     sites + tests stay byte-identical. Frozen baseline 4630 -> 4458 (-172, locks in
-    the shrink; zero logic change).
+    the shrink; zero logic change). +9 from #3540 root-prevention: the
+    idle-transcript scanner identity-dedup threading — the resolved `entry_id`
+    passed inline across the scan -> observe seam plus the `SuppressedReplayedEntry`
+    handling that stops the scanner re-claiming an already-processed prompt across a
+    watermark reset — is inline integration code on the scan/observe call path (not
+    a self-contained helper) and the sibling `idle_transcript_scan.rs` is itself
+    giant-capped, so the ratchet baseline was RAISED 4301 -> 4310 (a deliberate,
+    reviewable admission per the baseline header) rather than split.
+  - `src/services/discord/tui_direct_pending_start.rs` (1030 production lines;
+    the deferred TUI-direct synthetic turn-start path — the pending-start claim
+    queue, the no-evict promote of a stalled inflight, and the deferred-claim
+    owner handoff. #3540 added the B′ "no-evict promote" path (a stalled inflight
+    is safely promoted off the pending-start queue instead of evicted) plus its
+    regression tests, which pushed the production surface over the 1000-line
+    giant-file threshold, so this file is now a registered giant. Bugfix /
+    queue-safety only; split before adding new pending-start behavior).
   - `src/services/discord/tui_prompt_relay/injected_prompt_policy.rs` (318 prod
     lines; #3479 rank-5: pure injected-prompt classification + formatting policy
     extracted verbatim from `tui_prompt_relay.rs` — no `shared.`/`http.`/async-IO
@@ -833,9 +848,17 @@
     nested `usage` on the success result frame so watcher-owned codex turns
     persist token telemetry — never the session-cumulative
     `info.total_token_usage`).
-  - `src/services/tui_prompt_dedupe.rs` (1393 lines; shared TUI prompt
+  - `src/services/tui_prompt_dedupe.rs` (1569 lines; shared TUI prompt
     fingerprinting/dedupe state for hook and rollout relay paths, bugfix only
-    outside an extraction plan; +37 from #3527: `is_discord_relayed_user_prompt`
+    outside an extraction plan; +176 from #3540: stable JSONL entry-identity
+    (`uuid`) dedup — `extract_claude_transcript_user_prompt_with_entry_id`
+    returns `(prompt, Option<uuid>)`, a `relayed_entry_ids_by_tmux` ledger
+    (PROMPT_ANCHOR_TTL-purged, ring-capped) + `PromptObservation::SuppressedReplayedEntry`,
+    and `observe_prompt_by_tmux_with_entry_id_at` suppress an already-relayed entry
+    re-encountered after a relay-watermark reset / jsonl head rotation BY IDENTITY
+    (never by inflight/EOF observation), so the idle-transcript scanner cannot mint
+    a phantom synthetic inflight; a genuinely new prompt carries a new uuid and is
+    never suppressed (#3459/#3303 missed-prompt guard); +37 from #3527: `is_discord_relayed_user_prompt`
     skips re-observed `[User: … (ID: …)]` Discord-relay lines (whole-string scan —
     context like `[External Recall]` may precede the marker and the legacy pane
     observer collapses blocks mid-line) in the observation candidate filter so a

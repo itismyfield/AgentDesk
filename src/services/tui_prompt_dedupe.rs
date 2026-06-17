@@ -25,6 +25,12 @@ const EXTERNAL_INPUT_RELAY_LEASE_TTL: Duration = Duration::from_secs(10 * 60);
 // leaking onto a much-later same-key turn.
 const DEFERRED_ANCHOR_COMPLETION_TTL: Duration = Duration::from_secs(60);
 const OBSERVED_PROMPT_BUFFER: usize = 128;
+// #3540: per-`(provider, tmux)` ring cap on the relayed-entry-id ledger. A
+// single session rarely relays anywhere near this many DISTINCT user prompts
+// inside the 30min entry-id TTL; the cap is a belt-and-braces upper bound so a
+// pathological long-lived session cannot grow the set without limit (TTL purge
+// is the primary bound). Oldest entries are dropped first.
+const RELAYED_ENTRY_ID_RING_CAP: usize = 512;
 
 static STATE: LazyLock<Mutex<TuiPromptDedupeState>> =
     LazyLock::new(|| Mutex::new(TuiPromptDedupeState::default()));
@@ -183,6 +189,22 @@ struct TuiPromptDedupeState {
     // marker whose stored generation MATCHES the lease generation THIS relay
     // invocation recorded; a marker for a different turn is left untouched.
     deferred_anchor_completion_by_tmux: HashMap<PromptKey, TimedValue<u64>>,
+    // #3540: stable JSONL entry-identity (`uuid`) ledger of prompts THIS process
+    // has already relayed for a `(provider, tmux)` pair. The root-cause fix for
+    // the phantom synthetic inflight: when the relay watermark is reset to 0
+    // (jsonl head rotation / session restore), the idle-transcript scanner
+    // re-scans from offset 0 and re-encounters already-relayed prompts. The
+    // content-keyed `recent_observed_by_tmux` (30s TTL) lets a re-encounter that
+    // straddles that window slip through and mint a fresh — phantom — synthetic
+    // inflight whose commit will never arrive. This ledger keys on the entry's
+    // immutable `uuid`, which is preserved verbatim across head rotation (offset
+    // shifts, uuid does not), so an already-relayed entry is suppressed by
+    // IDENTITY regardless of the 30s window. A genuinely NEW prompt has a NEW
+    // uuid (issued by Claude Code at type time) so it can never collide here —
+    // no #3459/#3303 missed-prompt regression. TTL'd by `PROMPT_ANCHOR_TTL`
+    // (30min) — long enough to span the rotation+self-loop window, bounded so
+    // the set cannot grow without limit; additionally ring-capped per key.
+    relayed_entry_ids_by_tmux: HashMap<PromptKey, VecDeque<TimedValue<String>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -708,6 +730,31 @@ pub fn observe_prompt_by_tmux_at(
         provider,
         tmux_session_name,
         &[prompt.to_string()],
+        None,
+        PromptObservationEffect::NotifyAndLease,
+        observed_at,
+    )
+}
+
+/// #3540: same as [`observe_prompt_by_tmux_at`] but carries the prompt's stable
+/// JSONL entry identity (`uuid`). When `entry_id` is `Some` AND that uuid was
+/// already relayed for this `(provider, tmux)` pair the call returns
+/// [`PromptObservation::SuppressedReplayedEntry`] BEFORE any synthetic turn is
+/// minted — closing the watermark-reset / jsonl-head-rotation re-claim window
+/// that the 30s content dedup leaves open. `entry_id == None` falls back to the
+/// pre-#3540 content-keyed path (no behavior change).
+pub fn observe_prompt_by_tmux_with_entry_id_at(
+    provider: &str,
+    tmux_session_name: &str,
+    prompt: &str,
+    entry_id: Option<&str>,
+    observed_at: DateTime<Utc>,
+) -> PromptObservation {
+    observe_prompt_candidates_by_tmux_inner(
+        provider,
+        tmux_session_name,
+        &[prompt.to_string()],
+        entry_id,
         PromptObservationEffect::NotifyAndLease,
         observed_at,
     )
@@ -722,6 +769,7 @@ pub fn observe_prompt_candidates_by_tmux(
         provider,
         tmux_session_name,
         prompts,
+        None,
         PromptObservationEffect::NotifyAndLease,
         Utc::now(),
     )
@@ -736,6 +784,7 @@ pub(crate) fn observe_prompt_candidates_by_tmux_for_relay_lease(
         provider,
         tmux_session_name,
         prompts,
+        None,
         PromptObservationEffect::RelayLeaseOnly,
         Utc::now(),
     )
@@ -751,11 +800,13 @@ fn observe_prompt_candidates_by_tmux_inner(
     provider: &str,
     tmux_session_name: &str,
     prompts: &[String],
+    entry_id: Option<&str>,
     effect: PromptObservationEffect,
     observed_at: DateTime<Utc>,
 ) -> PromptObservation {
     let provider = normalize_provider(provider);
     let tmux_session_name = tmux_session_name.trim();
+    let entry_id = entry_id.map(str::trim).filter(|value| !value.is_empty());
     let mut candidates = Vec::new();
     for prompt in prompts {
         let prompt = prompt.trim();
@@ -779,6 +830,20 @@ fn observe_prompt_candidates_by_tmux_inner(
     if provider.is_empty() || tmux_session_name.is_empty() || candidates.is_empty() {
         return PromptObservation::Ignored;
     }
+    // #3540 (root cause): suppress by STABLE entry identity BEFORE any pending /
+    // recent / lease bookkeeping or synthetic-turn mint. If this JSONL entry
+    // `uuid` was already relayed for this `(provider, tmux)` pair it is a
+    // re-encounter from a watermark reset / jsonl head rotation, NOT a new
+    // submission — return early so the scanner never mints a phantom synthetic
+    // inflight. This check inspects ONLY the relayed-entry ledger; it never
+    // reads inflight / EOF / current_msg_id, so it cannot mis-handle a slow
+    // genuine turn. A genuinely new prompt has a fresh uuid (absent from the
+    // ledger) and is never suppressed here.
+    if let Some(entry_id) = entry_id {
+        if relayed_entry_id_already_seen(&provider, tmux_session_name, entry_id) {
+            return PromptObservation::SuppressedReplayedEntry;
+        }
+    }
     for prompt in &candidates {
         if take_matching_pending_prompt(&provider, tmux_session_name, prompt) {
             return PromptObservation::SuppressedDiscordDuplicate;
@@ -788,6 +853,14 @@ fn observe_prompt_candidates_by_tmux_inner(
         if take_or_record_recent_observed_prompt(&provider, tmux_session_name, prompt) {
             return PromptObservation::SuppressedRecentDuplicate;
         }
+    }
+    // #3540: this candidate cleared the pending + recent dedup, so it is about to
+    // be relayed for real — record its stable entry id NOW (not earlier, so a
+    // candidate that was dedup-suppressed above is never recorded as "relayed").
+    // A future watermark-reset re-encounter of this exact uuid is then
+    // suppressed at the identity check above.
+    if let Some(entry_id) = entry_id {
+        record_relayed_entry_id(&provider, tmux_session_name, entry_id);
     }
     record_external_input_relay_lease(&provider, tmux_session_name, None);
     if effect == PromptObservationEffect::RelayLeaseOnly {
@@ -1080,6 +1153,33 @@ pub fn extract_codex_rollout_user_prompt(json: &Value) -> Option<String> {
 }
 
 pub fn extract_claude_transcript_user_prompt(json: &Value) -> Option<String> {
+    extract_claude_transcript_user_prompt_with_entry_id(json).map(|(prompt, _)| prompt)
+}
+
+/// #3540: same extraction as [`extract_claude_transcript_user_prompt`], but also
+/// returns the JSONL entry's STABLE identity (`uuid`) when present.
+///
+/// Claude Code stamps every transcript `user` entry with a content-stable
+/// top-level `uuid` (measured: ~18k user uuids across ~3.8k transcript files
+/// with ZERO cross-file collisions — it is a genuine per-entry identity, not a
+/// timestamp derivative). The relay-watermark reset path (`/relay-scan`
+/// self-loop + jsonl head rotation) re-presents an already-relayed prompt at a
+/// shifted byte offset; the rotation is a `truncate_jsonl_head_safe` rename
+/// (head clipped, surviving bytes preserved verbatim), so the SAME logical
+/// prompt keeps its uuid even though its offset moved. The idle-transcript
+/// scanner threads this uuid into the dedupe layer so an already-relayed entry
+/// is suppressed by IDENTITY (see [`observe_prompt_candidates_by_tmux`]) without
+/// ever inspecting inflight / EOF / current_msg_id — sidestepping the
+/// observationally-indistinguishable phantom-vs-slow-live-turn problem entirely.
+///
+/// Defensive extraction: the uuid is read from the top-level object (where
+/// Claude Code places it for `user` entries) with a `message.uuid` fallback for
+/// forward/backward tolerance. A missing uuid yields `None`, in which case the
+/// scanner falls back to the existing content-keyed 30s recent-observed dedup —
+/// no regression, just the same window as before #3540.
+pub fn extract_claude_transcript_user_prompt_with_entry_id(
+    json: &Value,
+) -> Option<(String, Option<String>)> {
     if json.get("type").and_then(Value::as_str) != Some("user") {
         return None;
     }
@@ -1098,7 +1198,23 @@ pub fn extract_claude_transcript_user_prompt(json: &Value) -> Option<String> {
     {
         return None;
     }
-    reject_synthetic_tui_user_prompt(extract_message_content_text(message)?)
+    let prompt = reject_synthetic_tui_user_prompt(extract_message_content_text(message)?)?;
+    let entry_id = extract_claude_transcript_entry_id(json, message);
+    Some((prompt, entry_id))
+}
+
+/// #3540: pull the stable entry identity for a Claude transcript `user` entry.
+/// Prefers the top-level `uuid` (where Claude Code writes it), falls back to a
+/// `message.uuid` if a future format ever moves it. Returns a normalized,
+/// non-empty `String` or `None` (the scanner treats `None` as "no stable
+/// identity available — use the content-keyed fallback").
+fn extract_claude_transcript_entry_id(json: &Value, message: &Value) -> Option<String> {
+    json.get("uuid")
+        .and_then(Value::as_str)
+        .or_else(|| message.get("uuid").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 pub fn extract_qwen_jsonl_user_prompt(json: &Value) -> Option<String> {
@@ -1165,6 +1281,16 @@ pub enum PromptObservation {
     PublishedSshDirect,
     SuppressedDiscordDuplicate,
     SuppressedRecentDuplicate,
+    /// #3540: the observed prompt's stable JSONL entry `uuid` was ALREADY relayed
+    /// for this `(provider, tmux)` pair. Distinct from
+    /// [`Self::SuppressedRecentDuplicate`]: that is a content match bounded by the
+    /// 30s recent window, whereas this is an IDENTITY match bounded only by the
+    /// 30min entry-id TTL. The idle-transcript scanner treats it like the other
+    /// suppressions — `should_tail_response == false` — so a re-encountered
+    /// already-relayed entry (watermark reset / jsonl head rotation) never mints a
+    /// phantom synthetic inflight. A genuinely new prompt carries a new uuid and
+    /// is never returned here.
+    SuppressedReplayedEntry,
     Ignored,
 }
 
@@ -1216,6 +1342,44 @@ fn take_or_record_recent_observed_prompt(
     }
     state.record_recent_observed_prompt(provider, tmux_session_name, prompt);
     false
+}
+
+/// #3540: `true` iff `entry_id` is in the already-relayed ledger for this
+/// `(provider, tmux)` pair (and not yet purged). Read-only — recording happens
+/// separately in [`record_relayed_entry_id`] at the actual relay point.
+fn relayed_entry_id_already_seen(provider: &str, tmux_session_name: &str, entry_id: &str) -> bool {
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.purge_expired();
+    state
+        .relayed_entry_ids_by_tmux
+        .get(&PromptKey::new(provider, tmux_session_name))
+        .is_some_and(|queue| queue.iter().any(|seen| seen.value == entry_id))
+}
+
+/// #3540: record `entry_id` as relayed for this `(provider, tmux)` pair. Called
+/// only at the actual relay point (after pending/recent dedup pass), so a
+/// dedup-suppressed candidate is never mis-recorded as relayed. Idempotent: a
+/// re-record of an id already present refreshes nothing and does not duplicate
+/// (the identity check would have short-circuited the caller anyway). Ring-capped
+/// per key at [`RELAYED_ENTRY_ID_RING_CAP`] (oldest dropped first); TTL-purged by
+/// `PROMPT_ANCHOR_TTL`.
+fn record_relayed_entry_id(provider: &str, tmux_session_name: &str, entry_id: &str) {
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.purge_expired();
+    let queue = state
+        .relayed_entry_ids_by_tmux
+        .entry(PromptKey::new(provider, tmux_session_name))
+        .or_default();
+    if queue.iter().any(|seen| seen.value == entry_id) {
+        return;
+    }
+    queue.push_back(TimedValue {
+        value: entry_id.to_string(),
+        recorded_at: Instant::now(),
+    });
+    while queue.len() > RELAYED_ENTRY_ID_RING_CAP {
+        queue.pop_front();
+    }
 }
 
 pub(crate) fn prompts_match(expected: &str, observed: &str) -> bool {
@@ -1387,6 +1551,18 @@ impl TuiPromptDedupeState {
         });
         self.deferred_anchor_completion_by_tmux.retain(|_, entry| {
             now.duration_since(entry.recorded_at) <= DEFERRED_ANCHOR_COMPLETION_TTL
+        });
+        // #3540: relayed-entry-id ledger — purge ids older than PROMPT_ANCHOR_TTL
+        // (30min), long enough to span a watermark-reset / jsonl-rotation +
+        // self-loop window while bounding memory growth.
+        self.relayed_entry_ids_by_tmux.retain(|_, queue| {
+            while queue
+                .front()
+                .is_some_and(|entry| now.duration_since(entry.recorded_at) > PROMPT_ANCHOR_TTL)
+            {
+                queue.pop_front();
+            }
+            !queue.is_empty()
         });
     }
 }
@@ -2787,5 +2963,275 @@ mod tests {
         });
 
         assert_eq!(extract_qwen_jsonl_user_prompt(&json), None);
+    }
+
+    // ----------------------------------------------------------------------
+    // #3540: stable JSONL entry-id (uuid) dedup — root-cause prevention of the
+    // phantom synthetic inflight on watermark reset / jsonl head rotation.
+    // ----------------------------------------------------------------------
+
+    /// #3540: the SAME entry uuid observed twice (the watermark-reset re-scan)
+    /// publishes once and is then suppressed by IDENTITY — so the second sighting
+    /// never mints a synthetic turn. This is the bound the 30s content window
+    /// could not provide.
+    #[test]
+    fn replayed_entry_id_is_suppressed_on_second_observe() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+        let now = Utc::now();
+
+        assert_eq!(
+            observe_prompt_by_tmux_with_entry_id_at(
+                "claude",
+                "tmux-3540",
+                "deploy to make=live",
+                Some("uuid-A"),
+                now,
+            ),
+            PromptObservation::PublishedSshDirect,
+            "first sighting of a fresh entry relays normally"
+        );
+        assert_eq!(
+            observe_prompt_by_tmux_with_entry_id_at(
+                "claude",
+                "tmux-3540",
+                "deploy to make=live",
+                Some("uuid-A"),
+                now,
+            ),
+            PromptObservation::SuppressedReplayedEntry,
+            "the SAME entry uuid re-encountered (watermark reset / head rotation) \
+             is suppressed by identity — no phantom synthetic inflight (#3540)"
+        );
+    }
+
+    /// #3540 regression guard (#3459/#3303): a genuinely NEW prompt carries a NEW
+    /// uuid (Claude Code issues one at type time), so it is NEVER suppressed by
+    /// the entry-id ledger — missed-prompt regression cannot recur.
+    #[test]
+    fn new_entry_id_is_never_suppressed() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+        let now = Utc::now();
+
+        assert_eq!(
+            observe_prompt_by_tmux_with_entry_id_at(
+                "claude",
+                "tmux-3540",
+                "first prompt",
+                Some("uuid-1"),
+                now,
+            ),
+            PromptObservation::PublishedSshDirect
+        );
+        assert_eq!(
+            observe_prompt_by_tmux_with_entry_id_at(
+                "claude",
+                "tmux-3540",
+                "second prompt",
+                Some("uuid-2"),
+                now,
+            ),
+            PromptObservation::PublishedSshDirect,
+            "a distinct entry uuid carrying distinct content is a distinct \
+             submission — always relayed (#3459/#3303 missed-prompt regression \
+             guard). The entry-id ledger only suppresses a RE-ENCOUNTER of the \
+             EXACT same uuid; a new uuid never collides."
+        );
+        // A THIRD distinct prompt under a THIRD uuid also relays — the ledger
+        // does not accumulate false suppressions across genuinely new prompts.
+        assert_eq!(
+            observe_prompt_by_tmux_with_entry_id_at(
+                "claude",
+                "tmux-3540",
+                "third prompt",
+                Some("uuid-3"),
+                now,
+            ),
+            PromptObservation::PublishedSshDirect,
+            "each genuinely new prompt (new uuid + new content) keeps relaying"
+        );
+    }
+
+    /// #3540: `entry_id == None` (uuid missing / non-Claude provider) falls back
+    /// to the pre-#3540 content-keyed 30s recent-observed dedup — no behavior
+    /// change, no functional regression.
+    #[test]
+    fn missing_entry_id_falls_back_to_content_dedup() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+        let now = Utc::now();
+
+        assert_eq!(
+            observe_prompt_by_tmux_with_entry_id_at(
+                "claude",
+                "tmux-3540",
+                "no-uuid prompt",
+                None,
+                now,
+            ),
+            PromptObservation::PublishedSshDirect
+        );
+        // Same content again with no uuid → the content-keyed recent dedup
+        // suppresses it (the existing 30s path), NOT the entry-id path.
+        assert_eq!(
+            observe_prompt_by_tmux_with_entry_id_at(
+                "claude",
+                "tmux-3540",
+                "no-uuid prompt",
+                None,
+                now,
+            ),
+            PromptObservation::SuppressedRecentDuplicate,
+            "with no stable id the legacy content-keyed dedup still applies"
+        );
+    }
+
+    /// #3540: a candidate suppressed by the recent-duplicate path must NOT be
+    /// recorded in the entry-id ledger as 'relayed' — only an ACTUAL relay
+    /// records the id. (Recording on a dedup-suppressed sighting would be a
+    /// false 'seen', a subtle correctness bug.)
+    #[test]
+    fn dedup_suppressed_candidate_does_not_record_entry_id() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+        let now = Utc::now();
+
+        // A discord-originated pending prompt is queued first.
+        record_discord_originated_prompt("claude", "tmux-3540", "queued prompt");
+        // The transcript scanner then observes the SAME text (with a uuid) — it is
+        // suppressed as a Discord duplicate, NOT relayed-as-SSH-direct.
+        assert_eq!(
+            observe_prompt_by_tmux_with_entry_id_at(
+                "claude",
+                "tmux-3540",
+                "queued prompt",
+                Some("uuid-D"),
+                now,
+            ),
+            PromptObservation::SuppressedDiscordDuplicate
+        );
+        // Because that sighting was dedup-suppressed (not a real SSH-direct
+        // relay), its uuid was NOT recorded. A later genuine SSH-direct sighting
+        // of a DIFFERENT prompt under that same uuid would still relay — proving
+        // the ledger was not poisoned. (We assert the simpler invariant: the same
+        // uuid under fresh content publishes, i.e. is not falsely pre-suppressed.)
+        assert_eq!(
+            observe_prompt_by_tmux_with_entry_id_at(
+                "claude",
+                "tmux-3540",
+                "different fresh text",
+                Some("uuid-D"),
+                now,
+            ),
+            PromptObservation::PublishedSshDirect,
+            "a uuid seen only on a dedup-suppressed sighting was not recorded as \
+             relayed, so it does not falsely suppress a later real relay (#3540)"
+        );
+    }
+
+    /// #3540: purge_expired drops entry ids older than PROMPT_ANCHOR_TTL so the
+    /// ledger cannot grow without bound; a re-encounter after purge relays again
+    /// (correct — the watermark-reset window is far shorter than the 30min TTL).
+    #[test]
+    fn relayed_entry_id_ledger_purges_after_ttl() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        record_relayed_entry_id("claude", "tmux-3540", "uuid-T");
+        assert!(relayed_entry_id_already_seen(
+            "claude",
+            "tmux-3540",
+            "uuid-T"
+        ));
+
+        // Force the recorded id to look older than the TTL, then purge.
+        {
+            let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(queue) = state
+                .relayed_entry_ids_by_tmux
+                .get_mut(&PromptKey::new("claude", "tmux-3540"))
+            {
+                for entry in queue.iter_mut() {
+                    entry.recorded_at =
+                        Instant::now() - (PROMPT_ANCHOR_TTL + Duration::from_secs(1));
+                }
+            }
+            state.purge_expired();
+        }
+        assert!(
+            !relayed_entry_id_already_seen("claude", "tmux-3540", "uuid-T"),
+            "entry ids older than PROMPT_ANCHOR_TTL are purged (bounded growth)"
+        );
+    }
+
+    /// #3540: the ring cap bounds per-key growth even before the TTL fires —
+    /// the oldest id is evicted once the cap is exceeded.
+    #[test]
+    fn relayed_entry_id_ledger_is_ring_capped() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        record_relayed_entry_id("claude", "tmux-cap", "uuid-oldest");
+        for i in 0..RELAYED_ENTRY_ID_RING_CAP {
+            record_relayed_entry_id("claude", "tmux-cap", &format!("uuid-{i}"));
+        }
+        assert!(
+            !relayed_entry_id_already_seen("claude", "tmux-cap", "uuid-oldest"),
+            "the oldest id is dropped once the ring cap is exceeded"
+        );
+        assert!(
+            relayed_entry_id_already_seen(
+                "claude",
+                "tmux-cap",
+                &format!("uuid-{}", RELAYED_ENTRY_ID_RING_CAP - 1)
+            ),
+            "the newest ids remain"
+        );
+    }
+
+    /// #3540: head-rotation simulation — `extract_claude_transcript_user_prompt_with_entry_id`
+    /// returns the SAME top-level uuid regardless of where the entry sits, so a
+    /// surviving entry whose byte offset shifted after a head truncation is still
+    /// recognized by identity.
+    #[test]
+    fn extract_returns_stable_top_level_uuid() {
+        let json = serde_json::json!({
+            "type": "user",
+            "uuid": "6c532800-4c8c-4d1d-9e64-d308fab44a1e",
+            "message": {
+                "role": "user",
+                "content": [{ "type": "text", "text": "surviving prompt" }],
+            },
+            "sessionId": "sess-rot",
+        });
+        let (prompt, entry_id) =
+            extract_claude_transcript_user_prompt_with_entry_id(&json).expect("user prompt");
+        assert_eq!(prompt, "surviving prompt");
+        assert_eq!(
+            entry_id.as_deref(),
+            Some("6c532800-4c8c-4d1d-9e64-d308fab44a1e"),
+            "the stable top-level uuid is extracted; it survives head rotation \
+             (offset shifts, uuid does not) so identity dedup recognizes the \
+             re-encountered entry (#3540)"
+        );
+    }
+
+    /// #3540: a `user` entry with no uuid yields `(prompt, None)` — the scanner
+    /// then uses the content-keyed fallback (no panic, no regression).
+    #[test]
+    fn extract_yields_none_entry_id_when_uuid_absent() {
+        let json = serde_json::json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{ "type": "text", "text": "no uuid here" }],
+            },
+            "sessionId": "sess-x",
+        });
+        let (prompt, entry_id) =
+            extract_claude_transcript_user_prompt_with_entry_id(&json).expect("user prompt");
+        assert_eq!(prompt, "no uuid here");
+        assert_eq!(entry_id, None);
     }
 }
