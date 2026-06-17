@@ -8,7 +8,7 @@
 > [`docs/generated/giant-file-registry.md`](../generated/giant-file-registry.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-06-15 (against `main` @ `9594a4d94`).
+> Last refreshed: 2026-06-17 (against #3552 watcher invariant-severity TOCTOU fix — removed the racy tmux pre-save `response_sent_offset_monotonic` emit; the lock-atomic inflight save-path is the single authoritative emitter).
 >
 > PR #3456 dcserver-robustness: freeze counts re-synced after the reconcile
 > row-allocation churn reduction (`src/reconcile.rs` now 1816 prod lines) and the
@@ -135,7 +135,7 @@
     lifecycle extraction surface from #1435; split further before adding new
     lifecycle behavior; #3016 phase-5b2 dropped the `mailbox_finalize_owed`
     construction from the watcher-spawn handle).
-  - `src/services/discord/tmux.rs` (2057 lines after #2558 dead-code sweep;
+  - `src/services/discord/tmux.rs` (2058 lines after #2558 dead-code sweep;
     +1 from #3384 restored-seed undelivered-body discard guard;
     +38 for suppressed-label noise, user report 2026-06-12: provider-aware
     status/footer stripping in the placeholder suppression decisions;
@@ -154,6 +154,18 @@
     -1 from #3038 S4 after routing the placeholder/status-panel cluster
     through `shared.ui`; +8 from #3533 ActiveBridgeTurnGuard restart-boundary
     preserve fix (no SUPPRESSED_INTERNAL_LABEL on an already-delivered duplicate);
+    +1 from #3552 codex r2 (2057 -> 2058): the watcher pre-save
+    `response_sent_offset_monotonic` severity emit added by #3552 codex r1 was
+    REMOVED as a TOCTOU-racy duplicate — it judged WARN/ERROR against an unlocked
+    `load_inflight_state` snapshot while the immediately-following
+    `save_inflight_state` re-judges the row under its own lock and emits at the
+    correct severity atomically with the skip/persist decision. The lock-atomic
+    inflight save-path is now the single authoritative emitter of this invariant
+    (`persist_watcher_stream_progress` always reaches that save), removing the
+    `record_watcher_invariant_with_severity` / `persist_watcher_response_sent_offset_severity`
+    helpers and the `persist_watcher_stream_progress_with_authority` test seam;
+    net +1 is the replacement doc-comment. The DEBUG-only
+    `debug_assert!(monotonic_offset)` tripwire stays;
     still giant-file territory).
   - `src/services/discord/tmux_watcher.rs` (6923 production lines; +1 from #3534
     gating the post-terminal-success continuation flush on

@@ -40,6 +40,8 @@ use super::InflightRestartMode;
 use super::runtime_store::{atomic_write, discord_inflight_root};
 use crate::dispatch::Source;
 use crate::services::agent_protocol::{RuntimeHandoffKind, TaskNotificationKind};
+// #3552: short alias for the invariant-severity hint forwarded to observability.
+use crate::services::observability::InvariantSeverity as ObsSeverity;
 use crate::services::provider::ProviderKind;
 
 // #2235 (follow-up to #2213): bump v7→v8. v7 added `runtime_kind` without a
@@ -211,8 +213,44 @@ fn record_inflight_invariant(
     message: &'static str,
     details: serde_json::Value,
 ) -> bool {
+    record_inflight_invariant_with_severity(
+        condition,
+        state,
+        invariant,
+        code_location,
+        message,
+        details,
+        ObsSeverity::Error,
+    )
+}
+
+/// #3552 (pure, testable): the offset-monotonic invariants on the save path are
+/// paired with the #3416 enforce guard. When that guard will SKIP the backward
+/// write (`enforce_skips_backward_write`), the violation is already safely
+/// handled (offset preserved, zero data loss) → record at WARN so the paired
+/// `#3416 enforce` WARN is the only operator log and the duplicate ERROR noise
+/// (~17/day) disappears. Otherwise the backward write persists → ERROR (a
+/// genuine breach). The structured analytics event is identical either way.
+fn offset_monotonic_invariant_severity(enforce_skips_backward_write: bool) -> ObsSeverity {
+    if enforce_skips_backward_write {
+        ObsSeverity::Warn
+    } else {
+        ObsSeverity::Error
+    }
+}
+
+/// #3552: severity-aware variant of `record_inflight_invariant`.
+fn record_inflight_invariant_with_severity(
+    condition: bool,
+    state: &InflightTurnState,
+    invariant: &'static str,
+    code_location: &'static str,
+    message: &'static str,
+    details: serde_json::Value,
+    severity: ObsSeverity,
+) -> bool {
     let turn_id = turn_id_for_state(state);
-    crate::services::observability::record_invariant_check(
+    crate::services::observability::record_invariant_check_with_severity(
         condition,
         crate::services::observability::InvariantViolation {
             provider: Some(state.provider.as_str()),
@@ -225,6 +263,7 @@ fn record_inflight_invariant(
             message,
             details,
         },
+        severity,
     )
 }
 
@@ -272,7 +311,33 @@ fn validate_inflight_state_for_save(
         && existing.turn_start_offset == state.turn_start_offset;
     let monotonic_offset =
         !same_turn_identity || state.response_sent_offset >= existing.response_sent_offset;
-    record_inflight_invariant(
+    // I6 (last_offset_monotonic) — OBSERVE-ONLY on the bridge/watcher save
+    // path. A legit fresh-turn reset (different user_msg_id or
+    // turn_start_offset) lowers last_offset on purpose, so the check is gated
+    // by SAME turn identity; only a backward move within the same turn is a
+    // violation. We do not skip the write here (that would drop a legit fresh
+    // turn); the enforcing variant lives in the standby/refresh path.
+    let last_offset_monotonic = !same_turn_identity || state.last_offset >= existing.last_offset;
+
+    // #3552: when the #3416 enforce guard (below) will SKIP this backward write
+    // and preserve the offset (zero data loss), the offset-monotonic violation
+    // has already been safely handled — record it at WARN instead of ERROR so
+    // the paired `#3416 enforce` WARN is the only operator-facing log, killing
+    // the duplicate ERROR-log noise. When enforce is OFF the backward write
+    // actually persists below, so the violation stays ERROR (a genuine breach).
+    // Computed BEFORE the records so the severity is correct; the enforce branch
+    // itself (skip + return false) is unchanged.
+    use crate::services::discord::outbound::delivery_record as dr;
+    let authority = dr::delivery_record_authority_enabled();
+    let enforce_skips_backward_write = dr::authority_blocks_backward_inflight_write(
+        authority,
+        monotonic_offset,
+        last_offset_monotonic,
+    );
+    let offset_monotonic_severity =
+        offset_monotonic_invariant_severity(enforce_skips_backward_write);
+
+    record_inflight_invariant_with_severity(
         monotonic_offset,
         state,
         "response_sent_offset_monotonic",
@@ -284,20 +349,14 @@ fn validate_inflight_state_for_save(
             "same_turn_identity": same_turn_identity,
             "path": path.display().to_string(),
         }),
+        offset_monotonic_severity,
     );
     debug_assert!(
         monotonic_offset,
         "inflight response_sent_offset must not move backwards for the same turn identity"
     );
 
-    // I6 (last_offset_monotonic) — OBSERVE-ONLY on the bridge/watcher save
-    // path. A legit fresh-turn reset (different user_msg_id or
-    // turn_start_offset) lowers last_offset on purpose, so the check is gated
-    // by SAME turn identity; only a backward move within the same turn is a
-    // violation. We do not skip the write here (that would drop a legit fresh
-    // turn); the enforcing variant lives in the standby/refresh path.
-    let last_offset_monotonic = !same_turn_identity || state.last_offset >= existing.last_offset;
-    record_inflight_invariant(
+    record_inflight_invariant_with_severity(
         last_offset_monotonic,
         state,
         "last_offset_monotonic",
@@ -309,6 +368,7 @@ fn validate_inflight_state_for_save(
             "same_turn_identity": same_turn_identity,
             "path": path.display().to_string(),
         }),
+        offset_monotonic_severity,
     );
     debug_assert!(
         last_offset_monotonic,
@@ -334,14 +394,9 @@ fn validate_inflight_state_for_save(
 
     // #3416 (#3089 B3): observe→ENFORCE under the durable-authority flag (no-op
     // when OFF); see dr::authority_blocks_backward_inflight_write. The violation
-    // itself was already recorded by the monotonic record_inflight_invariant above.
-    use crate::services::discord::outbound::delivery_record as dr;
-    let authority = dr::delivery_record_authority_enabled();
-    if dr::authority_blocks_backward_inflight_write(
-        authority,
-        monotonic_offset,
-        last_offset_monotonic,
-    ) {
+    // itself was already recorded by the monotonic record_inflight_invariant
+    // above (downgraded to WARN for this skipped-write case — see #3552).
+    if enforce_skips_backward_write {
         tracing::warn!(
             "#3416 enforce: skipped backward inflight write at {}",
             path.display()
@@ -1989,6 +2044,7 @@ mod stall_recovery_tests {
         clear_inflight_state_if_matches_zero_owned_in_root, clear_status_panel_if_current_in_root,
         inflight_state_allows_idle_tmux_repair_state, inflight_state_is_stale, inflight_state_path,
         load_inflight_states_from_root, lock_inflight_state_path, normalize_response_sent_offset,
+        offset_monotonic_invariant_severity,
         refresh_inflight_last_offset_if_matches_identity_in_root,
         save_inflight_state_if_matches_identity_in_root, save_inflight_state_in_root,
         validate_inflight_state_for_save,
@@ -3652,6 +3708,22 @@ mod stall_recovery_tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].user_msg_id, 101);
         assert_eq!(loaded[0].last_offset, 10);
+    }
+
+    #[test]
+    fn offset_monotonic_severity_downgrades_only_when_enforce_skips() {
+        use crate::services::observability::InvariantSeverity;
+        // #3552: when the #3416 enforce guard will skip the backward write the
+        // violation is already handled → WARN (no ERROR noise). When it will NOT
+        // skip (enforce OFF → write persists) it stays ERROR (a genuine breach).
+        assert_eq!(
+            offset_monotonic_invariant_severity(true),
+            InvariantSeverity::Warn
+        );
+        assert_eq!(
+            offset_monotonic_invariant_severity(false),
+            InvariantSeverity::Error
+        );
     }
 
     #[test]

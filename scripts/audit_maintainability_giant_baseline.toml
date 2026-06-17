@@ -296,7 +296,18 @@
 # entry). Lowers 2585 -> 1980 (actual post-split prod LoC). The status-panel
 # guards stay in root: their compare-and-clear still needs the file-private
 # load/persist-under-lock internals, so they cannot move cleanly yet.
-"src/services/discord/inflight.rs" = 1980
+# #3552: +55 (1980 -> 2035) for the severity-aware invariant recorder
+# (`record_inflight_invariant_with_severity` + `offset_monotonic_invariant_severity`
+# pure helper + doc) on the save path. When the #3416 enforce guard will skip a
+# backward inflight write (offset preserved, zero data loss) the paired
+# offset-monotonic invariant is recorded at WARN instead of ERROR, killing the
+# duplicate ERROR-log noise; the ERROR severity is preserved for the persist path.
+# This save-path emit is the SINGLE lock-atomic authority for the
+# response_sent_offset_monotonic invariant (codex r2): it re-validates the row
+# under its own lock and emits at the correct severity atomically with the
+# skip/persist decision, so the tmux watcher pre-save emit was removed as a
+# race-prone duplicate (`offset_monotonic_invariant_severity` stays private).
+"src/services/discord/inflight.rs" = 2035
 # #3038 Phase A: health.rs decomposed into health/ directory modules (root 402
 # prod LoC + 6 sub-1000-LoC submodules) — dropped below the giant threshold, so
 # its ratchet entry is deleted (win; no baseline raises).
@@ -309,7 +320,21 @@
 # notify-outbox subsystem — build/enqueue/reconcile/parse/rollback).
 # suppressed-label noise, user report 2026-06-12: +38 for provider-aware
 # status/footer stripping in the placeholder suppression decisions.
-"src/services/discord/tmux.rs" = 2057
+# #3552 (codex r2): +1 (2057 -> 2058) — the racy pre-save
+# `response_sent_offset_monotonic` severity emit added in #3552 codex r1 is
+# REMOVED. It computed WARN/ERROR against an unlocked `load_inflight_state`
+# snapshot, but the immediately-following `save_inflight_state` re-judges the row
+# under its own lock; a concurrent clear/fresh-row between them could make the
+# tmux emit WARN while the save actually persists a stale backward write (a
+# WARN-only-when-skipped breach hidden). `persist_watcher_stream_progress` always
+# reaches that save (no early return after the check), so the lock-atomic
+# save-path emit is the single authoritative source — the tmux emit was a pure
+# duplicate. Dropping it also removes `record_watcher_invariant_with_severity`,
+# `persist_watcher_response_sent_offset_severity`, and the
+# `persist_watcher_stream_progress_with_authority` test seam; net +1 vs base is a
+# replacement doc-comment explaining the delegation. The DEBUG-only
+# `debug_assert!(monotonic_offset)` tripwire stays (production no-op).
+"src/services/discord/tmux.rs" = 2058
 # completion_guard.rs decomposed in #3479 (1834 -> 872 prod LoC); dropped below
 # the giant threshold, so its ratchet baseline is retired (no longer tracked).
 # #3034 batch-8: lowered 1781 -> 1753 (deleted the dead `assistant_turns` turn-cap

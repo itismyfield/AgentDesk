@@ -2393,19 +2393,20 @@ fn persist_watcher_stream_progress(
     let normalized_response_sent_offset =
         normalize_response_sent_offset(full_response, response_sent_offset);
     let monotonic_offset = normalized_response_sent_offset >= inflight.response_sent_offset;
-    record_watcher_invariant(
-        monotonic_offset,
-        Some(provider),
-        channel_id,
-        "response_sent_offset_monotonic",
-        "src/services/discord/tmux.rs:persist_watcher_stream_progress",
-        "watcher response_sent_offset must not move backwards",
-        serde_json::json!({
-            "previous": inflight.response_sent_offset,
-            "next": normalized_response_sent_offset,
-            "tmux_session_name": tmux_session_name,
-        }),
-    );
+    // #3552 (codex r2): the `response_sent_offset_monotonic` invariant for this
+    // backward write is NOT emitted here. This load↔save is unlocked, so a
+    // severity computed against `inflight` (loaded above) can race a concurrent
+    // path that clears the row or stores a fresh-turn row B before the
+    // `save_inflight_state` below re-reads it under its lock — which would make
+    // this emit WARN ("#3416 will skip") while the save actually persists the
+    // stale write (WARN-only-when-skipped violation that hides a real breach).
+    // `save_inflight_state` re-validates the SAME row inside its lock and emits
+    // `response_sent_offset_monotonic` at the correct severity atomically with
+    // the skip/persist decision (WARN iff #3416 skips, ERROR iff it persists),
+    // and this function always reaches that save (no early return after this
+    // point), so the save path is the single authoritative emitter and the tmux
+    // pre-save emit would be a pure, race-prone duplicate. The DEBUG-only
+    // tripwire below stays as a local safety net (production no-op).
     debug_assert!(
         monotonic_offset,
         "watcher response_sent_offset must not move backwards"

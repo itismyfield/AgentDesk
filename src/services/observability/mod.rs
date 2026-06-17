@@ -38,10 +38,11 @@ mod worker;
 // or by downstream crates that ship outside the default build profile.
 #[allow(unused_imports)]
 pub use emit::{
-    emit_agent_quality_event, emit_dispatch_result, emit_guard_fired,
+    InvariantSeverity, emit_agent_quality_event, emit_dispatch_result, emit_guard_fired,
     emit_inflight_lifecycle_event, emit_intake_placeholder_post_failed, emit_recovery_fired,
     emit_relay_delivery, emit_turn_cancelled, emit_turn_finished_with_dispatch_kind,
     emit_turn_started, emit_watcher_replaced, record_invariant_check,
+    record_invariant_check_with_severity,
 };
 #[allow(unused_imports)]
 pub use queries::{
