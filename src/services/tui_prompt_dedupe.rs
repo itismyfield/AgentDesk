@@ -620,7 +620,10 @@ pub(crate) fn clear_tmux_runtime_binding(tmux_session_name: &str) -> bool {
     }
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
-    state.runtime_by_tmux.remove(tmux_session_name).is_some()
+    let removed_runtime = state.runtime_by_tmux.remove(tmux_session_name).is_some();
+    let removed_provider_sessions =
+        state.remove_provider_session_mappings_for_tmux(tmux_session_name);
+    removed_runtime || removed_provider_sessions
 }
 
 /// #3105 (codex P1 sub-case B): tombstone-evict every mirror mapping for a tmux
@@ -646,7 +649,9 @@ pub(crate) fn evict_dead_tmux_mirror(tmux_session_name: &str) -> bool {
     state.purge_expired();
     let removed_runtime = state.runtime_by_tmux.remove(tmux_session_name).is_some();
     let removed_channel = state.channel_by_tmux.remove(tmux_session_name).is_some();
-    removed_runtime || removed_channel
+    let removed_provider_sessions =
+        state.remove_provider_session_mappings_for_tmux(tmux_session_name);
+    removed_runtime || removed_channel || removed_provider_sessions
 }
 
 pub(crate) fn runtime_bindings_for_kind(
@@ -1597,6 +1602,13 @@ impl TuiPromptDedupeState {
             !queue.is_empty()
         });
     }
+
+    fn remove_provider_session_mappings_for_tmux(&mut self, tmux_session_name: &str) -> bool {
+        let before = self.tmux_by_provider_session.len();
+        self.tmux_by_provider_session
+            .retain(|_, entry| entry.value != tmux_session_name);
+        before != self.tmux_by_provider_session.len()
+    }
 }
 
 #[cfg(test)]
@@ -1675,6 +1687,39 @@ mod tests {
         assert_eq!(
             provider_session_for_tmux("claude", "tmux-long-lived"),
             Some("uuid-long-lived".to_string())
+        );
+    }
+
+    #[test]
+    fn provider_session_mapping_is_removed_with_runtime_binding_clear() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        register_provider_session("claude", "uuid-stale", "tmux-stale");
+        assert_eq!(
+            provider_session_for_tmux("claude", "tmux-stale"),
+            Some("uuid-stale".to_string())
+        );
+
+        assert!(clear_tmux_runtime_binding("tmux-stale"));
+        assert_eq!(
+            provider_session_for_tmux("claude", "tmux-stale"),
+            None,
+            "clearing a tmux runtime binding must also clear stale provider-session reverse mappings"
+        );
+    }
+
+    #[test]
+    fn provider_session_mapping_is_removed_with_dead_tmux_mirror() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        register_provider_session("claude", "uuid-dead", "tmux-dead");
+        assert!(evict_dead_tmux_mirror("tmux-dead"));
+        assert_eq!(
+            provider_session_for_tmux("claude", "tmux-dead"),
+            None,
+            "dead tmux mirror eviction must not leave provider-session reverse mappings behind"
         );
     }
 

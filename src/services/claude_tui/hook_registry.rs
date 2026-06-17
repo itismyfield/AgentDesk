@@ -253,6 +253,21 @@ impl HookRegistry {
             .fetch_add(state.empty_stop_total, Ordering::Relaxed);
     }
 
+    fn state_is_droppable(state: &KeyState) -> bool {
+        state.buffer.is_empty() && !state.claimed && state.unclaimed_stop.is_none()
+    }
+
+    fn sweep_and_evict_empty_keys(&self, keys: &mut HashMap<RegistryKey, KeyState>, now: Instant) {
+        keys.retain(|_, state| {
+            Self::sweep_state(state, self.ttl, now);
+            if Self::state_is_droppable(state) {
+                self.absorb_evicted_counters(state);
+                return false;
+            }
+            true
+        });
+    }
+
     /// Deliver an event into the registry. If a listener has claimed the key
     /// the event is delivered live (buffer stays drained); otherwise it is
     /// buffered for later replay, and a Stop additionally arms the diagnostic
@@ -261,8 +276,8 @@ impl HookRegistry {
     pub fn deliver(&self, key: RegistryKey, event: HookEvent) -> DeliverOutcome {
         let now = Instant::now();
         let mut keys = self.lock();
+        self.sweep_and_evict_empty_keys(&mut keys, now);
         let state = keys.entry(key).or_default();
-        Self::sweep_state(state, self.ttl, now);
 
         let is_stop = matches!(
             event.kind,
@@ -379,7 +394,7 @@ impl HookRegistry {
     /// counters (absorbed at the registry level so the totals stay monotonic).
     ///
     /// Test-only: production consumers (`/tui/wait`, the readiness wait) migrated
-    /// to [`claim_matching_once`], which consumes only the matching event and
+    /// to [`claim_matching_once`], which consumes matching events and
     /// re-buffers the rest so an unrelated waiter's buffered events are not
     /// discarded. The unconditional drain remains exercised by the unit tests
     /// that pin the REQ-002/REQ-003 single-consumption + replay-counting
@@ -408,10 +423,11 @@ impl HookRegistry {
         drained
     }
 
-    /// One-shot claim that consumes ONLY the events matching `wants`, leaving
-    /// every other fresh (unexpired) buffered event in place for a later waiter
-    /// to replay. Returns the newest matching event, or `None` when nothing
-    /// matches.
+    /// One-shot claim that consumes every event matching `wants`, leaving every
+    /// other fresh (unexpired) buffered event in place for a later waiter to
+    /// replay. Returns the newest matching event, or `None` when nothing
+    /// matches. Older matching events are intentionally discarded in the same
+    /// claim so a stale Stop cannot replay into a later turn.
     ///
     /// This is the selective variant of `claim_once` used by `/tui/wait`. The
     /// plain `claim_once` drains and drops the whole key, which discards buffered
@@ -430,33 +446,41 @@ impl HookRegistry {
     {
         let now = Instant::now();
         let mut keys = self.lock();
+        self.sweep_and_evict_empty_keys(&mut keys, now);
         let state = keys.get_mut(&key)?;
-        Self::sweep_state(state, self.ttl, now);
 
-        // Find the newest matching event (scan from the back; arrival order is
-        // preserved in the Vec). Remove exactly that one and keep the rest.
-        let matched_idx = state
-            .buffer
-            .iter()
-            .rposition(|buffered| wants(&buffered.event));
-        let matched = match matched_idx {
-            Some(idx) => {
-                let removed = state.buffer.remove(idx);
-                state.buffered_bytes = state.buffered_bytes.saturating_sub(removed.bytes);
-                self.replayed_once_total.fetch_add(1, Ordering::Relaxed);
-                // Consuming a Stop claims it: cancel the unclaimed-Stop diagnostic
-                // timer so a later turn's diagnostic does not report this
-                // now-claimed Stop as still pending.
-                if matches!(
-                    removed.event.kind,
+        let mut matched: Option<HookEvent> = None;
+        let mut consumed = 0u64;
+        let mut consumed_stop = false;
+        let mut retained = Vec::with_capacity(state.buffer.len());
+        let mut retained_bytes = 0usize;
+        for buffered in std::mem::take(&mut state.buffer) {
+            if wants(&buffered.event) {
+                consumed += 1;
+                consumed_stop |= matches!(
+                    buffered.event.kind,
                     HookEventKind::Stop | HookEventKind::SubagentStop
-                ) {
-                    state.unclaimed_stop = None;
-                }
-                Some(removed.event)
+                );
+                // Iteration preserves arrival order, so the last match is the
+                // newest matching event returned to the caller.
+                matched = Some(buffered.event);
+            } else {
+                retained_bytes += buffered.bytes;
+                retained.push(buffered);
             }
-            None => None,
-        };
+        }
+        state.buffer = retained;
+        state.buffered_bytes = retained_bytes;
+        if consumed > 0 {
+            self.replayed_once_total
+                .fetch_add(consumed, Ordering::Relaxed);
+        }
+        if consumed_stop {
+            // Consuming a Stop claims every buffered Stop for this key: cancel the
+            // unclaimed-Stop diagnostic so a later turn cannot report any of
+            // these now-consumed Stops as pending.
+            state.unclaimed_stop = None;
+        }
 
         // If the buffer is now empty and the key has nothing else to retain, drop
         // it to bound map growth (mirrors the snapshot eviction policy); its
@@ -478,14 +502,25 @@ impl HookRegistry {
     pub fn unclaimed_stop_diagnostic(&self, key: &RegistryKey) -> Option<UnclaimedStopDiagnostic> {
         let now = Instant::now();
         let mut keys = self.lock();
-        let state = keys.get_mut(key)?;
-        Self::sweep_state(state, self.ttl, now);
-        let stop = state.unclaimed_stop.as_ref()?;
-        Some(UnclaimedStopDiagnostic {
-            kind: stop.kind.as_str().to_string(),
-            qualifying: stop.qualifying,
-            delay_elapsed: now.duration_since(stop.armed_at) >= self.unclaimed_stop_delay,
-        })
+        let diagnostic = {
+            let state = keys.get_mut(key)?;
+            Self::sweep_state(state, self.ttl, now);
+            state
+                .unclaimed_stop
+                .as_ref()
+                .map(|stop| UnclaimedStopDiagnostic {
+                    kind: stop.kind.as_str().to_string(),
+                    qualifying: stop.qualifying,
+                    delay_elapsed: now.duration_since(stop.armed_at) >= self.unclaimed_stop_delay,
+                })
+        };
+        if diagnostic.is_none()
+            && keys.get(key).is_some_and(Self::state_is_droppable)
+            && let Some(removed) = keys.remove(key)
+        {
+            self.absorb_evicted_counters(&removed);
+        }
+        diagnostic
     }
 
     /// Number of currently-buffered (unconsumed, unexpired) events for `key`,
@@ -1153,7 +1188,7 @@ mod tests {
             k.clone(),
             event("claude", "sid", HookEventKind::Stop, json!({})),
         );
-        // A Stop waiter consumes ONLY the Stop.
+        // A Stop waiter consumes matching Stops only.
         let matched = reg.claim_matching_once(k.clone(), |e| {
             matches!(e.kind, HookEventKind::Stop | HookEventKind::SubagentStop)
         });
@@ -1178,6 +1213,65 @@ mod tests {
         );
         // Now the buffer is drained and the empty key is evicted.
         assert_eq!(reg.buffered_len(&k), 0);
+    }
+
+    #[test]
+    fn claim_matching_once_consumes_all_matching_stops() {
+        let reg = registry();
+        let k = key("claude", "sid");
+        reg.deliver(
+            k.clone(),
+            event(
+                "claude",
+                "sid",
+                HookEventKind::Stop,
+                json!({ "marker": "old" }),
+            ),
+        );
+        reg.deliver(
+            k.clone(),
+            event(
+                "claude",
+                "sid",
+                HookEventKind::Notification,
+                json!({ "text": "TOKEN-XYZ here" }),
+            ),
+        );
+        reg.deliver(
+            k.clone(),
+            event(
+                "claude",
+                "sid",
+                HookEventKind::SubagentStop,
+                json!({ "marker": "new" }),
+            ),
+        );
+
+        let matched = reg
+            .claim_matching_once(k.clone(), |e| {
+                matches!(e.kind, HookEventKind::Stop | HookEventKind::SubagentStop)
+            })
+            .expect("newest Stop returned");
+        assert_eq!(matched.kind, HookEventKind::SubagentStop);
+        assert_eq!(matched.payload["marker"], "new");
+        assert_eq!(
+            reg.buffered_len(&k),
+            1,
+            "only the non-matching token payload remains buffered"
+        );
+        assert!(
+            reg.claim_matching_once(k.clone(), |e| {
+                matches!(e.kind, HookEventKind::Stop | HookEventKind::SubagentStop)
+            })
+            .is_none(),
+            "older matching Stops must be consumed in the first claim"
+        );
+        assert!(reg.unclaimed_stop_diagnostic(&k).is_none());
+        assert_eq!(
+            reg.snapshot().replayed_total,
+            2,
+            "both matching Stops are consumed exactly once"
+        );
     }
 
     #[test]
