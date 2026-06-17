@@ -1,5 +1,6 @@
 import subprocess
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 def run(cmd):
@@ -32,6 +33,32 @@ def head_commit_timestamp(pr):
     if code != 0:
         return None
     return parse_github_timestamp(timestamp)
+
+def _meaningful_field_value(value):
+    normalized = value.strip().strip("-–—").strip()
+    return bool(normalized) and normalized not in {"n/a", "none", "todo", "tbd", "na"}
+
+def has_non_empty_body_field(body, labels):
+    for label in labels:
+        pattern = re.compile(
+            rf"(?im)^[ \t]*(?:[-*][ \t]*)?(?:#{{1,6}}[ \t]*)?{re.escape(label)}(?:[ \t]*:[ \t]*(.*)|[ \t]*)$"
+        )
+        for match in pattern.finditer(body):
+            if _meaningful_field_value(match.group(1) or ""):
+                return True
+
+            for next_line in body[match.end():].splitlines():
+                stripped = next_line.strip()
+                if not stripped:
+                    continue
+                if stripped.startswith("#"):
+                    break
+                if re.match(r"^(?:[-*]\s*)?[a-z0-9 /_-]+\s*:\s*$", stripped, re.I):
+                    break
+                if _meaningful_field_value(stripped):
+                    return True
+                break
+    return False
 
 print("Fetching PRs...")
 prs_json, gh_code = run(f"gh pr list --repo {REPO} --state open --limit 50 --json number,title,headRefName,createdAt,headRefOid,body")
@@ -66,9 +93,9 @@ for pr in prs:
         print("  [!] MISSING VERIFICATION: PR body lacks the required 'verification' commands and results.")
     if "skipped checks" not in body:
         print("  [!] MISSING SKIPPED CHECKS: PR body fails to mention 'skipped checks' with reasons.")
-    if "risk" not in body:
+    if not has_non_empty_body_field(body, ["risk", "risk assessment"]):
         print("  [!] MISSING RISK: PR body fails to mention 'risk' assessment.")
-    if "rollback notes" not in body:
+    if not has_non_empty_body_field(body, ["rollback notes", "rollback"]):
         print("  [!] MISSING ROLLBACK NOTES: PR body fails to mention 'rollback notes'.")
 
     # 2026-05-13 lesson: treat low-signal or stale broad branches as queue debt
