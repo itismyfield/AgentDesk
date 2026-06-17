@@ -424,7 +424,6 @@ impl HookRegistry {
         let matched = match matched_idx {
             Some(idx) => {
                 let removed = state.buffer.remove(idx);
-                state.replayed_total += 1;
                 self.replayed_once_total.fetch_add(1, Ordering::Relaxed);
                 // Consuming a Stop claims it: cancel the unclaimed-Stop diagnostic
                 // timer so a later turn's diagnostic does not report this
@@ -1079,6 +1078,11 @@ mod tests {
         assert_eq!(matched.unwrap().kind, HookEventKind::Stop);
         // The non-matching token payload is still buffered for a later token wait.
         assert_eq!(reg.buffered_len(&k), 1);
+        assert_eq!(
+            reg.snapshot().replayed_total,
+            1,
+            "selective replay must be counted exactly once while the key stays live"
+        );
         let token_match = reg.claim_matching_once(k.clone(), |e| {
             e.payload
                 .get("text")
