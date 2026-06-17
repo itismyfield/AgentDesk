@@ -60,11 +60,11 @@ const HEADER_SCAN_LINE_LIMIT: usize = 20;
 /// ever passes many distinct roots, evicting the least-recently-built root.
 const MAX_CACHED_ROOTS: usize = 32;
 
-/// Same-leaf rollout membership validation is intentionally bounded to the most
-/// recently modified known directories. Codex creates new rollouts in the
-/// current dated leaf, so probing recent known directories catches the
-/// mtime-coarseness stale-hit risk without re-walking the whole sessions tree on
-/// every 100ms launch poll.
+/// Rollout membership validation is intentionally bounded to the most recently
+/// modified known directories. Codex creates new rollouts in the current dated
+/// leaf, so probing direct rollout-file and child-directory membership catches
+/// the mtime-coarseness stale-hit risk without re-walking the whole sessions
+/// tree on every 100ms launch poll.
 const MAX_MEMBERSHIP_PROBE_DIRS: usize = 8;
 
 /// Parsed `session_meta` header for a single rollout file. This is the only
@@ -323,17 +323,24 @@ fn tree_signature(root: &Path) -> Option<u64> {
 
 fn recent_rollout_membership_changed(index: &RootIndex) -> bool {
     for dir in rollout_membership_probe_dirs(index) {
-        let Some(current) = rollout_files_in_dir(&dir) else {
+        let Some(current) = rollout_membership_in_dir(&dir) else {
             return true;
         };
-        let mut cached = index
+        let mut cached_files = index
             .files
             .keys()
             .filter(|path| path.parent() == Some(dir.as_path()))
             .cloned()
             .collect::<Vec<_>>();
-        cached.sort();
-        if current != cached {
+        cached_files.sort();
+        let mut cached_child_dirs = index
+            .dirs
+            .iter()
+            .filter(|path| path.parent() == Some(dir.as_path()))
+            .cloned()
+            .collect::<Vec<_>>();
+        cached_child_dirs.sort();
+        if current.rollout_files != cached_files || current.child_dirs != cached_child_dirs {
             return true;
         }
     }
@@ -365,15 +372,29 @@ fn rollout_membership_probe_dirs(index: &RootIndex) -> Vec<PathBuf> {
     unique_dirs
 }
 
-fn rollout_files_in_dir(dir: &Path) -> Option<Vec<PathBuf>> {
+struct DirMembership {
+    child_dirs: Vec<PathBuf>,
+    rollout_files: Vec<PathBuf>,
+}
+
+fn rollout_membership_in_dir(dir: &Path) -> Option<DirMembership> {
     let entries = std::fs::read_dir(dir).ok()?;
-    let mut files = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.is_file() && is_rollout_jsonl(path))
-        .collect::<Vec<_>>();
-    files.sort();
-    Some(files)
+    let mut child_dirs = Vec::new();
+    let mut rollout_files = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            child_dirs.push(path);
+        } else if path.is_file() && is_rollout_jsonl(&path) {
+            rollout_files.push(path);
+        }
+    }
+    child_dirs.sort();
+    rollout_files.sort();
+    Some(DirMembership {
+        child_dirs,
+        rollout_files,
+    })
 }
 
 /// Cache-backed rollout discovery returning each candidate's path + cached
@@ -1123,6 +1144,33 @@ mod tests {
             second.len(),
             1,
             "empty cached leaves must be revalidated so a same-leaf rollout is discovered"
+        );
+    }
+
+    #[test]
+    fn membership_probe_detects_new_child_leaf_with_restored_parent_mtime() {
+        let _guard = lock_test();
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let year = dir.path().join("2026");
+        std::fs::create_dir_all(&year).unwrap();
+        let original_mtime = std::fs::metadata(&year).unwrap().modified().unwrap();
+
+        let first = cached_indexed_rollouts(dir.path());
+        assert!(
+            first.is_empty(),
+            "warm cache starts before the child leaf exists"
+        );
+
+        write_rollout(dir.path(), "2026/05/rollout-a.jsonl", "s1", cwd.path());
+        filetime::set_file_mtime(&year, filetime::FileTime::from_system_time(original_mtime))
+            .unwrap();
+
+        let second = cached_indexed_rollouts(dir.path());
+        assert_eq!(
+            second.len(),
+            1,
+            "cached parents must validate direct child membership so a new day/month leaf is discovered"
         );
     }
 
