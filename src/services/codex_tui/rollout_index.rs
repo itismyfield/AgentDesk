@@ -164,6 +164,12 @@ pub fn rollout_files_under(root: &Path) -> Vec<PathBuf> {
     files
 }
 
+fn is_rollout_jsonl(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(".jsonl"))
+}
+
 /// Read and parse the `session_meta` header of a single rollout file. Bounded to
 /// the first [`HEADER_SCAN_LINE_LIMIT`] lines (REQ-005). This is the direct
 /// (uncached) read used on the cold path and when the cache is disabled.
@@ -221,8 +227,10 @@ pub struct IndexedRollout {
 }
 
 /// Deterministic, content-free tree signature for `root`. Folds each directory's
-/// (path, mtime) into a stable hash. A new rollout file bumps the mtime of its
-/// containing directory; a deleted/renamed leaf changes the parent mtime; a
+/// (path, mtime) plus the set of `rollout-*.jsonl` file paths into a stable
+/// hash. Most filesystems bump the containing directory mtime when a rollout is
+/// added, but hashing rollout membership avoids stale hits on coarse or restored
+/// directory mtimes. A deleted/renamed leaf changes the parent mtime; a
 /// brand-new root that did not exist before yields a different signature than an
 /// empty/missing one. Reads no rollout file contents (REQ-005).
 ///
@@ -237,6 +245,7 @@ fn tree_signature(root: &Path) -> Option<u64> {
     let mut visited_any = false;
     // Collect directory entries deterministically so the hash is order-stable.
     let mut dir_records: Vec<(PathBuf, Option<SystemTime>)> = Vec::new();
+    let mut rollout_records: Vec<PathBuf> = Vec::new();
     while let Some(path) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&path) else {
             // The root itself being unreadable -> no authoritative signature.
@@ -254,6 +263,8 @@ fn tree_signature(root: &Path) -> Option<u64> {
             let child = entry.path();
             if child.is_dir() {
                 stack.push(child);
+            } else if is_rollout_jsonl(&child) {
+                rollout_records.push(child);
             }
         }
     }
@@ -274,6 +285,10 @@ fn tree_signature(root: &Path) -> Option<u64> {
             }
             None => 0u8.hash(&mut hasher),
         }
+    }
+    rollout_records.sort();
+    for path in rollout_records {
+        path.hash(&mut hasher);
     }
     Some(hasher.finish())
 }
@@ -900,6 +915,31 @@ mod tests {
             warm[0].meta.as_ref().unwrap().id,
             "after-longer-id",
             "a signature-hit warm lookup must re-read a file whose (mtime, len) changed"
+        );
+    }
+
+    // TEST-001 / regression: adding a rollout under an already-known leaf must
+    // change the signature even if the leaf directory mtime is restored or too
+    // coarse to advance. The signature hashes rollout membership, so the warm
+    // path cannot stale-hit and miss the new file.
+    #[test]
+    fn same_leaf_rollout_membership_changes_signature_even_with_restored_dir_mtime() {
+        let _guard = lock_test();
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        write_rollout(dir.path(), "2026/05/rollout-a.jsonl", "s1", cwd.path());
+        let leaf = dir.path().join("2026/05");
+        let original_mtime = std::fs::metadata(&leaf).unwrap().modified().unwrap();
+        let sig1 = tree_signature(dir.path()).unwrap();
+
+        write_rollout(dir.path(), "2026/05/rollout-b.jsonl", "s2", cwd.path());
+        filetime::set_file_mtime(&leaf, filetime::FileTime::from_system_time(original_mtime))
+            .unwrap();
+
+        let sig2 = tree_signature(dir.path()).unwrap();
+        assert_ne!(
+            sig1, sig2,
+            "same-leaf rollout membership must invalidate the cached file list even when directory mtime is unchanged"
         );
     }
 
