@@ -323,7 +323,11 @@ fn scrub_startup_secrets(raw: &str) -> String {
                     out.push(format!("{key}:"));
                     redact_next = true;
                 } else {
-                    // `token:abc` — value is inline.
+                    // `token:abc` — value is inline. If that inline value is
+                    // itself an auth scheme marker (e.g. `Authorization:Basic
+                    // <cred>`), the real credential is the *next* token, so keep
+                    // redacting forward instead of leaking it into the tail.
+                    redact_next = is_auth_scheme_marker(value);
                     out.push(format!("{key}:[REDACTED]"));
                 }
                 continue;
@@ -2809,6 +2813,22 @@ mod tests {
         assert!(!s.contains("hunter2"), "leaked inline colon value: {s}");
         assert!(s.contains("password:[REDACTED]"), "got: {s}");
         assert!(s.contains("ok"));
+
+        // Inline `auth:Scheme value` — when the inline value is itself a
+        // `Basic`/`Bearer` scheme marker, the real credential is the next token
+        // and must still be redacted (otherwise it leaks into the detail tail).
+        let s = scrub_startup_secrets("Authorization:Basic c2VjcmV0Y3JlZA== done");
+        assert!(
+            !s.contains("c2VjcmV0Y3JlZA=="),
+            "leaked inline-scheme credential: {s}"
+        );
+        assert!(s.contains("done"));
+        let s = scrub_startup_secrets("auth:Bearer tok_inlinecred tail");
+        assert!(
+            !s.contains("tok_inlinecred"),
+            "leaked inline bearer credential: {s}"
+        );
+        assert!(s.contains("tail"));
 
         // A non-secret colon token (e.g. a URL) is left intact.
         let s = scrub_startup_secrets("listening http://127.0.0.1:8080 ready");
