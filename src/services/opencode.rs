@@ -754,6 +754,17 @@ fn cleanup_idle_warm_servers(pool: &mut OpenCodeServerPool) {
     }
 }
 
+fn next_idle_disposal_delay(pool: &OpenCodeServerPool) -> Option<Duration> {
+    pool.values()
+        .filter(|server| server.active_sessions.load(Ordering::SeqCst) == 0)
+        .map(|server| idle_disposal_delay_for_idle_duration(server.idle_for()))
+        .min()
+}
+
+fn idle_disposal_delay_for_idle_duration(idle_for: Duration) -> Duration {
+    WARM_SERVER_IDLE_TTL.saturating_sub(idle_for)
+}
+
 fn evict_warm_server_from_pool(server: &Arc<OpenCodeWarmServer>) {
     let mut pool = opencode_server_pool().lock().unwrap_or_else(|e| {
         tracing::warn!("Recovered poisoned lock for OpenCode server pool");
@@ -797,18 +808,27 @@ fn claim_idle_disposal_sweep(scheduled: &AtomicBool) -> bool {
 /// and `idle_for` under the pool lock, so a server that was re-acquired in
 /// the meantime is left untouched.
 fn schedule_idle_disposal() {
+    schedule_idle_disposal_after(WARM_SERVER_IDLE_TTL);
+}
+
+fn schedule_idle_disposal_after(delay: Duration) {
     if !claim_idle_disposal_sweep(&IDLE_DISPOSAL_SCHEDULED) {
         return;
     }
-    thread::spawn(|| {
-        thread::sleep(WARM_SERVER_IDLE_TTL);
+    thread::spawn(move || {
+        thread::sleep(delay);
         let pool = opencode_server_pool();
         let mut pool = pool.lock().unwrap_or_else(|e| {
             tracing::warn!("Recovered poisoned lock for OpenCode server pool");
             e.into_inner()
         });
         cleanup_idle_warm_servers(&mut pool);
+        let next_delay = next_idle_disposal_delay(&pool);
+        drop(pool);
         IDLE_DISPOSAL_SCHEDULED.store(false, Ordering::SeqCst);
+        if let Some(delay) = next_delay {
+            schedule_idle_disposal_after(delay);
+        }
     });
 }
 
@@ -1141,12 +1161,18 @@ fn run_session(
         .timeout_read(SSE_READ_TIMEOUT)
         .build();
 
-    let sse_response = sse_agent
+    let sse_response = match sse_agent
         .get(&format!("{base_url}/global/event"))
         .set("Authorization", auth)
         .set("Accept", "text/event-stream")
         .call()
-        .map_err(|e| format!("Failed to connect to OpenCode SSE stream: {e}"))?;
+    {
+        Ok(response) => response,
+        Err(error) => {
+            abort_session(base_url, auth, &session_id);
+            return Err(format!("Failed to connect to OpenCode SSE stream: {error}"));
+        }
+    };
 
     // 5. Send prompt (non-blocking — server processes it while we read SSE)
     if let Err(error) = send_prompt(
@@ -1765,6 +1791,7 @@ fn consume_sse_inner(
     if !terminal_seen {
         let result = state.accumulated_text.trim().to_string();
         if !result.is_empty() {
+            abort_session(base_url, auth, session_id);
             send_sse_done(sender, session_id, result);
             return Ok(());
         }
@@ -1784,6 +1811,7 @@ fn consume_sse_inner(
                 abort_session(base_url, auth, session_id);
                 return Err("OpenCode request cancelled".to_string());
             }
+            abort_session(base_url, auth, session_id);
             send_sse_done(sender, session_id, result);
             return Ok(());
         }
@@ -2744,6 +2772,22 @@ mod tests {
         assert!(!claim_idle_disposal_sweep(&scheduled));
         scheduled.store(false, Ordering::SeqCst);
         assert!(claim_idle_disposal_sweep(&scheduled));
+    }
+
+    #[test]
+    fn idle_disposal_delay_reschedules_until_ttl_elapsed() {
+        assert_eq!(
+            idle_disposal_delay_for_idle_duration(Duration::from_secs(0)),
+            WARM_SERVER_IDLE_TTL
+        );
+        assert_eq!(
+            idle_disposal_delay_for_idle_duration(WARM_SERVER_IDLE_TTL / 2),
+            WARM_SERVER_IDLE_TTL / 2
+        );
+        assert_eq!(
+            idle_disposal_delay_for_idle_duration(WARM_SERVER_IDLE_TTL + Duration::from_secs(1)),
+            Duration::ZERO
+        );
     }
 
     #[test]

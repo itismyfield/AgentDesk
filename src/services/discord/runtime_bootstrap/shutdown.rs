@@ -206,6 +206,4 @@ pub(super) async fn run_bot_run_gateway_backend(
         handle.abort();
         let _ = handle.await;
     }
-
-    crate::services::opencode::shutdown_warm_servers();
 }
