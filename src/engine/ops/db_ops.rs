@@ -519,89 +519,148 @@ fn strip_prefix_ci<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
 }
 
 fn translate_sqlite_rowid(sql: &str) -> String {
-    let chars: Vec<char> = sql.chars().collect();
     let mut result = String::with_capacity(sql.len());
+    let bytes = sql.as_bytes();
     let mut idx = 0usize;
-    let mut in_single_quote = false;
 
-    while idx < chars.len() {
-        let ch = chars[idx];
-        if ch == '\'' {
-            result.push(ch);
-            if in_single_quote {
-                if idx + 1 < chars.len() && chars[idx + 1] == '\'' {
+    enum ScanState {
+        Normal,
+        SingleQuoted,
+        DoubleQuoted,
+        LineComment,
+        BlockComment { depth: usize },
+        DollarQuoted { delimiter: String },
+    }
+
+    let mut state = ScanState::Normal;
+
+    while idx < bytes.len() {
+        match &mut state {
+            ScanState::Normal => {
+                if bytes[idx] == b'\'' {
                     result.push('\'');
+                    state = ScanState::SingleQuoted;
+                    idx += 1;
+                    continue;
+                }
+                if bytes[idx] == b'"' {
+                    result.push('"');
+                    state = ScanState::DoubleQuoted;
+                    idx += 1;
+                    continue;
+                }
+                if sql[idx..].starts_with("--") {
+                    result.push_str("--");
+                    idx += 2;
+                    state = ScanState::LineComment;
+                    continue;
+                }
+                if sql[idx..].starts_with("/*") {
+                    result.push_str("/*");
+                    idx += 2;
+                    state = ScanState::BlockComment { depth: 1 };
+                    continue;
+                }
+                if let Some(delimiter) = dollar_quote_delimiter(sql, idx) {
+                    result.push_str(&delimiter);
+                    idx += delimiter.len();
+                    state = ScanState::DollarQuoted { delimiter };
+                    continue;
+                }
+                if bytes[idx].is_ascii_alphabetic() || bytes[idx] == b'_' {
+                    let start = idx;
+                    idx += 1;
+                    while idx < bytes.len()
+                        && (bytes[idx].is_ascii_alphanumeric()
+                            || bytes[idx] == b'_'
+                            || bytes[idx] == b'.')
+                    {
+                        idx += 1;
+                    }
+
+                    let token = &sql[start..idx];
+                    if token.eq_ignore_ascii_case("rowid") {
+                        result.push_str("ctid");
+                        continue;
+                    }
+
+                    let lower = token.to_ascii_lowercase();
+                    if let Some(prefix) = lower.strip_suffix(".rowid") {
+                        result.push_str(&token[..prefix.len()]);
+                        result.push_str(".ctid");
+                        continue;
+                    }
+
+                    result.push_str(token);
+                    continue;
+                }
+            }
+            ScanState::SingleQuoted => {
+                if bytes[idx] == b'\'' {
+                    result.push('\'');
+                    if bytes.get(idx + 1).copied() == Some(b'\'') {
+                        result.push('\'');
+                        idx += 2;
+                    } else {
+                        idx += 1;
+                        state = ScanState::Normal;
+                    }
+                    continue;
+                }
+            }
+            ScanState::DoubleQuoted => {
+                if bytes[idx] == b'"' {
+                    result.push('"');
+                    if bytes.get(idx + 1).copied() == Some(b'"') {
+                        result.push('"');
+                        idx += 2;
+                    } else {
+                        idx += 1;
+                        state = ScanState::Normal;
+                    }
+                    continue;
+                }
+            }
+            ScanState::LineComment => {
+                if bytes[idx] == b'\n' {
+                    result.push('\n');
+                    idx += 1;
+                    state = ScanState::Normal;
+                    continue;
+                }
+            }
+            ScanState::BlockComment { depth } => {
+                if sql[idx..].starts_with("/*") {
+                    result.push_str("/*");
+                    *depth += 1;
                     idx += 2;
                     continue;
                 }
-                in_single_quote = false;
-            } else {
-                in_single_quote = true;
-            }
-            idx += 1;
-            continue;
-        }
-
-        if ch == '"' && !in_single_quote {
-            result.push(ch);
-            idx += 1;
-
-            let mut token = String::new();
-            while idx < chars.len() {
-                if chars[idx] == '"' {
-                    if idx + 1 < chars.len() && chars[idx + 1] == '"' {
-                        token.push('"');
-                        token.push('"');
-                        idx += 2;
-                        continue;
+                if sql[idx..].starts_with("*/") {
+                    result.push_str("*/");
+                    *depth = depth.saturating_sub(1);
+                    if *depth == 0 {
+                        state = ScanState::Normal;
                     }
-                    break;
+                    idx += 2;
+                    continue;
                 }
-                token.push(chars[idx]);
-                idx += 1;
             }
-
-            if token.eq_ignore_ascii_case("rowid") {
-                result.push_str("ctid");
-            } else {
-                result.push_str(&token);
+            ScanState::DollarQuoted { delimiter } => {
+                if sql[idx..].starts_with(delimiter.as_str()) {
+                    result.push_str(delimiter);
+                    idx += delimiter.len();
+                    state = ScanState::Normal;
+                    continue;
+                }
             }
+        };
 
-            if idx < chars.len() && chars[idx] == '"' {
-                result.push('"');
-                idx += 1;
-            }
-            continue;
-        }
-
-        if !in_single_quote && (ch.is_ascii_alphabetic() || ch == '_') {
-            let start = idx;
-            idx += 1;
-            while idx < chars.len()
-                && (chars[idx].is_ascii_alphanumeric() || chars[idx] == '_' || chars[idx] == '.')
-            {
-                idx += 1;
-            }
-
-            let token: String = chars[start..idx].iter().collect();
-            if token.eq_ignore_ascii_case("rowid") {
-                result.push_str("ctid");
-                continue;
-            }
-
-            let lower = token.to_ascii_lowercase();
-            if let Some(prefix) = lower.strip_suffix(".rowid") {
-                result.push_str(&token[..prefix.len()]);
-                result.push_str(".ctid");
-                continue;
-            }
-
-            result.push_str(&token);
-            continue;
-        }
-
+        let Some(ch) = sql[idx..].chars().next() else {
+            break;
+        };
         result.push(ch);
-        idx += 1;
+        idx += ch.len_utf8();
     }
 
     result
@@ -1270,7 +1329,7 @@ mod tests {
         assert!(
             prepared
                 .sql
-                .contains("SELECT ctid, td.ctid, \"ctid\", 'rowid' AS literal")
+                .contains("SELECT ctid, td.ctid, \"rowid\", 'rowid' AS literal")
         );
         assert!(prepared.sql.contains("ORDER BY td.ctid DESC, ctid DESC"));
         assert!(prepared.params.is_empty());
@@ -1281,7 +1340,36 @@ mod tests {
         let sql = r#"SELECT "rowid""suffix", "rowid" FROM task_dispatches"#;
         let prepared = prepare_policy_sql_for_pg(sql, &[]).expect("render rowid");
 
-        assert!(prepared.sql.contains(r#""rowid""suffix", "ctid""#));
+        assert!(prepared.sql.contains(r#""rowid""suffix", "rowid""#));
+    }
+
+    #[test]
+    fn prepare_policy_sql_for_pg_preserves_quoted_rowid_alias() {
+        let sql = r#"SELECT 1 AS "rowid", rowid FROM task_dispatches ORDER BY rowid"#;
+        let prepared = prepare_policy_sql_for_pg(sql, &[]).expect("render rowid alias");
+
+        assert!(prepared.sql.contains(r#"1 AS "rowid", ctid"#));
+        assert!(prepared.sql.contains("ORDER BY ctid"));
+    }
+
+    #[test]
+    fn prepare_policy_sql_for_pg_ignores_comment_quotes_while_rewriting_rowid() {
+        let sql = "SELECT id FROM task_dispatches -- \" explain\nORDER BY rowid";
+        let prepared = prepare_policy_sql_for_pg(sql, &[]).expect("render rowid after comment");
+
+        assert!(prepared.sql.contains("-- \" explain\nORDER BY ctid"));
+    }
+
+    #[test]
+    fn prepare_policy_sql_for_pg_skips_dollar_quoted_literals_for_rowid() {
+        let sql = r#"SELECT $$ {"rowid": 1} $$ AS payload, rowid FROM task_dispatches"#;
+        let prepared = prepare_policy_sql_for_pg(sql, &[]).expect("render dollar quote");
+
+        assert!(
+            prepared
+                .sql
+                .contains(r#"$$ {"rowid": 1} $$ AS payload, ctid"#)
+        );
     }
 
     #[test]
