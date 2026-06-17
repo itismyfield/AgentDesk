@@ -61,4 +61,26 @@ describe("EmojiPicker", () => {
     expect(dialog).not.toBeNull();
     expect(dialog?.getAttribute("aria-label")).toBe("Choose an emoji");
   });
+
+  it("returns focus to the trigger when dismissed by an outside click", async () => {
+    const target = await render(<EmojiPicker value="🤖" onChange={() => {}} />);
+    const button = target.querySelector("button") as HTMLButtonElement;
+    const outside = document.createElement("div");
+    document.body.appendChild(outside);
+
+    await act(async () => {
+      button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(target.querySelector('div[role="dialog"]')).not.toBeNull();
+
+    await act(async () => {
+      outside.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    });
+
+    expect(target.querySelector('div[role="dialog"]')).toBeNull();
+    expect(document.activeElement).toBe(button);
+
+    outside.remove();
+  });
 });
