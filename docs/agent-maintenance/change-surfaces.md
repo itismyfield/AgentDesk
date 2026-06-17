@@ -12,7 +12,7 @@
 >
 > PR #3456 dcserver-robustness: freeze counts re-synced after the reconcile
 > row-allocation churn reduction (`src/reconcile.rs` now 1816 prod lines) and the
-> OpenCode warm-server reuse/cancel recovery (`src/services/opencode.rs` now 2717 prod
+> OpenCode warm-server reuse/cancel recovery (`src/services/opencode.rs` now 2733 prod
 > lines); no new logic added to either giant file, the line deltas are
 > bugfix-only. On top of #3358 round 2 — synthetic-inflight carry-forward now
 > gated on same-generation evidence: `tmux.rs` re-exports the new
@@ -1398,7 +1398,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   behavior.
 - `src/services/claude.rs` (2963), `src/services/gemini.rs` (1358),
   `src/services/qwen.rs` (2196), `src/services/codex.rs` (3011),
-  `src/services/opencode.rs` (2717), `src/services/provider.rs` (1818) —
+  `src/services/opencode.rs` (2733), `src/services/provider.rs` (1818) —
   provider adapters. (#3034 removed dead non-cancel `execute_command_simple*`
   twins from the claude/codex/gemini adapters and a superseded
   `select_counterpart_from` from provider. #3263 added the Codex max-of-cache

@@ -765,6 +765,14 @@ fn idle_disposal_delay_for_idle_duration(idle_for: Duration) -> Duration {
     WARM_SERVER_IDLE_TTL.saturating_sub(idle_for)
 }
 
+fn min_idle_disposal_delay(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(delay), None) | (None, Some(delay)) => Some(delay),
+        (None, None) => None,
+    }
+}
+
 fn evict_warm_server_from_pool(server: &Arc<OpenCodeWarmServer>) {
     let mut pool = opencode_server_pool().lock().unwrap_or_else(|e| {
         tracing::warn!("Recovered poisoned lock for OpenCode server pool");
@@ -826,7 +834,14 @@ fn schedule_idle_disposal_after(delay: Duration) {
         let next_delay = next_idle_disposal_delay(&pool);
         drop(pool);
         IDLE_DISPOSAL_SCHEDULED.store(false, Ordering::SeqCst);
-        if let Some(delay) = next_delay {
+        let rechecked_delay = {
+            let pool = opencode_server_pool().lock().unwrap_or_else(|e| {
+                tracing::warn!("Recovered poisoned lock for OpenCode server pool");
+                e.into_inner()
+            });
+            next_idle_disposal_delay(&pool)
+        };
+        if let Some(delay) = min_idle_disposal_delay(next_delay, rechecked_delay) {
             schedule_idle_disposal_after(delay);
         }
     });
@@ -1158,6 +1173,7 @@ fn run_session(
 
     // 4. Connect SSE stream first, then send prompt
     let sse_agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(2))
         .timeout_read(SSE_READ_TIMEOUT)
         .build();
 
@@ -2788,6 +2804,27 @@ mod tests {
             idle_disposal_delay_for_idle_duration(WARM_SERVER_IDLE_TTL + Duration::from_secs(1)),
             Duration::ZERO
         );
+    }
+
+    #[test]
+    fn idle_disposal_reschedule_uses_rechecked_soonest_delay() {
+        assert_eq!(
+            min_idle_disposal_delay(None, Some(Duration::from_secs(1))),
+            Some(Duration::from_secs(1))
+        );
+        assert_eq!(
+            min_idle_disposal_delay(Some(Duration::from_secs(30)), Some(Duration::from_secs(5))),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            min_idle_disposal_delay(Some(Duration::from_secs(5)), Some(Duration::from_secs(30))),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            min_idle_disposal_delay(Some(Duration::from_secs(5)), None),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(min_idle_disposal_delay(None, None), None);
     }
 
     #[test]
