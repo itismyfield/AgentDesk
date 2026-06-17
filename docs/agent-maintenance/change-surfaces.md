@@ -860,7 +860,7 @@
     nested `usage` on the success result frame so watcher-owned codex turns
     persist token telemetry — never the session-cumulative
     `info.total_token_usage`).
-  - `src/services/tui_prompt_dedupe.rs` (1601 lines; shared TUI prompt
+  - `src/services/tui_prompt_dedupe.rs` (1613 lines; shared TUI prompt
     fingerprinting/dedupe state for hook and rollout relay paths, bugfix only
     outside an extraction plan; +176 from #3540: stable JSONL entry-identity
     (`uuid`) dedup — `extract_claude_transcript_user_prompt_with_entry_id`
@@ -1317,7 +1317,7 @@
   (supervised-worker registry / leader-only lifecycle).
 - legacy_modules: none — these are shared runtime coordination surfaces.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/config.rs` (2560 lines).
+  - `src/config.rs` (2378 lines).
   - `src/server/mod.rs` (2430 lines).
   - `src/receipt.rs` (1842 lines).
   - `src/github/sync.rs` (1488 lines).
@@ -1427,7 +1427,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   detector and prompt delivery surface (#2399 hardened the post-turn
   handoff deadline). Treat as giant-file territory; split before adding
   non-bugfix behavior beyond the readiness/cancel contract.
-- `src/services/claude_tui/input.rs` (1629) — Claude TUI input readiness
+- `src/services/claude_tui/input.rs` (1636) — Claude TUI input readiness
   detector, prompt delivery, and cancellation/offset handoff surface. Treat as
   giant-file territory; split before adding non-bugfix behavior beyond the
   readiness/cancel contract. (+191 from the #685/#720 reliability fixes:

@@ -89,11 +89,11 @@ fn followup_prompt_ready_timeout() -> Duration {
 /// name (REQ-001 fallback) when no mapping is known (e.g. a relay that reported
 /// only the tmux name).
 ///
-/// `claim_matching_once` consumes ONLY a Stop / SubagentStop and re-buffers any
-/// other fresh buffered events (e.g. a token payload a concurrent `/tui/wait`
-/// until=token might still want), so the readiness wait does not discard
-/// unrelated buffered events. The consumed Stop cannot replay into a later turn
-/// (single-consumption).
+/// `claim_matching_once` consumes every buffered Stop / SubagentStop and
+/// re-buffers any other fresh buffered events (e.g. a token payload a concurrent
+/// `/tui/wait` until=token might still want), so the readiness wait does not
+/// discard unrelated buffered events. Consumed Stops cannot replay into a later
+/// turn (single-consumption).
 fn claude_registry_stop_already_buffered(session_name: &str) -> bool {
     use crate::services::claude_tui::hook_registry;
     use crate::services::claude_tui::hook_server::HookEventKind;
@@ -905,8 +905,8 @@ fn wait_for_prompt_ready_inner(
     // wait would otherwise be lost and force a full polling fallback. We consume
     // a FRESH (unexpired) Stop keyed by the PROVIDER session UUID the hooks
     // buffer under (resolved from the tmux session, with the tmux name as the
-    // REQ-001 fallback), and `claim_matching_once` removes only that Stop so it
-    // can never replay into a later turn (REQ-002/REQ-003).
+    // REQ-001 fallback), and `claim_matching_once` removes buffered Stops so
+    // they can never replay into a later turn (REQ-002/REQ-003).
     //
     // CRITICAL (verifier top regression risk — "stale Stop contaminates a new
     // turn"): a buffered Stop is treated like an edge-triggered Notify wake, NOT
@@ -995,10 +995,15 @@ fn wait_for_prompt_ready_inner(
     if let Some(snapshot) = post_event_snapshot {
         if prompt_marker_confirms_prompt_ready(&snapshot) {
             check_prompt_cancel(cancel_token)?;
+            // The live broadcast woke this waiter. Drain the parallel registry
+            // copy as consumed too, otherwise the same Stop can be replayed into
+            // the next follow-up wait.
+            let drained_buffered_stop = claude_registry_stop_already_buffered(session_name);
             tracing::debug!(
                 tmux_session_name = session_name,
                 readiness = readiness.label(),
                 hook_event_fast_path_hit = matches!(fast_path, HookFastPathOutcome::Ready),
+                drained_buffered_stop,
                 elapsed_ms = start.elapsed().as_millis() as u64,
                 "claude_tui prompt ready via hook event fast path"
             );
@@ -1006,9 +1011,11 @@ fn wait_for_prompt_ready_inner(
         }
         if transcript_idle_confirms_prompt_ready(&snapshot, transcript_path) {
             check_prompt_cancel(cancel_token)?;
+            let drained_buffered_stop = claude_registry_stop_already_buffered(session_name);
             tracing::info!(
                 tmux_session_name = session_name,
                 readiness = readiness.label(),
+                drained_buffered_stop,
                 elapsed_ms = start.elapsed().as_millis() as u64,
                 "claude_tui prompt ready via idle transcript fallback after hook fast path"
             );
