@@ -271,8 +271,9 @@ fn confidence_score(
 /// A row becomes a candidate only when raw state is active-like AND the resolver
 /// verdict is NOT working. Rows still inside the grace window
 /// (`stale_for_secs < settings.stale_secs` with a KNOWN heartbeat) are excluded
-/// entirely (not surfaced as low-confidence). `raw_matches_total` is the count
-/// of raw active-like rows BEFORE the cap, used to compute `truncated`.
+/// entirely (not surfaced as low-confidence). `raw_matches_total` is the bounded
+/// raw active-like row count observed by the route layer (`cap + 1` sentinel at
+/// most), used only to compute `truncated`.
 pub(super) fn classify_active_session_audit(
     rows: &[RawSessionRow],
     resolver: &mut SessionActivityResolver,
@@ -358,11 +359,10 @@ pub(super) fn classify_active_session_audit(
         .count() as u64;
     let candidate_count = candidates.len() as u64;
     // `truncated` means the cap omitted raw active-like rows the classifier never
-    // examined: i.e. the pre-LIMIT raw-match count exceeds the rows actually
-    // fetched/scanned (`rows.len()`, capped at `max_candidates`). It is NOT a
-    // function of how many of those rows survived classification, so a fully
-    // candidate-producing capped batch correctly reports `truncated = true` and a
-    // sub-cap batch with resolver-filtered rows correctly reports `false`.
+    // examined. The route layer uses a `cap + 1` sentinel row rather than an
+    // uncapped total count. It is NOT a function of how many fetched rows survived
+    // classification, so a capped batch correctly reports `truncated = true` and
+    // a sub-cap batch with resolver-filtered rows correctly reports `false`.
     let truncated = raw_matches_total > rows.len();
 
     ActiveSessionAuditReport {
