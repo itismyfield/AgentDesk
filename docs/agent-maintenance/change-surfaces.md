@@ -1390,7 +1390,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   split before further non-bugfix growth.
 - `src/services/onboarding/mod.rs` (2936),
   `src/services/dispatched_sessions.rs` (1328), and
-  `src/services/settings.rs` (1029) — service-layer route support surfaces
+  `src/services/settings.rs` (1082) — service-layer route support surfaces
   split out of the large dashboard route modules. (`src/services/onboarding.rs`
   and `src/services/api_friction.rs` have been removed/decomposed.)
 - `src/services/dispatches/outbox_route.rs` (1089) — dispatch outbox route
@@ -1440,7 +1440,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   helpers before adding non-bugfix behavior. (+5 from #3169 exposing the idle-
   kill `latest_runtime_activity_unix_nanos` jsonl-mtime probe to the stall-
   watchdog liveness guard.)
-- `src/services/settings.rs` (1029) — settings domain service extracted from
+- `src/services/settings.rs` (1082) — settings domain service extracted from
   the route layer in #1519. Keep follow-up changes bugfix-only unless the file
   is split further.
 - `src/services/routines/{store.rs (2844), migrated.rs (1286),

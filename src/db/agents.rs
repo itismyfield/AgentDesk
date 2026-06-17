@@ -51,7 +51,15 @@ impl AgentChannelBindings {
             ProviderKind::Gemini | ProviderKind::OpenCode | ProviderKind::Qwen
                 if self.configured_provider_kind().as_ref() == Some(provider) =>
             {
-                self.legacy_primary_channel()
+                let primary = self.legacy_primary_channel()?;
+                let explicit_claude = normalized_channel(self.discord_channel_cc.clone());
+                if matches!(provider, ProviderKind::Gemini | ProviderKind::Qwen)
+                    && explicit_claude.as_deref() == Some(primary.as_str())
+                {
+                    None
+                } else {
+                    Some(primary)
+                }
             }
             _ => None,
         }
@@ -158,6 +166,44 @@ mod tests {
         assert_eq!(
             bindings.primary_channel().as_deref(),
             Some("1470000000000000002")
+        );
+    }
+
+    #[test]
+    fn resolved_primary_provider_does_not_treat_claude_fallback_as_gemini() {
+        let bindings = AgentChannelBindings {
+            provider: Some("gemini".to_string()),
+            discord_channel_id: Some("1470000000000000003".to_string()),
+            discord_channel_cc: Some("1470000000000000003".to_string()),
+            ..AgentChannelBindings::default()
+        };
+
+        assert_eq!(
+            bindings.resolved_primary_provider_kind(),
+            Some(ProviderKind::Claude)
+        );
+        assert_eq!(
+            bindings.primary_channel().as_deref(),
+            Some("1470000000000000003")
+        );
+    }
+
+    #[test]
+    fn resolved_primary_provider_does_not_treat_claude_fallback_as_qwen() {
+        let bindings = AgentChannelBindings {
+            provider: Some("qwen".to_string()),
+            discord_channel_id: Some("1470000000000000004".to_string()),
+            discord_channel_cc: Some("1470000000000000004".to_string()),
+            ..AgentChannelBindings::default()
+        };
+
+        assert_eq!(
+            bindings.resolved_primary_provider_kind(),
+            Some(ProviderKind::Claude)
+        );
+        assert_eq!(
+            bindings.primary_channel().as_deref(),
+            Some("1470000000000000004")
         );
     }
 }

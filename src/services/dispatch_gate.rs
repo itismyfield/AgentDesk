@@ -750,25 +750,34 @@ pub fn persisted_runtime_overrides(
 
 fn persisted_runtime_overrides_with_fallbacks(
     runtime_config: Option<&Value>,
-    yaml_enabled: bool,
-    yaml_danger: u64,
-    yaml_stale: i64,
+    _yaml_enabled: bool,
+    _yaml_danger: u64,
+    _yaml_stale: i64,
 ) -> (Option<bool>, Option<u64>, Option<i64>) {
     let Some(value) = runtime_config else {
         return (None, None, None);
     };
+    let explicit_keys = value
+        .as_object()
+        .map(crate::services::settings::explicit_runtime_config_keys)
+        .unwrap_or_default();
     let enabled = value
         .get("dispatchRateLimitGateEnabled")
         .and_then(Value::as_bool)
-        .filter(|enabled| *enabled != true || yaml_enabled != true);
+        .filter(|enabled| {
+            explicit_keys.contains("dispatchRateLimitGateEnabled") || *enabled != true
+        });
     let danger = value
         .get("dispatchRateLimitGateDangerPct")
         .and_then(Value::as_u64)
-        .filter(|danger| *danger != DEFAULT_DANGER_PCT || yaml_danger != DEFAULT_DANGER_PCT);
+        .filter(|danger| {
+            explicit_keys.contains("dispatchRateLimitGateDangerPct")
+                || *danger != DEFAULT_DANGER_PCT
+        });
     let stale = value
         .get("rateLimitStaleSec")
         .and_then(Value::as_i64)
-        .filter(|stale| *stale != DEFAULT_STALE_SEC || yaml_stale != DEFAULT_STALE_SEC);
+        .filter(|stale| explicit_keys.contains("rateLimitStaleSec") || *stale != DEFAULT_STALE_SEC);
     (enabled, danger, stale)
 }
 
@@ -1271,6 +1280,11 @@ mod tests {
             "dispatchRateLimitGateEnabled": true,
             "dispatchRateLimitGateDangerPct": 100,
             "rateLimitStaleSec": 600,
+            "__runtimeConfigExplicitKeys": [
+                "dispatchRateLimitGateEnabled",
+                "dispatchRateLimitGateDangerPct",
+                "rateLimitStaleSec"
+            ],
         });
         let (enabled, danger, stale) =
             persisted_runtime_overrides_with_fallbacks(Some(&cfg), false, 95, 900);
