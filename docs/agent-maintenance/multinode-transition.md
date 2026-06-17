@@ -729,3 +729,9 @@
   token-built Http fallback on standby nodes) are byte-identical and stay
   process-local. No new multinode ownership, singleton, or lease assumption
   is introduced.
+- Active-session audit: `active_session_audit` adds read-only health diagnostics
+  plus optional local repair-path metadata for stale running-session rows. It
+  does not move Discord gateway startup, worker ownership, durable queue claims,
+  or PG lease boundaries; each reported repair action still targets the existing
+  node-local/runtime owner. No new multinode ownership, singleton, or lease
+  assumption is introduced.
