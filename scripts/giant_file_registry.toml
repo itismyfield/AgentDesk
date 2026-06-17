@@ -347,3 +347,17 @@ file = "src/services/discord/turn_bridge/mod.rs"
 owner = "discord-relay"
 deadline = "2026-08-31"
 decompose_issue = "#3038"
+
+[[entry]]
+# Crossed the 1000-prod-LoC giant threshold in #3540: the durable pending
+# synthetic-turn-start worker (#3154) accreted the #3174/#3282/#3296/#3303/#3350
+# reconcile-marker chokepoints plus the #3540 no-evict post-abort queue promote.
+# The file is dominated by the worker FSM (`run_worker_inner`) and its
+# marker-recording guards; decomposition would lift the marker-record cluster
+# (`record_claim_marker_if_watcher_owned` + wrappers) and the durable
+# store/persistence helpers into siblings, leaving the worker loop in the root.
+# Tracked for splitting under the relay-decomposition program.
+file = "src/services/discord/tui_direct_pending_start.rs"
+owner = "discord-relay"
+deadline = "2026-08-31"
+decompose_issue = "#3540"

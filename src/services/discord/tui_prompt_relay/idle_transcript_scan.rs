@@ -55,6 +55,13 @@ pub(super) enum ClaudeIdleTranscriptScan {
         prompt: String,
         prompt_start_offset: u64,
         line_end_offset: u64,
+        /// #3540: the scanned `user` entry's STABLE identity (`uuid`), when the
+        /// transcript provides one. Threaded into the dedupe layer so an
+        /// already-relayed entry re-encountered after a watermark reset / jsonl
+        /// head rotation is suppressed by identity (not by the 30s content
+        /// window), preventing a phantom synthetic inflight. `None` falls back to
+        /// the content-keyed recent-observed dedup (pre-#3540 behavior).
+        entry_id: Option<String>,
     },
 }
 
@@ -112,13 +119,16 @@ pub(super) fn scan_claude_idle_transcript_for_prompt(
             }
             continue;
         };
-        if let Some(prompt) =
-            crate::services::tui_prompt_dedupe::extract_claude_transcript_user_prompt(&json)
+        if let Some((prompt, entry_id)) =
+            crate::services::tui_prompt_dedupe::extract_claude_transcript_user_prompt_with_entry_id(
+                &json,
+            )
         {
             return Ok(ClaudeIdleTranscriptScan::Prompt {
                 prompt,
                 prompt_start_offset: line_start_offset,
                 line_end_offset: offset,
+                entry_id,
             });
         }
     }
@@ -216,13 +226,16 @@ pub(super) fn scan_claude_idle_transcript_for_last_prompt(
             }
             continue;
         };
-        if let Some(prompt) =
-            crate::services::tui_prompt_dedupe::extract_claude_transcript_user_prompt(&json)
+        if let Some((prompt, entry_id)) =
+            crate::services::tui_prompt_dedupe::extract_claude_transcript_user_prompt_with_entry_id(
+                &json,
+            )
         {
             last_prompt = Some(ClaudeIdleTranscriptScan::Prompt {
                 prompt,
                 prompt_start_offset: line_start_offset,
                 line_end_offset: offset,
+                entry_id,
             });
         }
     }

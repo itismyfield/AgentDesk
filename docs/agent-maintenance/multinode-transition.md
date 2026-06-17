@@ -396,6 +396,35 @@
 
 ### Audited touches
 
+- #3540 phantom-synthetic-inflight fix: two worker-local, in-memory-state-only
+  touches with no multinode ownership/lease/singleton implications.
+  (A) `tui_prompt_dedupe.rs` gained a process-global `relayed_entry_ids_by_tmux`
+  ledger keyed on the Claude transcript `user` entry's stable `uuid`
+  (TTL-purged + ring-capped) and the `SuppressedReplayedEntry` observation, so
+  the idle-transcript scanner suppresses an already-relayed prompt re-encountered
+  after a relay-watermark reset / jsonl head rotation BY IDENTITY. This is the
+  same per-process dedupe state the relay already owns (it is NOT a routing
+  authority and is never read cross-node); the channel→tmux routing invariant is
+  untouched. (B) `tui_direct_pending_start.rs` adds a no-evict post-abort queue
+  promote: on the terminal backstop ABORT it kicks the EXISTING
+  `schedule_deferred_idle_queue_kickoff` once (after the pending record is
+  deleted) so a queued follow-up dispatches through the unchanged
+  `mailbox_try_start_turn_kinded` FSM — NO inflight is cleared/reset/deleted, so
+  the worst case is a normal merge with zero live-turn loss. The detached worker
+  remains per-`(provider, channel_id)` worker-local under the existing channel
+  lock; queue ownership, lease semantics, and singleton assumptions are
+  unchanged. (C) absorbed warm-followup strand fix in
+  `turn_bridge/watcher_handoff.rs`: the #3277 proven-delivered guard
+  (`busy_turn_already_proven_delivered`) now reads the transcript's on-disk EOF
+  (`std::fs::metadata(output_path).len()`) instead of the racy in-memory
+  `tmux_last_offset` to decide whether a quiescence-timeout turn already grew
+  its full response past `turn_start_offset`. Both `turn_start_offset` and
+  `tmux_last_offset` are seeded to the same per-turn `inflight_offset` (itself a
+  `std::fs::metadata().len()` of the same `output_path`), so the new EOF read is
+  in the SAME single-file byte-space — purely a worker-local disk read on the
+  bridge's own transcript path, with no node ownership, lease, or singleton
+  implication. A rotated/truncated transcript shrinks the EOF and the guard
+  conservatively fails open to the existing #3268 watcher handoff.
 - #3038 run_bot S5: the leader gateway runtime tail moved verbatim from
   `runtime_bootstrap.rs` into `runtime_bootstrap/gateway_runtime.rs`: restored
   generation/model/fast-mode logging, health registry registration,
