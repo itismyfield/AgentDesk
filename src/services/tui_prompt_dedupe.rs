@@ -248,9 +248,9 @@ pub fn register_provider_session(
 }
 
 /// Reverse lookup: resolve the provider session id that maps to `tmux_session_name`
-/// for `provider`, if one was registered (and has not expired). `register_provider_session`
-/// records the forward `provider_session_id -> tmux_session_name` mapping at
-/// launch; this scans it for the entry whose value matches the tmux session.
+/// for `provider`, if one was registered. `register_provider_session` records
+/// the forward `provider_session_id -> tmux_session_name` mapping at launch;
+/// this scans it for the entry whose value matches the tmux session.
 ///
 /// #tui-hook-ttl-buffer key-match fix: the Claude hook relay buffers under the
 /// PROVIDER session UUID (`config.session_id`), but the readiness layer only
@@ -267,8 +267,10 @@ pub fn provider_session_for_tmux(provider: &str, tmux_session_name: &str) -> Opt
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
     // The forward map can in principle hold multiple provider session ids that
-    // pointed at the same tmux session over time; `purge_expired` has already
-    // dropped stale ones, so prefer the most recently recorded survivor.
+    // pointed at the same tmux session over time; prefer the most recently
+    // recorded survivor. Do not TTL-expire this bridge: long-lived TUI sessions
+    // can keep emitting hooks with the same provider UUID after the ordinary
+    // prompt-cache TTL has elapsed.
     state
         .tmux_by_provider_session
         .iter()
@@ -1568,8 +1570,6 @@ impl TuiPromptDedupeState {
             }
             !queue.is_empty()
         });
-        self.tmux_by_provider_session
-            .retain(|_, entry| now.duration_since(entry.recorded_at) <= SESSION_MAPPING_TTL);
         self.channel_by_tmux
             .retain(|_, entry| now.duration_since(entry.recorded_at) <= SESSION_MAPPING_TTL);
         self.runtime_by_tmux
@@ -1649,6 +1649,32 @@ mod tests {
         assert_eq!(
             provider_session_for_tmux("claude", "tmux-relaunch"),
             Some("uuid-new".to_string())
+        );
+    }
+
+    #[test]
+    fn provider_session_mapping_survives_prompt_purge_ttl() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        register_provider_session("claude", "uuid-long-lived", "tmux-long-lived");
+        {
+            let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+            let key = PromptKey::new("claude", "uuid-long-lived");
+            state
+                .tmux_by_provider_session
+                .get_mut(&key)
+                .expect("registered provider-session mapping")
+                .recorded_at = Instant::now() - SESSION_MAPPING_TTL - Duration::from_secs(1);
+        }
+
+        // Any API that calls purge_expired should not delete the provider UUID
+        // bridge while the TUI session can still be alive.
+        register_tmux_channel("tmux-other", 42);
+
+        assert_eq!(
+            provider_session_for_tmux("claude", "tmux-long-lived"),
+            Some("uuid-long-lived".to_string())
         );
     }
 
