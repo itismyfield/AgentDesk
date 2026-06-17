@@ -731,16 +731,17 @@ async fn build_active_session_audit(state: &AppState) -> ActiveSessionAuditRepor
 }
 
 /// One bounded `SELECT` for raw active-like sessions (`turn_active`, legacy
-/// `working`, OR a non-empty `active_dispatch_id`). Read-only. Returns the
-/// capped rows and the total raw-match count (capped at `LIMIT`, used only for
-/// the `truncated` flag). Duplicate rows are not possible because each row is a
+/// `working`, OR a non-empty `active_dispatch_id`). Read-only. Fetches one
+/// sentinel row beyond the cap so `truncated` can be computed without an
+/// uncapped `COUNT(*)`. Duplicate rows are not possible because each row is a
 /// distinct `sessions` row; precedence dedup of the raw signal happens in the
 /// classifier.
 async fn load_active_session_audit_rows(
     pool: &PgPool,
     max_candidates: u64,
 ) -> (Vec<RawSessionRow>, usize) {
-    let limit = max_candidates.min(i64::MAX as u64) as i64;
+    let capped = max_candidates.min(i64::MAX as u64) as usize;
+    let limit = max_candidates.saturating_add(1).min(i64::MAX as u64) as i64;
     // Surface the staleness-relevant rows FIRST so the LIMIT keeps the candidates
     // that matter: NULL/unknown heartbeats (can't be proven fresh) come first,
     // then the OLDEST heartbeats. Ordering newest-first would let stale/zombie
@@ -765,8 +766,10 @@ async fn load_active_session_audit_rows(
             return (Vec::new(), 0);
         }
     };
+    let raw_matches_seen = rows.len();
     let mapped: Vec<RawSessionRow> = rows
         .iter()
+        .take(capped)
         .map(|row| RawSessionRow {
             session_key: row.try_get("session_key").ok(),
             provider: row.try_get("provider").ok(),
@@ -776,42 +779,7 @@ async fn load_active_session_audit_rows(
             thread_channel_id: row.try_get("thread_channel_id").ok(),
         })
         .collect();
-    // `truncated` must reflect the PRE-LIMIT raw-match count, not `mapped.len()`
-    // (which is capped at `LIMIT`). Compute it with a matching COUNT over the same
-    // predicate. If the returned rows are fewer than the cap, nothing was omitted
-    // and we can skip the extra round-trip; otherwise count the raw matches.
-    let raw_matches_total = if (mapped.len() as i64) < limit {
-        mapped.len()
-    } else {
-        count_active_session_audit_rows(pool)
-            .await
-            .unwrap_or(mapped.len())
-    };
-    (mapped, raw_matches_total)
-}
-
-/// Pre-LIMIT raw-match count over the same predicate as
-/// [`load_active_session_audit_rows`]. Read-only; used only to compute the
-/// `truncated` flag accurately when the capped query fills to `LIMIT`.
-async fn count_active_session_audit_rows(pool: &PgPool) -> Option<usize> {
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)
-           FROM sessions
-          WHERE status IN ('turn_active', 'working')
-             OR COALESCE(btrim(active_dispatch_id), '') <> ''",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(|error| {
-        tracing::debug!(
-            event = "active_session_audit_count_failed",
-            error = %error,
-            "active-session audit count query failed; using capped row count"
-        );
-        error
-    })
-    .ok()?;
-    Some(count.max(0) as usize)
+    (mapped, raw_matches_seen)
 }
 
 /// Read a (possibly `timestamptz`/`timestamp`/`text`) heartbeat column into a
