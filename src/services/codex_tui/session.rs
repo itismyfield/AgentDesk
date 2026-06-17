@@ -178,7 +178,7 @@ fn matching_rollout_candidates(
             if !session.is_tui_compatible() {
                 return None;
             }
-            if session.id != requested_id {
+            if session.id.as_deref() != Some(requested_id) {
                 return None;
             }
             let session_cwd =

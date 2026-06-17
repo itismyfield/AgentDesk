@@ -60,12 +60,20 @@ const HEADER_SCAN_LINE_LIMIT: usize = 20;
 /// ever passes many distinct roots, evicting the least-recently-built root.
 const MAX_CACHED_ROOTS: usize = 32;
 
+/// Same-leaf rollout membership validation is intentionally bounded to the most
+/// recent rollout leaf directories. Codex creates new rollouts in the current
+/// dated leaf, so probing recent leaves catches the mtime-coarseness stale-hit
+/// risk without re-walking the whole sessions tree on every 100ms launch poll.
+const RECENT_MEMBERSHIP_PROBE_WINDOW: std::time::Duration =
+    std::time::Duration::from_secs(24 * 60 * 60);
+const MAX_MEMBERSHIP_PROBE_DIRS: usize = 8;
+
 /// Parsed `session_meta` header for a single rollout file. This is the only
 /// data the resolver needs beyond the file path + length, and re-parsing it is
 /// the expensive part this cache eliminates on a warm hit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RolloutSessionMeta {
-    pub id: String,
+    pub id: Option<String>,
     pub cwd: PathBuf,
     pub source: Option<String>,
     pub originator: Option<String>,
@@ -102,6 +110,10 @@ struct RootIndex {
     /// Deterministic signature of the directory subtree (mtime-based). When the
     /// recomputed signature differs from this, the file list is rebuilt.
     signature: u64,
+    /// Directory list discovered on the last cold scan. Warm hits re-stat this
+    /// list instead of recursively calling `read_dir` every poll; parent dir
+    /// mtime changes still force a full rediscovery.
+    dirs: Vec<PathBuf>,
     /// Discovered rollout files with their cached metadata, keyed by path.
     files: HashMap<PathBuf, CachedFile>,
     /// Monotonic counter used for tiny LRU-ish eviction across roots.
@@ -190,17 +202,20 @@ pub fn read_rollout_session_meta(path: &Path) -> Option<RolloutSessionMeta> {
         let Some(payload) = json.get("payload") else {
             continue;
         };
-        let Some(id) = payload.get("id").and_then(Value::as_str).map(str::trim) else {
-            continue;
-        };
         let Some(cwd) = payload.get("cwd").and_then(Value::as_str).map(str::trim) else {
             continue;
         };
-        if id.is_empty() || cwd.is_empty() {
+        let id = payload
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string);
+        if cwd.is_empty() {
             return None;
         }
         return Some(RolloutSessionMeta {
-            id: id.to_string(),
+            id,
             cwd: PathBuf::from(cwd),
             source: payload
                 .get("source")
@@ -226,50 +241,63 @@ pub struct IndexedRollout {
     pub meta: Option<RolloutSessionMeta>,
 }
 
-/// Deterministic, content-free tree signature for `root`. Folds each directory's
-/// (path, mtime) plus the set of `rollout-*.jsonl` file paths into a stable
-/// hash. Most filesystems bump the containing directory mtime when a rollout is
-/// added, but hashing rollout membership avoids stale hits on coarse or restored
-/// directory mtimes. A deleted/renamed leaf changes the parent mtime; a
-/// brand-new root that did not exist before yields a different signature than an
-/// empty/missing one. Reads no rollout file contents (REQ-005).
+#[derive(Debug, Clone)]
+struct TreeSignature {
+    value: u64,
+    dirs: Vec<PathBuf>,
+}
+
+/// Deterministic, content-free tree signature for `root`. A cold discovery
+/// folds each directory's (path, mtime) into a stable hash and records the
+/// directory list. Warm lookups re-stat that known directory list instead of
+/// recursively calling `read_dir`, so the 100ms follow-up poll path stays cheap.
+/// A new rollout normally bumps its containing directory mtime; if a filesystem
+/// preserves/coarsens that mtime, a bounded recent-leaf membership probe below
+/// catches the practical same-leaf case without re-walking the full tree.
 ///
 /// Returns `None` when the root does not exist or cannot be read, which the
 /// caller treats as "no authoritative cache" — it does NOT cache a missing root,
 /// so a later directory creation is picked up on the next lookup (PRD risk:
 /// "missing root appears later").
-fn tree_signature(root: &Path) -> Option<u64> {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+fn discover_tree_signature(root: &Path) -> Option<TreeSignature> {
     let mut stack = vec![root.to_path_buf()];
     let mut visited_any = false;
-    // Collect directory entries deterministically so the hash is order-stable.
-    let mut dir_records: Vec<(PathBuf, Option<SystemTime>)> = Vec::new();
-    let mut rollout_records: Vec<PathBuf> = Vec::new();
+    let mut dirs: Vec<PathBuf> = Vec::new();
     while let Some(path) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&path) else {
-            // The root itself being unreadable -> no authoritative signature.
             if !visited_any {
                 return None;
             }
             continue;
         };
         visited_any = true;
-        let dir_mtime = std::fs::metadata(&path)
-            .and_then(|meta| meta.modified())
-            .ok();
-        dir_records.push((path.clone(), dir_mtime));
+        dirs.push(path);
         for entry in entries.flatten() {
             let child = entry.path();
             if child.is_dir() {
                 stack.push(child);
-            } else if is_rollout_jsonl(&child) {
-                rollout_records.push(child);
             }
         }
     }
     if !visited_any {
         return None;
+    }
+    let value = signature_from_dirs(&dirs)?;
+    Some(TreeSignature { value, dirs })
+}
+
+fn signature_from_dirs(dirs: &[PathBuf]) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    if dirs.is_empty() {
+        return None;
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut dir_records: Vec<(PathBuf, Option<SystemTime>)> = Vec::new();
+    for path in dirs {
+        let dir_mtime = std::fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .ok();
+        dir_records.push((path.clone(), dir_mtime));
     }
     dir_records.sort_by(|left, right| left.0.cmp(&right.0));
     for (path, mtime) in dir_records {
@@ -286,11 +314,67 @@ fn tree_signature(root: &Path) -> Option<u64> {
             None => 0u8.hash(&mut hasher),
         }
     }
-    rollout_records.sort();
-    for path in rollout_records {
-        path.hash(&mut hasher);
-    }
     Some(hasher.finish())
+}
+
+#[cfg(test)]
+fn tree_signature(root: &Path) -> Option<u64> {
+    discover_tree_signature(root).map(|signature| signature.value)
+}
+
+fn recent_rollout_membership_changed(previous_files: &HashMap<PathBuf, CachedFile>) -> bool {
+    let now = SystemTime::now();
+    let mut dirs = previous_files
+        .iter()
+        .filter_map(|(path, cached)| {
+            let age = now
+                .duration_since(cached.modified)
+                .unwrap_or(std::time::Duration::ZERO);
+            if age > RECENT_MEMBERSHIP_PROBE_WINDOW {
+                return None;
+            }
+            path.parent()
+                .map(|parent| (cached.modified, parent.to_path_buf()))
+        })
+        .collect::<Vec<_>>();
+    dirs.sort_by(|left, right| right.0.cmp(&left.0));
+
+    let mut unique_dirs = Vec::new();
+    for (_, dir) in dirs {
+        if !unique_dirs.iter().any(|seen| seen == &dir) {
+            unique_dirs.push(dir);
+        }
+        if unique_dirs.len() >= MAX_MEMBERSHIP_PROBE_DIRS {
+            break;
+        }
+    }
+
+    for dir in unique_dirs {
+        let Some(current) = rollout_files_in_dir(&dir) else {
+            return true;
+        };
+        let mut cached = previous_files
+            .keys()
+            .filter(|path| path.parent() == Some(dir.as_path()))
+            .cloned()
+            .collect::<Vec<_>>();
+        cached.sort();
+        if current != cached {
+            return true;
+        }
+    }
+    false
+}
+
+fn rollout_files_in_dir(dir: &Path) -> Option<Vec<PathBuf>> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut files = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && is_rollout_jsonl(path))
+        .collect::<Vec<_>>();
+    files.sort();
+    Some(files)
 }
 
 /// Cache-backed rollout discovery returning each candidate's path + cached
@@ -317,11 +401,6 @@ fn cached_indexed_rollouts_inner(root: &Path, enabled: bool) -> Vec<IndexedRollo
         return scan_indexed_rollouts(root, None);
     }
     let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let Some(signature) = tree_signature(root) else {
-        // Missing/unreadable root: do not cache, fall back to a direct scan
-        // (which will also yield nothing) so a later directory creation is seen.
-        return scan_indexed_rollouts(root, None);
-    };
 
     // Snapshot the previous per-root state so headers (and, on a signature hit,
     // the file list itself) can be reused without holding the lock during file
@@ -335,9 +414,44 @@ fn cached_indexed_rollouts_inner(root: &Path, enabled: bool) -> Vec<IndexedRollo
         let state = lock_cache();
         state.roots.get(&canonical_root).cloned()
     };
-    let signature_hit = previous
+
+    let warm_signature = previous
         .as_ref()
-        .is_some_and(|index| index.signature == signature);
+        .and_then(|index| signature_from_dirs(&index.dirs));
+    let cold_signature = if previous.is_none()
+        || previous
+            .as_ref()
+            .is_some_and(|index| warm_signature != Some(index.signature))
+    {
+        discover_tree_signature(root)
+    } else {
+        None
+    };
+
+    let Some(signature_state) = cold_signature.or_else(|| {
+        warm_signature.map(|value| TreeSignature {
+            value,
+            dirs: previous
+                .as_ref()
+                .map(|index| index.dirs.clone())
+                .unwrap_or_default(),
+        })
+    }) else {
+        // Missing/unreadable root: do not cache, fall back to a direct scan
+        // (which will also yield nothing) so a later directory creation is seen.
+        return scan_indexed_rollouts(root, None);
+    };
+
+    let mut signature_hit = previous
+        .as_ref()
+        .is_some_and(|index| index.signature == signature_state.value);
+    if signature_hit
+        && previous
+            .as_ref()
+            .is_some_and(|index| recent_rollout_membership_changed(&index.files))
+    {
+        signature_hit = false;
+    }
     let previous_files = previous.map(|index| index.files);
 
     let results = match (signature_hit, previous_files) {
@@ -374,7 +488,14 @@ fn cached_indexed_rollouts_inner(root: &Path, enabled: bool) -> Vec<IndexedRollo
             },
         );
     }
-    store_root(&canonical_root, signature, files);
+    let dirs = if signature_hit {
+        signature_state.dirs
+    } else {
+        discover_tree_signature(root)
+            .map(|signature| signature.dirs)
+            .unwrap_or(signature_state.dirs)
+    };
+    store_root(&canonical_root, signature_state.value, dirs, files);
     results
 }
 
@@ -433,7 +554,12 @@ fn lock_cache() -> std::sync::MutexGuard<'static, IndexState> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn store_root(canonical_root: &Path, signature: u64, files: HashMap<PathBuf, CachedFile>) {
+fn store_root(
+    canonical_root: &Path,
+    signature: u64,
+    dirs: Vec<PathBuf>,
+    files: HashMap<PathBuf, CachedFile>,
+) {
     let mut state = lock_cache();
     state.seq = state.seq.wrapping_add(1);
     let seq = state.seq;
@@ -441,6 +567,7 @@ fn store_root(canonical_root: &Path, signature: u64, files: HashMap<PathBuf, Cac
         canonical_root.to_path_buf(),
         RootIndex {
             signature,
+            dirs,
             files,
             last_built_seq: seq,
         },
@@ -511,6 +638,20 @@ mod tests {
             format!(
                 "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":\"{}\"}}}}\n",
                 id,
+                cwd.display()
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    fn write_rollout_without_id(root: &Path, relative: &str, cwd: &Path) -> PathBuf {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"cwd\":\"{}\"}}}}\n",
                 cwd.display()
             ),
         )
@@ -608,7 +749,7 @@ mod tests {
                 modified,
                 len,
                 meta: Some(RolloutSessionMeta {
-                    id: "cached-sentinel".to_string(),
+                    id: Some("cached-sentinel".to_string()),
                     cwd: cwd.path().to_path_buf(),
                     source: None,
                     originator: None,
@@ -619,8 +760,8 @@ mod tests {
         let warm = scan_indexed_rollouts(dir.path(), Some(&previous));
         assert_eq!(warm.len(), 1);
         assert_eq!(
-            warm[0].meta.as_ref().unwrap().id,
-            "cached-sentinel",
+            warm[0].meta.as_ref().unwrap().id.as_deref(),
+            Some("cached-sentinel"),
             "matching (mtime, len) must reuse the cached header instead of re-reading the file"
         );
 
@@ -632,7 +773,7 @@ mod tests {
                 modified,
                 len: len + 1,
                 meta: Some(RolloutSessionMeta {
-                    id: "cached-sentinel".to_string(),
+                    id: Some("cached-sentinel".to_string()),
                     cwd: cwd.path().to_path_buf(),
                     source: None,
                     originator: None,
@@ -641,10 +782,24 @@ mod tests {
         );
         let rescanned = scan_indexed_rollouts(dir.path(), Some(&stale));
         assert_eq!(
-            rescanned[0].meta.as_ref().unwrap().id,
-            "on-disk-id",
+            rescanned[0].meta.as_ref().unwrap().id.as_deref(),
+            Some("on-disk-id"),
             "a changed (mtime, len) must force a header re-read"
         );
+    }
+
+    #[test]
+    fn session_meta_without_id_preserves_cwd_for_cwd_only_discovery() {
+        let _guard = lock_test();
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        write_rollout_without_id(dir.path(), "2026/05/rollout-no-id.jsonl", cwd.path());
+
+        let found = cached_indexed_rollouts(dir.path());
+        assert_eq!(found.len(), 1);
+        let meta = found[0].meta.as_ref().expect("cwd-only session_meta");
+        assert_eq!(meta.id, None);
+        assert_eq!(meta.cwd, cwd.path());
     }
 
     // TEST-001 / TEST-005: a second `cached_indexed_rollouts` call with an
@@ -664,7 +819,10 @@ mod tests {
         );
 
         let cold = cached_indexed_rollouts(dir.path());
-        assert_eq!(cold[0].meta.as_ref().unwrap().id, "warm-sess");
+        assert_eq!(
+            cold[0].meta.as_ref().unwrap().id.as_deref(),
+            Some("warm-sess")
+        );
         let primed = std::fs::metadata(&path).unwrap();
         let (modified, len) = (primed.modified().unwrap(), primed.len());
 
@@ -679,8 +837,8 @@ mod tests {
         let warm = cached_indexed_rollouts(dir.path());
         if after.modified().unwrap() == modified && after.len() == len {
             assert_eq!(
-                warm[0].meta.as_ref().unwrap().id,
-                "warm-sess",
+                warm[0].meta.as_ref().unwrap().id.as_deref(),
+                Some("warm-sess"),
                 "warm cache must reuse the cached header rather than re-reading the corrupted file"
             );
         }
@@ -698,7 +856,7 @@ mod tests {
         let path = write_rollout(dir.path(), "2026/05/rollout-a.jsonl", "old-id", cwd.path());
 
         let cold = cached_indexed_rollouts(dir.path());
-        assert_eq!(cold[0].meta.as_ref().unwrap().id, "old-id");
+        assert_eq!(cold[0].meta.as_ref().unwrap().id.as_deref(), Some("old-id"));
 
         // Rewrite with a different session id (different length) and bump mtime.
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -714,8 +872,8 @@ mod tests {
 
         let warm = cached_indexed_rollouts(dir.path());
         assert_eq!(
-            warm[0].meta.as_ref().unwrap().id,
-            "new-longer-id",
+            warm[0].meta.as_ref().unwrap().id.as_deref(),
+            Some("new-longer-id"),
             "a content/length rewrite must re-parse the header"
         );
     }
@@ -741,7 +899,7 @@ mod tests {
 
         let disabled = cached_indexed_rollouts_inner(dir.path(), false);
         assert_eq!(disabled.len(), 1);
-        assert_eq!(disabled[0].meta.as_ref().unwrap().id, "s1");
+        assert_eq!(disabled[0].meta.as_ref().unwrap().id.as_deref(), Some("s1"));
         {
             let state = lock_cache();
             assert!(
@@ -754,8 +912,8 @@ mod tests {
         let enabled = cached_indexed_rollouts_inner(dir.path(), true);
         assert_eq!(enabled.len(), disabled.len());
         assert_eq!(
-            enabled[0].meta.as_ref().unwrap().id,
-            disabled[0].meta.as_ref().unwrap().id
+            enabled[0].meta.as_ref().unwrap().id.as_deref(),
+            disabled[0].meta.as_ref().unwrap().id.as_deref()
         );
     }
 
@@ -828,7 +986,7 @@ mod tests {
                 .find(|item| item.path == survivor)
                 .and_then(|item| item.meta.as_ref());
             assert_eq!(
-                survivor_meta.map(|meta| meta.id.as_str()),
+                survivor_meta.map(|meta| meta.id.as_deref().unwrap_or("")),
                 Some("survivor"),
                 "a signature miss must reuse the surviving file's cached header, not re-read it"
             );
@@ -876,8 +1034,8 @@ mod tests {
         assert_eq!(warm.len(), 1, "warm hit must reuse the cached file list");
         if after.modified().unwrap() == modified && after.len() == len {
             assert_eq!(
-                warm[0].meta.as_ref().unwrap().id,
-                "warm-list",
+                warm[0].meta.as_ref().unwrap().id.as_deref(),
+                Some("warm-list"),
                 "a signature-hit warm lookup with unchanged (mtime, len) must reuse the cached header, not re-read the corrupted file"
             );
         }
@@ -895,7 +1053,7 @@ mod tests {
         let path = write_rollout(dir.path(), "2026/05/rollout-a.jsonl", "before", cwd.path());
 
         let cold = cached_indexed_rollouts(dir.path());
-        assert_eq!(cold[0].meta.as_ref().unwrap().id, "before");
+        assert_eq!(cold[0].meta.as_ref().unwrap().id.as_deref(), Some("before"));
 
         // Rewrite the SAME file in place with a different id + length, bumping its
         // mtime, WITHOUT adding/removing a directory entry (signature unchanged).
@@ -912,33 +1070,35 @@ mod tests {
 
         let warm = cached_indexed_rollouts(dir.path());
         assert_eq!(
-            warm[0].meta.as_ref().unwrap().id,
-            "after-longer-id",
+            warm[0].meta.as_ref().unwrap().id.as_deref(),
+            Some("after-longer-id"),
             "a signature-hit warm lookup must re-read a file whose (mtime, len) changed"
         );
     }
 
-    // TEST-001 / regression: adding a rollout under an already-known leaf must
-    // change the signature even if the leaf directory mtime is restored or too
-    // coarse to advance. The signature hashes rollout membership, so the warm
-    // path cannot stale-hit and miss the new file.
+    // TEST-001 / regression: adding a rollout under an already-known recent leaf
+    // must be discovered even if the leaf directory mtime is restored or too
+    // coarse to advance. Warm hits probe recent leaf membership without
+    // re-walking the whole sessions tree every poll.
     #[test]
-    fn same_leaf_rollout_membership_changes_signature_even_with_restored_dir_mtime() {
+    fn same_leaf_rollout_membership_probe_discovers_addition_with_restored_dir_mtime() {
         let _guard = lock_test();
         let dir = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
         write_rollout(dir.path(), "2026/05/rollout-a.jsonl", "s1", cwd.path());
         let leaf = dir.path().join("2026/05");
         let original_mtime = std::fs::metadata(&leaf).unwrap().modified().unwrap();
-        let sig1 = tree_signature(dir.path()).unwrap();
+        let first = cached_indexed_rollouts(dir.path());
+        assert_eq!(first.len(), 1);
 
         write_rollout(dir.path(), "2026/05/rollout-b.jsonl", "s2", cwd.path());
         filetime::set_file_mtime(&leaf, filetime::FileTime::from_system_time(original_mtime))
             .unwrap();
 
-        let sig2 = tree_signature(dir.path()).unwrap();
-        assert_ne!(
-            sig1, sig2,
+        let second = cached_indexed_rollouts(dir.path());
+        assert_eq!(
+            second.len(),
+            2,
             "same-leaf rollout membership must invalidate the cached file list even when directory mtime is unchanged"
         );
     }
