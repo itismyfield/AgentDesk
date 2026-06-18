@@ -1708,6 +1708,26 @@ fn consume_sse(
     })
 }
 
+/// Whether a line successfully read from the SSE socket proves the transport is
+/// still alive and must therefore refresh the `SSE_READ_TIMEOUT` idle deadline
+/// in [`consume_sse_inner`].
+///
+/// Intentionally `true` for EVERY line — keep-alive comments (`:` / `event:`),
+/// `data:` chunks, the blank dispatch delimiter, and frames addressed to OTHER
+/// co-resident sessions on the shared `/global/event` stream. The warm pool
+/// multiplexes many sessions over one `opencode serve` SSE stream, so liveness
+/// is a property of the TRANSPORT, not of this session's dispatched events.
+/// Tying the refresh to `process_sse_event` returning `Some(_)` (which is `None`
+/// for keep-alives and any non-matching `sessionID`) would let a long-running
+/// turn that legitimately emits no data for >120s be falsely declared idle and
+/// `abort_session`'d — killing the live server-side turn — whenever co-resident
+/// traffic keeps the socket busy. Restores the pre-warm-pool transport-idle
+/// semantics; guarded by `sse_idle_timer_refreshes_on_all_transport_lines`.
+#[inline]
+fn sse_line_is_transport_liveness(_line: &str) -> bool {
+    true
+}
+
 fn consume_sse_inner(
     reader: BufReader<Box<dyn std::io::Read + Send>>,
     session_id: &str,
@@ -1757,6 +1777,14 @@ fn consume_sse_inner(
             }
         };
 
+        // Transport-liveness: any line we manage to read refreshes the idle
+        // deadline, BEFORE the keep-alive / data / dispatch branches below.
+        // (See `sse_line_is_transport_liveness` for why this must not be gated
+        // on this session's dispatched events in the shared warm-pool stream.)
+        if sse_line_is_transport_liveness(&line) {
+            last_event = Instant::now();
+        }
+
         // Keep-alive comment
         if line.starts_with(':') || line.starts_with("event:") {
             continue;
@@ -1773,7 +1801,6 @@ fn consume_sse_inner(
             current_data.clear();
 
             if let Some(should_stop) = process_sse_event(&data, session_id, sender, &mut state) {
-                last_event = Instant::now();
                 if should_stop {
                     terminal_seen = true;
                     if !state.terminal_error {
@@ -3017,6 +3044,30 @@ mod tests {
             process_sse_event(&current.to_string(), "current-session", &tx, &mut state),
             Some(false)
         );
+    }
+
+    /// Regression guard for the warm-pool SSE idle-timeout: the 120s
+    /// `SSE_READ_TIMEOUT` deadline is a TRANSPORT-idle guard, so every line read
+    /// from the shared `/global/event` stream must refresh it — keep-alives,
+    /// `event:` framing, `data:` chunks, the blank dispatch delimiter, and
+    /// frames for OTHER co-resident sessions. Gating the refresh on this
+    /// session's dispatched events (the bug this fix reverts) false-aborted
+    /// long-running turns that emit no data for >120s while co-resident traffic
+    /// kept the socket alive.
+    #[test]
+    fn sse_idle_timer_refreshes_on_all_transport_lines() {
+        for line in [
+            ":heartbeat",
+            "event: message.updated",
+            "data: {\"type\":\"message.updated\",\"properties\":{\"sessionID\":\"other-session\"}}",
+            "",
+            "data: {\"type\":\"session.idle\"}",
+        ] {
+            assert!(
+                sse_line_is_transport_liveness(line),
+                "line must count as transport liveness for the SSE idle timer: {line:?}"
+            );
+        }
     }
 
     /// [TEST-006] empty pool is cold-start safe: returns empty, no panic.
