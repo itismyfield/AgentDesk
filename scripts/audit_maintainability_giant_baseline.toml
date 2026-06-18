@@ -250,7 +250,11 @@
 # #3562: +53 (3276 -> 3329) for recovery_fired/agent_quality_event turn_id+agent_id
 # traceability — turn_id (recovered_transcript_turn_id) and agent_id (resolve_role_binding)
 # derivation at the 3 recovery emit sites + helper signature widening; no logic change.
-"src/services/discord/recovery_engine.rs" = 3329
+# #3581: +11 (3329 -> 3340) for the rebind-origin birth-site stamps — the three
+# bounded-preservation fields (created_at_unix / deadline_secs / birth_generation)
+# are stamped right after `turn_source = ExternalAdopted` so an unadopted,
+# never-progressed rebind orphan can be reaped instead of wedging turn-start.
+"src/services/discord/recovery_engine.rs" = 3340
 # #3034 batch-8: lowered 3771 -> 3770 (dead-code removal).
 # #3038 S1: +1 (3770 -> 3771) for the mechanical `shared.queued_placeholders` ->
 # `shared.queued.queued_placeholders` re-wire (one extra method-chain line) forced
@@ -356,7 +360,31 @@
 # `last_offset`/`response_sent_offset`/`full_response`, so a late relay can no
 # longer clobber a concurrently-advanced watermark backward — plus 2 unit tests
 # (concurrent-advance preservation, fresh-row identity rejection).
-"src/services/discord/inflight.rs" = 2378
+# #3581 raised 2378 -> 2551 (+173): bounded reap of abandoned rebind-origin
+# orphans (the STALL-WATCHDOG wedge source). Adds the env-overridable deadline
+# constant + `rebind_origin_deadline_secs_env` (clamped) + `now_unix`, the
+# strict-conjunction predicate `should_reap_abandoned_rebind_origin` (owner-less +
+# unadopted + never-progressed + never-delivered; reap iff past-deadline OR
+# prior-generation), the `rebind_origin_age_secs` stamp/mtime age helper, the
+# `emit_reap_abandoned_rebind_origin` #3561 lifecycle event, and the boot-time
+# reap branch wired into `invalidate_stale_generation_in_root` (the prior code
+# skipped every rebind row unconditionally, the permanent-orphan source). The
+# bulk is load-bearing doc comments pinning the never-live argument; the tests
+# live in `#[cfg(test)] mod rebind_origin_reap_tests` and are excluded here.
+# #3581 (codex TOCTOU follow-up) raised 2551 -> 2660 (+109): closes the
+# placeholder-sweeper reap race (unlocked-snapshot pre-check, then
+# `delete_inflight_state_file` unlinked without re-reading the row under the
+# lock — a racing intake/TUI claim could persist a new live inflight at the same
+# sidecar path and have it wiped). Adds the shared locked re-validate helper
+# `reap_abandoned_rebind_origin_locked_in_root` (+ its env wrapper
+# `reap_abandoned_rebind_origin_locked`), the `RebindReapOutcome` enum, and the
+# `rebind_row_identity_unchanged` identity guard (created_at + birth_generation +
+# turn_start_offset) so a replacement turn is never mistaken for the snapshotted
+# orphan. Both the sweeper and the boot `invalidate_stale_generation_in_root`
+# path now route their unlink through this single helper (the boot branch loses
+# its inline lock+reload). The bulk is load-bearing doc comments; the 4 new
+# boundary tests live in the excluded `rebind_origin_reap_tests` module.
+"src/services/discord/inflight.rs" = 2660
 # #3038 Phase A: health.rs decomposed into health/ directory modules (root 402
 # prod LoC + 6 sub-1000-LoC submodules) — dropped below the giant threshold, so
 # its ratchet entry is deleted (win; no baseline raises).

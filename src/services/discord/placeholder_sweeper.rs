@@ -30,8 +30,9 @@ use super::formatting::{
 };
 use super::gateway::edit_outbound_message;
 use super::inflight::{
-    InflightTurnState, delete_inflight_state_file, load_inflight_states_for_sweep,
-    parse_started_at_unix,
+    InflightTurnState, delete_inflight_state_file, emit_reap_abandoned_rebind_origin,
+    load_inflight_states_for_sweep, parse_started_at_unix, reap_abandoned_rebind_origin_locked,
+    should_reap_abandoned_rebind_origin,
 };
 use crate::services::provider::ProviderKind;
 
@@ -344,8 +345,37 @@ async fn run_placeholder_sweep_pass(
     stalled_tracker.retain_live(provider, &states);
     for (state, age_secs) in states {
         if state.rebind_origin {
-            // Rebind-origin inflights do not represent a real Discord turn.
-            // Skip — there is no placeholder message to edit.
+            // #3581: a rebind-origin inflight has no placeholder message to
+            // edit, so it is normally skipped. But an abandoned, never-
+            // progressed orphan (STALL-WATCHDOG respawn) would otherwise live
+            // forever and wedge turn-start (`backstop_claim_is_safe` reads it as
+            // a "live foreign inflight"). Reap it once it is past its deadline.
+            // The strict conjunction in `should_reap_abandoned_rebind_origin`
+            // (owner-less + unadopted + never-progressed) guarantees a live /
+            // adopted rebind is never touched. `age_secs` here is the file-mtime
+            // age the sweeper already computed, which covers legacy rows that
+            // pre-date the persisted birth stamp.
+            //
+            // #3581 (codex TOCTOU fix): the `should_reap_*` check above runs on
+            // an UNLOCKED snapshot. Between this read and the delete, a normal
+            // intake / TUI claim can persist a brand-new live inflight at the
+            // same sidecar path. Route the delete through the locked
+            // re-validate helper so it reloads + re-checks identity + eligibility
+            // under the lock and only unlinks a row that is *still* the same
+            // abandoned orphan — never a live replacement.
+            let current_generation = super::runtime_store::load_generation();
+            if should_reap_abandoned_rebind_origin(&state, age_secs, current_generation)
+                && reap_abandoned_rebind_origin_locked(provider, &state, current_generation)
+            {
+                emit_reap_abandoned_rebind_origin(
+                    provider,
+                    &state,
+                    age_secs,
+                    current_generation,
+                    "placeholder_sweep_deadline",
+                );
+                report.abandoned += 1;
+            }
             continue;
         }
         // #3003: reclaim an orphaned status-panel-v2 BEFORE the placeholder skips

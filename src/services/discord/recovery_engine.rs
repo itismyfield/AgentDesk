@@ -3609,6 +3609,17 @@ pub(crate) async fn rebind_inflight_for_channel(
         // #2285 E1–E5) routes both identically — this is pure audit
         // metadata.
         state.turn_source = super::inflight::TurnSource::ExternalAdopted;
+        // #3581: stamp the bounded-preservation fields so an unadopted,
+        // never-progressed rebind-origin row can be reaped after a deadline (or
+        // a boot-time generation mismatch) instead of becoming a permanent
+        // orphan that wedges turn-start. Only this birth site stamps them; the
+        // reap predicate (`should_reap_abandoned_rebind_origin`) still requires
+        // the row to be owner-less / unadopted / never-progressed, so a row that
+        // goes live before the deadline is never reaped.
+        state.rebind_origin_created_at_unix = Some(super::inflight::now_unix());
+        state.rebind_origin_deadline_secs =
+            Some(super::inflight::rebind_origin_deadline_secs_env());
+        state.rebind_origin_birth_generation = Some(super::runtime_store::load_generation());
 
         // Atomic create-or-fail: if a legitimate turn created its inflight file
         // between the preflight check above and this point, the write fails

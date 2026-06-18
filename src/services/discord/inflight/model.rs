@@ -172,6 +172,32 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// identify a real Discord message.
     #[serde(default)]
     pub rebind_origin: bool,
+    /// #3581: bounded-preservation stamps for a `rebind_origin` row.
+    ///
+    /// A rebind-origin inflight is born by `recovery_engine` when a
+    /// STALL-WATCHDOG force-clean → watcher respawn synthesises a
+    /// `turn_source = ExternalAdopted`, `user_msg_id = 0`,
+    /// `relay_owner_kind = None` row to expose a recovered tmux session.
+    /// Historically these rows were preserved unconditionally (the rebind
+    /// API "owns" them), but a row that is never adopted and never makes
+    /// progress becomes a permanent orphan that
+    /// `tui_direct_pending_start::backstop_claim_is_safe` mistakes for a
+    /// "live foreign inflight", wedging every subsequent turn-start
+    /// (#3581). These stamps let the reaper bound the preservation:
+    /// `rebind_origin_created_at_unix` anchors the TTL, `_deadline_secs`
+    /// carries the (env-overridable) deadline captured at birth, and
+    /// `_birth_generation` lets a boot-time generation mismatch reap the
+    /// row immediately. All three are additive `#[serde(default)]` fields —
+    /// no `INFLIGHT_STATE_VERSION` bump per the #2235 compat convention;
+    /// legacy rows deserialize them as `None` and fall back to file-mtime
+    /// age. Only ever populated at the rebind-origin birth site; `None` on
+    /// every non-rebind row.
+    #[serde(default)]
+    pub rebind_origin_created_at_unix: Option<i64>,
+    #[serde(default)]
+    pub rebind_origin_deadline_secs: Option<u64>,
+    #[serde(default)]
+    pub rebind_origin_birth_generation: Option<u64>,
     /// #1255 codex round-2 P2: `true` while a long-running tool placeholder
     /// (`Monitor` / background `Bash`/`Task`/`Agent`) owns `current_msg_id`.
     /// `placeholder_sweeper` skips inflights whose `full_response` is non-empty
@@ -567,6 +593,10 @@ impl InflightTurnState {
             restart_mode: None,
             restart_generation: None,
             rebind_origin: false,
+            // #3581: only the rebind-origin birth site stamps these.
+            rebind_origin_created_at_unix: None,
+            rebind_origin_deadline_secs: None,
+            rebind_origin_birth_generation: None,
             long_running_placeholder_active: false,
             watcher_owns_live_relay: false,
             relay_owner_kind: RelayOwnerKind::None,
