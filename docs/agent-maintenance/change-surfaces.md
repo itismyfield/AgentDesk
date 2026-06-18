@@ -83,7 +83,7 @@
 - legacy_modules: none — there is no parallel engine. The whole surface is
   pre-migration giant-file territory.
 - do_not_edit_without_migration_plan:
-  - `src/engine/mod.rs` (1265 lines, giant-file).
+  - `src/engine/mod.rs` (1279 lines, giant-file).
   - `src/engine/ops/db_ops.rs` (1244 lines, giant-file).
   - `src/engine/loader.rs` (1332 lines, giant-file) — engine loader / QuickJS
     validator surface; split before adding non-bugfix behavior.
@@ -1323,9 +1323,9 @@
 - legacy_modules: none — these are shared runtime coordination surfaces.
 - do_not_edit_without_migration_plan (giant-file):
   - `src/config.rs` (2417 lines).
-  - `src/server/mod.rs` (2514 lines).
+  - `src/server/mod.rs` (2549 lines).
   - `src/receipt.rs` (1842 lines).
-  - `src/github/sync.rs` (1488 lines).
+  - `src/github/sync.rs` (1513 lines).
   - `src/reconcile.rs` (1816 lines; periodic reconcile loop covering stale
     inflights, orphan uploads, dispatched-session drift, and queue-review
     drift — split before adding non-bugfix behavior).

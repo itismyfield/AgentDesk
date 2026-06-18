@@ -20,6 +20,7 @@ pub use shell::hostname_short;
 #[allow(unused_imports)]
 pub use crate::services::git::{
     ManagedWorktreeCleanup, cleanup_managed_worktree, ensure_worktree_for_issue,
-    find_latest_commit_for_issue, find_worktree_for_issue, git_head_commit, resolve_repo_dir,
-    resolve_repo_dir_for_id, resolve_repo_dir_for_target,
+    find_latest_commit_for_issue, find_worktree_for_issue, git_head_commit,
+    is_no_repo_mapping_error, resolve_repo_dir, resolve_repo_dir_for_id,
+    resolve_repo_dir_for_target,
 };

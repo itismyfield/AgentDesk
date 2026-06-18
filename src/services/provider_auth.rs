@@ -1,4 +1,13 @@
+use std::io::ErrorKind;
 use std::path::PathBuf;
+
+/// Stable marker embedded in the error returned by [`read_gemini_oauth_creds`]
+/// when `~/.gemini/oauth_creds.json` is simply absent (`ErrorKind::NotFound`),
+/// i.e. Gemini is not configured. Callers match on this (via
+/// [`is_gemini_unconfigured_error`]) to suppress repeated "not configured"
+/// noise, while genuine I/O failures (PermissionDenied / IsADirectory / other)
+/// keep their original message and must stay loud.
+pub const GEMINI_OAUTH_NOT_FOUND: &str = "gemini oauth creds not found";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProviderAuthSpec {
@@ -104,10 +113,28 @@ pub fn codex_access_token() -> Option<String> {
 pub fn read_gemini_oauth_creds() -> Result<(PathBuf, serde_json::Value), anyhow::Error> {
     let path = expanded_auth_path("~/.gemini/oauth_creds.json")
         .ok_or_else(|| anyhow::anyhow!("no home dir"))?;
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|error| anyhow::anyhow!("cannot read ~/.gemini/oauth_creds.json: {error}"))?;
+    let raw = std::fs::read_to_string(&path).map_err(|error| {
+        if error.kind() == ErrorKind::NotFound {
+            // File absent = Gemini not configured. Tag with the stable marker so
+            // callers can suppress repeated noise; keep the path for context.
+            anyhow::anyhow!("{GEMINI_OAUTH_NOT_FOUND}: ~/.gemini/oauth_creds.json")
+        } else {
+            // PermissionDenied / IsADirectory / transient I/O are real problems —
+            // do NOT tag them, so they keep WARNing.
+            anyhow::anyhow!("cannot read ~/.gemini/oauth_creds.json: {error}")
+        }
+    })?;
     let creds = serde_json::from_str(&raw)?;
     Ok((path, creds))
+}
+
+/// True when `error` means Gemini is simply not configured (no $HOME, or
+/// `~/.gemini/oauth_creds.json` does not exist). Permission/IO/parse failures
+/// and corrupt-or-partial credentials (`no access_token` / `no refresh_token`)
+/// return `false` so they keep WARNing. (#3566)
+pub fn is_gemini_unconfigured_error(error: &anyhow::Error) -> bool {
+    let msg = error.to_string();
+    msg.contains("no home dir") || msg.contains(GEMINI_OAUTH_NOT_FOUND)
 }
 
 fn detect_claude_oauth_source() -> Option<String> {
@@ -370,6 +397,59 @@ mod tests {
     use std::sync::{Mutex, MutexGuard};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    // Mirrors the `read_to_string` error mapping in `read_gemini_oauth_creds`
+    // so the NotFound-vs-other classification can be exercised without touching
+    // the real `~/.gemini/oauth_creds.json` path. (#3566)
+    fn map_read_error(kind: ErrorKind) -> anyhow::Error {
+        let error = std::io::Error::from(kind);
+        if error.kind() == ErrorKind::NotFound {
+            anyhow::anyhow!("{GEMINI_OAUTH_NOT_FOUND}: ~/.gemini/oauth_creds.json")
+        } else {
+            anyhow::anyhow!("cannot read ~/.gemini/oauth_creds.json: {error}")
+        }
+    }
+
+    #[test]
+    fn gemini_not_found_is_unconfigured() {
+        let err = map_read_error(ErrorKind::NotFound);
+        assert!(
+            is_gemini_unconfigured_error(&err),
+            "missing oauth_creds.json must be treated as unconfigured (suppressible): {err}"
+        );
+    }
+
+    #[test]
+    fn gemini_no_home_dir_is_unconfigured() {
+        let err = anyhow::anyhow!("no home dir");
+        assert!(is_gemini_unconfigured_error(&err));
+    }
+
+    #[test]
+    fn gemini_permission_denied_is_not_unconfigured() {
+        let err = map_read_error(ErrorKind::PermissionDenied);
+        assert!(
+            !is_gemini_unconfigured_error(&err),
+            "PermissionDenied is a real problem and must keep WARNing: {err}"
+        );
+    }
+
+    #[test]
+    fn gemini_is_a_directory_is_not_unconfigured() {
+        // `IsADirectory` is unstable to name directly; reuse a generic non-NotFound
+        // kind to prove anything other than NotFound stays loud.
+        let err = map_read_error(ErrorKind::Other);
+        assert!(!is_gemini_unconfigured_error(&err));
+    }
+
+    #[test]
+    fn gemini_corrupt_creds_are_not_unconfigured() {
+        // Partial creds surface as separate errors and must keep WARNing.
+        let err = anyhow::anyhow!("no access_token in oauth_creds.json");
+        assert!(!is_gemini_unconfigured_error(&err));
+        let err = anyhow::anyhow!("no refresh_token in oauth_creds.json");
+        assert!(!is_gemini_unconfigured_error(&err));
+    }
 
     fn env_guard() -> MutexGuard<'static, ()> {
         ENV_LOCK.lock().unwrap()

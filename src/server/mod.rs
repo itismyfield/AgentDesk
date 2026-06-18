@@ -38,6 +38,13 @@ const GITHUB_SYNC_ADVISORY_LOCK_ID: i64 = 7_801_002;
 const POLICY_TICK_WARN_MS: u128 = 500;
 const POLICY_TICK_HOOK_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Set once the rate-limit sync loop has emitted its first WARN about absent
+/// Gemini OAuth credentials. When Gemini is simply not configured, the loop runs
+/// every 2 minutes and would otherwise spam an identical WARN forever (#3566).
+/// First miss logs at WARN; subsequent misses drop to DEBUG. Transient errors
+/// (network/API) bypass this flag and keep WARNing every cycle.
+static GEMINI_CREDS_MISSING_WARNED: AtomicBool = AtomicBool::new(false);
+
 /// Monotonically increasing count of policy tick hook timeouts (#747).
 /// Incremented each time `fire_tick_hook_by_name_with_timeout` returns
 /// because the wall-clock timeout elapsed before the spawn_blocking task
@@ -1008,7 +1015,35 @@ async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
                 tracing::info!("[rate-limit-sync] Gemini: {} buckets cached", n);
             }
             Err(e) => {
-                tracing::warn!("[rate-limit-sync] Gemini rate_limit fetch failed: {e}");
+                let msg = e.to_string();
+                // Only suppress the genuine "not configured / file missing" case,
+                // classified at the source (provider_auth) by `io::ErrorKind`:
+                //   - "no home dir"            (no $HOME)
+                //   - NotFound                 (oauth_creds.json does not exist)
+                // PermissionDenied / IsADirectory / transient I/O are tagged
+                // differently and corrupt/partial creds ("no access_token" /
+                // "no refresh_token") are separate problems — all keep WARNing,
+                // so we deliberately do NOT match on "oauth_creds.json" broadly
+                // here (#3566 over-suppress fix, codex r2).
+                let creds_missing =
+                    crate::services::provider_auth::is_gemini_unconfigured_error(&e);
+                if creds_missing {
+                    // Gemini simply isn't configured — log once, then drop to DEBUG
+                    // so the 2-minute sync loop doesn't spam an identical WARN (#3566).
+                    if !GEMINI_CREDS_MISSING_WARNED.swap(true, Ordering::AcqRel) {
+                        tracing::warn!(
+                            "[rate-limit-sync] Gemini credentials not configured ({msg}); suppressing further repeats"
+                        );
+                    } else {
+                        tracing::debug!(
+                            "[rate-limit-sync] Gemini credentials absent; skipping (suppressed)"
+                        );
+                    }
+                } else {
+                    // Transient errors (network/API/token refresh) and corrupt/partial
+                    // credentials keep WARNing.
+                    tracing::warn!("[rate-limit-sync] Gemini rate_limit fetch failed: {e}");
+                }
             }
         }
 

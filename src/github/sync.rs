@@ -3,6 +3,7 @@
 use chrono::{Duration as ChronoDuration, NaiveDate, Utc};
 use sqlx::{PgPool, Row};
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 const ISSUE_JSON_FIELDS: &str =
@@ -115,6 +116,13 @@ fn merge_unique_issues(target: &mut Vec<GhIssue>, extras: Vec<GhIssue>) {
     target.extend(extras.into_iter().filter(|issue| seen.insert(issue.number)));
 }
 
+/// Repos for which we've already emitted the "no repo_dirs mapping" WARN.
+/// When a repo lacks an `agentdesk.yaml` `repo_dirs` entry, mainline sync runs
+/// every ~10 minutes and would otherwise spam an identical WARN forever (#3566).
+/// We log once per repo_id at WARN, then drop to DEBUG. A new/misconfigured
+/// repo_id still WARNs on its first cycle. Reset on process restart (intended).
+static REPO_MAPPING_WARN_SENT: OnceLock<dashmap::DashSet<String>> = OnceLock::new();
+
 fn mainline_issue_numbers_for_repo(repo: &str) -> Vec<i64> {
     let repo_dir = match crate::services::platform::shell::resolve_repo_dir_for_target(Some(repo)) {
         Ok(Some(repo_dir)) => repo_dir,
@@ -123,9 +131,26 @@ fn mainline_issue_numbers_for_repo(repo: &str) -> Vec<i64> {
             return Vec::new();
         }
         Err(error) => {
-            tracing::warn!(
-                "[github-sync] {repo}: repo dir resolution failed for mainline sync: {error}"
-            );
+            // Only the genuine "no repo_dirs mapping" failure is benign/noisy and
+            // safe to rate-suppress. Persistent misconfiguration errors — invalid
+            // mapped dir, non-git worktree, wrong remote — must keep WARNing with an
+            // accurate label so they aren't hidden behind a "no mapping" message (#3566).
+            if crate::services::platform::shell::is_no_repo_mapping_error(&error) {
+                let warned = REPO_MAPPING_WARN_SENT.get_or_init(dashmap::DashSet::new);
+                if warned.insert(repo.to_string()) {
+                    tracing::warn!(
+                        "[github-sync] {repo}: repo dir resolution failed for mainline sync (no repo_dirs mapping); suppressing further repeats — {error}"
+                    );
+                } else {
+                    tracing::debug!(
+                        "[github-sync] {repo}: repo dir resolution failed (no mapping, suppressed): {error}"
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    "[github-sync] {repo}: repo dir resolution failed for mainline sync (misconfiguration): {error}"
+                );
+            }
             return Vec::new();
         }
     };
