@@ -2321,6 +2321,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                             &watcher_provider,
                                             channel_id,
                                             &tmux_session_name,
+                                            turn_identity_for_panel.as_ref(),
                                             placeholder_msg_id,
                                             &full_response,
                                             response_sent_offset,
@@ -2426,6 +2427,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             &watcher_provider,
                             channel_id,
                             &tmux_session_name,
+                            turn_identity_for_panel.as_ref(),
                             placeholder_msg_id,
                             &full_response,
                             response_sent_offset,
@@ -4729,24 +4731,31 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 crate::services::observability::watcher_latency::record_first_relay(
                     channel_id.get(),
                 );
-                if let Some((pk, _)) = parse_provider_and_channel_from_tmux_name(&tmux_session_name)
-                {
-                    if let Some(mut inflight) =
-                        crate::services::discord::inflight::load_inflight_state(
-                            &pk,
+                // #3558 (codex review follow-up): the old unlocked
+                // `load_inflight_state` → mutate → `save_inflight_state(&inflight)`
+                // re-wrote the WHOLE stale row (including a possibly-backward
+                // `last_offset`/`response_sent_offset`), reintroducing the exact
+                // backward-write TOCTOU the #3558 fix closed in the streaming /
+                // terminal-commit paths. Route the relay-success watermark through
+                // the single-flock RMW helper, which patches ONLY
+                // `last_watcher_relayed_*` and preserves the disk watermark.
+                // #3041 P1-3 (Part a, B1 — FRAME-CARRIED): the authoritative
+                // consumed-terminal END is NOT written here; it rides the
+                // RESULT-bearing `StreamFrame` and the sink advances
+                // `confirmed_end_offset` identity-gated on its confirmed POST.
+                if let Some(identity) = inflight_identity_before_relay.as_ref() {
+                    let _ =
+                        crate::services::discord::inflight::persist_watcher_relay_watermark_locked(
+                            &watcher_provider,
                             channel_id.get(),
-                        )
-                    {
-                        inflight.last_watcher_relayed_offset = Some(turn_data_start_offset);
-                        inflight.last_watcher_relayed_generation_mtime_ns =
-                            last_observed_generation_mtime_ns;
-                        // #3041 P1-3 (Part a, B1 — FRAME-CARRIED): the authoritative
-                        // consumed-terminal END is NO LONGER written to the inflight
-                        // file (the racy inflight-persist Part (a) is removed). It now
-                        // rides the RESULT-bearing `StreamFrame` and the sink advances
-                        // `confirmed_end_offset` identity-gated on its confirmed POST.
-                        let _ = crate::services::discord::inflight::save_inflight_state(&inflight);
-                    }
+                            identity,
+                            &tmux_session_name,
+                            crate::services::discord::inflight::WatcherRelayWatermarkPatch {
+                                last_watcher_relayed_offset: Some(turn_data_start_offset),
+                                last_watcher_relayed_generation_mtime_ns:
+                                    last_observed_generation_mtime_ns,
+                            },
+                        );
                 }
             }
             clear_provider_overload_retry_state(channel_id);
@@ -5243,27 +5252,30 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     crate::services::observability::watcher_latency::record_first_relay(
                         channel_id.get(),
                     );
-                    if let Some((pk, _)) =
-                        parse_provider_and_channel_from_tmux_name(&tmux_session_name)
-                    {
-                        if let Some(mut inflight) =
-                            crate::services::discord::inflight::load_inflight_state(
-                                &pk,
-                                channel_id.get(),
-                            )
-                        {
-                            inflight.last_watcher_relayed_offset = Some(turn_data_start_offset);
-                            // #1270: persist the matching `.generation` mtime
-                            // alongside the offset so a replacement watcher
-                            // (e.g. after dcserver restart) can disambiguate
-                            // same-wrapper rotation (mtime unchanged → pin to
-                            // EOF) from cancel→respawn (mtime changed → reset
-                            // to 0) when restoring this offset.
-                            inflight.last_watcher_relayed_generation_mtime_ns =
-                                last_observed_generation_mtime_ns;
-                            let _ =
-                                crate::services::discord::inflight::save_inflight_state(&inflight);
-                        }
+                    // #3558 (codex review follow-up): same backward-write TOCTOU
+                    // as the session-bound-delegation arm — the old unlocked
+                    // `load_inflight_state` → mutate → `save_inflight_state` re-wrote
+                    // the whole stale row (including `last_offset`/
+                    // `response_sent_offset`). Route the relay-success watermark
+                    // through the single-flock RMW helper, which patches ONLY
+                    // `last_watcher_relayed_*` and preserves the disk watermark.
+                    // #1270: persist the matching `.generation` mtime alongside the
+                    // offset so a replacement watcher (e.g. after dcserver restart)
+                    // can disambiguate same-wrapper rotation (mtime unchanged → pin
+                    // to EOF) from cancel→respawn (mtime changed → reset to 0) when
+                    // restoring this offset.
+                    if let Some(identity) = inflight_identity_before_relay.as_ref() {
+                        let _ = crate::services::discord::inflight::persist_watcher_relay_watermark_locked(
+                            &watcher_provider,
+                            channel_id.get(),
+                            identity,
+                            &tmux_session_name,
+                            crate::services::discord::inflight::WatcherRelayWatermarkPatch {
+                                last_watcher_relayed_offset: Some(turn_data_start_offset),
+                                last_watcher_relayed_generation_mtime_ns:
+                                    last_observed_generation_mtime_ns,
+                            },
+                        );
                     }
                 }
                 clear_provider_overload_retry_state(channel_id);

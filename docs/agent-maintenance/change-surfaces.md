@@ -135,7 +135,7 @@
     lifecycle extraction surface from #1435; split further before adding new
     lifecycle behavior; #3016 phase-5b2 dropped the `mailbox_finalize_owed`
     construction from the watcher-spawn handle).
-  - `src/services/discord/tmux.rs` (2058 lines after #2558 dead-code sweep;
+  - `src/services/discord/tmux.rs` (2049 lines after #2558 dead-code sweep;
     +1 from #3384 restored-seed undelivered-body discard guard;
     +38 for suppressed-label noise, user report 2026-06-12: provider-aware
     status/footer stripping in the placeholder suppression decisions;
@@ -166,8 +166,25 @@
     helpers and the `persist_watcher_stream_progress_with_authority` test seam;
     net +1 is the replacement doc-comment. The DEBUG-only
     `debug_assert!(monotonic_offset)` tripwire stays;
+    -9 from #3558 (2058 -> 2049): `persist_watcher_stream_progress` no longer
+    runs an unlocked `load_inflight_state` -> mutate -> `save_inflight_state`
+    (the offset-monotonic TOCTOU); it now builds a `WatcherStreamProgressPatch`
+    and delegates the read-modify-write to the single-flock
+    `inflight::persist_watcher_stream_progress_locked` (which preserves the
+    non-owned `last_offset` from the in-lock disk reload). The duplicated
+    in-bounds/monotonic local mutation block collapsed into the helper, and the
+    function gained a `require_identity: Option<&InflightTurnIdentity>` param so a
+    late-frame fresh row B is rejected;
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (6923 production lines; +1 from #3534
+  - `src/services/discord/tmux_watcher.rs` (6935 production lines; +10 from #3558
+    (codex review follow-up) routing the two remaining session-bound-relay-success
+    sites — which still did an unlocked `load_inflight_state` -> mutate ->
+    `save_inflight_state` (re-writing a stale `last_offset`/`response_sent_offset`)
+    — through the new single-flock `inflight::persist_watcher_relay_watermark_locked`
+    helper, gated on the captured `inflight_identity_before_relay`; +2 from #3558
+    threading the captured `turn_identity_for_panel.as_ref()` into both
+    `persist_watcher_stream_progress` streaming call sites so the new single-flock
+    RMW helper can reject a write onto a fresh row B; +1 from #3534
     gating the post-terminal-success continuation flush on
     `new_output_observed` (`current_offset > data_start_offset`) so a zero-width
     re-entry never re-relays an already-delivered carried body as a NEW message;

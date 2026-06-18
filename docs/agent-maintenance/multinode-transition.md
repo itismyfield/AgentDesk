@@ -797,3 +797,22 @@
   OpenCode turn. It adds no durable queue, cross-node read, leader-only side
   effect, or PG lease assumption, so multinode ownership semantics are
   unchanged.
+- #3558 (watcher offset TOCTOU root fix): the two watcher write paths that ran an
+  unlocked `load_inflight_state` -> mutate -> `save_inflight_state` (the streaming
+  `persist_watcher_stream_progress` and the terminal-commit
+  `mark_watcher_terminal_delivery_committed`) now delegate to two new single-flock
+  read-modify-write helpers in `inflight.rs`
+  (`persist_watcher_stream_progress_locked` /
+  `commit_watcher_terminal_delivery_locked`). Both acquire the EXISTING
+  per-`(provider, channel_id)` sidecar `flock` ONCE, reload the on-disk row,
+  re-check the caller's identity/session guards against the freshly reloaded row,
+  patch only watcher-owned fields, and persist via `persist_under_lock` (never
+  re-entering `save_inflight_state`, so the non-reentrant flock cannot
+  self-deadlock). This is **worker-local**: it operates entirely on the same
+  per-channel inflight sidecar file the watcher already owns, under the same
+  advisory lock. No lease, durable queue, leader/standby ownership, or singleton
+  assumption changes — the only behavioural change is that the streaming path now
+  PRESERVES the non-owned `last_offset` from the in-lock reload (instead of
+  clobbering it backward) and the commit path `max`-serializes its watermark
+  against the reload, eliminating the backward-write race with the owner-gated
+  `refresh_inflight_last_offset_*` advance.

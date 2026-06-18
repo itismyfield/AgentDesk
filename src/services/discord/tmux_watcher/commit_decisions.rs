@@ -48,45 +48,39 @@ pub(super) fn mark_watcher_terminal_delivery_committed(
     if is_loop_turn && expected_identity.turn_start_offset.is_none() {
         return false;
     }
-    let Some(mut inflight) =
-        crate::services::discord::inflight::load_inflight_state(provider, channel_id.get())
-    else {
-        return false;
-    };
-    if inflight.restart_mode.is_some() || inflight.rebind_origin {
-        return false;
-    }
-    if inflight.user_msg_id != expected_identity.user_msg_id
-        || inflight.started_at.as_str() != expected_identity.started_at.as_str()
-        || inflight.tmux_session_name.as_deref() != expected_identity.tmux_session_name.as_deref()
-        || inflight.tmux_session_name.as_deref() != Some(tmux_session_name)
-    {
-        return false;
-    }
-    // #3169 P1: for a loop turn (`user_msg_id == 0`) the 1-second-resolution
-    // `started_at` can collide across two consecutive self-triggered turns, so it
-    // is insufficient to prove this completion belongs to the loaded inflight.
-    // Require the monotonic `turn_start_offset` (#3041 P1-3) to match as well so a
-    // late completion can never commit the WRONG (newer, still-running) loop turn.
-    if is_loop_turn && inflight.turn_start_offset != expected_identity.turn_start_offset {
-        return false;
-    }
 
-    inflight.terminal_delivery_committed = true;
-    inflight.full_response = full_response.to_string();
-    inflight.response_sent_offset = full_response.len();
-    inflight.last_offset = last_offset;
-    inflight.last_watcher_relayed_offset = Some(turn_data_start_offset);
-    inflight.last_watcher_relayed_generation_mtime_ns = generation_mtime_ns;
-
-    match crate::services::discord::inflight::save_inflight_state(&inflight) {
-        Ok(()) => true,
-        Err(error) => {
+    // #3558: the old unlocked `load_inflight_state` → mutate → `save_inflight_state`
+    // re-wrote `last_offset`/`response_sent_offset` from a stale snapshot, racing a
+    // concurrent owner-gated `refresh_inflight_last_offset_*` advance and emitting a
+    // spurious `response_sent_offset_monotonic` / `last_offset_monotonic` violation.
+    // The locked RMW helper holds the sidecar flock across reload → identity guard →
+    // patch → persist. The strong identity guard below (user_msg_id + started_at +
+    // tmux_session + turn_start_offset, including the #3169 loop-turn pin) is enforced
+    // inside the helper via `InflightTurnIdentity::matches_state`, which compares all
+    // four fields — `expected_identity` already carries them — plus the caller-supplied
+    // `tmux_session_name`. The commit IS the watermark owner, so it writes
+    // `last_offset`/`response_sent_offset`, but the helper `max`-serializes both
+    // against the in-lock reload so a late commit never moves them backward.
+    let outcome = crate::services::discord::inflight::commit_watcher_terminal_delivery_locked(
+        provider,
+        channel_id.get(),
+        expected_identity,
+        tmux_session_name,
+        crate::services::discord::inflight::WatcherTerminalCommitPatch {
+            full_response: full_response.to_string(),
+            last_offset,
+            last_watcher_relayed_offset: Some(turn_data_start_offset),
+            last_watcher_relayed_generation_mtime_ns: generation_mtime_ns,
+        },
+    );
+    match outcome {
+        crate::services::discord::inflight::WatcherTerminalCommitOutcome::Committed => true,
+        crate::services::discord::inflight::WatcherTerminalCommitOutcome::Skipped => false,
+        crate::services::discord::inflight::WatcherTerminalCommitOutcome::IoError => {
             tracing::warn!(
                 provider = %provider.as_str(),
                 channel = channel_id.get(),
                 tmux_session = %tmux_session_name,
-                error = %error,
                 "watcher failed to mirror committed terminal delivery into inflight state"
             );
             false

@@ -67,7 +67,17 @@
 # #3479 SPC-shadow removal: lowered 6939 -> 6922 (deleted the dead StatusPanelController
 # shadow-parity calls — 2x shadow_adopt_liveness_reacquired_panel + assert_watcher_create_parity;
 # legacy reacquire/create/edit IO unchanged).
-"src/services/discord/tmux_watcher.rs" = 6923
+# #3558 raised 6923 -> 6925: both `persist_watcher_stream_progress` streaming call
+# sites now thread the captured `turn_identity_for_panel.as_ref()` into the new
+# single-flock RMW helper so a late-frame fresh row B is rejected (+2 lines).
+# #3558 (codex review follow-up) raised 6925 -> 6935: the two remaining
+# session-bound-relay-success sites that still did an unlocked
+# `load_inflight_state` -> mutate -> `save_inflight_state` (re-writing a stale
+# `last_offset`/`response_sent_offset`) now route through the new
+# `persist_watcher_relay_watermark_locked` single-flock RMW helper, gated on the
+# captured `inflight_identity_before_relay` (+10 lines of identity-guarded calls
+# and explanatory comments).
+"src/services/discord/tmux_watcher.rs" = 6935
 # #3038 tmux_watcher S1 child modules, frozen at landed production LoC.
 "src/services/discord/tmux_watcher/commit_decisions.rs" = 140
 "src/services/discord/tmux_watcher/completion_gate.rs" = 275
@@ -319,7 +329,23 @@
 # under its own lock and emits at the correct severity atomically with the
 # skip/persist decision, so the tmux watcher pre-save emit was removed as a
 # race-prone duplicate (`offset_monotonic_invariant_severity` stays private).
-"src/services/discord/inflight.rs" = 2035
+# #3558 raised 2035 -> 2275 (+240): two new single-flock read-modify-write helpers
+# that fix the watcher offset TOCTOU — `persist_watcher_stream_progress_locked`
+# (preserves the non-owned `last_offset` from the in-lock reload) and
+# `commit_watcher_terminal_delivery_locked` (max-serializes the watermark) — plus
+# their `WatcherStreamProgressPatch` / `WatcherTerminalCommitPatch` value structs,
+# `WatcherProgressOutcome` / `WatcherTerminalCommitOutcome` enums, and 5 unit
+# tests covering last_offset preservation, fresh-row identity rejection,
+# backward/forward commit max-serialize, and Gemini retry-reset non-destruction.
+# #3558 (codex review follow-up) raised 2275 -> 2378 (+103): a third single-flock
+# RMW helper `persist_watcher_relay_watermark_locked` (with its
+# `WatcherRelayWatermarkPatch` value struct and `WatcherRelayWatermarkOutcome`
+# enum) for the two `tmux_watcher.rs` session-bound-relay-success sites — it
+# patches ONLY `last_watcher_relayed_*` and preserves the in-lock
+# `last_offset`/`response_sent_offset`/`full_response`, so a late relay can no
+# longer clobber a concurrently-advanced watermark backward — plus 2 unit tests
+# (concurrent-advance preservation, fresh-row identity rejection).
+"src/services/discord/inflight.rs" = 2378
 # #3038 Phase A: health.rs decomposed into health/ directory modules (root 402
 # prod LoC + 6 sub-1000-LoC submodules) — dropped below the giant threshold, so
 # its ratchet entry is deleted (win; no baseline raises).
@@ -346,7 +372,12 @@
 # `persist_watcher_stream_progress_with_authority` test seam; net +1 vs base is a
 # replacement doc-comment explaining the delegation. The DEBUG-only
 # `debug_assert!(monotonic_offset)` tripwire stays (production no-op).
-"src/services/discord/tmux.rs" = 2058
+# #3558 lowered 2058 -> 2049 (-9): `persist_watcher_stream_progress` dropped its
+# unlocked `load_inflight_state` -> mutate -> `save_inflight_state` body and now
+# builds a `WatcherStreamProgressPatch` + delegates the read-modify-write to the
+# single-flock `inflight::persist_watcher_stream_progress_locked`. Locks in the
+# shrink win.
+"src/services/discord/tmux.rs" = 2049
 # completion_guard.rs decomposed in #3479 (1834 -> 872 prod LoC); dropped below
 # the giant threshold, so its ratchet baseline is retired (no longer tracked).
 # #3034 batch-8: lowered 1781 -> 1753 (deleted the dead `assistant_turns` turn-cap
