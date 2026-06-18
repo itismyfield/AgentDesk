@@ -65,6 +65,7 @@ impl MaintenanceJobRegistry {
             Arc::new(NoopHeartbeatJob),
             Arc::new(AgentQualityRollupJob),
             Arc::new(QualityRegressionAlerterJob),
+            Arc::new(RelaySignalAlerterJob),
             Arc::new(CancelTombstonePruneJob),
             Arc::new(PromptManifestRetentionJob::new(prompt_manifest_retention)),
             Arc::new(VoiceTurnLinkGcJob),
@@ -159,6 +160,40 @@ impl MaintenanceJob for QualityRegressionAlerterJob {
                 job = self.name(),
                 alerts_dispatched = sent,
                 "agent quality regression alerter completed"
+            );
+            Ok(())
+        })
+    }
+}
+
+/// #3561 — hourly relay-loss signal monitor + operator alert.
+///
+/// Aggregates the restart-safe `observability_events` stream (relay root-cause
+/// counters + offset invariant violations) over the trailing hour and enqueues
+/// a single de-duplicated Discord alert per signal when its count crosses the
+/// (conservative, config-overridable) threshold. Double off-switch: no alert
+/// target configured ⇒ no enqueue, so unconfigured deploys never spam. The 30s
+/// startup stagger sequences it after the quality alerter on the same hourly
+/// tick so the two alert pipelines do not race for a connection at boot.
+struct RelaySignalAlerterJob;
+
+impl MaintenanceJob for RelaySignalAlerterJob {
+    fn name(&self) -> &'static str {
+        "relay_signal_alerter"
+    }
+
+    fn schedule(&self) -> MaintenanceSchedule {
+        MaintenanceSchedule::every(Duration::from_secs(60 * 60), Duration::from_secs(30))
+    }
+
+    fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
+        Box::pin(async move {
+            let alerts =
+                crate::services::observability::enqueue_relay_signal_alerts_pg(pool).await?;
+            tracing::info!(
+                job = self.name(),
+                alerts_dispatched = alerts,
+                "relay signal alerter completed"
             );
             Ok(())
         })
@@ -1021,5 +1056,27 @@ mod registry_membership_tests {
         assert_eq!(job.name(), "voice.turn_link_gc");
         let schedule = job.schedule();
         assert_eq!(schedule.every_ms(), 60 * 60 * 1_000);
+    }
+
+    /// #3561 — the relay-loss operator monitor must be registered so the
+    /// leader scheduler actually evaluates the relay signal thresholds hourly;
+    /// otherwise the alert pipeline silently never runs.
+    #[test]
+    fn static_registry_includes_relay_signal_alerter() {
+        let registry = MaintenanceJobRegistry::static_registry();
+        let names: Vec<&'static str> = registry.jobs().iter().map(|job| job.name()).collect();
+        assert!(
+            names.contains(&"relay_signal_alerter"),
+            "relay_signal_alerter must be registered so the leader scheduler \
+             evaluates relay-loss signal thresholds hourly (#3561). \
+             present jobs: {names:?}"
+        );
+    }
+
+    #[test]
+    fn relay_signal_alerter_schedule_is_hourly() {
+        let job = RelaySignalAlerterJob;
+        assert_eq!(job.name(), "relay_signal_alerter");
+        assert_eq!(job.schedule().every_ms(), 60 * 60 * 1_000);
     }
 }

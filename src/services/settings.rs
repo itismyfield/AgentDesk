@@ -86,6 +86,15 @@ const CONFIG_KEYS: &[(&str, &str, &str, &str, Option<&str>)] = &[
         None,
     ),
     (
+        // #3561 — operator override for the per-hour relay-loss signal alert
+        // threshold. Empty/absent ⇒ conservative per-signal code defaults.
+        "kanban_relay_alert_threshold",
+        "quality",
+        "릴레이 누락 신호 경보 임계",
+        "Relay Signal Alert Threshold",
+        None,
+    ),
+    (
         "review_enabled",
         "review",
         "리뷰 활성화",
@@ -490,6 +499,7 @@ fn yaml_section_value(config: &crate::config::Config, key: &str) -> Option<Strin
         "deadlock_manager_channel_id" => config.kanban.deadlock_manager_channel_id.clone(),
         "kanban_human_alert_channel_id" => config.kanban.human_alert_channel_id.clone(),
         "agent_quality_monitoring_channel_id" => None,
+        "kanban_relay_alert_threshold" => stringified_number(config.kanban.relay_alert_threshold),
         "review_enabled" => stringified_bool(config.review.enabled),
         "max_review_rounds" => stringified_number(config.review.max_rounds),
         "pm_decision_gate_enabled" => stringified_bool(config.kanban.pm_decision_gate_enabled),

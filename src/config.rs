@@ -1161,6 +1161,16 @@ pub struct KanbanConfig {
     pub human_alert_channel_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pm_decision_gate_enabled: Option<bool>,
+    /// #3561 — operator override for the relay-signal alert threshold. When
+    /// set, every per-hour relay invariant signal (terminal-ack timeout,
+    /// uncommitted-inflight-cleared, owner-unknown, offset invariant
+    /// violation) fires once its hourly window count reaches this value,
+    /// overriding the conservative per-signal code defaults. `None` keeps the
+    /// built-in defaults; it does NOT disable alerting (the alert target —
+    /// `kanban_human_alert_channel_id` — remaining unset is the real off
+    /// switch, so an unconfigured deploy never spams).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_alert_threshold: Option<u32>,
 }
 
 impl KanbanConfig {
@@ -1169,6 +1179,7 @@ impl KanbanConfig {
             && self.deadlock_manager_channel_id.is_none()
             && self.human_alert_channel_id.is_none()
             && self.pm_decision_gate_enabled.is_none()
+            && self.relay_alert_threshold.is_none()
     }
 }
 

@@ -29,6 +29,7 @@ mod helpers;
 mod pg_io;
 mod quality_alert;
 mod queries;
+mod relay_signal_alert;
 mod retention;
 mod worker;
 
@@ -48,6 +49,9 @@ pub use emit::{
 pub use queries::{
     query_agent_quality_ranking_with, query_agent_quality_summary, run_agent_quality_rollup_pg,
 };
+// #3561 — operator relay-loss signal monitor. Driven by the hourly
+// `RelaySignalAlerterJob` maintenance job (see `server::maintenance`).
+pub(crate) use relay_signal_alert::enqueue_relay_signal_alerts_pg;
 
 pub(super) const EVENT_BATCH_SIZE: usize = 64;
 pub(super) const EVENT_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
@@ -70,6 +74,77 @@ pub(super) const QUALITY_SAMPLE_GUARD: i64 = 5;
 pub(super) const QUALITY_ALERT_DEDUPE_MS: i64 = 24 * 60 * 60 * 1000;
 pub(super) const QUALITY_REVIEW_DROP_THRESHOLD: f64 = 0.20;
 pub(super) const QUALITY_TURN_DROP_THRESHOLD: f64 = 0.15;
+
+// #3561 — relay-loss operator monitor. Each signal alerts at most once per
+// hour (`RELAY_SIGNAL_ALERT_DEDUPE_TTL_SECS`), so the dedupe window matches the
+// job cadence. The per-signal `default_threshold` values are conservative:
+//   * `relay_terminal_ack_timeout` (duplicate-emit vector) tolerates a few per
+//     hour before it's worth waking an operator.
+//   * `relay_owner_unknown` (relay started with unknown owner) is rarer and
+//     more suspicious, so a lower bar.
+//   * `relay_uncommitted_inflight_cleared` (LEAKED ANSWER — a non-empty reply
+//     was dropped) and `offset_invariant_violation` (persisted bad offset
+//     state) are severe enough that a single occurrence warrants an alert.
+// All are overridable per-deploy via `kanban.relay_alert_threshold`
+// (mirrored to kv_meta `kanban_relay_alert_threshold` by `services::settings`).
+pub(super) const RELAY_SIGNAL_ALERT_DEDUPE_TTL_SECS: i64 = 60 * 60;
+
+/// One relay-loss signal as projected onto the `observability_events` table.
+/// `event_type` + `status` uniquely identify the persisted rows that count
+/// toward this signal's hourly window. `default_threshold` is the conservative
+/// built-in trip point (overridable per-deploy via
+/// `kanban.relay_alert_threshold`).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct RelaySignal {
+    /// Stable identifier used in the dedupe key and the alert body.
+    pub(super) key: &'static str,
+    /// `observability_events.event_type` filter.
+    pub(super) event_type: &'static str,
+    /// `observability_events.status` values that map to this signal. The relay
+    /// root-cause counters store the counter name in `status`
+    /// (`emit_relay_root_cause_counter`); the offset invariants store the
+    /// invariant name in `status` (`record_invariant_check`).
+    pub(super) statuses: &'static [&'static str],
+    /// Conservative built-in hourly trip threshold.
+    pub(super) default_threshold: u32,
+    /// Human-readable label for the operator alert.
+    pub(super) label: &'static str,
+}
+
+/// Canonical relay-loss signal table monitored by the #3561 operator alert
+/// job. Each entry maps 1:1 onto rows the emit path already persists to
+/// `observability_events` (see `emit::emit_relay_root_cause_counter` and
+/// `emit::record_invariant_check_with_severity`).
+pub(super) const RELAY_SIGNAL_DEFINITIONS: &[RelaySignal] = &[
+    RelaySignal {
+        key: "relay_terminal_ack_timeout",
+        event_type: "relay_root_cause_counter",
+        statuses: &["relay_terminal_ack_timeout"],
+        default_threshold: 5,
+        label: "터미널 ACK 타임아웃(중복 송신 벡터)",
+    },
+    RelaySignal {
+        key: "relay_uncommitted_inflight_cleared",
+        event_type: "relay_root_cause_counter",
+        statuses: &["relay_uncommitted_inflight_cleared"],
+        default_threshold: 1,
+        label: "미커밋 inflight 정리(답변 누출 벡터)",
+    },
+    RelaySignal {
+        key: "relay_owner_unknown",
+        event_type: "relay_root_cause_counter",
+        statuses: &["relay_owner_unknown"],
+        default_threshold: 3,
+        label: "릴레이 owner 불명",
+    },
+    RelaySignal {
+        key: "offset_invariant_violation",
+        event_type: "invariant_violation",
+        statuses: &["last_offset_monotonic", "response_sent_offset_monotonic"],
+        default_threshold: 1,
+        label: "오프셋 단조성 불변식 위반",
+    },
+];
 pub(super) const AGENT_QUALITY_EVENT_TYPES: &[&str] = &[
     "turn_start",
     "turn_complete",
