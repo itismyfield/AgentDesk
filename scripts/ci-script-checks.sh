@@ -26,6 +26,9 @@ python3 scripts/audit_state_lint_hardening.py
 echo "=== await_holding_lock ratchet guard ==="
 python3 scripts/check_await_holding_lock_ratchet.py
 
+echo "=== Hotfile LOC ratchet guard (#3565) ==="
+python3 scripts/check_hotfile_ratchet.py
+
 echo "=== CI runner hardening guard ==="
 ./scripts/check-ci-runner-hardening.sh
 

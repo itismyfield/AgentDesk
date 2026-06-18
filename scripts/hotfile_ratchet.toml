@@ -1,0 +1,28 @@
+# Hotfile raw-LOC ratchet baseline (#3565).
+#
+# Freezes the raw line count (`wc -l`: comments, blank lines, and test code all
+# COUNTED) of the three oversized Discord-relay hot files at their current size.
+# `scripts/check_hotfile_ratchet.py` fails CI when a file's raw line count
+# exceeds its ceiling here, so these already-giant modules cannot regress and
+# grow even larger while a decomposition is pending.
+#
+# Metric note: this gate uses RAW wc -l (total physical lines). That is a
+# DELIBERATELY DIFFERENT, complementary metric from the production-LoC ratchet
+# in scripts/audit_maintainability_giant_baseline.toml, which excludes test
+# (`#[cfg(test)]`) code. A change can satisfy one gate and trip the other; both
+# are intended to stay in force. This raw-LOC gate is the coarse "the physical
+# file may not get bigger" backstop; the production-LoC ratchet is the finer
+# "production complexity may not re-inflate" gate.
+#
+# Workflow:
+#   * As a file shrinks, LOWER its number here to lock in the win.
+#   * Growing a hot file requires RAISING its number — a deliberate, reviewable
+#     admission in the diff that the file got bigger. Prefer splitting instead.
+#
+# Counts are raw `wc -l` (equivalently Python `str.splitlines()`) on the
+# LF-terminated source; the two agree exactly for this repo's LF-only files.
+
+[hotfile_ratchet]
+"src/services/discord/tmux_watcher.rs" = 10086
+"src/services/discord/tui_prompt_relay.rs" = 7789
+"src/services/discord/turn_bridge/mod.rs" = 6612
