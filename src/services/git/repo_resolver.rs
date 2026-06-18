@@ -163,6 +163,27 @@ fn ensure_git_worktree(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Stable sentinel prefix for the "no `repo_dirs` mapping" resolver error.
+///
+/// This is the *only* resolver failure that is purely a "not configured" signal
+/// (no entry in `github.repo_dirs`, and the default repo's remote doesn't match).
+/// Other failures from [`resolve_repo_dir_for_id`] / [`resolve_repo_dir_for_target`]
+/// — invalid mapped dir, non-git worktree, wrong remote — are persistent
+/// misconfiguration and must surface as real WARNs (#3566). Callers that want to
+/// rate-suppress only the "not configured" case match on this via
+/// [`is_no_repo_mapping_error`].
+const NO_REPO_MAPPING_ERROR_PREFIX: &str = "No local repo mapping for";
+
+/// Returns `true` when `error` is the "no `repo_dirs` mapping" resolver failure
+/// (i.e. the repo simply isn't configured), as opposed to a persistent
+/// misconfiguration error (invalid dir / non-git worktree / wrong remote).
+///
+/// Used by log call sites to rate-suppress only the benign "not configured"
+/// case while keeping genuine configuration errors at WARN (#3566).
+pub fn is_no_repo_mapping_error(error: &str) -> bool {
+    error.starts_with(NO_REPO_MAPPING_ERROR_PREFIX)
+}
+
 /// Resolve the local git directory for a specific GitHub repo id.
 ///
 /// Resolution order:
@@ -198,7 +219,7 @@ pub fn resolve_repo_dir_for_id(repo_id: Option<&str>) -> Result<Option<String>, 
     }
 
     Err(format!(
-        "No local repo mapping for '{}'; configure github.repo_dirs.{} in agentdesk config",
+        "{NO_REPO_MAPPING_ERROR_PREFIX} '{}'; configure github.repo_dirs.{} in agentdesk config",
         requested, requested
     ))
 }
@@ -226,4 +247,37 @@ pub fn resolve_repo_dir_for_target(target_repo: Option<&str>) -> Result<Option<S
     }
 
     resolve_repo_dir_for_id(Some(requested))
+}
+
+#[cfg(test)]
+mod no_repo_mapping_classification_tests {
+    use super::{NO_REPO_MAPPING_ERROR_PREFIX, is_no_repo_mapping_error};
+
+    #[test]
+    fn classifies_the_no_mapping_error_as_suppressible() {
+        // Mirrors the exact error produced by resolve_repo_dir_for_id when no
+        // repo_dirs entry exists and the default remote doesn't match.
+        let err = format!(
+            "{NO_REPO_MAPPING_ERROR_PREFIX} 'owner/repo'; configure github.repo_dirs.owner/repo in agentdesk config"
+        );
+        assert!(is_no_repo_mapping_error(&err));
+    }
+
+    #[test]
+    fn keeps_persistent_misconfiguration_errors_as_real_warns() {
+        // These are persistent setup errors and must NOT be classified as the
+        // benign "no mapping" case (#3566 over-suppress fix).
+        assert!(!is_no_repo_mapping_error(
+            "'/some/dir' is not a git worktree"
+        ));
+        assert!(!is_no_repo_mapping_error(
+            "Configured repo dir '/some/dir' resolves to 'a/b' instead of requested 'c/d'"
+        ));
+        assert!(!is_no_repo_mapping_error(
+            "git rev-parse failed for '/some/dir': boom"
+        ));
+        assert!(!is_no_repo_mapping_error(
+            "cannot resolve repo path 'rel/path': boom"
+        ));
+    }
 }

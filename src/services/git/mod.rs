@@ -16,7 +16,10 @@ pub use commit_resolver::{
     git_tracked_change_paths_strict,
 };
 pub(crate) use remote::parse_github_repo_from_remote;
-pub use repo_resolver::{resolve_repo_dir, resolve_repo_dir_for_id, resolve_repo_dir_for_target};
+pub use repo_resolver::{
+    is_no_repo_mapping_error, resolve_repo_dir, resolve_repo_dir_for_id,
+    resolve_repo_dir_for_target,
+};
 #[allow(unused_imports)]
 pub use runner::{GitCommand, GitCommandError};
 pub use worktree_resolver::{

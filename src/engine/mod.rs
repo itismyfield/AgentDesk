@@ -24,6 +24,12 @@ use hooks::Hook;
 use loader::PolicyStore;
 
 const POLICY_HOOK_WARN_THRESHOLD: Duration = Duration::from_millis(100);
+/// Tick hooks (onTick/onTick30s/onTick1min/onTick5min) routinely run auto-queue /
+/// timeout sweeps measured at 500-600ms, so the flat 100ms threshold produced a
+/// "policy hook slow" WARN every cycle. Use a dedicated, higher threshold for tick
+/// hooks (aligned with `POLICY_TICK_WARN_MS` in server/mod.rs) while keeping the
+/// tighter 100ms bound for non-tick hooks so their genuine slow-WARNs survive.
+const POLICY_TICK_HOOK_WARN_THRESHOLD: Duration = Duration::from_millis(500);
 
 /// Inner state of the policy engine (not Clone).
 struct PolicyEngineInner {
@@ -971,7 +977,15 @@ impl PolicyEngine {
                 let elapsed = policy_start.elapsed();
                 let effects_after = Self::count_pending_effects(&ctx);
                 let effects_count = effects_after.saturating_sub(effects_before);
-                if elapsed >= POLICY_HOOK_WARN_THRESHOLD {
+                let warn_threshold = if matches!(
+                    hook,
+                    Hook::OnTick | Hook::OnTick30s | Hook::OnTick1min | Hook::OnTick5min
+                ) {
+                    POLICY_TICK_HOOK_WARN_THRESHOLD
+                } else {
+                    POLICY_HOOK_WARN_THRESHOLD
+                };
+                if elapsed >= warn_threshold {
                     tracing::warn!(
                         policy_name,
                         hook = %hook,
