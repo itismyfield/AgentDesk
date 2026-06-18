@@ -2579,8 +2579,31 @@ pub(in crate::services::discord) async fn handle_text_message(
         // extension for alert context; it is no longer an absolute cap.
         let now_ms = chrono::Utc::now().timestamp_millis();
         let turn_started_ms = now_ms;
-        let deadline_ms = now_ms + timeout.as_millis() as i64;
+        // #3557 (A) Codex-review fix: the per-turn hard ceiling must bind the
+        // INITIAL deadline, not only the auto-extend clamp. Previously the
+        // initial deadline was always `now + turn_watchdog_timeout()` (6h), and
+        // the auto-extend clamp could not lower it because the store is gated by
+        // `new_dl > current_dl`. So a Codex turn (4h ceiling) was still cancelled
+        // at 6h and the clamp warn never fired. Cap the initial deadline at the
+        // provider ceiling here so the tighter Codex bound is honored end to end.
+        let ceiling_deadline_ms =
+            super::super::super::turn_hard_ceiling_deadline_ms(turn_started_ms, &provider);
+        let proposed_initial_dl = now_ms + timeout.as_millis() as i64;
+        let deadline_ms = std::cmp::min(proposed_initial_dl, ceiling_deadline_ms);
         let max_deadline_ms = deadline_ms;
+        // When the ceiling already caps the initial deadline (e.g. Codex 4h <
+        // 6h watchdog timeout) the auto-extend clamp warn below never fires
+        // (its `current_dl < ceiling_ms` guard is false once the deadline is
+        // parked at the ceiling), so surface the bound once here instead.
+        if proposed_initial_dl > ceiling_deadline_ms {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            let ceiling_min = (ceiling_deadline_ms - now_ms) / 1000 / 60;
+            tracing::warn!(
+                "  [{ts}] ⛔ WATCHDOG: hard ceiling ({ceiling_min}m) caps initial deadline for channel {} (provider={}) — turn will be reconciled at the ceiling",
+                channel_id,
+                provider_label
+            );
+        }
         // claude-e rollout Phase 1 (counter-review round 3 with Codex):
         // mark this token as async-managed so the per-provider sync
         // watchdog (`enforce_watchdog_deadline` in `spawn_cancel_watchdog`)
@@ -2651,7 +2674,34 @@ pub(in crate::services::discord) async fn handle_text_message(
                                 let age_ms = now_ms_check - updated_ms;
                                 // If inflight was updated within the last 5 minutes, auto-extend
                                 if age_ms < 300_000 {
-                                    let new_dl = now_ms_check + timeout.as_millis() as i64;
+                                    // #3557 (A): clamp the auto-extend so a turn
+                                    // that keeps inflight warm forever cannot push
+                                    // the deadline indefinitely. The hard ceiling
+                                    // is measured from turn start and is tighter
+                                    // for Codex (the 13125s outlier source).
+                                    let ceiling_ms =
+                                        super::super::super::turn_hard_ceiling_deadline_ms(
+                                            turn_started_ms,
+                                            &watchdog_provider,
+                                        );
+                                    let proposed_dl = now_ms_check + timeout.as_millis() as i64;
+                                    let (new_dl, clamped) =
+                                        super::super::super::clamp_auto_extend_deadline_ms(
+                                            proposed_dl,
+                                            ceiling_ms,
+                                        );
+                                    // Warn exactly once when the ceiling first bites:
+                                    // `current_dl < ceiling_ms` is only true before
+                                    // the deadline has been parked at the ceiling. On
+                                    // later ticks `current_dl == ceiling_ms` so this is
+                                    // false and the warn does not repeat.
+                                    if clamped && current_dl < ceiling_ms {
+                                        let ts = chrono::Local::now().format("%H:%M:%S");
+                                        tracing::warn!(
+                                            "  [{ts}] ⛔ WATCHDOG: hard ceiling reached for channel {} — auto-extend clamped, turn will be reconciled at deadline",
+                                            channel_id
+                                        );
+                                    }
                                     if new_dl > current_dl {
                                         watchdog_token
                                             .watchdog_deadline_ms

@@ -44,6 +44,7 @@ pub mod git;
 pub mod issue_announcements;
 pub mod kanban;
 pub mod kanban_cards;
+pub mod long_turn_watchdog;
 // #3034: 81 residual dead-code items; scoped here so the lint stays
 // live on clean sibling modules. Remove during maintenance dead-code cleanup.
 #[allow(dead_code)]

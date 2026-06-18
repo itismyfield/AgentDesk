@@ -807,6 +807,7 @@ src/
 │   ├── issue_announcements.rs
 │   ├── kanban.rs
 │   ├── kanban_cards.rs
+│   ├── long_turn_watchdog.rs
 │   ├── mcp_config.rs
 │   ├── message_outbox.rs
 │   ├── mod.rs

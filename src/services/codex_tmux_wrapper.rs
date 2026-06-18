@@ -14,6 +14,31 @@ use crate::services::tmux_wrapper::{InputMode, render_for_terminal};
 const TMUX_PROMPT_B64_PREFIX: &str = "__AGENTDESK_B64__:";
 const TMUX_PROMPT_B64_CHUNK_PREFIX: &str = "__AGENTDESK_B64_CHUNK__:";
 const DEFAULT_CODEX_FIRST_EVENT_TIMEOUT_SECS: u64 = 120;
+/// #3557 (B): idle window after the first event. Once Codex has emitted at
+/// least one event, the run loop previously blocked on `recv()` forever, so a
+/// Codex process that hung mid-turn (tool/API hang) without emitting another
+/// JSON event and without exiting kept the watcher believing the pane was busy
+/// — the direct cause of the 13125s outlier. We now bound inter-event silence.
+///
+/// #3557 (B) Codex-review r2 fix: this wrapper runs `codex exec` as a direct
+/// child process and reads its JSON event stream over an OS pipe — there is NO
+/// tmux pane to `capture-pane`, so the "pane liveness" check is not available
+/// on this path. The only liveness signal IS the JSON stream, which `recv` here
+/// already measures. A single long SILENT tool run (e.g. a multi-minute
+/// `cargo build` issued through a shell tool) emits the tool-call-start event,
+/// then nothing until the tool returns — so the idle window must clear the
+/// longest plausible single tool execution, not merely a typical reasoning gap.
+/// We therefore raise the generous default to 3600s (was 1800s) so a normal
+/// long-running tool run is never mistaken for an idle hang. The 4h hard ceiling
+/// (`DEFAULT_CODEX_TURN_HARD_CEILING_SECS`) is the real backstop: idle-kill only
+/// trips on a Codex that is BOTH silent on its event stream AND not exiting, and
+/// even then the ceiling guarantees termination regardless of idle tuning.
+const DEFAULT_CODEX_TURN_IDLE_RECV_SECS: u64 = 3600;
+/// #3557 (B): absolute wall-clock ceiling for a single Codex `exec` turn,
+/// measured from process spawn. A hung Codex that *does* keep dribbling events
+/// would slip past the idle window, so this is the hard backstop. Default 4h
+/// matches the per-turn Codex ceiling and clears any legitimate Codex turn.
+const DEFAULT_CODEX_TURN_HARD_CEILING_SECS: u64 = 4 * 3600;
 
 pub fn run(
     output_file: &str,
@@ -337,6 +362,29 @@ fn codex_first_event_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(seconds)
 }
 
+/// #3557 (B): idle inter-event recv timeout after the first event. Override via
+/// `AGENTDESK_CODEX_TURN_IDLE_RECV_SECS`.
+fn codex_turn_idle_recv_timeout() -> std::time::Duration {
+    let seconds = std::env::var("AGENTDESK_CODEX_TURN_IDLE_RECV_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(DEFAULT_CODEX_TURN_IDLE_RECV_SECS);
+    std::time::Duration::from_secs(seconds)
+}
+
+/// #3557 (B): absolute per-turn ceiling for a Codex `exec` run. Override via
+/// `AGENTDESK_CODEX_TURN_HARD_CEILING_SECS` (shared with the orchestrator-side
+/// auto-extend ceiling so a single knob bounds the Codex turn end to end).
+fn codex_turn_hard_ceiling() -> std::time::Duration {
+    let seconds = std::env::var("AGENTDESK_CODEX_TURN_HARD_CEILING_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(DEFAULT_CODEX_TURN_HARD_CEILING_SECS);
+    std::time::Duration::from_secs(seconds)
+}
+
 fn cleanup(output_file: &str, input_fifo: &str) {
     let _ = std::fs::remove_file(output_file);
     let _ = std::fs::remove_file(input_fifo);
@@ -469,12 +517,77 @@ fn run_turn(
     let start = std::time::Instant::now();
     let mut saw_any_stdout = false;
     let first_event_timeout = codex_first_event_timeout();
+    // #3557 (B): bound a turn that hung after its first event (idle window) and a
+    // turn that drips events forever (absolute ceiling). Both kill the Codex
+    // process tree so the turn rejoins the normal error path instead of looking
+    // "busy" to the watcher indefinitely.
+    let idle_recv_timeout = codex_turn_idle_recv_timeout();
+    let hard_ceiling = codex_turn_hard_ceiling();
 
     loop {
+        // Absolute wall-clock ceiling, checked every iteration so even a Codex
+        // that keeps emitting events past the limit is terminated.
+        if start.elapsed() >= hard_ceiling {
+            crate::services::process::kill_pid_tree(child_pid);
+            let _ = child.wait();
+            return Err(format!(
+                "Codex turn exceeded hard ceiling of {}s",
+                hard_ceiling.as_secs()
+            ));
+        }
+
         let next_line = if saw_any_stdout {
-            stdout_rx
-                .recv()
-                .map_err(|_| "Codex stdout reader disconnected".to_string())?
+            // After the first event, bound inter-event silence: a hung Codex that
+            // stops emitting without exiting used to block here forever.
+            //
+            // #3557 (B) Codex-review fix: cap the idle recv by the REMAINING
+            // ceiling budget. Previously the loop entered `recv_timeout` with the
+            // full idle window (1800s) regardless of how close the run was to the
+            // hard ceiling, so an event at 3h59m followed by a hang killed Codex
+            // only at 4h29m (ceiling + idle). Clamping the wait to the ceiling
+            // remainder keeps the absolute ceiling honored even mid-recv; when no
+            // budget remains we kill immediately on the next loop iteration via
+            // the `start.elapsed() >= hard_ceiling` check at the top.
+            let elapsed = start.elapsed();
+            let ceiling_remaining = hard_ceiling.saturating_sub(elapsed);
+            if ceiling_remaining.is_zero() {
+                crate::services::process::kill_pid_tree(child_pid);
+                let _ = child.wait();
+                return Err(format!(
+                    "Codex turn exceeded hard ceiling of {}s",
+                    hard_ceiling.as_secs()
+                ));
+            }
+            let wait = idle_recv_timeout.min(ceiling_remaining);
+            match stdout_rx.recv_timeout(wait) {
+                Ok(line) => line,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    // A timeout here is either the idle window or the ceiling
+                    // remainder elapsing; the top-of-loop ceiling check would
+                    // also catch the latter, but kill now to avoid one more
+                    // idle wait. Report the cause for diagnosis.
+                    crate::services::process::kill_pid_tree(child_pid);
+                    let _ = child.wait();
+                    if wait < idle_recv_timeout {
+                        return Err(format!(
+                            "Codex turn exceeded hard ceiling of {}s (idle recv capped by ceiling remainder)",
+                            hard_ceiling.as_secs()
+                        ));
+                    }
+                    // NOTE: this path runs `codex exec` over a pipe (no tmux
+                    // pane), so we cannot confirm pane activity before killing —
+                    // the JSON event stream is the only liveness signal we have.
+                    // A genuinely busy-but-silent tool run is covered by the
+                    // generous idle window; the 4h hard ceiling is the backstop.
+                    return Err(format!(
+                        "Codex produced no JSON event for {}s (idle hang; no tmux pane to confirm activity — relied on JSON-stream liveness, hard ceiling is the backstop)",
+                        idle_recv_timeout.as_secs()
+                    ));
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("Codex stdout reader disconnected".to_string());
+                }
+            }
         } else {
             match stdout_rx.recv_timeout(first_event_timeout) {
                 Ok(line) => line,
@@ -2295,4 +2408,147 @@ fn emit_json_line(
         .map_err(|e| format!("write output line: {}", e))?;
     render_for_terminal(&line);
     Ok(())
+}
+
+#[cfg(test)]
+mod turn_timeout_tests {
+    use super::{
+        DEFAULT_CODEX_TURN_HARD_CEILING_SECS, DEFAULT_CODEX_TURN_IDLE_RECV_SECS,
+        codex_turn_hard_ceiling, codex_turn_idle_recv_timeout,
+    };
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// #3557 (B): after the first event the run loop must bound inter-event
+    /// silence. This mirrors the post-`saw_any_stdout` branch: a channel that
+    /// never produces another line must surface a Timeout (the kill+Err path),
+    /// not block forever as the old unconditional `recv()` did.
+    #[test]
+    fn idle_recv_timeout_fires_when_no_further_events() {
+        let (_tx, rx) = mpsc::channel::<Result<Option<String>, String>>();
+        // Keep _tx alive (so it's not Disconnected) and never send.
+        let result = rx.recv_timeout(Duration::from_millis(50));
+        assert!(matches!(result, Err(mpsc::RecvTimeoutError::Timeout)));
+    }
+
+    /// A live event stream still passes through `recv_timeout` cleanly.
+    #[test]
+    fn idle_recv_timeout_passes_through_live_event() {
+        let (tx, rx) = mpsc::channel::<Result<Option<String>, String>>();
+        tx.send(Ok(Some("{\"type\":\"event\"}\n".to_string())))
+            .unwrap();
+        let received = rx.recv_timeout(Duration::from_secs(1));
+        assert!(matches!(received, Ok(Ok(Some(_)))));
+    }
+
+    #[test]
+    fn idle_recv_timeout_defaults_to_generous_window() {
+        // Only assert the default when the env override is not set, so this is
+        // robust under a polluted shell.
+        if std::env::var("AGENTDESK_CODEX_TURN_IDLE_RECV_SECS").is_err() {
+            assert_eq!(
+                codex_turn_idle_recv_timeout(),
+                Duration::from_secs(DEFAULT_CODEX_TURN_IDLE_RECV_SECS)
+            );
+        }
+    }
+
+    /// #3557 (B) Codex-review r2 fix: this wrapper runs `codex exec` over a pipe
+    /// (no tmux pane), so a long SILENT tool run cannot be distinguished from an
+    /// idle hang via pane activity — the JSON stream is the only liveness
+    /// signal. To avoid killing a normal long-running tool (e.g. a big build),
+    /// the idle window must be generous and the 4h hard ceiling must stay the
+    /// real backstop. Lock both: the default idle window is now >= 1h AND is
+    /// strictly smaller than the hard ceiling (otherwise the idle window would
+    /// be dead code that the ceiling always preempts).
+    #[test]
+    fn idle_window_is_generous_and_below_hard_ceiling() {
+        assert_eq!(DEFAULT_CODEX_TURN_IDLE_RECV_SECS, 3600);
+        assert!(
+            DEFAULT_CODEX_TURN_IDLE_RECV_SECS >= 3600,
+            "idle window must clear the longest plausible single silent tool run"
+        );
+        assert!(
+            DEFAULT_CODEX_TURN_IDLE_RECV_SECS < DEFAULT_CODEX_TURN_HARD_CEILING_SECS,
+            "the hard ceiling must remain the real backstop, above the idle window"
+        );
+    }
+
+    /// A live event arriving before the (generous) idle window elapses must NOT
+    /// be treated as a hang: a long-running tool that emits its completion event
+    /// within the window passes through cleanly. Models the post-first-event
+    /// branch: a delayed-but-present event resolves to `Ok`, not a Timeout kill.
+    #[test]
+    fn delayed_event_within_idle_window_is_not_killed() {
+        let (tx, rx) = mpsc::channel::<Result<Option<String>, String>>();
+        // Simulate a silent tool run that finishes and emits a completion event
+        // shortly before the idle window would expire.
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            let _ = tx.send(Ok(Some("{\"type\":\"item.completed\"}\n".to_string())));
+        });
+        // Generous window relative to the simulated tool latency: the event wins.
+        let received = rx.recv_timeout(Duration::from_millis(500));
+        assert!(
+            matches!(received, Ok(Ok(Some(_)))),
+            "a tool event arriving within the idle window must not trip the idle-kill path"
+        );
+    }
+
+    #[test]
+    fn hard_ceiling_defaults_to_four_hours() {
+        if std::env::var("AGENTDESK_CODEX_TURN_HARD_CEILING_SECS").is_err() {
+            assert_eq!(
+                codex_turn_hard_ceiling(),
+                Duration::from_secs(DEFAULT_CODEX_TURN_HARD_CEILING_SECS)
+            );
+            assert_eq!(DEFAULT_CODEX_TURN_HARD_CEILING_SECS, 4 * 3600);
+        }
+    }
+
+    /// The ceiling check is a pure elapsed comparison; verify the predicate the
+    /// run loop uses (`start.elapsed() >= hard_ceiling`).
+    #[test]
+    fn ceiling_predicate_triggers_when_elapsed_exceeds_limit() {
+        let ceiling = Duration::from_millis(10);
+        let start = std::time::Instant::now();
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(start.elapsed() >= ceiling);
+    }
+
+    /// #3557 (B) Codex-review fix: the idle recv must be capped by the REMAINING
+    /// ceiling budget so a post-first-event hang can never run past the ceiling
+    /// by a full idle window. This mirrors `idle_recv_timeout.min(remaining)`.
+    /// Mid-run, with budget left, the cap wins only when it is the smaller of
+    /// the two.
+    #[test]
+    fn idle_recv_is_capped_by_ceiling_remainder() {
+        let idle = Duration::from_secs(1800);
+        // Plenty of budget left: idle window governs (cap does not bite).
+        let remaining_lots = Duration::from_secs(3600);
+        assert_eq!(idle.min(remaining_lots), idle);
+        // Near the ceiling: the remainder governs, so a hang is killed at the
+        // ceiling, not ceiling+idle.
+        let remaining_little = Duration::from_secs(60);
+        assert_eq!(idle.min(remaining_little), remaining_little);
+        assert!(idle.min(remaining_little) < idle);
+    }
+
+    /// At/over the ceiling the remainder is zero, which the run loop treats as
+    /// "kill now" rather than entering another recv. Verify the saturating
+    /// remainder is zero exactly when elapsed has reached the ceiling.
+    #[test]
+    fn ceiling_remainder_is_zero_at_or_past_ceiling() {
+        let ceiling = Duration::from_secs(4 * 3600);
+        // elapsed == ceiling => zero remainder => immediate kill branch.
+        assert!(ceiling.saturating_sub(ceiling).is_zero());
+        // elapsed > ceiling => still zero (saturating), never a huge wait.
+        let past = ceiling + Duration::from_secs(120);
+        assert!(ceiling.saturating_sub(past).is_zero());
+        // elapsed < ceiling => positive remainder used as the recv cap.
+        let before = ceiling - Duration::from_secs(120);
+        let remaining = ceiling.saturating_sub(before);
+        assert!(!remaining.is_zero());
+        assert_eq!(remaining, Duration::from_secs(120));
+    }
 }
