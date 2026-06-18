@@ -52,9 +52,11 @@
   instead of looping back through the internal HTTP cleanup route. The singleton
   assumption remains unchanged: the task is still spawned from the leased
   gateway runtime.
-- 2026-06-12 audit note (#3089 S0): `runtime_bootstrap` only initializes the
-  default-off `single_message_panel` flag for startup logging. Gateway lease,
-  startup order, worker ownership, and singleton assumptions are unchanged.
+- 2026-06-12 audit note (#3089 S0; updated #3560): `runtime_bootstrap` only
+  initializes the `single_message_panel` flag for startup logging. Since #3560
+  the flag is default-ON (opt-out via `AGENTDESK_SINGLE_MESSAGE_PANEL=0|false`).
+  Gateway lease, startup order, worker ownership, and singleton assumptions are
+  unchanged.
 - 2026-06-17 audit note (#3548): PR analyzer hygiene guard work is confined to
   `scripts/analyze_prs.py`; gateway lease, startup order, worker ownership, and
   singleton assumptions are unchanged.
@@ -402,6 +404,17 @@
 
 ### Audited touches
 
+- #3560 single_message_panel default-ON + footer-mode migration guard: the
+  `single_message_panel` flag is now default-ON (opt-out via
+  `AGENTDESK_SINGLE_MESSAGE_PANEL=0|false`) and `turn_bridge/mod.rs` gained a
+  deployment-boundary migration guard. When a turn that created a *separate*
+  status panel under the old default-OFF runtime resumes under footer mode, the
+  bridge now reconciles (edits to a migration notice) and clears its OWN
+  `inflight_state.status_message_id` instead of orphaning that Discord message.
+  This is purely worker-local: it operates on the resuming turn's own per-turn
+  inflight handle and its own gateway, with no node ownership, lease, or
+  singleton implication. Gateway lease, startup order, worker ownership, and
+  singleton assumptions are unchanged.
 - #3540 phantom-synthetic-inflight fix: two worker-local, in-memory-state-only
   touches with no multinode ownership/lease/singleton implications.
   (A) `tui_prompt_dedupe.rs` gained a process-global `relayed_entry_ids_by_tmux`

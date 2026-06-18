@@ -67,8 +67,17 @@ pub(in crate::services::discord) fn enabled() -> bool {
 }
 
 fn parse_single_message_panel_flag(raw: Option<&str>) -> bool {
-    raw.map(str::trim)
-        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+    // #3560: default-ON (opt-out). The rollout gate previously short-circuited a
+    // missing env var to `false`, so any environment without an explicit
+    // `AGENTDESK_SINGLE_MESSAGE_PANEL=1` silently fell back to the legacy panel.
+    // Mirror the original explicit truthy-allowlist as an explicit disable-list:
+    // only the documented opt-out tokens "0" / case-insensitive "false" disable
+    // the feature. Everything else — unset, empty, or garbage — stays enabled so
+    // a default-ON feature is never quietly switched off by an empty env value.
+    match raw.map(str::trim) {
+        None => true,
+        Some(value) => value != "0" && !value.eq_ignore_ascii_case("false"),
+    }
 }
 
 pub(in crate::services::discord) fn footer_mode_enabled(
@@ -1026,13 +1035,19 @@ mod tests {
     }
 
     #[test]
-    fn single_message_panel_flag_defaults_off_when_unset() {
-        assert!(!super::parse_single_message_panel_flag(None));
+    fn single_message_panel_flag_defaults_on_when_unset() {
+        // #3560: missing env var means default-ON (opt-out), not the legacy OFF.
+        assert!(super::parse_single_message_panel_flag(None));
     }
 
     #[test]
-    fn single_message_panel_flag_accepts_only_documented_truthy_values() {
-        for raw in ["1", "true", "TRUE", "TrUe", " true "] {
+    fn single_message_panel_flag_treats_non_optout_values_as_enabled() {
+        // #3560: only "0" / "false" disable the gate. Everything else — including
+        // an empty string or garbage — keeps the default-ON feature enabled so it
+        // is never quietly switched off by an unintended env value.
+        for raw in [
+            "1", "true", "TRUE", "TrUe", " true ", "", "yes", "on", "garbage",
+        ] {
             assert!(
                 super::parse_single_message_panel_flag(Some(raw)),
                 "{raw:?} should enable the flag"
@@ -1041,11 +1056,13 @@ mod tests {
     }
 
     #[test]
-    fn single_message_panel_flag_rejects_falsy_and_garbage_values() {
-        for raw in ["", "0", "false", "FALSE", "yes", "on", "garbage"] {
+    fn single_message_panel_flag_rejects_documented_optout_values() {
+        // #3560: the disable-list mirrors the original truthy-allowlist — only the
+        // documented opt-out tokens "0" and case-insensitive "false" turn it off.
+        for raw in ["0", "false", "FALSE"] {
             assert!(
                 !super::parse_single_message_panel_flag(Some(raw)),
-                "{raw:?} should leave the flag disabled"
+                "{raw:?} should disable the flag"
             );
         }
     }

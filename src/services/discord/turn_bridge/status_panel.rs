@@ -436,6 +436,52 @@ pub(super) fn status_panel_message_id_for_turn(
     Some(status_msg_id)
 }
 
+/// #3560 codex review: default-OFF → default-ON deployment migration guard.
+///
+/// When `single_message_panel` was default-OFF a bridge turn may have already
+/// created a *separate* status panel (a real Discord message tracked by
+/// `inflight_state.status_message_id`). After #3560 the same turn can be
+/// resumed under footer mode, where the separate panel is no longer used.
+/// Previously the resume path simply cleared `status_message_id` to `None`,
+/// orphaning that Discord message (a stuck panel that never completes).
+///
+/// This helper closes that gap: before clearing the handle, it edits the old
+/// panel into a short migration notice (mirroring the
+/// `long_running_placeholder_active` reconciliation path) so the message is
+/// visibly finalized rather than left dangling. Synthetic-headless ids are not
+/// real Discord messages, so they are dropped without an edit.
+///
+/// Returns `true` when an old separate panel existed and was reconciled
+/// (regardless of edit success), `false` when there was nothing to migrate.
+/// This is worker-local: it operates only on the resuming turn's own handle.
+pub(super) async fn migrate_separate_status_panel_to_footer<G: TurnGateway + ?Sized>(
+    gateway: &G,
+    channel_id: ChannelId,
+    inflight_state: &mut InflightTurnState,
+) -> bool {
+    let Some(raw_id) = inflight_state.status_message_id.take() else {
+        return false;
+    };
+    let old_id = MessageId::new(raw_id);
+    if is_synthetic_headless_message_id(old_id) {
+        // Not a real Discord message — nothing to finalize.
+        return true;
+    }
+    let migration_notice = "🔁 상태 패널이 통합 패널로 이전되었습니다.";
+    if let Err(error) = gateway
+        .edit_message(channel_id, old_id, migration_notice)
+        .await
+    {
+        tracing::warn!(
+            "[turn_bridge] failed to finalize migrated separate status panel {} in channel {}: {}",
+            old_id,
+            channel_id,
+            error
+        );
+    }
+    true
+}
+
 #[cfg(test)]
 #[path = "status_panel_tests.rs"]
 mod status_panel_v2_rework_tests;

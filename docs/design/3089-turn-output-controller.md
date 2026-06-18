@@ -1,6 +1,6 @@
 # #3089 — Unify Discord agent-output delivery behind one controller
 
-Status: **Design** (pre-implementation, hardened by one adversarial review round). Issue: #3089. Parent EPIC: #3016 (TurnFinalizer single-authority, closed). Folds in: #3235 (idle-tail dedup), #3078 (status-panel lifecycle), #3088 (TUI external-input streaming parity), #3082 (queued-notice chunk split), #3416 (same-turn offset-monotonic backward write).
+Status: **Design** — single_message_panel rollout gate is now default-ON as of #3560 (opt-out via `AGENTDESK_SINGLE_MESSAGE_PANEL=0|false`); Phases A–C of the controller refactor remain in progress. Issue: #3089. Parent EPIC: #3016 (TurnFinalizer single-authority, closed). Folds in: #3235 (idle-tail dedup), #3078 (status-panel lifecycle), #3088 (TUI external-input streaming parity), #3082 (queued-notice chunk split), #3416 (same-turn offset-monotonic backward write).
 
 This document is the synthesis of three independently-authored proposals (Gateway / Finalizer-actor / durable-datamodel), reconciled adversarially, then hardened against a design-review pass (3 High + 4 Medium findings, all folded in). It is the plan of record for #3089; each phase below becomes its own PR.
 
