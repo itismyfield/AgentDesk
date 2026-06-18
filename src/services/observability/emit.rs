@@ -139,15 +139,23 @@ pub fn emit_recovery_fired(
     channel_id: u64,
     dispatch_id: Option<&str>,
     session_key: Option<&str>,
+    turn_id: Option<&str>,
+    agent_id: Option<&str>,
     reason: &str,
 ) {
+    // #3562: thread the turn identity and agent role through so consumers can
+    // back-trace *which* agent/turn triggered the recovery. `turn_id` rides the
+    // dedicated correlation column (enrich_payload_with_correlation also mirrors
+    // it into payload_json for jsonl/dashboard parsers). `observability_events`
+    // has no `agent_id` column, so `agent_id` lives only in payload_json — a
+    // backward-compatible add (older rows simply omit the key).
     emit_event(
         "recovery_fired",
         Some(provider),
         Some(channel_id),
         dispatch_id,
         session_key,
-        None,
+        turn_id,
         normalize_string(reason).as_deref(),
         CounterDelta {
             recovery_fires: 1,
@@ -155,6 +163,7 @@ pub fn emit_recovery_fired(
         },
         json!({
             "reason": normalize_string(reason),
+            "agent_id": agent_id.and_then(normalize_string),
         }),
     );
 }
@@ -629,6 +638,8 @@ mod tests {
             42,
             Some("dispatch-recovery"),
             Some("session-recovery"),
+            Some("turn-recovery"),
+            Some("planner"),
             "watchdog",
         );
         emit_turn_cancelled(
@@ -746,6 +757,17 @@ mod tests {
         assert_eq!(quality.payload["dispatch_id"], "dispatch-quality");
         assert_eq!(quality.payload["source_event_id"], "turn-quality");
         assert_eq!(quality.payload["status"], "review_pass");
+
+        // #3562: recovery_fired must carry the turn identity (correlation column +
+        // mirrored into payload_json) and the agent_id (payload_json only) so
+        // consumers can back-trace which agent/turn triggered the recovery.
+        let recovery = events
+            .iter()
+            .find(|event| event.event_type == "recovery_fired")
+            .expect("recovery_fired should be in recent ring");
+        assert_eq!(recovery.payload["turn_id"], "turn-recovery");
+        assert_eq!(recovery.payload["agent_id"], "planner");
+        assert_eq!(recovery.payload["reason"], "watchdog");
     }
 
     #[test]

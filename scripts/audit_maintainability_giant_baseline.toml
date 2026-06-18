@@ -230,7 +230,10 @@
 # #3479 SPC-shadow removal: lowered 3330 -> 3276 (deleted the dead StatusPanelController
 # recovery-completion shadow block + assert_recovery_completion_parity fn + its dead test;
 # legacy completion_target let-else and complete_status_panel_v2_with_http IO unchanged).
-"src/services/discord/recovery_engine.rs" = 3276
+# #3562: +53 (3276 -> 3329) for recovery_fired/agent_quality_event turn_id+agent_id
+# traceability — turn_id (recovered_transcript_turn_id) and agent_id (resolve_role_binding)
+# derivation at the 3 recovery emit sites + helper signature widening; no logic change.
+"src/services/discord/recovery_engine.rs" = 3329
 # #3034 batch-8: lowered 3771 -> 3770 (dead-code removal).
 # #3038 S1: +1 (3770 -> 3771) for the mechanical `shared.queued_placeholders` ->
 # `shared.queued.queued_placeholders` re-wire (one extra method-chain line) forced
