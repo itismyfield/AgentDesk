@@ -39,6 +39,36 @@ const LONG_TURN_CLUSTER_THRESHOLD: i64 = 3;
 /// successive scans tile the timeline without gaps or double counting).
 const WINDOW_SECONDS: i64 = 300;
 
+/// #3557 (A) Codex-review fix: alert cooldown (seconds). A sustained or
+/// overlapping cluster spans many consecutive 5-minute scans; without a cooldown
+/// the raw insert paged once per scan (every 5 min) for the cluster's whole
+/// lifetime. This dedupe window (via `message_outbox` `dedupe_key` + TTL,
+/// following the #3561/#3564 `enqueue_outbox_pg_with_ttl` precedent) collapses a
+/// persistent cluster to one page per window. 30 min ≫ the 5-min scan cadence so
+/// repeated scans coalesce, while still re-paging if a cluster is still forming a
+/// half-hour later. Override via `AGENTDESK_LONG_TURN_ALERT_COOLDOWN_SECS`.
+const LONG_TURN_ALERT_COOLDOWN_SECS: i64 = 1800;
+
+/// Stable dedupe session key for the cluster alert. The same key every scan is
+/// what lets the `dedupe_key` (derived from target + reason_code + session_key)
+/// collapse repeated alerts inside the cooldown TTL into a single outbox row.
+const LONG_TURN_ALERT_SESSION_KEY: &str = "long_turn_watchdog:cluster";
+
+/// `message_outbox.reason_code` for the cluster alert. Combined with the stable
+/// session key above this gives a reason-code identity (content-independent)
+/// dedupe key, so the alert dedupes even though its rendered counts vary scan to
+/// scan.
+const LONG_TURN_ALERT_REASON_CODE: &str = "long_turn_cluster";
+
+/// Read the alert cooldown, allowing an env override for ops tuning.
+fn alert_cooldown_secs() -> i64 {
+    std::env::var("AGENTDESK_LONG_TURN_ALERT_COOLDOWN_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<i64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(LONG_TURN_ALERT_COOLDOWN_SECS)
+}
+
 /// Spawn the watchdog as a background task. The query is a single indexed range
 /// scan every 5 minutes, so always-on is fine.
 pub fn spawn(pool: PgPool) {
@@ -93,8 +123,19 @@ async fn scan_once(pool: &PgPool) -> Result<(), sqlx::Error> {
         }),
     );
 
-    if let Err(error) = enqueue_alert(pool, &target, &message).await {
-        tracing::warn!("[long_turn_watchdog] enqueue alert failed: {error}");
+    match enqueue_alert(pool, &target, &message).await {
+        Ok(true) => {}
+        Ok(false) => {
+            // Suppressed by the cooldown dedupe key — the cluster is still
+            // active but already paged inside this window.
+            tracing::debug!(
+                "[long_turn_watchdog] cluster alert suppressed by cooldown ({}s window)",
+                alert_cooldown_secs()
+            );
+        }
+        Err(error) => {
+            tracing::warn!("[long_turn_watchdog] enqueue alert failed: {error}");
+        }
     }
 
     Ok(())
@@ -162,16 +203,32 @@ fn format_long_turn_alert(window: &LongTurnWindow) -> String {
     )
 }
 
-async fn enqueue_alert(pool: &PgPool, target: &str, content: &str) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO message_outbox (target, content, bot, source, reason_code, status)
-         VALUES ($1, $2, 'notify', 'long_turn_watchdog', 'long_turn_cluster', 'pending')",
+/// Enqueue the cluster alert through the deduped `message_outbox` path so a
+/// persistent/overlapping cluster pages at most once per cooldown window.
+///
+/// #3557 (A) Codex-review fix: the previous raw `INSERT` had no `dedupe_key`, so
+/// every 5-minute scan over a long-lived cluster inserted a fresh row and the
+/// channel got spammed. Routing through `enqueue_outbox_pg_with_ttl` with a
+/// stable session key + reason code mirrors the `dispatch_watchdog`
+/// `last_stuck_alert_at` cooldown intent using the durable DB dedupe key
+/// (#3561/#3564 precedent), so suppression survives process restarts too.
+///
+/// Returns `Ok(true)` when a new alert row was actually enqueued and `Ok(false)`
+/// when the cooldown suppressed it as a duplicate.
+async fn enqueue_alert(pool: &PgPool, target: &str, content: &str) -> Result<bool, sqlx::Error> {
+    crate::services::message_outbox::enqueue_outbox_pg_with_ttl(
+        pool,
+        crate::services::message_outbox::OutboxMessage {
+            target,
+            content,
+            bot: "notify",
+            source: "long_turn_watchdog",
+            reason_code: Some(LONG_TURN_ALERT_REASON_CODE),
+            session_key: Some(LONG_TURN_ALERT_SESSION_KEY),
+        },
+        alert_cooldown_secs(),
     )
-    .bind(target)
-    .bind(content)
-    .execute(pool)
-    .await?;
-    Ok(())
+    .await
 }
 
 #[cfg(test)]
@@ -212,5 +269,53 @@ mod tests {
         // 13125s ≈ 218 min.
         assert!(msg.contains("max=218m"));
         assert!(msg.contains("#3557"));
+    }
+
+    /// #3557 (A) Codex-review fix: the alert cooldown must be a positive window
+    /// strictly larger than the 5-minute scan cadence, otherwise consecutive
+    /// scans over a persistent cluster would each page (the spam the dedupe
+    /// fixes).
+    #[test]
+    fn alert_cooldown_exceeds_scan_cadence_by_default() {
+        if std::env::var("AGENTDESK_LONG_TURN_ALERT_COOLDOWN_SECS").is_err() {
+            assert_eq!(alert_cooldown_secs(), LONG_TURN_ALERT_COOLDOWN_SECS);
+            assert!(
+                alert_cooldown_secs() > SCAN_INTERVAL.as_secs() as i64,
+                "cooldown ({}s) must exceed the scan cadence ({}s) so repeated scans coalesce",
+                alert_cooldown_secs(),
+                SCAN_INTERVAL.as_secs()
+            );
+        }
+    }
+
+    /// The dedupe identity (session key + reason code) must be stable across
+    /// scans — that stability is exactly what collapses repeated alerts into a
+    /// single outbox row via the `dedupe_key`. A drifting key would defeat the
+    /// suppression, so pin both constants to non-empty, content-independent
+    /// values.
+    #[test]
+    fn dedupe_identity_is_stable_and_content_independent() {
+        assert!(!LONG_TURN_ALERT_SESSION_KEY.trim().is_empty());
+        assert!(!LONG_TURN_ALERT_REASON_CODE.trim().is_empty());
+        // The reason code is the message_outbox dedupe identity kind; with a
+        // reason_code present the dedupe key ignores the (varying) rendered
+        // content, so two different alert bodies dedupe to the same row.
+        let key_a = crate::services::message_outbox::dedupe_key_for_message_for_test(
+            "channel:123",
+            "3 turns >10m ...",
+            Some(LONG_TURN_ALERT_REASON_CODE),
+            Some(LONG_TURN_ALERT_SESSION_KEY),
+        );
+        let key_b = crate::services::message_outbox::dedupe_key_for_message_for_test(
+            "channel:123",
+            "9 turns >10m ... (different counts)",
+            Some(LONG_TURN_ALERT_REASON_CODE),
+            Some(LONG_TURN_ALERT_SESSION_KEY),
+        );
+        assert_eq!(
+            key_a, key_b,
+            "same session key + reason code must dedupe regardless of rendered counts"
+        );
+        assert!(key_a.is_some());
     }
 }

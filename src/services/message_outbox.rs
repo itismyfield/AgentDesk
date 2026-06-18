@@ -62,6 +62,19 @@ fn dedupe_key_for_message(
     Some(format!("message_outbox:v1:{}", hasher.finalize().to_hex()))
 }
 
+/// Test-only accessor for [`dedupe_key_for_message`] so sibling modules can
+/// assert their dedupe identity is stable (e.g. `long_turn_watchdog` verifying
+/// its cluster alert dedupes across scans). Not part of the runtime API.
+#[cfg(test)]
+pub(crate) fn dedupe_key_for_message_for_test(
+    target: &str,
+    content: &str,
+    reason_code: Option<&str>,
+    session_key: Option<&str>,
+) -> Option<String> {
+    dedupe_key_for_message(target, content, reason_code, session_key)
+}
+
 #[cfg(test)]
 mod dedupe_key_tests {
     use super::dedupe_key_for_message;

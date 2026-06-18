@@ -4870,4 +4870,59 @@ mod hard_ceiling_tests {
             );
         }
     }
+
+    /// #3557 (A) Codex-review fix: the INITIAL watchdog deadline must already be
+    /// capped at the provider ceiling, not only the auto-extend clamp. This
+    /// reproduces the `min(now + watchdog_timeout, ceiling_deadline)` the
+    /// watchdog now applies at spawn. With a 6h watchdog timeout and the tighter
+    /// 4h Codex ceiling, the initial deadline must land at 4h (the ceiling), so
+    /// a hung Codex turn is reconciled at 4h instead of 6h.
+    #[test]
+    fn initial_deadline_is_capped_at_codex_ceiling() {
+        // Only meaningful with default ceilings (codex 4h < generic/timeout 6h).
+        if std::env::var("AGENTDESK_CODEX_TURN_HARD_CEILING_SECS").is_ok()
+            || std::env::var("AGENTDESK_TURN_TIMEOUT_SECS").is_ok()
+        {
+            return;
+        }
+        let now_ms: i64 = 1_000_000_000;
+        let watchdog_timeout_ms = super::turn_watchdog_timeout().as_millis() as i64; // 6h
+        let proposed_initial_dl = now_ms + watchdog_timeout_ms;
+        let codex_ceiling = turn_hard_ceiling_deadline_ms(now_ms, &ProviderKind::Codex);
+        let initial = std::cmp::min(proposed_initial_dl, codex_ceiling);
+        assert_eq!(
+            initial, codex_ceiling,
+            "Codex initial deadline must be capped at the 4h ceiling, not the 6h timeout"
+        );
+        assert!(
+            initial < proposed_initial_dl,
+            "the cap must actually lower the initial deadline below the 6h timeout"
+        );
+        // The cap binds => the init-time warn condition (`proposed > ceiling`)
+        // is true, so the operator gets the one-shot ceiling warning.
+        assert!(proposed_initial_dl > codex_ceiling);
+    }
+
+    /// For a non-Codex provider whose ceiling equals the watchdog timeout (the
+    /// non-destructive default), the initial cap is a no-op: `min` leaves the
+    /// timeout-based deadline untouched and the init warn does NOT fire.
+    #[test]
+    fn initial_deadline_uncapped_when_ceiling_equals_timeout() {
+        if std::env::var("AGENTDESK_TURN_HARD_CEILING_SECS").is_ok()
+            || std::env::var("AGENTDESK_TURN_TIMEOUT_SECS").is_ok()
+        {
+            return;
+        }
+        let now_ms: i64 = 2_000_000_000;
+        let watchdog_timeout_ms = super::turn_watchdog_timeout().as_millis() as i64;
+        let proposed_initial_dl = now_ms + watchdog_timeout_ms;
+        let claude_ceiling = turn_hard_ceiling_deadline_ms(now_ms, &ProviderKind::Claude);
+        let initial = std::cmp::min(proposed_initial_dl, claude_ceiling);
+        // Defaults: generic ceiling 6h == watchdog timeout 6h.
+        assert_eq!(initial, proposed_initial_dl);
+        assert!(
+            proposed_initial_dl <= claude_ceiling,
+            "with equal defaults the init warn (proposed > ceiling) must not fire"
+        );
+    }
 }

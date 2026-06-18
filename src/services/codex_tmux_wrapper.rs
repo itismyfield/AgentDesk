@@ -526,11 +526,41 @@ fn run_turn(
         let next_line = if saw_any_stdout {
             // After the first event, bound inter-event silence: a hung Codex that
             // stops emitting without exiting used to block here forever.
-            match stdout_rx.recv_timeout(idle_recv_timeout) {
+            //
+            // #3557 (B) Codex-review fix: cap the idle recv by the REMAINING
+            // ceiling budget. Previously the loop entered `recv_timeout` with the
+            // full idle window (1800s) regardless of how close the run was to the
+            // hard ceiling, so an event at 3h59m followed by a hang killed Codex
+            // only at 4h29m (ceiling + idle). Clamping the wait to the ceiling
+            // remainder keeps the absolute ceiling honored even mid-recv; when no
+            // budget remains we kill immediately on the next loop iteration via
+            // the `start.elapsed() >= hard_ceiling` check at the top.
+            let elapsed = start.elapsed();
+            let ceiling_remaining = hard_ceiling.saturating_sub(elapsed);
+            if ceiling_remaining.is_zero() {
+                crate::services::process::kill_pid_tree(child_pid);
+                let _ = child.wait();
+                return Err(format!(
+                    "Codex turn exceeded hard ceiling of {}s",
+                    hard_ceiling.as_secs()
+                ));
+            }
+            let wait = idle_recv_timeout.min(ceiling_remaining);
+            match stdout_rx.recv_timeout(wait) {
                 Ok(line) => line,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
+                    // A timeout here is either the idle window or the ceiling
+                    // remainder elapsing; the top-of-loop ceiling check would
+                    // also catch the latter, but kill now to avoid one more
+                    // idle wait. Report the cause for diagnosis.
                     crate::services::process::kill_pid_tree(child_pid);
                     let _ = child.wait();
+                    if wait < idle_recv_timeout {
+                        return Err(format!(
+                            "Codex turn exceeded hard ceiling of {}s (idle recv capped by ceiling remainder)",
+                            hard_ceiling.as_secs()
+                        ));
+                    }
                     return Err(format!(
                         "Codex produced no JSON event for {}s (idle hang)",
                         idle_recv_timeout.as_secs()
@@ -2424,5 +2454,41 @@ mod turn_timeout_tests {
         let start = std::time::Instant::now();
         std::thread::sleep(Duration::from_millis(20));
         assert!(start.elapsed() >= ceiling);
+    }
+
+    /// #3557 (B) Codex-review fix: the idle recv must be capped by the REMAINING
+    /// ceiling budget so a post-first-event hang can never run past the ceiling
+    /// by a full idle window. This mirrors `idle_recv_timeout.min(remaining)`.
+    /// Mid-run, with budget left, the cap wins only when it is the smaller of
+    /// the two.
+    #[test]
+    fn idle_recv_is_capped_by_ceiling_remainder() {
+        let idle = Duration::from_secs(1800);
+        // Plenty of budget left: idle window governs (cap does not bite).
+        let remaining_lots = Duration::from_secs(3600);
+        assert_eq!(idle.min(remaining_lots), idle);
+        // Near the ceiling: the remainder governs, so a hang is killed at the
+        // ceiling, not ceiling+idle.
+        let remaining_little = Duration::from_secs(60);
+        assert_eq!(idle.min(remaining_little), remaining_little);
+        assert!(idle.min(remaining_little) < idle);
+    }
+
+    /// At/over the ceiling the remainder is zero, which the run loop treats as
+    /// "kill now" rather than entering another recv. Verify the saturating
+    /// remainder is zero exactly when elapsed has reached the ceiling.
+    #[test]
+    fn ceiling_remainder_is_zero_at_or_past_ceiling() {
+        let ceiling = Duration::from_secs(4 * 3600);
+        // elapsed == ceiling => zero remainder => immediate kill branch.
+        assert!(ceiling.saturating_sub(ceiling).is_zero());
+        // elapsed > ceiling => still zero (saturating), never a huge wait.
+        let past = ceiling + Duration::from_secs(120);
+        assert!(ceiling.saturating_sub(past).is_zero());
+        // elapsed < ceiling => positive remainder used as the recv cap.
+        let before = ceiling - Duration::from_secs(120);
+        let remaining = ceiling.saturating_sub(before);
+        assert!(!remaining.is_zero());
+        assert_eq!(remaining, Duration::from_secs(120));
     }
 }
