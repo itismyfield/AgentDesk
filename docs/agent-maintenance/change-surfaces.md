@@ -894,7 +894,12 @@
     its G1/G2 snapshots from `external_input_relay_lease(...).map(|l| l.generation)`;
     +62 from #3304: slash-command canonical prompt keys for `<command-*>` XML vs
     `/command args` dedupe, plus focused loop skill-expansion regressions).
-  - `src/services/discord/recovery_engine.rs` (3276 lines; the #3479 SPC-shadow
+  - `src/services/discord/recovery_engine.rs` (3329 lines; +53 from #3562 threading
+    the recovered-turn identity (`recovered_transcript_turn_id` full-path call) +
+    channel-bound `agent_id` (`resolve_role_binding(...).role_id`) through the
+    `emit_recovery_fired` / `emit_recovery_quality_event` recovery observability
+    pair at all three production fire sites so events back-trace which agent/turn
+    triggered the recovery; the #3479 SPC-shadow
     removal deleted the dead `StatusPanelController` recovery-completion shadow
     block + `assert_recovery_completion_parity` fn + its dead test, leaving the
     legacy `completion_target` let-else and `complete_status_panel_v2_with_http`
