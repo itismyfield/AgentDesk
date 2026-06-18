@@ -1546,6 +1546,246 @@ fn refresh_inflight_last_offset_if_matches_identity_in_root(
         .is_ok()
 }
 
+/// #3558: the watcher-owned streaming fields a single-flock RMW patches onto the
+/// persisted row. Plain value struct (moved into the helper). `last_offset` is
+/// deliberately ABSENT — the streaming caller does not own the relay watermark
+/// and the helper preserves whatever the in-lock disk reload carries (this is
+/// the core of the TOCTOU fix: the old unlocked load→save re-wrote a stale
+/// `last_offset`, racing a concurrent owner-gated `refresh_inflight_last_offset_*`
+/// advance and emitting a spurious `last_offset_monotonic` violation).
+#[derive(Debug, Clone)]
+pub(in crate::services::discord) struct WatcherStreamProgressPatch {
+    pub current_msg_id: Option<u64>,
+    pub full_response: String,
+    pub response_sent_offset: usize,
+    pub current_tool_line: Option<String>,
+    pub prev_tool_status: Option<String>,
+    pub task_notification_kind: Option<TaskNotificationKind>,
+    pub any_tool_used: bool,
+    pub has_post_tool_text: bool,
+}
+
+/// #3558: outcome of [`persist_watcher_stream_progress_locked_in_root`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum WatcherProgressOutcome {
+    /// The watcher-owned fields were patched and persisted.
+    Saved,
+    /// Either no row exists, or the in-lock reload no longer matches the
+    /// expected identity / tmux session (a fresh turn replaced it, or a
+    /// restart/rebind marker is now pinned). The write was skipped.
+    Skipped,
+    /// Filesystem or lock acquisition failure.
+    IoError,
+}
+
+/// #3558: single-flock read-modify-write for the tmux streaming-progress
+/// caller. Acquires the sidecar flock ONCE, reloads the on-disk row, re-checks
+/// the caller's identity/session guards against the freshly reloaded row, then
+/// patches ONLY the watcher-owned streaming fields and persists via
+/// [`persist_under_lock`] — never re-entering [`save_inflight_state`] (which
+/// would re-acquire the same non-reentrant flock and self-deadlock).
+///
+/// `last_offset` is preserved verbatim from the in-lock reload, so a concurrent
+/// owner-gated `refresh_inflight_last_offset_*` advance can no longer be
+/// clobbered backward by a stale unlocked snapshot.
+pub(in crate::services::discord) fn persist_watcher_stream_progress_locked(
+    provider: &ProviderKind,
+    channel_id: u64,
+    require_identity: Option<&InflightTurnIdentity>,
+    require_tmux_session_name: &str,
+    patch: WatcherStreamProgressPatch,
+) -> WatcherProgressOutcome {
+    let Some(root) = inflight_runtime_root() else {
+        return WatcherProgressOutcome::IoError;
+    };
+    persist_watcher_stream_progress_locked_in_root(
+        &root,
+        provider,
+        channel_id,
+        require_identity,
+        require_tmux_session_name,
+        patch,
+    )
+}
+
+/// Root-explicit variant of [`persist_watcher_stream_progress_locked`] for unit
+/// tests (avoids `AGENTDESK_ROOT_DIR` env-var races).
+fn persist_watcher_stream_progress_locked_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    require_identity: Option<&InflightTurnIdentity>,
+    require_tmux_session_name: &str,
+    patch: WatcherStreamProgressPatch,
+) -> WatcherProgressOutcome {
+    let path = inflight_state_path(root, provider, channel_id);
+    if let Some(parent) = path.parent()
+        && fs::create_dir_all(parent).is_err()
+    {
+        return WatcherProgressOutcome::IoError;
+    }
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return WatcherProgressOutcome::IoError;
+    };
+    let Some(mut state) = load_inflight_state_unlocked(&path) else {
+        return WatcherProgressOutcome::Skipped;
+    };
+    // A pinned restart/rebind marker means a different lifecycle owns the row;
+    // the streaming caller must not touch it (mirrors the refresh-path guard).
+    if state.restart_mode.is_some() || state.rebind_origin {
+        return WatcherProgressOutcome::Skipped;
+    }
+    if state.tmux_session_name.as_deref() != Some(require_tmux_session_name) {
+        return WatcherProgressOutcome::Skipped;
+    }
+    // #3558: when the caller has captured a per-turn identity, reject a write
+    // onto a fresh row B (different user_msg_id / started_at / turn_start_offset)
+    // — exactly the late-frame race the old tmux-session-only guard let through.
+    // Before identity is captured (early frames) the caller passes `None` and we
+    // fall back to the historical tmux-session-only guard above.
+    if let Some(identity) = require_identity
+        && !identity.matches_state(&state)
+    {
+        return WatcherProgressOutcome::Skipped;
+    }
+
+    if let Some(msg_id) = patch.current_msg_id {
+        state.current_msg_id = msg_id;
+    }
+    state.full_response = patch.full_response;
+    // Recompute the boundary clamp against the freshly reloaded full_response so
+    // the persisted offset stays in-bounds even if the disk row's body differs
+    // from the caller's last unlocked snapshot.
+    state.response_sent_offset =
+        normalize_response_sent_offset(&state.full_response, patch.response_sent_offset);
+    state.current_tool_line = patch.current_tool_line;
+    state.prev_tool_status = patch.prev_tool_status;
+    state.any_tool_used = patch.any_tool_used;
+    state.has_post_tool_text = patch.has_post_tool_text;
+    if patch.task_notification_kind.is_some() {
+        state.task_notification_kind = patch.task_notification_kind;
+    }
+    // `last_offset` intentionally untouched — preserved from the in-lock reload.
+
+    match persist_under_lock(
+        root,
+        &path,
+        &state,
+        "src/services/discord/inflight.rs:persist_watcher_stream_progress_locked_in_root",
+    ) {
+        Ok(()) => WatcherProgressOutcome::Saved,
+        Err(_) => WatcherProgressOutcome::IoError,
+    }
+}
+
+/// #3558: the watcher-owned fields the terminal-commit RMW writes. Unlike the
+/// streaming patch, the commit caller IS the authoritative owner of the
+/// turn-end watermark, so it deliberately writes `last_offset` /
+/// `response_sent_offset` — but max-serializes them against the in-lock reload
+/// so a late commit observing a newer disk watermark never moves it backward.
+pub(in crate::services::discord) struct WatcherTerminalCommitPatch {
+    pub full_response: String,
+    pub last_offset: u64,
+    pub last_watcher_relayed_offset: Option<u64>,
+    pub last_watcher_relayed_generation_mtime_ns: Option<i64>,
+}
+
+/// #3558: outcome of [`commit_watcher_terminal_delivery_locked_in_root`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum WatcherTerminalCommitOutcome {
+    Committed,
+    Skipped,
+    IoError,
+}
+
+/// #3558: single-flock read-modify-write for the watcher terminal-commit caller
+/// (`commit_decisions::mark_watcher_terminal_delivery_committed`). Replaces the
+/// old unlocked `load_inflight_state` → mutate → `save_inflight_state` (which
+/// re-wrote a stale `last_offset`/`response_sent_offset`, racing a concurrent
+/// owner advance). Holds the flock across reload → identity guard → patch →
+/// `persist_under_lock`. The commit owns the watermark, so it writes
+/// `last_offset`/`response_sent_offset` but `max`-serializes both against the
+/// in-lock reload (forward writes are unchanged; only a backward commit is
+/// clamped up to the disk value).
+pub(in crate::services::discord) fn commit_watcher_terminal_delivery_locked(
+    provider: &ProviderKind,
+    channel_id: u64,
+    require_identity: &InflightTurnIdentity,
+    require_tmux_session_name: &str,
+    patch: WatcherTerminalCommitPatch,
+) -> WatcherTerminalCommitOutcome {
+    let Some(root) = inflight_runtime_root() else {
+        return WatcherTerminalCommitOutcome::IoError;
+    };
+    commit_watcher_terminal_delivery_locked_in_root(
+        &root,
+        provider,
+        channel_id,
+        require_identity,
+        require_tmux_session_name,
+        patch,
+    )
+}
+
+/// Root-explicit variant of [`commit_watcher_terminal_delivery_locked`] for unit
+/// tests.
+fn commit_watcher_terminal_delivery_locked_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    require_identity: &InflightTurnIdentity,
+    require_tmux_session_name: &str,
+    patch: WatcherTerminalCommitPatch,
+) -> WatcherTerminalCommitOutcome {
+    let path = inflight_state_path(root, provider, channel_id);
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return WatcherTerminalCommitOutcome::IoError;
+    };
+    let Some(mut state) = load_inflight_state_unlocked(&path) else {
+        return WatcherTerminalCommitOutcome::Skipped;
+    };
+    if state.restart_mode.is_some() || state.rebind_origin {
+        return WatcherTerminalCommitOutcome::Skipped;
+    }
+    // Preserve the existing strong identity guard (user_msg_id + started_at +
+    // tmux_session + turn_start_offset) exactly — `matches_state` already
+    // compares all four, and we additionally pin the caller-supplied session.
+    if !require_identity.matches_state(&state)
+        || state.tmux_session_name.as_deref() != Some(require_tmux_session_name)
+    {
+        return WatcherTerminalCommitOutcome::Skipped;
+    }
+
+    state.terminal_delivery_committed = true;
+    // Max-serialize against the in-lock reload so a late commit never moves the
+    // watermark backward (the TOCTOU the old unlocked load→save introduced):
+    //  - `full_response`: keep whichever body is LONGER. A concurrent stream may
+    //    have persisted a longer body than this (possibly stale) commit carries;
+    //    adopting the longer one avoids truncating already-relayed content AND
+    //    keeps `response_sent_offset` in-bounds.
+    //  - `response_sent_offset`: the committed body length, never below disk.
+    //  - `last_offset`: the larger of the commit arg and the disk watermark.
+    if patch.full_response.len() >= state.full_response.len() {
+        state.full_response = patch.full_response;
+    }
+    let committed_response_offset = state.full_response.len().max(state.response_sent_offset);
+    state.response_sent_offset =
+        normalize_response_sent_offset(&state.full_response, committed_response_offset);
+    state.last_offset = patch.last_offset.max(state.last_offset);
+    state.last_watcher_relayed_offset = patch.last_watcher_relayed_offset;
+    state.last_watcher_relayed_generation_mtime_ns = patch.last_watcher_relayed_generation_mtime_ns;
+
+    match persist_under_lock(
+        root,
+        &path,
+        &state,
+        "src/services/discord/inflight.rs:commit_watcher_terminal_delivery_locked_in_root",
+    ) {
+        Ok(()) => WatcherTerminalCommitOutcome::Committed,
+        Err(_) => WatcherTerminalCommitOutcome::IoError,
+    }
+}
+
 fn inflight_state_allows_idle_tmux_repair_state(state: &InflightTurnState) -> bool {
     state.full_response.trim().is_empty()
         && state.response_sent_offset == 0
@@ -2037,14 +2277,17 @@ mod stall_recovery_tests {
         GuardedClearOutcome, GuardedSaveOutcome, INFLIGHT_STALENESS_THRESHOLD_SECS,
         InflightRestartMode, InflightTurnIdentity, InflightTurnState, RelayOwnerKind,
         StatusPanelBindGuard, StatusPanelBindOutcome, StatusPanelClearGuard,
-        bind_status_panel_in_root, clear_current_msg_if_matches_in_root,
+        WatcherProgressOutcome, WatcherStreamProgressPatch, WatcherTerminalCommitOutcome,
+        WatcherTerminalCommitPatch, bind_status_panel_in_root,
+        clear_current_msg_if_matches_in_root,
         clear_inflight_state_if_matches_identity_after_delivery_in_root,
         clear_inflight_state_if_matches_identity_in_root, clear_inflight_state_if_matches_in_root,
         clear_inflight_state_if_matches_tmux_response_in_root,
         clear_inflight_state_if_matches_zero_owned_in_root, clear_status_panel_if_current_in_root,
+        commit_watcher_terminal_delivery_locked_in_root,
         inflight_state_allows_idle_tmux_repair_state, inflight_state_is_stale, inflight_state_path,
         load_inflight_states_from_root, lock_inflight_state_path, normalize_response_sent_offset,
-        offset_monotonic_invariant_severity,
+        offset_monotonic_invariant_severity, persist_watcher_stream_progress_locked_in_root,
         refresh_inflight_last_offset_if_matches_identity_in_root,
         save_inflight_state_if_matches_identity_in_root, save_inflight_state_in_root,
         validate_inflight_state_for_save,
@@ -2244,6 +2487,315 @@ mod stall_recovery_tests {
         assert!(!legacy.followup_merge_consecutive);
         assert!(legacy.followup_pending_uploads.is_empty());
         assert_eq!(legacy.followup_voice_announcement, None);
+    }
+
+    // ---- #3558: watcher locked read-modify-write (offset TOCTOU) tests ----
+
+    /// Seeds a watcher-streaming inflight row in `root` and returns it, with
+    /// caller-controlled `last_offset` / `response_sent_offset` / `full_response`
+    /// so the offset ownership semantics can be exercised.
+    fn seed_watcher_stream_state(
+        root: &Path,
+        channel_id: u64,
+        tmux_session_name: &str,
+        full_response: &str,
+        last_offset: u64,
+    ) -> InflightTurnState {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            channel_id,
+            Some("adk-claude".to_string()),
+            42,
+            42,
+            43,
+            "prompt".to_string(),
+            Some("session-3558".to_string()),
+            Some(tmux_session_name.to_string()),
+            Some("/tmp/agentdesk-3558.jsonl".to_string()),
+            None,
+            64,
+        );
+        state.turn_start_offset = Some(64);
+        state.full_response = full_response.to_string();
+        state.response_sent_offset = full_response.len();
+        state.last_offset = last_offset;
+        save_inflight_state_in_root(root, &state).expect("seed watcher stream state");
+        state
+    }
+
+    fn loaded_row(root: &Path, channel_id: u64) -> InflightTurnState {
+        load_inflight_states_from_root(root, &ProviderKind::Claude)
+            .into_iter()
+            .find(|s| s.channel_id == channel_id)
+            .expect("inflight row present")
+    }
+
+    /// Writes `state` to its on-disk path bypassing `validate_inflight_state_for_save`
+    /// so a test can seed a pre-condition that is itself a (legitimate)
+    /// fresh-turn reset / concurrently-advanced watermark without tripping the
+    /// `#[cfg(debug_assertions)]` monotonic tripwire — these are exactly the
+    /// disk states the helper under test must handle, not produce.
+    fn force_write_state(root: &Path, state: &InflightTurnState) {
+        let provider = state.provider_kind().expect("known provider");
+        let path = inflight_state_path(root, &provider, state.channel_id);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create provider dir");
+        }
+        let json = serde_json::to_string_pretty(state).expect("serialize state");
+        super::atomic_write(&path, &json).expect("force write state");
+    }
+
+    /// #3558 core: a streaming progress write must PRESERVE the on-disk
+    /// `last_offset` (which a concurrent owner-gated refresh advanced) instead
+    /// of clobbering it backward from a stale unlocked snapshot.
+    #[test]
+    fn watcher_stream_progress_preserves_concurrently_advanced_last_offset() {
+        let temp = TempDir::new().unwrap();
+        let channel_id = 35_580_001;
+        let session = "AgentDesk-claude-3558-a";
+        let state = seed_watcher_stream_state(temp.path(), channel_id, session, "hello", 100);
+        let identity = InflightTurnIdentity::from_state(&state);
+
+        // Concurrent owner-gated refresh advances the persisted watermark to 200
+        // (simulating the race window between the old unlocked load and save).
+        assert!(refresh_inflight_last_offset_if_matches_identity_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            channel_id,
+            &identity,
+            Some(64),
+            "/tmp/agentdesk-3558.jsonl",
+            None,
+            200,
+            RelayOwnerKind::None,
+        ));
+
+        // The streaming caller (holding a stale last_offset == 100 implicitly)
+        // patches only watcher-owned fields.
+        let outcome = persist_watcher_stream_progress_locked_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            channel_id,
+            Some(&identity),
+            session,
+            WatcherStreamProgressPatch {
+                current_msg_id: Some(43),
+                full_response: "hello world".to_string(),
+                response_sent_offset: 11,
+                current_tool_line: None,
+                prev_tool_status: None,
+                task_notification_kind: None,
+                any_tool_used: false,
+                has_post_tool_text: false,
+            },
+        );
+        assert_eq!(outcome, WatcherProgressOutcome::Saved);
+
+        let persisted = loaded_row(temp.path(), channel_id);
+        assert_eq!(persisted.full_response, "hello world");
+        assert_eq!(persisted.response_sent_offset, 11);
+        assert_eq!(
+            persisted.last_offset, 200,
+            "last_offset must be preserved at the concurrently-advanced value, NOT clobbered to 100"
+        );
+    }
+
+    /// #3558: a streaming write must be SKIPPED when a fresh turn (row B) with a
+    /// different `turn_start_offset` replaced the row mid-frame — the identity
+    /// guard rejects it and leaves row B untouched.
+    #[test]
+    fn watcher_stream_progress_skips_on_fresh_row_identity_mismatch() {
+        let temp = TempDir::new().unwrap();
+        let channel_id = 35_580_002;
+        let session = "AgentDesk-claude-3558-b";
+        let state = seed_watcher_stream_state(temp.path(), channel_id, session, "old", 50);
+        let stale_identity = InflightTurnIdentity::from_state(&state);
+
+        // A fresh turn B replaces the row (different turn_start_offset). A legit
+        // fresh-turn reset lowers last_offset/offset on purpose, so seed it via a
+        // direct write (the on-disk pre-condition the helper must reject).
+        let mut fresh = state.clone();
+        fresh.turn_start_offset = Some(999);
+        fresh.full_response = "fresh".to_string();
+        fresh.response_sent_offset = "fresh".len();
+        fresh.last_offset = 0;
+        force_write_state(temp.path(), &fresh);
+
+        let outcome = persist_watcher_stream_progress_locked_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            channel_id,
+            Some(&stale_identity),
+            session,
+            WatcherStreamProgressPatch {
+                current_msg_id: Some(43),
+                full_response: "stale write".to_string(),
+                response_sent_offset: 11,
+                current_tool_line: None,
+                prev_tool_status: None,
+                task_notification_kind: None,
+                any_tool_used: false,
+                has_post_tool_text: false,
+            },
+        );
+        assert_eq!(outcome, WatcherProgressOutcome::Skipped);
+
+        let persisted = loaded_row(temp.path(), channel_id);
+        assert_eq!(
+            persisted.full_response, "fresh",
+            "fresh row B must be untouched by the stale streaming write"
+        );
+        assert_eq!(persisted.turn_start_offset, Some(999));
+    }
+
+    /// #3558: the terminal-commit RMW max-serializes `last_offset` /
+    /// `response_sent_offset` / `full_response` — a late commit observing a NEWER
+    /// disk watermark (a concurrent stream persisted a longer body / larger
+    /// offset) must not move any of them backward. The commit owns the fields but
+    /// clamps up, keeping the longer already-relayed body so nothing is truncated.
+    #[test]
+    fn watcher_terminal_commit_max_serializes_backward_offsets() {
+        let temp = TempDir::new().unwrap();
+        let channel_id = 35_580_003;
+        let session = "AgentDesk-claude-3558-c";
+        // Disk carries a LONGER already-streamed body + watermark than the
+        // (stale) commit — the concurrent-advance pre-condition. Seed via a
+        // direct write since this is the on-disk state the commit must handle.
+        let long_body = "delivered body plus a much longer already-relayed tail";
+        let mut state = seed_watcher_stream_state(temp.path(), channel_id, session, long_body, 300);
+        state.response_sent_offset = long_body.len();
+        force_write_state(temp.path(), &state);
+        let identity = InflightTurnIdentity::from_state(&state);
+
+        // Commit arrives with a SMALLER last_offset (250 < disk 300) and a
+        // SHORTER body than disk.
+        let outcome = commit_watcher_terminal_delivery_locked_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            channel_id,
+            &identity,
+            session,
+            WatcherTerminalCommitPatch {
+                full_response: "delivered body".to_string(),
+                last_offset: 250,
+                last_watcher_relayed_offset: Some(64),
+                last_watcher_relayed_generation_mtime_ns: Some(7),
+            },
+        );
+        assert_eq!(outcome, WatcherTerminalCommitOutcome::Committed);
+
+        let persisted = loaded_row(temp.path(), channel_id);
+        assert!(persisted.terminal_delivery_committed);
+        assert_eq!(
+            persisted.last_offset, 300,
+            "backward commit last_offset must clamp UP to the disk watermark"
+        );
+        assert_eq!(
+            persisted.full_response, long_body,
+            "the longer already-relayed body must NOT be truncated by a shorter stale commit"
+        );
+        assert_eq!(
+            persisted.response_sent_offset,
+            long_body.len(),
+            "response_sent_offset must clamp UP to the longer body length, never backward"
+        );
+        assert!(
+            persisted.response_sent_offset <= persisted.full_response.len(),
+            "response_sent_offset must stay in bounds"
+        );
+    }
+
+    /// #3558: a forward commit (larger watermark than disk) advances normally —
+    /// the max-serialize is a no-op when the commit is the authoritative tip.
+    #[test]
+    fn watcher_terminal_commit_advances_forward_offset() {
+        let temp = TempDir::new().unwrap();
+        let channel_id = 35_580_004;
+        let session = "AgentDesk-claude-3558-d";
+        let state = seed_watcher_stream_state(temp.path(), channel_id, session, "body", 100);
+        let identity = InflightTurnIdentity::from_state(&state);
+
+        let outcome = commit_watcher_terminal_delivery_locked_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            channel_id,
+            &identity,
+            session,
+            WatcherTerminalCommitPatch {
+                full_response: "delivered response".to_string(),
+                last_offset: 256,
+                last_watcher_relayed_offset: Some(64),
+                last_watcher_relayed_generation_mtime_ns: Some(9),
+            },
+        );
+        assert_eq!(outcome, WatcherTerminalCommitOutcome::Committed);
+
+        let persisted = loaded_row(temp.path(), channel_id);
+        assert_eq!(persisted.last_offset, 256);
+        assert_eq!(persisted.full_response, "delivered response");
+        assert_eq!(
+            persisted.response_sent_offset,
+            "delivered response".len(),
+            "forward commit sets response_sent_offset to the committed body length"
+        );
+        assert_eq!(persisted.last_watcher_relayed_offset, Some(64));
+        assert_eq!(persisted.last_watcher_relayed_generation_mtime_ns, Some(9));
+    }
+
+    /// #3558 (Gemini retry non-destruction): after a same-turn retry reset
+    /// (full_response="", response_sent_offset=0), a streaming write that itself
+    /// carries the reset (empty body) must NOT pull the offset back up via any
+    /// blanket max-merge — the patched value is preserved exactly and stays
+    /// in-bounds.
+    #[test]
+    fn watcher_stream_progress_preserves_gemini_retry_reset() {
+        let temp = TempDir::new().unwrap();
+        let channel_id = 35_580_005;
+        let session = "AgentDesk-claude-3558-e";
+        let mut state =
+            seed_watcher_stream_state(temp.path(), channel_id, session, "first attempt", 100);
+        let identity = InflightTurnIdentity::from_state(&state);
+
+        // Legitimate same-turn retry reset (mirrors reset_gemini_retry_attempt_state).
+        // A reset lowers full_response/offset to 0 on purpose for the SAME turn
+        // identity — the bridge persists it; seed it via a direct write so the
+        // intentional backward reset does not trip the test-only monotonic
+        // tripwire (the production save records it OBSERVE-ONLY, never skips).
+        state.full_response = String::new();
+        state.response_sent_offset = 0;
+        force_write_state(temp.path(), &state);
+
+        // Watcher streams the retried turn from empty; the patch carries the
+        // post-reset body. No blanket max-merge: the offset follows the patch.
+        let outcome = persist_watcher_stream_progress_locked_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            channel_id,
+            Some(&identity),
+            session,
+            WatcherStreamProgressPatch {
+                current_msg_id: Some(43),
+                full_response: "retry body".to_string(),
+                response_sent_offset: 10,
+                current_tool_line: None,
+                prev_tool_status: None,
+                task_notification_kind: None,
+                any_tool_used: false,
+                has_post_tool_text: false,
+            },
+        );
+        assert_eq!(outcome, WatcherProgressOutcome::Saved);
+
+        let persisted = loaded_row(temp.path(), channel_id);
+        assert_eq!(persisted.full_response, "retry body");
+        assert_eq!(
+            persisted.response_sent_offset, 10,
+            "post-reset offset must follow the patch, not be pulled back up to the pre-reset value"
+        );
+        assert!(
+            persisted.response_sent_offset <= persisted.full_response.len(),
+            "response_sent_offset must stay in bounds after a retry reset"
+        );
     }
 
     // ---- #3077: typed status-panel ownership write tests ----

@@ -2366,10 +2366,16 @@ async fn reconcile_orphan_suppressed_placeholder_for_restored_watcher(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn persist_watcher_stream_progress(
     provider: &ProviderKind,
     channel_id: ChannelId,
     tmux_session_name: &str,
+    // #3558: the per-turn identity the watcher captured for this panel. `Some`
+    // rejects a write onto a fresh row B (different turn started after this
+    // frame); `None` (early frames before identity capture) falls back to the
+    // historical tmux-session-only guard inside the helper.
+    require_identity: Option<&super::inflight::InflightTurnIdentity>,
     current_msg_id: Option<MessageId>,
     full_response: &str,
     response_sent_offset: usize,
@@ -2379,38 +2385,12 @@ fn persist_watcher_stream_progress(
     any_tool_used: bool,
     has_post_tool_text: bool,
 ) {
-    let Some(mut inflight) = super::inflight::load_inflight_state(provider, channel_id.get())
-    else {
-        return;
-    };
-    if inflight.tmux_session_name.as_deref() != Some(tmux_session_name) {
-        return;
-    }
-
-    if let Some(msg_id) = current_msg_id {
-        inflight.current_msg_id = msg_id.get();
-    }
+    // #3558: pre-emit the in-bounds telemetry against the caller's snapshot for
+    // continuity; the helper re-clamps `response_sent_offset` against the
+    // freshly reloaded `full_response` under the lock, so the persisted value is
+    // always in-bounds regardless of this advisory check.
     let normalized_response_sent_offset =
         normalize_response_sent_offset(full_response, response_sent_offset);
-    let monotonic_offset = normalized_response_sent_offset >= inflight.response_sent_offset;
-    // #3552 (codex r2): the `response_sent_offset_monotonic` invariant for this
-    // backward write is NOT emitted here. This load↔save is unlocked, so a
-    // severity computed against `inflight` (loaded above) can race a concurrent
-    // path that clears the row or stores a fresh-turn row B before the
-    // `save_inflight_state` below re-reads it under its lock — which would make
-    // this emit WARN ("#3416 will skip") while the save actually persists the
-    // stale write (WARN-only-when-skipped violation that hides a real breach).
-    // `save_inflight_state` re-validates the SAME row inside its lock and emits
-    // `response_sent_offset_monotonic` at the correct severity atomically with
-    // the skip/persist decision (WARN iff #3416 skips, ERROR iff it persists),
-    // and this function always reaches that save (no early return after this
-    // point), so the save path is the single authoritative emitter and the tmux
-    // pre-save emit would be a pure, race-prone duplicate. The DEBUG-only
-    // tripwire below stays as a local safety net (production no-op).
-    debug_assert!(
-        monotonic_offset,
-        "watcher response_sent_offset must not move backwards"
-    );
     let offset_in_bounds = normalized_response_sent_offset <= full_response.len()
         && full_response.is_char_boundary(normalized_response_sent_offset);
     record_watcher_invariant(
@@ -2430,16 +2410,27 @@ fn persist_watcher_stream_progress(
         offset_in_bounds,
         "watcher response_sent_offset must stay on a full_response boundary"
     );
-    inflight.full_response = full_response.to_string();
-    inflight.response_sent_offset = normalized_response_sent_offset;
-    inflight.current_tool_line = current_tool_line.map(str::to_string);
-    inflight.prev_tool_status = prev_tool_status.map(str::to_string);
-    inflight.any_tool_used = any_tool_used;
-    inflight.has_post_tool_text = has_post_tool_text;
-    if task_notification_kind.is_some() {
-        inflight.task_notification_kind = task_notification_kind;
-    }
-    let _ = super::inflight::save_inflight_state(&inflight);
+
+    // #3558: single-flock read-modify-write. `last_offset` is NOT in the patch
+    // — the helper preserves whatever the in-lock disk reload carries, so a
+    // concurrent owner-gated `refresh_inflight_last_offset_*` advance can no
+    // longer be clobbered backward by this previously-unlocked load→save TOCTOU.
+    let _ = super::inflight::persist_watcher_stream_progress_locked(
+        provider,
+        channel_id.get(),
+        require_identity,
+        tmux_session_name,
+        super::inflight::WatcherStreamProgressPatch {
+            current_msg_id: current_msg_id.map(MessageId::get),
+            full_response: full_response.to_string(),
+            response_sent_offset,
+            current_tool_line: current_tool_line.map(str::to_string),
+            prev_tool_status: prev_tool_status.map(str::to_string),
+            task_notification_kind,
+            any_tool_used,
+            has_post_tool_text,
+        },
+    );
 }
 
 async fn finish_restored_watcher_active_turn(
@@ -2631,7 +2622,7 @@ mod watcher_stream_progress_tests {
         let provider = ProviderKind::Claude;
         let channel_id = ChannelId::new(1509350490461180105);
         let tmux_session_name = "AgentDesk-claude-adk-issue-2985-hold-witness";
-        let state = InflightTurnState::new(
+        let mut state = InflightTurnState::new(
             provider.clone(),
             channel_id.get(),
             Some("claude-pipe".to_string()),
@@ -2645,12 +2636,16 @@ mod watcher_stream_progress_tests {
             Some("/tmp/issue-2985-input.fifo".to_string()),
             0,
         );
+        // #3558: seed a non-zero relay watermark the streaming caller must NOT
+        // own — the locked RMW must preserve it verbatim.
+        state.last_offset = 777;
         super::super::inflight::save_inflight_state(&state).expect("save inflight");
 
         persist_watcher_stream_progress(
             &provider,
             channel_id,
             tmux_session_name,
+            None,
             Some(MessageId::new(9100000000000000125)),
             "[E2E:E18:OK]\n\n",
             0,
@@ -2674,6 +2669,12 @@ mod watcher_stream_progress_tests {
             Some("Bash: sleep 60")
         );
         assert_eq!(persisted.current_msg_id, 9100000000000000125);
+        // #3558: the streaming progress write does NOT own `last_offset` — it
+        // must survive untouched (the core TOCTOU fix).
+        assert_eq!(
+            persisted.last_offset, 777,
+            "streaming progress must preserve the non-owned last_offset watermark"
+        );
 
         unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
     }
