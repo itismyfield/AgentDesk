@@ -920,7 +920,11 @@
     its G1/G2 snapshots from `external_input_relay_lease(...).map(|l| l.generation)`;
     +62 from #3304: slash-command canonical prompt keys for `<command-*>` XML vs
     `/command args` dedupe, plus focused loop skill-expansion regressions).
-  - `src/services/discord/recovery_engine.rs` (3340 lines; +11 from #3581 stamping
+  - `src/services/discord/recovery_engine.rs` (3349 lines; +9 from #3582 stamping
+    `set_relay_owner_kind(Watcher)` at the rebind-origin birth site so the
+    STALL-WATCHDOG force-clean -> respawn synthetic row (which lands here with
+    `existing_inflight = None`) is watcher-owned instead of degrading to
+    `relay_owner_kind = None`; +11 from #3581 stamping
     the three bounded-preservation fields (`rebind_origin_created_at_unix` /
     `_deadline_secs` / `_birth_generation`) at the rebind-origin birth site so an
     unadopted, never-progressed orphan can be reaped instead of permanently

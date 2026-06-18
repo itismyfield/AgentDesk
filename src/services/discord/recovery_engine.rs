@@ -3609,6 +3609,15 @@ pub(crate) async fn rebind_inflight_for_channel(
         // #2285 E1–E5) routes both identically — this is pure audit
         // metadata.
         state.turn_source = super::inflight::TurnSource::ExternalAdopted;
+        // #3582: bind the relay to the watcher we respawn below. The
+        // STALL-WATCHDOG force-clean -> respawn path reaches this birth site with
+        // `existing_inflight = None` (force-clean deleted the row first); without
+        // this stamp the synthetic row defaults to `relay_owner_kind = None` and
+        // every later idle-tail / panel / routing check runs the degraded
+        // bridge-owned path even though the watcher owns the live tmux relay. The
+        // monitor-auto-turn birth site (`tmux.rs`) already stamps Watcher the same
+        // way; `rebind_origin` and `relay_owner_kind` are independent flags.
+        state.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
         // #3581: stamp the bounded-preservation fields so an unadopted,
         // never-progressed rebind-origin row can be reaped after a deadline (or
         // a boot-time generation mismatch) instead of becoming a permanent
@@ -3833,6 +3842,49 @@ mod post_work_evidence_tests {
         state.any_tool_used = false;
         state.last_tool_summary = Some("Bash completed".to_string());
         assert!(recovery_has_post_work_ready_evidence(&state));
+    }
+
+    /// #3582 regression: the synthetic inflight that `rebind_inflight_for_channel`
+    /// creates when `existing_inflight = None` (the STALL-WATCHDOG force-clean ->
+    /// respawn path, which deletes the row first) must be stamped watcher-owned.
+    /// Before the fix this row defaulted to `relay_owner_kind = None`, so
+    /// `effective_relay_owner_kind()` resolved to `None` and every later idle-tail /
+    /// panel / routing check ran the degraded bridge-owned path even though the
+    /// watcher actually owns the live tmux relay. This mirrors the exact stamps the
+    /// birth site applies; if a refactor drops `set_relay_owner_kind(Watcher)` there
+    /// this assertion fails.
+    #[test]
+    fn synthetic_rebind_origin_row_is_watcher_owned() {
+        let mut state = inflight::InflightTurnState::new(
+            ProviderKind::Claude,
+            1_479_671_298_497_183_835,
+            Some("adk-cc".to_string()),
+            0, // request_owner_user_id — no originating Discord user
+            0, // user_msg_id
+            0, // current_msg_id (placeholder)
+            String::from("/api/inflight/rebind"),
+            None,
+            Some("AgentDesk-claude-adk-cc".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            0,
+        );
+        // Birth-site stamps (must stay in sync with `rebind_inflight_for_channel`).
+        state.rebind_origin = true;
+        state.turn_source = inflight::TurnSource::ExternalAdopted;
+        state.set_relay_owner_kind(inflight::RelayOwnerKind::Watcher);
+
+        assert_eq!(
+            state.effective_relay_owner_kind(),
+            inflight::RelayOwnerKind::Watcher,
+            "force-clean respawn must leave the relay watcher-owned, not degraded to None",
+        );
+        assert!(
+            state.watcher_owns_live_relay,
+            "the legacy bool must agree so older deserializers also see watcher ownership",
+        );
+        // rebind_origin and watcher ownership are independent flags and must coexist.
+        assert!(state.rebind_origin);
     }
 }
 

@@ -254,7 +254,14 @@
 # bounded-preservation fields (created_at_unix / deadline_secs / birth_generation)
 # are stamped right after `turn_source = ExternalAdopted` so an unadopted,
 # never-progressed rebind orphan can be reaped instead of wedging turn-start.
-"src/services/discord/recovery_engine.rs" = 3340
+# #3582: +9 (3340 -> 3349) for the `set_relay_owner_kind(Watcher)` stamp (+ its
+# rationale comment) on the same rebind-origin birth site. The STALL-WATCHDOG
+# force-clean -> respawn path lands here with `existing_inflight = None`, so the
+# synthetic row used to default to `relay_owner_kind = None` and run every later
+# idle-tail / panel / routing check on the degraded bridge-owned path even though
+# the respawned watcher owns the live tmux relay (the #3582 "relay re-occurrence"
+# regression). No new direct-send; pure inflight-field stamp mirroring tmux.rs.
+"src/services/discord/recovery_engine.rs" = 3349
 # #3034 batch-8: lowered 3771 -> 3770 (dead-code removal).
 # #3038 S1: +1 (3770 -> 3771) for the mechanical `shared.queued_placeholders` ->
 # `shared.queued.queued_placeholders` re-wire (one extra method-chain line) forced

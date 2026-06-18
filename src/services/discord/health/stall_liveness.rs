@@ -10,7 +10,27 @@ use crate::services::provider::ProviderKind;
 use super::snapshot::WatcherStateSnapshot;
 
 pub(super) const STALL_WATCHDOG_POSITIVE_LIVENESS_SECS: u64 = 120;
-pub(super) const STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS: u8 = 3;
+/// Hard ceiling on how many consecutive watchdog ticks a force-clean may be
+/// deferred while positive liveness keeps being observed. A deferral only ever
+/// fires when `has_positive_liveness` is true — i.e. fresh bytes are demonstrably
+/// flowing (pane offset advanced cross-tick, transcript/runtime jsonl mtime
+/// inside `POSITIVE_LIVENESS_SECS`, or a fresh background-synthetic anchor) — so
+/// a genuinely dead relay (every signal stale ⇒ `reason_codes == none`) takes the
+/// `ProceedNoEvidence` branch and is cleaned on the very first tick, untouched by
+/// this cap.
+///
+/// #3582: raised 3 -> 20. At the old value a *live* turn that kept emitting output
+/// for longer than `THRESHOLD_SECS + 3 * INTERVAL_SECS` (~600s + ~90s) was killed
+/// mid-stream the instant the cap was hit even though `reason_codes` still listed
+/// `pane_offset_advanced_recently,transcript_mtime_recent` — the confirmed
+/// 2026-06-18 12:07 false-positive (a "Response sent" landed 5s after the
+/// force-clean). The window is only ~90s of grace over the threshold, far short of
+/// a long but live turn. 20 deferrals = `20 * INTERVAL_SECS` (~600s) of extra
+/// grace, so the watchdog still only kills a turn that has been quiet (no
+/// liveness signal) — and a true live-spinner hang (pane bytes flow but no answer
+/// ever lands) is still bounded: once the cap is reached the force-clean proceeds,
+/// so the detection ceiling stays finite (R1).
+pub(super) const STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS: u8 = 20;
 pub(super) const STALL_LIVENESS_STATE_TTL_SECS: u64 = 1800;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -774,7 +794,7 @@ mod tests {
     }
 
     #[test]
-    fn liveness_deferral_cap_allows_cleanup_after_three_passes_and_logs_limit() {
+    fn liveness_deferral_cap_allows_cleanup_after_max_passes_and_logs_limit() {
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(3363);
         let tmux_session = "AgentDesk-codex-liveness-cap";
@@ -844,6 +864,94 @@ mod tests {
         );
     }
 
+    /// #3582 regression: the 2026-06-18 12:07 false-positive. A live turn that
+    /// keeps emitting output (fresh transcript mtime every tick) was force-cleaned
+    /// the instant the OLD cap of 3 was hit, even though `reason_codes` still
+    /// listed positive liveness — a "Response sent" landed 5s later. With the cap
+    /// raised to 20 the same strong-liveness streak that previously died at pass 4
+    /// keeps deferring, so a live-but-quiet turn survives well past the old window.
+    #[test]
+    fn strong_liveness_past_old_cap_still_defers_under_new_cap() {
+        const OLD_CAP: u8 = 3;
+        assert!(
+            STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS > OLD_CAP,
+            "this regression only has teeth when the new cap exceeds the old one"
+        );
+
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(3368);
+        let tmux_session = "AgentDesk-codex-liveness-12-07";
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+        // A fresh temp transcript => `transcript_mtime_recent` is positive on
+        // every tick, mirroring the live turn whose JSONL kept being written.
+        let file = tempfile::NamedTempFile::new().expect("temp transcript");
+        let inflight = inflight_with_output(
+            channel.get(),
+            tmux_session,
+            Some(file.path().display().to_string()),
+        );
+        let snap = snapshot(channel.get(), tmux_session, Some(20));
+        let now = chrono::Utc::now().timestamp();
+
+        // Every tick from 1..=OLD_CAP+1 must STILL defer — at the old cap the
+        // (OLD_CAP+1)th pass returned ProceedAfterDeferralLimit and killed the
+        // live turn. Under the new cap it stays a Defer.
+        for expected_count in 1..=(OLD_CAP + 1) {
+            let decision = evaluate_stall_watchdog_liveness(
+                &provider,
+                channel,
+                &snap,
+                Some(&inflight),
+                now,
+                STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+                STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+            );
+            assert_eq!(
+                decision.action,
+                StallWatchdogLivenessAction::Defer {
+                    deferral_count: expected_count
+                },
+                "pass {expected_count} should still defer under the raised cap"
+            );
+        }
+
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+    }
+
+    /// #3582 corollary: the cap raise must NOT weaken detection of a genuinely
+    /// dead relay. When no liveness signal is present (`reason_codes == none`),
+    /// the decision is `ProceedNoEvidence` on the very first tick regardless of
+    /// the cap — exactly the 11:52 / 12:38 immediate-clean cases.
+    #[test]
+    fn no_liveness_still_proceeds_immediately_under_raised_cap() {
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(3369);
+        let tmux_session = "AgentDesk-codex-liveness-dead-relay";
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+        // No transcript path => no transcript mtime signal; stale inflight =>
+        // no other positive signal either.
+        let snap = snapshot(channel.get(), tmux_session, None);
+        let mut inflight = inflight_with_output(channel.get(), tmux_session, None);
+        inflight.updated_at = "2026-06-12 00:00:00".to_string();
+
+        let decision = evaluate_stall_watchdog_liveness(
+            &provider,
+            channel,
+            &snap,
+            Some(&inflight),
+            1_800_000_000,
+            STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+            STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+        );
+        assert_eq!(
+            decision.action,
+            StallWatchdogLivenessAction::ProceedNoEvidence,
+            "a dead relay must be cleaned on the first tick even with a raised cap"
+        );
+
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+    }
+
     #[test]
     fn liveness_deferral_streak_survives_desync_flap_without_positive_health() {
         let provider = ProviderKind::Codex;
@@ -860,7 +968,8 @@ mod tests {
         let snap = snapshot(channel.get(), tmux_session, Some(20));
         let now = chrono::Utc::now().timestamp();
 
-        for expected_count in 1..=2 {
+        // Build the streak up to one short of the cap.
+        for expected_count in 1..STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS {
             let decision = evaluate_stall_watchdog_liveness(
                 &provider,
                 channel,
@@ -878,6 +987,9 @@ mod tests {
             );
         }
 
+        // A transient desync flap (desynced toggles off but terminal delivery
+        // never committed) must NOT clear the in-flight deferral streak.
+        let pre_flap_count = STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS - 1;
         let mut flapped_snapshot = snap.clone();
         flapped_snapshot.desynced = false;
         flapped_snapshot.relay_health.desynced = false;
@@ -886,9 +998,11 @@ mod tests {
             channel,
             &flapped_snapshot,
         ));
-        assert_eq!(deferral_count(&key), Some(2));
+        assert_eq!(deferral_count(&key), Some(pre_flap_count));
 
-        let third = evaluate_stall_watchdog_liveness(
+        // The next tick reaches the cap (the final defer), then the one after
+        // proceeds with the force-clean.
+        let at_cap = evaluate_stall_watchdog_liveness(
             &provider,
             channel,
             &snap,
@@ -898,8 +1012,10 @@ mod tests {
             STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
         );
         assert_eq!(
-            third.action,
-            StallWatchdogLivenessAction::Defer { deferral_count: 3 }
+            at_cap.action,
+            StallWatchdogLivenessAction::Defer {
+                deferral_count: STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS
+            }
         );
 
         let decision = evaluate_stall_watchdog_liveness(
