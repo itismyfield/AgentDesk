@@ -2079,6 +2079,19 @@ pub struct RoutinesConfig {
     /// Watch `dir` for script changes and reload without restart.
     #[serde(default = "default_true")]
     pub hot_reload: bool,
+    /// Alert the operator (Discord) when a routine has been `paused` for at
+    /// least this many seconds. A routine that fails/times out can become stuck
+    /// in `paused` indefinitely (it is excluded from claims), so this surfaces
+    /// the stall instead of letting it silently never run again (#3564).
+    /// Defaults to 0, which disables the alert and preserves prior behavior.
+    #[serde(default)]
+    pub stale_paused_alert_secs: u64,
+    /// Dedupe window for the stale-paused alert, in seconds. The tick fires
+    /// every `tick_interval_secs`, so without a long dedupe TTL the alert would
+    /// re-fire every tick for every stuck routine. Defaults to 86400 (once per
+    /// day per routine).
+    #[serde(default = "default_routines_stale_paused_alert_ttl_secs")]
+    pub stale_paused_alert_ttl_secs: u64,
 }
 
 impl Default for RoutinesConfig {
@@ -2094,6 +2107,8 @@ impl Default for RoutinesConfig {
             agent_timeout_secs: default_routines_agent_timeout_secs(),
             max_checkpoint_bytes: default_routines_max_checkpoint_bytes(),
             hot_reload: true,
+            stale_paused_alert_secs: 0,
+            stale_paused_alert_ttl_secs: default_routines_stale_paused_alert_ttl_secs(),
         }
     }
 }
@@ -2142,6 +2157,10 @@ fn default_routines_max_checkpoint_bytes() -> usize {
     256 * 1024
 }
 
+fn default_routines_stale_paused_alert_ttl_secs() -> u64 {
+    24 * 60 * 60
+}
+
 #[cfg(test)]
 mod routine_config_unit_tests {
     use super::*;
@@ -2165,6 +2184,32 @@ mod routine_config_unit_tests {
                 PathBuf::from("/Volumes/ops/agentdesk-routines")
             ]
         );
+    }
+
+    #[test]
+    fn stale_paused_knobs_default_to_disabled_alert_preserving_prior_behavior() {
+        // Omitting the new field must leave the stale-paused alert disabled (0)
+        // so the tick loop never enters the block — i.e. existing deployments
+        // behave exactly as before (#3564).
+        let config: RoutinesConfig = serde_json::from_str("{}").expect("empty routines config");
+        assert_eq!(config.stale_paused_alert_secs, 0);
+        // The dedupe TTL still defaults to a non-spammy once-per-day window so
+        // that, once the alert is enabled, it cannot flood the channel.
+        assert_eq!(config.stale_paused_alert_ttl_secs, 24 * 60 * 60);
+        assert_eq!(config, RoutinesConfig::default());
+    }
+
+    #[test]
+    fn stale_paused_knobs_deserialize_when_provided() {
+        let config: RoutinesConfig = serde_json::from_str(
+            r#"{
+                "stale_paused_alert_secs": 86400,
+                "stale_paused_alert_ttl_secs": 43200
+            }"#,
+        )
+        .expect("routines config with stale-paused knobs");
+        assert_eq!(config.stale_paused_alert_secs, 86_400);
+        assert_eq!(config.stale_paused_alert_ttl_secs, 43_200);
     }
 }
 

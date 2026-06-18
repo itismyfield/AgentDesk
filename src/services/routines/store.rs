@@ -652,6 +652,47 @@ impl RoutineStore {
         .map_err(|e| anyhow!("list routines: {e}"))
     }
 
+    /// Routines that have been stuck in `paused` since before `threshold`.
+    ///
+    /// A `paused` routine is excluded from claims, so `updated_at` stops moving
+    /// the moment it pauses — it is therefore an accurate "paused_since" proxy
+    /// and no new column/migration is needed. Used by the runtime tick to alert
+    /// operators when a failed/timed-out routine would otherwise stay paused
+    /// forever (#3564).
+    ///
+    /// The cap is a generous safety ceiling rather than a real batch limit: a
+    /// deployment runs on the order of dozens of routines, so 500 comfortably
+    /// covers the entire paused set in one pass. A small `LIMIT 50` would cause
+    /// tail starvation — this tick never mutates the routine row it processes,
+    /// so once the paused backlog exceeds the limit the same oldest
+    /// (`updated_at ASC`) rows are returned every tick and the routines past the
+    /// cutoff would never get an alert. The cap only exists to bound a
+    /// pathological backlog; alert spam is already prevented by the per-routine
+    /// dedupe TTL on the outbox, not by this limit.
+    pub async fn list_stale_paused_routines(
+        &self,
+        threshold: DateTime<Utc>,
+    ) -> Result<Vec<RoutineRecord>> {
+        sqlx::query_as(
+            r#"
+            SELECT id, agent_id, script_ref, name, status, execution_strategy,
+                   schedule, next_due_at, last_run_at, last_result, checkpoint,
+                   discord_thread_id, timeout_secs, fallback_agent_id, max_retries,
+                   in_flight_run_id,
+                   created_at, updated_at
+            FROM routines
+            WHERE status = 'paused'
+              AND updated_at < $1
+            ORDER BY updated_at ASC
+            LIMIT 500
+            "#,
+        )
+        .bind(threshold)
+        .fetch_all(&*self.pool)
+        .await
+        .map_err(|e| anyhow!("list stale paused routines: {e}"))
+    }
+
     pub async fn get_routine(&self, routine_id: &str) -> Result<Option<RoutineRecord>> {
         sqlx::query_as(
             r#"

@@ -263,6 +263,69 @@ impl RoutineDiscordLogger {
         status
     }
 
+    /// Alert the operator that `routine` has been stuck in `paused` for
+    /// `paused_for_secs` (#3564). Routed to the routine's log thread when one
+    /// exists, otherwise to the configured `health_target`; if neither is
+    /// available the message is logged via `tracing::warn` so the stall is
+    /// never silently dropped.
+    ///
+    /// The enqueue uses a caller-supplied dedupe TTL (`dedupe_ttl_secs`, e.g.
+    /// once per day) on a stable `(reason_code, session_key)` so the 30s tick
+    /// cannot spam the channel — only one alert fires per routine per window.
+    pub async fn log_stale_paused(
+        &self,
+        store: &RoutineStore,
+        routine: &RoutineRecord,
+        paused_for_secs: i64,
+        dedupe_ttl_secs: i64,
+    ) -> RoutineDiscordLogStatus {
+        let message = stale_paused_message(routine, paused_for_secs);
+        let session_key = stale_paused_session_key(&routine.id);
+
+        if routine
+            .discord_thread_id
+            .as_deref()
+            .and_then(channel_target_from_id)
+            .is_some()
+        {
+            return self
+                .log_to_routine_target_with_ttl(
+                    Some(store),
+                    Some(&routine.id),
+                    Some(&routine.name),
+                    routine.agent_id.as_deref(),
+                    routine.discord_thread_id.as_deref(),
+                    STALE_PAUSED_REASON_CODE,
+                    &session_key,
+                    &message,
+                    dedupe_ttl_secs,
+                )
+                .await;
+        }
+
+        if let Some(target) = self.health_target.as_deref() {
+            return self
+                .log_to_target_with_ttl(
+                    target,
+                    "notify",
+                    STALE_PAUSED_REASON_CODE,
+                    &session_key,
+                    &message,
+                    dedupe_ttl_secs,
+                )
+                .await;
+        }
+
+        // No thread and no health target: never silently swallow the stall.
+        tracing::warn!(
+            routine_id = %routine.id,
+            routine = %routine.name,
+            paused_for_secs,
+            "routine paused stall has no discord thread or health target; logging instead of alerting"
+        );
+        RoutineDiscordLogStatus::skipped()
+    }
+
     async fn log_to_routine_target(
         &self,
         store: Option<&RoutineStore>,
@@ -295,6 +358,48 @@ impl RoutineDiscordLogger {
             reason_code,
             session_key,
             content,
+        )
+        .await
+    }
+
+    /// Like [`Self::log_to_routine_target`] but with an explicit dedupe TTL,
+    /// for periodic alerts (e.g. the stale-paused stall) that must not re-fire
+    /// every tick (#3564).
+    #[allow(clippy::too_many_arguments)]
+    async fn log_to_routine_target_with_ttl(
+        &self,
+        store: Option<&RoutineStore>,
+        routine_id: Option<&str>,
+        routine_name: Option<&str>,
+        agent_id: Option<&str>,
+        discord_thread_id: Option<&str>,
+        reason_code: &str,
+        session_key: &str,
+        content: &str,
+        dedupe_ttl_secs: i64,
+    ) -> RoutineDiscordLogStatus {
+        let target = match self
+            .resolve_routine_log_target(
+                store,
+                routine_id,
+                routine_name,
+                agent_id,
+                discord_thread_id,
+            )
+            .await
+        {
+            Ok(Some(target)) => target,
+            Ok(None) => return RoutineDiscordLogStatus::skipped(),
+            Err(error) => return RoutineDiscordLogStatus::failed(error),
+        };
+
+        self.log_to_target_with_ttl(
+            &target.target,
+            &target.bot,
+            reason_code,
+            session_key,
+            content,
+            dedupe_ttl_secs,
         )
         .await
     }
@@ -639,6 +744,40 @@ impl RoutineDiscordLogger {
         }
     }
 
+    /// Like [`Self::log_to_target`] but with an explicit dedupe TTL so periodic
+    /// alerts can dedupe over a long window (#3564). The default `log_to_target`
+    /// path uses the 5-minute lifecycle TTL, which is far too short for a 30s
+    /// tick that re-evaluates every stuck routine every cycle.
+    async fn log_to_target_with_ttl(
+        &self,
+        target: &str,
+        bot: &str,
+        reason_code: &str,
+        session_key: &str,
+        content: &str,
+        dedupe_ttl_secs: i64,
+    ) -> RoutineDiscordLogStatus {
+        match crate::services::message_outbox::enqueue_outbox_pg_with_ttl(
+            &self.pool,
+            crate::services::message_outbox::OutboxMessage {
+                target,
+                content,
+                bot,
+                source: "routine-runtime",
+                reason_code: Some(reason_code),
+                session_key: Some(session_key),
+            },
+            dedupe_ttl_secs,
+        )
+        .await
+        {
+            Ok(_) => RoutineDiscordLogStatus::ok(),
+            Err(error) => RoutineDiscordLogStatus::failed(format!(
+                "failed to enqueue routine discord log: {error}"
+            )),
+        }
+    }
+
     async fn persist_run_log_status(
         &self,
         store: &RoutineStore,
@@ -877,6 +1016,16 @@ impl RoutineLifecycleEvent {
     }
 }
 
+/// Stable dedupe identifiers for the long-paused-stall alert (#3564). Kept
+/// separate from [`RoutineLifecycleEvent`] because the alert is repeated
+/// periodically (it must dedupe over a long TTL on a stable session key),
+/// whereas lifecycle events fire once per transition.
+pub(crate) const STALE_PAUSED_REASON_CODE: &str = "routine_paused_stale";
+
+pub(crate) fn stale_paused_session_key(routine_id: &str) -> String {
+    format!("routine:{routine_id}:paused_stale")
+}
+
 async fn resolve_agent_channel_target(pool: &PgPool, agent_id: &str) -> Result<String, String> {
     let bindings = crate::db::agents::load_agent_channel_bindings_pg(pool, agent_id)
         .await
@@ -1008,6 +1157,57 @@ fn recovery_message(recovered: &RecoveredRoutineRun) -> String {
             ],
         )],
     )
+}
+
+/// Operator-facing message for a routine that has been stuck in `paused` past
+/// the configured threshold (#3564). The duration and `last` result help the
+/// operator decide whether to resume manually or leave it paused.
+fn stale_paused_message(routine: &RoutineRecord, paused_for_secs: i64) -> String {
+    let last_result = routine
+        .last_result
+        .as_deref()
+        .map(|value| compact(value, 160))
+        .unwrap_or_else(|| "없음".to_string());
+    routine_log_block_message(
+        "루틴 paused 고착",
+        vec![(
+            "기본",
+            vec![
+                field_line(
+                    "reason",
+                    "paused 상태가 임계값 이상 지속됨 - 수동 resume 또는 점검이 필요합니다",
+                ),
+                field_line("routine", &compact(&routine.name, 80)),
+                field_line("id", short_id(&routine.id)),
+                field_line("script", &script_ref_for_message(&routine.script_ref, 120)),
+                field_line("paused_for", &humanize_secs(paused_for_secs)),
+                field_line("last", &last_result),
+            ],
+        )],
+    )
+}
+
+/// Compact human-readable duration (e.g. "1d 6h", "45m") for alert messages.
+fn humanize_secs(secs: i64) -> String {
+    let secs = secs.max(0);
+    let days = secs / 86_400;
+    let hours = (secs % 86_400) / 3_600;
+    let minutes = (secs % 3_600) / 60;
+    let mut parts = Vec::new();
+    if days > 0 {
+        parts.push(format!("{days}d"));
+    }
+    if hours > 0 {
+        parts.push(format!("{hours}h"));
+    }
+    if minutes > 0 && days == 0 {
+        parts.push(format!("{minutes}m"));
+    }
+    if parts.is_empty() {
+        format!("{secs}s")
+    } else {
+        parts.join(" ")
+    }
 }
 
 // #3034: exercised only by the discord_log unit tests below.
@@ -1397,6 +1597,77 @@ mod tests {
     fn compact_caps_long_values() {
         assert_eq!(compact("abcdef", 3), "abc...");
         assert_eq!(compact(" abc ", 10), "abc");
+    }
+
+    fn stale_paused_routine_fixture() -> RoutineRecord {
+        RoutineRecord {
+            id: "routine-abcdef123456".to_string(),
+            agent_id: Some("monitoring".to_string()),
+            fallback_agent_id: None,
+            max_retries: 0,
+            script_ref: "family-profile-probe.js".to_string(),
+            name: "family-profile-probe-obujang".to_string(),
+            status: "paused".to_string(),
+            execution_strategy: "fresh".to_string(),
+            schedule: None,
+            next_due_at: None,
+            last_run_at: None,
+            last_result: Some("routine agent turn timed out after 900 seconds".to_string()),
+            checkpoint: None,
+            discord_thread_id: None,
+            timeout_secs: None,
+            in_flight_run_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn stale_paused_reason_code_and_session_key_are_stable() {
+        // Dedupe identity must be fixed (independent of duration/content) so the
+        // long-TTL window suppresses repeated ticks for the same routine (#3564).
+        assert_eq!(STALE_PAUSED_REASON_CODE, "routine_paused_stale");
+        let routine = stale_paused_routine_fixture();
+        assert_eq!(
+            stale_paused_session_key(&routine.id),
+            "routine:routine-abcdef123456:paused_stale"
+        );
+        // Same routine id always yields the same key regardless of paused time.
+        assert_eq!(
+            stale_paused_session_key(&routine.id),
+            stale_paused_session_key(&routine.id)
+        );
+    }
+
+    #[test]
+    fn stale_paused_message_surfaces_duration_and_last_result() {
+        let routine = stale_paused_routine_fixture();
+        let message = stale_paused_message(&routine, 86_400 + 6 * 3_600);
+
+        assert!(message.contains("루틴 paused 고착"));
+        assert!(message.contains("family-profile-probe-obujang"));
+        assert!(message.contains("paused_for: 1d 6h"));
+        assert!(message.contains("last: routine agent turn timed out after 900 seconds"));
+        assert!(message.contains("수동 resume"));
+    }
+
+    #[test]
+    fn stale_paused_message_handles_missing_last_result() {
+        let mut routine = stale_paused_routine_fixture();
+        routine.last_result = None;
+        let message = stale_paused_message(&routine, 2_700);
+        assert!(message.contains("paused_for: 45m"));
+        assert!(message.contains("last: 없음"));
+    }
+
+    #[test]
+    fn humanize_secs_formats_durations() {
+        assert_eq!(humanize_secs(45), "45s");
+        assert_eq!(humanize_secs(2_700), "45m");
+        assert_eq!(humanize_secs(3_600), "1h");
+        assert_eq!(humanize_secs(86_400), "1d");
+        assert_eq!(humanize_secs(86_400 + 6 * 3_600 + 59 * 60), "1d 6h");
+        assert_eq!(humanize_secs(-10), "0s");
     }
 
     #[test]
