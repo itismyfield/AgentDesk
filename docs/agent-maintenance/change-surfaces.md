@@ -870,13 +870,17 @@
     `compose_recap_header` and `attach_live_context_usage` keep byte-identical
     call sites, while the rest of the selection helpers stay module-private;
     below the giant-file threshold).
-  - `src/services/codex_tmux_wrapper.rs` (1289 lines; Codex tmux wrapper JSON
+  - `src/services/codex_tmux_wrapper.rs` (1355 lines; Codex tmux wrapper JSON
     event parser and relay bridge for native Codex session events — bugfix only
     outside an extraction plan; +65 from #3275: capture per-call
     `token_count.info.last_token_usage` and re-emit it as a Claude-compatible
     nested `usage` on the success result frame so watcher-owned codex turns
     persist token telemetry — never the session-cumulative
-    `info.total_token_usage`).
+    `info.total_token_usage`; +66 from #3557 (B): bound the post-first-event
+    `recv()` with an idle recv-timeout + absolute per-turn ceiling so a hung
+    Codex process that stops emitting JSON without exiting is killed and rejoins
+    the error path instead of looking "busy" to the watcher indefinitely — the
+    13125s outlier source).
   - `src/services/tui_prompt_dedupe.rs` (1613 lines; shared TUI prompt
     fingerprinting/dedupe state for hook and rollout relay paths, bugfix only
     outside an extraction plan; +176 from #3540: stable JSONL entry-identity
@@ -990,7 +994,7 @@
     force-clean watcher-respawn follow-through + always-run cross-tick
     retry/dead-man (P1-a: no early return on zero candidates), delegating the
     new behaviour to `health/watcher_respawn.rs`).
-  - `src/services/discord/router/message_handler/intake_turn.rs` (3672 lines; +1 from #3479 item-3 `shared.dispatch.<field>` nesting;
+  - `src/services/discord/router/message_handler/intake_turn.rs` (3699 lines; +27 from #3557 (A) per-turn hard-ceiling clamp wired into the watchdog auto-extend block; +1 from #3479 item-3 `shared.dispatch.<field>` nesting;
     Discord message intake turn orchestration split from the router message
     handler; bugfix only outside a further extraction plan; #3464 extracted the
     unauthorized-voice-announcement scope decision to `voice_announcement_scope.rs`;
@@ -1340,7 +1344,7 @@
 - legacy_modules: none — these are shared runtime coordination surfaces.
 - do_not_edit_without_migration_plan (giant-file):
   - `src/config.rs` (2447 lines).
-  - `src/server/mod.rs` (2587 lines).
+  - `src/server/mod.rs` (2593 lines; +6 from #3557 (A) long_turn_watchdog spawn).
   - `src/receipt.rs` (1842 lines).
   - `src/github/sync.rs` (1513 lines).
   - `src/reconcile.rs` (1816 lines; periodic reconcile loop covering stale

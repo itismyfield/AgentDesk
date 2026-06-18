@@ -14,6 +14,18 @@ use crate::services::tmux_wrapper::{InputMode, render_for_terminal};
 const TMUX_PROMPT_B64_PREFIX: &str = "__AGENTDESK_B64__:";
 const TMUX_PROMPT_B64_CHUNK_PREFIX: &str = "__AGENTDESK_B64_CHUNK__:";
 const DEFAULT_CODEX_FIRST_EVENT_TIMEOUT_SECS: u64 = 120;
+/// #3557 (B): idle window after the first event. Once Codex has emitted at
+/// least one event, the run loop previously blocked on `recv()` forever, so a
+/// Codex process that hung mid-turn (tool/API hang) without emitting another
+/// JSON event and without exiting kept the watcher believing the pane was busy
+/// — the direct cause of the 13125s outlier. We now bound inter-event silence;
+/// the generous 1800s default never trips a healthy long-running tool call.
+const DEFAULT_CODEX_TURN_IDLE_RECV_SECS: u64 = 1800;
+/// #3557 (B): absolute wall-clock ceiling for a single Codex `exec` turn,
+/// measured from process spawn. A hung Codex that *does* keep dribbling events
+/// would slip past the idle window, so this is the hard backstop. Default 4h
+/// matches the per-turn Codex ceiling and clears any legitimate Codex turn.
+const DEFAULT_CODEX_TURN_HARD_CEILING_SECS: u64 = 4 * 3600;
 
 pub fn run(
     output_file: &str,
@@ -337,6 +349,29 @@ fn codex_first_event_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(seconds)
 }
 
+/// #3557 (B): idle inter-event recv timeout after the first event. Override via
+/// `AGENTDESK_CODEX_TURN_IDLE_RECV_SECS`.
+fn codex_turn_idle_recv_timeout() -> std::time::Duration {
+    let seconds = std::env::var("AGENTDESK_CODEX_TURN_IDLE_RECV_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(DEFAULT_CODEX_TURN_IDLE_RECV_SECS);
+    std::time::Duration::from_secs(seconds)
+}
+
+/// #3557 (B): absolute per-turn ceiling for a Codex `exec` run. Override via
+/// `AGENTDESK_CODEX_TURN_HARD_CEILING_SECS` (shared with the orchestrator-side
+/// auto-extend ceiling so a single knob bounds the Codex turn end to end).
+fn codex_turn_hard_ceiling() -> std::time::Duration {
+    let seconds = std::env::var("AGENTDESK_CODEX_TURN_HARD_CEILING_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(DEFAULT_CODEX_TURN_HARD_CEILING_SECS);
+    std::time::Duration::from_secs(seconds)
+}
+
 fn cleanup(output_file: &str, input_fifo: &str) {
     let _ = std::fs::remove_file(output_file);
     let _ = std::fs::remove_file(input_fifo);
@@ -469,12 +504,42 @@ fn run_turn(
     let start = std::time::Instant::now();
     let mut saw_any_stdout = false;
     let first_event_timeout = codex_first_event_timeout();
+    // #3557 (B): bound a turn that hung after its first event (idle window) and a
+    // turn that drips events forever (absolute ceiling). Both kill the Codex
+    // process tree so the turn rejoins the normal error path instead of looking
+    // "busy" to the watcher indefinitely.
+    let idle_recv_timeout = codex_turn_idle_recv_timeout();
+    let hard_ceiling = codex_turn_hard_ceiling();
 
     loop {
+        // Absolute wall-clock ceiling, checked every iteration so even a Codex
+        // that keeps emitting events past the limit is terminated.
+        if start.elapsed() >= hard_ceiling {
+            crate::services::process::kill_pid_tree(child_pid);
+            let _ = child.wait();
+            return Err(format!(
+                "Codex turn exceeded hard ceiling of {}s",
+                hard_ceiling.as_secs()
+            ));
+        }
+
         let next_line = if saw_any_stdout {
-            stdout_rx
-                .recv()
-                .map_err(|_| "Codex stdout reader disconnected".to_string())?
+            // After the first event, bound inter-event silence: a hung Codex that
+            // stops emitting without exiting used to block here forever.
+            match stdout_rx.recv_timeout(idle_recv_timeout) {
+                Ok(line) => line,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    crate::services::process::kill_pid_tree(child_pid);
+                    let _ = child.wait();
+                    return Err(format!(
+                        "Codex produced no JSON event for {}s (idle hang)",
+                        idle_recv_timeout.as_secs()
+                    ));
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("Codex stdout reader disconnected".to_string());
+                }
+            }
         } else {
             match stdout_rx.recv_timeout(first_event_timeout) {
                 Ok(line) => line,
@@ -2295,4 +2360,69 @@ fn emit_json_line(
         .map_err(|e| format!("write output line: {}", e))?;
     render_for_terminal(&line);
     Ok(())
+}
+
+#[cfg(test)]
+mod turn_timeout_tests {
+    use super::{
+        DEFAULT_CODEX_TURN_HARD_CEILING_SECS, DEFAULT_CODEX_TURN_IDLE_RECV_SECS,
+        codex_turn_hard_ceiling, codex_turn_idle_recv_timeout,
+    };
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// #3557 (B): after the first event the run loop must bound inter-event
+    /// silence. This mirrors the post-`saw_any_stdout` branch: a channel that
+    /// never produces another line must surface a Timeout (the kill+Err path),
+    /// not block forever as the old unconditional `recv()` did.
+    #[test]
+    fn idle_recv_timeout_fires_when_no_further_events() {
+        let (_tx, rx) = mpsc::channel::<Result<Option<String>, String>>();
+        // Keep _tx alive (so it's not Disconnected) and never send.
+        let result = rx.recv_timeout(Duration::from_millis(50));
+        assert!(matches!(result, Err(mpsc::RecvTimeoutError::Timeout)));
+    }
+
+    /// A live event stream still passes through `recv_timeout` cleanly.
+    #[test]
+    fn idle_recv_timeout_passes_through_live_event() {
+        let (tx, rx) = mpsc::channel::<Result<Option<String>, String>>();
+        tx.send(Ok(Some("{\"type\":\"event\"}\n".to_string())))
+            .unwrap();
+        let received = rx.recv_timeout(Duration::from_secs(1));
+        assert!(matches!(received, Ok(Ok(Some(_)))));
+    }
+
+    #[test]
+    fn idle_recv_timeout_defaults_to_generous_window() {
+        // Only assert the default when the env override is not set, so this is
+        // robust under a polluted shell.
+        if std::env::var("AGENTDESK_CODEX_TURN_IDLE_RECV_SECS").is_err() {
+            assert_eq!(
+                codex_turn_idle_recv_timeout(),
+                Duration::from_secs(DEFAULT_CODEX_TURN_IDLE_RECV_SECS)
+            );
+        }
+    }
+
+    #[test]
+    fn hard_ceiling_defaults_to_four_hours() {
+        if std::env::var("AGENTDESK_CODEX_TURN_HARD_CEILING_SECS").is_err() {
+            assert_eq!(
+                codex_turn_hard_ceiling(),
+                Duration::from_secs(DEFAULT_CODEX_TURN_HARD_CEILING_SECS)
+            );
+            assert_eq!(DEFAULT_CODEX_TURN_HARD_CEILING_SECS, 4 * 3600);
+        }
+    }
+
+    /// The ceiling check is a pure elapsed comparison; verify the predicate the
+    /// run loop uses (`start.elapsed() >= hard_ceiling`).
+    #[test]
+    fn ceiling_predicate_triggers_when_elapsed_exceeds_limit() {
+        let ceiling = Duration::from_millis(10);
+        let start = std::time::Instant::now();
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(start.elapsed() >= ceiling);
+    }
 }

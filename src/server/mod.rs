@@ -354,6 +354,12 @@ pub(crate) async fn run(
     if let Some(pool) = pg_pool.clone() {
         crate::services::dispatch_watchdog::spawn(pool);
     }
+    // #3557 (A): long-turn cluster probe — pages out when a burst of >10m turns
+    // finishes inside one window (the stall watchdog's blind spot for
+    // delegated_to_watcher turns, which stay desynced=false).
+    if let Some(pool) = pg_pool.clone() {
+        crate::services::long_turn_watchdog::spawn(pool);
+    }
     crate::pipeline::refresh_override_health_report(pg_pool.as_ref()).await;
     let boot_reconcile_engine = match startup_pg_pool.as_ref() {
         Some(pool) => Some(crate::engine::PolicyEngine::new_with_pg(

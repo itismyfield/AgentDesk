@@ -2651,7 +2651,34 @@ pub(in crate::services::discord) async fn handle_text_message(
                                 let age_ms = now_ms_check - updated_ms;
                                 // If inflight was updated within the last 5 minutes, auto-extend
                                 if age_ms < 300_000 {
-                                    let new_dl = now_ms_check + timeout.as_millis() as i64;
+                                    // #3557 (A): clamp the auto-extend so a turn
+                                    // that keeps inflight warm forever cannot push
+                                    // the deadline indefinitely. The hard ceiling
+                                    // is measured from turn start and is tighter
+                                    // for Codex (the 13125s outlier source).
+                                    let ceiling_ms =
+                                        super::super::super::turn_hard_ceiling_deadline_ms(
+                                            turn_started_ms,
+                                            &watchdog_provider,
+                                        );
+                                    let proposed_dl = now_ms_check + timeout.as_millis() as i64;
+                                    let (new_dl, clamped) =
+                                        super::super::super::clamp_auto_extend_deadline_ms(
+                                            proposed_dl,
+                                            ceiling_ms,
+                                        );
+                                    // Warn exactly once when the ceiling first bites:
+                                    // `current_dl < ceiling_ms` is only true before
+                                    // the deadline has been parked at the ceiling. On
+                                    // later ticks `current_dl == ceiling_ms` so this is
+                                    // false and the warn does not repeat.
+                                    if clamped && current_dl < ceiling_ms {
+                                        let ts = chrono::Local::now().format("%H:%M:%S");
+                                        tracing::warn!(
+                                            "  [{ts}] ⛔ WATCHDOG: hard ceiling reached for channel {} — auto-extend clamped, turn will be reconciled at deadline",
+                                            channel_id
+                                        );
+                                    }
                                     if new_dl > current_dl {
                                         watchdog_token
                                             .watchdog_deadline_ms

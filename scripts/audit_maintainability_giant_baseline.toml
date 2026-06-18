@@ -164,7 +164,10 @@
 # stale-dispatch turn gating + its tests, allowed-turn-sender / bot-user-id
 # resolvers, phase2 recovery predicate) moved verbatim to the capped sibling
 # `dispatch_policy.rs`, lowering the frozen baseline 4243 -> 4074 (-169).
-"src/services/discord/mod.rs" = 4056
+# #3557 (A): per-turn hard-ceiling backstop helpers (turn_hard_ceiling_timeout,
+# codex_turn_hard_ceiling_timeout, turn_hard_ceiling_deadline_ms,
+# clamp_auto_extend_deadline_ms) + their unit tests. +55 prod LoC. 4056 -> 4111.
+"src/services/discord/mod.rs" = 4111
 # #3305: the local-only pass-through lifecycle-skip (kind hoist + note-only return
 # branch + idle-loop skip) is offset by comment dedup in the same root, lowering the
 # frozen baseline 5438 -> 5429 (-9). Locks in the shrink win (#3028 ratchet).
@@ -255,7 +258,10 @@
 # FIX #6 (Codex P2): +6 (3771 -> 3777) for the `set_followup_requeue_context`
 # call that persists the originating Intervention's reply/upload/voice context on
 # the follow-up inflight row so a PRE-submit busy-timeout requeue can rebuild it.
-"src/services/discord/router/message_handler/intake_turn.rs" = 3672
+# #3557 (A): hard-ceiling clamp wired into the watchdog auto-extend block so a
+# turn keeping inflight warm forever can no longer push the deadline without
+# bound (Codex 13125s outlier source). +27 prod LoC. 3672 -> 3699.
+"src/services/discord/router/message_handler/intake_turn.rs" = 3699
 "src/services/discord/meeting_orchestrator.rs" = 3227
 # #3293: +3 for the `registry_purge` child-module declaration (peek +
 # operator-gated idle-entry purge live outside the frozen root); lowered
