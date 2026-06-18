@@ -263,8 +263,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     {
         let mut data = shared.core.lock().await;
         if let Some(session) = data.sessions.get_mut(&channel_id)
-            && let Some(reason) =
-                session_reset_reason_for_turn(session, tokio::time::Instant::now())
+            && let Some(reason) = session_reset_reason_for_turn(session)
         {
             if let Some(retry_context) = session
                 .recent_history_context(super::super::super::SESSION_RECOVERY_CONTEXT_MESSAGES)
@@ -641,7 +640,6 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
             let ts = chrono::Local::now().format("%H:%M:%S");
             session_strategy_reason = session_reset_reason_lifecycle_code(reason);
             let display_reason = match reason {
-                SessionResetReason::IdleExpired => "idle timeout",
                 SessionResetReason::AssistantTurnCap => "assistant turn cap",
             };
             tracing::info!(

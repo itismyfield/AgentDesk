@@ -125,17 +125,18 @@ pub(in crate::services::discord) fn reserve_headless_turn() -> HeadlessTurnReser
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SessionResetReason {
-    IdleExpired,
     AssistantTurnCap,
 }
 
+// NOTE(#3588): idle 기반 세션 리셋은 제거됨. 4시간 idle 후에도 provider session
+// (claude resume id)을 보존해 다음 턴에 `--resume`으로 transcript를 이어간다.
+// in-memory/tmux 메모리 회수는 `maybe_cleanup_sessions`가 담당하되 resume id는
+// 남긴다. 명시적 초기화는 idle recap의 `새 세션 시작` 버튼(idle_recap:clear).
+// AssistantTurnCap(100턴)은 idle과 무관한 컨텍스트 폭주 방어 장치라 유지한다.
 pub(super) fn session_reset_reason_for_turn(
     session: &DiscordSession,
-    now: tokio::time::Instant,
 ) -> Option<SessionResetReason> {
-    if now.duration_since(session.last_active) > super::super::SESSION_MAX_IDLE {
-        Some(SessionResetReason::IdleExpired)
-    } else if session.assistant_turn_count() >= super::super::SESSION_MAX_ASSISTANT_TURNS {
+    if session.assistant_turn_count() >= super::super::SESSION_MAX_ASSISTANT_TURNS {
         Some(SessionResetReason::AssistantTurnCap)
     } else {
         None
@@ -144,7 +145,6 @@ pub(super) fn session_reset_reason_for_turn(
 
 pub(super) fn session_reset_reason_lifecycle_code(reason: SessionResetReason) -> &'static str {
     match reason {
-        SessionResetReason::IdleExpired => "idle_timeout",
         SessionResetReason::AssistantTurnCap => "assistant_turn_cap",
     }
 }
