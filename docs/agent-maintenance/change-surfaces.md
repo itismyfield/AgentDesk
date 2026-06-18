@@ -920,7 +920,11 @@
     its G1/G2 snapshots from `external_input_relay_lease(...).map(|l| l.generation)`;
     +62 from #3304: slash-command canonical prompt keys for `<command-*>` XML vs
     `/command args` dedupe, plus focused loop skill-expansion regressions).
-  - `src/services/discord/recovery_engine.rs` (3329 lines; +53 from #3562 threading
+  - `src/services/discord/recovery_engine.rs` (3340 lines; +11 from #3581 stamping
+    the three bounded-preservation fields (`rebind_origin_created_at_unix` /
+    `_deadline_secs` / `_birth_generation`) at the rebind-origin birth site so an
+    unadopted, never-progressed orphan can be reaped instead of permanently
+    wedging turn-start; +53 from #3562 threading
     the recovered-turn identity (`recovered_transcript_turn_id` full-path call) +
     channel-bound `agent_id` (`resolve_role_binding(...).role_id`) through the
     `emit_recovery_fired` / `emit_recovery_quality_event` recovery observability

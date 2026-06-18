@@ -30,8 +30,8 @@ use super::formatting::{
 };
 use super::gateway::edit_outbound_message;
 use super::inflight::{
-    InflightTurnState, delete_inflight_state_file, load_inflight_states_for_sweep,
-    parse_started_at_unix,
+    InflightTurnState, delete_inflight_state_file, emit_reap_abandoned_rebind_origin,
+    load_inflight_states_for_sweep, parse_started_at_unix, should_reap_abandoned_rebind_origin,
 };
 use crate::services::provider::ProviderKind;
 
@@ -344,8 +344,29 @@ async fn run_placeholder_sweep_pass(
     stalled_tracker.retain_live(provider, &states);
     for (state, age_secs) in states {
         if state.rebind_origin {
-            // Rebind-origin inflights do not represent a real Discord turn.
-            // Skip — there is no placeholder message to edit.
+            // #3581: a rebind-origin inflight has no placeholder message to
+            // edit, so it is normally skipped. But an abandoned, never-
+            // progressed orphan (STALL-WATCHDOG respawn) would otherwise live
+            // forever and wedge turn-start (`backstop_claim_is_safe` reads it as
+            // a "live foreign inflight"). Reap it once it is past its deadline.
+            // The strict conjunction in `should_reap_abandoned_rebind_origin`
+            // (owner-less + unadopted + never-progressed) guarantees a live /
+            // adopted rebind is never touched. `age_secs` here is the file-mtime
+            // age the sweeper already computed, which covers legacy rows that
+            // pre-date the persisted birth stamp.
+            let current_generation = super::runtime_store::load_generation();
+            if should_reap_abandoned_rebind_origin(&state, age_secs, current_generation)
+                && delete_inflight_state_file(provider, state.channel_id)
+            {
+                emit_reap_abandoned_rebind_origin(
+                    provider,
+                    &state,
+                    age_secs,
+                    current_generation,
+                    "placeholder_sweep_deadline",
+                );
+                report.abandoned += 1;
+            }
             continue;
         }
         // #3003: reclaim an orphaned status-panel-v2 BEFORE the placeholder skips

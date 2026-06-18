@@ -91,6 +91,149 @@ pub(super) const RECOVERY_RELAY_RESTART_ATTEMPT_BUDGET: u32 = 3;
 /// to fire (a false-positive cleanup of a live turn is far worse than delay).
 pub(super) const INFLIGHT_STALENESS_THRESHOLD_SECS: u64 = 300;
 
+/// #3581: default deadline (seconds) after which an unadopted, never-progressed
+/// `rebind_origin` row is reaped. Far shorter than the placeholder sweeper's
+/// 1800s safety net so the wedge-causing orphan drains within a handful of
+/// sweep ticks, but comfortably longer than the ~8s TUI-direct adoption
+/// backstop window so a legitimate `/api/inflight/rebind` → TUI-adopt handoff
+/// is never raced. Overridable via `AGENTDESK_REBIND_ORIGIN_DEADLINE_SECS`.
+pub(super) const REBIND_ORIGIN_DEADLINE_SECS_DEFAULT: u64 = 120;
+
+/// #3581: floor for the env-overridden rebind-origin deadline. Guards against a
+/// pathologically small (or zero) override reaping rows before the adoption
+/// backstop window can complete.
+const REBIND_ORIGIN_DEADLINE_SECS_MIN: u64 = 30;
+
+/// #3581: resolve the rebind-origin reap deadline. Reads
+/// `AGENTDESK_REBIND_ORIGIN_DEADLINE_SECS`; on absence / parse failure falls
+/// back to [`REBIND_ORIGIN_DEADLINE_SECS_DEFAULT`]. Any explicit value is
+/// clamped up to [`REBIND_ORIGIN_DEADLINE_SECS_MIN`] so an operator cannot
+/// accidentally configure a reap that races the adoption backstop.
+pub(super) fn rebind_origin_deadline_secs_env() -> u64 {
+    std::env::var("AGENTDESK_REBIND_ORIGIN_DEADLINE_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .map(|secs| secs.max(REBIND_ORIGIN_DEADLINE_SECS_MIN))
+        .unwrap_or(REBIND_ORIGIN_DEADLINE_SECS_DEFAULT)
+}
+
+/// #3581: current Unix epoch seconds (wall clock). Used to stamp a
+/// rebind-origin row's birth time at creation.
+pub(super) fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// #3581: decide whether an abandoned `rebind_origin` inflight row is safe to
+/// reap. The predicate is a strict conjunction of "never-progressed,
+/// never-adopted, never-owned" signals so that a genuinely-live rebind
+/// (MonitorTriggered watcher rebind: `relay_owner_kind = Watcher`) or a row
+/// that has started relaying / been adopted is NEVER reaped:
+///
+///   * `rebind_origin` — only rebind-origin rows are in scope.
+///   * `turn_source == ExternalAdopted` — pins the predicate to the
+///     `recovery_engine` birth site; the `tmux` MonitorTriggered rebind
+///     (`turn_source = MonitorTriggered`, owner Watcher) is excluded twice.
+///   * `effective_relay_owner_kind() == None` — no live relay owner (also
+///     absorbs the legacy `watcher_owns_live_relay` bool).
+///   * `user_msg_id == 0 && current_msg_id == 0` — never adopted / no anchor.
+///   * `!terminal_delivery_committed` — not finalised.
+///   * `response_sent_offset == 0 && full_response.is_empty()` — nothing was
+///     ever streamed to Discord.
+///   * `last_offset == turn_start_offset` — the watcher never advanced past
+///     the birth offset (NOTE: a fresh rebind row is born with
+///     `last_offset == turn_start_offset == file_len`, which can be > 0 — the
+///     "no progress" test is offset equality, NOT `last_offset == 0`).
+///   * `restart_mode.is_none()` — planned restart / hot-swap rows own their
+///     own retention and are never reaped here.
+///
+/// When every structural conjunct holds, the row is reaped iff it is past its
+/// deadline OR it was born in a prior generation. `age_secs` is supplied by the
+/// caller (file-mtime age in the sweeper path) so legacy rows with no
+/// `rebind_origin_created_at_unix` stamp still age out via mtime.
+pub(super) fn should_reap_abandoned_rebind_origin(
+    state: &InflightTurnState,
+    age_secs: u64,
+    current_generation: u64,
+) -> bool {
+    if !state.rebind_origin {
+        return false;
+    }
+    let structurally_abandoned = state.turn_source == TurnSource::ExternalAdopted
+        && state.effective_relay_owner_kind() == RelayOwnerKind::None
+        && state.user_msg_id == 0
+        && state.current_msg_id == 0
+        && !state.terminal_delivery_committed
+        && state.response_sent_offset == 0
+        && state.full_response.is_empty()
+        && state.last_offset == state.turn_start_offset.unwrap_or(state.last_offset)
+        && state.restart_mode.is_none();
+    if !structurally_abandoned {
+        return false;
+    }
+
+    let deadline = state
+        .rebind_origin_deadline_secs
+        .unwrap_or_else(rebind_origin_deadline_secs_env);
+    let past_deadline = age_secs >= deadline;
+    let stale_generation = state
+        .rebind_origin_birth_generation
+        .is_some_and(|birth| birth != current_generation);
+    past_deadline || stale_generation
+}
+
+/// #3581: best-effort age (seconds) for a rebind-origin row. Prefers the
+/// persisted `rebind_origin_created_at_unix` stamp (so the deadline is anchored
+/// to the row's actual birth even if the file is later touched); falls back to
+/// the file's mtime age for legacy rows that pre-date the stamp. Returns 0 when
+/// neither signal is available — in that case only the generation-mismatch
+/// disjunct of `should_reap_abandoned_rebind_origin` can fire, which is the
+/// conservative outcome.
+fn rebind_origin_age_secs(path: &Path, state: &InflightTurnState) -> u64 {
+    if let Some(created) = state.rebind_origin_created_at_unix {
+        return now_unix().saturating_sub(created).max(0) as u64;
+    }
+    fs::metadata(path)
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .and_then(|modified| modified.elapsed().ok())
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
+}
+
+/// #3581: operator-visibility event for a reaped abandoned rebind-origin row
+/// (#3561 lifecycle stream). Mirrors the `evict_stale_generation` shape so the
+/// two boot-time reap reasons aggregate side by side.
+pub(super) fn emit_reap_abandoned_rebind_origin(
+    provider: &ProviderKind,
+    state: &InflightTurnState,
+    age_secs: u64,
+    current_generation: u64,
+    reason: &str,
+) {
+    crate::services::observability::emit_inflight_lifecycle_event(
+        provider.as_str(),
+        state.channel_id,
+        state.dispatch_id.as_deref(),
+        None,
+        None,
+        "reap_abandoned_rebind_origin",
+        serde_json::json!({
+            "reason": reason,
+            "age_secs": age_secs,
+            "deadline_secs": state
+                .rebind_origin_deadline_secs
+                .unwrap_or_else(rebind_origin_deadline_secs_env),
+            "birth_generation": state.rebind_origin_birth_generation,
+            "current_generation": current_generation,
+            "turn_source": state.turn_source.as_str(),
+            "tmux_session_name": state.tmux_session_name,
+        }),
+    );
+}
+
 pub(super) fn inflight_runtime_root() -> Option<PathBuf> {
     discord_inflight_root()
 }
@@ -2014,6 +2157,35 @@ fn invalidate_stale_generation_in_root(
             continue;
         }
         if state.rebind_origin {
+            // #3581: a rebind-origin row is normally owned by the rebind API
+            // and skipped here. The one exception is an abandoned, never-
+            // progressed orphan from a STALL-WATCHDOG respawn: reap it at boot
+            // if it is past its deadline OR was born in a prior generation.
+            // The reap predicate's strict conjunction guarantees a live /
+            // adopted rebind is never touched.
+            let path = inflight_state_path(root, provider, state.channel_id);
+            let age_secs = rebind_origin_age_secs(&path, &state);
+            if should_reap_abandoned_rebind_origin(&state, age_secs, current_generation) {
+                let Ok(_lock) = lock_inflight_state_path(&path) else {
+                    continue;
+                };
+                let Some(locked) = read_inflight_state_content(&path) else {
+                    continue;
+                };
+                if !should_reap_abandoned_rebind_origin(&locked, age_secs, current_generation) {
+                    continue;
+                }
+                if fs::remove_file(&path).is_ok() {
+                    emit_reap_abandoned_rebind_origin(
+                        provider,
+                        &locked,
+                        age_secs,
+                        current_generation,
+                        "invalidate_stale_generation_boot",
+                    );
+                    removed.push((locked.channel_id, locked.rebind_origin_birth_generation));
+                }
+            }
             continue;
         }
         // Codex review HIGH on PR #2460: normal rows are constructed with
@@ -5417,6 +5589,294 @@ mod wave_a_cleanup_tests {
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].restart_generation, Some(2));
         assert_eq!(after[0].user_msg_id, 78);
+    }
+}
+
+#[cfg(test)]
+mod rebind_origin_reap_tests {
+    //! #3581: bounded reap of abandoned `rebind_origin` orphans.
+    //!
+    //! The predicate `should_reap_abandoned_rebind_origin` must fire ONLY on the
+    //! exact STALL-WATCHDOG orphan signature (rebind_origin + ExternalAdopted +
+    //! owner None + user_msg_id 0 + current_msg_id 0 + never-progressed +
+    //! never-delivered) AND only once past its deadline OR born in a prior
+    //! generation. Every single live/adopted signal (owner, offset advance,
+    //! user_msg_id, sent response, planned restart) must independently block the
+    //! reap so a genuinely-live rebind is never destroyed (#3154 / #3540
+    //! no-regression pins).
+    use super::{
+        InflightTurnState, REBIND_ORIGIN_DEADLINE_SECS_DEFAULT, RelayOwnerKind, TurnSource,
+        invalidate_stale_generation_in_root, load_inflight_states_from_root,
+        save_inflight_state_in_root, should_reap_abandoned_rebind_origin,
+    };
+    use crate::services::discord::InflightRestartMode;
+    use crate::services::provider::ProviderKind;
+    use tempfile::TempDir;
+
+    /// A bare reapable rebind-origin row: born at offset `last_offset`,
+    /// never adopted, never progressed, no owner, deadline default, stamped at
+    /// `birth_generation`.
+    fn reapable_rebind(
+        channel_id: u64,
+        last_offset: u64,
+        birth_generation: u64,
+    ) -> InflightTurnState {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Codex,
+            channel_id,
+            Some("adk-cdx".to_string()),
+            0, // request_owner
+            0, // user_msg_id
+            0, // current_msg_id
+            "/api/inflight/rebind".to_string(),
+            None,
+            Some(format!("AgentDesk-codex-adk-cdx-{channel_id}")),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            last_offset,
+        );
+        state.rebind_origin = true;
+        state.turn_source = TurnSource::ExternalAdopted;
+        state.rebind_origin_created_at_unix = Some(super::now_unix());
+        state.rebind_origin_deadline_secs = Some(REBIND_ORIGIN_DEADLINE_SECS_DEFAULT);
+        state.rebind_origin_birth_generation = Some(birth_generation);
+        // `new()` already sets last_offset == turn_start_offset; assert the
+        // never-progressed invariant the predicate depends on.
+        assert_eq!(state.last_offset, state.turn_start_offset.unwrap());
+        state
+    }
+
+    const CURRENT_GEN: u64 = 9;
+    const PAST_DEADLINE: u64 = REBIND_ORIGIN_DEADLINE_SECS_DEFAULT + 5;
+    const WITHIN_DEADLINE: u64 = REBIND_ORIGIN_DEADLINE_SECS_DEFAULT - 5;
+
+    #[test]
+    fn reaps_abandoned_rebind_past_deadline() {
+        // (a) Born on a non-empty output file (offset > 0), never adopted /
+        // progressed, past deadline → reap. This is the exact #3581 wedge row.
+        let state = reapable_rebind(1, 4096, CURRENT_GEN);
+        assert!(should_reap_abandoned_rebind_origin(
+            &state,
+            PAST_DEADLINE,
+            CURRENT_GEN
+        ));
+    }
+
+    #[test]
+    fn preserves_fresh_rebind_within_deadline() {
+        // (b) Same signature but within deadline and same generation → preserve.
+        let state = reapable_rebind(2, 4096, CURRENT_GEN);
+        assert!(!should_reap_abandoned_rebind_origin(
+            &state,
+            WITHIN_DEADLINE,
+            CURRENT_GEN
+        ));
+    }
+
+    #[test]
+    fn live_protect_offset_progress_never_reaped() {
+        // (c-1) Watcher advanced past the birth offset → never reaped even past
+        // the deadline. last_offset != turn_start_offset.
+        let mut state = reapable_rebind(3, 4096, CURRENT_GEN);
+        state.last_offset = state.turn_start_offset.unwrap() + 100;
+        assert!(!should_reap_abandoned_rebind_origin(
+            &state,
+            PAST_DEADLINE,
+            CURRENT_GEN
+        ));
+    }
+
+    #[test]
+    fn live_protect_owner_watcher_never_reaped() {
+        // (c-2) A live relay owner (MonitorTriggered watcher rebind shape) →
+        // never reaped. Test both the typed field and the legacy bool.
+        let mut typed = reapable_rebind(4, 4096, CURRENT_GEN);
+        typed.set_relay_owner_kind(RelayOwnerKind::Watcher);
+        assert!(!should_reap_abandoned_rebind_origin(
+            &typed,
+            PAST_DEADLINE,
+            CURRENT_GEN
+        ));
+
+        let mut legacy = reapable_rebind(5, 4096, CURRENT_GEN);
+        legacy.relay_owner_kind = RelayOwnerKind::None;
+        legacy.watcher_owns_live_relay = true; // legacy bool only
+        assert!(!should_reap_abandoned_rebind_origin(
+            &legacy,
+            PAST_DEADLINE,
+            CURRENT_GEN
+        ));
+    }
+
+    #[test]
+    fn live_protect_adopted_user_msg_never_reaped() {
+        // (c-3) Adopted (user_msg_id != 0) → never reaped.
+        let mut state = reapable_rebind(6, 4096, CURRENT_GEN);
+        state.user_msg_id = 42;
+        assert!(!should_reap_abandoned_rebind_origin(
+            &state,
+            PAST_DEADLINE,
+            CURRENT_GEN
+        ));
+    }
+
+    #[test]
+    fn live_protect_delivered_response_never_reaped() {
+        // (c-4) Any delivered text (response_sent_offset > 0 or non-empty
+        // full_response) → never reaped.
+        let mut sent = reapable_rebind(7, 4096, CURRENT_GEN);
+        sent.response_sent_offset = 10;
+        assert!(!should_reap_abandoned_rebind_origin(
+            &sent,
+            PAST_DEADLINE,
+            CURRENT_GEN
+        ));
+
+        let mut accumulated = reapable_rebind(8, 4096, CURRENT_GEN);
+        accumulated.full_response = "partial answer".to_string();
+        assert!(!should_reap_abandoned_rebind_origin(
+            &accumulated,
+            PAST_DEADLINE,
+            CURRENT_GEN
+        ));
+    }
+
+    #[test]
+    fn live_protect_anchor_or_terminal_never_reaped() {
+        // Anchor placeholder present (current_msg_id != 0) or terminal commit →
+        // never reaped.
+        let mut anchored = reapable_rebind(9, 4096, CURRENT_GEN);
+        anchored.current_msg_id = 777;
+        assert!(!should_reap_abandoned_rebind_origin(
+            &anchored,
+            PAST_DEADLINE,
+            CURRENT_GEN
+        ));
+
+        let mut committed = reapable_rebind(10, 4096, CURRENT_GEN);
+        committed.terminal_delivery_committed = true;
+        assert!(!should_reap_abandoned_rebind_origin(
+            &committed,
+            PAST_DEADLINE,
+            CURRENT_GEN
+        ));
+    }
+
+    #[test]
+    fn reaps_on_generation_mismatch_within_deadline() {
+        // (d) Born in a prior generation → reap even within the deadline.
+        let state = reapable_rebind(11, 4096, 1);
+        assert!(should_reap_abandoned_rebind_origin(
+            &state,
+            WITHIN_DEADLINE,
+            CURRENT_GEN
+        ));
+    }
+
+    #[test]
+    fn legacy_row_reaps_via_mtime_age() {
+        // (e) Legacy row: no created_at / birth_generation stamps. Reaps only
+        // via the supplied (file-mtime) age; preserved while within deadline.
+        let mut legacy = reapable_rebind(12, 4096, CURRENT_GEN);
+        legacy.rebind_origin_created_at_unix = None;
+        legacy.rebind_origin_deadline_secs = None; // falls back to env default
+        legacy.rebind_origin_birth_generation = None;
+
+        assert!(
+            should_reap_abandoned_rebind_origin(&legacy, PAST_DEADLINE, CURRENT_GEN),
+            "legacy row past mtime-age deadline must reap"
+        );
+        assert!(
+            !should_reap_abandoned_rebind_origin(&legacy, WITHIN_DEADLINE, CURRENT_GEN),
+            "legacy row within deadline must be preserved"
+        );
+    }
+
+    #[test]
+    fn planned_restart_rebind_never_reaped() {
+        // (f) restart_mode set → planned restart owns retention; never reaped.
+        let mut state = reapable_rebind(13, 4096, CURRENT_GEN);
+        state.set_restart_mode(InflightRestartMode::DrainRestart);
+        assert!(!should_reap_abandoned_rebind_origin(
+            &state,
+            PAST_DEADLINE,
+            CURRENT_GEN
+        ));
+    }
+
+    #[test]
+    fn non_rebind_row_never_reaped() {
+        // A normal (non-rebind) row that happens to match every other conjunct
+        // is out of scope entirely.
+        let mut state = reapable_rebind(14, 4096, CURRENT_GEN);
+        state.rebind_origin = false;
+        assert!(!should_reap_abandoned_rebind_origin(
+            &state,
+            PAST_DEADLINE,
+            CURRENT_GEN
+        ));
+    }
+
+    #[test]
+    fn invalidate_stale_generation_reaps_prior_generation_rebind_orphan() {
+        // Boot-time integration: a rebind orphan stamped from a prior
+        // generation is reaped by `invalidate_stale_generation_in_root` even
+        // though it has no `restart_generation` stamp (the old skip path would
+        // have preserved it forever).
+        let temp = TempDir::new().unwrap();
+        let orphan = reapable_rebind(2001, 4096, 1); // birth gen 1
+        save_inflight_state_in_root(temp.path(), &orphan).expect("save");
+
+        let removed =
+            invalidate_stale_generation_in_root(temp.path(), &ProviderKind::Codex, CURRENT_GEN);
+        assert_eq!(
+            removed.len(),
+            1,
+            "prior-generation rebind orphan must be reaped"
+        );
+        assert_eq!(removed[0], (2001, Some(1)));
+        let after = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
+        assert!(after.is_empty());
+    }
+
+    #[test]
+    fn invalidate_stale_generation_preserves_same_generation_fresh_rebind() {
+        // A same-generation rebind orphan whose file mtime is fresh (age 0)
+        // must survive the boot-time pass — neither the deadline nor the
+        // generation disjunct fires.
+        let temp = TempDir::new().unwrap();
+        let fresh = reapable_rebind(2002, 4096, CURRENT_GEN);
+        save_inflight_state_in_root(temp.path(), &fresh).expect("save");
+
+        let removed =
+            invalidate_stale_generation_in_root(temp.path(), &ProviderKind::Codex, CURRENT_GEN);
+        assert!(
+            removed.is_empty(),
+            "fresh same-generation rebind row must survive the boot-time pass"
+        );
+        let after = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
+        assert_eq!(after.len(), 1);
+        assert!(after[0].rebind_origin);
+    }
+
+    #[test]
+    fn invalidate_stale_generation_preserves_live_owned_rebind_prior_generation() {
+        // Even with a prior-generation stamp, a rebind row that has a live
+        // owner (Watcher) must NOT be reaped at boot — the live-protection
+        // conjunction overrides the generation disjunct.
+        let temp = TempDir::new().unwrap();
+        let mut live = reapable_rebind(2003, 4096, 1); // prior gen
+        live.set_relay_owner_kind(RelayOwnerKind::Watcher);
+        save_inflight_state_in_root(temp.path(), &live).expect("save");
+
+        let removed =
+            invalidate_stale_generation_in_root(temp.path(), &ProviderKind::Codex, CURRENT_GEN);
+        assert!(
+            removed.is_empty(),
+            "owner-Watcher rebind must survive boot reap even from a prior generation"
+        );
+        let after = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
+        assert_eq!(after.len(), 1);
     }
 }
 
