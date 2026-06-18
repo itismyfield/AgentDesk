@@ -31,7 +31,8 @@ use super::formatting::{
 use super::gateway::edit_outbound_message;
 use super::inflight::{
     InflightTurnState, delete_inflight_state_file, emit_reap_abandoned_rebind_origin,
-    load_inflight_states_for_sweep, parse_started_at_unix, should_reap_abandoned_rebind_origin,
+    load_inflight_states_for_sweep, parse_started_at_unix, reap_abandoned_rebind_origin_locked,
+    should_reap_abandoned_rebind_origin,
 };
 use crate::services::provider::ProviderKind;
 
@@ -354,9 +355,17 @@ async fn run_placeholder_sweep_pass(
             // adopted rebind is never touched. `age_secs` here is the file-mtime
             // age the sweeper already computed, which covers legacy rows that
             // pre-date the persisted birth stamp.
+            //
+            // #3581 (codex TOCTOU fix): the `should_reap_*` check above runs on
+            // an UNLOCKED snapshot. Between this read and the delete, a normal
+            // intake / TUI claim can persist a brand-new live inflight at the
+            // same sidecar path. Route the delete through the locked
+            // re-validate helper so it reloads + re-checks identity + eligibility
+            // under the lock and only unlinks a row that is *still* the same
+            // abandoned orphan — never a live replacement.
             let current_generation = super::runtime_store::load_generation();
             if should_reap_abandoned_rebind_origin(&state, age_secs, current_generation)
-                && delete_inflight_state_file(provider, state.channel_id)
+                && reap_abandoned_rebind_origin_locked(provider, &state, current_generation)
             {
                 emit_reap_abandoned_rebind_origin(
                     provider,

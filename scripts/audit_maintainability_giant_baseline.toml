@@ -371,7 +371,20 @@
 # skipped every rebind row unconditionally, the permanent-orphan source). The
 # bulk is load-bearing doc comments pinning the never-live argument; the tests
 # live in `#[cfg(test)] mod rebind_origin_reap_tests` and are excluded here.
-"src/services/discord/inflight.rs" = 2551
+# #3581 (codex TOCTOU follow-up) raised 2551 -> 2660 (+109): closes the
+# placeholder-sweeper reap race (unlocked-snapshot pre-check, then
+# `delete_inflight_state_file` unlinked without re-reading the row under the
+# lock — a racing intake/TUI claim could persist a new live inflight at the same
+# sidecar path and have it wiped). Adds the shared locked re-validate helper
+# `reap_abandoned_rebind_origin_locked_in_root` (+ its env wrapper
+# `reap_abandoned_rebind_origin_locked`), the `RebindReapOutcome` enum, and the
+# `rebind_row_identity_unchanged` identity guard (created_at + birth_generation +
+# turn_start_offset) so a replacement turn is never mistaken for the snapshotted
+# orphan. Both the sweeper and the boot `invalidate_stale_generation_in_root`
+# path now route their unlink through this single helper (the boot branch loses
+# its inline lock+reload). The bulk is load-bearing doc comments; the 4 new
+# boundary tests live in the excluded `rebind_origin_reap_tests` module.
+"src/services/discord/inflight.rs" = 2660
 # #3038 Phase A: health.rs decomposed into health/ directory modules (root 402
 # prod LoC + 6 sub-1000-LoC submodules) — dropped below the giant threshold, so
 # its ratchet entry is deleted (win; no baseline raises).

@@ -301,6 +301,114 @@ pub(super) fn delete_inflight_state_file(provider: &ProviderKind, channel_id: u6
     fs::remove_file(path).is_ok()
 }
 
+/// #3581 (codex TOCTOU fix): outcome of a locked rebind-origin reap attempt so
+/// callers (and tests) can distinguish "reaped" from "skipped because the row
+/// was replaced/no-longer-eligible" from "the file was already gone".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RebindReapOutcome {
+    /// The row was re-validated under the lock and unlinked.
+    Reaped,
+    /// The on-disk row no longer satisfies the reap predicate (e.g. a live
+    /// intake/claim replaced it between the unlocked snapshot and the lock) —
+    /// deletion was intentionally skipped.
+    Skipped,
+    /// The state file was already absent (idempotent no-op) or unreadable.
+    Missing,
+    /// The advisory lock could not be acquired — the caller should retry later.
+    LockUnavailable,
+}
+
+/// #3581 (codex TOCTOU fix): true when the on-disk `locked` row is still the
+/// *same* abandoned rebind-origin orphan identified by the unlocked `snapshot`.
+///
+/// The placeholder sweeper (and the boot invalidator) pass an unlocked snapshot
+/// to `should_reap_abandoned_rebind_origin`; between that read and acquiring the
+/// sidecar lock a normal intake / TUI claim can persist a brand-new live
+/// inflight at the same `(provider, channel_id)` path. Re-running the reap
+/// predicate alone is not sufficient: a *new* rebind-origin orphan could be born
+/// (different birth stamp/generation) that also looks structurally abandoned.
+/// We therefore additionally require the row's birth identity to be unchanged
+/// (`rebind_origin_created_at_unix` + `rebind_origin_birth_generation`), so a
+/// replacement turn is never mistaken for the snapshotted orphan.
+fn rebind_row_identity_unchanged(snapshot: &InflightTurnState, locked: &InflightTurnState) -> bool {
+    locked.rebind_origin == snapshot.rebind_origin
+        && locked.rebind_origin_created_at_unix == snapshot.rebind_origin_created_at_unix
+        && locked.rebind_origin_birth_generation == snapshot.rebind_origin_birth_generation
+        && locked.turn_start_offset == snapshot.turn_start_offset
+}
+
+/// #3581 (codex TOCTOU fix): reap an abandoned rebind-origin orphan under the
+/// sidecar lock with a re-validate-then-unlink contract. This is the shared
+/// implementation behind both the periodic placeholder-sweeper path and the
+/// boot-time `invalidate_stale_generation` path so the two stay consistent.
+///
+/// Contract:
+///   1. Acquire the sidecar advisory lock for the row's path (the same
+///      non-reentrant `flock` every intake/claim/persist helper takes).
+///   2. **Reload** the current on-disk row under the lock.
+///   3. Confirm the reloaded row is still the *same* orphan as `snapshot`
+///      (`rebind_row_identity_unchanged`) AND still satisfies
+///      `should_reap_abandoned_rebind_origin` with a freshly recomputed age
+///      (created-at preferred, mtime fallback for legacy rows).
+///   4. Unlink **only** when both checks hold; otherwise skip (a live intake /
+///      claim replaced the orphan since the snapshot).
+///
+/// Returns the [`RebindReapOutcome`]; the caller emits observability on
+/// [`RebindReapOutcome::Reaped`].
+fn reap_abandoned_rebind_origin_locked_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    snapshot: &InflightTurnState,
+    current_generation: u64,
+) -> RebindReapOutcome {
+    let path = inflight_state_path(root, provider, snapshot.channel_id);
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return RebindReapOutcome::LockUnavailable;
+    };
+    let Some(locked) = read_inflight_state_content(&path) else {
+        return RebindReapOutcome::Missing;
+    };
+    // The unlocked snapshot may have raced a replacement turn. Re-validate the
+    // current row's birth identity AND its eligibility under a freshly computed
+    // age before touching the file.
+    if !rebind_row_identity_unchanged(snapshot, &locked) {
+        return RebindReapOutcome::Skipped;
+    }
+    let age_secs = rebind_origin_age_secs(&path, &locked);
+    if !should_reap_abandoned_rebind_origin(&locked, age_secs, current_generation) {
+        return RebindReapOutcome::Skipped;
+    }
+    match fs::remove_file(&path) {
+        Ok(()) => RebindReapOutcome::Reaped,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => RebindReapOutcome::Missing,
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = snapshot.channel_id,
+                error = %error,
+                "#3581 rebind reap remove_file failed under lock; treating as Missing"
+            );
+            RebindReapOutcome::Missing
+        }
+    }
+}
+
+/// #3581 (codex TOCTOU fix): env-rooted wrapper around
+/// [`reap_abandoned_rebind_origin_locked_in_root`] for the periodic
+/// placeholder-sweeper path. Returns `true` iff the row was re-validated under
+/// the lock and unlinked (so the sweeper only counts/emits genuine reaps).
+pub(super) fn reap_abandoned_rebind_origin_locked(
+    provider: &ProviderKind,
+    snapshot: &InflightTurnState,
+    current_generation: u64,
+) -> bool {
+    let Some(root) = inflight_runtime_root() else {
+        return false;
+    };
+    reap_abandoned_rebind_origin_locked_in_root(&root, provider, snapshot, current_generation)
+        == RebindReapOutcome::Reaped
+}
+
 fn now_string() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
@@ -2163,28 +2271,29 @@ fn invalidate_stale_generation_in_root(
             // if it is past its deadline OR was born in a prior generation.
             // The reap predicate's strict conjunction guarantees a live /
             // adopted rebind is never touched.
+            //
+            // #3581 (codex TOCTOU fix): gate the unlocked-snapshot pre-check
+            // with the same locked re-validate-then-unlink helper the periodic
+            // sweeper now uses, so boot and sweeper stay consistent and a row
+            // replaced between the snapshot and the lock is never wiped.
             let path = inflight_state_path(root, provider, state.channel_id);
             let age_secs = rebind_origin_age_secs(&path, &state);
-            if should_reap_abandoned_rebind_origin(&state, age_secs, current_generation) {
-                let Ok(_lock) = lock_inflight_state_path(&path) else {
-                    continue;
-                };
-                let Some(locked) = read_inflight_state_content(&path) else {
-                    continue;
-                };
-                if !should_reap_abandoned_rebind_origin(&locked, age_secs, current_generation) {
-                    continue;
-                }
-                if fs::remove_file(&path).is_ok() {
-                    emit_reap_abandoned_rebind_origin(
-                        provider,
-                        &locked,
-                        age_secs,
-                        current_generation,
-                        "invalidate_stale_generation_boot",
-                    );
-                    removed.push((locked.channel_id, locked.rebind_origin_birth_generation));
-                }
+            if should_reap_abandoned_rebind_origin(&state, age_secs, current_generation)
+                && reap_abandoned_rebind_origin_locked_in_root(
+                    root,
+                    provider,
+                    &state,
+                    current_generation,
+                ) == RebindReapOutcome::Reaped
+            {
+                emit_reap_abandoned_rebind_origin(
+                    provider,
+                    &state,
+                    age_secs,
+                    current_generation,
+                    "invalidate_stale_generation_boot",
+                );
+                removed.push((state.channel_id, state.rebind_origin_birth_generation));
             }
             continue;
         }
@@ -5605,9 +5714,10 @@ mod rebind_origin_reap_tests {
     //! reap so a genuinely-live rebind is never destroyed (#3154 / #3540
     //! no-regression pins).
     use super::{
-        InflightTurnState, REBIND_ORIGIN_DEADLINE_SECS_DEFAULT, RelayOwnerKind, TurnSource,
-        invalidate_stale_generation_in_root, load_inflight_states_from_root,
-        save_inflight_state_in_root, should_reap_abandoned_rebind_origin,
+        InflightTurnState, REBIND_ORIGIN_DEADLINE_SECS_DEFAULT, RebindReapOutcome, RelayOwnerKind,
+        TurnSource, invalidate_stale_generation_in_root, load_inflight_states_from_root,
+        reap_abandoned_rebind_origin_locked_in_root, save_inflight_state_in_root,
+        should_reap_abandoned_rebind_origin,
     };
     use crate::services::discord::InflightRestartMode;
     use crate::services::provider::ProviderKind;
@@ -5877,6 +5987,140 @@ mod rebind_origin_reap_tests {
         );
         let after = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
         assert_eq!(after.len(), 1);
+    }
+
+    // ----------------------------------------------------------------------
+    // #3581 (codex TOCTOU fix): locked re-validate boundary for the periodic
+    // placeholder-sweeper reap path. The sweeper passes an UNLOCKED snapshot to
+    // `should_reap_abandoned_rebind_origin`; between that snapshot and the
+    // delete, a normal intake / TUI claim can persist a brand-new live inflight
+    // at the same sidecar path. `reap_abandoned_rebind_origin_locked_in_root`
+    // must reload + re-validate identity + eligibility under the lock and skip
+    // the unlink when the on-disk row is no longer the snapshotted orphan.
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn locked_reap_unlinks_orphan_that_is_still_the_same_row() {
+        // (b) The on-disk row is unchanged since the snapshot and is still a
+        // prior-generation orphan → the locked re-validate succeeds and unlinks.
+        let temp = TempDir::new().unwrap();
+        let orphan = reapable_rebind(3001, 4096, 1); // prior gen → reap disjunct
+        save_inflight_state_in_root(temp.path(), &orphan).expect("save");
+        // Pre-check passes on the unlocked snapshot (mirrors the sweeper).
+        assert!(should_reap_abandoned_rebind_origin(&orphan, 0, CURRENT_GEN));
+
+        let outcome = reap_abandoned_rebind_origin_locked_in_root(
+            temp.path(),
+            &ProviderKind::Codex,
+            &orphan,
+            CURRENT_GEN,
+        );
+        assert_eq!(
+            outcome,
+            RebindReapOutcome::Reaped,
+            "unchanged prior-generation orphan must be unlinked under the lock"
+        );
+        let after = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
+        assert!(after.is_empty(), "orphan file must be gone after reap");
+    }
+
+    #[test]
+    fn locked_reap_skips_when_row_replaced_by_new_live_turn() {
+        // (a) THE RACE: the sweeper snapshots an abandoned orphan, but before it
+        // takes the lock a normal intake persists a brand-new LIVE turn at the
+        // same channel path. The locked re-validate must DETECT the replacement
+        // (live row no longer reapable) and skip the unlink so the new live turn
+        // survives.
+        let temp = TempDir::new().unwrap();
+        let snapshot = reapable_rebind(3002, 4096, 1); // prior gen, reapable
+        save_inflight_state_in_root(temp.path(), &snapshot).expect("save snapshot");
+        assert!(should_reap_abandoned_rebind_origin(
+            &snapshot,
+            0,
+            CURRENT_GEN
+        ));
+
+        // Simulate the racing intake: overwrite the same path with a live,
+        // adopted, current-generation turn (NOT reapable). Same channel_id.
+        let mut live = reapable_rebind(3002, 4096, CURRENT_GEN);
+        live.rebind_origin = false; // a normal intake turn, not a rebind orphan
+        live.turn_source = TurnSource::Managed;
+        live.user_msg_id = 9999; // adopted → live-protected
+        save_inflight_state_in_root(temp.path(), &live).expect("save live replacement");
+
+        let outcome = reap_abandoned_rebind_origin_locked_in_root(
+            temp.path(),
+            &ProviderKind::Codex,
+            &snapshot,
+            CURRENT_GEN,
+        );
+        assert_eq!(
+            outcome,
+            RebindReapOutcome::Skipped,
+            "a live replacement turn must NOT be reaped by a stale snapshot"
+        );
+        let after = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
+        assert_eq!(after.len(), 1, "the live replacement turn must survive");
+        assert_eq!(after[0].user_msg_id, 9999, "survivor is the live turn");
+        assert!(!after[0].rebind_origin);
+    }
+
+    #[test]
+    fn locked_reap_skips_when_orphan_replaced_by_fresh_rebind_orphan() {
+        // (a') Subtle variant: the replacement is ALSO a structurally-abandoned
+        // rebind orphan, but a NEW birth (different created_at/generation). The
+        // bare `should_reap_*` re-check could still fire on it, so the identity
+        // guard is what blocks the wrong unlink — proving identity re-validation
+        // (not just predicate re-run) is load-bearing.
+        let temp = TempDir::new().unwrap();
+        let snapshot = reapable_rebind(3003, 4096, 1); // birth gen 1
+        save_inflight_state_in_root(temp.path(), &snapshot).expect("save snapshot");
+
+        // Racing rebind respawn: same channel, fresh birth (gen 2, new
+        // created_at, different turn_start_offset) but still prior to CURRENT_GEN
+        // so the predicate alone would happily reap it.
+        let mut respawn = reapable_rebind(3003, 8192, 2); // different offset + gen
+        respawn.rebind_origin_created_at_unix =
+            Some(snapshot.rebind_origin_created_at_unix.unwrap() + 100);
+        save_inflight_state_in_root(temp.path(), &respawn).expect("save respawn");
+        // Sanity: the predicate WOULD reap the respawn on its own (gen 2 != 9).
+        assert!(should_reap_abandoned_rebind_origin(
+            &respawn,
+            0,
+            CURRENT_GEN
+        ));
+
+        let outcome = reap_abandoned_rebind_origin_locked_in_root(
+            temp.path(),
+            &ProviderKind::Codex,
+            &snapshot, // stale snapshot drives the reap
+            CURRENT_GEN,
+        );
+        assert_eq!(
+            outcome,
+            RebindReapOutcome::Skipped,
+            "a freshly-reborn orphan must not be reaped under the prior snapshot's identity"
+        );
+        let after = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
+        assert_eq!(after.len(), 1, "the respawned row must survive this pass");
+        assert_eq!(after[0].rebind_origin_birth_generation, Some(2));
+    }
+
+    #[test]
+    fn locked_reap_missing_when_file_already_gone() {
+        // Idempotency: a snapshot whose file was already removed (e.g. a peer
+        // sweep / claim cleared it) yields Missing, never a spurious Reaped.
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir_all(temp.path().join(ProviderKind::Codex.as_str())).unwrap();
+        let snapshot = reapable_rebind(3004, 4096, 1);
+        // Deliberately do NOT save the row.
+        let outcome = reap_abandoned_rebind_origin_locked_in_root(
+            temp.path(),
+            &ProviderKind::Codex,
+            &snapshot,
+            CURRENT_GEN,
+        );
+        assert_eq!(outcome, RebindReapOutcome::Missing);
     }
 }
 
