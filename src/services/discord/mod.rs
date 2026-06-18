@@ -215,8 +215,8 @@ pub use discord_io::{
 };
 pub(in crate::services::discord) use dispatch_policy::{
     is_allowed_turn_sender, prepend_monitor_auto_turn_origin, resolve_announce_bot_user_id,
-    resolve_notify_bot_user_id, session_retry_context_key, should_phase2_recover_message,
-    stale_dispatch_turn_for_text, strip_monitor_auto_turn_origin,
+    resolve_notify_bot_user_id, should_phase2_recover_message, stale_dispatch_turn_for_text,
+    strip_monitor_auto_turn_origin,
 };
 pub(crate) use inflight::latest_request_owner_user_id_for_channel;
 pub use settings::{
@@ -4037,9 +4037,7 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
 
     struct ExpiredSessionCleanup {
         channel_id: ChannelId,
-        session_id: Option<String>,
         session_key: Option<String>,
-        retry_context: Option<String>,
     }
 
     let provider = shared.settings.read().await.provider.clone();
@@ -4057,7 +4055,6 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
             })
             .map(|(ch, s)| ExpiredSessionCleanup {
                 channel_id: *ch,
-                session_id: s.session_id.clone(),
                 session_key: s.channel_name.as_ref().map(|name| {
                     let tmux_name = provider.build_tmux_session_name(name);
                     adk_session::build_namespaced_session_key(
@@ -4066,7 +4063,6 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
                         &tmux_name,
                     )
                 }),
-                retry_context: s.recent_history_context(SESSION_RECOVERY_CONTEXT_MESSAGES),
             })
             .collect()
     };
@@ -4086,20 +4082,14 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
             data.sessions.remove(&ch);
         }
     }
-    for expired_session in &expired {
-        if let Some(retry_context) = expired_session.retry_context.as_deref() {
-            let _ = internal_api::set_kv_value(
-                &session_retry_context_key(expired_session.channel_id),
-                retry_context,
-            );
-        }
-        if let Some(session_key) = expired_session.session_key.as_deref() {
-            adk_session::clear_provider_session_id(session_key, shared.api_port).await;
-        }
-        if let Some(session_id) = expired_session.session_id.as_deref() {
-            let _ = internal_api::clear_stale_session_id(session_id).await;
-        }
-    }
+    // #3588: idle 정리는 in-memory/worktree 메모리 회수만 수행하고 provider
+    // session(claude resume id)은 DB에 보존한다. 다음 턴에서
+    // `fetch_provider_session_id`로 복원되어 `--resume`으로 transcript가 이어진다.
+    // retry_context(session_retry_context_key) kv는 의도적으로 저장하지 않는다 —
+    // 같은 키를 `take_session_retry_context`가 다음 턴에 무조건 take/주입하므로,
+    // resume이 성공하는 idle 경로에서 저장하면 transcript 중복 + "새 세션 시작"
+    // 레이블 오표시가 발생한다. 진짜 reset(AssistantTurnCap)만 turn_start에서 저장한다.
+    // 명시적 세션 초기화는 idle recap의 `새 세션 시작` 버튼(idle_recap:clear)으로 한다.
     for expired_session in &expired {
         let cleared = mailbox_clear_channel(shared, &provider, expired_session.channel_id).await;
         if cleared.removed_token.is_some() {
