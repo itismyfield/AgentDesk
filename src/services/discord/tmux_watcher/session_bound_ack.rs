@@ -27,6 +27,22 @@ use super::supervisor_relay::SessionBoundRelayAckTarget;
 ///     [`session_bound_ack_delivery_outcome`]). They stay DISTINCT variants here
 ///     so the flight-recorder / metrics keep their exact provenance.
 ///
+/// #3579: `NotAttempted` is the watcher-owned NON-attempt sentinel. It is the
+/// INIT value of `session_bound_ack_outcome` (tmux_watcher.rs) and is what the
+/// flight recorder logs as `frame_ack_outcome` when the session-bound ack-wait
+/// block was SKIPPED entirely — i.e. `session_bound_relay_should_own_terminal_delivery`
+/// returned false (typically `relay_owner=Watcher`, so the WATCHER itself owns the
+/// terminal delivery and the sink-delegated ack path is intentionally not taken).
+/// This is a BENIGN, expected steady-state — NOT a relay loss. Before #3579 the
+/// init was `MissingTarget`, which conflated this watcher-owned non-attempt with
+/// the genuine `wait_for_session_bound_relay_delivery_ack` `target.is_none()`
+/// failure path, inflating operator/audit relay-loss tallies. `NotAttempted` is
+/// distinct precisely so the recorder/metrics can EXCLUDE it as benign while
+/// `MissingTarget` keeps meaning "ack-wait ran but had no target" (a real
+/// unconfirmed). For the resend DECISION it folds to `DeliveryOutcome::Unknown`
+/// IDENTICALLY to `MissingTarget` — behavior is unchanged; only the provenance
+/// label/aggregation classification differs.
+///
 /// §3.2 SAFETY INVARIANT: BOTH `NotDelivered` AND every `Unknown`-class arm route
 /// through `watcher_terminal_resend_action` (committed-offset reconciliation).
 /// There is NO blind skip for `NotDelivered` and NO blind 10s re-send for any
@@ -40,6 +56,9 @@ pub(super) enum SessionBoundRelayAckOutcome {
     SinkError,
     TimedOut,
     MissingTarget,
+    /// #3579: the session-bound ack-wait was never attempted (watcher-owned
+    /// terminal delivery). Benign steady-state, distinct from `MissingTarget`.
+    NotAttempted,
 }
 
 /// #3041 P1-5: collapse the watcher ACK onto the canonical cross-actor 3-way
@@ -59,7 +78,11 @@ pub(super) fn session_bound_ack_delivery_outcome(
         | SessionBoundRelayAckOutcome::Dropped
         | SessionBoundRelayAckOutcome::SinkError
         | SessionBoundRelayAckOutcome::TimedOut
-        | SessionBoundRelayAckOutcome::MissingTarget => DeliveryOutcome::Unknown,
+        | SessionBoundRelayAckOutcome::MissingTarget
+        // #3579: the watcher-owned non-attempt folds to `Unknown` IDENTICALLY to
+        // `MissingTarget` for the resend DECISION (committed-offset reconciliation),
+        // so behavior is preserved exactly — only the provenance label differs.
+        | SessionBoundRelayAckOutcome::NotAttempted => DeliveryOutcome::Unknown,
     }
 }
 

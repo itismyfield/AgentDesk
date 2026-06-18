@@ -4317,7 +4317,18 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let relay_producer_session_name = cached_relay_producer
             .as_ref()
             .map(|producer| producer.session_name());
-        let mut session_bound_ack_outcome = SessionBoundRelayAckOutcome::MissingTarget;
+        // #3579: INIT the ack outcome to the watcher-owned NON-attempt sentinel.
+        // When `session_bound_relay_should_own_terminal_delivery` returns false
+        // (e.g. relay_owner=Watcher) the ack-wait block below is SKIPPED and this
+        // init value is what the flight recorder logs as `frame_ack_outcome`. It
+        // is BENIGN (the watcher owns terminal delivery; the sink-delegated ack
+        // path is intentionally not taken) — distinct from `MissingTarget`, which
+        // `wait_for_session_bound_relay_delivery_ack` returns only when the block
+        // ACTUALLY RAN but had no target (a real unconfirmed). Before #3579 this
+        // init was `MissingTarget`, conflating the two and inflating relay-loss
+        // tallies. Behavior is unchanged: `NotAttempted` folds to the same
+        // `DeliveryOutcome::Unknown` as `MissingTarget` for the resend decision.
+        let mut session_bound_ack_outcome = SessionBoundRelayAckOutcome::NotAttempted;
         let session_bound_terminal_delivery_attempted =
             session_bound_relay_should_own_terminal_delivery(
                 relay_decision.should_direct_send,
@@ -8989,7 +9000,9 @@ TUI-E2E-marker ssh-direct
         let relay_decision = terminal_relay_decision(has_assistant_response, None, true);
         let watcher_direct_send = watcher_should_direct_send_after_session_bound_ack(
             relay_decision.should_direct_send,
-            SessionBoundRelayAckOutcome::MissingTarget,
+            // #3579: the non-attempt sentinel folds to `Unknown` exactly like the
+            // old `MissingTarget` init, so the watcher-direct gate is unchanged.
+            SessionBoundRelayAckOutcome::NotAttempted,
             false,
         );
 

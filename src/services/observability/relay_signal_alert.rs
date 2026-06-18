@@ -354,6 +354,37 @@ mod tests {
         }
     }
 
+    /// #3579: the operator alert table must NEVER count the watcher-owned
+    /// `frame_ack_outcome` non-attempt as a relay-loss signal. `NotAttempted`
+    /// (the session-bound ack-wait was intentionally SKIPPED because the watcher
+    /// owns terminal delivery) is a BENIGN steady-state, distinct from the real
+    /// `MissingTarget` failure. Wiring either the raw enum debug string
+    /// (`NotAttempted`) or a generic `frame_ack`/`missing_target` counter into a
+    /// signal here would resurrect the false-positive relay-loss tally #3579
+    /// fixes (the ~2307/month phantom misses). Guard the exclusion explicitly so
+    /// a future alert-table edit cannot silently re-conflate them.
+    #[test]
+    fn signal_table_excludes_benign_watcher_owned_non_attempt() {
+        let mut keys: Vec<&str> = RELAY_SIGNAL_DEFINITIONS.iter().map(|s| s.key).collect();
+        let statuses: Vec<&str> = RELAY_SIGNAL_DEFINITIONS
+            .iter()
+            .flat_map(|s| s.statuses.iter().copied())
+            .collect();
+        keys.extend_from_slice(&statuses);
+        for benign in [
+            "NotAttempted",
+            "not_attempted",
+            "frame_ack_outcome",
+            "frame_ack",
+        ] {
+            assert!(
+                !keys.contains(&benign),
+                "relay signal table must NOT count the benign watcher-owned \
+                 non-attempt `{benign}` as a relay-loss signal (#3579); present: {keys:?}"
+            );
+        }
+    }
+
     /// Every status string in the table must be one the emit path actually
     /// writes to `observability_events.status`, otherwise the window query
     /// counts zero forever. These mirror `emit_relay_root_cause_counter`

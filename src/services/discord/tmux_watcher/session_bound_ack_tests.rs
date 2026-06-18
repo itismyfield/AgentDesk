@@ -49,6 +49,74 @@ fn relay_slot_guard_release_is_idempotent_and_does_not_clobber_reacquire() {
     );
 }
 
+/// #3579: the `NotAttempted` vs `MissingTarget` sentinel split. `NotAttempted`
+/// is the watcher-owned NON-attempt (the ack-wait block was skipped); it must
+/// stay DISTINCT from the genuine `MissingTarget` failure (the ack-wait ran but
+/// had no target) so the flight recorder / metrics can exclude the former as
+/// benign — yet both must fold to the SAME resend decision so delivery behavior
+/// is unchanged.
+mod not_attempted_sentinel {
+    use super::super::{
+        SessionBoundRelayAckOutcome, session_bound_ack_delivery_outcome,
+        wait_for_session_bound_relay_delivery_ack,
+    };
+    use crate::services::cluster::stream_relay::DeliveryOutcome;
+
+    /// The watcher-owned non-attempt sentinel is a DISTINCT enum value from the
+    /// real `MissingTarget` failure — they must never compare equal, or the
+    /// recorder's benign-vs-failure classification collapses (#3579 regression).
+    #[test]
+    fn not_attempted_is_distinct_from_missing_target() {
+        assert_ne!(
+            SessionBoundRelayAckOutcome::NotAttempted,
+            SessionBoundRelayAckOutcome::MissingTarget,
+            "the benign non-attempt must not equal the real target-none failure"
+        );
+        // The Debug labels the flight recorder logs as `frame_ack_outcome` must
+        // also differ, so log-grep / audit aggregation can tell them apart.
+        assert_ne!(
+            format!("{:?}", SessionBoundRelayAckOutcome::NotAttempted),
+            format!("{:?}", SessionBoundRelayAckOutcome::MissingTarget),
+        );
+        assert_eq!(
+            format!("{:?}", SessionBoundRelayAckOutcome::NotAttempted),
+            "NotAttempted"
+        );
+    }
+
+    /// Behavior-preserving: the non-attempt folds to the SAME cross-actor
+    /// `DeliveryOutcome::Unknown` as `MissingTarget` for the resend DECISION, so
+    /// the watcher-direct fallback / §3.2 reconciliation is byte-for-byte
+    /// unchanged — #3579 alters provenance/aggregation only, never delivery.
+    #[test]
+    fn not_attempted_folds_identically_to_missing_target() {
+        assert_eq!(
+            session_bound_ack_delivery_outcome(SessionBoundRelayAckOutcome::NotAttempted),
+            DeliveryOutcome::Unknown,
+        );
+        assert_eq!(
+            session_bound_ack_delivery_outcome(SessionBoundRelayAckOutcome::NotAttempted),
+            session_bound_ack_delivery_outcome(SessionBoundRelayAckOutcome::MissingTarget),
+            "the resend decision must be identical to the old MissingTarget init"
+        );
+    }
+
+    /// The REAL failure path is untouched: when the ack-wait actually runs with
+    /// no target, it still returns `MissingTarget` (NOT `NotAttempted`). This is
+    /// the genuine unconfirmed the recorder/metrics MUST still surface.
+    #[tokio::test]
+    async fn ack_wait_with_no_target_still_returns_missing_target() {
+        let outcome =
+            wait_for_session_bound_relay_delivery_ack(None, std::time::Duration::from_millis(1))
+                .await;
+        assert_eq!(
+            outcome,
+            SessionBoundRelayAckOutcome::MissingTarget,
+            "a ran-but-no-target ack-wait is a real failure, not the benign non-attempt"
+        );
+    }
+}
+
 /// #3151: the deterministic decision seam for the in-flight sink-delivery
 /// marker gate (`watcher_terminal_resend_action_gated`). Table-drives the gate
 /// over every lease-snapshot variant and asserts the reclaim side-effect flag.

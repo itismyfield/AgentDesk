@@ -77,7 +77,13 @@
 # `persist_watcher_relay_watermark_locked` single-flock RMW helper, gated on the
 # captured `inflight_identity_before_relay` (+10 lines of identity-guarded calls
 # and explanatory comments).
-"src/services/discord/tmux_watcher.rs" = 6935
+# #3579 raised 6935 -> 6946: the `session_bound_ack_outcome` INIT switched from
+# the `MissingTarget` failure sentinel to the new watcher-owned `NotAttempted`
+# non-attempt sentinel, with a load-bearing explanatory comment block at the init
+# site documenting why the skipped-ack-wait benign case is now distinct from the
+# real `wait_for_session_bound_relay_delivery_ack` target-none failure. NO new
+# direct send / behavior change — provenance/aggregation classification only.
+"src/services/discord/tmux_watcher.rs" = 6946
 # #3038 tmux_watcher S1 child modules, frozen at landed production LoC.
 "src/services/discord/tmux_watcher/commit_decisions.rs" = 140
 "src/services/discord/tmux_watcher/completion_gate.rs" = 275
@@ -91,7 +97,12 @@
 # tmux_watcher/** 700-line namespace cap; their moved unit tests live in sibling
 # *_tests.rs files (excluded from the production splitter).
 "src/services/discord/tmux_watcher/supervisor_relay.rs" = 393
-"src/services/discord/tmux_watcher/session_bound_ack.rs" = 404
+# #3579 raised 404 -> 427: added the `NotAttempted` enum variant + its fold arm
+# and a doc block distinguishing the watcher-owned non-attempt from the real
+# `MissingTarget` target-none failure (behavior-preserving; resend decision folds
+# to `DeliveryOutcome::Unknown` identically). Stays well under the 700-line cap;
+# the new sentinel-distinction unit tests live in sibling session_bound_ack_tests.rs.
+"src/services/discord/tmux_watcher/session_bound_ack.rs" = 427
 # #3479 Phase-1 rank-2 child modules (streaming UTF-8 chunk decoder + terminal-
 # readiness predicates / pure buffer reconcilers), frozen at landed production LoC.
 # Both sit under the tmux_watcher/** 700-line namespace cap; their moved unit tests

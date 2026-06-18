@@ -34,7 +34,13 @@
 # new `persist_watcher_relay_watermark_locked` single-flock RMW helper, gated on
 # the captured `inflight_identity_before_relay`. The helper body lives in
 # inflight.rs; this is the identity-guarded call-site + comment cost.
-"src/services/discord/tmux_watcher.rs" = 10098
+# #3579: 10098 -> 10111 (+13), reviewable admission — the `session_bound_ack_outcome`
+# INIT switched from the `MissingTarget` failure sentinel to the new watcher-owned
+# `NotAttempted` non-attempt sentinel, plus a load-bearing comment block at the init
+# site explaining why the skipped-ack-wait benign case is now distinct from the real
+# target-none failure. Behavior-preserving (folds to the same resend decision); the
+# new sentinel-distinction tests live in the sibling session_bound_ack_tests.rs file.
+"src/services/discord/tmux_watcher.rs" = 10111
 "src/services/discord/tui_prompt_relay.rs" = 7789
 # #3560: 6612 -> 6621 (+9), reviewable admission — footer-mode separate-panel
 # migration reconcile call + comment at the resume entry. Helper body lives in
