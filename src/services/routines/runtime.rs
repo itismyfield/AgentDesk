@@ -727,6 +727,7 @@ async fn close_action(
             prompt,
             dm_user_id,
             checkpoint,
+            last_result,
             next_due_at,
         } => {
             let Some(agent_executor) = agent_executor else {
@@ -753,7 +754,15 @@ async fn close_action(
                 }));
             };
             agent_executor
-                .start_agent_run(store, claimed, prompt, dm_user_id, checkpoint, next_due_at)
+                .start_agent_run(
+                    store,
+                    claimed,
+                    prompt,
+                    dm_user_id,
+                    checkpoint,
+                    last_result,
+                    next_due_at,
+                )
                 .await
                 .map(Some)
         }
@@ -992,6 +1001,7 @@ mod tests {
         let action = RoutineAction::Agent {
             prompt: "# 자동화 후보 추천\n패턴: api-friction".to_string(),
             dm_user_id: None,
+            last_result: None,
             checkpoint: Some(json!({
                 "recommendations": [{
                     "decision_summary": "선택 이유: api-friction 후보가 기준을 충족했습니다.",
