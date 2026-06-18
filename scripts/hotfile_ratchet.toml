@@ -25,4 +25,7 @@
 [hotfile_ratchet]
 "src/services/discord/tmux_watcher.rs" = 10086
 "src/services/discord/tui_prompt_relay.rs" = 7789
-"src/services/discord/turn_bridge/mod.rs" = 6612
+# #3560: 6612 -> 6621 (+9), reviewable admission — footer-mode separate-panel
+# migration reconcile call + comment at the resume entry. Helper body lives in
+# turn_bridge/status_panel.rs; this is the minimal call-site cost.
+"src/services/discord/turn_bridge/mod.rs" = 6621

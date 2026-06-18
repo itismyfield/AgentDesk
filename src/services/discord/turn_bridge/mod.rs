@@ -175,7 +175,7 @@ use stale_resume::{
     stream_error_requires_terminal_session_reset,
 };
 use status_panel::{
-    bridge_epilogue_identity_guards_inflight_clear,
+    bridge_epilogue_identity_guards_inflight_clear, migrate_separate_status_panel_to_footer,
     should_open_long_running_placeholder_controller,
     status_panel_completion_ready_after_terminal_body, status_panel_message_id_for_turn,
 };
@@ -1570,8 +1570,17 @@ pub(super) fn spawn_turn_bridge(
             bridge.reuse_status_panel_message,
         );
         if single_message_panel_footer_mode {
+            // #3560 codex review: a turn that created a *separate* status panel
+            // under default-OFF can be resumed here under footer mode. Clearing
+            // the handle alone would orphan that Discord message, so reconcile
+            // it (edit to a migration notice) before dropping it.
+            migrate_separate_status_panel_to_footer(
+                gateway.as_ref(),
+                channel_id,
+                &mut inflight_state,
+            )
+            .await;
             status_panel_msg_id = None;
-            inflight_state.status_message_id = None;
         }
         let mut last_status_panel_text = String::new();
         let mut status_panel_dirty = shared_owned.ui.status_panel_v2_enabled;

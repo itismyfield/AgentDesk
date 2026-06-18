@@ -6,9 +6,10 @@ use super::common::{EVENT_LINE_MAX_CHARS, normalize_summary, normalize_tool_key,
 
 pub(super) fn slots_enabled_by_footer_flag() -> bool {
     // #3089: background Bash task slots are deliberately footer-mode gated so the
-    // legacy separate status-panel / completion-card render path is unchanged when
-    // AGENTDESK_SINGLE_MESSAGE_PANEL is off. `status_panel_v2_enabled` is already
-    // checked by the callers before status events are pushed/rendered.
+    // legacy separate status-panel / completion-card render path is unchanged only
+    // when AGENTDESK_SINGLE_MESSAGE_PANEL=0/false (opt-out). As of #3560 the gate is
+    // default-ON, so unset/other values render in footer mode. `status_panel_v2_enabled`
+    // is already checked by the callers before status events are pushed/rendered.
     super::super::single_message_panel::enabled()
 }
 

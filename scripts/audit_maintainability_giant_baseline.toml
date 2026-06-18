@@ -117,7 +117,10 @@
 # spawn_watcher_orphan_spinner_cleanup_retry) into
 # `turn_bridge/watcher_orphan_cleanup.rs` (both re-exported, call sites
 # byte-identical). Locks in the shrink win (ratchet down only).
-"src/services/discord/turn_bridge/mod.rs" = 6189
+# #3560: +9 (6189 -> 6198) for the footer-mode migration reconcile — the
+# migrate_separate_status_panel_to_footer call + comment at the footer-mode entry
+# (helper body itself extracted to turn_bridge/status_panel.rs, net decomposition).
+"src/services/discord/turn_bridge/mod.rs" = 6198
 # #3038 turn_bridge S1 child modules, frozen at landed production LoC.
 "src/services/discord/turn_bridge/headless_delivery.rs" = 415
 "src/services/discord/turn_bridge/status_panel.rs" = 437
@@ -134,8 +137,9 @@
 # #3038 S3: lowered 4980 -> 4965 (-15) as the cluster-E field block (13
 # restart-lifecycle fields) moved into `shared_state::RestartLifecycle`.
 # Locks in the shrink win (ratchet down only).
-# #3089 S0: +5 for default-off single_message_panel wrapper/log trigger in
-# mod.rs; parser/cache body lives in `single_message_panel.rs`.
+# #3089 S0 (updated #3560): +5 for the single_message_panel wrapper/log trigger
+# in mod.rs; parser/cache body lives in `single_message_panel.rs`. As of #3560
+# the flag is default-ON (opt-out via AGENTDESK_SINGLE_MESSAGE_PANEL=0|false).
 # #3038 S4: lowered 4970 -> 4967 (-3) as the cluster-F field block (5
 # live-placeholder/status-panel fields) moved into `shared_state::PlaceholderState`.
 # Locks in the shrink win (ratchet down only).

@@ -1,8 +1,8 @@
 use super::{
     ChannelId, InflightTurnState, MessageId, ProviderKind, StatusPanelCompletionAction,
     bridge_epilogue_identity_guards_inflight_clear, complete_status_panel_v2,
-    should_open_long_running_placeholder_controller, status_panel_completion_action,
-    status_panel_completion_edit_aliases_newer_turn,
+    migrate_separate_status_panel_to_footer, should_open_long_running_placeholder_controller,
+    status_panel_completion_action, status_panel_completion_edit_aliases_newer_turn,
     status_panel_completion_ready_after_terminal_body, status_panel_message_id_for_turn,
 };
 use crate::services::discord::formatting::ReplaceLongMessageOutcome;
@@ -210,6 +210,80 @@ fn resume_turn_discards_synthetic_status_panel_message_id() {
 
     assert_eq!(status_panel_msg_id, None);
     assert_eq!(state.status_message_id, None);
+}
+
+// #3560 codex review: default-OFF → default-ON migration guard. A turn that
+// created a real separate status panel under default-OFF must have that panel
+// finalized (edited to a migration notice) when it resumes under footer mode,
+// instead of orphaning the Discord message.
+#[tokio::test]
+async fn footer_migration_edits_and_clears_existing_separate_panel() {
+    let gateway = StatusPanelFallbackGateway::default();
+    let mut state = test_inflight_state();
+    state.status_message_id = Some(9_876_543_210);
+
+    let migrated =
+        migrate_separate_status_panel_to_footer(&gateway, ChannelId::new(4321), &mut state).await;
+
+    assert!(
+        migrated,
+        "an existing separate panel should report a migration"
+    );
+    assert_eq!(
+        state.status_message_id, None,
+        "handle must be cleared after migration"
+    );
+    let edited = gateway.edited_message_ids.lock().expect("edited ids lock");
+    assert_eq!(
+        edited.as_slice(),
+        &[MessageId::new(9_876_543_210)],
+        "the old separate panel must be edited exactly once"
+    );
+}
+
+// Synthetic-headless ids are not real Discord messages, so footer migration
+// clears the handle without issuing an edit.
+#[tokio::test]
+async fn footer_migration_skips_synthetic_headless_panel() {
+    let gateway = StatusPanelFallbackGateway::default();
+    let mut state = test_inflight_state();
+    state.status_message_id = Some(9_100_000_000_000_000_123);
+
+    let migrated =
+        migrate_separate_status_panel_to_footer(&gateway, ChannelId::new(4321), &mut state).await;
+
+    assert!(migrated);
+    assert_eq!(state.status_message_id, None);
+    assert!(
+        gateway
+            .edited_message_ids
+            .lock()
+            .expect("edited ids lock")
+            .is_empty(),
+        "synthetic-headless panels must not be edited"
+    );
+}
+
+// When no separate panel handle exists (footer mode from the start) the
+// migration is a no-op and reports nothing was migrated.
+#[tokio::test]
+async fn footer_migration_noop_without_existing_panel() {
+    let gateway = StatusPanelFallbackGateway::default();
+    let mut state = test_inflight_state();
+    state.status_message_id = None;
+
+    let migrated =
+        migrate_separate_status_panel_to_footer(&gateway, ChannelId::new(4321), &mut state).await;
+
+    assert!(!migrated);
+    assert_eq!(state.status_message_id, None);
+    assert!(
+        gateway
+            .edited_message_ids
+            .lock()
+            .expect("edited ids lock")
+            .is_empty()
+    );
 }
 
 #[test]

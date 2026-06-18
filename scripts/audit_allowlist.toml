@@ -57,6 +57,11 @@ direct_discord_sends = [
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:b4849c24f5cb7d09",
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:1c6f6dcd93167903",
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:9b9526b38f0691a8",
+  # #3560: footer-mode migration reconcile — edits a pre-default-ON *separate*
+  # status panel to a migration notice before dropping its handle (behaviorally
+  # the same direct resume-notice edit already allowlisted in mod.rs; extracted
+  # into turn_bridge/status_panel.rs as migrate_separate_status_panel_to_footer).
+  "src/services/discord/turn_bridge/status_panel.rs#direct_discord_sends:650f7b34584abb84",
   # #3089 S2: existing status-panel-v2 response-placeholder send moved out of
   # turn_bridge/mod.rs into the bridge footer helper while preserving behavior.
   # #3479 SPC-shadow removal: re-fingerprinted (same `gateway.send_message`
