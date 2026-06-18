@@ -914,8 +914,33 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         let timeout = super::super::super::turn_watchdog_timeout();
         let now_ms = chrono::Utc::now().timestamp_millis();
         let turn_started_ms = now_ms;
-        let deadline_ms = now_ms + timeout.as_millis() as i64;
+        // #3557 (A) Codex-review r2 fix: mirror the foreground intake_turn.rs
+        // ceiling cap on the headless path. This path also calls
+        // `mark_async_managed()` so the per-provider sync watchdog stops
+        // enforcing the deadline — meaning ONLY this async loop bounds the turn.
+        // Previously the initial deadline was always `now + 6h` and the
+        // auto-extend stored `now + 6h` unclamped, so headless Codex turns
+        // ignored the tighter 4h ceiling and could be re-extended without a
+        // hard backstop. Cap the initial deadline at the provider ceiling so
+        // the bound is honored end to end (same helper as the foreground path).
+        let ceiling_deadline_ms =
+            super::super::super::turn_hard_ceiling_deadline_ms(turn_started_ms, &provider);
+        let proposed_initial_dl = now_ms + timeout.as_millis() as i64;
+        let deadline_ms = std::cmp::min(proposed_initial_dl, ceiling_deadline_ms);
         let max_deadline_ms = deadline_ms;
+        // When the ceiling already caps the initial deadline (e.g. Codex 4h <
+        // 6h watchdog timeout) the auto-extend clamp warn below never fires
+        // (its `current_dl < ceiling_ms` guard is false once the deadline is
+        // parked at the ceiling), so surface the bound once here instead.
+        if proposed_initial_dl > ceiling_deadline_ms {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            let ceiling_min = (ceiling_deadline_ms - now_ms) / 1000 / 60;
+            tracing::warn!(
+                "  [{ts}] ⛔ WATCHDOG: hard ceiling ({ceiling_min}m) caps initial deadline for headless channel {} (provider={}) — turn will be reconciled at the ceiling",
+                channel_id.get(),
+                provider_label
+            );
+        }
         // claude-e rollout Phase 1 (counter-review round 3 with Codex):
         // see the text-watchdog setup above for the rationale.
         watchdog_token.mark_async_managed();
@@ -973,7 +998,35 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
                                     let updated_ms = updated.and_utc().timestamp_millis();
                                     let age_ms = now_ms_check - updated_ms;
                                     if age_ms < 300_000 {
-                                        let new_dl = now_ms_check + timeout.as_millis() as i64;
+                                        // #3557 (A) Codex-review r2 fix: clamp the
+                                        // headless auto-extend to the per-turn hard
+                                        // ceiling, exactly like the foreground path.
+                                        // Without this a headless Codex turn that
+                                        // keeps inflight warm could push the deadline
+                                        // past its 4h ceiling indefinitely (this path
+                                        // is `mark_async_managed`, so the sync
+                                        // watchdog does not enforce it either).
+                                        let ceiling_ms =
+                                            super::super::super::turn_hard_ceiling_deadline_ms(
+                                                turn_started_ms,
+                                                &watchdog_provider,
+                                            );
+                                        let proposed_dl = now_ms_check + timeout.as_millis() as i64;
+                                        let (new_dl, clamped) =
+                                            super::super::super::clamp_auto_extend_deadline_ms(
+                                                proposed_dl,
+                                                ceiling_ms,
+                                            );
+                                        // Warn exactly once when the ceiling first
+                                        // bites: `current_dl < ceiling_ms` only holds
+                                        // before the deadline is parked at the ceiling.
+                                        if clamped && current_dl < ceiling_ms {
+                                            let ts = chrono::Local::now().format("%H:%M:%S");
+                                            tracing::warn!(
+                                                "  [{ts}] ⛔ WATCHDOG: hard ceiling reached for headless channel {} — auto-extend clamped, turn will be reconciled at deadline",
+                                                watchdog_channel_id_num
+                                            );
+                                        }
                                         if new_dl > current_dl {
                                             watchdog_token.watchdog_deadline_ms.store(
                                                 new_dl,
@@ -1459,4 +1512,97 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         turn_id: reservation.turn_id(channel_id),
         status: HeadlessTurnStartStatus::Started,
     })
+}
+
+#[cfg(test)]
+mod headless_hard_ceiling_tests {
+    //! #3557 (A) Codex-review r2: the headless watchdog now mirrors the
+    //! foreground intake path's per-turn hard ceiling cap (the headless path
+    //! had been missing it, and it also `mark_async_managed`s the token so the
+    //! sync watchdog does not enforce — leaving this async loop as the ONLY
+    //! bound). These tests reproduce the exact arithmetic the headless loop
+    //! applies (initial-deadline `min` cap + auto-extend clamp) so a regression
+    //! that drops the cap is caught at the headless call site, not only in the
+    //! shared helper tests in `discord/mod.rs`.
+    use super::super::super::super::{
+        ProviderKind, clamp_auto_extend_deadline_ms, turn_hard_ceiling_deadline_ms,
+        turn_watchdog_timeout,
+    };
+
+    /// Codex's tighter 4h ceiling must cap the headless INITIAL deadline below
+    /// the 6h watchdog timeout — exactly the `min(now + timeout, ceiling)` the
+    /// headless spawn now uses. Skipped when env overrides the defaults.
+    #[test]
+    fn headless_initial_deadline_capped_at_codex_ceiling() {
+        if std::env::var("AGENTDESK_CODEX_TURN_HARD_CEILING_SECS").is_ok()
+            || std::env::var("AGENTDESK_TURN_TIMEOUT_SECS").is_ok()
+        {
+            return;
+        }
+        let now_ms: i64 = 1_700_000_000_000;
+        let proposed_initial_dl = now_ms + turn_watchdog_timeout().as_millis() as i64; // ~6h
+        let codex_ceiling = turn_hard_ceiling_deadline_ms(now_ms, &ProviderKind::Codex);
+        let initial = std::cmp::min(proposed_initial_dl, codex_ceiling);
+        assert_eq!(
+            initial, codex_ceiling,
+            "headless Codex initial deadline must land at the 4h ceiling, not 6h"
+        );
+        assert!(
+            initial < proposed_initial_dl,
+            "the headless cap must actually lower the deadline below the watchdog timeout"
+        );
+        // The init-time one-shot warn fires exactly when proposed > ceiling.
+        assert!(proposed_initial_dl > codex_ceiling);
+    }
+
+    /// For a default-Claude turn (generic ceiling == watchdog timeout) the
+    /// headless initial cap is a no-op and the init warn must NOT fire.
+    #[test]
+    fn headless_initial_deadline_uncapped_for_default_claude() {
+        if std::env::var("AGENTDESK_TURN_HARD_CEILING_SECS").is_ok()
+            || std::env::var("AGENTDESK_TURN_TIMEOUT_SECS").is_ok()
+        {
+            return;
+        }
+        let now_ms: i64 = 1_700_000_000_000;
+        let proposed_initial_dl = now_ms + turn_watchdog_timeout().as_millis() as i64;
+        let claude_ceiling = turn_hard_ceiling_deadline_ms(now_ms, &ProviderKind::Claude);
+        let initial = std::cmp::min(proposed_initial_dl, claude_ceiling);
+        assert_eq!(initial, proposed_initial_dl);
+        assert!(
+            proposed_initial_dl <= claude_ceiling,
+            "with equal defaults the headless init warn (proposed > ceiling) must not fire"
+        );
+    }
+
+    /// The headless AUTO-EXTEND must clamp to the ceiling: a turn that keeps
+    /// inflight warm can no longer push the deadline past its Codex ceiling.
+    /// Mirrors `clamp_auto_extend_deadline_ms(now + timeout, ceiling)`.
+    #[test]
+    fn headless_auto_extend_clamped_at_codex_ceiling() {
+        if std::env::var("AGENTDESK_CODEX_TURN_HARD_CEILING_SECS").is_ok()
+            || std::env::var("AGENTDESK_TURN_TIMEOUT_SECS").is_ok()
+        {
+            return;
+        }
+        // Turn started 3h ago; an auto-extend would propose now + 6h, well past
+        // the 4h Codex ceiling (1h of budget left), so the clamp must bind.
+        let turn_started_ms: i64 = 1_700_000_000_000;
+        let now_ms_check = turn_started_ms + 3 * 3600 * 1000;
+        let ceiling_ms = turn_hard_ceiling_deadline_ms(turn_started_ms, &ProviderKind::Codex);
+        let proposed_dl = now_ms_check + turn_watchdog_timeout().as_millis() as i64;
+        let (new_dl, clamped) = clamp_auto_extend_deadline_ms(proposed_dl, ceiling_ms);
+        assert!(
+            clamped,
+            "auto-extend past the Codex ceiling must be clamped"
+        );
+        assert_eq!(
+            new_dl, ceiling_ms,
+            "clamped deadline must park at the ceiling"
+        );
+        assert!(
+            new_dl < proposed_dl,
+            "the clamp must lower the proposed extension to the ceiling"
+        );
+    }
 }

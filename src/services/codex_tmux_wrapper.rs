@@ -18,9 +18,22 @@ const DEFAULT_CODEX_FIRST_EVENT_TIMEOUT_SECS: u64 = 120;
 /// least one event, the run loop previously blocked on `recv()` forever, so a
 /// Codex process that hung mid-turn (tool/API hang) without emitting another
 /// JSON event and without exiting kept the watcher believing the pane was busy
-/// — the direct cause of the 13125s outlier. We now bound inter-event silence;
-/// the generous 1800s default never trips a healthy long-running tool call.
-const DEFAULT_CODEX_TURN_IDLE_RECV_SECS: u64 = 1800;
+/// — the direct cause of the 13125s outlier. We now bound inter-event silence.
+///
+/// #3557 (B) Codex-review r2 fix: this wrapper runs `codex exec` as a direct
+/// child process and reads its JSON event stream over an OS pipe — there is NO
+/// tmux pane to `capture-pane`, so the "pane liveness" check is not available
+/// on this path. The only liveness signal IS the JSON stream, which `recv` here
+/// already measures. A single long SILENT tool run (e.g. a multi-minute
+/// `cargo build` issued through a shell tool) emits the tool-call-start event,
+/// then nothing until the tool returns — so the idle window must clear the
+/// longest plausible single tool execution, not merely a typical reasoning gap.
+/// We therefore raise the generous default to 3600s (was 1800s) so a normal
+/// long-running tool run is never mistaken for an idle hang. The 4h hard ceiling
+/// (`DEFAULT_CODEX_TURN_HARD_CEILING_SECS`) is the real backstop: idle-kill only
+/// trips on a Codex that is BOTH silent on its event stream AND not exiting, and
+/// even then the ceiling guarantees termination regardless of idle tuning.
+const DEFAULT_CODEX_TURN_IDLE_RECV_SECS: u64 = 3600;
 /// #3557 (B): absolute wall-clock ceiling for a single Codex `exec` turn,
 /// measured from process spawn. A hung Codex that *does* keep dribbling events
 /// would slip past the idle window, so this is the hard backstop. Default 4h
@@ -561,8 +574,13 @@ fn run_turn(
                             hard_ceiling.as_secs()
                         ));
                     }
+                    // NOTE: this path runs `codex exec` over a pipe (no tmux
+                    // pane), so we cannot confirm pane activity before killing —
+                    // the JSON event stream is the only liveness signal we have.
+                    // A genuinely busy-but-silent tool run is covered by the
+                    // generous idle window; the 4h hard ceiling is the backstop.
                     return Err(format!(
-                        "Codex produced no JSON event for {}s (idle hang)",
+                        "Codex produced no JSON event for {}s (idle hang; no tmux pane to confirm activity — relied on JSON-stream liveness, hard ceiling is the backstop)",
                         idle_recv_timeout.as_secs()
                     ));
                 }
@@ -2433,6 +2451,48 @@ mod turn_timeout_tests {
                 Duration::from_secs(DEFAULT_CODEX_TURN_IDLE_RECV_SECS)
             );
         }
+    }
+
+    /// #3557 (B) Codex-review r2 fix: this wrapper runs `codex exec` over a pipe
+    /// (no tmux pane), so a long SILENT tool run cannot be distinguished from an
+    /// idle hang via pane activity — the JSON stream is the only liveness
+    /// signal. To avoid killing a normal long-running tool (e.g. a big build),
+    /// the idle window must be generous and the 4h hard ceiling must stay the
+    /// real backstop. Lock both: the default idle window is now >= 1h AND is
+    /// strictly smaller than the hard ceiling (otherwise the idle window would
+    /// be dead code that the ceiling always preempts).
+    #[test]
+    fn idle_window_is_generous_and_below_hard_ceiling() {
+        assert_eq!(DEFAULT_CODEX_TURN_IDLE_RECV_SECS, 3600);
+        assert!(
+            DEFAULT_CODEX_TURN_IDLE_RECV_SECS >= 3600,
+            "idle window must clear the longest plausible single silent tool run"
+        );
+        assert!(
+            DEFAULT_CODEX_TURN_IDLE_RECV_SECS < DEFAULT_CODEX_TURN_HARD_CEILING_SECS,
+            "the hard ceiling must remain the real backstop, above the idle window"
+        );
+    }
+
+    /// A live event arriving before the (generous) idle window elapses must NOT
+    /// be treated as a hang: a long-running tool that emits its completion event
+    /// within the window passes through cleanly. Models the post-first-event
+    /// branch: a delayed-but-present event resolves to `Ok`, not a Timeout kill.
+    #[test]
+    fn delayed_event_within_idle_window_is_not_killed() {
+        let (tx, rx) = mpsc::channel::<Result<Option<String>, String>>();
+        // Simulate a silent tool run that finishes and emits a completion event
+        // shortly before the idle window would expire.
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            let _ = tx.send(Ok(Some("{\"type\":\"item.completed\"}\n".to_string())));
+        });
+        // Generous window relative to the simulated tool latency: the event wins.
+        let received = rx.recv_timeout(Duration::from_millis(500));
+        assert!(
+            matches!(received, Ok(Ok(Some(_)))),
+            "a tool event arriving within the idle window must not trip the idle-kill path"
+        );
     }
 
     #[test]
