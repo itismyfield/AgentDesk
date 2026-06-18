@@ -266,7 +266,12 @@
 # `handle_event` (mirrors the model-picker / idle-recap arms — the dispatch can
 # only live in the root event handler). The cancel handler body itself lives in
 # the non-giant `steering.rs`, not here. Combined with #3446: 2969 -> 2975.
-"src/services/discord/router/intake_gate.rs" = 2977
+# #3576 announce-trigger restore: +1 (2977 -> 2978) for the extra
+# `announce_bot_id,` argument line on the `is_allowed_turn_sender` call in
+# `handle_event` (restores the announce branch removed by #3478). The call
+# site lives in the root event handler; the gate logic itself stays in the
+# non-giant `dispatch_policy.rs`.
+"src/services/discord/router/intake_gate.rs" = 2978
 "src/services/discord/formatting.rs" = 2802
 # #3038 run_bot S0/S1: lowered 2802 -> 1918 by adding characterization tests and
 # moving restored_state, queued_placeholders, startup_doctor, orphan_recovery,

@@ -2006,6 +2006,7 @@ pub(in crate::services::discord) async fn handle_event(
             if is_allowed_bot_sender
                 && !super::super::is_allowed_turn_sender(
                     &settings_snapshot.allowed_bot_ids,
+                    announce_bot_id,
                     user_id.get(),
                     new_message.author.bot,
                     raw_text,

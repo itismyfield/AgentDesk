@@ -243,6 +243,7 @@ pub(in crate::services::discord) fn classify_catch_up_message(
     existing_ids: &std::collections::HashSet<u64>,
     max_age_secs: i64,
     allowed_bot_ids: &[u64],
+    announce_bot_id: Option<u64>,
 ) -> CatchUpClassification {
     if !msg.is_processable_kind {
         return CatchUpClassification::SystemKind;
@@ -261,6 +262,7 @@ pub(in crate::services::discord) fn classify_catch_up_message(
     }
     if !is_allowed_turn_sender(
         allowed_bot_ids,
+        announce_bot_id,
         msg.author_id,
         msg.author_is_bot,
         &msg.trimmed_text,
@@ -419,6 +421,7 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
             let settings = shared.settings.read().await;
             settings.allowed_bot_ids.clone()
         };
+        let announce_bot_id = resolve_announce_bot_user_id(shared).await;
         let mut max_recovered_id: Option<u64> = None;
         let mut stats = CatchUpScanStats::default();
         stats.returned = messages.len();
@@ -458,6 +461,7 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
                 &existing_ids,
                 max_age.as_secs() as i64,
                 &allowed_bot_ids,
+                announce_bot_id,
             );
             // Codex P2 round 2 on #1301: check the cap BEFORE recording the
             // recover, otherwise `stats.recovered` would tally a message we
@@ -657,6 +661,7 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
             let mid = msg.id.get();
             if !is_allowed_turn_sender(
                 &allowed_bot_ids_phase2,
+                announce_bot_id_phase2,
                 msg.author.id.get(),
                 msg.author.bot,
                 text,
@@ -799,12 +804,48 @@ mod catch_up_recovery_tests {
         let existing = HashSet::new();
 
         assert_eq!(
-            classify_catch_up_message(&view, Some(current_bot_id), &existing, 300, &[]),
+            classify_catch_up_message(&view, Some(current_bot_id), &existing, 300, &[], None),
             CatchUpClassification::Recover
         );
         assert_eq!(
-            classify_catch_up_message(&view, Some(owner_user_id), &existing, 300, &[]),
+            classify_catch_up_message(&view, Some(owner_user_id), &existing, 300, &[], None),
             CatchUpClassification::SelfAuthored
+        );
+    }
+
+    #[test]
+    fn announce_bot_message_recovers_without_dispatch_marker() {
+        // #3576: a catch-up scan must recover announce-authored trigger
+        // traffic even without the DISPATCH:/monitor marker.
+        let announce_id = 7777;
+        let current_bot_id = 9001;
+        let view = CatchUpMessageView {
+            message_id: 1504813049431724054,
+            author_id: announce_id,
+            author_is_bot: true,
+            is_processable_kind: true,
+            age_secs: 60,
+            trimmed_text: "PM triage: claude, please pick up #42".to_string(),
+        };
+        let existing = HashSet::new();
+
+        // Without the announce_bot_id hint the bot message is NotAllowed
+        // (no marker), proving the parameter is load-bearing.
+        assert_eq!(
+            classify_catch_up_message(&view, Some(current_bot_id), &existing, 300, &[], None),
+            CatchUpClassification::NotAllowed
+        );
+        // With the announce_bot_id hint it recovers.
+        assert_eq!(
+            classify_catch_up_message(
+                &view,
+                Some(current_bot_id),
+                &existing,
+                300,
+                &[],
+                Some(announce_id),
+            ),
+            CatchUpClassification::Recover
         );
     }
 }

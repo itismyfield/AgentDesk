@@ -177,6 +177,99 @@ mod dispatch_turn_gate_tests {
     }
 }
 
+#[cfg(test)]
+mod allowed_turn_sender_tests {
+    use super::is_allowed_turn_sender;
+
+    const ANNOUNCE_ID: u64 = 1001;
+    const OTHER_BOT_ID: u64 = 2002;
+    const HUMAN_ID: u64 = 3003;
+
+    #[test]
+    fn announce_bot_triggers_without_dispatch_marker() {
+        // #3576: announce-authored PM-triage / deadlock / send-to-agent
+        // text triggers a turn even without the DISPATCH:/monitor marker.
+        assert!(is_allowed_turn_sender(
+            &[ANNOUNCE_ID, OTHER_BOT_ID],
+            Some(ANNOUNCE_ID),
+            ANNOUNCE_ID,
+            true,
+            "PM triage: please pick up issue #42",
+        ));
+    }
+
+    #[test]
+    fn announce_bot_with_dispatch_marker_triggers() {
+        assert!(is_allowed_turn_sender(
+            &[ANNOUNCE_ID],
+            Some(ANNOUNCE_ID),
+            ANNOUNCE_ID,
+            true,
+            "DISPATCH:1f3c2b1a-0000-4000-8000-000000000000\n── implementation dispatch ──",
+        ));
+    }
+
+    #[test]
+    fn announce_bot_legacy_issue_card_is_suppressed() {
+        // Conservative guard: catch-up replays of announce-authored issue /
+        // completion cards must NOT trigger turns.
+        assert!(!is_allowed_turn_sender(
+            &[ANNOUNCE_ID],
+            Some(ANNOUNCE_ID),
+            ANNOUNCE_ID,
+            true,
+            "📋 **새 이슈 #42** — fix the thing\n> 상태: 🟡 open",
+        ));
+        assert!(!is_allowed_turn_sender(
+            &[ANNOUNCE_ID],
+            Some(ANNOUNCE_ID),
+            ANNOUNCE_ID,
+            true,
+            "✅ **#42 완료** — fix the thing",
+        ));
+    }
+
+    #[test]
+    fn non_announce_allowed_bot_still_requires_dispatch_marker() {
+        // Security (#706): a non-announce allowed bot is dropped when its
+        // message lacks the DISPATCH:/monitor-origin marker.
+        assert!(!is_allowed_turn_sender(
+            &[ANNOUNCE_ID, OTHER_BOT_ID],
+            Some(ANNOUNCE_ID),
+            OTHER_BOT_ID,
+            true,
+            "just a status note, no marker",
+        ));
+        // …but the same bot WITH the marker triggers.
+        assert!(is_allowed_turn_sender(
+            &[ANNOUNCE_ID, OTHER_BOT_ID],
+            Some(ANNOUNCE_ID),
+            OTHER_BOT_ID,
+            true,
+            "DISPATCH:1f3c2b1a-0000-4000-8000-000000000000",
+        ));
+    }
+
+    #[test]
+    fn human_message_is_unaffected() {
+        assert!(is_allowed_turn_sender(
+            &[ANNOUNCE_ID],
+            Some(ANNOUNCE_ID),
+            HUMAN_ID,
+            false,
+            "hello agent",
+        ));
+        // An unknown bot (not announce, not allowed) is still dropped.
+        assert!(!is_allowed_turn_sender(
+            &[ANNOUNCE_ID],
+            Some(ANNOUNCE_ID),
+            OTHER_BOT_ID,
+            true,
+            "spam",
+        ));
+    }
+}
+
 pub(in crate::services::discord) async fn resolve_announce_bot_user_id(
     shared: &SharedData,
 ) -> Option<u64> {
@@ -197,14 +290,55 @@ pub(in crate::services::discord) async fn resolve_notify_bot_user_id(
 
 pub(in crate::services::discord) fn is_allowed_turn_sender(
     allowed_bot_ids: &[u64],
+    announce_bot_id: Option<u64>,
     author_id: u64,
     author_is_bot: bool,
     text: &str,
 ) -> bool {
+    if announce_bot_id.is_some_and(|id| id == author_id) {
+        // #3576 (restores the announce branch removed by #3478): the
+        // `announce` bot is the authoritative trigger source. Its live
+        // traffic — dispatch envelopes, PM-triage / deadlock / escalation
+        // cards, and agent-to-agent `/api/discord/send` messages — must
+        // start turns WITHOUT requiring the `DISPATCH:` / monitor-origin
+        // marker that gates other allowed bots. The `should_process_*`
+        // marker gate (#706 security) only applies to non-announce bots.
+        //
+        // The lone exception is the legacy issue-announcement / completion
+        // card (📋/✅) shape: issue cards now route through notify-bot
+        // (#1448 follow-up, and #3478 removed the announce-token fallback
+        // in `issue_announcements.rs`), so announce never authors them in
+        // live traffic. This guard remains a conservative safety net for
+        // catch-up replays of pre-cutover announce-authored cards so they
+        // don't spawn spurious turns.
+        return !is_legacy_announce_issue_card(text);
+    }
     if allowed_bot_ids.contains(&author_id) {
         return should_process_allowed_bot_turn_text(text);
     }
     !author_is_bot
+}
+
+/// Conservative guard (#3576) that suppresses announce-authored issue
+/// announcement / completion cards from triggering turns. Live issue cards
+/// route through notify-bot, which never reaches the announce branch above;
+/// this only catches catch-up replays of pre-cutover announce-authored cards.
+fn is_legacy_announce_issue_card(text: &str) -> bool {
+    let head = text.trim_start();
+    if head.starts_with("📋 **새 이슈 #") {
+        return true;
+    }
+    if let Some(rest) = head.strip_prefix("✅ **#") {
+        let digits_end = rest
+            .char_indices()
+            .find(|(_, ch)| !ch.is_ascii_digit())
+            .map(|(idx, _)| idx)
+            .unwrap_or(rest.len());
+        if digits_end > 0 && rest[digits_end..].starts_with(" 완료** —") {
+            return true;
+        }
+    }
+    false
 }
 
 pub(in crate::services::discord) fn should_phase2_recover_message(
