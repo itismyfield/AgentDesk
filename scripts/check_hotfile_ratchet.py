@@ -19,6 +19,12 @@ source files this is exactly the ``wc -l`` value (CRLF is not used here).
 
 A missing hot file or a missing manifest is a HARD error (exit 1): a rename or
 move must not silently pass the gate.
+
+The three relay hot files in ``REQUIRED_HOTFILES`` MUST each have a ceiling
+entry in the manifest. Dropping a key from the manifest would otherwise stop
+that file from being checked while the script still passed (the manifest table
+is non-empty); ``REQUIRED_HOTFILES`` closes that bypass by hard-failing (exit 1)
+on any missing required entry.
 """
 
 from __future__ import annotations
@@ -29,6 +35,16 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = REPO_ROOT / "scripts" / "hotfile_ratchet.toml"
+
+# The relay hot files that MUST always be ratcheted. Every path here has to have
+# a ceiling entry in scripts/hotfile_ratchet.toml; if a future edit deletes one
+# of these keys (which would silently stop checking that file), the gate fails
+# closed instead of passing on the remaining non-empty table.
+REQUIRED_HOTFILES = (
+    "src/services/discord/tmux_watcher.rs",
+    "src/services/discord/tui_prompt_relay.rs",
+    "src/services/discord/turn_bridge/mod.rs",
+)
 
 
 def line_count(path: Path) -> int:
@@ -54,6 +70,17 @@ def main() -> int:
             f"FAIL: no [hotfile_ratchet] entries in {MANIFEST}.",
             file=sys.stderr,
         )
+        return 1
+
+    missing_required = [rel for rel in REQUIRED_HOTFILES if rel not in ceilings]
+    if missing_required:
+        for rel in missing_required:
+            print(
+                f"FAIL: required relay hot file '{rel}' has no ceiling entry in "
+                f"{MANIFEST}. Every path in REQUIRED_HOTFILES must stay ratcheted; "
+                "do not delete its entry (that would silently stop checking it).",
+                file=sys.stderr,
+            )
         return 1
 
     failed = False

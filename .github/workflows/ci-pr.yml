@@ -716,6 +716,15 @@ jobs:
         if: ${{ needs.changes.outputs.ci_relax_safe != 'true' }}
         run: ./scripts/ci-script-checks.sh
 
+      # Hotfile LOC ratchet (#3565) runs UNCONDITIONALLY — it must NOT inherit
+      # the `ci_relax_safe` skip above. The ratchet is otherwise reachable only
+      # via ci-script-checks.sh, so a `tui-relay-stabilization` branch (which
+      # relaxes "Run script checks") could grow a relay hot file past its ceiling
+      # and merge before main CI catches it. This standalone step keeps the
+      # PR-time hot-file freeze in force for every branch, with no skip gate.
+      - name: Hotfile LOC ratchet (always, #3565)
+        run: python3 scripts/check_hotfile_ratchet.py
+
       - name: Upload maintainability audit artifact
         if: always()
         uses: actions/upload-artifact@v4
