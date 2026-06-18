@@ -305,6 +305,7 @@ pub(crate) async fn cmd_send_to_agent(
     message: &str,
     channel_kind: crate::services::discord::agent_handoff::AgentHandoffChannelKind,
     prefix: bool,
+    start_turn: bool,
 ) -> Result<(), String> {
     run_command(true, false, |state| async move {
         let registry = state
@@ -314,6 +315,24 @@ pub(crate) async fn cmd_send_to_agent(
         let pool = state
             .pg_pool_ref()
             .ok_or_else(|| "postgres pool unavailable".to_string())?;
+        // #3556 — --start-turn and the default announce post are mutually
+        // exclusive: we either reserve a turn or post a message, never both.
+        if start_turn {
+            let response = crate::services::discord::agent_handoff::start_agent_handoff_turn(
+                registry,
+                pool,
+                from_agent_id,
+                to_agent_id,
+                message,
+                channel_kind,
+                prefix,
+                Some("cli:send-to-agent".to_string()),
+                None,
+            )
+            .await
+            .map_err(|error| error.one_line())?;
+            return Ok(response.to_value());
+        }
         let response = crate::services::discord::agent_handoff::send_agent_handoff(
             registry,
             pool,

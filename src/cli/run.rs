@@ -102,12 +102,14 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
             message,
             channel_kind,
             no_prefix,
+            start_turn,
         } => exit_for_cli(super::direct::run_async(super::direct::cmd_send_to_agent(
             &from_agent_id,
             &to_agent_id,
             &message,
             agent_handoff_channel_kind(channel_kind),
             !no_prefix,
+            start_turn,
         ))),
         Commands::ReviewVerdict {
             dispatch_id,

@@ -4,7 +4,9 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 
 use super::health::{self, HealthRegistry};
+use super::router::{HeadlessTurnStartError, HeadlessTurnStartOutcome};
 use crate::db::agents::AgentChannelBindings;
+use crate::services::provider::ProviderKind;
 
 const ANNOUNCE_BOT: &str = "announce";
 
@@ -90,6 +92,24 @@ impl AgentHandoffError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             body: json!({"error": "announce bot not configured"}),
+        }
+    }
+
+    /// 409 — a turn is already active for the target mailbox. This semantic is
+    /// unique to the turn-trigger handoff (#3556); the announce-only path
+    /// silently coalesced into the running turn instead.
+    fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            body: json!({"error": message.into(), "status": "conflict"}),
+        }
+    }
+
+    /// 503 — the headless turn could not be reserved (runtime unavailable).
+    fn turn_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            body: json!({"error": message.into()}),
         }
     }
 
@@ -255,6 +275,174 @@ pub(crate) async fn send_agent_handoff(
     })
 }
 
+/// Successful outcome of a turn-trigger handoff (#3556). Unlike
+/// [`AgentHandoffResponse`] (announce message post), this carries the reserved
+/// `turn_id` and lifecycle `status` so the caller learns the turn was actually
+/// scheduled — not merely that a message was best-effort delivered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct AgentHandoffTurnResponse {
+    pub(crate) to_agent_id: String,
+    pub(crate) channel_id: String,
+    pub(crate) channel_kind: &'static str,
+    pub(crate) turn_id: String,
+    pub(crate) status: &'static str,
+}
+
+impl AgentHandoffTurnResponse {
+    pub(crate) fn to_value(&self) -> Value {
+        let mut value = serde_json::to_value(self).unwrap_or_else(|_| json!({}));
+        if let Value::Object(map) = &mut value {
+            map.insert("ok".to_string(), Value::Bool(true));
+        }
+        value
+    }
+}
+
+/// Provider that owns a given handoff channel binding. The cc binding is the
+/// Claude mailbox; cdx is the Codex mailbox. Mapping the turn to the binding's
+/// owning provider keeps the handoff envelope and the reserved turn on the same
+/// channel so the announce-bot double-trigger (#3576) cannot fire.
+fn provider_for_channel_kind(channel_kind: AgentHandoffChannelKind) -> ProviderKind {
+    match channel_kind {
+        AgentHandoffChannelKind::Cc => ProviderKind::Claude,
+        AgentHandoffChannelKind::Cdx => ProviderKind::Codex,
+    }
+}
+
+/// Registry-independent resolution for a turn-trigger handoff: validates the
+/// agents, resolves the cc/cdx binding to a numeric Discord channel id, derives
+/// the owning provider, and builds the handoff envelope content. Split out from
+/// [`start_agent_handoff_turn`] so the resolution contract is unit-testable
+/// without a live [`HealthRegistry`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentHandoffTurnTarget {
+    pub(crate) to_agent_id: String,
+    pub(crate) channel_id: String,
+    pub(crate) channel_id_num: u64,
+    pub(crate) channel_kind: AgentHandoffChannelKind,
+    pub(crate) provider: ProviderKind,
+    pub(crate) content: String,
+}
+
+fn resolve_agent_handoff_turn_target(
+    bindings: &AgentChannelBindings,
+    from_agent_id: &str,
+    to_agent_id: &str,
+    prompt: &str,
+    channel_kind: AgentHandoffChannelKind,
+    prefix: bool,
+) -> Result<AgentHandoffTurnTarget, AgentHandoffError> {
+    let from_agent_id = from_agent_id.trim();
+    if from_agent_id.is_empty() {
+        return Err(AgentHandoffError::bad_request("from_agent_id is required"));
+    }
+    let to_agent_id = to_agent_id.trim();
+    if to_agent_id.is_empty() {
+        return Err(AgentHandoffError::bad_request("to_agent_id is required"));
+    }
+    if prompt.trim().is_empty() {
+        return Err(AgentHandoffError::bad_request("prompt is required"));
+    }
+
+    let Some(channel_id) = channel_for_kind(bindings, channel_kind) else {
+        return Err(AgentHandoffError::channel_kind_unset(
+            to_agent_id,
+            channel_kind,
+            available_channel_kinds(bindings),
+        ));
+    };
+
+    let Some(channel_id_num) =
+        crate::services::dispatches::outbox_route::resolve_channel_alias_pub(&channel_id)
+            .or_else(|| channel_id.parse::<u64>().ok())
+            .filter(|id| *id > 0)
+    else {
+        return Err(AgentHandoffError::internal(format!(
+            "agent {to_agent_id} {} channel is invalid: {channel_id}",
+            channel_kind.as_str()
+        )));
+    };
+
+    let content = build_agent_handoff_content(from_agent_id, to_agent_id, prompt, prefix);
+
+    Ok(AgentHandoffTurnTarget {
+        to_agent_id: to_agent_id.to_string(),
+        channel_id,
+        channel_id_num,
+        channel_kind,
+        provider: provider_for_channel_kind(channel_kind),
+        content,
+    })
+}
+
+/// Map a headless turn-start result to the handoff API contract (#3556):
+/// `started`/`consumed` → 200 with `turn_id`, `Conflict` → 409 (mailbox busy —
+/// a semantic the announce-only path never had), `Internal` → 503.
+fn map_turn_start_result(
+    target: &AgentHandoffTurnTarget,
+    result: Result<HeadlessTurnStartOutcome, HeadlessTurnStartError>,
+) -> Result<AgentHandoffTurnResponse, AgentHandoffError> {
+    match result {
+        Ok(outcome) => Ok(AgentHandoffTurnResponse {
+            to_agent_id: target.to_agent_id.clone(),
+            channel_id: target.channel_id.clone(),
+            channel_kind: target.channel_kind.as_str(),
+            turn_id: outcome.turn_id,
+            status: outcome.status.as_str(),
+        }),
+        Err(HeadlessTurnStartError::Conflict(error)) => Err(AgentHandoffError::conflict(error)),
+        Err(HeadlessTurnStartError::Internal(error)) => {
+            Err(AgentHandoffError::turn_unavailable(error))
+        }
+    }
+}
+
+/// Turn-trigger handoff (#3556). Resolves the cc/cdx binding and reserves a
+/// headless turn directly on that mailbox — never posts an announce message —
+/// so the handoff is an authoritative, synchronous turn reservation rather than
+/// "post and hope". Because no announce message lands on the cc channel, the
+/// #3576 announce-trigger branch cannot start an unintended second turn.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn start_agent_handoff_turn(
+    registry: &HealthRegistry,
+    pg_pool: &PgPool,
+    from_agent_id: &str,
+    to_agent_id: &str,
+    prompt: &str,
+    channel_kind: AgentHandoffChannelKind,
+    prefix: bool,
+    source: Option<String>,
+    metadata: Option<Value>,
+) -> Result<AgentHandoffTurnResponse, AgentHandoffError> {
+    let to_agent_id_trimmed = to_agent_id.trim();
+    let bindings = crate::db::agents::load_agent_channel_bindings_pg(pg_pool, to_agent_id_trimmed)
+        .await
+        .map_err(|error| AgentHandoffError::internal(format!("query agent channels: {error}")))?
+        .ok_or_else(|| AgentHandoffError::agent_not_found(to_agent_id_trimmed))?;
+
+    let target = resolve_agent_handoff_turn_target(
+        &bindings,
+        from_agent_id,
+        to_agent_id,
+        prompt,
+        channel_kind,
+        prefix,
+    )?;
+
+    let result = health::start_headless_agent_turn(
+        registry,
+        poise::serenity_prelude::ChannelId::new(target.channel_id_num),
+        target.provider.clone(),
+        target.content.clone(),
+        source,
+        metadata,
+        None,
+    )
+    .await;
+
+    map_turn_start_result(&target, result)
+}
+
 fn channel_for_kind(
     bindings: &AgentChannelBindings,
     channel_kind: AgentHandoffChannelKind,
@@ -409,5 +597,162 @@ mod tests {
         );
         assert_eq!(error.status(), StatusCode::BAD_GATEWAY);
         assert_eq!(error.body()["discord_status"], 403);
+    }
+
+    // ── #3556 turn-trigger handoff ────────────────────────────────────────
+
+    #[test]
+    fn handoff_turn_maps_channel_kind_to_owning_provider() {
+        assert_eq!(
+            provider_for_channel_kind(AgentHandoffChannelKind::Cc),
+            ProviderKind::Claude
+        );
+        assert_eq!(
+            provider_for_channel_kind(AgentHandoffChannelKind::Cdx),
+            ProviderKind::Codex
+        );
+    }
+
+    #[test]
+    fn handoff_turn_target_resolves_channel_provider_and_envelope() {
+        let target = resolve_agent_handoff_turn_target(
+            &bindings(Some("111"), Some("222")),
+            "project-agentdesk",
+            "adk-dashboard",
+            "리뷰 반영해줘",
+            AgentHandoffChannelKind::Cdx,
+            true,
+        )
+        .expect("cdx binding resolves");
+        assert_eq!(target.to_agent_id, "adk-dashboard");
+        assert_eq!(target.channel_id, "222");
+        assert_eq!(target.channel_id_num, 222);
+        assert_eq!(target.channel_kind, AgentHandoffChannelKind::Cdx);
+        assert_eq!(target.provider, ProviderKind::Codex);
+        assert_eq!(
+            target.content,
+            "[project-agentdesk → adk-dashboard 핸드오프]\n\n리뷰 반영해줘"
+        );
+    }
+
+    #[test]
+    fn handoff_turn_target_honors_no_prefix() {
+        let target = resolve_agent_handoff_turn_target(
+            &bindings(Some("111"), None),
+            "from",
+            "to",
+            "raw prompt",
+            AgentHandoffChannelKind::Cc,
+            false,
+        )
+        .expect("cc binding resolves");
+        assert_eq!(target.content, "raw prompt");
+    }
+
+    #[test]
+    fn handoff_turn_target_rejects_unset_channel_kind() {
+        let error = resolve_agent_handoff_turn_target(
+            &bindings(None, Some("222")),
+            "from",
+            "to",
+            "prompt",
+            AgentHandoffChannelKind::Cc,
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(error.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(error.body()["available_kinds"], json!(["cdx"]));
+    }
+
+    #[test]
+    fn handoff_turn_target_requires_prompt() {
+        let error = resolve_agent_handoff_turn_target(
+            &bindings(Some("111"), None),
+            "from",
+            "to",
+            "   ",
+            AgentHandoffChannelKind::Cc,
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error.body()["error"], "prompt is required");
+    }
+
+    #[test]
+    fn handoff_turn_target_rejects_non_numeric_channel() {
+        let error = resolve_agent_handoff_turn_target(
+            &bindings(Some("not-a-channel"), None),
+            "from",
+            "to",
+            "prompt",
+            AgentHandoffChannelKind::Cc,
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(error.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    fn sample_target() -> AgentHandoffTurnTarget {
+        AgentHandoffTurnTarget {
+            to_agent_id: "adk-dashboard".to_string(),
+            channel_id: "111".to_string(),
+            channel_id_num: 111,
+            channel_kind: AgentHandoffChannelKind::Cc,
+            provider: ProviderKind::Claude,
+            content: "envelope".to_string(),
+        }
+    }
+
+    #[test]
+    fn handoff_turn_success_maps_to_started_response() {
+        let target = sample_target();
+        let response = map_turn_start_result(
+            &target,
+            Ok(HeadlessTurnStartOutcome {
+                turn_id: "discord:111:222".to_string(),
+                status: super::super::router::HeadlessTurnStartStatus::Started,
+            }),
+        )
+        .expect("started outcome maps to response");
+        let value = response.to_value();
+        assert_eq!(value["ok"], json!(true));
+        assert_eq!(value["to_agent_id"], "adk-dashboard");
+        assert_eq!(value["channel_id"], "111");
+        assert_eq!(value["channel_kind"], "cc");
+        assert_eq!(value["turn_id"], "discord:111:222");
+        assert_eq!(value["status"], "started");
+    }
+
+    #[test]
+    fn handoff_turn_conflict_maps_to_409() {
+        let target = sample_target();
+        let error = map_turn_start_result(
+            &target,
+            Err(HeadlessTurnStartError::Conflict(
+                "turn already active for this agent mailbox".to_string(),
+            )),
+        )
+        .unwrap_err();
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(error.body()["status"], "conflict");
+        assert_eq!(
+            error.body()["error"],
+            "turn already active for this agent mailbox"
+        );
+    }
+
+    #[test]
+    fn handoff_turn_internal_maps_to_503() {
+        let target = sample_target();
+        let error = map_turn_start_result(
+            &target,
+            Err(HeadlessTurnStartError::Internal(
+                "runtime unavailable".to_string(),
+            )),
+        )
+        .unwrap_err();
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.body()["error"], "runtime unavailable");
     }
 }

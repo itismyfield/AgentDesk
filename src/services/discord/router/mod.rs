@@ -15,6 +15,7 @@ pub(crate) use message_handler::{IntakeRequest, execute_intake_turn_core};
 pub(super) use turn_start::reserve_headless_turn;
 pub(crate) use turn_start::{
     HeadlessTurnReservation, HeadlessTurnStartError, HeadlessTurnStartOutcome,
+    HeadlessTurnStartStatus,
 };
 
 // Re-export items used across submodules

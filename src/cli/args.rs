@@ -101,6 +101,12 @@ pub(crate) enum Commands {
         /// Send the body without the automatic handoff prefix
         #[arg(long = "no-prefix")]
         no_prefix: bool,
+        /// #3556 — reserve a headless turn on the target mailbox instead of
+        /// posting an announce message. Authoritative wake-up: exits non-zero
+        /// on 409 (mailbox busy). Mutually exclusive with the default
+        /// announce-post behavior.
+        #[arg(long = "start-turn")]
+        start_turn: bool,
     },
     /// Submit a review verdict without HTTP server dependency
     ReviewVerdict {

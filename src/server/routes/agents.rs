@@ -95,6 +95,23 @@ pub struct AgentMessageBody {
     pub prefix: Option<bool>,
 }
 
+/// #3556 — turn-trigger handoff. Unlike `AgentMessageBody` (announce post),
+/// this reserves a headless turn on the target's cc/cdx mailbox and never posts
+/// an announce message, so the receiving agent is authoritatively woken.
+#[derive(Debug, Deserialize)]
+pub struct AgentHandoffBody {
+    pub from_agent_id: String,
+    pub prompt: String,
+    #[serde(default)]
+    pub channel_kind: Option<String>,
+    #[serde(default)]
+    pub prefix: Option<bool>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+}
+
 fn pg_required_response() -> (StatusCode, Json<serde_json::Value>) {
     (
         StatusCode::SERVICE_UNAVAILABLE,
@@ -1097,6 +1114,55 @@ pub async fn agent_message(
         &body.message,
         channel_kind,
         body.prefix.unwrap_or(true),
+    )
+    .await
+    {
+        Ok(response) => (StatusCode::OK, Json(response.to_value())),
+        Err(error) => (error.status(), Json(error.body())),
+    }
+}
+
+/// POST /api/agents/{id}/handoff
+/// #3556 — agent-to-agent turn-trigger handoff. Resolves the target's cc/cdx
+/// mailbox and reserves a headless turn directly on it. Unlike
+/// `/api/agents/{id}/message`, no announce message is posted: the turn is the
+/// authoritative effect, so success/failure carry turn semantics (200 started,
+/// 409 mailbox busy, 404 not found, 422 channel_kind unset, 503 unavailable).
+/// This is the "execution intent" counterpart to the announce-only "notify"
+/// path, and it cannot trip the #3576 announce-trigger double-run because it
+/// never lands a message on the cc channel.
+pub async fn agent_handoff(
+    State(state): State<super::AppState>,
+    axum::extract::Path(to_agent_id): axum::extract::Path<String>,
+    axum::Json(body): axum::Json<AgentHandoffBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(pool) = state.pg_pool_ref() else {
+        return pg_required_response();
+    };
+    let Some(registry) = state.health_registry.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "Discord not available (standalone mode)"})),
+        );
+    };
+
+    let channel_kind = match crate::services::discord::agent_handoff::AgentHandoffChannelKind::parse(
+        body.channel_kind.as_deref(),
+    ) {
+        Ok(channel_kind) => channel_kind,
+        Err(error) => return (error.status(), Json(error.body())),
+    };
+
+    match crate::services::discord::agent_handoff::start_agent_handoff_turn(
+        registry,
+        pool,
+        &body.from_agent_id,
+        &to_agent_id,
+        &body.prompt,
+        channel_kind,
+        body.prefix.unwrap_or(true),
+        body.source,
+        body.metadata,
     )
     .await
     {

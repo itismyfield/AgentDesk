@@ -259,6 +259,7 @@ pub(crate) const TOP_40_PAIRED_PATHS: &[(&str, &str)] = &[
     ("GET", "/api/agents/{id}"),
     ("PATCH", "/api/agents/{id}"),
     ("POST", "/api/agents/setup"),
+    ("POST", "/api/agents/{id}/handoff"),
     ("POST", "/api/agents/{id}/turn/start"),
     ("POST", "/api/agents/{id}/turn/stop"),
     ("GET", "/api/agents/{id}/quality"),
@@ -1573,6 +1574,45 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             json!({"error": "channel_kind unset", "to_agent_id": "adk-dashboard", "channel_kind": "cc", "available_kinds": ["cdx"]}),
         )
         .with_curl("curl -X POST http://localhost:8787/api/agents/adk-dashboard/message -H 'Content-Type: application/json' -d '{\"from_agent_id\":\"project-agentdesk\",\"message\":\"hello\",\"channel_kind\":\"cc\",\"prefix\":true}'"),
+        ep(
+            "POST",
+            "/api/agents/{id}/handoff",
+            "agents",
+            "#3556 — agent-to-agent turn-trigger handoff. Reserves a headless turn on the target's cc/cdx mailbox instead of posting an announce message, so the receiving agent is authoritatively woken. Returns 409 when a turn is already active for that mailbox (a semantic the announce-only /message path does not have). Use /message for human-readable notifications and /handoff for execution intent.",
+        )
+        .with_params([
+            ("id", path_param("Target agent id")),
+            ("from_agent_id", body_param("string", true, "Source agent id")),
+            ("prompt", body_param("string", true, "Instruction to execute in the handoff turn")),
+            (
+                "channel_kind",
+                body_param("string", false, "Target mailbox: cc (default) or cdx")
+                    .with_enum(&["cc", "cdx"])
+                    .with_default(json!("cc")),
+            ),
+            (
+                "prefix",
+                body_param("boolean", false, "Add the from->to handoff prefix to the prompt").with_default(true),
+            ),
+            (
+                "source",
+                body_param("string", false, "Optional trigger source label"),
+            ),
+            (
+                "metadata",
+                body_param("object", false, "Optional trigger metadata injected into the turn context"),
+            ),
+        ])
+        .with_example(
+            json!({"path": {"id": "adk-dashboard"}, "body": {"from_agent_id": "project-agentdesk", "prompt": "리뷰 코멘트 반영해서 PR 업데이트해줘", "channel_kind": "cc", "source": "agent-relay"}}),
+            json!({"ok": true, "to_agent_id": "adk-dashboard", "channel_id": "1473922824350601297", "channel_kind": "cc", "turn_id": "discord:1473922824350601297:9100000000000000000", "status": "started"}),
+        )
+        .with_error_example(
+            409,
+            json!({"path": {"id": "adk-dashboard"}, "body": {"from_agent_id": "project-agentdesk", "prompt": "do it"}}),
+            json!({"error": "turn already active for this agent mailbox", "status": "conflict"}),
+        )
+        .with_curl("curl -X POST http://localhost:8787/api/agents/adk-dashboard/handoff -H 'Content-Type: application/json' -d '{\"from_agent_id\":\"project-agentdesk\",\"prompt\":\"리뷰 반영해줘\",\"channel_kind\":\"cc\"}'"),
         ep(
             "GET",
             "/api/agents/{id}/cron",

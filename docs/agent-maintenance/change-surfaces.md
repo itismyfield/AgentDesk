@@ -1299,9 +1299,9 @@
     relocated the `require_explicit_bearer_token` /
     `resolve_requesting_agent_id_with_pg` auth/identity helpers to
     `crate::services::kanban`).
-  - `src/server/routes/docs.rs` (5900 lines; +4 from #3293 documenting
-    the stale-mailbox repair `purge` body param + registry-purge response
-    fields).
+  - `src/server/routes/docs.rs` (5940 lines; +40 from #3556 documenting
+    the agent-to-agent turn-trigger handoff endpoint `/api/agents/{id}/handoff`
+    paired example + 409 conflict error example + curl).
   - `src/server/routes/escalation.rs` (1376 lines).
   - `src/server/routes/meetings.rs` (1675 lines).
   - `src/server/routes/review_verdict/decision_route.rs` was decomposed in
