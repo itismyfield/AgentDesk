@@ -70,7 +70,14 @@
 # #3558 raised 6923 -> 6925: both `persist_watcher_stream_progress` streaming call
 # sites now thread the captured `turn_identity_for_panel.as_ref()` into the new
 # single-flock RMW helper so a late-frame fresh row B is rejected (+2 lines).
-"src/services/discord/tmux_watcher.rs" = 6925
+# #3558 (codex review follow-up) raised 6925 -> 6935: the two remaining
+# session-bound-relay-success sites that still did an unlocked
+# `load_inflight_state` -> mutate -> `save_inflight_state` (re-writing a stale
+# `last_offset`/`response_sent_offset`) now route through the new
+# `persist_watcher_relay_watermark_locked` single-flock RMW helper, gated on the
+# captured `inflight_identity_before_relay` (+10 lines of identity-guarded calls
+# and explanatory comments).
+"src/services/discord/tmux_watcher.rs" = 6935
 # #3038 tmux_watcher S1 child modules, frozen at landed production LoC.
 "src/services/discord/tmux_watcher/commit_decisions.rs" = 140
 "src/services/discord/tmux_watcher/completion_gate.rs" = 275
@@ -325,7 +332,15 @@
 # `WatcherProgressOutcome` / `WatcherTerminalCommitOutcome` enums, and 5 unit
 # tests covering last_offset preservation, fresh-row identity rejection,
 # backward/forward commit max-serialize, and Gemini retry-reset non-destruction.
-"src/services/discord/inflight.rs" = 2275
+# #3558 (codex review follow-up) raised 2275 -> 2378 (+103): a third single-flock
+# RMW helper `persist_watcher_relay_watermark_locked` (with its
+# `WatcherRelayWatermarkPatch` value struct and `WatcherRelayWatermarkOutcome`
+# enum) for the two `tmux_watcher.rs` session-bound-relay-success sites — it
+# patches ONLY `last_watcher_relayed_*` and preserves the in-lock
+# `last_offset`/`response_sent_offset`/`full_response`, so a late relay can no
+# longer clobber a concurrently-advanced watermark backward — plus 2 unit tests
+# (concurrent-advance preservation, fresh-row identity rejection).
+"src/services/discord/inflight.rs" = 2378
 # #3038 Phase A: health.rs decomposed into health/ directory modules (root 402
 # prod LoC + 6 sub-1000-LoC submodules) — dropped below the giant threshold, so
 # its ratchet entry is deleted (win; no baseline raises).

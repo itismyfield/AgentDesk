@@ -1786,6 +1786,109 @@ fn commit_watcher_terminal_delivery_locked_in_root(
     }
 }
 
+/// #3558 (codex review follow-up): the watcher-owned relay-success watermark a
+/// single-flock RMW patches onto the persisted row. Unlike the terminal-commit
+/// patch this does NOT carry `last_offset` / `response_sent_offset` /
+/// `full_response` and does NOT set `terminal_delivery_committed` — those are
+/// preserved verbatim from the in-lock disk reload. The two
+/// session-bound-relay-success sites in `tmux_watcher.rs` only mean to advance
+/// the relay watermark; the old unlocked `load_inflight_state` → mutate →
+/// `save_inflight_state(&inflight)` re-wrote the whole stale row (including a
+/// possibly-backward `last_offset`/`response_sent_offset`), reintroducing the
+/// exact backward-write TOCTOU the #3558 fix closed elsewhere.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::services::discord) struct WatcherRelayWatermarkPatch {
+    pub last_watcher_relayed_offset: Option<u64>,
+    pub last_watcher_relayed_generation_mtime_ns: Option<i64>,
+}
+
+/// #3558: outcome of [`persist_watcher_relay_watermark_locked_in_root`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum WatcherRelayWatermarkOutcome {
+    Saved,
+    Skipped,
+    IoError,
+}
+
+/// #3558 (codex review follow-up): single-flock read-modify-write for the
+/// watcher's session-bound-relay-success watermark. Replaces the old unlocked
+/// `load_inflight_state` → mutate → `save_inflight_state` at
+/// `tmux_watcher.rs` (the two terminal-relay-success sites). Holds the sidecar
+/// flock across reload → identity guard → patch → [`persist_under_lock`], never
+/// re-entering [`save_inflight_state`] (which would re-acquire the same
+/// non-reentrant flock and self-deadlock). ONLY `last_watcher_relayed_*` is
+/// patched; `last_offset` / `response_sent_offset` / `full_response` are
+/// preserved verbatim from the in-lock reload so a concurrent owner-gated
+/// `refresh_inflight_last_offset_*` advance can no longer be clobbered backward
+/// by the stale unlocked snapshot these sites used to write back.
+pub(in crate::services::discord) fn persist_watcher_relay_watermark_locked(
+    provider: &ProviderKind,
+    channel_id: u64,
+    require_identity: &InflightTurnIdentity,
+    require_tmux_session_name: &str,
+    patch: WatcherRelayWatermarkPatch,
+) -> WatcherRelayWatermarkOutcome {
+    let Some(root) = inflight_runtime_root() else {
+        return WatcherRelayWatermarkOutcome::IoError;
+    };
+    persist_watcher_relay_watermark_locked_in_root(
+        &root,
+        provider,
+        channel_id,
+        require_identity,
+        require_tmux_session_name,
+        patch,
+    )
+}
+
+/// Root-explicit variant of [`persist_watcher_relay_watermark_locked`] for unit
+/// tests.
+fn persist_watcher_relay_watermark_locked_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    require_identity: &InflightTurnIdentity,
+    require_tmux_session_name: &str,
+    patch: WatcherRelayWatermarkPatch,
+) -> WatcherRelayWatermarkOutcome {
+    let path = inflight_state_path(root, provider, channel_id);
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return WatcherRelayWatermarkOutcome::IoError;
+    };
+    let Some(mut state) = load_inflight_state_unlocked(&path) else {
+        return WatcherRelayWatermarkOutcome::Skipped;
+    };
+    if state.restart_mode.is_some() || state.rebind_origin {
+        return WatcherRelayWatermarkOutcome::Skipped;
+    }
+    // Same strong identity guard as the terminal-commit helper (user_msg_id +
+    // started_at + tmux_session + turn_start_offset, plus the caller-supplied
+    // session). Rejects a write onto a fresh row B that replaced the row this
+    // relay was for — the late-frame race the old tmux-session-only load→save
+    // let through.
+    if !require_identity.matches_state(&state)
+        || state.tmux_session_name.as_deref() != Some(require_tmux_session_name)
+    {
+        return WatcherRelayWatermarkOutcome::Skipped;
+    }
+
+    state.last_watcher_relayed_offset = patch.last_watcher_relayed_offset;
+    state.last_watcher_relayed_generation_mtime_ns = patch.last_watcher_relayed_generation_mtime_ns;
+    // `last_offset` / `response_sent_offset` / `full_response` /
+    // `terminal_delivery_committed` intentionally untouched — preserved from the
+    // in-lock reload.
+
+    match persist_under_lock(
+        root,
+        &path,
+        &state,
+        "src/services/discord/inflight.rs:persist_watcher_relay_watermark_locked_in_root",
+    ) {
+        Ok(()) => WatcherRelayWatermarkOutcome::Saved,
+        Err(_) => WatcherRelayWatermarkOutcome::IoError,
+    }
+}
+
 fn inflight_state_allows_idle_tmux_repair_state(state: &InflightTurnState) -> bool {
     state.full_response.trim().is_empty()
         && state.response_sent_offset == 0
@@ -2277,9 +2380,9 @@ mod stall_recovery_tests {
         GuardedClearOutcome, GuardedSaveOutcome, INFLIGHT_STALENESS_THRESHOLD_SECS,
         InflightRestartMode, InflightTurnIdentity, InflightTurnState, RelayOwnerKind,
         StatusPanelBindGuard, StatusPanelBindOutcome, StatusPanelClearGuard,
-        WatcherProgressOutcome, WatcherStreamProgressPatch, WatcherTerminalCommitOutcome,
-        WatcherTerminalCommitPatch, bind_status_panel_in_root,
-        clear_current_msg_if_matches_in_root,
+        WatcherProgressOutcome, WatcherRelayWatermarkOutcome, WatcherRelayWatermarkPatch,
+        WatcherStreamProgressPatch, WatcherTerminalCommitOutcome, WatcherTerminalCommitPatch,
+        bind_status_panel_in_root, clear_current_msg_if_matches_in_root,
         clear_inflight_state_if_matches_identity_after_delivery_in_root,
         clear_inflight_state_if_matches_identity_in_root, clear_inflight_state_if_matches_in_root,
         clear_inflight_state_if_matches_tmux_response_in_root,
@@ -2287,7 +2390,8 @@ mod stall_recovery_tests {
         commit_watcher_terminal_delivery_locked_in_root,
         inflight_state_allows_idle_tmux_repair_state, inflight_state_is_stale, inflight_state_path,
         load_inflight_states_from_root, lock_inflight_state_path, normalize_response_sent_offset,
-        offset_monotonic_invariant_severity, persist_watcher_stream_progress_locked_in_root,
+        offset_monotonic_invariant_severity, persist_watcher_relay_watermark_locked_in_root,
+        persist_watcher_stream_progress_locked_in_root,
         refresh_inflight_last_offset_if_matches_identity_in_root,
         save_inflight_state_if_matches_identity_in_root, save_inflight_state_in_root,
         validate_inflight_state_for_save,
@@ -2740,6 +2844,128 @@ mod stall_recovery_tests {
         );
         assert_eq!(persisted.last_watcher_relayed_offset, Some(64));
         assert_eq!(persisted.last_watcher_relayed_generation_mtime_ns, Some(9));
+    }
+
+    /// #3558 (codex review follow-up): the two `tmux_watcher.rs`
+    /// session-bound-relay-success sites only mean to advance the relay
+    /// watermark, but the OLD unlocked `load_inflight_state` → mutate →
+    /// `save_inflight_state(&inflight)` re-wrote the WHOLE stale row — including a
+    /// `last_offset`/`response_sent_offset`/`full_response` that a concurrent
+    /// owner-gated refresh had since advanced — reintroducing the exact
+    /// backward-write TOCTOU. The locked relay-watermark RMW must patch ONLY
+    /// `last_watcher_relayed_*` and PRESERVE the concurrently-advanced disk
+    /// watermark.
+    #[test]
+    fn watcher_relay_watermark_preserves_concurrently_advanced_last_offset() {
+        let temp = TempDir::new().unwrap();
+        let channel_id = 35_580_007;
+        let session = "AgentDesk-claude-3558-g";
+        // Disk carries a SHORT body the relay observed when it loaded.
+        let state = seed_watcher_stream_state(temp.path(), channel_id, session, "hello", 100);
+        let identity = InflightTurnIdentity::from_state(&state);
+
+        // Between the relay's (now-removed) unlocked load and its save, a
+        // concurrent owner-gated refresh advances the watermark to 200 AND a
+        // concurrent stream lengthens the body — the race window the old
+        // load→save clobbered. Seed via a direct write (the on-disk pre-condition
+        // the helper must handle, not produce).
+        assert!(refresh_inflight_last_offset_if_matches_identity_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            channel_id,
+            &identity,
+            Some(64),
+            "/tmp/agentdesk-3558.jsonl",
+            None,
+            200,
+            RelayOwnerKind::None,
+        ));
+        let mut advanced = loaded_row(temp.path(), channel_id);
+        advanced.full_response = "hello world longer body".to_string();
+        advanced.response_sent_offset = advanced.full_response.len();
+        force_write_state(temp.path(), &advanced);
+
+        // The relay-success site patches only the watcher watermark.
+        let outcome = persist_watcher_relay_watermark_locked_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            channel_id,
+            &identity,
+            session,
+            WatcherRelayWatermarkPatch {
+                last_watcher_relayed_offset: Some(64),
+                last_watcher_relayed_generation_mtime_ns: Some(11),
+            },
+        );
+        assert_eq!(outcome, WatcherRelayWatermarkOutcome::Saved);
+
+        let persisted = loaded_row(temp.path(), channel_id);
+        assert_eq!(persisted.last_watcher_relayed_offset, Some(64));
+        assert_eq!(persisted.last_watcher_relayed_generation_mtime_ns, Some(11));
+        assert_eq!(
+            persisted.last_offset, 200,
+            "last_offset must be preserved at the concurrently-advanced value, NOT clobbered back to the relay's stale 100"
+        );
+        assert_eq!(
+            persisted.full_response, "hello world longer body",
+            "the concurrently-advanced body must NOT be re-written back to the relay's stale snapshot"
+        );
+        assert_eq!(
+            persisted.response_sent_offset,
+            "hello world longer body".len(),
+            "response_sent_offset must stay at the concurrently-advanced value, never backward"
+        );
+        assert!(
+            !persisted.terminal_delivery_committed,
+            "the relay-watermark write must NOT set terminal_delivery_committed (commit owns that)"
+        );
+    }
+
+    /// #3558 (codex review follow-up): a relay-watermark write must be SKIPPED
+    /// when a fresh turn (row B) with a different `turn_start_offset` replaced
+    /// the row between the relay's load and save — the identity guard rejects it
+    /// and leaves row B untouched, so a late relay can never stamp its stale
+    /// watermark over a newer turn.
+    #[test]
+    fn watcher_relay_watermark_skips_on_fresh_row_identity_mismatch() {
+        let temp = TempDir::new().unwrap();
+        let channel_id = 35_580_008;
+        let session = "AgentDesk-claude-3558-h";
+        let state = seed_watcher_stream_state(temp.path(), channel_id, session, "old", 50);
+        let stale_identity = InflightTurnIdentity::from_state(&state);
+
+        let mut fresh = state.clone();
+        fresh.turn_start_offset = Some(999);
+        fresh.full_response = "fresh".to_string();
+        fresh.response_sent_offset = "fresh".len();
+        fresh.last_offset = 0;
+        fresh.last_watcher_relayed_offset = None;
+        force_write_state(temp.path(), &fresh);
+
+        let outcome = persist_watcher_relay_watermark_locked_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            channel_id,
+            &stale_identity,
+            session,
+            WatcherRelayWatermarkPatch {
+                last_watcher_relayed_offset: Some(64),
+                last_watcher_relayed_generation_mtime_ns: Some(7),
+            },
+        );
+        assert_eq!(outcome, WatcherRelayWatermarkOutcome::Skipped);
+
+        let persisted = loaded_row(temp.path(), channel_id);
+        assert_eq!(
+            persisted.turn_start_offset,
+            Some(999),
+            "fresh row B must be untouched by the stale relay-watermark write"
+        );
+        assert_eq!(
+            persisted.last_watcher_relayed_offset, None,
+            "fresh row B's relay watermark must not be stamped by the stale relay"
+        );
+        assert_eq!(persisted.last_offset, 0);
     }
 
     /// #3558 (Gemini retry non-destruction): after a same-turn retry reset

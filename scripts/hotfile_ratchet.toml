@@ -28,7 +28,13 @@
 # `turn_identity_for_panel.as_ref()` into the new single-flock offset-TOCTOU RMW
 # helper so a late-frame fresh row B is rejected. The helper bodies live in
 # inflight.rs; this is the minimal call-site cost.
-"src/services/discord/tmux_watcher.rs" = 10088
+# #3558 (codex review follow-up): 10088 -> 10098 (+10), reviewable admission —
+# the two remaining session-bound-relay-success sites that still did an unlocked
+# `load_inflight_state` -> mutate -> `save_inflight_state` now route through the
+# new `persist_watcher_relay_watermark_locked` single-flock RMW helper, gated on
+# the captured `inflight_identity_before_relay`. The helper body lives in
+# inflight.rs; this is the identity-guarded call-site + comment cost.
+"src/services/discord/tmux_watcher.rs" = 10098
 "src/services/discord/tui_prompt_relay.rs" = 7789
 # #3560: 6612 -> 6621 (+9), reviewable admission — footer-mode separate-panel
 # migration reconcile call + comment at the resume entry. Helper body lives in

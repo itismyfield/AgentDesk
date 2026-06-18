@@ -176,7 +176,12 @@
     function gained a `require_identity: Option<&InflightTurnIdentity>` param so a
     late-frame fresh row B is rejected;
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (6925 production lines; +2 from #3558
+  - `src/services/discord/tmux_watcher.rs` (6935 production lines; +10 from #3558
+    (codex review follow-up) routing the two remaining session-bound-relay-success
+    sites — which still did an unlocked `load_inflight_state` -> mutate ->
+    `save_inflight_state` (re-writing a stale `last_offset`/`response_sent_offset`)
+    — through the new single-flock `inflight::persist_watcher_relay_watermark_locked`
+    helper, gated on the captured `inflight_identity_before_relay`; +2 from #3558
     threading the captured `turn_identity_for_panel.as_ref()` into both
     `persist_watcher_stream_progress` streaming call sites so the new single-flock
     RMW helper can reject a write onto a fresh row B; +1 from #3534
