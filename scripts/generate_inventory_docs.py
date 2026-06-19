@@ -1398,6 +1398,7 @@ def generated_documents() -> dict[Path, str]:
 
 def write_documents(documents: dict[Path, str], check: bool) -> int:
     stale_paths: list[Path] = []
+    wrote_files = False
     for path, content in documents.items():
         if check:
             current = path.read_text(encoding="utf-8") if path.exists() else None
@@ -1423,6 +1424,7 @@ def write_documents(documents: dict[Path, str], check: bool) -> int:
         if current != content:
             path.write_text(content, encoding="utf-8")
             print(f"wrote {rel_posix(path)}")
+            wrote_files = True
         else:
             print(f"unchanged {rel_posix(path)}")
 
@@ -1430,6 +1432,10 @@ def write_documents(documents: dict[Path, str], check: bool) -> int:
         print("")
         print("generated docs are stale; rerun `python3 scripts/generate_inventory_docs.py`")
         return 1
+
+    if wrote_files:
+        print("\nNOTE: Generated inventory changed. Check for existing open PRs to avoid duplicate inventory refreshes.")
+
     return 0
 
 
