@@ -446,6 +446,81 @@ pub fn emit_relay_delivery(
     );
 }
 
+/// #3607 durable delete observability: record a structured event at each wired
+/// relay-message *delete* decision so terminal-anchor protections and orphan /
+/// panel / replay-prefix cleanups are PG-queryable and attributable. Mirrors
+/// [`emit_relay_delivery`] (which covers the answer-delivery side) for the
+/// destructive side: `source` is the call site (`turn_bridge_watcher_orphan_…`,
+/// `full_terminal_replay_prefix`, `placeholder_sweeper`, …), `operation_kind`
+/// reuses the `PlaceholderCleanupOperation` vocab (`delete_terminal` /
+/// `delete_nonterminal` / `edit_terminal` / `edit_preserve`) or a site-specific
+/// descriptive verb, and `outcome` is one of `committed` | `already_gone` |
+/// `failed` | `skipped_committed_terminal`. The outcome doubles as the event
+/// `status` (correlation column) so a query can split committed deletes from
+/// guard-skips without parsing the payload.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_relay_delete(
+    provider: &str,
+    channel_id: u64,
+    message_id: u64,
+    session_key: Option<&str>,
+    turn_id: Option<&str>,
+    source: &str,
+    operation_kind: &str,
+    outcome: &str,
+    detail: Option<&str>,
+) {
+    emit_event(
+        "relay_delete",
+        Some(provider),
+        Some(channel_id),
+        None,
+        session_key,
+        turn_id,
+        normalize_string(outcome).as_deref(),
+        CounterDelta::default(),
+        json!({
+            "message_id": message_id,
+            "source": normalize_string(source),
+            "operation_kind": normalize_string(operation_kind),
+            "outcome": normalize_string(outcome),
+            "detail": detail.and_then(normalize_string),
+        }),
+    );
+}
+
+/// #3607 ergonomic wrapper over [`emit_relay_delete`] for the common
+/// delete-then-observe call sites: maps a delete `Result` to the
+/// `committed` / `failed` outcome (and the `Err` text into `detail`) so each
+/// site stays a single compact call instead of an inline match. `provider` may
+/// be empty for sites with no provider scope (idle-recap / monitoring); it is
+/// normalized away to none.
+pub fn emit_relay_delete_result<E: std::fmt::Display>(
+    provider: &str,
+    channel_id: u64,
+    message_id: u64,
+    source: &str,
+    operation_kind: &str,
+    result: &Result<(), E>,
+) {
+    let detail = result.as_ref().err().map(|error| error.to_string());
+    emit_relay_delete(
+        provider,
+        channel_id,
+        message_id,
+        None,
+        None,
+        source,
+        operation_kind,
+        if result.is_ok() {
+            "committed"
+        } else {
+            "failed"
+        },
+        detail.as_deref(),
+    );
+}
+
 pub fn emit_agent_quality_event(event: AgentQualityEvent) {
     let Some(event_type) = super::helpers::normalize_quality_event_type(&event.event_type) else {
         tracing::warn!(
@@ -768,6 +843,47 @@ mod tests {
         assert_eq!(recovery.payload["turn_id"], "turn-recovery");
         assert_eq!(recovery.payload["agent_id"], "planner");
         assert_eq!(recovery.payload["reason"], "watchdog");
+    }
+
+    #[test]
+    fn relay_delete_records_required_fields_and_outcome() {
+        // #3607: every wired delete site funnels through emit_relay_delete. The
+        // event must carry the required relay fields (channel_id / message_id /
+        // source / operation_kind / outcome) and surface the outcome as both the
+        // payload value and the correlation status so committed deletes and
+        // guard-skips are queryable apart.
+        let _guard = super::super::test_runtime_lock();
+        super::super::reset_for_tests();
+
+        emit_relay_delete(
+            "Codex",
+            42,
+            7777,
+            Some("session-delete"),
+            Some("turn-delete"),
+            "turn_bridge_watcher_orphan_spinner_cleanup",
+            "delete_nonterminal",
+            "skipped_committed_terminal",
+            Some(" guarded "),
+        );
+
+        let events = events::recent(50);
+        let event = events
+            .iter()
+            .find(|event| event.event_type == "relay_delete")
+            .expect("relay_delete should be in recent ring");
+        assert_eq!(event.provider.as_deref(), Some("codex"));
+        assert_eq!(event.channel_id, Some(42));
+        assert_eq!(event.payload["message_id"], 7777);
+        assert_eq!(
+            event.payload["source"],
+            "turn_bridge_watcher_orphan_spinner_cleanup"
+        );
+        assert_eq!(event.payload["operation_kind"], "delete_nonterminal");
+        assert_eq!(event.payload["outcome"], "skipped_committed_terminal");
+        assert_eq!(event.payload["detail"], "guarded");
+        // outcome doubles as the correlation status.
+        assert_eq!(event.payload["status"], "skipped_committed_terminal");
     }
 
     #[test]

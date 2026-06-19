@@ -713,9 +713,18 @@ impl TurnGateway for DiscordGateway {
             )
             .await;
             for placeholder_msg_id in drained {
-                let _ = channel_id
+                let result = channel_id
                     .delete_message(&self.http, placeholder_msg_id)
                     .await;
+                // #3607: observe the merged-queued-placeholder drain delete.
+                crate::services::observability::emit_relay_delete_result(
+                    self.provider.as_str(),
+                    channel_id.get(),
+                    placeholder_msg_id.get(),
+                    "gateway_queued_placeholder_drain",
+                    "delete_nonterminal",
+                    &result,
+                );
             }
 
             let deps = router::IntakeDeps {

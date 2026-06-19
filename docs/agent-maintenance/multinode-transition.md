@@ -404,6 +404,20 @@
 
 ### Audited touches
 
+- #3607 terminal-delete protection guard + durable delete observability
+  (Phase A): `turn_bridge/mod.rs` gained a worker-local cleanup guard that
+  preserves a committed terminal anchor (a finished turn's retired message
+  recorded in the per-process `PlaceholderCleanupRegistry` tombstone, signal-c,
+  fused with the live-inflight fast path, signal-a) from the orphan-spinner
+  cleanup, plus `emit_relay_delete` observability on every wired delete site
+  (orphan-spinner, full-terminal replay-prefix). The hot-file body shrank
+  (orphan-spinner cleanup lifted whole into the `watcher_orphan_cleanup.rs`
+  sibling); only a dispatch call + guard remain inline. The guard reads the same
+  per-process tombstone registry the watcher already owns and the turn's OWN
+  inflight handle — it is NOT a routing authority, never read cross-node. No
+  leader election, gateway lease, PG ownership, startup order, worker ownership,
+  or singleton assumption is touched; the recovery-fallback criterion is
+  deferred to #3610.
 - #3560 single_message_panel default-ON + footer-mode migration guard: the
   `single_message_panel` flag is now default-ON (opt-out via
   `AGENTDESK_SINGLE_MESSAGE_PANEL=0|false`) and `turn_bridge/mod.rs` gained a

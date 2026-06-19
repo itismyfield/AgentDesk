@@ -3085,7 +3085,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let deferred_monitor_ready =
             monitor_auto_turn_claimed && monitor_auto_turn_deferred && !paused_now;
         if (was_paused || paused_now || epoch_changed_now) && !deferred_monitor_ready {
-            // Clean up placeholder if we created one
+            // Clean up placeholder if we created one (#3610/Phase-B defer: no emit_relay_delete here — tmux_watcher.rs raw-ratchet is at ceiling)
             if let Some(msg_id) = placeholder_msg_id {
                 if watcher_should_delete_suppressed_placeholder(placeholder_from_restored_inflight)
                 {

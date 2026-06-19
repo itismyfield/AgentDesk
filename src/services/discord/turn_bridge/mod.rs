@@ -98,8 +98,8 @@ pub(super) use tmux_runtime::handoff_interrupted_message;
 pub(super) use tmux_runtime::stale_inflight_message;
 pub(super) use tmux_runtime::stop_active_turn;
 pub(super) use watcher_orphan_cleanup::{
-    record_watcher_orphan_spinner_cleanup, should_delete_bridge_created_watcher_orphan_response,
-    should_retry_watcher_orphan_spinner_cleanup, spawn_watcher_orphan_spinner_cleanup_retry,
+    cleanup_or_preserve_watcher_orphan_spinner,
+    should_delete_bridge_created_watcher_orphan_response,
 };
 
 /// #2452 H6 graduation: schedule the history-aware auto-retry via the
@@ -4701,55 +4701,20 @@ pub(super) fn spawn_turn_bridge(
                         bridge_created_response_placeholder_msg_id,
                         current_msg_id,
                     ) {
-                        let cleanup_outcome =
-                            match gateway.delete_message(channel_id, current_msg_id).await {
-                                Ok(()) => {
-                                    super::placeholder_cleanup::PlaceholderCleanupOutcome::Succeeded
-                                }
-                                Err(error) => {
-                                    super::placeholder_cleanup::classify_delete_error(&error)
-                                }
-                            };
-                        let cleanup_committed = cleanup_outcome.is_committed();
-                        let cleanup_should_retry =
-                            should_retry_watcher_orphan_spinner_cleanup(&cleanup_outcome);
-                        let cleanup_already_gone = matches!(
-                            cleanup_outcome,
-                            super::placeholder_cleanup::PlaceholderCleanupOutcome::AlreadyGone
-                        );
-                        record_watcher_orphan_spinner_cleanup(
-                            shared_owned.as_ref(),
+                        // #3607: terminal-anchor guard + durable delete
+                        // observability live in the sibling so the hot file only
+                        // dispatches. The guard skips deleting a committed
+                        // terminal anchor (the accident this fixes); a genuine
+                        // non-terminal orphan is deleted, recorded, and retried.
+                        cleanup_or_preserve_watcher_orphan_spinner(
+                            shared_owned.clone(),
                             &provider,
+                            gateway.clone(),
                             channel_id,
                             current_msg_id,
-                            inflight_state.tmux_session_name.as_deref(),
-                            cleanup_outcome,
-                            "turn_bridge_watcher_orphan_spinner_cleanup",
-                        );
-                        if cleanup_committed {
-                            if cleanup_already_gone {
-                                tracing::info!(
-                                    "  [{ts}] 🧹 bridge orphan watcher-handoff spinner card already gone (channel {}, msg {})",
-                                    channel_id,
-                                    current_msg_id
-                                );
-                            } else {
-                                tracing::info!(
-                                    "  [{ts}] 🧹 bridge removed orphan watcher-handoff spinner card (channel {}, msg {})",
-                                    channel_id,
-                                    current_msg_id
-                                );
-                            }
-                        } else if cleanup_should_retry {
-                            spawn_watcher_orphan_spinner_cleanup_retry(
-                                shared_owned.clone(),
-                                provider.clone(),
-                                gateway.clone(),
-                                channel_id,
-                                current_msg_id,
-                                inflight_state.tmux_session_name.clone(),
-                            );
-                        }
+                            &inflight_state,
+                        )
+                        .await;
                     }
                 }
                 BridgeOutputOwner::StandbyRelay => tracing::info!(
@@ -5417,30 +5382,47 @@ pub(super) fn spawn_turn_bridge(
                     );
                 }
                 for frozen_msg_id in terminal_full_replay_cleanup_msg_ids.drain(..) {
+                    // #5413/#3607: current_msg_id is the terminal answer and is
+                    // already excluded here, so no terminal-anchor guard is
+                    // needed — every drained id is a non-terminal streamed prefix.
                     if frozen_msg_id == current_msg_id {
                         continue;
                     }
-                    match gateway.delete_message(channel_id, frozen_msg_id).await {
-                        Ok(()) => {
-                            tracing::info!(
-                                target: "agentdesk::codex_rollout_handoff",
-                                provider = %provider.as_str(),
-                                channel = channel_id.get(),
-                                message_id = frozen_msg_id.get(),
-                                "turn_bridge removed streamed rollover prefix after full terminal replay"
-                            );
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                target: "agentdesk::codex_rollout_handoff",
-                                provider = %provider.as_str(),
-                                channel = channel_id.get(),
-                                message_id = frozen_msg_id.get(),
-                                error = %error,
-                                "turn_bridge failed to remove streamed rollover prefix after full terminal replay"
-                            );
-                        }
-                    }
+                    let (replay_outcome, replay_detail) =
+                        match gateway.delete_message(channel_id, frozen_msg_id).await {
+                            Ok(()) => {
+                                tracing::info!(
+                                    target: "agentdesk::codex_rollout_handoff",
+                                    provider = %provider.as_str(),
+                                    channel = channel_id.get(),
+                                    message_id = frozen_msg_id.get(),
+                                    "turn_bridge removed streamed rollover prefix after full terminal replay"
+                                );
+                                ("committed", None)
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    target: "agentdesk::codex_rollout_handoff",
+                                    provider = %provider.as_str(),
+                                    channel = channel_id.get(),
+                                    message_id = frozen_msg_id.get(),
+                                    error = %error,
+                                    "turn_bridge failed to remove streamed rollover prefix after full terminal replay"
+                                );
+                                ("failed", Some(error))
+                            }
+                        };
+                    crate::services::observability::emit_relay_delete(
+                        provider.as_str(),
+                        channel_id.get(),
+                        frozen_msg_id.get(),
+                        adk_session_key.as_deref(),
+                        Some(turn_id.as_str()),
+                        "full_terminal_replay_prefix",
+                        "delete_nonterminal",
+                        replay_outcome,
+                        replay_detail.as_deref(),
+                    );
                 }
                 // #2236: look up the typed handoff marker stamped at dispatch
                 // time so multi-agent setups with overlapping background

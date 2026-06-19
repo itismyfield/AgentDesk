@@ -839,6 +839,15 @@ async fn sweep_orphan_status_panel(
         return;
     }
     let channel = serenity::ChannelId::new(state.channel_id);
+    if super::placeholder_cleanup::committed_terminal_panel_anchor_skip(
+        &shared.ui.placeholder_cleanup,
+        provider,
+        channel,
+        panel_msg,
+        state,
+    ) {
+        return; // #3607: a committed terminal cleanup owns this panel.
+    }
     let committed = match channel.delete_message(http, panel_msg).await {
         Ok(_) => true,
         Err(serenity::Error::Http(http_err))
