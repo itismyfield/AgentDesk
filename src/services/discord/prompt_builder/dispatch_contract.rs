@@ -404,6 +404,27 @@ pub(super) fn render_dispatch_contract(
                  - review verdict API는 사용하지 않는다."
             ))
         }
+        // #3605 (T2): scope-assessment — the assigned agent evaluates the
+        // issue's SCALE only (no implementation) and returns a structured
+        // `scope_depth`. The depth drives later phases (T3); here it is just
+        // recorded on the card. Any value outside {full,plan_only,direct} is
+        // normalized to "full" downstream, so emphasize emitting one of them.
+        Some("scope-assessment") => {
+            let dispatch_id = current_task.dispatch_id?;
+            Some(format!(
+                "[Dispatch Contract]\n\
+                 - 이 dispatch는 \"범위 평가\" 전용이다. 구현/수정/커밋은 하지 않는다.\n\
+                 - 이 이슈의 스케일을 판단해 `scope_depth`를 다음 중 하나로 결정한다:\n\
+                 \u{20}\u{20}- `full`: 설계 + 계획(plan)이 필요한 큰 변경\n\
+                 \u{20}\u{20}- `plan_only`: 계획은 필요하지만 설계 부담이 적은 중간 규모\n\
+                 \u{20}\u{20}- `direct`: 계획 없이 바로 처리 가능한 소규모 직접 수정\n\
+                 - 판단이 불명확하면 `full`로 둔다(가장 안전).\n\
+                 - 완료 시 `PATCH /api/dispatches/{dispatch_id}`로 dispatch를 종료한다.\n\
+                 - result에는 반드시 `scope_depth`(full|plan_only|direct), `scope_reason`(판단 근거), `scope_risk`(과소평가 시 위험)를 넣는다.\n\
+                 - 예시 body: `{{\"status\":\"completed\",\"result\":{{\"scope_depth\":\"plan_only\",\"scope_reason\":\"...\",\"scope_risk\":\"...\"}}}}`\n\
+                 - review verdict API는 사용하지 않는다."
+            ))
+        }
         Some("e2e-test") | Some("consultation") | Some("pm-decision") => {
             let dispatch_id = current_task.dispatch_id?;
             Some(format!(

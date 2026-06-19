@@ -550,6 +550,33 @@ fn phase_gate_contract_requires_verdict_and_checks() {
 }
 
 #[test]
+fn scope_assessment_contract_requires_scope_depth_and_patch_completion() {
+    // #3605 (T2): the scope-assessment contract must instruct the agent to
+    // evaluate scale only, emit one of full|plan_only|direct, and complete via
+    // the standard PATCH path.
+    let current_task = CurrentTaskContext {
+        dispatch_id: Some("dispatch-scope-1"),
+        ..CurrentTaskContext::default()
+    };
+    let contract = render_dispatch_contract(Some("scope-assessment"), &current_task)
+        .expect("scope-assessment dispatch contract");
+
+    assert!(contract.contains("[Dispatch Contract]"));
+    assert!(contract.contains("PATCH /api/dispatches/dispatch-scope-1"));
+    // Scale evaluation only — no implementation.
+    assert!(contract.contains("구현"));
+    // All three depth labels are documented.
+    assert!(contract.contains("full"));
+    assert!(contract.contains("plan_only"));
+    assert!(contract.contains("direct"));
+    // The structured result keys are required.
+    assert!(contract.contains("scope_depth"));
+    assert!(contract.contains("scope_reason"));
+    assert!(contract.contains("scope_risk"));
+    assert!(contract.contains("review verdict API는 사용하지 않는다"));
+}
+
+#[test]
 fn review_lite_prompt_keeps_review_contract_while_trimming_full_sections() {
     use super::super::settings::RoleBinding;
 

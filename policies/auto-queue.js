@@ -176,6 +176,13 @@ var autoQueue = {
     if (dispatches.length === 0) return;
 
     var dispatch = dispatches[0];
+
+    // #3605 (T2): scope-assessment is a side-path owned by kanban-rules
+    // (records scope_depth on the card metadata). It never participates in the
+    // auto-queue phase-gate continuation, so guard it out explicitly rather
+    // than relying on the phase_gate context check below.
+    if (dispatch.dispatch_type === "scope-assessment") return;
+
     var context = {};
     if (dispatch.context && dispatch.context !== "{}" && dispatch.context !== "[]") {
       try { context = JSON.parse(dispatch.context); } catch (e) { context = {}; }

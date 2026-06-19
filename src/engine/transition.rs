@@ -590,7 +590,13 @@ fn decide_dispatch_attached(
 ) -> TransitionDecision {
     let card = &ctx.card;
     let is_review_type = matches!(dispatch_type, "review" | "review-decision" | "rework");
-    let skip_kickoff = is_review_type || dispatch_type == "consultation";
+    // #3605 (T2): scope-assessment is a side-path that records the issue's scale
+    // (scope_depth) before implementation. Like consultation it must stay in
+    // `requested` — attaching it must NOT kick the card into the in_progress
+    // state, otherwise it would race the real implementation dispatch and break
+    // the "side-path before implementation" intent.
+    let skip_kickoff =
+        is_review_type || dispatch_type == "consultation" || dispatch_type == "scope-assessment";
 
     let mut intents = vec![];
 
@@ -601,7 +607,8 @@ fn decide_dispatch_attached(
     });
 
     // Non-review and non-consultation dispatches transition to kickoff state.
-    // Consultation dispatches stay in requested (side-path, not implementation).
+    // Consultation and scope-assessment dispatches stay in requested
+    // (side-paths, not implementation).
     if !skip_kickoff {
         if let Some(kickoff) = kickoff_state {
             if card.status != kickoff {
@@ -1058,5 +1065,112 @@ mod gate_fail_closed_tests {
             ForceIntent::OperatorOverride,
         );
         assert_eq!(decision.outcome, TransitionOutcome::Allowed);
+    }
+}
+
+#[cfg(test)]
+mod dispatch_attached_tests {
+    //! #3605 (T2): a scope-assessment dispatch is a side-path. Like consultation
+    //! it must NOT kick the card into the kickoff (in_progress) state when
+    //! attached, so the assessment can run while the card stays in `requested`
+    //! and the real implementation dispatch is created separately.
+    use super::*;
+    use crate::pipeline::{
+        PhaseGateConfig, PipelineConfig, StateConfig, TransitionConfig, TransitionType,
+    };
+    use std::collections::HashMap;
+
+    /// Two-state pipeline `requested` → `in_progress` (in_progress is the kickoff
+    /// target for `requested`).
+    fn pipeline() -> PipelineConfig {
+        PipelineConfig {
+            name: "test".to_string(),
+            version: 1,
+            states: vec![
+                StateConfig {
+                    id: "requested".to_string(),
+                    label: "Requested".to_string(),
+                    terminal: false,
+                },
+                StateConfig {
+                    id: "in_progress".to_string(),
+                    label: "In Progress".to_string(),
+                    terminal: false,
+                },
+            ],
+            transitions: vec![TransitionConfig {
+                from: "requested".to_string(),
+                to: "in_progress".to_string(),
+                transition_type: TransitionType::Free,
+                gates: vec![],
+            }],
+            gates: HashMap::new(),
+            hooks: HashMap::new(),
+            events: HashMap::new(),
+            clocks: HashMap::new(),
+            timeouts: HashMap::new(),
+            phase_gate: PhaseGateConfig::default(),
+        }
+    }
+
+    fn ctx_requested() -> TransitionContext {
+        TransitionContext {
+            card: CardState {
+                id: "card-1".to_string(),
+                status: "requested".to_string(),
+                review_status: None,
+                latest_dispatch_id: None,
+            },
+            pipeline: pipeline(),
+            gates: GateSnapshot::default(),
+        }
+    }
+
+    fn attach(dispatch_type: &str) -> TransitionDecision {
+        decide_transition(
+            &ctx_requested(),
+            &TransitionEvent::DispatchAttached {
+                dispatch_id: "d-1".to_string(),
+                dispatch_type: dispatch_type.to_string(),
+                kickoff_state: Some("in_progress".to_string()),
+            },
+        )
+    }
+
+    fn kicks_to_in_progress(decision: &TransitionDecision) -> bool {
+        decision.intents.iter().any(|intent| {
+            matches!(
+                intent,
+                TransitionIntent::UpdateStatus { to, .. } if to == "in_progress"
+            )
+        })
+    }
+
+    /// Control: an implementation dispatch DOES kick the card to in_progress.
+    #[test]
+    fn implementation_dispatch_kicks_to_in_progress() {
+        assert!(kicks_to_in_progress(&attach("implementation")));
+    }
+
+    /// #3605: a scope-assessment dispatch must NOT kick the card to in_progress
+    /// (skip_kickoff), mirroring consultation.
+    #[test]
+    fn scope_assessment_dispatch_stays_in_requested() {
+        let decision = attach("scope-assessment");
+        assert!(
+            !kicks_to_in_progress(&decision),
+            "scope-assessment must not advance the card to in_progress"
+        );
+        // It still records the latest dispatch id (shared with all attaches).
+        assert!(decision.intents.iter().any(|intent| matches!(
+            intent,
+            TransitionIntent::SetLatestDispatchId { dispatch_id: Some(id), .. } if id == "d-1"
+        )));
+    }
+
+    /// Equivalence guard: scope-assessment behaves like consultation here.
+    #[test]
+    fn consultation_dispatch_stays_in_requested() {
+        assert!(!kicks_to_in_progress(&attach("consultation")));
     }
 }
