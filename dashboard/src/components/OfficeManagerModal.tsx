@@ -109,7 +109,7 @@ export default function OfficeManagerModal({
       <div
         role="dialog"
         aria-modal="true"
-        aria-label={tr("오피스 관리", "Manage Offices")}
+        aria-labelledby="office-manager-title"
         className="mx-4 flex max-h-[84vh] w-full max-w-2xl flex-col rounded-[28px] border"
         style={{
           background:
@@ -123,6 +123,7 @@ export default function OfficeManagerModal({
           style={{ borderBottom: "1px solid color-mix(in srgb, var(--th-border) 72%, transparent)" }}
         >
           <h2
+            id="office-manager-title"
             className="text-lg font-bold"
             style={{ color: "var(--th-text-heading)" }}
           >
