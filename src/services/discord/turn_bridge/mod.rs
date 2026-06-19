@@ -426,6 +426,116 @@ fn spawn_stream_message_receiver_adapter(
     StreamMessageReceiverAdapter { rx: async_rx, stop }
 }
 
+/// #3608: true when the accumulated `full_response` currently ends *inside* an
+/// open ``` code fence. Mirrors the fence toggle used by `format_for_discord`
+/// (`trim_start().starts_with("```")`), so blank-line runs the model placed
+/// inside a fence are treated as intentional and left untouched.
+fn streamed_text_inside_open_code_fence(full_response: &str) -> bool {
+    let mut in_code_block = false;
+    for line in full_response.lines() {
+        if line.trim_start().starts_with("```") {
+            in_code_block = !in_code_block;
+        }
+    }
+    in_code_block
+}
+
+/// #3608: append a streamed `StreamMessage::Text` chunk to `full_response`,
+/// normalizing only the *chunk boundary* so a tool-use paragraph separator
+/// (`\n\n`, appended at the ToolUse branch) followed by a chunk that itself
+/// begins with blank lines does not accumulate into `\n\n\n\n`.
+///
+/// Narrow by construction (issue option 1): when `full_response` already ends
+/// with `\n\n` and we are NOT inside an open code fence, the chunk's leading
+/// `\n` run is trimmed before appending so the boundary collapses to a single
+/// `\n\n`. Intentional larger gaps *within* a single chunk are preserved, and
+/// blank lines inside an open code fence are never touched.
+fn append_streamed_text_chunk(full_response: &mut String, content: &str) {
+    if full_response.ends_with("\n\n") && !streamed_text_inside_open_code_fence(full_response) {
+        full_response.push_str(content.trim_start_matches('\n'));
+    } else {
+        full_response.push_str(content);
+    }
+}
+
+#[cfg(test)]
+mod chunk_boundary_blank_line_tests {
+    use super::{append_streamed_text_chunk, streamed_text_inside_open_code_fence};
+
+    // #3608 regression: Text("first") → ToolUse(...) → Text("\n\nsecond") must
+    // compose `first\n\nsecond`, NOT `first\n\n\n\nsecond`. The ToolUse branch
+    // trims trailing whitespace then appends the `\n\n` separator; this models
+    // exactly that boundary before the second chunk arrives.
+    #[test]
+    fn tool_boundary_then_blank_leading_chunk_collapses_to_single_separator() {
+        let mut full_response = String::new();
+        append_streamed_text_chunk(&mut full_response, "first");
+        // ToolUse boundary: trim trailing whitespace + append paragraph separator.
+        let trimmed = full_response.trim_end().len();
+        full_response.truncate(trimmed);
+        full_response.push_str("\n\n");
+        // Next text chunk that itself starts with a blank line.
+        append_streamed_text_chunk(&mut full_response, "\n\nsecond");
+
+        assert_eq!(full_response, "first\n\nsecond");
+        assert!(!full_response.contains("\n\n\n"));
+    }
+
+    // A single intentional `\n\n` separator with a non-blank-leading follow-up
+    // chunk must pass through untouched (no over-trimming).
+    #[test]
+    fn tool_boundary_then_plain_chunk_is_unchanged() {
+        let mut full_response = String::from("first\n\n");
+        append_streamed_text_chunk(&mut full_response, "second");
+        assert_eq!(full_response, "first\n\nsecond");
+    }
+
+    // Without a preceding `\n\n` boundary, a chunk's own leading newlines are
+    // preserved verbatim — the normalization is boundary-only.
+    #[test]
+    fn no_boundary_separator_preserves_chunk_leading_newlines() {
+        let mut full_response = String::from("first");
+        append_streamed_text_chunk(&mut full_response, "\nsecond");
+        assert_eq!(full_response, "first\nsecond");
+
+        let mut single_nl = String::from("first\n");
+        append_streamed_text_chunk(&mut single_nl, "\nsecond");
+        // ends with only one `\n`, so not a `\n\n` boundary → no trim.
+        assert_eq!(single_nl, "first\n\nsecond");
+    }
+
+    // Intentional larger gaps INSIDE a single chunk are preserved; only the
+    // cross-chunk boundary is normalized.
+    #[test]
+    fn intentional_gap_within_single_chunk_is_preserved() {
+        let mut full_response = String::new();
+        append_streamed_text_chunk(&mut full_response, "a\n\n\n\nb");
+        assert_eq!(full_response, "a\n\n\n\nb");
+    }
+
+    // Blank lines inside an OPEN code fence must not be touched: when the
+    // accumulated body ends inside a fence, the incoming chunk's leading
+    // newlines are intentional fenced content and are preserved.
+    #[test]
+    fn open_code_fence_preserves_chunk_leading_newlines() {
+        let mut full_response = String::from("```\ncode line\n\n");
+        assert!(streamed_text_inside_open_code_fence(&full_response));
+        append_streamed_text_chunk(&mut full_response, "\n\nmore code");
+        // Inside the fence: leading blank lines kept verbatim.
+        assert_eq!(full_response, "```\ncode line\n\n\n\nmore code");
+    }
+
+    // A closed fence followed by prose normalizes normally (we are no longer
+    // inside the fence at the boundary).
+    #[test]
+    fn closed_code_fence_then_boundary_normalizes() {
+        let mut full_response = String::from("```\ncode\n```\n\n");
+        assert!(!streamed_text_inside_open_code_fence(&full_response));
+        append_streamed_text_chunk(&mut full_response, "\n\nafter");
+        assert_eq!(full_response, "```\ncode\n```\n\nafter");
+    }
+}
+
 fn turn_bridge_stream_wait_duration(
     done: bool,
     terminal_control_drain_until: Option<std::time::Instant>,
@@ -1867,7 +1977,10 @@ pub(super) fn spawn_turn_bridge(
                                 continue;
                             }
                             streamed_assistant_text_this_turn = true;
-                            full_response.push_str(&content);
+                            // #3608: normalize the chunk boundary so a tool-use
+                            // `\n\n` separator + a chunk that itself begins with
+                            // blank lines does not accumulate into `\n\n\n\n`.
+                            append_streamed_text_chunk(&mut full_response, &content);
                             if (watcher_owns_assistant_relay
                                 && watcher_relay_available_for_turn)
                                 || standby_relay_owns_output
