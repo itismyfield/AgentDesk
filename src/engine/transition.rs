@@ -177,8 +177,19 @@ pub enum GateEvaluation {
     /// Every gate the transition declares evaluated to "pass".
     Allowed,
     /// At least one gate could not be positively evaluated to "pass".
-    /// Carries the canonical fail-closed reason (already prefixed `BLOCKED: …`).
-    Blocked(String),
+    Blocked {
+        /// Name of the gate that blocked the transition. The caller wraps the
+        /// final reason as `failed gate '<gate>': <message>` so the offending
+        /// gate is always named in the externally-surfaced reason — this is the
+        /// pre-#3595 (origin/main) behaviour, preserved byte-for-byte for the
+        /// known-builtin "check unsatisfied" path.
+        gate: String,
+        /// Canonical fail-closed message (already prefixed `BLOCKED: …`). For the
+        /// known-builtin unsatisfied path this is the original per-check string
+        /// (e.g. `BLOCKED: no active dispatch`) so the audit message stays
+        /// identical to origin/main.
+        message: String,
+    },
 }
 
 /// Single source of truth for `Gated` transition gate evaluation (#3595,
@@ -206,17 +217,20 @@ pub fn evaluate_gates(
         // gates map. validate() already rejects this for any resolved pipeline,
         // so reaching here means a tampered / out-of-band state — fail closed.
         let Some(gate) = gates.get(gate_name.as_str()) else {
-            return GateEvaluation::Blocked(format!("BLOCKED: unknown/unwired gate '{gate_name}'"));
+            return GateEvaluation::Blocked {
+                gate: gate_name.clone(),
+                message: format!("BLOCKED: unknown/unwired gate '{gate_name}'"),
+            };
         };
 
         // Point B: gate type the FSM cannot evaluate. After #3595 `policy` was
         // removed from KNOWN_GATE_TYPES, so the only known type is `builtin`;
         // anything else (including a `policy` override) is blocked here.
         if !KNOWN_GATE_TYPES.contains(&gate.gate_type.as_str()) {
-            return GateEvaluation::Blocked(format!(
-                "BLOCKED: gate '{}' has unsupported type '{}'",
-                gate_name, gate.gate_type
-            ));
+            return GateEvaluation::Blocked {
+                gate: gate_name.clone(),
+                message: format!("BLOCKED: unsupported type '{}'", gate.gate_type),
+            };
         }
 
         // Point C: builtin gate — the check MUST be one the FSM knows. Every
@@ -224,38 +238,55 @@ pub fn evaluate_gates(
         // debug_assert guards against a check being added to the list without a
         // corresponding arm, which would otherwise fail-closed in production).
         match gate.check.as_deref() {
+            // Known-builtin checks whose condition is unsatisfied: this is the
+            // normal block path and MUST stay behaviour-preserving against
+            // origin/main. The `message` is the original per-check string (no
+            // gate name) and the caller wraps it as
+            // `failed gate '<gate>': <message>`, reproducing the pre-#3595
+            // reason byte-for-byte (the gate name lives in the `gate` field).
             Some("has_active_dispatch") => {
                 if !snapshot.has_active_dispatch {
-                    return GateEvaluation::Blocked("BLOCKED: no active dispatch".to_string());
+                    return GateEvaluation::Blocked {
+                        gate: gate_name.clone(),
+                        message: "BLOCKED: no active dispatch".to_string(),
+                    };
                 }
             }
             Some("review_verdict_pass") => {
                 if !snapshot.review_verdict_pass {
-                    return GateEvaluation::Blocked(
-                        "BLOCKED: no review pass verdict for current round".to_string(),
-                    );
+                    return GateEvaluation::Blocked {
+                        gate: gate_name.clone(),
+                        message: "BLOCKED: no review pass verdict for current round".to_string(),
+                    };
                 }
             }
             Some("review_verdict_rework") => {
                 if !snapshot.review_verdict_rework {
-                    return GateEvaluation::Blocked(
-                        "BLOCKED: no review rework verdict for current round".to_string(),
-                    );
+                    return GateEvaluation::Blocked {
+                        gate: gate_name.clone(),
+                        message: "BLOCKED: no review rework verdict for current round".to_string(),
+                    };
                 }
             }
+            // Fail-closed cases new in #3595 (no origin/main equivalent). The
+            // gate name is carried in the `gate` field and surfaced by the
+            // caller's `failed gate '<gate>': …` wrapper, so it is omitted from
+            // `message` to avoid duplicating it.
             Some(check) => {
                 debug_assert!(
                     !KNOWN_BUILTIN_GATE_CHECKS.contains(&check),
                     "known builtin check '{check}' missing a match arm"
                 );
-                return GateEvaluation::Blocked(format!(
-                    "BLOCKED: builtin gate '{gate_name}' references unknown check '{check}'"
-                ));
+                return GateEvaluation::Blocked {
+                    gate: gate_name.clone(),
+                    message: format!("BLOCKED: references unknown check '{check}'"),
+                };
             }
             None => {
-                return GateEvaluation::Blocked(format!(
-                    "BLOCKED: builtin gate '{gate_name}' is missing a check"
-                ));
+                return GateEvaluation::Blocked {
+                    gate: gate_name.clone(),
+                    message: "BLOCKED: builtin gate is missing a check".to_string(),
+                };
             }
         }
     }
@@ -425,20 +456,20 @@ fn decide_pipeline_transition(
                 // evaluate to "pass" BLOCKs the transition rather than silently
                 // falling through. The forced-`Gated` match arm above already
                 // bypasses this.
-                if let GateEvaluation::Blocked(msg) =
+                if let GateEvaluation::Blocked { gate, message } =
                     evaluate_gates(&t.gates, &pipeline.gates, &ctx.gates)
                 {
                     return TransitionDecision {
                         outcome: TransitionOutcome::Blocked(format!(
-                            "Status transition {} → {} failed gate evaluation: {}",
-                            card.status, target, msg
+                            "Status transition {} → {} failed gate '{}': {}",
+                            card.status, target, gate, message
                         )),
                         intents: vec![TransitionIntent::AuditLog {
                             card_id: card.id.clone(),
                             from: card.status.clone(),
                             to: target.to_string(),
                             source: source.to_string(),
-                            message: msg,
+                            message,
                         }],
                     };
                 }
@@ -969,10 +1000,10 @@ mod gate_fail_closed_tests {
             ForceIntent::None,
         );
         let reason = blocked_reason(&decision);
-        assert!(
-            reason.contains("builtin gate 'g' is missing a check"),
-            "{reason}"
-        );
+        // The offending gate is named by the caller's `failed gate '<gate>': …`
+        // wrapper; the per-case message reports the missing check.
+        assert!(reason.contains("failed gate 'g'"), "{reason}");
+        assert!(reason.contains("missing a check"), "{reason}");
     }
 
     /// Regression guard: a known builtin check whose condition is satisfied
@@ -990,7 +1021,10 @@ mod gate_fail_closed_tests {
     }
 
     /// Regression guard: a known builtin check whose condition is NOT satisfied
-    /// keeps the pre-existing per-check BLOCKED message (behaviour unchanged).
+    /// keeps the pre-existing per-check BLOCKED message *and* the origin/main
+    /// (pre-#3595) reason format that names the offending gate
+    /// (`failed gate '<gate>': <message>`). This is the normal block path and
+    /// must stay behaviour-preserving — see #3595 codex review.
     #[test]
     fn gated_transition_blocks_on_known_check_unsatisfied() {
         let pipeline = pipeline_with_gates(vec!["g"], vec![("g", builtin("has_active_dispatch"))]);
@@ -1001,7 +1035,12 @@ mod gate_fail_closed_tests {
             ForceIntent::None,
         );
         let reason = blocked_reason(&decision);
-        assert!(reason.contains("no active dispatch"), "{reason}");
+        // Byte-identical to origin/main: from → to, gate name, and the
+        // per-check BLOCKED message.
+        assert_eq!(
+            reason,
+            "Status transition a → b failed gate 'g': BLOCKED: no active dispatch",
+        );
     }
 
     /// Force override bypasses gate evaluation entirely — even an unwired gate
