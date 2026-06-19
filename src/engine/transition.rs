@@ -219,7 +219,7 @@ pub fn evaluate_gates(
         let Some(gate) = gates.get(gate_name.as_str()) else {
             return GateEvaluation::Blocked {
                 gate: gate_name.clone(),
-                message: format!("BLOCKED: unknown/unwired gate '{gate_name}'"),
+                message: "BLOCKED: unknown/unwired gate".to_string(),
             };
         };
 
@@ -919,7 +919,10 @@ mod gate_fail_closed_tests {
             ForceIntent::None,
         );
         let reason = blocked_reason(&decision);
-        assert!(reason.contains("unknown/unwired gate 'ghost'"), "{reason}");
+        assert!(
+            reason.contains("failed gate 'ghost'") && reason.contains("unknown/unwired gate"),
+            "{reason}"
+        );
     }
 
     /// Point B: gate type the FSM has no evaluator for.
