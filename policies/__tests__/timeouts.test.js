@@ -128,6 +128,121 @@ test("timeouts card timeout module marks requested dispatches failed before retr
   assert.deepEqual(toPlain(state.executions[0].params), ["card-requested-1"]);
 });
 
+test("timeouts requested sweep skips consultation side-path dispatches (#256)", () => {
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { requested_timeout_min: 30 },
+    dbQuery: createSqlRouter([
+      {
+        match: "FROM kanban_cards kc LEFT JOIN task_dispatches td ON td.id = kc.latest_dispatch_id",
+        result: [
+          {
+            id: "card-consult-1",
+            assigned_agent_id: "agent-1",
+            latest_dispatch_id: "dispatch-consult-1",
+            retry_count: 0,
+            dispatch_type: "consultation"
+          }
+        ]
+      }
+    ])
+  });
+
+  policy._section_A();
+
+  // Consultation side-path: never marked failed, never retried/escalated.
+  assert.deepEqual(state.dispatchMarkFailedCalls, []);
+  assert.deepEqual(state.manualInterventions, []);
+  assert.equal(
+    state.executions.filter((e) => /UPDATE kanban_cards SET requested_at/.test(e.sql)).length,
+    0
+  );
+});
+
+test("timeouts requested sweep skips scope-assessment side-path even when overdue (#3605)", () => {
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { requested_timeout_min: 30 },
+    dbQuery: createSqlRouter([
+      {
+        match: "FROM kanban_cards kc LEFT JOIN task_dispatches td ON td.id = kc.latest_dispatch_id",
+        result: [
+          {
+            id: "card-scope-1",
+            assigned_agent_id: "agent-1",
+            latest_dispatch_id: "dispatch-scope-1",
+            retry_count: 0,
+            dispatch_type: "scope-assessment"
+          }
+        ]
+      }
+    ])
+  });
+
+  policy._section_A();
+
+  // #3605 (T2) inert side-path: the requested-timeout sweep must NOT mark the
+  // scope-assessment dispatch failed nor retry/escalate the card, exactly like
+  // consultation. A scope-assessment that lingers in `requested` is harmless.
+  assert.deepEqual(state.dispatchMarkFailedCalls, []);
+  assert.deepEqual(state.manualInterventions, []);
+  assert.equal(
+    state.executions.filter((e) => /UPDATE kanban_cards SET requested_at/.test(e.sql)).length,
+    0
+  );
+});
+
+test("timeouts reconcile fallback does not advance a completed scope-assessment (#3605)", () => {
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { pm_decision_gate_enabled: true },
+    dbQuery: createSqlRouter([
+      {
+        match: "SELECT key, value FROM kv_meta WHERE key LIKE 'reconcile_dispatch:%'",
+        result: [{ key: "reconcile_dispatch:dispatch-scope-r", value: "dispatch-scope-r" }]
+      },
+      {
+        match: "SELECT id, kanban_card_id, to_agent_id, dispatch_type, chain_depth, status, result, context FROM task_dispatches WHERE id = ?",
+        result: [
+          {
+            id: "dispatch-scope-r",
+            kanban_card_id: "card-scope-r",
+            to_agent_id: "agent-1",
+            dispatch_type: "scope-assessment",
+            chain_depth: 0,
+            status: "completed",
+            result: JSON.stringify({ scope_depth: "direct" }),
+            context: "{}"
+          }
+        ]
+      },
+      {
+        match: "SELECT id, status, priority, assigned_agent_id, deferred_dod_json FROM kanban_cards WHERE id = ?",
+        result: [
+          {
+            id: "card-scope-r",
+            status: "requested",
+            priority: "medium",
+            assigned_agent_id: "agent-1",
+            deferred_dod_json: null
+          }
+        ]
+      }
+    ])
+  });
+
+  policy._section_R();
+
+  // Missed-hook fallback must mirror kanban-rules.js onDispatchCompleted: a
+  // completed scope-assessment is an inert side-path. No card advance (no
+  // setStatus to review), no XP grant, no PM-gate-driven status changes.
+  assert.deepEqual(state.statusCalls, []);
+  assert.deepEqual(state.reviewStatusCalls, []);
+  assert.deepEqual(state.reviewStateSyncs, []);
+  // XP UPDATE (agents SET xp = xp + ?) must not fire for a side-path.
+  assert.equal(
+    state.executions.filter((e) => /UPDATE agents SET xp = xp/.test(e.sql)).length,
+    0
+  );
+});
+
 test("timeouts review timeout module escalates overdue DoD waits", () => {
   const { policy, state } = loadPolicy("policies/timeouts.js", {
     dbQuery: createSqlRouter([

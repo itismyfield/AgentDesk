@@ -50,8 +50,13 @@ module.exports = function attachCardTimeouts(timeouts, helpers) {
         }
         // #256: Skip cards with consultation dispatch — consultation has its own
         // lifecycle via onDispatchCompleted; let it resolve naturally.
-        if (rc.dispatch_type === "consultation") {
-          agentdesk.log.info("[timeout] Card " + rc.id + " in " + aInitial + " with consultation dispatch — skipping timeout");
+        // #3605 (T2): scope-assessment is the same kind of requested-pinned
+        // side-path — skip_kickoff (transition.rs) keeps the card in `requested`
+        // and makes the scope-assessment the latest_dispatch_id. Mirror the
+        // consultation guard so the requested-timeout sweep never marks the
+        // scope-assessment failed and retries/escalates the card. T2 is inert.
+        if (rc.dispatch_type === "consultation" || rc.dispatch_type === "scope-assessment") {
+          agentdesk.log.info("[timeout] Card " + rc.id + " in " + aInitial + " with " + rc.dispatch_type + " dispatch — skipping timeout");
           continue;
         }
         // Dispatch를 failed로 — skip state changes if dispatch was already terminal

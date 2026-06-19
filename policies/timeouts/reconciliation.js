@@ -68,6 +68,16 @@ module.exports = function attachReconciliation(timeouts, helpers) {
         var rPending = rInitial;
         if (agentdesk.pipeline.isTerminal(card.status, rCfg)) continue;
         if (di.dispatch_type === "review" || di.dispatch_type === "review-decision") continue;
+        // #3605 (T2): scope-assessment is a requested-pinned side-path. It never
+        // advances the card (kanban-rules.js onDispatchCompleted early-returns
+        // after recording scope_depth). This missed-hook fallback must mirror
+        // that: a completed scope-assessment must NOT run the PM gate / XP /
+        // review advance below, otherwise the fallback would mis-promote the
+        // card as if it were an implementation. Skip without advancing.
+        if (di.dispatch_type === "scope-assessment") {
+          agentdesk.log.info("[reconcile] " + card.id + " scope-assessment completed — inert side-path, no advance");
+          continue;
+        }
         if (di.dispatch_type === "rework") {
           agentdesk.kanban.setStatus(card.id, rReview);
           agentdesk.log.info("[reconcile] " + card.id + " rework done → " + rReview);

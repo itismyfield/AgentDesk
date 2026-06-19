@@ -762,10 +762,18 @@ async fn create_dispatch_core_internal(
         }
         base
     };
+    // NB: this is the broader "skip kickoff" set, not just review types — it
+    // already includes consultation. #3605 (T2): scope-assessment is the same
+    // kind of requested-pinned side-path as consultation, so it must NOT pass a
+    // kickoff_state into the transition. transition.rs::decide_dispatch_attached
+    // independently guards this via skip_kickoff (it already lists
+    // scope-assessment), so this is defense-in-depth parity across both layers;
+    // the only consumer is the kickoff_state gate below.
     let is_review_type = dispatch_type == "review"
         || dispatch_type == "review-decision"
         || dispatch_type == "rework"
-        || dispatch_type == "consultation";
+        || dispatch_type == "consultation"
+        || dispatch_type == "scope-assessment";
     validate_dispatch_target_on_pg(
         pg_pool,
         kanban_card_id,

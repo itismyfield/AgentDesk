@@ -633,6 +633,50 @@ test("kanban-rules does not dispatch scope-assessment twice when status already 
   assert.equal(state.dispatchCreates.length, 0);
 });
 
+test("kanban-rules skips scope-assessment when the card has no assigned agent (#3605)", () => {
+  const { policy, state } = loadPolicy("policies/kanban-rules.js", {
+    cards: {
+      "card-scope-noassignee": {
+        id: "card-scope-noassignee",
+        title: "Unassigned scope card",
+        github_issue_number: null,
+        github_issue_url: null,
+        status: "requested",
+        // Long body containing "DoD" → preflight returns "clear" so the
+        // scope-assessment trigger is reached (not short-circuited earlier).
+        description: "This issue body is comfortably longer than thirty characters and lists a DoD.",
+        assigned_agent_id: null,
+        metadata: "{}",
+        blocked_reason: null
+      }
+    },
+    dbQuery: createSqlRouter([
+      { match: "SELECT metadata FROM kanban_cards WHERE id = ?", result: [{ metadata: "{}" }] },
+      {
+        match: "SELECT id FROM task_dispatches WHERE kanban_card_id = ? AND dispatch_type = 'implementation' AND status = 'completed'",
+        result: []
+      },
+      // _maybeDispatchScopeAssessment's own lookup: assignee is falsy → skip.
+      {
+        match: "SELECT assigned_agent_id, title FROM kanban_cards WHERE id = ?",
+        result: [{ assigned_agent_id: null, title: "Unassigned scope card" }]
+      }
+    ])
+  });
+
+  policy.onCardTransition({ card_id: "card-scope-noassignee", from: "backlog", to: "requested" });
+
+  // No assignee → cannot route to "the assigned agent": log + return, no dispatch.
+  assert.equal(state.dispatchCreates.length, 0);
+  // And no scope metadata is written (status stays unset so a later requested
+  // entry can re-evaluate once an agent is assigned).
+  assert.equal(findScopeAssessmentMeta(state), undefined);
+  assert.ok(
+    state.logs.info.some((line) => /no assigned agent — skipping scope-assessment/.test(line)),
+    "expected the no-assignee skip to be logged"
+  );
+});
+
 test("kanban-rules does not dispatch scope-assessment when preflight is already_applied", () => {
   const { policy, state } = loadPolicy("policies/kanban-rules.js", {
     cards: {
