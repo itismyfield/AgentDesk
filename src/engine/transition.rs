@@ -904,7 +904,7 @@ mod gate_fail_closed_tests {
     fn blocked_reason(decision: &TransitionDecision) -> &str {
         match &decision.outcome {
             TransitionOutcome::Blocked(msg) => msg.as_str(),
-            other => panic!("expected Blocked, got {other:?}"),
+            other => panic!("expected Blocked, got {other:?}"), // agentdesk-audit: allow-unwrap test-only helper in #[cfg(test)] mod; panics solely on a violated test expectation
         }
     }
 
