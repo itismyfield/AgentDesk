@@ -716,12 +716,16 @@ pub struct GateConfig {
     pub description: Option<String>,
 }
 
-/// Gate types the FSM understands (#3595).
+/// Gate types the FSM understands (#3595, fail-closed).
 /// - `builtin`: evaluated in Rust (see `KNOWN_BUILTIN_GATE_CHECKS`).
-/// - `policy`: documented JS-policy extension point. Declarable for forward
-///   compatibility, but no FSM evaluator exists yet, so the runtime treats a
-///   `policy` gate as a no-op pass with a warning rather than blocking.
-pub const KNOWN_GATE_TYPES: &[&str] = &["builtin", "policy"];
+///
+/// `policy` was intentionally removed: the FSM has no policy evaluator, so a
+/// `type: policy` gate would otherwise pass through *un-enforced* (fail-open).
+/// Declaring one now fails validation at write time (`validate()` →
+/// BadRequest) and, defensively, blocks at runtime in `evaluate_gates`
+/// (engine/transition.rs Point B). When a real policy evaluator is wired,
+/// re-add `"policy"` here together with its evaluation arm.
+pub const KNOWN_GATE_TYPES: &[&str] = &["builtin"];
 
 /// The exact set of `check` strings a `builtin` gate may reference (#3595).
 /// These mirror the boolean fields on `engine::transition::GateSnapshot`.
@@ -1476,14 +1480,20 @@ mod gate_validation_tests {
     }
 
     #[test]
-    fn validate_accepts_policy_gate_declaration() {
-        // `policy` is a documented extension point and must remain declarable
-        // even though the FSM has no evaluator for it yet.
+    fn validate_rejects_policy_gate_declaration() {
+        // #3595: `policy` was removed from KNOWN_GATE_TYPES (fail-closed). The
+        // FSM has no policy evaluator, so a `type: policy` gate would pass
+        // through un-enforced; declaring one must be rejected at write time
+        // rather than failing open at runtime.
         let mut config = base_config();
         config
             .gates
             .insert("custom".to_string(), gate("policy", None));
-        assert!(config.validate().is_ok());
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("unsupported type 'policy'"),
+            "{err}"
+        );
     }
 }
 
