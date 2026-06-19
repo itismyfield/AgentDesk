@@ -458,27 +458,104 @@ fn append_streamed_text_chunk(full_response: &mut String, content: &str) {
     }
 }
 
+/// #3608: append the tool-use paragraph separator to `full_response`.
+///
+/// When a `StreamMessage::ToolUse` arrives mid-turn we trim trailing
+/// whitespace off the accumulated body and append exactly one `\n\n` so the
+/// post-tool prose starts on its own paragraph. This is the *only* boundary
+/// `append_streamed_text_chunk` keys off (a `\n\n` suffix), so the two helpers
+/// are the matched pair that composes `text → tool → text` into a single
+/// separator. Extracting the ToolUse side into its own primitive lets the
+/// regression test drive the *real* boundary instead of hand-rolling it, so a
+/// logic regression in either primitive is caught.
+///
+/// Caller keeps the surrounding `inflight_state` / `state_dirty` side effects
+/// inline — this helper is pure string composition only (no relay/watcher/
+/// ownership state, per the #3016 hot-file constraint). No-op on an empty body.
+fn append_tool_boundary_separator(full_response: &mut String) {
+    if full_response.is_empty() {
+        return;
+    }
+    let trimmed = full_response.trim_end();
+    full_response.truncate(trimmed.len());
+    full_response.push_str("\n\n");
+}
+
 #[cfg(test)]
 mod chunk_boundary_blank_line_tests {
-    use super::{append_streamed_text_chunk, streamed_text_inside_open_code_fence};
+    use super::{
+        append_streamed_text_chunk, append_tool_boundary_separator,
+        streamed_text_inside_open_code_fence,
+    };
 
     // #3608 regression: Text("first") → ToolUse(...) → Text("\n\nsecond") must
-    // compose `first\n\nsecond`, NOT `first\n\n\n\nsecond`. The ToolUse branch
-    // trims trailing whitespace then appends the `\n\n` separator; this models
-    // exactly that boundary before the second chunk arrives.
+    // compose `first\n\nsecond`, NOT `first\n\n\n\nsecond`.
+    //
+    // codex review on PR #3609: the boundary is now driven through the *real*
+    // production composition primitives — `append_tool_boundary_separator` for
+    // the ToolUse arm and `append_streamed_text_chunk` for the Text arm —
+    // instead of hand-rolling the trim+push_str. This ties the test to the
+    // same helpers the production loop calls, so a logic regression in either
+    // primitive (e.g. the separator no longer collapsing, or the chunk
+    // trimming dropped) fails here.
     #[test]
     fn tool_boundary_then_blank_leading_chunk_collapses_to_single_separator() {
         let mut full_response = String::new();
         append_streamed_text_chunk(&mut full_response, "first");
-        // ToolUse boundary: trim trailing whitespace + append paragraph separator.
-        let trimmed = full_response.trim_end().len();
-        full_response.truncate(trimmed);
-        full_response.push_str("\n\n");
+        // Real ToolUse boundary primitive (production path).
+        append_tool_boundary_separator(&mut full_response);
         // Next text chunk that itself starts with a blank line.
         append_streamed_text_chunk(&mut full_response, "\n\nsecond");
 
         assert_eq!(full_response, "first\n\nsecond");
         assert!(!full_response.contains("\n\n\n"));
+    }
+
+    // #3608 call-site wiring: the full Text → ToolUse → Text composition
+    // sequence, driven end-to-end through BOTH production primitives, must
+    // yield a single paragraph separator. This is the matched-pair contract —
+    // `append_tool_boundary_separator` only ever leaves a `\n\n` suffix, which
+    // is exactly the suffix `append_streamed_text_chunk` keys off to trim the
+    // next chunk's leading blank run. If the separator primitive stops
+    // emitting `\n\n`, or the text primitive stops collapsing the boundary,
+    // the two no longer compose and this assertion fails.
+    #[test]
+    fn text_tooluse_text_sequence_composes_single_separator_via_real_primitives() {
+        let mut full_response = String::new();
+        // Text arm chunk 1.
+        append_streamed_text_chunk(&mut full_response, "first");
+        // ToolUse arm separator.
+        append_tool_boundary_separator(&mut full_response);
+        assert_eq!(full_response, "first\n\n");
+        // Text arm chunk 2 (provider re-emits its own leading blank lines).
+        append_streamed_text_chunk(&mut full_response, "\n\nsecond");
+
+        assert_eq!(full_response, "first\n\nsecond");
+        assert!(!full_response.contains("\n\n\n"));
+    }
+
+    // `append_tool_boundary_separator` is a no-op on an empty body (mirrors the
+    // production `if !full_response.is_empty()` guard around the ToolUse arm):
+    // a tool call before any assistant text must not seed a leading separator.
+    #[test]
+    fn tool_boundary_separator_is_noop_on_empty_body() {
+        let mut full_response = String::new();
+        append_tool_boundary_separator(&mut full_response);
+        assert_eq!(full_response, "");
+    }
+
+    // `append_tool_boundary_separator` collapses pre-existing trailing
+    // whitespace to exactly one `\n\n` separator (idempotent boundary): a body
+    // that already ends in blank lines must not stack a second separator.
+    #[test]
+    fn tool_boundary_separator_collapses_trailing_whitespace() {
+        let mut full_response = String::from("first\n\n");
+        append_tool_boundary_separator(&mut full_response);
+        assert_eq!(full_response, "first\n\n");
+
+        let mut trailing_spaces = String::from("first  \n  \n");
+        append_tool_boundary_separator(&mut trailing_spaces);
+        assert_eq!(trailing_spaces, "first\n\n");
     }
 
     // A single intentional `\n\n` separator with a non-blank-leading follow-up
@@ -2308,9 +2385,12 @@ pub(super) fn spawn_turn_bridge(
                                 }
                             }
                             if !full_response.is_empty() {
-                                let trimmed = full_response.trim_end();
-                                full_response.truncate(trimmed.len());
-                                full_response.push_str("\n\n");
+                                // #3608: paragraph separator via the shared
+                                // composition primitive (matched pair with
+                                // `append_streamed_text_chunk`). inflight_state
+                                // / state_dirty stay inline (hot-file #3016:
+                                // only full_response composition is extracted).
+                                append_tool_boundary_separator(&mut full_response);
                                 inflight_state.full_response = full_response.clone();
                                 state_dirty = true;
                             }
