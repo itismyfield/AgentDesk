@@ -1,4 +1,5 @@
 mod cancel_finalize_policy;
+mod chunk_compose;
 mod completion_guard;
 mod context_window;
 mod headless_delivery;
@@ -1867,7 +1868,10 @@ pub(super) fn spawn_turn_bridge(
                                 continue;
                             }
                             streamed_assistant_text_this_turn = true;
-                            full_response.push_str(&content);
+                            // #3608: normalize the chunk boundary so a tool-use
+                            // `\n\n` separator + a chunk that itself begins with
+                            // blank lines does not accumulate into `\n\n\n\n`.
+                            chunk_compose::append_streamed_text_chunk(&mut full_response, &content);
                             if (watcher_owns_assistant_relay
                                 && watcher_relay_available_for_turn)
                                 || standby_relay_owns_output
@@ -2195,9 +2199,12 @@ pub(super) fn spawn_turn_bridge(
                                 }
                             }
                             if !full_response.is_empty() {
-                                let trimmed = full_response.trim_end();
-                                full_response.truncate(trimmed.len());
-                                full_response.push_str("\n\n");
+                                // #3608: paragraph separator via the shared
+                                // composition primitive (matched pair with
+                                // `append_streamed_text_chunk`). inflight_state
+                                // / state_dirty stay inline (hot-file #3016:
+                                // only full_response composition is extracted).
+                                chunk_compose::append_tool_boundary_separator(&mut full_response);
                                 inflight_state.full_response = full_response.clone();
                                 state_dirty = true;
                             }
