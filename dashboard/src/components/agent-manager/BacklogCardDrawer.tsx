@@ -294,7 +294,7 @@ export default function BacklogCardDrawer({
                 <a
                   href={githubIssueUrl}
                   target="_blank"
-                  rel="noreferrer"
+                  rel="noopener noreferrer"
                   className="inline-flex items-center rounded-full px-3 py-2 text-sm font-medium hover:underline"
                   style={{ color: "#93c5fd" }}
                 >

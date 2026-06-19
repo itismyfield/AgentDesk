@@ -309,7 +309,7 @@ export default function OfficeAgentDrawer({
                     <a
                       href={currentTaskIssueUrl}
                       target="_blank"
-                      rel="noreferrer"
+                      rel="noopener noreferrer"
                       className="rounded-full border px-2.5 py-1 text-xs font-semibold transition hover:opacity-90"
                       style={{
                         borderColor: "color-mix(in srgb, var(--th-accent-info) 30%, var(--th-border) 70%)",
@@ -445,7 +445,7 @@ export default function OfficeAgentDrawer({
                     {(summary.webUrl || summary.deepLink) && (
                       <div className="mt-3 flex flex-wrap gap-2">
                         {summary.webUrl && (
-                          <a href={summary.webUrl} target="_blank" rel="noreferrer">
+                          <a href={summary.webUrl} target="_blank" rel="noopener noreferrer">
                             <SurfaceActionButton tone="info" compact>
                               {t(isKo, "웹에서 열기", "Open web")}
                             </SurfaceActionButton>
@@ -532,14 +532,14 @@ export default function OfficeAgentDrawer({
                     {(entry.card_issue_url || session?.channel_web_url || session?.channel_deeplink_url) && (
                       <div className="mt-3 flex flex-wrap gap-2">
                         {entry.card_issue_url && (
-                          <a href={entry.card_issue_url} target="_blank" rel="noreferrer">
+                          <a href={entry.card_issue_url} target="_blank" rel="noopener noreferrer">
                             <SurfaceActionButton tone="neutral" compact>
                               {t(isKo, "GitHub 이슈", "GitHub issue")}
                             </SurfaceActionButton>
                           </a>
                         )}
                         {session?.channel_web_url && (
-                          <a href={session.channel_web_url} target="_blank" rel="noreferrer">
+                          <a href={session.channel_web_url} target="_blank" rel="noopener noreferrer">
                             <SurfaceActionButton tone="info" compact>
                               {t(isKo, "Discord 웹", "Discord web")}
                             </SurfaceActionButton>

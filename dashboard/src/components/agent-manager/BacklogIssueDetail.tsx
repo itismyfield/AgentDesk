@@ -164,7 +164,7 @@ export default function BacklogIssueDetail({
           <a
             href={issue.url}
             target="_blank"
-            rel="noreferrer"
+            rel="noopener noreferrer"
             className="rounded-xl px-4 py-2 text-sm text-center hover:underline"
             style={{ color: "#93c5fd" }}
           >

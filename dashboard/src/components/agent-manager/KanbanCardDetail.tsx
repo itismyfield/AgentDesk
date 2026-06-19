@@ -389,7 +389,7 @@ export default function KanbanCardDetail({
             <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("GitHub", "GitHub")}</div>
             <div style={{ color: "var(--th-text-primary)" }}>
               {githubIssueUrl ? (
-                <a href={githubIssueUrl} target="_blank" rel="noreferrer" className="hover:underline" style={{ color: "#93c5fd" }}>
+                <a href={githubIssueUrl} target="_blank" rel="noopener noreferrer" className="hover:underline" style={{ color: "#93c5fd" }}>
                   #{selectedCard.github_issue_number ?? "-"}
                 </a>
               ) : (

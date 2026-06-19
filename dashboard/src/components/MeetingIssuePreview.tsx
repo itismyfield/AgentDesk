@@ -173,7 +173,7 @@ export default function MeetingIssuePreview({
                       <a
                         href={issueResult.issue_url}
                         target="_blank"
-                        rel="noreferrer"
+                        rel="noopener noreferrer"
                         className="mt-1 inline-flex max-w-full break-all hover:underline"
                         style={{ color: "#34d399" }}
                       >
