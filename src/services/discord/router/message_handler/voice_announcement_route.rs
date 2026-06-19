@@ -212,7 +212,7 @@ mod voice_route_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn durable_duplicate_voice_announcement_invokes_foreground_once() {
+    async fn durable_duplicate_voice_announcement_pg_invokes_foreground_once() {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let channel_id = ChannelId::new(44_003);
