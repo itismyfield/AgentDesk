@@ -14,41 +14,6 @@ fn enters_review_state(pipeline: &crate::pipeline::PipelineConfig, status: &str)
         .is_some_and(|hooks| hooks.on_enter.iter().any(|name| name == "OnReviewEnter"))
 }
 
-/// Whether the card has an active dispatch for the `has_active_dispatch` gate
-/// (#3595). A pending/dispatched dispatch always counts; the just-completed
-/// latest work dispatch counts only when `allow_completed_work` is set (i.e.
-/// when entering review). Mirrors the snapshot query in
-/// `src/kanban/transition_core.rs::transition_status_with_opts_pg_inner` so the
-/// `setStatus` path and the intent path agree.
-async fn card_has_active_dispatch_on_pg_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    card_id: &str,
-    latest_dispatch_id: Option<&str>,
-    allow_completed_work: bool,
-) -> Result<bool, String> {
-    sqlx::query_scalar::<_, bool>(
-        "SELECT COUNT(*) > 0
-         FROM task_dispatches
-         WHERE kanban_card_id = $1
-           AND (
-                status IN ('pending', 'dispatched')
-                OR (
-                    $2::text IS NOT NULL
-                    AND id = $2::text
-                    AND status = 'completed'
-                    AND dispatch_type IN ('implementation', 'rework')
-                    AND $3::boolean
-                )
-           )",
-    )
-    .bind(card_id)
-    .bind(latest_dispatch_id)
-    .bind(allow_completed_work)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|error| format!("load active dispatch gate for {card_id}: {error}"))
-}
-
 async fn auto_queue_review_disabled_for_card_on_pg(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     card_id: &str,
@@ -306,80 +271,90 @@ fn set_status_raw_pg(pool: &PgPool, card_id: &str, new_status: &str, force: bool
             ));
         }
 
-        let is_review_enter = enters_review_state(&effective, &new_status);
-
-        // #3595 / #2051 Finding 1 (P1): this `setStatus` path (used by production
-        // JS policies) must share the EXACT fail-closed gate semantics as the
-        // reducer. It previously checked only `has_active_dispatch` +
-        // `review_verdict_pass` inline, letting unwired/unknown gates, unsupported
-        // types, unknown/None builtin checks, and `review_verdict_rework` slip
-        // past un-enforced. Now we collect the same `GateSnapshot` and call the
-        // shared `evaluate_gates`. Only `Gated` transitions gate (Free/ForceOnly
-        // do not); on a block, force/admin bypasses-but-warns, else it errors.
-        // cross-ref: engine/transition.rs `evaluate_gates` /
-        // `decide_pipeline_transition`, and the intent path in
-        // src/kanban/transition_core.rs `transition_status_with_opts_pg_inner`.
-        let mut active_dispatch_warning: Option<&'static str> = None;
-        if let Some(t) = transition_rule
-            && t.transition_type == crate::pipeline::TransitionType::Gated
+        if effective.is_terminal(&new_status)
+            && !force
+            && let Some(t) = transition_rule
         {
-            // The just-completed latest work dispatch counts toward
-            // `has_active_dispatch` only when entering review (matches the
-            // reducer's PG snapshot in transition_core.rs).
-            let active_gate_allows_completed_work = is_review_enter
-                && t.gates.iter().any(|g| {
-                    effective
-                        .gates
-                        .get(g.as_str())
-                        .is_some_and(|gc| gc.check.as_deref() == Some("has_active_dispatch"))
-                });
-            let has_active_dispatch = card_has_active_dispatch_on_pg_tx(
-                &mut tx,
-                &card_id,
-                latest_dispatch_id.as_deref(),
-                active_gate_allows_completed_work,
-            )
-            .await?;
-
-            let latest_review_verdict = sqlx::query_scalar::<_, Option<String>>(
-                "SELECT result::jsonb ->> 'verdict'
-                 FROM task_dispatches
-                 WHERE kanban_card_id = $1
-                   AND dispatch_type = 'review'
-                   AND status = 'completed'
-                 ORDER BY COALESCE(completed_at, updated_at) DESC, id DESC
-                 LIMIT 1",
-            )
-            .bind(&card_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|error| format!("load latest review verdict for {card_id}: {error}"))?
-            .flatten();
-
-            let snapshot = crate::engine::transition::GateSnapshot {
-                has_active_dispatch,
-                review_verdict_pass: matches!(
-                    latest_review_verdict.as_deref(),
-                    Some("pass") | Some("approved")
-                ),
-                review_verdict_rework: matches!(
-                    latest_review_verdict.as_deref(),
-                    Some("rework") | Some("improve") | Some("reject")
-                ),
-            };
-
-            if let crate::engine::transition::GateEvaluation::Blocked(reason) =
-                crate::engine::transition::evaluate_gates(&t.gates, &effective.gates, &snapshot)
-            {
-                if !force {
+            let needs_review_pass = t.gates.iter().any(|g| {
+                effective
+                    .gates
+                    .get(g.as_str())
+                    .is_some_and(|gc| gc.check.as_deref() == Some("review_verdict_pass"))
+            });
+            if needs_review_pass {
+                let latest_verdict = sqlx::query_scalar::<_, String>(
+                    "SELECT result ->> 'verdict'
+                     FROM task_dispatches
+                     WHERE kanban_card_id = $1
+                       AND dispatch_type = 'review'
+                       AND status = 'completed'
+                     ORDER BY updated_at DESC
+                     LIMIT 1",
+                )
+                .bind(&card_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|error| format!("load latest review verdict for {card_id}: {error}"))?;
+                let has_pass = matches!(latest_verdict.as_deref(), Some("pass") | Some("approved"));
+                if !has_pass {
                     return Err(format!(
-                        "gate blocked: {reason} (from {old_status} to {new_status})"
+                        "gate blocked: review_verdict_pass — no review pass verdict (from {old_status} to {new_status})"
                     ));
                 }
-                // force=true is an operator/admin override: bypass the gate but
-                // surface a warning so the JS bridge logs the un-enforced move.
-                active_dispatch_warning =
-                    Some("transition bypassed a failed gate via force without satisfying it");
+            }
+        }
+
+        // #2051 Finding 1 (P1): align `set_status_raw_pg` semantics with
+        // `decide_pipeline_transition` (transition.rs). Previously this path
+        // only stamped a `warning` and proceeded with the UPDATE, while the
+        // intent path (`TransitionCard` → `transition_status_with_opts_pg`)
+        // returned `TransitionDecision::Blocked`. The asymmetry let JS
+        // policies (`agentdesk.kanban.setStatus`) bypass the
+        // `has_active_dispatch` gate. Now: when force=false and the gate is
+        // violated, return `Err` so the JS bridge surfaces a real failure;
+        // force=true callers keep the bypass-but-warn behaviour.
+        let is_review_enter = enters_review_state(&effective, &new_status);
+        let mut active_dispatch_warning: Option<&'static str> = None;
+        if let Some(t) = transition_rule {
+            let needs_active_dispatch = t.gates.iter().any(|g| {
+                effective
+                    .gates
+                    .get(g.as_str())
+                    .is_some_and(|gc| gc.check.as_deref() == Some("has_active_dispatch"))
+            });
+            if needs_active_dispatch {
+                let has_active_dispatch = sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*)
+                     FROM task_dispatches
+                     WHERE kanban_card_id = $1
+                       AND (
+                            status IN ('pending', 'dispatched')
+                            OR (
+                                $2::text IS NOT NULL
+                                AND id = $2::text
+                                AND status = 'completed'
+                                AND dispatch_type IN ('implementation', 'rework')
+                                AND $3::boolean
+                            )
+                       )",
+                )
+                .bind(&card_id)
+                .bind(latest_dispatch_id.as_deref())
+                .bind(is_review_enter)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|error| format!("load active dispatch count for {card_id}: {error}"))?
+                    > 0;
+                if !has_active_dispatch {
+                    if !force {
+                        return Err(format!(
+                            "gate blocked: has_active_dispatch — no active dispatch (from {old_status} to {new_status})"
+                        ));
+                    }
+                    active_dispatch_warning = Some(
+                        "transition bypassed has_active_dispatch gate without an active dispatch",
+                    );
+                }
             }
         }
 
@@ -784,13 +759,9 @@ async fn resolve_pipeline_on_pg_tx(
 ) -> Result<crate::pipeline::PipelineConfig, String> {
     crate::pipeline::ensure_loaded();
 
-    // `pipeline_config` is a JSONB column; cast to ::text so sqlx decodes it as
-    // String (every other read site does this — without the cast a non-null
-    // override fails to decode, which previously crashed this path for any card
-    // with a repo/agent pipeline override).
     let repo_override = if let Some(repo_id) = repo_id {
         sqlx::query_scalar::<_, Option<String>>(
-            "SELECT pipeline_config::text AS pipeline_config FROM github_repos WHERE id = $1",
+            "SELECT pipeline_config FROM github_repos WHERE id = $1",
         )
         .bind(repo_id)
         .fetch_optional(&mut **tx)
@@ -806,18 +777,16 @@ async fn resolve_pipeline_on_pg_tx(
     };
 
     let agent_override = if let Some(agent_id) = agent_id {
-        sqlx::query_scalar::<_, Option<String>>(
-            "SELECT pipeline_config::text AS pipeline_config FROM agents WHERE id = $1",
-        )
-        .bind(agent_id)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(|error| format!("load agent pipeline override for {agent_id}: {error}"))?
-        .flatten()
-        .map(|json| crate::pipeline::parse_override(&json))
-        .transpose()
-        .map_err(|error| format!("parse agent pipeline override for {agent_id}: {error}"))?
-        .flatten()
+        sqlx::query_scalar::<_, Option<String>>("SELECT pipeline_config FROM agents WHERE id = $1")
+            .bind(agent_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|error| format!("load agent pipeline override for {agent_id}: {error}"))?
+            .flatten()
+            .map(|json| crate::pipeline::parse_override(&json))
+            .transpose()
+            .map_err(|error| format!("parse agent pipeline override for {agent_id}: {error}"))?
+            .flatten()
     } else {
         None
     };
@@ -976,295 +945,5 @@ pub(super) fn review_state_sync_pg(pool: &PgPool, json_str: &str) -> String {
     match result {
         Ok(value) => value,
         Err(raw) => crate::engine::ops::ensure_js_error_json(raw),
-    }
-}
-
-// ── set_status_raw_pg gate fail-closed tests (#3595) ─────────────
-//
-// These verify that `set_status_raw_pg` (the production `agentdesk.kanban.
-// setStatus` path) evaluates `Gated` transition gates with the SAME fail-closed
-// semantics as the reducer (engine/transition.rs `evaluate_gates` /
-// `decide_pipeline_transition`). Before #3595 this path only checked
-// `has_active_dispatch` + `review_verdict_pass` inline and let unwired/unknown
-// gates, unsupported gate types, unknown/None builtin checks, and
-// `review_verdict_rework` slip through un-enforced (fail-open).
-//
-// They rely on injecting a tampered agent `pipeline_config` override
-// (`resolve`/`parse_override` do NOT re-run `validate()`, so a malformed
-// override stored out-of-band reaches the runtime gate-eval path — exactly the
-// case the runtime fail-closed defense must catch).
-//
-// Test names contain `_pg_` so the nightly Postgres CI job collects them and the
-// trusted macOS lane (`--skip _pg`) skips them.
-#[cfg(test)]
-mod set_status_gate_fail_closed_pg_tests {
-    use super::*;
-    use crate::dispatch::test_support::DispatchPostgresTestDb;
-
-    /// Build an agent override JSON whose only transition is a single `gated`
-    /// `backlog → ready` referencing `gate_name`, with the supplied gate
-    /// definitions. States are inherited from the base default pipeline.
-    fn override_json(gate_name: &str, gates_json: serde_json::Value) -> String {
-        serde_json::json!({
-            "transitions": [
-                { "from": "backlog", "to": "ready", "type": "gated", "gates": [gate_name] }
-            ],
-            "gates": gates_json,
-        })
-        .to_string()
-    }
-
-    async fn seed_agent(pool: &PgPool, agent_id: &str, pipeline_config: Option<&str>) {
-        sqlx::query(
-            "INSERT INTO agents (id, name, pipeline_config, created_at, updated_at)
-             VALUES ($1, $2, $3::jsonb, NOW(), NOW())",
-        )
-        .bind(agent_id)
-        .bind(agent_id)
-        .bind(pipeline_config)
-        .execute(pool)
-        .await
-        .unwrap_or_else(|err| panic!("seed agent {agent_id}: {err}"));
-    }
-
-    async fn seed_card(pool: &PgPool, card_id: &str, status: &str, agent_id: &str) {
-        sqlx::query(
-            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, NOW(), NOW())",
-        )
-        .bind(card_id)
-        .bind(card_id)
-        .bind(status)
-        .bind(agent_id)
-        .execute(pool)
-        .await
-        .unwrap_or_else(|err| panic!("seed card {card_id}: {err}"));
-    }
-
-    /// Insert a completed `review` dispatch with the given verdict, then point
-    /// the card's latest_dispatch_id at it (so the verdict snapshot is read).
-    async fn seed_review_verdict(pool: &PgPool, card_id: &str, dispatch_id: &str, verdict: &str) {
-        sqlx::query(
-            "INSERT INTO task_dispatches
-                (id, kanban_card_id, dispatch_type, status, result, completed_at, created_at, updated_at)
-             VALUES ($1, $2, 'review', 'completed', $3, NOW(), NOW(), NOW())",
-        )
-        .bind(dispatch_id)
-        .bind(card_id)
-        .bind(serde_json::json!({ "verdict": verdict }).to_string())
-        .execute(pool)
-        .await
-        .unwrap_or_else(|err| panic!("seed review dispatch {dispatch_id}: {err}"));
-    }
-
-    /// Run `set_status_raw_pg` off the async task (mirrors the JS-bridge call
-    /// site) and return the parsed JSON response.
-    async fn run_set_status(
-        pool: &PgPool,
-        card_id: &str,
-        new_status: &str,
-        force: bool,
-    ) -> serde_json::Value {
-        let pool = pool.clone();
-        let card_id = card_id.to_string();
-        let new_status = new_status.to_string();
-        let raw = tokio::task::spawn_blocking(move || {
-            set_status_raw_pg(&pool, &card_id, &new_status, force)
-        })
-        .await
-        .expect("set_status_raw_pg blocking task panicked");
-        serde_json::from_str(&raw).expect("set_status_raw_pg returned non-JSON")
-    }
-
-    fn assert_blocked(resp: &serde_json::Value, needle: &str) {
-        let err = resp
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or_else(|| panic!("expected an error response, got: {resp}"));
-        assert!(
-            err.contains(needle),
-            "error {err:?} should contain {needle:?}"
-        );
-    }
-
-    /// Point A: transition references a gate absent from the gates map.
-    #[tokio::test]
-    async fn set_status_raw_pg_blocks_on_unwired_gate() {
-        let Some(test_db) =
-            DispatchPostgresTestDb::try_create("kanban_gate_unwired", "set_status unwired gate")
-                .await
-        else {
-            return;
-        };
-        let pool = test_db.connect_and_migrate().await;
-        // Gate "ghost" is referenced but the gates map is empty.
-        let ovr = override_json("ghost", serde_json::json!({}));
-        seed_agent(&pool, "agent-unwired", Some(&ovr)).await;
-        seed_card(&pool, "card-unwired", "backlog", "agent-unwired").await;
-
-        let resp = run_set_status(&pool, "card-unwired", "ready", false).await;
-        assert_blocked(&resp, "unknown/unwired gate 'ghost'");
-
-        pool.close().await;
-        test_db.drop().await;
-    }
-
-    /// Point B: gate type the FSM has no evaluator for (e.g. an out-of-band
-    /// `policy` or `webhook` override).
-    #[tokio::test]
-    async fn set_status_raw_pg_blocks_on_unsupported_gate_type() {
-        let Some(test_db) = DispatchPostgresTestDb::try_create(
-            "kanban_gate_unsupported",
-            "set_status unsupported gate type",
-        )
-        .await
-        else {
-            return;
-        };
-        let pool = test_db.connect_and_migrate().await;
-        let ovr = override_json("g", serde_json::json!({ "g": { "type": "policy" } }));
-        seed_agent(&pool, "agent-unsupported", Some(&ovr)).await;
-        seed_card(&pool, "card-unsupported", "backlog", "agent-unsupported").await;
-
-        let resp = run_set_status(&pool, "card-unsupported", "ready", false).await;
-        assert_blocked(&resp, "unsupported type 'policy'");
-
-        pool.close().await;
-        test_db.drop().await;
-    }
-
-    /// Point C: builtin gate whose check string is unknown to the FSM.
-    #[tokio::test]
-    async fn set_status_raw_pg_blocks_on_unknown_builtin_check() {
-        let Some(test_db) = DispatchPostgresTestDb::try_create(
-            "kanban_gate_unknown_check",
-            "set_status unknown builtin check",
-        )
-        .await
-        else {
-            return;
-        };
-        let pool = test_db.connect_and_migrate().await;
-        let ovr = override_json(
-            "g",
-            serde_json::json!({ "g": { "type": "builtin", "check": "bogus" } }),
-        );
-        seed_agent(&pool, "agent-unknown-check", Some(&ovr)).await;
-        seed_card(
-            &pool,
-            "card-unknown-check",
-            "backlog",
-            "agent-unknown-check",
-        )
-        .await;
-
-        let resp = run_set_status(&pool, "card-unknown-check", "ready", false).await;
-        assert_blocked(&resp, "unknown check 'bogus'");
-
-        pool.close().await;
-        test_db.drop().await;
-    }
-
-    /// Point C: builtin gate with a missing (`None`) check.
-    #[tokio::test]
-    async fn set_status_raw_pg_blocks_on_builtin_gate_with_no_check() {
-        let Some(test_db) = DispatchPostgresTestDb::try_create(
-            "kanban_gate_none_check",
-            "set_status builtin gate missing check",
-        )
-        .await
-        else {
-            return;
-        };
-        let pool = test_db.connect_and_migrate().await;
-        let ovr = override_json("g", serde_json::json!({ "g": { "type": "builtin" } }));
-        seed_agent(&pool, "agent-none-check", Some(&ovr)).await;
-        seed_card(&pool, "card-none-check", "backlog", "agent-none-check").await;
-
-        let resp = run_set_status(&pool, "card-none-check", "ready", false).await;
-        assert_blocked(&resp, "is missing a check");
-
-        pool.close().await;
-        test_db.drop().await;
-    }
-
-    /// `review_verdict_rework` is now enforced (it was ignored by the old inline
-    /// check): with no rework verdict the transition BLOCKs, and with a rework
-    /// verdict present it is ALLOWED.
-    #[tokio::test]
-    async fn set_status_raw_pg_enforces_review_verdict_rework() {
-        let Some(test_db) = DispatchPostgresTestDb::try_create(
-            "kanban_gate_rework",
-            "set_status review_verdict_rework",
-        )
-        .await
-        else {
-            return;
-        };
-        let pool = test_db.connect_and_migrate().await;
-        let ovr = override_json(
-            "g",
-            serde_json::json!({ "g": { "type": "builtin", "check": "review_verdict_rework" } }),
-        );
-
-        // (a) No rework verdict → blocked.
-        seed_agent(&pool, "agent-rework", Some(&ovr)).await;
-        seed_card(&pool, "card-rework-block", "backlog", "agent-rework").await;
-        let resp = run_set_status(&pool, "card-rework-block", "ready", false).await;
-        assert_blocked(&resp, "no review rework verdict");
-
-        // (b) Rework verdict present → allowed (proves it is now enforced, not
-        // silently passed like the old fail-open path).
-        seed_card(&pool, "card-rework-pass", "backlog", "agent-rework").await;
-        seed_review_verdict(&pool, "card-rework-pass", "disp-rework", "rework").await;
-        let resp = run_set_status(&pool, "card-rework-pass", "ready", false).await;
-        assert_eq!(
-            resp.get("changed").and_then(|v| v.as_bool()),
-            Some(true),
-            "rework verdict present should allow the transition: {resp}"
-        );
-
-        pool.close().await;
-        test_db.drop().await;
-    }
-
-    /// Regression guard: a satisfied `has_active_dispatch` gate still passes
-    /// (the normal happy path must not be over-blocked by the fail-closed work).
-    #[tokio::test]
-    async fn set_status_raw_pg_passes_on_satisfied_active_dispatch_gate() {
-        let Some(test_db) = DispatchPostgresTestDb::try_create(
-            "kanban_gate_happy",
-            "set_status active dispatch satisfied",
-        )
-        .await
-        else {
-            return;
-        };
-        let pool = test_db.connect_and_migrate().await;
-        let ovr = override_json(
-            "g",
-            serde_json::json!({ "g": { "type": "builtin", "check": "has_active_dispatch" } }),
-        );
-        seed_agent(&pool, "agent-happy", Some(&ovr)).await;
-        seed_card(&pool, "card-happy", "backlog", "agent-happy").await;
-        // A pending dispatch satisfies has_active_dispatch.
-        sqlx::query(
-            "INSERT INTO task_dispatches
-                (id, kanban_card_id, dispatch_type, status, created_at, updated_at)
-             VALUES ('disp-happy', 'card-happy', 'implementation', 'pending', NOW(), NOW())",
-        )
-        .execute(&pool)
-        .await
-        .expect("seed pending dispatch");
-
-        let resp = run_set_status(&pool, "card-happy", "ready", false).await;
-        assert_eq!(
-            resp.get("changed").and_then(|v| v.as_bool()),
-            Some(true),
-            "satisfied has_active_dispatch gate should allow the transition: {resp}"
-        );
-
-        pool.close().await;
-        test_db.drop().await;
     }
 }

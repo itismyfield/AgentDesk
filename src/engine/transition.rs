@@ -186,10 +186,11 @@ pub enum GateEvaluation {
 /// pipeline's gate definitions, and a pre-collected [`GateSnapshot`], decide
 /// whether the transition is permitted.
 ///
-/// This is intentionally a *pure* helper with no I/O: callers collect the
-/// snapshot however they like (the reducer from a pre-loaded
-/// `TransitionContext`; `set_status_raw_pg` from DB queries) and share this
-/// exact decision so the two paths can never diverge again. A gate the FSM
+/// This is intentionally a *pure* helper with no I/O: the caller collects the
+/// snapshot however it likes (the reducer from a pre-loaded
+/// `TransitionContext`) and the decision lives in one place so additional
+/// gate-eval paths cannot diverge from it. (#3603 wires the `set_status_raw_pg`
+/// path in `engine/ops/kanban_ops.rs` onto this same helper.) A gate the FSM
 /// cannot positively confirm as "pass" returns [`GateEvaluation::Blocked`]
 /// rather than silently passing through (no `_ => pass` / skip-on-miss).
 ///
@@ -418,12 +419,12 @@ fn decide_pipeline_transition(
             TransitionType::ForceOnly if force_intent.is_forced() => {}
             TransitionType::Gated => {
                 // Evaluate gates fail-closed (#3595) via the shared
-                // `evaluate_gates` helper — the single source of truth also used
-                // by `set_status_raw_pg` (engine/ops/kanban_ops.rs) so the two
-                // gate-eval paths can never diverge. A gate the FSM cannot
-                // positively evaluate to "pass" BLOCKs the transition rather
-                // than silently falling through. The force path above (L321)
-                // already bypasses this.
+                // `evaluate_gates` helper — the single source of truth for gate
+                // evaluation (#3603 routes `set_status_raw_pg` through it too so
+                // the paths can never diverge). A gate the FSM cannot positively
+                // evaluate to "pass" BLOCKs the transition rather than silently
+                // falling through. The forced-`Gated` match arm above already
+                // bypasses this.
                 if let GateEvaluation::Blocked(msg) =
                     evaluate_gates(&t.gates, &pipeline.gates, &ctx.gates)
                 {
