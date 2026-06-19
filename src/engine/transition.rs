@@ -8,7 +8,9 @@
 //! No direct SQL UPDATEs to `kanban_cards.status`, `review_status`, or
 //! `latest_dispatch_id` should happen outside this module.
 
-use crate::pipeline::{PipelineConfig, TransitionType};
+use crate::pipeline::{
+    KNOWN_BUILTIN_GATE_CHECKS, KNOWN_GATE_TYPES, PipelineConfig, TransitionType,
+};
 use serde::{Deserialize, Serialize};
 
 // ── Context types ────────────────────────────────────────────
@@ -321,40 +323,92 @@ fn decide_pipeline_transition(
             TransitionType::Gated if force_intent.is_forced() => {}
             TransitionType::ForceOnly if force_intent.is_forced() => {}
             TransitionType::Gated => {
-                // Evaluate gates
+                // Evaluate gates fail-closed (#3595). A gate that the FSM cannot
+                // positively evaluate to "pass" must BLOCK the transition rather
+                // than silently fall through (former `_ => None` / skip-on-miss
+                // fail-open). The force path above (L321) already bypasses this.
+                let block = |msg: &str| TransitionDecision {
+                    outcome: TransitionOutcome::Blocked(format!(
+                        "Status transition {} → {} failed gate evaluation: {}",
+                        card.status, target, msg
+                    )),
+                    intents: vec![TransitionIntent::AuditLog {
+                        card_id: card.id.clone(),
+                        from: card.status.clone(),
+                        to: target.to_string(),
+                        source: source.to_string(),
+                        message: msg.to_string(),
+                    }],
+                };
+
                 for gate_name in &t.gates {
-                    if let Some(gate) = pipeline.gates.get(gate_name.as_str()) {
-                        if gate.gate_type == "builtin" {
-                            let blocked_msg = match gate.check.as_deref() {
-                                Some("has_active_dispatch") if !ctx.gates.has_active_dispatch => {
-                                    Some("BLOCKED: no active dispatch")
-                                }
-                                Some("review_verdict_pass") if !ctx.gates.review_verdict_pass => {
-                                    Some("BLOCKED: no review pass verdict for current round")
-                                }
-                                Some("review_verdict_rework")
-                                    if !ctx.gates.review_verdict_rework =>
-                                {
-                                    Some("BLOCKED: no review rework verdict for current round")
-                                }
-                                _ => None,
-                            };
-                            if let Some(msg) = blocked_msg {
-                                return TransitionDecision {
-                                    outcome: TransitionOutcome::Blocked(format!(
-                                        "Status transition {} → {} failed gate '{}': {}",
-                                        card.status, target, gate_name, msg
-                                    )),
-                                    intents: vec![TransitionIntent::AuditLog {
-                                        card_id: card.id.clone(),
-                                        from: card.status.clone(),
-                                        to: target.to_string(),
-                                        source: source.to_string(),
-                                        message: msg.to_string(),
-                                    }],
-                                };
-                            }
+                    // Point A: gate referenced by the transition is not declared
+                    // in the gates map. validate() already rejects this for any
+                    // resolved pipeline, so reaching here means a tampered/
+                    // out-of-band state — fail closed instead of waving it through.
+                    let Some(gate) = pipeline.gates.get(gate_name.as_str()) else {
+                        return block(&format!("BLOCKED: unknown/unwired gate '{gate_name}'"));
+                    };
+
+                    // Point B: gate type the FSM cannot evaluate.
+                    if !KNOWN_GATE_TYPES.contains(&gate.gate_type.as_str()) {
+                        return block(&format!(
+                            "BLOCKED: gate '{}' has unsupported type '{}'",
+                            gate_name, gate.gate_type
+                        ));
+                    }
+
+                    if gate.gate_type != "builtin" {
+                        // `policy` is a documented extension point with no FSM
+                        // evaluator yet. Pass it through (no policy gates exist in
+                        // any shipped pipeline) but warn so it is never silently
+                        // assumed to have been enforced.
+                        tracing::warn!(
+                            card_id = %card.id,
+                            gate = %gate_name,
+                            gate_type = %gate.gate_type,
+                            "gate type has no FSM evaluator; passing through un-enforced"
+                        );
+                        continue;
+                    }
+
+                    // Point C: builtin gate — the check MUST be one the FSM knows.
+                    let blocked_msg = match gate.check.as_deref() {
+                        Some("has_active_dispatch") => (!ctx.gates.has_active_dispatch)
+                            .then_some("BLOCKED: no active dispatch"),
+                        Some("review_verdict_pass") => (!ctx.gates.review_verdict_pass)
+                            .then_some("BLOCKED: no review pass verdict for current round"),
+                        Some("review_verdict_rework") => (!ctx.gates.review_verdict_rework)
+                            .then_some("BLOCKED: no review rework verdict for current round"),
+                        Some(check) => {
+                            debug_assert!(
+                                !KNOWN_BUILTIN_GATE_CHECKS.contains(&check),
+                                "known builtin check '{check}' missing a match arm"
+                            );
+                            return block(&format!(
+                                "BLOCKED: builtin gate '{gate_name}' references unknown check '{check}'"
+                            ));
                         }
+                        None => {
+                            return block(&format!(
+                                "BLOCKED: builtin gate '{gate_name}' is missing a check"
+                            ));
+                        }
+                    };
+                    if let Some(msg) = blocked_msg {
+                        return TransitionDecision {
+                            outcome: TransitionOutcome::Blocked(format!(
+                                "Status transition {} → {} failed gate '{}': {}",
+                                card.status, target, gate_name, msg
+                            )),
+                            intents: vec![TransitionIntent::AuditLog {
+                                card_id: card.id.clone(),
+                                from: card.status.clone(),
+                                to: target.to_string(),
+                                source: source.to_string(),
+                                message: msg.to_string(),
+                            }],
+                        };
                     }
                 }
             }
@@ -714,3 +768,195 @@ fn format_audit_message(
 }
 
 // ── Unit tests ───────────────────────────────────────────────
+
+#[cfg(test)]
+mod gate_fail_closed_tests {
+    //! #3595: the `Gated` transition branch must fail closed. A gate the FSM
+    //! cannot positively evaluate to "pass" must BLOCK the transition.
+    use super::*;
+    use crate::pipeline::{
+        GateConfig, PhaseGateConfig, PipelineConfig, StateConfig, TransitionConfig, TransitionType,
+    };
+    use std::collections::HashMap;
+
+    /// Build a 2-state pipeline (`a` → `b`) with a single Gated transition
+    /// referencing `gate_names`, and the supplied gate definitions.
+    fn pipeline_with_gates(
+        gate_names: Vec<&str>,
+        gates: Vec<(&str, GateConfig)>,
+    ) -> PipelineConfig {
+        PipelineConfig {
+            name: "test".to_string(),
+            version: 1,
+            states: vec![
+                StateConfig {
+                    id: "a".to_string(),
+                    label: "A".to_string(),
+                    terminal: false,
+                },
+                StateConfig {
+                    id: "b".to_string(),
+                    label: "B".to_string(),
+                    terminal: false,
+                },
+            ],
+            transitions: vec![TransitionConfig {
+                from: "a".to_string(),
+                to: "b".to_string(),
+                transition_type: TransitionType::Gated,
+                gates: gate_names.into_iter().map(str::to_string).collect(),
+            }],
+            gates: gates
+                .into_iter()
+                .map(|(name, cfg)| (name.to_string(), cfg))
+                .collect(),
+            hooks: HashMap::new(),
+            events: HashMap::new(),
+            clocks: HashMap::new(),
+            timeouts: HashMap::new(),
+            phase_gate: PhaseGateConfig::default(),
+        }
+    }
+
+    fn builtin(check: &str) -> GateConfig {
+        GateConfig {
+            gate_type: "builtin".to_string(),
+            check: Some(check.to_string()),
+            description: None,
+        }
+    }
+
+    fn ctx(pipeline: PipelineConfig, gates: GateSnapshot) -> TransitionContext {
+        TransitionContext {
+            card: CardState {
+                id: "card-1".to_string(),
+                status: "a".to_string(),
+                review_status: None,
+                latest_dispatch_id: None,
+            },
+            pipeline,
+            gates,
+        }
+    }
+
+    fn blocked_reason(decision: &TransitionDecision) -> &str {
+        match &decision.outcome {
+            TransitionOutcome::Blocked(msg) => msg.as_str(),
+            other => panic!("expected Blocked, got {other:?}"),
+        }
+    }
+
+    /// Point A: transition references a gate absent from the gates map.
+    #[test]
+    fn gated_transition_blocks_on_unwired_gate() {
+        let pipeline = pipeline_with_gates(vec!["ghost"], vec![]);
+        let decision = decide_status_transition(
+            &ctx(pipeline, GateSnapshot::default()),
+            "b",
+            "test",
+            ForceIntent::None,
+        );
+        let reason = blocked_reason(&decision);
+        assert!(reason.contains("unknown/unwired gate 'ghost'"), "{reason}");
+    }
+
+    /// Point B: gate type the FSM has no evaluator for.
+    #[test]
+    fn gated_transition_blocks_on_unsupported_gate_type() {
+        let gate = GateConfig {
+            gate_type: "webhook".to_string(),
+            check: None,
+            description: None,
+        };
+        let pipeline = pipeline_with_gates(vec!["g"], vec![("g", gate)]);
+        let decision = decide_status_transition(
+            &ctx(pipeline, GateSnapshot::default()),
+            "b",
+            "test",
+            ForceIntent::None,
+        );
+        let reason = blocked_reason(&decision);
+        assert!(reason.contains("unsupported type 'webhook'"), "{reason}");
+    }
+
+    /// Point C: builtin gate whose check string is unknown to the FSM.
+    #[test]
+    fn gated_transition_blocks_on_unknown_builtin_check() {
+        let gate = GateConfig {
+            gate_type: "builtin".to_string(),
+            check: Some("bogus".to_string()),
+            description: None,
+        };
+        let pipeline = pipeline_with_gates(vec!["g"], vec![("g", gate)]);
+        let decision = decide_status_transition(
+            &ctx(pipeline, GateSnapshot::default()),
+            "b",
+            "test",
+            ForceIntent::None,
+        );
+        let reason = blocked_reason(&decision);
+        assert!(reason.contains("unknown check 'bogus'"), "{reason}");
+    }
+
+    /// A `policy` gate has no FSM evaluator: it passes through (un-enforced)
+    /// rather than blocking, since no shipped pipeline declares one.
+    #[test]
+    fn gated_transition_passes_through_policy_gate() {
+        let gate = GateConfig {
+            gate_type: "policy".to_string(),
+            check: None,
+            description: None,
+        };
+        let pipeline = pipeline_with_gates(vec!["g"], vec![("g", gate)]);
+        let decision = decide_status_transition(
+            &ctx(pipeline, GateSnapshot::default()),
+            "b",
+            "test",
+            ForceIntent::None,
+        );
+        assert_eq!(decision.outcome, TransitionOutcome::Allowed);
+    }
+
+    /// Regression guard: a known builtin check whose condition is satisfied
+    /// still allows the transition (normal pass path unchanged).
+    #[test]
+    fn gated_transition_passes_on_known_check_satisfied() {
+        let pipeline = pipeline_with_gates(vec!["g"], vec![("g", builtin("has_active_dispatch"))]);
+        let gates = GateSnapshot {
+            has_active_dispatch: true,
+            ..Default::default()
+        };
+        let decision =
+            decide_status_transition(&ctx(pipeline, gates), "b", "test", ForceIntent::None);
+        assert_eq!(decision.outcome, TransitionOutcome::Allowed);
+    }
+
+    /// Regression guard: a known builtin check whose condition is NOT satisfied
+    /// keeps the pre-existing per-check BLOCKED message (behaviour unchanged).
+    #[test]
+    fn gated_transition_blocks_on_known_check_unsatisfied() {
+        let pipeline = pipeline_with_gates(vec!["g"], vec![("g", builtin("has_active_dispatch"))]);
+        let decision = decide_status_transition(
+            &ctx(pipeline, GateSnapshot::default()),
+            "b",
+            "test",
+            ForceIntent::None,
+        );
+        let reason = blocked_reason(&decision);
+        assert!(reason.contains("no active dispatch"), "{reason}");
+    }
+
+    /// Force override bypasses gate evaluation entirely — even an unwired gate
+    /// must not block a forced transition (force path unchanged).
+    #[test]
+    fn forced_transition_skips_gate_evaluation() {
+        let pipeline = pipeline_with_gates(vec!["ghost"], vec![]);
+        let decision = decide_status_transition(
+            &ctx(pipeline, GateSnapshot::default()),
+            "b",
+            "test",
+            ForceIntent::OperatorOverride,
+        );
+        assert_eq!(decision.outcome, TransitionOutcome::Allowed);
+    }
+}
