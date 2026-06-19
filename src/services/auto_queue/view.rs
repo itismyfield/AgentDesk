@@ -72,18 +72,53 @@ pub(super) struct ActivateCardState {
     pub(super) title: String,
     pub(super) latest_dispatch_id: Option<String>,
     pub(super) latest_dispatch_status: Option<String>,
+    /// #3605 (codex R2): dispatch_type of `latest_dispatch_id`. Needed so the
+    /// auto-queue attach decision can distinguish an attachable IMPLEMENTATION
+    /// dispatch from an inert side-path (consultation / scope-assessment) that
+    /// merely became latest_dispatch_id. `None` when there is no latest dispatch
+    /// or it is not pending/dispatched.
+    pub(super) latest_dispatch_type: Option<String>,
     pub(super) entry_status: String,
     pub(super) repo_id: Option<String>,
     pub(super) assigned_agent_id: Option<String>,
 }
 
 impl ActivateCardState {
+    /// Whether the card has an active, ATTACHABLE implementation dispatch — i.e.
+    /// one the auto-queue activate/restore paths may bind a pending entry to
+    /// instead of creating a new dispatch.
+    ///
+    /// #3605 (codex R2) ROOT FIX — side-path hijacking: side-path dispatches
+    /// (consultation, scope-assessment) deliberately become `latest_dispatch_id`
+    /// (engine::transition::decide_dispatch_attached) but are inert — they record
+    /// info about the card without ever advancing/completing it. They must NOT be
+    /// treated as an attachable active dispatch: attaching a pending auto_queue
+    /// entry to a side-path leaves the entry bound to a dispatch whose terminal
+    /// completion is skipped (dispatch_status::should_skip_auto_queue_terminal_sync),
+    /// so the entry sticks in `dispatched` and the real implementation dispatch is
+    /// never created (stale recovery only reclaims cancelled/failed). Excluding
+    /// side-paths here makes activate fall through to creating a proper
+    /// implementation dispatch.
+    ///
+    /// consultation already avoided this only because its dedicated JS path
+    /// (auto-queue-error-recovery `_createConsultationDispatch` →
+    /// `record_consultation_dispatch_on_pg`) atomically marks the bound entry
+    /// `dispatched` at creation, so the entry is never pending when activate runs.
+    /// scope-assessment's JS path writes card metadata only and never touches the
+    /// entry, exposing this latent gap; the guard now closes it for the whole
+    /// side-path set.
+    ///
+    /// NB: this is the auto-queue `ActivateCardState` predicate only. It is
+    /// independent of the FSM review gate `has_active_dispatch`
+    /// (engine::transition::GateSnapshot / kanban::transition_core), which is a
+    /// separate count-based query and is intentionally left unchanged.
     pub(super) fn has_active_dispatch(&self) -> bool {
         self.latest_dispatch_id.is_some()
             && matches!(
                 self.latest_dispatch_status.as_deref(),
                 Some("pending") | Some("dispatched")
             )
+            && !crate::dispatch::dispatch_is_side_path(self.latest_dispatch_type.as_deref())
     }
 }
 
@@ -148,21 +183,35 @@ pub(super) async fn load_activate_card_state_pg(
     let mut latest_dispatch_id: Option<String> = row
         .try_get("latest_dispatch_id")
         .map_err(|error| format!("decode latest_dispatch_id for {card_id}: {error}"))?;
-    let mut latest_dispatch_status = if let Some(dispatch_id) = latest_dispatch_id.as_deref() {
-        sqlx::query_scalar::<_, String>("SELECT status FROM task_dispatches WHERE id = $1")
-            .bind(dispatch_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| format!("load postgres dispatch status for {dispatch_id}: {error}"))?
-    } else {
-        None
-    };
+    // #3605 (codex R2): also load the dispatch_type so has_active_dispatch() can
+    // exclude inert side-paths (consultation, scope-assessment) from the
+    // attachable-implementation-dispatch decision.
+    let mut latest_dispatch_status: Option<String> = None;
+    let mut latest_dispatch_type: Option<String> = None;
+    if let Some(dispatch_id) = latest_dispatch_id.as_deref() {
+        if let Some(dispatch_row) =
+            sqlx::query("SELECT status, dispatch_type FROM task_dispatches WHERE id = $1")
+                .bind(dispatch_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|error| {
+                    format!("load postgres dispatch status for {dispatch_id}: {error}")
+                })?
+        {
+            latest_dispatch_status = dispatch_row
+                .try_get("status")
+                .map_err(|error| format!("decode dispatch status for {dispatch_id}: {error}"))?;
+            latest_dispatch_type = dispatch_row
+                .try_get("dispatch_type")
+                .map_err(|error| format!("decode dispatch type for {dispatch_id}: {error}"))?;
+        }
+    }
     if !matches!(
         latest_dispatch_status.as_deref(),
         Some("pending") | Some("dispatched")
     ) {
         if let Some(row) = sqlx::query(
-            "SELECT td.id, td.status
+            "SELECT td.id, td.status, td.dispatch_type
              FROM sessions s
              JOIN task_dispatches td ON td.id = s.active_dispatch_id
              WHERE td.kanban_card_id = $1
@@ -182,6 +231,9 @@ pub(super) async fn load_activate_card_state_pg(
             latest_dispatch_status = Some(row.try_get("status").map_err(|error| {
                 format!("decode live session dispatch status for {card_id}: {error}")
             })?);
+            latest_dispatch_type = row.try_get("dispatch_type").map_err(|error| {
+                format!("decode live session dispatch type for {card_id}: {error}")
+            })?;
         }
     }
     let entry_status =
@@ -203,6 +255,7 @@ pub(super) async fn load_activate_card_state_pg(
             .map_err(|error| format!("decode title for {card_id}: {error}"))?,
         latest_dispatch_id,
         latest_dispatch_status,
+        latest_dispatch_type,
         entry_status,
         repo_id: row
             .try_get("repo_id")

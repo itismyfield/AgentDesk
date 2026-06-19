@@ -531,13 +531,25 @@ var rules = {
       // "clear" and "assumption_ok" → do nothing, auto-queue will create implementation dispatch
 
       // #3605 (T2): scope-assessment side-path. Once per card, right after
-      // preflight clears (NOT invalid/already_applied → those went terminal
-      // above), dispatch a scope-assessment to the ASSIGNED agent so it can
-      // record the issue's scale (scope_depth) before implementation. This is
-      // the only clean hook between assignment and the implementation dispatch
-      // (no per-assign hook exists). The depth is inert in T2 (no flow change);
-      // the T3 consumer reads it later.
-      if (preflight.status !== "invalid" && preflight.status !== "already_applied") {
+      // preflight CLEARS, dispatch a scope-assessment to the ASSIGNED agent so
+      // it can record the issue's scale (scope_depth) before implementation.
+      // This is the only clean hook between assignment and the implementation
+      // dispatch (no per-assign hook exists). The depth is inert in T2 (no flow
+      // change); the T3 consumer reads it later.
+      //
+      // codex R2 (#3605): fire ONLY on the "preflight cleared" statuses
+      // ("clear" / "assumption_ok"), NOT merely "not invalid/already_applied".
+      // The previous wide condition also fired on "consult_required" (issue is
+      // too short/unclear and needs counterpart consultation FIRST) — emitting a
+      // scope-assessment there is premature: scope is meaningless until the
+      // consultation clarifies the issue, and it adds a redundant side-path
+      // dispatch. invalid/already_applied went terminal above; consult_required
+      // is handled by the consultation path; only clear/assumption_ok proceed to
+      // implementation and warrant a pre-implementation scope read.
+      if (
+        preflight.status === "clear" ||
+        preflight.status === "assumption_ok"
+      ) {
         _maybeDispatchScopeAssessment(payload.card_id);
       }
     }

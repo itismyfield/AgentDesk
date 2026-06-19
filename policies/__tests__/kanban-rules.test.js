@@ -710,6 +710,51 @@ test("kanban-rules does not dispatch scope-assessment when preflight is already_
   assert.equal(state.dispatchCreates.length, 0);
 });
 
+test("kanban-rules does not dispatch scope-assessment when preflight is consult_required (codex R2 #3605)", () => {
+  // A short, non-empty body (<30 chars) → preflight returns "consult_required":
+  // the issue needs counterpart consultation FIRST. The scope-assessment trigger
+  // must NOT fire here — scope is meaningless until the consultation clarifies the
+  // issue, and emitting it would add a redundant side-path dispatch. Only
+  // "clear"/"assumption_ok" (preflight cleared) warrant a pre-implementation
+  // scope read.
+  const { policy, state } = loadPolicy("policies/kanban-rules.js", {
+    cards: {
+      "card-scope-consult": {
+        id: "card-scope-consult",
+        title: "Vague scope card",
+        github_issue_number: null,
+        github_issue_url: null,
+        status: "requested",
+        // < 30 chars, non-empty → consult_required (kanban-preflight Check 3).
+        description: "Too short, needs consult",
+        assigned_agent_id: "agent-7",
+        metadata: "{}",
+        blocked_reason: null
+      }
+    },
+    dbQuery: createSqlRouter([
+      { match: "SELECT metadata FROM kanban_cards WHERE id = ?", result: [{ metadata: "{}" }] },
+      {
+        match: "SELECT id FROM task_dispatches WHERE kanban_card_id = ? AND dispatch_type = 'implementation' AND status = 'completed'",
+        result: []
+      },
+      // If the (buggy) trigger reached _maybeDispatchScopeAssessment, this is the
+      // lookup it would run. Provide a valid assignee so the ONLY thing that can
+      // stop a dispatch is the consult_required trigger-condition guard itself.
+      {
+        match: "SELECT assigned_agent_id, title FROM kanban_cards WHERE id = ?",
+        result: [{ assigned_agent_id: "agent-7", title: "Vague scope card" }]
+      }
+    ])
+  });
+
+  policy.onCardTransition({ card_id: "card-scope-consult", from: "backlog", to: "requested" });
+
+  // consult_required → no scope-assessment dispatch, no scope metadata written.
+  assert.equal(state.dispatchCreates.length, 0);
+  assert.equal(findScopeAssessmentMeta(state), undefined);
+});
+
 test("kanban-rules records scope-assessment result on the card metadata and stays inert", () => {
   const { policy, state } = loadPolicy("policies/kanban-rules.js", {
     cards: {
