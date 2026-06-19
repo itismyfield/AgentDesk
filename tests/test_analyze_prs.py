@@ -6,6 +6,7 @@ from scripts.analyze_prs import (
     has_no_change_verification_ack,
     has_stale_branch_cleanup_ack,
     has_scratch_file_cleanup_ack,
+    has_overlap_reference,
 )
 
 
@@ -125,6 +126,19 @@ class PrAnalyzerScratchFileCleanupGuardTests(unittest.TestCase):
 
         self.assertTrue(has_scratch_file_cleanup_ack(body))
 
+
+class PrAnalyzerOverlapReferenceTests(unittest.TestCase):
+    def test_overlap_reference_with_hash(self):
+        body = "This is a no-change PR overlapping with #1234."
+        self.assertTrue(has_overlap_reference(body))
+
+    def test_overlap_reference_with_url(self):
+        body = "Overlap with https://github.com/owner/repo/pull/5678."
+        self.assertTrue(has_overlap_reference(body))
+
+    def test_missing_overlap_reference(self):
+        body = "This is a no-change PR but lacks exact PR numbers."
+        self.assertFalse(has_overlap_reference(body))
 
 if __name__ == "__main__":
     unittest.main()

@@ -113,6 +113,9 @@ def has_scratch_file_cleanup_ack(body):
         ],
     )
 
+def has_overlap_reference(body):
+    return bool(re.search(r"(?i)(?:#[0-9]+|github\.com/[^/]+/[^/]+/pull/[0-9]+)", body))
+
 def main():
     repo = _detect_repo()
     print("Fetching PRs...")
@@ -180,6 +183,8 @@ def main():
                         print(f"  [!] UNSAFE NO-CHANGE PR: Title claims no-change but modifies {len(files_data['files'])} files.")
                     else:
                         print(f"  [i] EMPTY NO-CHANGE PR: No changed files. If no durable queue-hygiene artifact is changed, it is a close candidate (report only).")
+                        if not has_overlap_reference(body):
+                            print("  [!] MISSING OVERLAP REFERENCE: Empty no-change PR body must explicitly list the exact overlapping PR numbers and branches.")
             except Exception:
                 pass
 
