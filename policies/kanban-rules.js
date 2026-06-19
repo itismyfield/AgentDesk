@@ -45,6 +45,16 @@ var _autoRefreshInventoryDocs = _inventory._autoRefreshInventoryDocs;
 var _preflight = require("./lib/kanban-preflight");
 var _runPreflight = _preflight._runPreflight;
 
+// #3605 (T2): scope-assessment result recorder is shared with
+// timeouts/reconciliation.js (missed-hook fallback) so both paths record
+// scope_depth + fall back to "full" identically.
+var _scopeAssessment = require("./lib/kanban-scope-assessment");
+var _recordScopeAssessment = _scopeAssessment._recordScopeAssessment;
+
+// #3605 (T2): canonical inert side-path dispatch-type predicate (shared).
+var _sidePath = require("./lib/dispatch-side-path");
+var isSidePathDispatch = _sidePath.isSidePathDispatch;
+
 // #3605 (T2): scope-assessment dispatch creation. Unlike consultation (#256)
 // which swaps to the counter-provider, this is sent to the ASSIGNED agent on
 // its primary channel — "scope-assessment" is intentionally absent from
@@ -64,15 +74,6 @@ function _createScopeAssessmentDispatch(cardId, agentId, title) {
     agentdesk.log.warn("[scope] scope-assessment dispatch failed for " + cardId + ": " + e);
     return null;
   }
-}
-
-// #3605 (T2): canonical scope_depth whitelist. Any agent output outside this set
-// (missing / unparsable / timeout / typo) falls back to "full" (most cautious).
-var SCOPE_DEPTH_VALUES = { full: true, plan_only: true, direct: true };
-function _normalizeScopeDepth(raw) {
-  if (typeof raw !== "string") return null;
-  var v = raw.trim().toLowerCase().replace(/-/g, "_");
-  return SCOPE_DEPTH_VALUES[v] ? v : null;
 }
 
 // #3605 (T2): once-only scope-assessment trigger. Reads the card's
@@ -110,38 +111,6 @@ function _maybeDispatchScopeAssessment(cardId) {
   agentdesk.log.info("[scope] Card " + cardId + " → scope-assessment dispatch " + dispatchId + " (agent " + agentId + ")");
 }
 
-// #3605 (T2): record scope-assessment result on the card metadata. Fail-safe
-// normalization: any scope_depth outside {full,plan_only,direct} → "full"
-// (most cautious). Missing reason/risk become diagnostic strings. No flow
-// change (inert) — depth is consumed by the T3 phase.
-function _recordScopeAssessment(cardId, dispatch) {
-  var parsed = {};
-  try { parsed = JSON.parse(dispatch.result || "{}"); } catch (e) { parsed = {}; }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) parsed = {};
-
-  var depth = _normalizeScopeDepth(parsed.scope_depth);
-  var fellBack = depth === null;
-  if (fellBack) depth = "full";
-
-  var reason = (typeof parsed.scope_reason === "string" && parsed.scope_reason.trim() !== "")
-    ? parsed.scope_reason
-    : (fellBack ? "unspecified (fallback to full)" : "unspecified");
-  var risk = (typeof parsed.scope_risk === "string" && parsed.scope_risk.trim() !== "")
-    ? parsed.scope_risk
-    : (fellBack ? "unspecified (fallback to full)" : "unspecified");
-
-  _mergeCardMetadata(cardId, {
-    scope_depth: depth,
-    scope_reason: reason,
-    scope_risk: risk,
-    scope_assessment_status: "completed",
-    scope_assessment_result: parsed
-  });
-  agentdesk.log.info(
-    "[scope] Card " + cardId + " scope-assessment completed: depth=" + depth +
-    (fellBack ? " (fallback)" : "")
-  );
-}
 
 // ── Policy ───────────────────────────────────────────────────
 

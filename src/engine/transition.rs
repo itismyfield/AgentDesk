@@ -589,26 +589,28 @@ fn decide_dispatch_attached(
     kickoff_state: Option<&str>,
 ) -> TransitionDecision {
     let card = &ctx.card;
-    let is_review_type = matches!(dispatch_type, "review" | "review-decision" | "rework");
     // #3605 (T2): scope-assessment is a side-path that records the issue's scale
     // (scope_depth) before implementation. Like consultation it must stay in
     // `requested` — attaching it must NOT kick the card into the in_progress
     // state, otherwise it would race the real implementation dispatch and break
-    // the "side-path before implementation" intent.
-    let skip_kickoff =
-        is_review_type || dispatch_type == "consultation" || dispatch_type == "scope-assessment";
+    // the "side-path before implementation" intent. Shared predicate keeps this
+    // in lockstep with dispatch_create / phase_gate.
+    let skip_kickoff = crate::dispatch::dispatch_type_skips_kickoff(dispatch_type);
 
     let mut intents = vec![];
 
-    // Always set latest_dispatch_id
+    // Always set latest_dispatch_id. NB: side-paths (consultation,
+    // scope-assessment) deliberately become latest_dispatch_id too — exactly
+    // like consultation — so the card↔dispatch link is consistent. The
+    // protection against a side-path closing the card lives in the terminal-sync
+    // guards (dispatch_status / turn_bridge completion), not here.
     intents.push(TransitionIntent::SetLatestDispatchId {
         card_id: card.id.clone(),
         dispatch_id: Some(dispatch_id.to_string()),
     });
 
-    // Non-review and non-consultation dispatches transition to kickoff state.
-    // Consultation and scope-assessment dispatches stay in requested
-    // (side-paths, not implementation).
+    // Review-family and inert side-path dispatches stay in their current state
+    // (requested); only real implementation work transitions to kickoff.
     if !skip_kickoff {
         if let Some(kickoff) = kickoff_state {
             if card.status != kickoff {

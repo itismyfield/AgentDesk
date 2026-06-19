@@ -215,8 +215,16 @@ fn should_skip_auto_queue_terminal_sync(
         return false;
     }
 
+    // #3605 (T2): inert side-paths (consultation, scope-assessment) attach to a
+    // card and can briefly become its latest_dispatch_id, so the auto-queue
+    // activate path may bind a pending entry to them. Their completion must NOT
+    // finalize that entry as `done` — otherwise a card closes with no
+    // implementation dispatch ever having run. Skip the terminal sync for the
+    // whole side-path set, exactly as consultation has always been skipped.
+    if crate::dispatch::dispatch_is_side_path(dispatch_type) {
+        return true;
+    }
     match dispatch_type {
-        Some("consultation") => true,
         Some("implementation" | "rework") => !auto_queue_review_disabled,
         _ => false,
     }
@@ -1586,5 +1594,47 @@ mod auto_queue_terminal_sync_policy_tests {
             true,
             false
         ));
+    }
+
+    #[test]
+    fn scope_assessment_terminal_completion_never_finalizes_auto_queue_entry() {
+        // #3605 (T2): a scope-assessment is an inert side-path. If an auto-queue
+        // entry was bound to it (because it transiently became the card's
+        // latest_dispatch_id), its completion must NOT finalize that entry as
+        // `done` — that would close the card with no implementation dispatch.
+        // Mirror of the consultation guard above; review_disabled must not matter.
+        let result = serde_json::json!({"scope_depth": "full"});
+        for review_disabled in [false, true] {
+            assert!(
+                should_skip_auto_queue_terminal_sync(
+                    Some("scope-assessment"),
+                    "completed",
+                    Some(&result),
+                    true,
+                    review_disabled,
+                ),
+                "scope-assessment completion must skip terminal sync (review_disabled={review_disabled})"
+            );
+        }
+    }
+
+    #[test]
+    fn side_path_dispatch_types_are_all_skipped_on_completion() {
+        // Guard the centralized SIDE_PATH_DISPATCH_TYPES set: every member must
+        // skip the auto-queue terminal sync on completion so future additions to
+        // the set automatically inherit the protection.
+        let result = serde_json::json!({"summary": "side-path"});
+        for dispatch_type in crate::dispatch::SIDE_PATH_DISPATCH_TYPES {
+            assert!(
+                should_skip_auto_queue_terminal_sync(
+                    Some(dispatch_type),
+                    "completed",
+                    Some(&result),
+                    true,
+                    false,
+                ),
+                "{dispatch_type} is a side-path and must skip terminal sync"
+            );
+        }
     }
 }

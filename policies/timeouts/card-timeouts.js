@@ -1,3 +1,5 @@
+var isSidePathDispatch = require("../lib/dispatch-side-path").isSidePathDispatch;
+
 module.exports = function attachCardTimeouts(timeouts, helpers) {
   var sendDeadlockAlert = helpers.sendDeadlockAlert;
   var MAX_DISPATCH_RETRIES = helpers.MAX_DISPATCH_RETRIES;
@@ -48,14 +50,13 @@ module.exports = function attachCardTimeouts(timeouts, helpers) {
           agentdesk.log.info("[timeout] Card " + rc.id + " in " + aInitial + " without dispatch — preflight, skipping timeout");
           continue;
         }
-        // #256: Skip cards with consultation dispatch — consultation has its own
-        // lifecycle via onDispatchCompleted; let it resolve naturally.
-        // #3605 (T2): scope-assessment is the same kind of requested-pinned
-        // side-path — skip_kickoff (transition.rs) keeps the card in `requested`
-        // and makes the scope-assessment the latest_dispatch_id. Mirror the
-        // consultation guard so the requested-timeout sweep never marks the
-        // scope-assessment failed and retries/escalates the card. T2 is inert.
-        if (rc.dispatch_type === "consultation" || rc.dispatch_type === "scope-assessment") {
+        // #256/#3605 (T2): skip cards whose latest dispatch is an inert
+        // side-path (consultation, scope-assessment). They are requested-pinned
+        // (skip_kickoff keeps the card in `requested` while the side-path is the
+        // latest_dispatch_id) and resolve via onDispatchCompleted. The
+        // requested-timeout sweep must never mark a side-path failed nor
+        // retry/escalate the card. Shared predicate covers both types.
+        if (isSidePathDispatch(rc.dispatch_type)) {
           agentdesk.log.info("[timeout] Card " + rc.id + " in " + aInitial + " with " + rc.dispatch_type + " dispatch — skipping timeout");
           continue;
         }

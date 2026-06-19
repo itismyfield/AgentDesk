@@ -762,18 +762,14 @@ async fn create_dispatch_core_internal(
         }
         base
     };
-    // NB: this is the broader "skip kickoff" set, not just review types — it
-    // already includes consultation. #3605 (T2): scope-assessment is the same
-    // kind of requested-pinned side-path as consultation, so it must NOT pass a
-    // kickoff_state into the transition. transition.rs::decide_dispatch_attached
-    // independently guards this via skip_kickoff (it already lists
-    // scope-assessment), so this is defense-in-depth parity across both layers;
-    // the only consumer is the kickoff_state gate below.
-    let is_review_type = dispatch_type == "review"
-        || dispatch_type == "review-decision"
-        || dispatch_type == "rework"
-        || dispatch_type == "consultation"
-        || dispatch_type == "scope-assessment";
+    // #3605 (T2): the broader "skip kickoff" set — review-family plus inert
+    // side-paths (consultation, scope-assessment). A side-path must NOT pass a
+    // kickoff_state into the transition so the card stays in `requested`. Shared
+    // with transition.rs::decide_dispatch_attached and phase_gate via
+    // dispatch_type_skips_kickoff; the only consumer is the kickoff_state gate
+    // below. (Variable name kept as `is_review_type` to avoid churn in the
+    // downstream helper signatures it feeds.)
+    let is_review_type = crate::dispatch::dispatch_type_skips_kickoff(dispatch_type);
     validate_dispatch_target_on_pg(
         pg_pool,
         kanban_card_id,

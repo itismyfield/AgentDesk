@@ -44,8 +44,16 @@ fn should_sync_runtime_auto_queue_terminal_entry(
     _result: &serde_json::Value,
     auto_queue_review_disabled: bool,
 ) -> bool {
+    // #3605 (T2): inert side-paths (consultation, scope-assessment) must never
+    // finalize a bound auto_queue entry on completion — mirror of
+    // dispatch_status::should_skip_auto_queue_terminal_sync for the live
+    // turn_bridge/watcher completion path. Without this, a scope-assessment
+    // completing through the runtime path would mark the entry done and close
+    // the card with no implementation dispatch.
+    if crate::dispatch::dispatch_is_side_path(dispatch_type) {
+        return false;
+    }
     match dispatch_type {
-        Some("consultation") => false,
         Some("implementation" | "rework") => auto_queue_review_disabled,
         _ => true,
     }
@@ -595,5 +603,19 @@ mod runtime_completion_policy_tests {
             &normal_result,
             false
         ));
+        // #3605 (T2): scope-assessment must NOT sync the runtime terminal entry,
+        // exactly like consultation — otherwise the live turn_bridge/watcher
+        // completion path would finalize the bound entry and close the card with
+        // no implementation dispatch. review_disabled must not change this.
+        for review_disabled in [false, true] {
+            assert!(
+                !should_sync_runtime_auto_queue_terminal_entry(
+                    Some("scope-assessment"),
+                    &normal_result,
+                    review_disabled,
+                ),
+                "scope-assessment must not sync runtime terminal entry (review_disabled={review_disabled})"
+            );
+        }
     }
 }

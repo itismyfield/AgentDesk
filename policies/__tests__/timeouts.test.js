@@ -224,6 +224,12 @@ test("timeouts reconcile fallback does not advance a completed scope-assessment 
             deferred_dod_json: null
           }
         ]
+      },
+      {
+        // #3605 (T2): the fallback now records scope_depth via the shared
+        // recorder, which reads the card metadata first.
+        match: "SELECT metadata FROM kanban_cards WHERE id = ?",
+        result: [{ metadata: "{}" }]
       }
     ])
   });
@@ -241,6 +247,70 @@ test("timeouts reconcile fallback does not advance a completed scope-assessment 
     state.executions.filter((e) => /UPDATE agents SET xp = xp/.test(e.sql)).length,
     0
   );
+  // #3605 (T2): but the fallback MUST still record scope_depth (parity with the
+  // live hook) — previously it only `continue`d and lost the result entirely.
+  const metaWrite = state.executions.find((e) =>
+    /UPDATE kanban_cards SET metadata = \?/.test(e.sql)
+  );
+  assert.ok(metaWrite, "fallback must persist scope-assessment metadata");
+  const meta = metaWrite.params[0];
+  assert.equal(meta.scope_depth, "direct");
+  assert.equal(meta.scope_assessment_status, "completed");
+});
+
+test("timeouts reconcile fallback applies full fallback for an unparsable scope-assessment (#3605)", () => {
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { pm_decision_gate_enabled: true },
+    dbQuery: createSqlRouter([
+      {
+        match: "SELECT key, value FROM kv_meta WHERE key LIKE 'reconcile_dispatch:%'",
+        result: [{ key: "reconcile_dispatch:dispatch-scope-fb", value: "dispatch-scope-fb" }]
+      },
+      {
+        match: "SELECT id, kanban_card_id, to_agent_id, dispatch_type, chain_depth, status, result, context FROM task_dispatches WHERE id = ?",
+        result: [
+          {
+            id: "dispatch-scope-fb",
+            kanban_card_id: "card-scope-fb",
+            to_agent_id: "agent-1",
+            dispatch_type: "scope-assessment",
+            chain_depth: 0,
+            status: "completed",
+            result: "not json at all",
+            context: "{}"
+          }
+        ]
+      },
+      {
+        match: "SELECT id, status, priority, assigned_agent_id, deferred_dod_json FROM kanban_cards WHERE id = ?",
+        result: [
+          {
+            id: "card-scope-fb",
+            status: "requested",
+            priority: "medium",
+            assigned_agent_id: "agent-1",
+            deferred_dod_json: null
+          }
+        ]
+      },
+      {
+        match: "SELECT metadata FROM kanban_cards WHERE id = ?",
+        result: [{ metadata: "{}" }]
+      }
+    ])
+  });
+
+  policy._section_R();
+
+  // Unparsable result → cautious "full" fallback, recorded even on the
+  // missed-hook path; card still inert (no advance).
+  assert.deepEqual(state.statusCalls, []);
+  const metaWrite = state.executions.find((e) =>
+    /UPDATE kanban_cards SET metadata = \?/.test(e.sql)
+  );
+  assert.ok(metaWrite, "fallback must persist scope metadata even when unparsable");
+  assert.equal(metaWrite.params[0].scope_depth, "full");
+  assert.match(metaWrite.params[0].scope_reason, /fallback to full/);
 });
 
 test("timeouts review timeout module escalates overdue DoD waits", () => {

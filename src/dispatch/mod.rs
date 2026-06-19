@@ -14,6 +14,10 @@ pub use dispatch_cancel::{
 };
 pub(crate) use dispatch_channel::dispatch_destination_provider_override;
 #[allow(unused_imports)]
+pub(crate) use dispatch_channel::{
+    SIDE_PATH_DISPATCH_TYPES, dispatch_is_side_path, dispatch_type_skips_kickoff,
+};
+#[allow(unused_imports)]
 pub use dispatch_channel::{
     drain_unified_thread_kill_signals, is_unified_thread_channel_active,
     is_unified_thread_channel_name_active,

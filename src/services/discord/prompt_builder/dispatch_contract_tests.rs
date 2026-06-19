@@ -563,8 +563,23 @@ fn scope_assessment_contract_requires_scope_depth_and_patch_completion() {
 
     assert!(contract.contains("[Dispatch Contract]"));
     assert!(contract.contains("PATCH /api/dispatches/dispatch-scope-1"));
-    // Scale evaluation only — no implementation.
-    assert!(contract.contains("구현"));
+    // #3605 (T2): the contract must affirmatively forbid implementation, not
+    // merely mention the word "구현". A bare `contains("구현")` would also pass a
+    // contract that *instructs* the agent to implement (e.g. "구현하라"), so
+    // assert the explicit "evaluate only / do not implement" directive verbatim.
+    assert!(
+        contract.contains("구현/수정/커밋은 하지 않는다"),
+        "scope-assessment contract must explicitly forbid implementation, got: {contract}"
+    );
+    assert!(
+        contract.contains("\"범위 평가\" 전용"),
+        "scope-assessment contract must declare it is evaluation-only, got: {contract}"
+    );
+    // Negative guard: it must NOT carry an implementation directive.
+    assert!(
+        !contract.contains("구현하라") && !contract.contains("구현한다"),
+        "scope-assessment contract must not instruct the agent to implement, got: {contract}"
+    );
     // All three depth labels are documented.
     assert!(contract.contains("full"));
     assert!(contract.contains("plan_only"));
