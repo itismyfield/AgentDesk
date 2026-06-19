@@ -31,30 +31,6 @@ var triage = {
         }
       }
 
-      // If no agent label found, request PMD classification (async)
-      if (!agentMatch) {
-        // Check if we already requested classification (avoid spam)
-        var triageKey = "triage_requested:" + card.id;
-        var alreadyRequested = agentdesk.kv.get(triageKey);
-        if (alreadyRequested === null) {
-          agentdesk.kv.set(triageKey, new Date().toISOString(), 86400);
-          // Send classification request to PMD via announce bot
-          if (card.github_issue_url) {
-            var pmdCh = agentdesk.config.get("kanban_manager_channel_id");
-            if (pmdCh) {
-              var issueLink = "[" + card.title + " #" + (card.github_issue_number || "?") + "](<" + card.github_issue_url + ">)";
-              agentdesk.message.queue(
-                "channel:" + pmdCh,
-                "📋 Triage 분류 요청: " + issueLink,
-                "announce",
-                "system"
-              );
-              agentdesk.log.info("[triage] PMD classification requested for " + card.id);
-            }
-          }
-        }
-      }
-
       // Auto-set priority based on labels
       if (labels.indexOf("priority:urgent") >= 0 || labels.indexOf("critical") >= 0) {
         if ((card.priority || "medium") === "medium") {
