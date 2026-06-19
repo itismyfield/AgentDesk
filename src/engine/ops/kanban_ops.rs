@@ -211,7 +211,7 @@ fn set_status_raw_pg(pool: &PgPool, card_id: &str, new_status: &str, force: bool
             .map_err(|error| format!("open postgres kanban status transaction: {error}"))?;
 
         let row = sqlx::query(
-            "SELECT status, title, metadata::text AS metadata, latest_dispatch_id, repo_id, assigned_agent_id, review_round
+            "SELECT status, title, metadata::text AS metadata, latest_dispatch_id, repo_id, assigned_agent_id, review_round, review_entered_at::text AS review_entered_at
              FROM kanban_cards
              WHERE id = $1",
         )
@@ -242,6 +242,9 @@ fn set_status_raw_pg(pool: &PgPool, card_id: &str, new_status: &str, force: bool
         let old_review_round: Option<i64> = row
             .try_get("review_round")
             .map_err(|error| format!("decode review_round for {card_id}: {error}"))?;
+        let review_entered_at: Option<String> = row
+            .try_get("review_entered_at")
+            .map_err(|error| format!("decode review_entered_at for {card_id}: {error}"))?;
 
         if old_status == new_status {
             return Ok(serde_json::json!({
@@ -282,19 +285,30 @@ fn set_status_raw_pg(pool: &PgPool, card_id: &str, new_status: &str, force: bool
                     .is_some_and(|gc| gc.check.as_deref() == Some("review_verdict_pass"))
             });
             if needs_review_pass {
-                let latest_verdict = sqlx::query_scalar::<_, String>(
-                    "SELECT result ->> 'verdict'
+                // #3603: window the review verdict to the current round
+                // (verdicts at/after `review_entered_at`) so a stale pass/rework
+                // from a previous round cannot satisfy the gate (fail-open).
+                // Mirrors `transition_core::transition_status_with_opts_pg_inner`
+                // verdict windowing:
+                // when `review_entered_at` is NULL the predicate yields no row,
+                // so the gate blocks (fail-closed), matching the intent path.
+                let latest_verdict = sqlx::query_scalar::<_, Option<String>>(
+                    "SELECT result::jsonb ->> 'verdict'
                      FROM task_dispatches
                      WHERE kanban_card_id = $1
                        AND dispatch_type = 'review'
                        AND status = 'completed'
-                     ORDER BY updated_at DESC
+                       AND $2::timestamptz IS NOT NULL
+                       AND COALESCE(completed_at, updated_at) >= $2::timestamptz
+                     ORDER BY COALESCE(completed_at, updated_at) DESC, id DESC
                      LIMIT 1",
                 )
                 .bind(&card_id)
+                .bind(review_entered_at.as_deref())
                 .fetch_optional(&mut *tx)
                 .await
-                .map_err(|error| format!("load latest review verdict for {card_id}: {error}"))?;
+                .map_err(|error| format!("load latest review verdict for {card_id}: {error}"))?
+                .flatten();
                 let has_pass = matches!(latest_verdict.as_deref(), Some("pass") | Some("approved"));
                 if !has_pass {
                     return Err(format!(
@@ -945,5 +959,187 @@ pub(super) fn review_state_sync_pg(pool: &PgPool, json_str: &str) -> String {
     match result {
         Ok(value) => value,
         Err(raw) => crate::engine::ops::ensure_js_error_json(raw),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn pg_test_db() -> crate::dispatch::test_support::DispatchPostgresTestDb {
+        crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_kanban_set_status",
+            "set_status_raw_pg review verdict windowing tests",
+        )
+        .await
+    }
+
+    /// Seed a card sitting in `review`, ready to attempt `review -> done`
+    /// (which is gated by `review_verdict_pass` in the default pipeline).
+    /// `review_entered_at` is set to `NOW() + offset_secs` so tests can place
+    /// the review-round boundary before/after seeded verdicts.
+    async fn seed_review_card(pool: &sqlx::PgPool, card_id: &str, entered_offset_secs: i64) {
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, review_round, review_entered_at, created_at, updated_at)
+             VALUES ($1, 'verdict window test', 'review', 1, NOW() + make_interval(secs => $2::double precision), NOW(), NOW())",
+        )
+        .bind(card_id)
+        .bind(entered_offset_secs as f64)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|err| panic!("seed review card {card_id}: {err}"));
+    }
+
+    async fn seed_review_card_null_entered(pool: &sqlx::PgPool, card_id: &str) {
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, review_round, review_entered_at, created_at, updated_at)
+             VALUES ($1, 'verdict window test', 'review', 1, NULL, NOW(), NOW())",
+        )
+        .bind(card_id)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|err| panic!("seed review card {card_id}: {err}"));
+    }
+
+    /// Seed a completed review dispatch whose verdict is stamped at
+    /// `NOW() + completed_offset_secs` (via both `completed_at` and `updated_at`,
+    /// matching the `COALESCE(completed_at, updated_at)` window predicate).
+    async fn seed_review_verdict(
+        pool: &sqlx::PgPool,
+        dispatch_id: &str,
+        card_id: &str,
+        verdict: &str,
+        completed_offset_secs: i64,
+    ) {
+        sqlx::query(
+            "INSERT INTO task_dispatches
+                (id, kanban_card_id, dispatch_type, status, result, completed_at, updated_at, created_at)
+             VALUES ($1, $2, 'review', 'completed', $3,
+                     NOW() + make_interval(secs => $4::double precision),
+                     NOW() + make_interval(secs => $4::double precision),
+                     NOW())",
+        )
+        .bind(dispatch_id)
+        .bind(card_id)
+        .bind(format!(r#"{{"verdict":"{verdict}"}}"#))
+        .bind(completed_offset_secs as f64)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|err| panic!("seed review verdict {dispatch_id}: {err}"));
+    }
+
+    fn is_review_pass_block(response: &str) -> bool {
+        let value: serde_json::Value =
+            serde_json::from_str(response).unwrap_or_else(|err| panic!("parse response: {err}"));
+        value
+            .get("error")
+            .and_then(|e| e.as_str())
+            .is_some_and(|e| e.contains("gate blocked: review_verdict_pass"))
+    }
+
+    fn is_transition_ok_to(response: &str, expected_status: &str) -> bool {
+        let value: serde_json::Value =
+            serde_json::from_str(response).unwrap_or_else(|err| panic!("parse response: {err}"));
+        value.get("error").is_none()
+            && value.get("ok").and_then(|v| v.as_bool()) == Some(true)
+            && value.get("changed").and_then(|v| v.as_bool()) == Some(true)
+            && value.get("to").and_then(|v| v.as_str()) == Some(expected_status)
+    }
+
+    /// Stale verdict: the only `pass` was stamped BEFORE `review_entered_at`
+    /// (previous round). The current round has no verdict, so `review -> done`
+    /// must be blocked (fail-closed), matching the canonical reducer window.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_status_raw_pg_blocks_stale_pass_verdict_before_review_entered_at() {
+        let db = pg_test_db().await;
+        let pool = db.connect_and_migrate().await;
+        crate::pipeline::ensure_loaded();
+
+        let card_id = "card-stale-pass";
+        // review entered "now"; pass verdict 1h earlier -> outside the window.
+        seed_review_card(&pool, card_id, 0).await;
+        seed_review_verdict(&pool, "disp-stale-pass", card_id, "pass", -3600).await;
+
+        let response = set_status_raw_pg(&pool, card_id, "done", false);
+        assert!(
+            is_review_pass_block(&response),
+            "stale pass before review_entered_at must block review->done, got: {response}"
+        );
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// Fresh verdict: a `pass` stamped AFTER `review_entered_at` (current round)
+    /// satisfies the gate, so `review -> done` succeeds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_status_raw_pg_allows_fresh_pass_verdict_after_review_entered_at() {
+        let db = pg_test_db().await;
+        let pool = db.connect_and_migrate().await;
+        crate::pipeline::ensure_loaded();
+
+        let card_id = "card-fresh-pass";
+        // review entered 1h ago; pass verdict "now" -> inside the window.
+        seed_review_card(&pool, card_id, -3600).await;
+        seed_review_verdict(&pool, "disp-fresh-pass", card_id, "pass", 0).await;
+
+        let response = set_status_raw_pg(&pool, card_id, "done", false);
+        assert!(
+            is_transition_ok_to(&response, "done"),
+            "fresh pass after review_entered_at must allow review->done, got: {response}"
+        );
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// NULL `review_entered_at` must behave like the reducer window
+    /// (`$2::timestamptz IS NOT NULL` => no row): the gate blocks even when a
+    /// historical pass exists.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_status_raw_pg_blocks_when_review_entered_at_is_null() {
+        let db = pg_test_db().await;
+        let pool = db.connect_and_migrate().await;
+        crate::pipeline::ensure_loaded();
+
+        let card_id = "card-null-entered";
+        seed_review_card_null_entered(&pool, card_id).await;
+        seed_review_verdict(&pool, "disp-null-pass", card_id, "pass", -10).await;
+
+        let response = set_status_raw_pg(&pool, card_id, "done", false);
+        assert!(
+            is_review_pass_block(&response),
+            "null review_entered_at must block review->done, got: {response}"
+        );
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// The window applies regardless of verdict value: with a stale `pass`
+    /// (previous round) and a fresh `rework` (current round), the in-window
+    /// latest verdict is `rework`, so the `review_verdict_pass` gate is not
+    /// satisfied and `review -> done` is blocked. This proves the rework path
+    /// is windowed identically (the stale pass cannot leak through).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_status_raw_pg_windows_rework_over_stale_pass() {
+        let db = pg_test_db().await;
+        let pool = db.connect_and_migrate().await;
+        crate::pipeline::ensure_loaded();
+
+        let card_id = "card-rework-window";
+        // review entered 1h ago. Stale pass 2h ago (outside), fresh rework now.
+        seed_review_card(&pool, card_id, -3600).await;
+        seed_review_verdict(&pool, "disp-stale-pass-2", card_id, "pass", -7200).await;
+        seed_review_verdict(&pool, "disp-fresh-rework", card_id, "rework", 0).await;
+
+        let response = set_status_raw_pg(&pool, card_id, "done", false);
+        assert!(
+            is_review_pass_block(&response),
+            "fresh rework over stale pass must block review->done, got: {response}"
+        );
+
+        pool.close().await;
+        db.drop().await;
     }
 }
