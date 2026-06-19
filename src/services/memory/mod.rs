@@ -115,7 +115,6 @@ pub(crate) struct CaptureRequest {
 pub(crate) enum SessionEndReason {
     IdleExpiry,
     LocalSessionReset,
-    TurnCapReached,
 }
 
 impl SessionEndReason {
@@ -123,7 +122,6 @@ impl SessionEndReason {
         match self {
             Self::IdleExpiry => "idle_expiry",
             Self::LocalSessionReset => "local_session_reset",
-            Self::TurnCapReached => "turn_cap_reached",
         }
     }
 }

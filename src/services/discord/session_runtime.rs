@@ -150,47 +150,6 @@ impl DiscordSession {
         self.memento_reflected = false;
     }
 
-    pub(super) fn assistant_turn_count(&self) -> usize {
-        self.history
-            .iter()
-            .filter(|item| item.item_type == HistoryType::Assistant)
-            .count()
-    }
-
-    pub(super) fn recent_history_context(&self, max_messages: usize) -> Option<String> {
-        if max_messages == 0 {
-            return None;
-        }
-
-        let mut lines = self
-            .history
-            .iter()
-            .rev()
-            .filter_map(|item| {
-                let speaker = match item.item_type {
-                    HistoryType::User => "User",
-                    HistoryType::Assistant => "Assistant",
-                    _ => return None,
-                };
-                let content = item.content.trim();
-                if content.is_empty() {
-                    return None;
-                }
-                Some(format!(
-                    "{speaker}: {}",
-                    content.chars().take(300).collect::<String>()
-                ))
-            })
-            .take(max_messages)
-            .collect::<Vec<_>>();
-
-        if lines.is_empty() {
-            return None;
-        }
-
-        lines.reverse();
-        Some(lines.join("\n"))
-    }
     /// Validate `current_path` and return it if it exists on disk.
     /// If the path is stale (deleted), clear `current_path` and `worktree`, log, and return `None`.
     pub(super) fn validated_path(&mut self, channel_id: impl std::fmt::Display) -> Option<String> {

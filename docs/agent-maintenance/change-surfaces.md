@@ -1007,7 +1007,7 @@
     force-clean watcher-respawn follow-through + always-run cross-tick
     retry/dead-man (P1-a: no early return on zero candidates), delegating the
     new behaviour to `health/watcher_respawn.rs`).
-  - `src/services/discord/router/message_handler/intake_turn.rs` (3720 lines; -2 from #3588 idle 세션 리셋 제거(IdleExpired display arm + `now` 인자 정리); +23 from #3557 Codex review: cap the INITIAL watchdog deadline at the provider hard ceiling (+one-shot ceiling warn); +27 from #3557 (A) per-turn hard-ceiling clamp wired into the watchdog auto-extend block; +1 from #3479 item-3 `shared.dispatch.<field>` nesting;
+  - `src/services/discord/router/message_handler/intake_turn.rs` (3680 lines; -40 from #3591 100턴 세션 리셋(AssistantTurnCap) 제거: reset 판정/clear/DB clear/display 블록 삭제; -2 from #3588 idle 세션 리셋 제거(IdleExpired display arm + `now` 인자 정리); +23 from #3557 Codex review: cap the INITIAL watchdog deadline at the provider hard ceiling (+one-shot ceiling warn); +27 from #3557 (A) per-turn hard-ceiling clamp wired into the watchdog auto-extend block; +1 from #3479 item-3 `shared.dispatch.<field>` nesting;
     Discord message intake turn orchestration split from the router message
     handler; bugfix only outside a further extraction plan; #3464 extracted the
     unauthorized-voice-announcement scope decision to `voice_announcement_scope.rs`;
@@ -1025,7 +1025,7 @@
     #3038 S1 mechanical `.queued_placeholders` -> `.queued.queued_placeholders`
     re-wire after lifting cluster C into `QueuedPlaceholderState`; -2 from #3038
     S4 mechanical placeholder/status-panel `.ui` rewiring).
-  - `src/services/discord/router/message_handler/headless_turn.rs` (1514 lines; -2 from #3588 idle 세션 리셋 제거(IdleExpired display arm + `now` 인자 정리);
+  - `src/services/discord/router/message_handler/headless_turn.rs` (1469 lines; -45 from #3591 100턴 세션 리셋(AssistantTurnCap) 제거: reset 판정/clear/DB clear/display 블록 삭제; -2 from #3588 idle 세션 리셋 제거(IdleExpired display arm + `now` 인자 정리);
     headless Discord turn launch/terminal-response path split from the router
     message handler; bugfix only outside a further extraction plan; +54 from
     #3557 (A) codex r2: the headless watchdog was missing the per-turn hard
@@ -1203,7 +1203,7 @@
     `audit_maintainability_config.toml`; the root is no longer a prod giant and
     was removed from `giant_file_registry.toml`; #3038 S5 locked the final
     root ratchet at 274 production lines).
-  - `src/services/discord/session_runtime.rs` (1753 lines).
+  - `src/services/discord/session_runtime.rs` (1712 lines; -41 from #3591 dead `assistant_turn_count`/`recent_history_context` 메서드 제거 — 100턴/idle 세션 리셋 폐기 연쇄).
   - `src/services/discord/voice_barge_in.rs` (2823 lines after #3038
     VoiceBargeInRuntime S1 moved the STT method cluster to
     `src/services/discord/voice_barge_in/stt.rs` (314 production lines) and

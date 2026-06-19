@@ -22,11 +22,10 @@ pub(crate) use super::turn_start::{
     HeadlessTurnStartStatus,
 };
 use super::turn_start::{
-    SessionResetReason, cli_just_spawned_for_emit, dispatch_reset_lifecycle_code,
-    emit_session_strategy_lifecycle, load_session_runtime_state, log_session_strategy_diagnostic,
+    cli_just_spawned_for_emit, dispatch_reset_lifecycle_code, emit_session_strategy_lifecycle,
+    load_session_runtime_state, log_session_strategy_diagnostic,
     refresh_session_strategy_after_pending_reset, release_mailbox_after_hosted_tui_busy_pre_submit,
-    release_mailbox_after_placeholder_post_failure, session_reset_reason_for_turn,
-    session_reset_reason_lifecycle_code, session_runtime_state_after_redirect,
+    release_mailbox_after_placeholder_post_failure, session_runtime_state_after_redirect,
     take_session_retry_context,
 };
 use crate::services::agent_protocol::RuntimeHandoffKind;

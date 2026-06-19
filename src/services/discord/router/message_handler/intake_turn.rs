@@ -491,29 +491,9 @@ pub(in crate::services::discord) async fn handle_text_message(
         .await;
         return Ok(());
     }
-    let mut session_reset_reason = None;
-    let mut reset_session_id_to_clear = None;
     // Get session info, allowed tools, and pending uploads
     let (session_info, mut pending_uploads, session_was_cleared) = {
         let mut data = shared.core.lock().await;
-        if let Some(session) = data.sessions.get_mut(&channel_id)
-            && let Some(reason) = session_reset_reason_for_turn(session)
-        {
-            if let Some(retry_context) = session
-                .recent_history_context(super::super::super::SESSION_RECOVERY_CONTEXT_MESSAGES)
-            {
-                let _ = super::super::super::turn_bridge::store_session_retry_context(
-                    None::<&crate::db::Db>,
-                    shared.pg_pool.as_ref(),
-                    channel_id.get(),
-                    &retry_context,
-                );
-            }
-            session_reset_reason = Some(reason);
-            reset_session_id_to_clear = session.session_id.clone();
-            session.clear_provider_session();
-            session.history.clear();
-        }
         let info = load_session_runtime_state(&mut data.sessions, channel_id);
         let (uploads, was_cleared) = data
             .sessions
@@ -1339,15 +1319,6 @@ pub(in crate::services::discord) async fn handle_text_message(
         (channel_name, tmux_session_name)
     };
     let adk_session_key = build_adk_session_key(shared, channel_id, &provider).await;
-    if session_reset_reason.is_some() {
-        if let Some(ref key) = adk_session_key {
-            super::super::super::adk_session::clear_provider_session_id(key, shared.api_port).await;
-        }
-        if let Some(ref session_id_to_clear) = reset_session_id_to_clear {
-            let _ = super::super::super::internal_api::clear_stale_session_id(session_id_to_clear)
-                .await;
-        }
-    }
     let turn_goal_kind = if !dispatch_reset_provider_state && !dispatch_recreate_tmux {
         classify_codex_goal_command_for_provider(
             &provider,
@@ -1426,17 +1397,6 @@ pub(in crate::services::discord) async fn handle_text_message(
                 "  [{ts}] ↻ Skipping DB provider session restore for dispatch reset_provider_state={} recreate_tmux={}",
                 dispatch_reset_provider_state,
                 dispatch_recreate_tmux
-            );
-        } else if let Some(reason) = session_reset_reason {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            session_strategy_reason = session_reset_reason_lifecycle_code(reason);
-            let display_reason = match reason {
-                SessionResetReason::AssistantTurnCap => "assistant turn cap",
-            };
-            tracing::info!(
-                "  [{ts}] ↻ Skipping DB provider session restore for channel {} due to {}",
-                channel_id.get(),
-                display_reason
             );
         } else if let Some(ref key) = adk_session_key {
             let restored = super::super::super::adk_session::fetch_provider_session_id(

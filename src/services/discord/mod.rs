@@ -252,8 +252,6 @@ const SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60); // 1 ho
 // lunch / sync meeting" gaps while still bounding zombie growth via the
 // cleanup interval reaper at `mod.rs:2093`.
 const SESSION_MAX_IDLE: Duration = Duration::from_secs(4 * 60 * 60); // 4 hours
-const SESSION_MAX_ASSISTANT_TURNS: usize = 100;
-const SESSION_RECOVERY_CONTEXT_MESSAGES: usize = 10;
 const DEAD_SESSION_REAP_INTERVAL: Duration = Duration::from_secs(60); // 1 minute
 const RESTART_REPORT_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const DEFERRED_RESTART_POLL_INTERVAL: Duration = Duration::from_secs(10);
@@ -4088,7 +4086,8 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
     // retry_context(session_retry_context_key) kv는 의도적으로 저장하지 않는다 —
     // 같은 키를 `take_session_retry_context`가 다음 턴에 무조건 take/주입하므로,
     // resume이 성공하는 idle 경로에서 저장하면 transcript 중복 + "새 세션 시작"
-    // 레이블 오표시가 발생한다. 진짜 reset(AssistantTurnCap)만 turn_start에서 저장한다.
+    // 레이블 오표시가 발생한다. (#3591에서 100턴 세션 리셋도 제거되어 reset 기반
+    // 저장 경로는 없다; resume 실패 복구만 auto_retry_with_history가 별도로 저장한다.)
     // 명시적 세션 초기화는 idle recap의 `새 세션 시작` 버튼(idle_recap:clear)으로 한다.
     for expired_session in &expired {
         let cleared = mailbox_clear_channel(shared, &provider, expired_session.channel_id).await;
