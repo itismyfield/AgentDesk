@@ -80,6 +80,39 @@ def has_duplicate_guard_ack(body):
         ],
     )
 
+def has_no_change_verification_ack(body):
+    if re.search(r"(?im)^[ \t]*[-*][ \t]*\[[xX]\][ \t]*\*\*no-change verification:\*\*", body):
+        return True
+    return has_non_empty_body_field(
+        body,
+        [
+            "no-change verification",
+            "no change verification",
+        ],
+    )
+
+def has_stale_branch_cleanup_ack(body):
+    if re.search(r"(?im)^[ \t]*[-*][ \t]*\[[xX]\][ \t]*\*\*stale branch cleanup:\*\*", body):
+        return True
+    return has_non_empty_body_field(
+        body,
+        [
+            "stale branch cleanup",
+            "stale-branch cleanup",
+        ],
+    )
+
+def has_scratch_file_cleanup_ack(body):
+    if re.search(r"(?im)^[ \t]*[-*][ \t]*\[[xX]\][ \t]*\*\*scratch file cleanup:\*\*", body):
+        return True
+    return has_non_empty_body_field(
+        body,
+        [
+            "scratch file cleanup",
+            "scratch-file cleanup",
+        ],
+    )
+
 def main():
     repo = _detect_repo()
     print("Fetching PRs...")
@@ -112,6 +145,12 @@ def main():
             print("  [!] MISSING FINGERPRINT: PR body lacks the required 'WorkFingerprint' section.")
         if not has_duplicate_guard_ack(body):
             print("  [!] MISSING OVERLAP CHECK: PR body lacks a completed duplicate/overlap guard acknowledgement.")
+        if not has_no_change_verification_ack(body):
+            print("  [!] MISSING NO-CHANGE VERIFICATION CHECK: PR body lacks a completed no-change verification acknowledgement.")
+        if not has_stale_branch_cleanup_ack(body):
+            print("  [!] MISSING STALE BRANCH CLEANUP CHECK: PR body lacks a completed stale branch cleanup acknowledgement.")
+        if not has_scratch_file_cleanup_ack(body):
+            print("  [!] MISSING SCRATCH FILE CLEANUP CHECK: PR body lacks a completed scratch file cleanup acknowledgement.")
         if "verification" not in normalized_body:
             print("  [!] MISSING VERIFICATION: PR body lacks the required 'verification' commands and results.")
         if "skipped checks" not in normalized_body:
