@@ -53,6 +53,18 @@ pub(super) fn terminal_delivery_should_send_new_chunks(
     can_chain_locally && formatted_response.len() > super::super::DISCORD_MSG_LIMIT
 }
 
+/// Returns `(first_chunk_msg_id, last_chunk_msg_id)` on a FULL commit. The send
+/// is all-or-nothing: `send_ordered_long_terminal_chunks` propagates the
+/// rollback-aware `send_long_message_with_rollback` `Err` (which deletes any
+/// already-sent chunks) via `?`, so an `Ok` here means EVERY chunk committed.
+///
+/// #3610 PR-1c: `last_chunk_msg_id` is the durable TERMINAL ANCHOR for the
+/// long-chunk arm — the tail chunk carrying the END of the terminal text. The
+/// placeholder is DELETED by this path (no anchor there), so the last NEW chunk
+/// is the only stable anchor. It is `Some` whenever Discord returned ≥1 chunk id
+/// (always true on `Ok`, since the empty-Vec case errors in
+/// `send_ordered_long_terminal_chunks`); callers treat `None` as "no anchor,
+/// record range only" (safe, identical to the absent-status-panel case).
 pub(super) async fn send_ordered_long_terminal_response(
     shared: &SharedData,
     gateway: &dyn TurnGateway,
@@ -64,8 +76,8 @@ pub(super) async fn send_ordered_long_terminal_response(
     dispatch_id: Option<&str>,
     session_key: Option<&str>,
     turn_id: Option<&str>,
-) -> Result<MessageId, String> {
-    let (first_msg_id, delete_result) =
+) -> Result<(MessageId, Option<MessageId>), String> {
+    let (first_msg_id, last_msg_id, delete_result) =
         send_ordered_long_terminal_chunks(gateway, channel_id, placeholder_msg_id, response)
             .await?;
     let cleanup_outcome = match delete_result {
@@ -98,15 +110,22 @@ pub(super) async fn send_ordered_long_terminal_response(
         true,
         Some("terminal long response sent as ordered chunks"),
     );
-    Ok(first_msg_id)
+    Ok((first_msg_id, last_msg_id))
 }
 
+/// Returns `(first_chunk_msg_id, last_chunk_msg_id, delete_result)`.
+/// `send_long_message_with_rollback` is all-or-nothing — on ANY chunk failure it
+/// rolls back (deletes) the already-sent chunks and returns `Err`, propagated
+/// here by `?`. So a returned `Vec` is the COMPLETE, committed chunk set; its
+/// `.last()` is the terminal text tail (#3610 PR-1c anchor). The empty-Vec case
+/// errors (it cannot be a committed delivery), so on the `Ok` path `last` is
+/// always `Some` — `Option` is kept for type-honesty at the call boundary.
 async fn send_ordered_long_terminal_chunks(
     gateway: &dyn TurnGateway,
     channel_id: ChannelId,
     placeholder_msg_id: MessageId,
     response: &str,
-) -> Result<(MessageId, Result<(), String>), String> {
+) -> Result<(MessageId, Option<MessageId>, Result<(), String>), String> {
     let message_ids = gateway
         .send_long_message_with_rollback(channel_id, placeholder_msg_id, response)
         .await?;
@@ -114,8 +133,9 @@ async fn send_ordered_long_terminal_chunks(
         .first()
         .copied()
         .ok_or_else(|| "long terminal response produced no Discord chunks".to_string())?;
+    let last_msg_id = message_ids.last().copied();
     let delete_result = gateway.delete_message(channel_id, placeholder_msg_id).await;
-    Ok((first_msg_id, delete_result))
+    Ok((first_msg_id, last_msg_id, delete_result))
 }
 
 pub(super) fn turn_bridge_replace_outcome_committed(
@@ -544,6 +564,15 @@ impl BridgeDeliveryLease {
             end,
             heartbeat,
         })
+    }
+
+    /// #3610 PR-1c: the lease's committed `(start, end)` offset range — the SAME
+    /// range `acquire` took and `commit_and_advance` advances `confirmed_end_offset`
+    /// to. The long-chunk anchor record (mod.rs site 4) reads this BEFORE
+    /// `commit_and_advance` consumes `self` so the durable frontier range is
+    /// offset-consistent with the in-memory advance (no offset-space mixing).
+    pub(super) fn range(&self) -> (u64, u64) {
+        (self.start, self.end)
     }
 
     /// Stop the heartbeat, commit the 3-way `outcome`, and — ONLY on a successful
@@ -986,7 +1015,7 @@ mod tests {
         let gateway = FakeOrderedChunkGateway::default();
         let placeholder_msg_id = MessageId::new(42);
 
-        let (first_msg_id, delete_result) = send_ordered_long_terminal_chunks(
+        let (first_msg_id, last_msg_id, delete_result) = send_ordered_long_terminal_chunks(
             &gateway,
             ChannelId::new(7),
             placeholder_msg_id,
@@ -1003,6 +1032,12 @@ mod tests {
             .expect("sent chunks lock")
             .clone();
         assert!(chunks.len() > 1);
+        // #3610 PR-1c: the anchor is the LAST chunk's id (the fake mints
+        // `9000 + index`), so it tracks the tail chunk, not the first.
+        assert_eq!(
+            last_msg_id,
+            Some(MessageId::new(9000 + chunks.len() as u64 - 1))
+        );
         assert!(
             chunks
                 .iter()
@@ -1455,6 +1490,77 @@ mod tests {
                 shared.committed_relay_offset(ch),
                 64,
                 "the retry delivers the previously-skipped range (no black-hole)"
+            );
+        }
+
+        // #3610 (codex review): the M4 gate the long-chunk arm (mod.rs site 4)
+        // now relies on. `record_long_chunk_terminal_delivery` MUST only fire when
+        // `commit_and_advance` returned `true` — i.e. the in-memory
+        // `confirmed_end_offset` actually advanced. This pins the underlying
+        // coupling the bool gate depends on: in a RECLAIMED / identity-mismatch
+        // state the bridge's own `DeliveryLeaseCell::commit` returns `false` AND
+        // `confirmed_end_offset` does NOT advance. (The full `commit_and_advance`
+        // wrapper carries a `debug_assert!(committed)` — it deliberately panics on
+        // a false commit in debug/test builds because the bridge committing its OWN
+        // fresh lease is an invariant — so the false-commit path is exercised at the
+        // `cell.commit` boundary the wrapper delegates to. Were the durable frontier
+        // recorded here, its END (= range.1) would sit AHEAD of the un-advanced
+        // `confirmed_end_offset`, the exact M4 violation the bool gate prevents.)
+        #[tokio::test(start_paused = true)]
+        async fn reclaimed_lease_commit_is_false_and_never_advances_offset() {
+            let shared = make_shared_data_for_tests();
+            let ch = channel();
+            assert_eq!(shared.committed_relay_offset(ch), 0);
+
+            // The bridge acquires a real lease for (0, 64) on the channel's cell.
+            let _lease = match BridgeDeliveryLease::acquire(&shared, ch, turn(90), 0, Some(64)) {
+                BridgeLeaseAcquire::Held(lease) => lease,
+                _ => panic!("expected Held on a fresh cell"),
+            };
+
+            // The deadline passes and a reconciler reclaims the (presumed-dead)
+            // holder's lease → the cell flips back to Unleased.
+            let cell = shared.delivery_lease(ch);
+            assert!(
+                cell.reclaim_if_expired(
+                    lease_now_ms().saturating_add(DELIVERY_LEASE_DEADLINE_MS + 1),
+                ),
+                "an expired lease must be reclaimable"
+            );
+
+            // A REPLACEMENT holder (a fresh watcher) takes the reclaimed range.
+            let watcher = LeaseHolder::Watcher { instance_id: 91 };
+            assert!(cell.try_acquire(
+                turn(90),
+                watcher,
+                0,
+                64,
+                lease_now_ms().saturating_add(DELIVERY_LEASE_DEADLINE_MS),
+            ));
+
+            // The original bridge's commit (same identity `commit_and_advance`
+            // delegates to) now hits a DIFFERENT holder → identity mismatch →
+            // `false`. This is the commit==false branch the mod.rs bool gate guards.
+            let committed = cell.commit(
+                LeaseHolder::Bridge,
+                turn(90),
+                0,
+                64,
+                LeaseOutcome::Delivered,
+            );
+            assert!(
+                !committed,
+                "a reclaimed-then-reacquired cell rejects the original holder's commit"
+            );
+            // Because the commit failed, `confirmed_end_offset` did NOT advance —
+            // so recording `delivered_frontier.range = (0, 64)` would put the
+            // durable END (64) ahead of the in-memory authority (0): M4 violation.
+            // The mod.rs `if committed { record_long_chunk_terminal_delivery(..) }`
+            // gate is what keeps the durable frontier a faithful mirror.
+            assert_eq!(
+                shared.committed_relay_offset(ch),
+                0,
+                "a failed commit must never advance confirmed_end (M4 — durable frontier mirrors it)"
             );
         }
 

@@ -713,6 +713,54 @@ pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
     );
 }
 
+/// #3610 PR-1c: record the durable terminal anchor for the BRIDGE long-chunk arm
+/// (`turn_bridge/mod.rs` site 4 — `send_ordered_long_terminal_response`). PR-1/1b
+/// instrumented only the short-replace sites (sink/watcher) and the bridge cutover,
+/// so a LONG (`len > DISCORD_MSG_LIMIT`) terminal answer — which routes through the
+/// send-new-chunks + placeholder-delete path — recorded NO anchor.
+///
+/// The caller invokes this ONLY on the FULL-COMMIT `Ok` arm of
+/// `send_ordered_long_terminal_response` (the send is all-or-nothing — a partial
+/// chunk failure rolls back and returns `Err`, never `Ok`) AND ONLY when
+/// `lease.commit_and_advance(.., Delivered)` returned `true` — i.e. the in-memory
+/// `confirmed_end_offset` actually advanced. That commit-success gate is the M4
+/// invariant: a non-Leased / identity-mismatch / reclaimed cell makes
+/// `commit_and_advance` return `false` WITHOUT advancing the offset, and recording
+/// `delivered_frontier.range = end` in that case would leave the durable frontier
+/// END ahead of `confirmed_end_offset` (M4 violation). With both gates satisfied
+/// `is_delivered = true` is correct here (mirrors the cutover's
+/// `outcome_is_shadow_delivered` gate, which for this arm is unconditionally
+/// `Delivered`).
+///
+/// Channel split (same as the cutover): the frontier is KEYED by
+/// `watcher_owner_channel_id` (the OFFSET-AUTHORITY channel where
+/// `confirmed_end_offset` advanced — unchanged), while the recorded anchor PAIR is
+/// `(panel_channel_id = delivery_channel_id, panel_msg_id = last_chunk_anchor_msg_id)`
+/// — the channel/message the tail chunk actually lives in. These differ for a
+/// recovered/reused-watcher bridge. `range` is the SAME `(start, end)` the bridge
+/// delivery lease acquired/committed (offset-space consistent — never mix spaces).
+/// `last_chunk_anchor_msg_id = None` (empty chunk Vec — impossible on the `Ok`
+/// path, but type-honest) records the range with a null anchor, identical to the
+/// absent-status-panel case. Shadow flag OFF (default) → no-op.
+pub(in crate::services::discord) fn record_long_chunk_terminal_delivery(
+    shared: &crate::services::discord::SharedData,
+    provider: &ProviderKind,
+    watcher_owner_channel_id: ChannelId,
+    delivery_channel_id: ChannelId,
+    range: (u64, u64),
+    last_chunk_anchor_msg_id: Option<u64>,
+) {
+    shadow_mirror_delivered_frontier(
+        shared,
+        provider,
+        watcher_owner_channel_id,
+        range,
+        true,
+        last_chunk_anchor_msg_id,
+        Some(delivery_channel_id.get()),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1341,5 +1389,132 @@ mod tests {
         // any coord/inflight access or write. Pinned here at the gate level.
         assert!(!should_shadow_mirror(true, false)); // flag OFF → no anchor write
         assert!(!should_shadow_mirror(false, true)); // not delivered → no anchor write (I2)
+    }
+
+    // ---- #3610 PR-1c: long-chunk terminal arm anchor recording -----------------
+    // `record_long_chunk_terminal_delivery` is the BRIDGE long-chunk arm's anchor
+    // helper (turn_bridge/mod.rs site 4). It is a thin pass-through to
+    // `shadow_mirror_delivered_frontier` with `is_delivered = true` hardcoded
+    // (the caller invokes it ONLY on the full-commit `Ok` arm of
+    // `send_ordered_long_terminal_response`, which is all-or-nothing — a partial
+    // chunk failure rolls back and returns `Err`, so an `Ok` means every chunk
+    // committed). These pin the recorded shape via the path-based core the helper
+    // funnels into (same approach as the PR-1/PR-1b tests above), since the full
+    // helper's flag (OnceLock) + runtime-root resolution are env-global.
+
+    #[test]
+    fn long_chunk_full_commit_records_last_chunk_anchor_3610c() {
+        // The long-chunk arm deletes the placeholder, so the LAST sent chunk's
+        // message id is the only stable terminal anchor. On full commit the helper
+        // records (panel_msg_id = last_chunk, panel_channel_id = delivery channel)
+        // — proving panel_msg_id is NON-null on the long-message path PR-1/1b left
+        // uncovered. The frontier END is the lease range's `.1`.
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36110);
+        let last_chunk_anchor: u64 = 912_345_678; // tail chunk msg id (not the first)
+        let delivery_channel: u64 = 444_555_666;
+        // Mirrors the args record_long_chunk_terminal_delivery forwards: range =
+        // lease (start,end), panel_msg_id = last chunk, panel_channel_id = delivery.
+        record_delivered_frontier_shadow_at(
+            &path,
+            (0, 4096),
+            700,
+            0,
+            Some(last_chunk_anchor),
+            Some(delivery_channel),
+            4096,
+        )
+        .unwrap();
+        let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
+        assert_eq!(written.panel_msg_id, Some(last_chunk_anchor)); // NON-null
+        assert_eq!(written.panel_channel_id, Some(delivery_channel));
+        assert_eq!(written.range, (0, 4096));
+    }
+
+    #[test]
+    fn long_chunk_cross_channel_separates_owner_and_delivery_3610c() {
+        // Gate (C): the frontier is KEYED by `watcher_owner_channel_id` (offset
+        // authority — unchanged), while the recorded anchor PAIR points at the
+        // delivery `channel_id` (where the tail chunk lives). For a reused-watcher
+        // bridge these DIFFER; the helper must NOT swap them. The frontier key is the
+        // record PATH's channel (owner); the recorded `panel_channel_id` is delivery.
+        let dir = tempfile::tempdir().unwrap();
+        let owner_channel: u64 = 100_200_300; // watcher_owner_channel_id = frontier key
+        let delivery_channel: u64 = 900_800_700; // edit/delivery channel = anchor home
+        assert_ne!(owner_channel, delivery_channel);
+        // The record lives under the OWNER channel (the frontier key) ...
+        let owner_path =
+            delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, owner_channel);
+        // ... and its recorded anchor channel is the DELIVERY channel.
+        record_delivered_frontier_shadow_at(
+            &owner_path,
+            (10, 8192),
+            700,
+            0,
+            Some(777_111_222),
+            Some(delivery_channel),
+            8192,
+        )
+        .unwrap();
+        let written = read_record_at(&owner_path)
+            .unwrap()
+            .delivered_frontier
+            .unwrap();
+        assert_eq!(written.panel_channel_id, Some(delivery_channel)); // delivery, not owner
+        assert_eq!(written.range, (10, 8192));
+        // No record was written under the DELIVERY channel (the frontier key is owner).
+        let delivery_path =
+            delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, delivery_channel);
+        assert_eq!(read_record_at(&delivery_path), None);
+    }
+
+    #[test]
+    fn long_chunk_anchor_none_records_range_only_3610c() {
+        // Gate (D): an empty chunk Vec (impossible on the full-commit `Ok` path, but
+        // type-honest) → last = None → the helper records the range with a null
+        // anchor, identical to the absent-status-panel case. The frontier still
+        // advances (END = range.1) so the dedup floor is correct.
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36111);
+        record_delivered_frontier_shadow_at(&path, (0, 2048), 700, 0, None, Some(444), 2048)
+            .unwrap();
+        let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
+        assert_eq!(written.panel_msg_id, None);
+        assert_eq!(written.range, (0, 2048));
+    }
+
+    #[test]
+    fn long_chunk_partial_or_err_never_records_anchor_3610c() {
+        // Gate (A): the helper hardcodes `is_delivered = true` because the mod.rs
+        // call site lives ONLY inside the full-commit `Ok` arm — the long-chunk send
+        // (`send_long_message_with_rollback`) rolls back and returns `Err` on ANY
+        // chunk failure, so a partial delivery NEVER reaches the helper. The shadow
+        // gate then still requires the flag ON. This pins that an ambiguous/failed
+        // outcome (modelled here as `is_delivered = false`) can never advance the
+        // durable frontier, and that OFF is a full no-op.
+        assert!(!should_shadow_mirror(false, true)); // not-delivered → no anchor (I2)
+        assert!(!should_shadow_mirror(true, false)); // flag OFF → no anchor (deploy no-op)
+    }
+
+    #[test]
+    fn record_long_chunk_terminal_delivery_off_is_noop_3610c() {
+        // The REAL helper end-to-end under the default-OFF shadow flag: it must be a
+        // complete no-op (no panic, no write) regardless of the resolved anchor.
+        // (Tests never set AGENTDESK_DELIVERY_RECORD_SHADOW, so the OnceLock reads
+        // OFF; this exercises the helper's own short-circuit through
+        // `shadow_mirror_delivered_frontier`.)
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        // Does not panic; OFF → writes nothing.
+        super::record_long_chunk_terminal_delivery(
+            &shared,
+            &ProviderKind::Claude,
+            ChannelId::new(100_200_300), // owner (frontier key)
+            ChannelId::new(900_800_700), // delivery (anchor home)
+            (0, 4096),
+            Some(912_345_678),
+        );
+        // No durable record was created for either channel under the test root.
+        assert!(read_record(&ProviderKind::Claude, 100_200_300).is_none());
+        assert!(read_record(&ProviderKind::Claude, 900_800_700).is_none());
     }
 }
