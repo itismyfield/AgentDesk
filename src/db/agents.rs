@@ -206,6 +206,50 @@ mod tests {
             Some("1470000000000000004")
         );
     }
+
+    /// #3594 (T3, codex R2 Finding 2): the dispatch-channel resolver
+    /// (`resolve_agent_dispatch_channel_pg`) and the delivery router
+    /// (`outbox_route::use_counter_model_channel`) MUST classify counter-model
+    /// channels identically. The resolver now calls the shared predicate, so this
+    /// pins the contract: `plan-review` (the channel that regressed) and the
+    /// review family resolve to the counter-model channel, while the
+    /// agent-owned stages (`plan`, `scope-assessment`, `implementation`) and the
+    /// absent case resolve to the primary channel.
+    ///
+    /// Mutation check: dropping `plan-review` from `use_counter_model_channel`
+    /// flips the `plan-review` assertion (→ primary), failing this test.
+    #[test]
+    fn dispatch_channel_counter_model_set_matches_outbox_router() {
+        use crate::services::dispatches::outbox_route::use_counter_model_channel;
+
+        // `resolve_agent_dispatch_channel_pg` now selects the counter-model vs
+        // primary channel SOLELY via this shared predicate, so pinning the
+        // predicate's classification IS the contract for that resolver — the
+        // earlier `review|e2e-test|consultation` drift (missing `plan-review`)
+        // cannot recur without failing here.
+        //
+        // Counter-model channel (checked by the counterpart model).
+        for dt in ["review", "e2e-test", "consultation", "plan-review"] {
+            assert!(
+                use_counter_model_channel(Some(dt)),
+                "{dt} must resolve to the counter-model channel (parity with outbox_route)"
+            );
+        }
+        // Primary channel (agent designs / self-assesses / implements).
+        for dt in [
+            "plan",
+            "scope-assessment",
+            "implementation",
+            "review-decision",
+        ] {
+            assert!(
+                !use_counter_model_channel(Some(dt)),
+                "{dt} must resolve to the PRIMARY channel"
+            );
+        }
+        // Absent dispatch_type → primary.
+        assert!(!use_counter_model_channel(None));
+    }
 }
 
 fn normalized_channel(value: Option<String>) -> Option<String> {
@@ -303,7 +347,16 @@ pub async fn resolve_agent_dispatch_channel_pg(
     Ok(load_agent_channel_bindings_pg(pool, agent_id)
         .await?
         .and_then(|bindings| {
-            if matches!(dispatch_type, Some("review" | "e2e-test" | "consultation")) {
+            // #3594 (T3, codex R2 Finding 2): resolve the counter-model-vs-primary
+            // channel through the SINGLE source of truth
+            // `outbox_route::use_counter_model_channel` instead of a duplicated
+            // `matches!` set. Previously this set was `review|e2e-test|consultation`
+            // and had silently drifted from `use_counter_model_channel` (which also
+            // routes `plan-review` to the counter-model channel), so a `plan-review`
+            // dispatch was validated/routed against the PRIMARY channel at creation
+            // while delivery used the counter-model channel. Calling the shared
+            // predicate makes the two layers structurally impossible to drift again.
+            if crate::services::dispatches::outbox_route::use_counter_model_channel(dispatch_type) {
                 bindings.counter_model_channel()
             } else {
                 bindings.primary_channel()

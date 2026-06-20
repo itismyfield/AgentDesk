@@ -92,6 +92,24 @@ pub(super) struct ActivateCardState {
     /// `scope_assessment_status` key → `false` here → no behavior change (the
     /// core no-regression invariant — absent ≠ pending).
     pub(super) scope_assessment_pending: bool,
+    /// #3594 (T3, codex R2 Finding 1): the card's recorded `scope_depth`
+    /// (`metadata->>'scope_depth'`), one of `direct` / `plan_only` / `full`
+    /// (already normalized + full-fallback on write by
+    /// `policies/lib/kanban-scope-assessment._recordScopeAssessment`). `None`
+    /// when the card never ran scope-assessment (no key) — the core
+    /// no-regression case: activate must NOT insert a plan stage for such cards.
+    /// Drives `activate_next_dispatch_type` so a late entry (one generated AFTER
+    /// scope-assessment completed, missed by both the JS scope-completion resume
+    /// AND its by-card fallback) does not reach the plain-`implementation`
+    /// activate path and bypass the depth gate.
+    pub(super) scope_depth: Option<String>,
+    /// #3594 (T3, codex R2 Finding 1): whether this card already has a
+    /// `completed` `plan` dispatch. When true the plan stage is already behind
+    /// us, so activate creates `implementation` (not another `plan`) — the
+    /// plan-review fan-out (full) is owned by the JS plan-completion arm, which
+    /// already ran for that completed plan. Idempotency anchor: prevents
+    /// activate from re-creating a plan after one finished.
+    pub(super) has_completed_plan_dispatch: bool,
 }
 
 impl ActivateCardState {
@@ -142,6 +160,44 @@ impl ActivateCardState {
     /// `"pending"`-only: a card with no scope-assessment never blocks here.
     pub(super) fn scope_assessment_pending(&self) -> bool {
         self.scope_assessment_pending
+    }
+
+    /// #3594 (T3, codex R2 Finding 1): the dispatch_type activate must create
+    /// for this card's pending entry — `"plan"` to honor the depth gate, or
+    /// `"implementation"` for the fast track. This is the activate-side mirror of
+    /// the JS `policies/lib/kanban-scope-gate._resolveScopeFlow(depth)`; it MUST
+    /// stay in lockstep with that mapping (same depth → same first stage).
+    ///
+    /// activate only inserts the **plan** stage when it is missing — it never
+    /// inserts plan-review (that is the JS plan-completion arm's job once a plan
+    /// dispatch exists; the plan dispatch activate creates here carries the
+    /// linked entry, so when it completes the JS arm finds it and fans out to
+    /// plan-review (full) / impl (plan_only) exactly as on the normal path).
+    ///
+    /// Returns `"plan"` iff:
+    ///   - `scope_depth` is present (the card WAS scope-assessed) — absent ≠
+    ///     scope-assessed, so a card that never ran scope-assessment stays on the
+    ///     plain-`implementation` path (the core no-regression invariant), AND
+    ///   - `scope_depth != "direct"` — `direct` is the fast track (`needsPlan:
+    ///     false`), AND
+    ///   - no `completed` plan dispatch exists yet — once a plan finished the
+    ///     stage is behind us and we advance to `implementation`.
+    ///
+    /// A present-but-unrecognized depth (corrupted metadata; in practice
+    /// impossible since the writer normalizes to {direct,plan_only,full}) is
+    /// treated as plan-worthy, mirroring `_resolveScopeFlow`'s "unknown → full"
+    /// most-cautious fallback.
+    pub(super) fn activate_next_dispatch_type(&self) -> &'static str {
+        let needs_plan = match self.scope_depth.as_deref() {
+            None => false,
+            Some("direct") => false,
+            Some(_) => true,
+        };
+        if needs_plan && !self.has_completed_plan_dispatch {
+            "plan"
+        } else {
+            "implementation"
+        }
     }
 }
 
@@ -195,7 +251,14 @@ pub(super) async fn load_activate_card_state_pg(
     let row = sqlx::query(
         "SELECT status, title, latest_dispatch_id, repo_id, assigned_agent_id,
                 COALESCE(metadata->>'scope_assessment_status', '') = 'pending'
-                    AS scope_assessment_pending
+                    AS scope_assessment_pending,
+                metadata->>'scope_depth' AS scope_depth,
+                EXISTS (
+                    SELECT 1 FROM task_dispatches td
+                    WHERE td.kanban_card_id = kanban_cards.id
+                      AND td.dispatch_type = 'plan'
+                      AND td.status = 'completed'
+                ) AS has_completed_plan_dispatch
          FROM kanban_cards
          WHERE id = $1",
     )
@@ -291,6 +354,12 @@ pub(super) async fn load_activate_card_state_pg(
         scope_assessment_pending: row
             .try_get("scope_assessment_pending")
             .map_err(|error| format!("decode scope_assessment_pending for {card_id}: {error}"))?,
+        scope_depth: row
+            .try_get("scope_depth")
+            .map_err(|error| format!("decode scope_depth for {card_id}: {error}"))?,
+        has_completed_plan_dispatch: row.try_get("has_completed_plan_dispatch").map_err(
+            |error| format!("decode has_completed_plan_dispatch for {card_id}: {error}"),
+        )?,
     })
 }
 
@@ -339,4 +408,107 @@ pub(super) async fn resolve_activate_pipeline_pg(
         repo_override.as_ref(),
         agent_override.as_ref(),
     ))
+}
+
+/// #3594 (T3, codex R2 Finding 1): pure (no-PG) coverage of the activate-side
+/// depth gate `ActivateCardState::activate_next_dispatch_type`, which mirrors the
+/// JS `policies/lib/kanban-scope-gate._resolveScopeFlow`. The PG tests in
+/// `activate_command::depth_gate_activate_pg_tests` prove the end-to-end create
+/// path; these pin every branch of the decision itself (including the
+/// `has_completed_plan_dispatch` idempotency arm the PG attach-path short-circuits
+/// before reaching the create decision).
+#[cfg(test)]
+mod activate_next_dispatch_type_tests {
+    use super::ActivateCardState;
+
+    /// Build a minimal `ActivateCardState` varying only the two fields the gate
+    /// reads. The rest are inert defaults — the gate does not consult them.
+    fn state(scope_depth: Option<&str>, has_completed_plan_dispatch: bool) -> ActivateCardState {
+        ActivateCardState {
+            status: "in_progress".to_string(),
+            title: "T".to_string(),
+            latest_dispatch_id: None,
+            latest_dispatch_status: None,
+            latest_dispatch_type: None,
+            entry_status: "pending".to_string(),
+            repo_id: None,
+            assigned_agent_id: None,
+            scope_assessment_pending: false,
+            scope_depth: scope_depth.map(str::to_string),
+            has_completed_plan_dispatch,
+        }
+    }
+
+    #[test]
+    fn full_and_plan_only_without_completed_plan_create_plan() {
+        // Mirrors _resolveScopeFlow needsPlan=true for full/plan_only.
+        assert_eq!(
+            state(Some("full"), false).activate_next_dispatch_type(),
+            "plan"
+        );
+        assert_eq!(
+            state(Some("plan_only"), false).activate_next_dispatch_type(),
+            "plan"
+        );
+    }
+
+    #[test]
+    fn direct_is_fast_track_implementation() {
+        // _resolveScopeFlow("direct") → needsPlan=false.
+        assert_eq!(
+            state(Some("direct"), false).activate_next_dispatch_type(),
+            "implementation"
+        );
+    }
+
+    #[test]
+    fn absent_scope_depth_is_implementation_no_regression() {
+        // Core no-regression: a card that never ran scope-assessment (absent ≠
+        // scope-assessed) must stay on the plain implementation path. This is the
+        // ONE place the activate gate diverges from _resolveScopeFlow's
+        // "unknown→full": _resolveScopeFlow is only ever called post-assessment
+        // (depth always present), whereas activate sees never-assessed cards too.
+        assert_eq!(
+            state(None, false).activate_next_dispatch_type(),
+            "implementation"
+        );
+    }
+
+    #[test]
+    fn completed_plan_advances_to_implementation_even_for_full() {
+        // Idempotency: once a plan finished the stage is behind us. full/plan_only
+        // with a completed plan → implementation (NOT another plan). The
+        // plan-review fan-out for full is owned by the JS plan-completion arm that
+        // already ran for that completed plan.
+        assert_eq!(
+            state(Some("full"), true).activate_next_dispatch_type(),
+            "implementation"
+        );
+        assert_eq!(
+            state(Some("plan_only"), true).activate_next_dispatch_type(),
+            "implementation"
+        );
+        // direct + completed plan is still implementation (vacuously).
+        assert_eq!(
+            state(Some("direct"), true).activate_next_dispatch_type(),
+            "implementation"
+        );
+    }
+
+    #[test]
+    fn unrecognized_present_depth_is_cautious_plan() {
+        // Defensive double-guard parity with _resolveScopeFlow: a present-but-
+        // unknown depth (corrupted metadata; impossible on the normal path since
+        // the writer normalizes to {direct,plan_only,full}) is treated as
+        // plan-worthy (most cautious), NOT as absent.
+        assert_eq!(
+            state(Some("weird"), false).activate_next_dispatch_type(),
+            "plan"
+        );
+        // ...unless a plan already completed.
+        assert_eq!(
+            state(Some("weird"), true).activate_next_dispatch_type(),
+            "implementation"
+        );
+    }
 }

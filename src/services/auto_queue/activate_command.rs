@@ -531,6 +531,38 @@ pub(crate) async fn activate_with_deps_pg(
             );
         }
 
+        // #3594 (T3, codex R2 Finding 1): pick the dispatch_type DEPTH-AWARELY.
+        // A "late" entry — generated AFTER scope-assessment completed, so it was
+        // never claimed by the JS scope-completion resume NOR its by-card
+        // fallback — reaches here `pending` with the scope-pending gate already
+        // released. Creating a plain `"implementation"` would bypass the depth
+        // gate (plan / plan-review). `activate_next_dispatch_type` mirrors the JS
+        // `_resolveScopeFlow`: full/plan_only → `"plan"` (unless a plan already
+        // completed), direct/absent/plan-done → `"implementation"`. The plan we
+        // create here carries the entry, so when it completes the JS
+        // plan-completion arm fans out to plan-review (full) / impl (plan_only)
+        // exactly as on the normal path. Idempotency: `create_*_dispatch_for_entry_pg`
+        // short-circuits to any existing live dispatch of the SAME type, so a
+        // concurrent JS-created plan is never duplicated; the completed-plan
+        // guard stops re-creating a plan after one finished.
+        let next_dispatch_type = initial_state.activate_next_dispatch_type();
+        if next_dispatch_type == "plan" {
+            // Carry the resolved depth on the plan dispatch context so the JS
+            // plan-completion arm branches (plan_only→impl, full→plan-review)
+            // WITHOUT re-reading card metadata — matching the JS
+            // `_createPlanDispatch` `{ scope_depth }` contract. Defaults to "full"
+            // only if the depth somehow read empty (impossible once
+            // scope_depth is present, but fail-safe to the most cautious flow).
+            let depth = initial_state.scope_depth.as_deref().unwrap_or("full");
+            dispatch_extra_fields.push(("scope_depth", json!(depth)));
+            crate::auto_queue_log!(
+                info,
+                "activate_late_entry_depth_gated_plan_pg_3594",
+                entry_log_ctx.clone().maybe_slot_index(slot_index),
+                "[auto-queue] late entry {entry_id} for card {card_id}: scope_depth={depth} → creating depth-gated `plan` dispatch (not plain implementation)",
+            );
+        }
+
         let dispatch_context = build_auto_queue_dispatch_context(
             &entry_id,
             *group,
@@ -542,7 +574,7 @@ pub(crate) async fn activate_with_deps_pg(
             pool,
             &card_id,
             &agent_id,
-            "implementation",
+            next_dispatch_type,
             &initial_state.title,
             &dispatch_context,
             ActivateDispatchEntryAttachment::new(
@@ -1813,13 +1845,54 @@ mod tests {
         }
 
         async fn impl_dispatch_row_count(pool: &PgPool) -> i64 {
+            dispatch_row_count_of_type(pool, "implementation").await
+        }
+
+        /// #3594 (T3, codex R2 Finding 1): count dispatch rows of an arbitrary
+        /// `dispatch_type` for `card-dg`. Used by the late-entry depth-aware tests
+        /// to assert that activate created a `plan` (or did NOT) instead of a
+        /// plain `implementation`.
+        async fn dispatch_row_count_of_type(pool: &PgPool, dispatch_type: &str) -> i64 {
             sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*)::BIGINT FROM task_dispatches
-                 WHERE kanban_card_id = 'card-dg' AND dispatch_type = 'implementation'",
+                 WHERE kanban_card_id = 'card-dg' AND dispatch_type = $1",
             )
+            .bind(dispatch_type)
             .fetch_one(pool)
             .await
-            .expect("count impl dispatches")
+            .expect("count dispatches of type")
+        }
+
+        /// #3594 (T3, codex R2 Finding 1): set BOTH `scope_assessment_status` and
+        /// `scope_depth` on `card-dg` metadata — the late-entry state where the
+        /// scope-assessment already COMPLETED (so the scope-pending gate is
+        /// released) and recorded a depth, exactly as
+        /// `kanban-scope-assessment._recordScopeAssessment` writes it.
+        async fn set_scope_completed_with_depth(pool: &PgPool, depth: &str) {
+            let metadata = serde_json::json!({
+                "scope_assessment_status": "completed",
+                "scope_depth": depth,
+            })
+            .to_string();
+            sqlx::query("UPDATE kanban_cards SET metadata = $1::jsonb WHERE id = 'card-dg'")
+                .bind(metadata)
+                .execute(pool)
+                .await
+                .expect("set scope metadata with depth");
+        }
+
+        /// #3594 (T3, codex R2 Finding 1): seed a COMPLETED `plan` dispatch so the
+        /// `has_completed_plan_dispatch` guard fires — the "plan already finished"
+        /// idempotency case where activate must advance to `implementation`, not
+        /// re-create a plan.
+        async fn seed_completed_plan_dispatch(pool: &PgPool) {
+            sqlx::query(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, completed_at)
+                 VALUES ('plan-done', 'card-dg', 'agent-dg', 'plan', 'completed', 'Plan', NOW())",
+            )
+            .execute(pool)
+            .await
+            .expect("seed completed plan dispatch");
         }
 
         async fn entry_status(pool: &PgPool) -> String {
@@ -1906,6 +1979,225 @@ mod tests {
                 "dispatched",
                 "a card with no scope-assessment must bind the entry (no regression)"
             );
+
+            pool.close().await;
+            pg_db.drop().await;
+        }
+
+        // ── #3594 (T3, codex R2 Finding 1): LATE-ENTRY depth-aware tests ──────
+        //
+        // The "late entry" ordering: a card runs scope-assessment FIRST (so
+        // `/queue/generate` skipped it while the scope dispatch was
+        // pending/dispatched). scope-assessment COMPLETES → its JS resume + the
+        // by-card fallback find NO auto-queue entry yet (it was never generated).
+        // THEN `/queue/generate` finally creates the entry (`pending`) — it
+        // reaches activate with `scope_assessment_status == "completed"` (gate
+        // released) and NO active dispatch. Pre-fix, activate created a plain
+        // `implementation`, bypassing the depth gate. These assert activate is now
+        // depth-aware: it creates a `plan` for full/plan_only (mirroring the JS
+        // `_resolveScopeFlow`), and stays on `implementation` for direct / absent
+        // / plan-already-done (no regression).
+        //
+        // The full/plan_only cards seed NO existing dispatch, so activate reaches
+        // the CREATE path; `plan` does not require a fresh worktree
+        // (dispatch_type_requires_fresh_worktree = implementation|rework only), so
+        // the plan dispatch is creatable in a PG-only fixture. The direct/absent
+        // cards seed an existing live `implementation` dispatch so activate
+        // ATTACHES to it (proving it chose `implementation`) without needing
+        // worktree infra to create a fresh impl.
+
+        async fn plan_dispatch_row_count(pool: &PgPool) -> i64 {
+            dispatch_row_count_of_type(pool, "plan").await
+        }
+
+        /// Read the `scope_depth` carried on the newly-created `plan` dispatch
+        /// context — must equal the card's recorded depth so the JS
+        /// plan-completion arm branches (plan_only→impl, full→plan-review)
+        /// without re-reading metadata.
+        async fn latest_plan_dispatch_scope_depth(pool: &PgPool) -> Option<String> {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT context::jsonb->>'scope_depth'
+                 FROM task_dispatches
+                 WHERE kanban_card_id = 'card-dg' AND dispatch_type = 'plan'
+                 ORDER BY created_at DESC
+                 LIMIT 1",
+            )
+            .fetch_one(pool)
+            .await
+            .expect("read plan dispatch scope_depth")
+        }
+
+        #[tokio::test]
+        async fn late_entry_full_depth_creates_plan_not_impl_pg() {
+            let pg_db = TestPostgresDb::create().await;
+            let pool = pg_db.connect_and_migrate_with_max_connections(8).await;
+            seed_run_card_entry(&pool).await;
+            // No existing dispatch → activate reaches the create path.
+            set_scope_completed_with_depth(&pool, "full").await;
+
+            let deps = make_deps(&pool);
+            let (status, _body) = activate_with_deps_pg(&deps, activate_body()).await;
+            assert_eq!(status, axum::http::StatusCode::OK);
+
+            // Depth-aware: a `plan` dispatch was created, NOT a plain impl.
+            assert_eq!(
+                plan_dispatch_row_count(&pool).await,
+                1,
+                "full late entry must create a depth-gated `plan` dispatch"
+            );
+            assert_eq!(
+                impl_dispatch_row_count(&pool).await,
+                0,
+                "full late entry must NOT create a plain `implementation` dispatch (depth gate bypass)"
+            );
+            // The resolved depth rides on the plan context so the JS
+            // plan-completion arm fans out to plan-review (full) without re-reading
+            // card metadata.
+            assert_eq!(
+                latest_plan_dispatch_scope_depth(&pool).await.as_deref(),
+                Some("full"),
+                "plan dispatch must carry scope_depth=full for the JS plan-completion fan-out"
+            );
+            // The late entry was bound to the plan dispatch (not left pending).
+            assert_eq!(entry_status(&pool).await, "dispatched");
+
+            pool.close().await;
+            pg_db.drop().await;
+        }
+
+        #[tokio::test]
+        async fn late_entry_plan_only_depth_creates_plan_not_impl_pg() {
+            let pg_db = TestPostgresDb::create().await;
+            let pool = pg_db.connect_and_migrate_with_max_connections(8).await;
+            seed_run_card_entry(&pool).await;
+            set_scope_completed_with_depth(&pool, "plan_only").await;
+
+            let deps = make_deps(&pool);
+            let (status, _body) = activate_with_deps_pg(&deps, activate_body()).await;
+            assert_eq!(status, axum::http::StatusCode::OK);
+
+            assert_eq!(
+                plan_dispatch_row_count(&pool).await,
+                1,
+                "plan_only late entry must create a `plan` dispatch"
+            );
+            assert_eq!(
+                impl_dispatch_row_count(&pool).await,
+                0,
+                "plan_only late entry must NOT create a plain `implementation` dispatch"
+            );
+            // plan_only must still carry its depth so the plan-completion arm goes
+            // plan→impl (NOT plan-review). The activate side does not itself create
+            // plan-review; it only seeds the plan stage with the correct depth.
+            assert_eq!(
+                latest_plan_dispatch_scope_depth(&pool).await.as_deref(),
+                Some("plan_only"),
+                "plan dispatch must carry scope_depth=plan_only"
+            );
+            assert_eq!(entry_status(&pool).await, "dispatched");
+
+            pool.close().await;
+            pg_db.drop().await;
+        }
+
+        #[tokio::test]
+        async fn late_entry_direct_depth_creates_impl_no_plan_pg() {
+            let pg_db = TestPostgresDb::create().await;
+            let pool = pg_db.connect_and_migrate_with_max_connections(8).await;
+            seed_run_card_entry(&pool).await;
+            // direct → fast track. Seed an existing live impl so activate ATTACHES
+            // (no worktree-requiring fresh-impl create) — proving it chose the
+            // `implementation` path, NOT `plan`.
+            seed_existing_impl_dispatch(&pool).await;
+            set_scope_completed_with_depth(&pool, "direct").await;
+
+            let deps = make_deps(&pool);
+            let (status, _body) = activate_with_deps_pg(&deps, activate_body()).await;
+            assert_eq!(status, axum::http::StatusCode::OK);
+
+            // No plan stage for direct.
+            assert_eq!(
+                plan_dispatch_row_count(&pool).await,
+                0,
+                "direct late entry must NOT create a `plan` dispatch (fast track)"
+            );
+            // It attached to the existing impl (the `implementation` decision).
+            assert_eq!(
+                entry_status(&pool).await,
+                "dispatched",
+                "direct late entry must bind to the implementation dispatch"
+            );
+
+            pool.close().await;
+            pg_db.drop().await;
+        }
+
+        #[tokio::test]
+        async fn late_entry_full_depth_with_completed_plan_does_not_create_new_plan_pg() {
+            let pg_db = TestPostgresDb::create().await;
+            let pool = pg_db.connect_and_migrate_with_max_connections(8).await;
+            seed_run_card_entry(&pool).await;
+            // full depth, but a plan ALREADY completed AND the impl is already
+            // live. activate attaches the entry to the existing impl (the
+            // `has_active_dispatch()` branch fires before the create branch), so it
+            // must NOT spin up a SECOND plan. This pins the end-to-end invariant
+            // "a finished plan is never re-run by activate"; the create-path
+            // decision for the same state (completed plan → `implementation`) is
+            // unit-tested directly in `view::activate_next_dispatch_type_tests`
+            // (which needs no worktree infra).
+            seed_completed_plan_dispatch(&pool).await;
+            seed_existing_impl_dispatch(&pool).await;
+            set_scope_completed_with_depth(&pool, "full").await;
+
+            let deps = make_deps(&pool);
+            let (status, _body) = activate_with_deps_pg(&deps, activate_body()).await;
+            assert_eq!(status, axum::http::StatusCode::OK);
+
+            // No NEW plan was created — only the pre-existing completed plan remains.
+            assert_eq!(
+                plan_dispatch_row_count(&pool).await,
+                1,
+                "a completed plan must not be re-created (idempotency)"
+            );
+            assert_eq!(
+                entry_status(&pool).await,
+                "dispatched",
+                "with a completed plan + live impl, activate binds the entry to the implementation dispatch"
+            );
+
+            pool.close().await;
+            pg_db.drop().await;
+        }
+
+        /// Core no-regression, explicit plan-absence form: a card that never ran
+        /// scope-assessment (no `scope_depth` key) must NEVER get a `plan` stage
+        /// from activate — it stays on the plain `implementation` path exactly as
+        /// before T3. (The sibling
+        /// `card_without_scope_assessment_entry_binds_no_regression_pg` asserts the
+        /// entry binds; this adds the `plan` must NOT exist invariant.)
+        ///
+        /// Mutation check: if `activate_next_dispatch_type` dropped the
+        /// `scope_depth.is_none()` short-circuit and treated absent as plan-worthy,
+        /// this test would see a `plan` dispatch created and fail.
+        #[tokio::test]
+        async fn absent_scope_depth_never_creates_plan_no_regression_pg() {
+            let pg_db = TestPostgresDb::create().await;
+            let pool = pg_db.connect_and_migrate_with_max_connections(8).await;
+            seed_run_card_entry(&pool).await;
+            seed_existing_impl_dispatch(&pool).await;
+            // No scope metadata at all (absent ≠ scope-assessed).
+            set_scope_status(&pool, None).await;
+
+            let deps = make_deps(&pool);
+            let (status, _body) = activate_with_deps_pg(&deps, activate_body()).await;
+            assert_eq!(status, axum::http::StatusCode::OK);
+
+            assert_eq!(
+                plan_dispatch_row_count(&pool).await,
+                0,
+                "a card that never ran scope-assessment must NEVER get a plan stage from activate"
+            );
+            assert_eq!(entry_status(&pool).await, "dispatched");
 
             pool.close().await;
             pg_db.drop().await;
