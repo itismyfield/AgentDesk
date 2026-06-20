@@ -273,7 +273,21 @@
 # idle-tail / panel / routing check on the degraded bridge-owned path even though
 # the respawned watcher owns the live tmux relay (the #3582 "relay re-occurrence"
 # regression). No new direct-send; pure inflight-field stamp mirroring tmux.rs.
-"src/services/discord/recovery_engine.rs" = 3349
+# #3610 PR-2: +33 (3349 -> 3382) for the anchor-repost backstop hook in the
+# committed branch of `restore_inflight_turns` (the #3607 "committed-then-gone"
+# fallback). The whole block is gated behind the default-OFF
+# `recovery_anchor_repost_enabled()` flag (dark deploy — flag OFF is a byte-for-byte
+# no-op), and the heavy lifting lives in the non-giant `recovery_paths/restart.rs`
+# (`try_recover_anchor_repost`) — this site only resolves `tmux_alive` and disposes
+# the returned outcome. No new direct-send; the repost reuses the existing
+# `relay_recovered_terminal_text_to_placeholder` send-new path.
+# #3610 PR-2 codex r2 (Issue-2 storm guard): +15 (3382 -> 3397) for the comment
+# block at the anchor-repost dispose call documenting why `tmux_alive = false` is
+# passed (committed-row repost must be budget-bounded, not pane-preserved). The
+# call itself drops the now-unused `tmux_session_alive_with_retry` probe — logic
+# shrank by one line; the net +15 is comment LoC explaining the storm-prevention
+# invariant. No new behavior at this site beyond the literal `false` argument.
+"src/services/discord/recovery_engine.rs" = 3397
 # #3034 batch-8: lowered 3771 -> 3770 (dead-code removal).
 # #3038 S1: +1 (3770 -> 3771) for the mechanical `shared.queued_placeholders` ->
 # `shared.queued.queued_placeholders` re-wire (one extra method-chain line) forced
