@@ -192,7 +192,15 @@ module.exports = function attachReconciliation(timeouts, helpers) {
               agentdesk.log.warn("[reconcile] Card " + card.id + " → " + rReview + "(awaiting_dod): " + reasons[0]);
               continue;
             }
-            agentdesk.kanban.setStatus(card.id, rPending);
+            // #3603: force=true. set_status_raw_pg now delegates to the FSM
+            // reducer (decide_pipeline_transition), which BLOCKs non-forced
+            // transitions that have no pipeline rule. This PM-gate recovery
+            // revert (in_progress → requested == rPending/kickoff) has no
+            // transition rule, so a non-forced call would be blocked and the
+            // missed-hook fallback would break. force=true routes through the
+            // reducer's no-rule bypass arm, preserving the prior behaviour.
+            // (Mirrors the live hot-path precedent kanban-rules.js:610.)
+            agentdesk.kanban.setStatus(card.id, rPending, true);
             agentdesk.kanban.setReviewStatus(card.id, null, {suggestion_pending_at: null});
             // #117: sync canonical review state
             agentdesk.reviewState.sync(card.id, "idle");
