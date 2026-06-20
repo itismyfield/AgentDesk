@@ -88,6 +88,30 @@ fn render_dispatch_context_section(
         sections.push("Dispatch Trigger: auto-queue".to_string());
     }
 
+    // #3594 (T3, codex Finding 3): surface the parent PLAN dispatch's output so a
+    // plan-review (and full→impl) dispatch actually sees the plan body it must
+    // review / implement. The kanban-rules scope-gate copies the completed plan
+    // dispatch's `result.plan` into the downstream dispatch context under
+    // `parent_plan` (it already holds the plan result in hand at fan-out time),
+    // and this renders it verbatim into the prompt. Without this the agent only
+    // saw `{scope_depth}` and had to re-derive the plan from the issue alone.
+    // Truncated defensively so an oversized plan cannot blow up the system prompt.
+    if let Some(plan) = context
+        .get("parent_plan")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        const PARENT_PLAN_PROMPT_LIMIT: usize = 8000;
+        let rendered = if plan.chars().count() > PARENT_PLAN_PROMPT_LIMIT {
+            let truncated: String = plan.chars().take(PARENT_PLAN_PROMPT_LIMIT).collect();
+            format!("{truncated}\n… (plan truncated)")
+        } else {
+            plan.to_string()
+        };
+        sections.push(format!("Parent Plan (from the plan dispatch):\n{rendered}"));
+    }
+
     let reset_provider_state = context
         .get("reset_provider_state")
         .and_then(|value| value.as_bool())

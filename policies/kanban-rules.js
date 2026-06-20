@@ -58,6 +58,7 @@ var _recordScopeAssessment = _scopeAssessment._recordScopeAssessment;
 // flow identically instead of stranding the card after recording depth.
 var _scopeGate = require("./lib/kanban-scope-gate");
 var _resolveScopeFlow = _scopeGate._resolveScopeFlow;
+var _claimPendingEntryForDispatch = _scopeGate._claimPendingEntryForDispatch;
 var _createImplDispatch = _scopeGate._createImplDispatch;
 var _createPlanDispatch = _scopeGate._createPlanDispatch;
 var _createPlanReviewDispatch = _scopeGate._createPlanReviewDispatch;
@@ -119,6 +120,16 @@ function _maybeDispatchScopeAssessment(cardId) {
     scope_assessment_status: "pending",
     scope_assessment_dispatch_id: dispatchId
   });
+  // #3594 (T3, codex Finding 2): CLAIM the card's pending auto-queue entry onto
+  // the scope-assessment dispatch (consultation pattern). This links the entry to
+  // the staged dispatch chain (auto_queue_entry_dispatch_history) so scope
+  // completion's resume can find it and create the depth-gated next dispatch
+  // (direct→impl, plan_only/full→plan), instead of the entry staying pending and
+  // the activate fallback creating a plain `implementation` that bypasses the
+  // depth gate. The Rust `entry_status != "pending"` guard then naturally blocks
+  // activate from racing in (double safety with the `scope_assessment_pending`
+  // gate). No-op for manual/API cards with no pending entry.
+  _claimPendingEntryForDispatch(cardId, dispatchId, "scope_assessment_claim");
   agentdesk.log.info("[scope] Card " + cardId + " → scope-assessment dispatch " + dispatchId + " (agent " + agentId + ")");
 }
 
@@ -306,11 +317,16 @@ var rules = {
     if (dispatch.dispatch_type === "plan") {
       var planDepth = (dispatchContext && dispatchContext.scope_depth) || "full";
       var planFlow = _resolveScopeFlow(planDepth);
+      // #3594 (T3, codex Finding 3): carry the plan body forward so the next
+      // stage actually sees it. The plan dispatch's result holds {plan: "..."}.
+      var planResult = {};
+      try { planResult = JSON.parse(dispatch.result || "{}"); } catch (e) { planResult = {}; }
+      var planText = (planResult && typeof planResult.plan === "string") ? planResult.plan : null;
       if (planFlow.needsPlanReview) {
-        _createPlanReviewDispatch(dispatch.kanban_card_id, dispatch, card, planDepth);
+        _createPlanReviewDispatch(dispatch.kanban_card_id, dispatch, card, planDepth, planText);
         agentdesk.log.info("[scope-gate] " + dispatch.kanban_card_id + " plan done (depth=" + planDepth + ") → plan-review dispatch");
       } else {
-        _createImplDispatch(dispatch.kanban_card_id, dispatch, card, "scope_gate_plan_done");
+        _createImplDispatch(dispatch.kanban_card_id, dispatch, card, "scope_gate_plan_done", planText);
         agentdesk.log.info("[scope-gate] " + dispatch.kanban_card_id + " plan done (depth=plan_only) → implementation dispatch");
       }
       return;
@@ -328,7 +344,13 @@ var rules = {
       var verdict = planReviewResult.verdict;
       var prDepth = (dispatchContext && dispatchContext.scope_depth) || "full";
       if (verdict === "pass") {
-        _createImplDispatch(dispatch.kanban_card_id, dispatch, card, "scope_gate_plan_review_pass");
+        // #3594 (T3, codex Finding 3): forward the approved plan body (carried in
+        // the plan-review dispatch context as parent_plan) into the impl dispatch
+        // so the implementer sees the plan that was reviewed and approved.
+        var approvedPlan = (dispatchContext && typeof dispatchContext.parent_plan === "string")
+          ? dispatchContext.parent_plan
+          : null;
+        _createImplDispatch(dispatch.kanban_card_id, dispatch, card, "scope_gate_plan_review_pass", approvedPlan);
         agentdesk.log.info("[scope-gate] " + dispatch.kanban_card_id + " plan-review pass → implementation dispatch");
       } else {
         _createPlanDispatch(dispatch.kanban_card_id, dispatch, card, prDepth);

@@ -53,6 +53,16 @@ fn should_sync_runtime_auto_queue_terminal_entry(
     if crate::dispatch::dispatch_is_side_path(dispatch_type) {
         return false;
     }
+    // #3594 (T3): plan / plan-review are multi-stage WORK dispatches whose
+    // completion the kanban-rules JS fan-out consumes to RE-DISPATCH the bound
+    // auto-queue entry to the next stage (plan → plan-review|impl, plan-review →
+    // impl|re-plan). Finalizing the entry here (the live turn_bridge/watcher
+    // completion path) would break that chain and close the card with no
+    // implementation. Mirror of dispatch_status::should_skip_auto_queue_terminal_sync
+    // — do NOT sync; JS owns the entry transition.
+    if matches!(dispatch_type, Some("plan" | "plan-review")) {
+        return false;
+    }
     match dispatch_type {
         Some("implementation" | "rework") => auto_queue_review_disabled,
         _ => true,
@@ -616,6 +626,22 @@ mod runtime_completion_policy_tests {
                 ),
                 "scope-assessment must not sync runtime terminal entry (review_disabled={review_disabled})"
             );
+        }
+        // #3594 (T3): plan / plan-review completion (via the live turn_bridge/watcher
+        // path) must NOT sync the bound auto-queue entry — the kanban-rules JS
+        // fan-out re-dispatches it to the next stage. review_disabled must not change
+        // this. Mirror of dispatch_status::should_skip_auto_queue_terminal_sync.
+        for dispatch_type in ["plan", "plan-review"] {
+            for review_disabled in [false, true] {
+                assert!(
+                    !should_sync_runtime_auto_queue_terminal_entry(
+                        Some(dispatch_type),
+                        &normal_result,
+                        review_disabled,
+                    ),
+                    "{dispatch_type} must not sync runtime terminal entry (review_disabled={review_disabled})"
+                );
+            }
         }
     }
 }

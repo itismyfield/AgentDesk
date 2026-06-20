@@ -1674,71 +1674,212 @@ mod tests {
             pg_db.drop().await;
         }
 
-        // #3594 (T3) ─ impl-before-depth race gate. While a scope-assessment is
-        // in flight (`scope_assessment_status == "pending"`), the activate loop
-        // must DEFER creating an implementation dispatch — otherwise (because
-        // scope-assessment is excluded from has_active_dispatch, #3605) activate
-        // would fall through and create impl before the depth that gates the flow
-        // is known. The gate the loop reads is `scope_assessment_pending()`,
-        // computed by the real production loader from card metadata. These
-        // exercise that loader against real Postgres rows.
+        // #3594 (T3) impl-before-depth race gate: the EFFECTIVE row-counting tests
+        // that drive the real `activate_with_deps_pg` live in the sibling module
+        // `depth_gate_activate_pg_tests` below. The earlier predicate-only tests
+        // (asserting just `scope_assessment_pending()` on a loaded state without
+        // running activate or counting dispatch rows) were vacuous — they passed
+        // even with the loop guard deleted — and have been replaced.
+    }
+
+    /// #3594 (T3, codex Finding 4): EFFECTIVE race-gate tests. The previous
+    /// `scope_assessment_*_pg` tests only asserted the `scope_assessment_pending()`
+    /// PREDICATE on a loaded `ActivateCardState` — they never ran the real activate
+    /// entry point, so deleting the loop guard left them green (vacuous).
+    ///
+    /// These drive the REAL `activate_with_deps_pg` against real Postgres rows and
+    /// assert on what the gate actually controls. Creating a *fresh* implementation
+    /// dispatch needs a resolvable git worktree a unit fixture cannot cheaply
+    /// provide, so to keep the post-gate step observable WITHOUT worktree infra each
+    /// card is seeded with a pre-existing live (dispatched) implementation dispatch.
+    /// The activate loop's order is: scope-pending guard FIRST, then the
+    /// `has_active_dispatch()` attach step. So:
+    ///   - scope pending  → the `if scope_assessment_pending() { continue; }` guard
+    ///                       fires BEFORE the attach step: the pending entry is NOT
+    ///                       bound (stays `pending`), and no NEW impl dispatch row is
+    ///                       created (exactly one pre-existing impl row remains).
+    ///   - scope completed → the guard does NOT fire, so the loop reaches the attach
+    ///                       step and binds the entry to the existing impl dispatch
+    ///                       (entry → `dispatched`).
+    ///   - no scope-assessment key → core no-regression: identical to "completed"
+    ///                       (absent ≠ pending) — entry binds.
+    ///
+    /// Mutation check: deleting the loop guard makes the "pending" case fall through
+    /// to the attach step too → its entry becomes `dispatched` → the pending-case
+    /// `entry stays pending` assertion fails. (Verified by hand.)
+    mod depth_gate_activate_pg_tests {
+        use super::super::activate_with_deps_pg;
+        use super::super::{ActivateBody, AutoQueueActivateDeps};
+        use crate::db::auto_queue::test_support::TestPostgresDb;
+        use sqlx::PgPool;
+        use std::sync::Arc;
+
+        async fn seed_run_card_entry(pool: &PgPool) {
+            sqlx::query(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, max_concurrent_threads, thread_group_count)
+                 VALUES ('run-dg', 'repo-1', 'agent-dg', 'active', 2, 1)",
+            )
+            .execute(pool)
+            .await
+            .expect("seed run");
+            sqlx::query(
+                "INSERT INTO agents (id, name, provider, discord_channel_id)
+                 VALUES ('agent-dg', 'Agent DG', 'claude', '999')",
+            )
+            .execute(pool)
+            .await
+            .expect("seed agent");
+            sqlx::query(
+                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, repo_id)
+                 VALUES ('card-dg', 'Card DG', 'in_progress', 'agent-dg', 'repo-1')",
+            )
+            .execute(pool)
+            .await
+            .expect("seed card");
+            sqlx::query(
+                "INSERT INTO auto_queue_entries
+                    (id, run_id, kanban_card_id, agent_id, status, thread_group, batch_phase)
+                 VALUES ('entry-dg', 'run-dg', 'card-dg', 'agent-dg', 'pending', 0, 0)",
+            )
+            .execute(pool)
+            .await
+            .expect("seed pending entry");
+            // Assign the agent's slot 0 to this run+group so the activate planner's
+            // `assigned_groups_with_pending_entries_pg` selects the group and the
+            // per-entry loop runs for `entry-dg`.
+            sqlx::query(
+                "INSERT INTO auto_queue_slots
+                    (agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map)
+                 VALUES ('agent-dg', 0, 'run-dg', 0, CAST('{}' AS jsonb))",
+            )
+            .execute(pool)
+            .await
+            .expect("seed assigned slot");
+        }
+
+        /// Seed a live (dispatched) IMPLEMENTATION dispatch as the card's latest, so
+        /// the activate loop's attach path (`has_active_dispatch()` true) can bind
+        /// the entry to it WITHOUT creating a fresh worktree-requiring dispatch.
+        async fn seed_existing_impl_dispatch(pool: &PgPool) {
+            sqlx::query(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title)
+                 VALUES ('impl-existing', 'card-dg', 'agent-dg', 'implementation', 'dispatched', 'Impl')",
+            )
+            .execute(pool)
+            .await
+            .expect("seed existing impl dispatch");
+            sqlx::query(
+                "UPDATE kanban_cards SET latest_dispatch_id = 'impl-existing' WHERE id = 'card-dg'",
+            )
+            .execute(pool)
+            .await
+            .expect("set latest_dispatch_id");
+        }
+
         async fn set_scope_status(pool: &PgPool, status: Option<&str>) {
             let metadata = match status {
                 Some(s) => serde_json::json!({ "scope_assessment_status": s }).to_string(),
                 None => "{}".to_string(),
             };
-            sqlx::query("UPDATE kanban_cards SET metadata = $1::jsonb WHERE id = 'card-1'")
+            sqlx::query("UPDATE kanban_cards SET metadata = $1::jsonb WHERE id = 'card-dg'")
                 .bind(metadata)
                 .execute(pool)
                 .await
                 .expect("set scope metadata");
         }
 
+        fn make_deps(pool: &PgPool) -> AutoQueueActivateDeps {
+            let config = crate::config::Config::default();
+            let engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone()))
+                .expect("test policy engine");
+            AutoQueueActivateDeps {
+                pg_pool: Some(pool.clone()),
+                engine,
+                config: Arc::new(config),
+                health_registry: None,
+                guild_id: None,
+            }
+        }
+
+        fn activate_body() -> ActivateBody {
+            ActivateBody {
+                run_id: Some("run-dg".to_string()),
+                repo: None,
+                agent_id: None,
+                thread_group: None,
+                unified_thread: None,
+                active_only: None,
+            }
+        }
+
+        async fn impl_dispatch_row_count(pool: &PgPool) -> i64 {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*)::BIGINT FROM task_dispatches
+                 WHERE kanban_card_id = 'card-dg' AND dispatch_type = 'implementation'",
+            )
+            .fetch_one(pool)
+            .await
+            .expect("count impl dispatches")
+        }
+
+        async fn entry_status(pool: &PgPool) -> String {
+            sqlx::query_scalar::<_, String>(
+                "SELECT status FROM auto_queue_entries WHERE id = 'entry-dg'",
+            )
+            .fetch_one(pool)
+            .await
+            .expect("entry status")
+        }
+
         #[tokio::test]
-        async fn scope_assessment_pending_defers_impl_creation_pg() {
+        async fn scope_pending_defers_entry_not_bound_no_new_impl_row_pg() {
             let pg_db = TestPostgresDb::create().await;
-            let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
-            seed_base(&pool).await;
-            // scope-assessment is in flight and is the card's latest dispatch; the
-            // impl entry is still pending — the gating-prone state.
-            attach_live_dispatch(&pool, "dispatch-scope", "scope-assessment").await;
+            let pool = pg_db.connect_and_migrate_with_max_connections(8).await;
+            seed_run_card_entry(&pool).await;
+            seed_existing_impl_dispatch(&pool).await;
+            // scope-assessment in flight → the loop's scope-pending guard fires
+            // BEFORE the attach step, so the entry is never bound.
             set_scope_status(&pool, Some("pending")).await;
 
-            let state = load_activate_card_state_pg(&pool, "card-1", "entry-1")
-                .await
-                .expect("load card state");
+            let deps = make_deps(&pool);
+            let (status, _body) = activate_with_deps_pg(&deps, activate_body()).await;
+            assert_eq!(status, axum::http::StatusCode::OK);
 
-            // The activate loop's `if scope_assessment_pending() { continue; }`
-            // guard fires here → no impl dispatch is created, entry stays pending.
-            assert!(
-                state.scope_assessment_pending(),
-                "scope-assessment pending must defer impl creation"
+            // The gate fired: the entry was NOT bound to the existing impl dispatch.
+            assert_eq!(
+                entry_status(&pool).await,
+                "pending",
+                "scope-assessment pending must defer: the entry stays pending (not attached)"
             );
-            // And the side-path is (independently) non-attachable, so even the
-            // attach path would not bind the entry.
-            assert!(!state.has_active_dispatch());
+            // And no NEW impl dispatch was created — only the seeded one remains.
+            assert_eq!(
+                impl_dispatch_row_count(&pool).await,
+                1,
+                "no new implementation dispatch must be created while scope is pending"
+            );
 
             pool.close().await;
             pg_db.drop().await;
         }
 
         #[tokio::test]
-        async fn scope_assessment_completed_releases_impl_creation_pg() {
+        async fn scope_completed_releases_gate_entry_binds_pg() {
             let pg_db = TestPostgresDb::create().await;
-            let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
-            seed_base(&pool).await;
-            // After scope-assessment completes (direct depth), the policy layer
-            // flips status → "completed". The gate must release so activate
-            // resumes and creates the implementation dispatch on the next tick.
+            let pool = pg_db.connect_and_migrate_with_max_connections(8).await;
+            seed_run_card_entry(&pool).await;
+            seed_existing_impl_dispatch(&pool).await;
+            // scope-assessment completed → the gate releases; the loop reaches the
+            // attach step and binds the entry to the existing impl dispatch.
             set_scope_status(&pool, Some("completed")).await;
 
-            let state = load_activate_card_state_pg(&pool, "card-1", "entry-1")
-                .await
-                .expect("load card state");
+            let deps = make_deps(&pool);
+            let (status, _body) = activate_with_deps_pg(&deps, activate_body()).await;
+            assert_eq!(status, axum::http::StatusCode::OK);
 
-            assert!(
-                !state.scope_assessment_pending(),
-                "completed scope-assessment must NOT block impl creation"
+            assert_eq!(
+                entry_status(&pool).await,
+                "dispatched",
+                "completed scope-assessment must release the gate so the entry binds to the impl dispatch"
             );
 
             pool.close().await;
@@ -1746,22 +1887,24 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn card_without_scope_assessment_never_blocks_pg() {
+        async fn card_without_scope_assessment_entry_binds_no_regression_pg() {
             let pg_db = TestPostgresDb::create().await;
-            let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
-            seed_base(&pool).await;
+            let pool = pg_db.connect_and_migrate_with_max_connections(8).await;
+            seed_run_card_entry(&pool).await;
+            seed_existing_impl_dispatch(&pool).await;
             // CORE NO-REGRESSION: a card that never ran scope-assessment has NO
-            // scope_assessment_status key. absent ≠ pending, so the gate must NOT
-            // fire and activate behaves exactly as before T3 (creates impl).
+            // scope_assessment_status key. absent ≠ pending → the gate must NOT fire
+            // and the entry binds exactly as before T3.
             set_scope_status(&pool, None).await;
 
-            let state = load_activate_card_state_pg(&pool, "card-1", "entry-1")
-                .await
-                .expect("load card state");
+            let deps = make_deps(&pool);
+            let (status, _body) = activate_with_deps_pg(&deps, activate_body()).await;
+            assert_eq!(status, axum::http::StatusCode::OK);
 
-            assert!(
-                !state.scope_assessment_pending(),
-                "a card with no scope-assessment must never be blocked (absent ≠ pending)"
+            assert_eq!(
+                entry_status(&pool).await,
+                "dispatched",
+                "a card with no scope-assessment must bind the entry (no regression)"
             );
 
             pool.close().await;

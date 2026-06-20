@@ -34,6 +34,61 @@
 var _cardMetadata = require("./kanban-card-metadata");
 var _findAutoQueueEntriesByDispatch = _cardMetadata._findAutoQueueEntriesByDispatch;
 
+// #3594 (T3, codex Finding 2): the FIRST stage (scope-assessment) must CLAIM the
+// card's pending auto-queue entry onto its own dispatch — exactly as consultation
+// does at creation (record_consultation_dispatch_on_pg) — otherwise the entry is
+// never linked to the staged dispatch chain and scope-completion's resume cannot
+// find it, so the activate fallback creates a plain `implementation` dispatch and
+// the depth gate (plan/plan-review) is bypassed entirely.
+//
+// Returns the claimed entry row {id, agent_id} or null when there is no pending
+// entry to claim (manual/API card, or the entry has not been generated yet — in
+// which case the Rust activate `scope_assessment_pending` gate holds the entry
+// pending until scope completes, and the resume path's by-card fallback below
+// re-discovers it). On any failure it warns and returns null (entry untouched).
+//
+// Unlike recordConsultationDispatch (which also stamps consultation_status on the
+// card metadata) this uses the generic entry-status claim, so it links the entry
+// via auto_queue_entry_dispatch_history + marks it `dispatched` WITHOUT polluting
+// the card's scope metadata.
+function _findPendingEntryForCard(cardId) {
+  var rows = agentdesk.db.query(
+    "SELECT e.id, e.agent_id FROM auto_queue_entries e " +
+    "JOIN auto_queue_runs r ON r.id = e.run_id " +
+    "WHERE e.kanban_card_id = ? AND e.status = 'pending' " +
+    "  AND r.status IN ('active', 'paused') " +
+    "ORDER BY e.priority_rank ASC, e.created_at ASC LIMIT 1",
+    [cardId]
+  );
+  return rows.length > 0 ? rows[0] : null;
+}
+
+function _claimPendingEntryForDispatch(cardId, dispatchId, reason) {
+  var entry = _findPendingEntryForCard(cardId);
+  if (!entry) {
+    return null;
+  }
+  try {
+    agentdesk.autoQueue.updateEntryStatus(
+      entry.id,
+      "dispatched",
+      reason,
+      { dispatchId: dispatchId }
+    );
+    agentdesk.log.info(
+      "[scope-gate] claimed pending entry " + entry.id + " for " + cardId +
+      " onto dispatch " + dispatchId + " (" + reason + ")"
+    );
+    return entry;
+  } catch (e) {
+    agentdesk.log.warn(
+      "[scope-gate] failed to claim pending entry " + entry.id + " for " + cardId +
+      " onto dispatch " + dispatchId + ": " + e
+    );
+    return null;
+  }
+}
+
 // Canonical depth → flow mapping. Anything not exactly "direct" or "plan_only"
 // (including null/undefined/typos) resolves to the most cautious full flow:
 // plan + plan-review. This mirrors kanban-scope-assessment._recordScopeAssessment,
@@ -62,18 +117,33 @@ function _resolveScopeFlow(depth) {
 function _resumeEntriesWithDispatch(cardId, dispatch, card, dispatchType, title, resumeReason, extraContext) {
   var aqEntries = _findAutoQueueEntriesByDispatch(dispatch.id, false);
   if (aqEntries.length === 0) {
-    // No linked auto-queue entry yet (manual/API card, or scope fired before the
-    // generate transaction inserted entries). The Rust activate path will create
-    // the proper dispatch once the impl-block clears (scope_assessment_status is
-    // now "completed"). For plan/full this means the activate fallback creates an
-    // IMPLEMENTATION dispatch — acceptable: the scope-gate's plan stage is a
-    // best-effort enrichment on the auto-queue path, and the cautious default of
-    // "still produce an implementation" preserves forward progress.
+    // The parent dispatch has no linked `dispatched` entry. With the Finding-2 fix
+    // the scope-assessment claims the pending entry up-front, so the staged chain
+    // (scope→plan→plan-review→impl) keeps the SAME entry linked at each hop and
+    // this branch is normally unreachable on the auto-queue path. But the entry
+    // may have been generated AFTER scope-assessment fired (held pending by the
+    // Rust activate `scope_assessment_pending` gate). Recover it: find the card's
+    // pending entry and claim it onto this staged dispatch so the chain proceeds
+    // instead of yielding to the activate fallback (which would create a plain
+    // `implementation`, bypassing the depth gate).
+    var recovered = _findPendingEntryForCard(cardId);
+    if (!recovered) {
+      // Genuinely no auto-queue entry (manual/API card). There is no entry to
+      // claim or resume, so this staged-resume helper creates nothing and returns
+      // null — exactly as before T3. Manual/API cards drive their own dispatch
+      // lifecycle outside the auto-queue resume path, so forward progress is not
+      // this helper's responsibility here.
+      agentdesk.log.info(
+        "[scope-gate] " + cardId + " has no auto-queue entry for " +
+        dispatchType + " — no staged dispatch created (manual/API card)"
+      );
+      return null;
+    }
+    aqEntries = [recovered];
     agentdesk.log.info(
-      "[scope-gate] " + cardId + " has no linked auto-queue entry for " +
-      dispatchType + " — deferring to activate path"
+      "[scope-gate] " + cardId + " recovered late pending entry " + recovered.id +
+      " for " + dispatchType + " (claiming onto staged dispatch)"
     );
-    return null;
   }
   var primary = aqEntries[0];
   var context = {
@@ -149,9 +219,28 @@ function _resumeEntriesWithDispatch(cardId, dispatch, card, dispatchType, title,
   return nextDispatchId;
 }
 
+// #3594 (T3, codex Finding 3): build the downstream dispatch context, carrying
+// the resolved depth and (when present) the parent PLAN text. The plan body is
+// propagated as `parent_plan` so the prompt builder (render_dispatch_context_section)
+// renders it into the plan-review / impl prompt — that is what lets a plan-review
+// actually see the plan it must review, and a full→impl see the approved plan.
+// Only a non-empty string is forwarded so plan_only/direct (no review) and
+// manual cards stay clean.
+function _stageContext(depth, planText) {
+  var ctx = { scope_depth: depth };
+  if (typeof planText === "string" && planText.trim() !== "") {
+    ctx.parent_plan = planText;
+  }
+  return ctx;
+}
+
 // direct (or any terminal stage that resolves to "implement now"): create the
-// implementation dispatch via the consultation-resume path.
-function _createImplDispatch(cardId, dispatch, card, resumeReason) {
+// implementation dispatch via the consultation-resume path. `planText` (optional)
+// is the approved plan body forwarded so the impl agent sees it (full → impl).
+function _createImplDispatch(cardId, dispatch, card, resumeReason, planText) {
+  var extra = (typeof planText === "string" && planText.trim() !== "")
+    ? { parent_plan: planText }
+    : null;
   return _resumeEntriesWithDispatch(
     cardId,
     dispatch,
@@ -159,14 +248,15 @@ function _createImplDispatch(cardId, dispatch, card, resumeReason) {
     "implementation",
     (card && card.title) || "Implementation",
     resumeReason || "scope_gate_impl",
-    null
+    extra
   );
 }
 
 // plan_only / full: create the "plan" work-dispatch. The resolved depth rides in
 // the dispatch context so the plan-completion arm can branch (plan_only→impl,
 // full→plan-review) WITHOUT re-reading card metadata (which a concurrent path
-// could have mutated).
+// could have mutated). The plan dispatch itself has no parent plan (it IS the
+// plan stage), so only `scope_depth` is carried.
 function _createPlanDispatch(cardId, dispatch, card, depth) {
   return _resumeEntriesWithDispatch(
     cardId,
@@ -184,7 +274,9 @@ function _createPlanDispatch(cardId, dispatch, card, depth) {
 // dispatch whose verdict (pass|rework) is read directly by the kanban-rules
 // plan-review arm. Reuses the resume path so the bound entry stays attached to
 // the in-flight review stage rather than being re-created by activate.
-function _createPlanReviewDispatch(cardId, dispatch, card, depth) {
+// `planText` is the completed plan dispatch's `result.plan`, forwarded as
+// `parent_plan` so the reviewer actually sees the plan body (codex Finding 3).
+function _createPlanReviewDispatch(cardId, dispatch, card, depth, planText) {
   return _resumeEntriesWithDispatch(
     cardId,
     dispatch,
@@ -192,12 +284,14 @@ function _createPlanReviewDispatch(cardId, dispatch, card, depth) {
     "plan-review",
     "[Plan Review] " + ((card && card.title) || cardId),
     "scope_gate_plan_review",
-    { scope_depth: depth }
+    _stageContext(depth, planText)
   );
 }
 
 module.exports = {
   _resolveScopeFlow: _resolveScopeFlow,
+  _findPendingEntryForCard: _findPendingEntryForCard,
+  _claimPendingEntryForDispatch: _claimPendingEntryForDispatch,
   _resumeEntriesWithDispatch: _resumeEntriesWithDispatch,
   _createImplDispatch: _createImplDispatch,
   _createPlanDispatch: _createPlanDispatch,

@@ -109,10 +109,14 @@ module.exports = function attachReconciliation(timeouts, helpers) {
           var rPlanContext = {};
           try { rPlanContext = JSON.parse(di.context || "{}"); } catch (e) { rPlanContext = {}; }
           var rPlanDepth = rPlanContext.scope_depth || "full";
+          // #3594 (T3, codex Finding 3): forward the plan body to the next stage.
+          var rPlanResult = {};
+          try { rPlanResult = JSON.parse(di.result || "{}"); } catch (e) { rPlanResult = {}; }
+          var rPlanText = (rPlanResult && typeof rPlanResult.plan === "string") ? rPlanResult.plan : null;
           if (_resolveScopeFlow(rPlanDepth).needsPlanReview) {
-            _createPlanReviewDispatch(di.kanban_card_id, di, card, rPlanDepth);
+            _createPlanReviewDispatch(di.kanban_card_id, di, card, rPlanDepth, rPlanText);
           } else {
-            _createImplDispatch(di.kanban_card_id, di, card, "scope_gate_plan_done_reconcile");
+            _createImplDispatch(di.kanban_card_id, di, card, "scope_gate_plan_done_reconcile", rPlanText);
           }
           agentdesk.log.info("[reconcile] " + card.id + " plan completed (depth=" + rPlanDepth + ") — gated next stage");
           continue;
@@ -126,7 +130,12 @@ module.exports = function attachReconciliation(timeouts, helpers) {
           try { rPrContext = JSON.parse(di.context || "{}"); } catch (e) { rPrContext = {}; }
           var rPrDepth = rPrContext.scope_depth || "full";
           if (rPrResult.verdict === "pass") {
-            _createImplDispatch(di.kanban_card_id, di, card, "scope_gate_plan_review_pass_reconcile");
+            // #3594 (T3, codex Finding 3): forward the approved plan (carried in
+            // the plan-review context) into impl.
+            var rApprovedPlan = (rPrContext && typeof rPrContext.parent_plan === "string")
+              ? rPrContext.parent_plan
+              : null;
+            _createImplDispatch(di.kanban_card_id, di, card, "scope_gate_plan_review_pass_reconcile", rApprovedPlan);
           } else {
             _createPlanDispatch(di.kanban_card_id, di, card, rPrDepth);
           }
