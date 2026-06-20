@@ -100,8 +100,12 @@ transitions:
 # ── Gates ─────────────────────────────────────────────────────────
 #
 # type:
-#   builtin   — evaluated in Rust (kanban.rs / dispatch check)
-#   policy    — evaluated by JS policy function
+#   builtin   — evaluated in Rust (see KNOWN_BUILTIN_GATE_CHECKS in pipeline.rs)
+#
+# `policy` (JS-policy-evaluated gates) is NOT currently supported: the FSM has
+# no policy evaluator, so declaring `type: policy` is rejected at write time and
+# fails closed at runtime (#3595). Re-enable by adding "policy" to
+# KNOWN_GATE_TYPES together with its evaluation arm once an evaluator exists.
 
 gates:
   active_dispatch:

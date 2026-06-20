@@ -9,10 +9,8 @@ use crate::services::observability::turn_lifecycle::{
     RecoveryContextDetails, RecoveryDetails, TurnEvent, TurnLifecycleEmit, emit_turn_lifecycle,
 };
 use crate::services::provider::ProviderKind;
-use crate::ui::ai_screen::{HistoryItem, HistoryType};
 use serenity::all::{ChannelId, MessageId};
 
-const SESSION_RETRY_CONTEXT_LIMIT: usize = 10;
 const SESSION_RETRY_CONTEXT_ITEM_CHAR_LIMIT: usize = 300;
 const DISCORD_RECENT_MESSAGES_RECOVERY_SOURCE: &str = "discord_recent_messages";
 
@@ -177,43 +175,6 @@ fn take_session_retry_context_runtime_pg(key: &str) -> Option<String> {
     .flatten()
 }
 
-pub(in crate::services::discord) fn build_session_retry_context_from_history(
-    history: &[HistoryItem],
-) -> Option<String> {
-    let lines = history
-        .iter()
-        .filter_map(|item| {
-            let label = match item.item_type {
-                HistoryType::User => "User",
-                HistoryType::Assistant | HistoryType::Error => "Assistant",
-                HistoryType::System | HistoryType::ToolUse | HistoryType::ToolResult => {
-                    return None;
-                }
-            };
-            let content = item.content.trim();
-            if content.is_empty() {
-                return None;
-            }
-            let excerpt = content
-                .chars()
-                .take(SESSION_RETRY_CONTEXT_ITEM_CHAR_LIMIT)
-                .collect::<String>();
-            Some(format!("{label}: {excerpt}"))
-        })
-        .rev()
-        .take(SESSION_RETRY_CONTEXT_LIMIT)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>();
-
-    if lines.is_empty() {
-        None
-    } else {
-        Some(lines.join("\n"))
-    }
-}
-
 fn store_session_retry_context_impl(
     db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
@@ -246,15 +207,6 @@ fn store_session_retry_context_impl(
     }
 
     Ok(())
-}
-
-pub(in crate::services::discord) fn store_session_retry_context(
-    db: Option<&crate::db::Db>,
-    pg_pool: Option<&sqlx::PgPool>,
-    channel_id: u64,
-    history: &str,
-) -> Result<(), String> {
-    store_session_retry_context_impl(db, pg_pool, channel_id, history, None)
 }
 
 /// Store the session retry (recovery) context together with its recovery

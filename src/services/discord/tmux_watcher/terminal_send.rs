@@ -329,12 +329,19 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
     .await;
 
     // #3089 B2a: shadow-mirror durable delivered frontier — flag-gated, observe-only, Delivered-only (I2), OFF=no-op. Extends B1's sink coverage to the watcher (A4) before B2b's authority flip.
+    // #3610 PR-1: anchor = `msg_id` — the controller active-slot `current_msg_id`
+    // (the assistant response message terminal-replace edits in place), NOT
+    // `status_message_id`. Records the true terminal anchor for PR-2.
+    // #3610 PR-1b: the anchor pair's channel is this same `channel_id` (same-channel
+    // path — the frontier key, edit target, and placeholder all share `channel_id`).
     dr::shadow_mirror_delivered_frontier(
         shared,
         provider,
         channel_id,
         (start, end),
         dr::outcome_is_shadow_delivered(&outcome),
+        Some(msg_id.get()),
+        Some(channel_id.get()),
     );
 
     match outcome {
@@ -563,6 +570,55 @@ pub(in crate::services::discord) fn apply_watcher_short_replace_result(
     }
 }
 
+/// #3610 PR-1d: record the durable terminal anchor for the WATCHER legacy
+/// long-chunk fallback arm (`tmux_watcher.rs` — the
+/// `watcher_should_send_ordered_new_chunks_for_terminal_fallback` branch:
+/// `send_long_message_raw_with_rollback` send-new-chunks + placeholder delete).
+/// This arm is the watcher-owned counterpart of the bridge long-chunk arm PR-1c
+/// instrumented; it is EXCLUDED from the #3089 A4 short-replace controller cutover
+/// (`watcher_short_replace_cutover` requires `!should_send_ordered_new_chunks`), so
+/// it never reached the cutover's `shadow_mirror_delivered_frontier` site and a LONG
+/// (`len > DISCORD_MSG_LIMIT`) watcher-owned terminal answer recorded NO anchor —
+/// the production-majority (`relay_owner_kind = watcher`) gap PR-1c did not cover.
+///
+/// The caller (the FROZEN giant `tmux_watcher.rs`) invokes this with a SINGLE line,
+/// ONLY when BOTH gates hold (matching PR-1c's M4 discipline at the bridge):
+/// - (A) the send fully committed: `send_long_message_raw_with_rollback` is
+///   all-or-nothing — a partial chunk failure rolls back the already-sent chunks
+///   and returns `Err` (formatting.rs), so the `last_chunk_anchor_msg_id` is only
+///   `Some` on the full-commit `Ok` arm; and
+/// - (M4) the watcher lease `commit` returned `true` AND advanced (the caller gates
+///   on `committed && commit_outcome == Delivered`, the exact site that runs
+///   `advance_watcher_confirmed_end` to `watcher_lease_end`). Recording without an
+///   in-memory advance would leave the durable frontier END ahead of
+///   `confirmed_end_offset` (M4 violation), so the caller passes the anchor through
+///   to the post-advance site rather than recording at the send arm.
+///
+/// Same-channel (unlike the bridge cutover's channel split): the watcher acquires
+/// its lease on, advances, and edits the SAME `channel_id`, so the frontier key
+/// (offset authority) and the anchor pair's channel are BOTH `channel_id`. `range`
+/// is `(watcher_lease_start, watcher_lease_end)` — the SAME offset range the lease
+/// committed and `confirmed_end_offset` advanced to (never mix offset spaces).
+/// Delegates to the shared `dr::record_long_chunk_terminal_delivery` (PR-1c) with
+/// `watcher_owner_channel_id == delivery_channel_id == channel_id`; the shadow flag
+/// being OFF (default) makes the whole thing a no-op (deploy-safe).
+pub(in crate::services::discord) fn record_watcher_long_chunk_terminal_delivery(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    range: (u64, u64),
+    last_chunk_anchor_msg_id: Option<u64>,
+) {
+    dr::record_long_chunk_terminal_delivery(
+        shared,
+        provider,
+        channel_id,
+        channel_id,
+        range,
+        last_chunk_anchor_msg_id,
+    );
+}
+
 /// #3089 A4: the controller-path result mapped back into the watcher's send-arm
 /// locals by `apply_watcher_short_replace_controller`. Keeps the `DeliveryOutcome`
 /// → `(relay_ok, direct_send_delivered, retry)` translation in one testable place.
@@ -594,4 +650,51 @@ pub(in crate::services::discord) enum WatcherShortReplaceResult {
     PartialFailureRetry,
     /// Empty body (cut-over gate excludes it). Unreachable in prod; mapped to a no-op.
     Skipped,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use poise::serenity_prelude::ChannelId;
+
+    /// #3610 PR-1d: the watcher long-chunk delivery helper under the default-OFF
+    /// shadow flag must be a COMPLETE no-op (no panic, no durable write) regardless
+    /// of the resolved anchor — the deploy-safe property (tests never set
+    /// `AGENTDESK_DELIVERY_RECORD_SHADOW`, so the OnceLock reads OFF and the call
+    /// short-circuits inside `shadow_mirror_delivered_frontier`). This is the
+    /// watcher-arm counterpart of delivery_record.rs's
+    /// `record_long_chunk_terminal_delivery_off_is_noop_3610c`.
+    #[test]
+    fn watcher_long_chunk_delivery_off_is_noop_3610d() {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(556_677_889);
+        // Does not panic; OFF → writes nothing.
+        record_watcher_long_chunk_terminal_delivery(
+            &shared,
+            &ProviderKind::Claude,
+            channel,
+            (0, 8192),
+            Some(912_345_678),
+        );
+        // No durable record was created under the test root for this channel.
+        assert!(dr::read_record(&ProviderKind::Claude, channel.get()).is_none());
+    }
+
+    /// #3610 PR-1d gate (D), `last = None`: the empty-Vec anchor (impossible on the
+    /// full-commit `Ok` path, but type-honest) is forwarded as `None` and the helper
+    /// still no-ops under OFF without panicking. Pins that a null anchor is a legal
+    /// input to the watcher wrapper (range-only record when the flag is ON).
+    #[test]
+    fn watcher_long_chunk_delivery_none_anchor_is_noop_3610d() {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(112_233_445);
+        record_watcher_long_chunk_terminal_delivery(
+            &shared,
+            &ProviderKind::Claude,
+            channel,
+            (0, 2048),
+            None,
+        );
+        assert!(dr::read_record(&ProviderKind::Claude, channel.get()).is_none());
+    }
 }

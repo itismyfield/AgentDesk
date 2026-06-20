@@ -256,10 +256,13 @@ async fn create_activate_dispatch_pg_inner(
     };
 
     let dispatch_id = uuid::Uuid::new_v4().to_string();
-    let kickoff_state = if matches!(
-        dispatch_type,
-        "review" | "review-decision" | "rework" | "consultation"
-    ) {
+    // #3605 (T2): review-family and inert side-paths (consultation,
+    // scope-assessment) must not pass a kickoff_state, so attaching them leaves
+    // the card pinned in `requested`. Shared with transition.rs/dispatch_create
+    // via dispatch_type_skips_kickoff so the three layers cannot drift —
+    // previously this matches! omitted scope-assessment, letting an activate
+    // dispatch kick the card into in_progress.
+    let kickoff_state = if crate::dispatch::dispatch_type_skips_kickoff(dispatch_type) {
         None
     } else {
         Some(

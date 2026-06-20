@@ -460,7 +460,16 @@ pub(crate) async fn delete_previous_card(http: &serenity::Http, channel_id: u64,
     let message = MessageId::new(message_id);
     match http.get_message(channel, message).await {
         Ok(current) if message_is_idle_recap_card(&current) => {
-            let _ = super::http::delete_channel_message(http, channel, message).await;
+            // #3607: observe the delete; idle-recap cards are not provider-scoped.
+            let result = super::http::delete_channel_message(http, channel, message).await;
+            crate::services::observability::emit_relay_delete_result(
+                "",
+                channel_id,
+                message_id,
+                "idle_recap_previous_card",
+                "delete_nonterminal",
+                &result,
+            );
         }
         Ok(current) => {
             tracing::warn!(

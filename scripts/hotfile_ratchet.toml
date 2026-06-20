@@ -40,7 +40,18 @@
 # site explaining why the skipped-ack-wait benign case is now distinct from the real
 # target-none failure. Behavior-preserving (folds to the same resend decision); the
 # new sentinel-distinction tests live in the sibling session_bound_ack_tests.rs file.
-"src/services/discord/tmux_watcher.rs" = 10111
+# #3610 PR-1d: 10111 -> 10135 (+24), reviewable admission — the watcher legacy
+# long-chunk fallback arm (the `watcher_should_send_ordered_new_chunks_for_terminal_fallback`
+# branch) now records the durable terminal anchor like the bridge arm did in PR-1c,
+# covering watcher-owned (production-majority) long messages. The arm's send and its
+# M4 commit+advance are at DIFFERENT sites in this giant file, so the cost is: a
+# lease-scope `Option<MessageId>` anchor var, capturing `message_ids.last()` on the
+# full-commit `Ok` arm, and a single guarded `record_watcher_long_chunk_terminal_delivery`
+# call inside the existing `if committed && Delivered { advance(); … }` block — all
+# with load-bearing comments. The record/format LOGIC lives in the sibling
+# terminal_send.rs (a thin pass-through to delivery_record.rs's PR-1c helper); this is
+# the minimal frozen-file call-site cost.
+"src/services/discord/tmux_watcher.rs" = 10135
 "src/services/discord/tui_prompt_relay.rs" = 7789
 # #3560: 6612 -> 6621 (+9), reviewable admission — footer-mode separate-panel
 # migration reconcile call + comment at the resume entry. Helper body lives in

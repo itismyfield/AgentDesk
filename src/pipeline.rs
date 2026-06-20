@@ -716,6 +716,25 @@ pub struct GateConfig {
     pub description: Option<String>,
 }
 
+/// Gate types the FSM understands (#3595, fail-closed).
+/// - `builtin`: evaluated in Rust (see `KNOWN_BUILTIN_GATE_CHECKS`).
+///
+/// `policy` was intentionally removed: the FSM has no policy evaluator, so a
+/// `type: policy` gate would otherwise pass through *un-enforced* (fail-open).
+/// Declaring one now fails validation at write time (`validate()` →
+/// BadRequest) and, defensively, blocks at runtime in `evaluate_gates`
+/// (engine/transition.rs Point B). When a real policy evaluator is wired,
+/// re-add `"policy"` here together with its evaluation arm.
+pub const KNOWN_GATE_TYPES: &[&str] = &["builtin"];
+
+/// The exact set of `check` strings a `builtin` gate may reference (#3595).
+/// These mirror the boolean fields on `engine::transition::GateSnapshot`.
+pub const KNOWN_BUILTIN_GATE_CHECKS: &[&str] = &[
+    "has_active_dispatch",
+    "review_verdict_pass",
+    "review_verdict_rework",
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HookBindings {
     #[serde(default)]
@@ -1213,6 +1232,38 @@ impl PipelineConfig {
             }
         }
 
+        // Every declared gate must be evaluable by the FSM (#3595, fail-closed).
+        // Rejecting unsupported gate types / unknown builtin checks at declaration
+        // time means a misconfigured gate is caught on override write
+        // (validate_pipeline_override → resolve → validate) instead of silently
+        // failing open at runtime and leaking a transition past an un-evaluated gate.
+        for (gate_name, gate) in &self.gates {
+            if !KNOWN_GATE_TYPES.contains(&gate.gate_type.as_str()) {
+                anyhow::bail!(
+                    "gate '{}' has unsupported type '{}'; expected one of {:?}",
+                    gate_name,
+                    gate.gate_type,
+                    KNOWN_GATE_TYPES
+                );
+            }
+            if gate.gate_type == "builtin" {
+                match gate.check.as_deref() {
+                    Some(check) if KNOWN_BUILTIN_GATE_CHECKS.contains(&check) => {}
+                    Some(check) => anyhow::bail!(
+                        "builtin gate '{}' references unknown check '{}'; expected one of {:?}",
+                        gate_name,
+                        check,
+                        KNOWN_BUILTIN_GATE_CHECKS
+                    ),
+                    None => anyhow::bail!(
+                        "builtin gate '{}' is missing a 'check'; expected one of {:?}",
+                        gate_name,
+                        KNOWN_BUILTIN_GATE_CHECKS
+                    ),
+                }
+            }
+        }
+
         // Clock fields must reference valid states
         for state in self.clocks.keys() {
             if !state_ids.contains(&state.as_str()) {
@@ -1337,6 +1388,110 @@ mod state_slug_contract_tests {
         assert!(
             err.to_string()
                 .contains("kanban status slug contract ^[a-z][a-z0-9_]*$"),
+            "{err}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod gate_validation_tests {
+    //! #3595: declaration-time fail-closed checks for gate definitions.
+    use super::*;
+
+    /// Minimal valid pipeline (one non-terminal state, no transitions/gates) that
+    /// passes `validate()`. Tests then inject a single gate to exercise the
+    /// gate-validation branch in isolation.
+    fn base_config() -> PipelineConfig {
+        PipelineConfig {
+            name: "test".to_string(),
+            version: 1,
+            states: vec![StateConfig {
+                id: "todo".to_string(),
+                label: "Todo".to_string(),
+                terminal: false,
+            }],
+            transitions: Vec::new(),
+            gates: HashMap::new(),
+            hooks: HashMap::new(),
+            events: HashMap::new(),
+            clocks: HashMap::new(),
+            timeouts: HashMap::new(),
+            phase_gate: PhaseGateConfig::default(),
+        }
+    }
+
+    fn gate(gate_type: &str, check: Option<&str>) -> GateConfig {
+        GateConfig {
+            gate_type: gate_type.to_string(),
+            check: check.map(str::to_string),
+            description: None,
+        }
+    }
+
+    #[test]
+    fn validate_rejects_gate_with_unsupported_type() {
+        let mut config = base_config();
+        config
+            .gates
+            .insert("hookish".to_string(), gate("webhook", None));
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("unsupported type 'webhook'"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_builtin_gate_with_unknown_check() {
+        let mut config = base_config();
+        config
+            .gates
+            .insert("weird".to_string(), gate("builtin", Some("bogus_check")));
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("unknown check 'bogus_check'"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_builtin_gate_with_missing_check() {
+        let mut config = base_config();
+        config
+            .gates
+            .insert("incomplete".to_string(), gate("builtin", None));
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("missing a 'check'"), "{err}");
+    }
+
+    #[test]
+    fn validate_accepts_known_builtin_gates() {
+        // Regression guard: all three shipped builtin checks must keep validating.
+        for check in KNOWN_BUILTIN_GATE_CHECKS {
+            let mut config = base_config();
+            config
+                .gates
+                .insert("g".to_string(), gate("builtin", Some(check)));
+            assert!(
+                config.validate().is_ok(),
+                "builtin gate with known check '{check}' should validate"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rejects_policy_gate_declaration() {
+        // #3595: `policy` was removed from KNOWN_GATE_TYPES (fail-closed). The
+        // FSM has no policy evaluator, so a `type: policy` gate would pass
+        // through un-enforced; declaring one must be rejected at write time
+        // rather than failing open at runtime.
+        let mut config = base_config();
+        config
+            .gates
+            .insert("custom".to_string(), gate("policy", None));
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("unsupported type 'policy'"),
             "{err}"
         );
     }

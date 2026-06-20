@@ -20,6 +20,8 @@ var _autoQueueDispatchLib = require("./lib/auto-queue-dispatch");
 var _autoQueuePhaseGateLib = require("./lib/auto-queue-phase-gate");
 var _autoQueueLifecycleLib = require("./lib/auto-queue-lifecycle");
 var _autoQueueErrorRecoveryLib = require("./lib/auto-queue-error-recovery");
+// #3605 (T2): canonical inert side-path predicate (consultation, scope-assessment).
+var isSidePathDispatch = require("./lib/dispatch-side-path").isSidePathDispatch;
 
 // ── log helpers (re-export the names the rest of the file used) ────────
 var _autoQueueHasValue = _autoQueueLogLib.hasValue;
@@ -176,6 +178,15 @@ var autoQueue = {
     if (dispatches.length === 0) return;
 
     var dispatch = dispatches[0];
+
+    // #256/#3605 (T2): inert side-paths (consultation, scope-assessment) are
+    // owned by kanban-rules (preflight/scope_depth metadata) and never
+    // participate in the auto-queue phase-gate continuation. Guard them out
+    // explicitly via the shared predicate rather than relying solely on the
+    // phase_gate context check below. (Both already lack a phase_gate context,
+    // so this is an explicit, future-proof early return — no behavior change.)
+    if (isSidePathDispatch(dispatch.dispatch_type)) return;
+
     var context = {};
     if (dispatch.context && dispatch.context !== "{}" && dispatch.context !== "[]") {
       try { context = JSON.parse(dispatch.context); } catch (e) { context = {}; }

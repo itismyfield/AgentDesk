@@ -1,7 +1,6 @@
 use std::borrow::Cow;
 use std::sync::OnceLock;
 
-use super::ChannelId;
 use super::QueueExitKind;
 use super::SharedData;
 use super::parse_dispatch_id;
@@ -47,10 +46,6 @@ pub(in crate::services::discord) fn strip_monitor_auto_turn_origin<'a>(
     }
 
     (Cow::Borrowed(text), false)
-}
-
-pub(super) fn session_retry_context_key(channel_id: ChannelId) -> String {
-    format!("session_retry_context:{}", channel_id.get())
 }
 
 pub(super) fn should_process_allowed_bot_turn_text(text: &str) -> bool {

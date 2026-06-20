@@ -46,7 +46,20 @@ pub(super) async fn fetch_dispatch_snapshot(
 
 fn should_complete_work_dispatch(snapshot: &DispatchSnapshot) -> bool {
     matches!(snapshot.status.as_str(), "pending" | "dispatched")
-        && matches!(snapshot.dispatch_type.as_str(), "implementation" | "rework")
+        && matches!(
+            snapshot.dispatch_type.as_str(),
+            // #3594 (T3): "plan"/"plan-review" are work-dispatches (they kick the
+            // card into in_progress and are NOT side-paths). They must be
+            // eligible for the idle/turn-end auto-completion safety net just like
+            // implementation/rework — otherwise a plan agent that goes idle
+            // WITHOUT explicitly PATCH-completing would stall forever
+            // (OnDispatchCompleted never fires, the depth-gated lifecycle hangs).
+            // The downstream completion is benign for them: they produce no
+            // tracked changes, and their JS follow-up reads the plan dispatch
+            // context (scope_depth) / plan-review result.verdict (missing →
+            // cautious re-plan), not a commit SHA.
+            "implementation" | "rework" | "plan" | "plan-review"
+        )
 }
 
 fn normalize_review_decision_text(text: &str) -> String {
@@ -867,5 +880,64 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
         } else {
             tracing::error!("all completion paths exhausted; dispatch stranded");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DispatchSnapshot, should_complete_work_dispatch};
+
+    fn snap(dispatch_type: &str, status: &str) -> DispatchSnapshot {
+        DispatchSnapshot {
+            dispatch_type: dispatch_type.to_string(),
+            status: status.to_string(),
+            kanban_card_id: None,
+            context: None,
+        }
+    }
+
+    #[test]
+    fn idle_auto_completion_covers_work_dispatch_types_including_plan() {
+        // #3594 (T3): plan / plan-review are work-dispatches and MUST be eligible
+        // for the idle/turn-end auto-completion safety net, alongside the
+        // pre-existing implementation / rework. Without this a plan agent that
+        // goes idle without PATCHing would stall (OnDispatchCompleted never
+        // fires).
+        for dispatch_type in ["implementation", "rework", "plan", "plan-review"] {
+            assert!(
+                should_complete_work_dispatch(&snap(dispatch_type, "dispatched")),
+                "{dispatch_type} must be eligible for idle auto-completion"
+            );
+            assert!(
+                should_complete_work_dispatch(&snap(dispatch_type, "pending")),
+                "{dispatch_type} (pending) must be eligible for idle auto-completion"
+            );
+        }
+    }
+
+    #[test]
+    fn idle_auto_completion_excludes_side_paths_and_review_family() {
+        // Side-paths (scope-assessment, consultation) and the review family must
+        // NOT be auto-completed by the work-dispatch turn-end path — they have
+        // their own lifecycles. Guards against the plan allowlist over-firing.
+        for dispatch_type in [
+            "scope-assessment",
+            "consultation",
+            "review",
+            "review-decision",
+            "create-pr",
+        ] {
+            assert!(
+                !should_complete_work_dispatch(&snap(dispatch_type, "dispatched")),
+                "{dispatch_type} must NOT be auto-completed by the work-dispatch path"
+            );
+        }
+    }
+
+    #[test]
+    fn idle_auto_completion_requires_live_status() {
+        // Only pending/dispatched are completable; a terminal status is a no-op.
+        assert!(!should_complete_work_dispatch(&snap("plan", "completed")));
+        assert!(!should_complete_work_dispatch(&snap("plan", "failed")));
     }
 }

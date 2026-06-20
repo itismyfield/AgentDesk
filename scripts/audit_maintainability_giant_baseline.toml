@@ -83,7 +83,8 @@
 # site documenting why the skipped-ack-wait benign case is now distinct from the
 # real `wait_for_session_bound_relay_delivery_ack` target-none failure. NO new
 # direct send / behavior change — provenance/aggregation classification only.
-"src/services/discord/tmux_watcher.rs" = 6946
+# #3610 PR-1d: watcher legacy long-chunk arm anchor instrumentation (+M4 reasoning comments)
+"src/services/discord/tmux_watcher.rs" = 6970
 # #3038 tmux_watcher S1 child modules, frozen at landed production LoC.
 "src/services/discord/tmux_watcher/commit_decisions.rs" = 140
 "src/services/discord/tmux_watcher/completion_gate.rs" = 275
@@ -272,7 +273,21 @@
 # idle-tail / panel / routing check on the degraded bridge-owned path even though
 # the respawned watcher owns the live tmux relay (the #3582 "relay re-occurrence"
 # regression). No new direct-send; pure inflight-field stamp mirroring tmux.rs.
-"src/services/discord/recovery_engine.rs" = 3349
+# #3610 PR-2: +33 (3349 -> 3382) for the anchor-repost backstop hook in the
+# committed branch of `restore_inflight_turns` (the #3607 "committed-then-gone"
+# fallback). The whole block is gated behind the default-OFF
+# `recovery_anchor_repost_enabled()` flag (dark deploy — flag OFF is a byte-for-byte
+# no-op), and the heavy lifting lives in the non-giant `recovery_paths/restart.rs`
+# (`try_recover_anchor_repost`) — this site only resolves `tmux_alive` and disposes
+# the returned outcome. No new direct-send; the repost reuses the existing
+# `relay_recovered_terminal_text_to_placeholder` send-new path.
+# #3610 PR-2 codex r2 (Issue-2 storm guard): +15 (3382 -> 3397) for the comment
+# block at the anchor-repost dispose call documenting why `tmux_alive = false` is
+# passed (committed-row repost must be budget-bounded, not pane-preserved). The
+# call itself drops the now-unused `tmux_session_alive_with_retry` probe — logic
+# shrank by one line; the net +15 is comment LoC explaining the storm-prevention
+# invariant. No new behavior at this site beyond the literal `false` argument.
+"src/services/discord/recovery_engine.rs" = 3397
 # #3034 batch-8: lowered 3771 -> 3770 (dead-code removal).
 # #3038 S1: +1 (3770 -> 3771) for the mechanical `shared.queued_placeholders` ->
 # `shared.queued.queued_placeholders` re-wire (one extra method-chain line) forced
@@ -442,7 +457,10 @@
 "src/services/discord/session_runtime.rs" = 1753
 # #3034 batch-8: +1 for a test-only `#[allow(dead_code)]` on
 # `session_bound_terminal_delivery_route_decision` (#3041 route decision, tested).
-"src/services/discord/session_relay_sink.rs" = 1731
+# #3610 PR-1: 1731 -> 1738 — pass terminal anchor (current_msg_id) explicitly to
+# shadow_mirror_delivered_frontier at the sink delivery call site (Phase B prereq;
+# irreducible 6-arg rustfmt-wrapped call). panel_msg_id has 0 prod readers -> dedup unchanged.
+"src/services/discord/session_relay_sink.rs" = 1738
 # #3479: turn_bridge/tmux_runtime.rs decomposed into tmux_runtime/ directory
 # modules (root tmux_runtime.rs 964 prod LoC + sub-1000-LoC
 # tmux_runtime/{interrupt_policy,process_table,pid_exit}.rs) — dropped below the

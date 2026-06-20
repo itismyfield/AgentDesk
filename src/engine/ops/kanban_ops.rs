@@ -202,6 +202,10 @@ pub(super) fn register_kanban_ops<'js>(
 }
 
 fn set_status_raw_pg(pool: &PgPool, card_id: &str, new_status: &str, force: bool) -> String {
+    use crate::engine::transition::{
+        self, CardState, ForceIntent, GateSnapshot, TransitionContext, TransitionOutcome,
+    };
+
     let card_id = card_id.to_string();
     let new_status = new_status.to_string();
     match run_async_bridge_pg(pool, move |pool| async move {
@@ -210,8 +214,22 @@ fn set_status_raw_pg(pool: &PgPool, card_id: &str, new_status: &str, force: bool
             .await
             .map_err(|error| format!("open postgres kanban status transaction: {error}"))?;
 
+        // #3603: `set_status_raw_pg` (the JS `agentdesk.kanban.setStatus`
+        // bridge) now delegates transition validation to the FSM reducer
+        // `decide_pipeline_transition` (transition.rs), mirroring the canonical
+        // intent path `transition_core::transition_status_with_opts_pg_inner`
+        // 1:1. The previous body partially re-implemented the reducer and
+        // diverged: it only checked `has_active_dispatch`/`review_verdict_pass`
+        // (fail-open on `review_verdict_rework`, unwired/unknown gate types) and
+        // it never enforced ForceOnly-non-force / no-transition-rule /
+        // invalid-target guards — it issued a direct UPDATE instead. Collecting
+        // the full `GateSnapshot` here and routing through the reducer removes
+        // that whole divergence class. The PG transaction stays open across the
+        // load → decide → execute steps; pipeline resolution uses the tx-bound
+        // resolver (`resolve_pipeline_on_pg_tx`) to avoid the cross-pool
+        // deadlock fixed in #1342.
         let row = sqlx::query(
-            "SELECT status, title, metadata::text AS metadata, latest_dispatch_id, repo_id, assigned_agent_id, review_round
+            "SELECT status, review_status, latest_dispatch_id, repo_id, assigned_agent_id, review_entered_at::text AS review_entered_at
              FROM kanban_cards
              WHERE id = $1",
         )
@@ -224,12 +242,9 @@ fn set_status_raw_pg(pool: &PgPool, card_id: &str, new_status: &str, force: bool
         let old_status: String = row
             .try_get("status")
             .map_err(|error| format!("decode old status for {card_id}: {error}"))?;
-        let title: String = row
-            .try_get("title")
-            .map_err(|error| format!("decode title for {card_id}: {error}"))?;
-        let metadata: Option<String> = row
-            .try_get("metadata")
-            .map_err(|error| format!("decode metadata for {card_id}: {error}"))?;
+        let review_status: Option<String> = row
+            .try_get("review_status")
+            .map_err(|error| format!("decode review_status for {card_id}: {error}"))?;
         let latest_dispatch_id: Option<String> = row
             .try_get("latest_dispatch_id")
             .map_err(|error| format!("decode latest_dispatch_id for {card_id}: {error}"))?;
@@ -239,11 +254,22 @@ fn set_status_raw_pg(pool: &PgPool, card_id: &str, new_status: &str, force: bool
         let assigned_agent_id: Option<String> = row
             .try_get("assigned_agent_id")
             .map_err(|error| format!("decode assigned_agent_id for {card_id}: {error}"))?;
-        let old_review_round: Option<i64> = row
-            .try_get("review_round")
-            .map_err(|error| format!("decode review_round for {card_id}: {error}"))?;
+        let review_entered_at: Option<String> = row
+            .try_get("review_entered_at")
+            .map_err(|error| format!("decode review_entered_at for {card_id}: {error}"))?;
+
+        let effective =
+            resolve_pipeline_on_pg_tx(&mut tx, repo_id.as_deref(), assigned_agent_id.as_deref())
+                .await?;
 
         if old_status == new_status {
+            // Mirror the reference no-op: a forced same-status call still
+            // validates that the target exists in the effective pipeline.
+            if force && !effective.is_valid_state(&new_status) {
+                return Err(format!(
+                    "target status '{new_status}' is not defined in the effective pipeline"
+                ));
+            }
             return Ok(serde_json::json!({
                 "ok": true,
                 "changed": false,
@@ -251,113 +277,133 @@ fn set_status_raw_pg(pool: &PgPool, card_id: &str, new_status: &str, force: bool
             }));
         }
 
-        let latest_dispatch_status = if let Some(dispatch_id) = latest_dispatch_id.as_deref() {
-            sqlx::query_scalar::<_, String>("SELECT status FROM task_dispatches WHERE id = $1")
-                .bind(dispatch_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|error| format!("load latest dispatch status for {card_id}: {error}"))?
-        } else {
-            None
-        };
-        let effective =
-            resolve_pipeline_on_pg_tx(&mut tx, repo_id.as_deref(), assigned_agent_id.as_deref())
-                .await?;
+        // Gate-input collection — identical semantics to the reference path
+        // (transition_core.rs). The `has_active_dispatch` gate counts a
+        // completed implementation/rework dispatch as "active" only when the
+        // transition is a review-enter whose rule actually carries a
+        // `has_active_dispatch` gate (completed work satisfies the gate).
         let transition_rule = effective.find_transition(&old_status, &new_status);
-
-        if effective.is_terminal(&old_status) && old_status != new_status && !force {
-            return Err(format!(
-                "cannot revert terminal card from {old_status} to {new_status}"
-            ));
-        }
-
-        if effective.is_terminal(&new_status)
-            && !force
-            && let Some(t) = transition_rule
-        {
-            let needs_review_pass = t.gates.iter().any(|g| {
-                effective
-                    .gates
-                    .get(g.as_str())
-                    .is_some_and(|gc| gc.check.as_deref() == Some("review_verdict_pass"))
-            });
-            if needs_review_pass {
-                let latest_verdict = sqlx::query_scalar::<_, String>(
-                    "SELECT result ->> 'verdict'
-                     FROM task_dispatches
-                     WHERE kanban_card_id = $1
-                       AND dispatch_type = 'review'
-                       AND status = 'completed'
-                     ORDER BY updated_at DESC
-                     LIMIT 1",
-                )
-                .bind(&card_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|error| format!("load latest review verdict for {card_id}: {error}"))?;
-                let has_pass = matches!(latest_verdict.as_deref(), Some("pass") | Some("approved"));
-                if !has_pass {
-                    return Err(format!(
-                        "gate blocked: review_verdict_pass — no review pass verdict (from {old_status} to {new_status})"
-                    ));
-                }
-            }
-        }
-
-        // #2051 Finding 1 (P1): align `set_status_raw_pg` semantics with
-        // `decide_pipeline_transition` (transition.rs). Previously this path
-        // only stamped a `warning` and proceeded with the UPDATE, while the
-        // intent path (`TransitionCard` → `transition_status_with_opts_pg`)
-        // returned `TransitionDecision::Blocked`. The asymmetry let JS
-        // policies (`agentdesk.kanban.setStatus`) bypass the
-        // `has_active_dispatch` gate. Now: when force=false and the gate is
-        // violated, return `Err` so the JS bridge surfaces a real failure;
-        // force=true callers keep the bypass-but-warn behaviour.
         let is_review_enter = enters_review_state(&effective, &new_status);
-        let mut active_dispatch_warning: Option<&'static str> = None;
-        if let Some(t) = transition_rule {
-            let needs_active_dispatch = t.gates.iter().any(|g| {
-                effective
-                    .gates
-                    .get(g.as_str())
-                    .is_some_and(|gc| gc.check.as_deref() == Some("has_active_dispatch"))
+        let active_gate_allows_completed_work = is_review_enter
+            && transition_rule.is_some_and(|transition| {
+                transition.gates.iter().any(|gate_name| {
+                    effective
+                        .gates
+                        .get(gate_name.as_str())
+                        .is_some_and(|gate| gate.check.as_deref() == Some("has_active_dispatch"))
+                })
             });
-            if needs_active_dispatch {
-                let has_active_dispatch = sqlx::query_scalar::<_, i64>(
-                    "SELECT COUNT(*)
-                     FROM task_dispatches
-                     WHERE kanban_card_id = $1
-                       AND (
-                            status IN ('pending', 'dispatched')
-                            OR (
-                                $2::text IS NOT NULL
-                                AND id = $2::text
-                                AND status = 'completed'
-                                AND dispatch_type IN ('implementation', 'rework')
-                                AND $3::boolean
-                            )
-                       )",
-                )
-                .bind(&card_id)
-                .bind(latest_dispatch_id.as_deref())
-                .bind(is_review_enter)
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(|error| format!("load active dispatch count for {card_id}: {error}"))?
-                    > 0;
-                if !has_active_dispatch {
-                    if !force {
-                        return Err(format!(
-                            "gate blocked: has_active_dispatch — no active dispatch (from {old_status} to {new_status})"
-                        ));
-                    }
-                    active_dispatch_warning = Some(
-                        "transition bypassed has_active_dispatch gate without an active dispatch",
-                    );
-                }
-            }
+
+        let has_active_dispatch = sqlx::query_scalar::<_, bool>(
+            "SELECT COUNT(*) > 0
+             FROM task_dispatches
+             WHERE kanban_card_id = $1
+               AND (
+                    status IN ('pending', 'dispatched')
+                    OR (
+                        $2::text IS NOT NULL
+                        AND id = $2::text
+                        AND status = 'completed'
+                        AND dispatch_type IN ('implementation', 'rework')
+                        AND $3::boolean
+                    )
+               )",
+        )
+        .bind(&card_id)
+        .bind(latest_dispatch_id.as_deref())
+        .bind(active_gate_allows_completed_work)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|error| format!("load active dispatch gate for {card_id}: {error}"))?;
+
+        // Window the latest review verdict to the current round (verdicts
+        // stamped at/after `review_entered_at`). Collect BOTH pass and rework
+        // so the reducer can evaluate either gate (the old body only looked at
+        // `pass`, and only when the target was terminal — that is the
+        // `review_verdict_rework` fail-open #3603 R1/R2 removes). When
+        // `review_entered_at` is NULL the `$2 IS NOT NULL` predicate yields no
+        // row, so both flags are false (fail-closed), matching the intent path.
+        let latest_review_verdict = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT result::jsonb ->> 'verdict'
+             FROM task_dispatches
+             WHERE kanban_card_id = $1
+               AND dispatch_type = 'review'
+               AND status = 'completed'
+               AND $2::timestamptz IS NOT NULL
+               AND COALESCE(completed_at, updated_at) >= $2::timestamptz
+             ORDER BY COALESCE(completed_at, updated_at) DESC, id DESC
+             LIMIT 1",
+        )
+        .bind(&card_id)
+        .bind(review_entered_at.as_deref())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| format!("load latest review verdict for {card_id}: {error}"))?
+        .flatten();
+
+        let ctx = TransitionContext {
+            card: CardState {
+                id: card_id.clone(),
+                status: old_status.clone(),
+                review_status: review_status.clone(),
+                latest_dispatch_id: latest_dispatch_id.clone(),
+            },
+            pipeline: effective.clone(),
+            gates: GateSnapshot {
+                has_active_dispatch,
+                review_verdict_pass: matches!(
+                    latest_review_verdict.as_deref(),
+                    Some("pass") | Some("approved")
+                ),
+                review_verdict_rework: matches!(
+                    latest_review_verdict.as_deref(),
+                    Some("rework") | Some("improve") | Some("reject")
+                ),
+            },
+        };
+
+        let force_intent = if force {
+            ForceIntent::OperatorOverride
+        } else {
+            ForceIntent::None
+        };
+        let decision = transition::decide_status_transition_with_caller(
+            &ctx,
+            &new_status,
+            "kanban::set_status_raw_pg",
+            force_intent,
+            "kanban::set_status_raw_pg",
+        );
+
+        if let TransitionOutcome::Blocked(reason) = &decision.outcome {
+            // The JS bridge surfaces a blocked transition as `{ "error": ... }`
+            // (the `Err` path below). Audit-log intents from the reducer are
+            // dropped here rather than committed: the prior body never wrote an
+            // audit row on a blocked call, so we preserve that to keep the diff
+            // a pure validation change.
+            tracing::warn!(
+                "[kanban] Blocked postgres setStatus {} → {} for card {}: {}",
+                old_status,
+                new_status,
+                card_id,
+                reason
+            );
+            return Err(reason.clone());
         }
 
+        if decision.outcome == TransitionOutcome::NoOp {
+            return Ok(serde_json::json!({
+                "ok": true,
+                "changed": false,
+                "status": new_status,
+            }));
+        }
+
+        // Preserve the `auto_queue_review_disabled` skip (a side-effect the
+        // intent path does not carry). The reducer has just approved the
+        // transition; if this is a non-forced review-enter for a card whose
+        // auto-queue review is disabled, skip the move entirely — exactly as
+        // before.
         if !force
             && is_review_enter
             && auto_queue_review_disabled_for_card_on_pg(&mut tx, &card_id).await?
@@ -370,77 +416,34 @@ fn set_status_raw_pg(pool: &PgPool, card_id: &str, new_status: &str, force: bool
             }));
         }
 
-        let clock_extra = match effective.clock_for_state(&new_status) {
-            Some(clock) if clock.mode.as_deref() == Some("coalesce") => {
-                format!(", {} = COALESCE({}, NOW())", clock.set, clock.set)
-            }
-            Some(clock) => format!(", {} = NOW()", clock.set),
-            None => String::new(),
-        };
-        let terminal_cleanup = if effective.is_terminal(&new_status) {
-            ", review_status = NULL, suggestion_pending_at = NULL, review_entered_at = NULL, awaiting_dod_at = NULL, blocked_reason = NULL, review_round = NULL, deferred_dod_json = NULL"
-        } else {
-            ""
-        };
-        let sql = format!(
-            "UPDATE kanban_cards SET status = $1, updated_at = NOW(){}{} WHERE id = $2",
-            clock_extra, terminal_cleanup
-        );
-        sqlx::query(&sql)
-            .bind(&new_status)
-            .bind(&card_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| format!("update kanban card {card_id} status: {error}"))?;
-
-        if effective.is_terminal(&new_status) {
-            crate::github::sync::sync_auto_queue_terminal_on_pg(&mut tx, &card_id).await?;
-
-            sqlx::query(
-                "UPDATE task_dispatches
-                 SET status = 'cancelled',
-                     updated_at = NOW(),
-                     completed_at = COALESCE(completed_at, NOW())
-                 WHERE kanban_card_id = $1
-                   AND dispatch_type IN ('implementation', 'review-decision', 'rework')
-                   AND status IN ('pending', 'dispatched')",
-            )
-            .bind(&card_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| {
-                format!("cancel orphan dispatches for terminal card {card_id}: {error}")
-            })?;
+        for intent in &decision.intents {
+            crate::engine::transition_executor_pg::execute_pg_transition_intent(&mut tx, intent)
+                .await?;
         }
 
-        let has_hooks = effective
-            .hooks_for_state(&new_status)
-            .is_some_and(|h| !h.on_enter.is_empty() || !h.on_exit.is_empty());
-        if effective.is_terminal(&new_status) || !has_hooks {
-            crate::github::sync::sync_review_state_on_pg(&mut tx, &card_id, "idle").await?;
-        } else if is_review_enter {
-            crate::github::sync::sync_review_state_on_pg(&mut tx, &card_id, "reviewing").await?;
+        // Terminal cleanup: route through the canonical helper (matches the
+        // reference path), replacing the prior inline raw cancel UPDATE. This
+        // cancels live dispatches through `cancel_dispatch_and_reset_auto_queue`
+        // (semaphore release, auto_queue reset, dispatch_events audit, outbox,
+        // thread teardown) and preserves verdictless review dispatches.
+        if effective.is_terminal(&new_status) {
+            crate::engine::transition_executor_pg::cancel_live_dispatches_for_terminal_card_pg(
+                &mut tx, &card_id,
+            )
+            .await?;
         }
 
         tx.commit().await.map_err(|error| {
             format!("commit postgres kanban status update for {card_id}: {error}")
         })?;
 
-        let mut response = serde_json::json!({
+        Ok(serde_json::json!({
             "ok": true,
             "changed": true,
             "from": old_status,
             "to": new_status,
             "card_id": card_id,
-        });
-        if let Some(warning) = active_dispatch_warning {
-            response["warning"] = serde_json::json!(warning);
-        }
-        let _ = metadata;
-        let _ = latest_dispatch_status;
-        let _ = old_review_round;
-        let _ = title;
-        Ok(response)
+        }))
     }) {
         Ok(response) => response.to_string(),
         Err(error) => serde_json::json!({ "error": error }).to_string(),
@@ -945,5 +948,604 @@ pub(super) fn review_state_sync_pg(pool: &PgPool, json_str: &str) -> String {
     match result {
         Ok(value) => value,
         Err(raw) => crate::engine::ops::ensure_js_error_json(raw),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn pg_test_db() -> crate::dispatch::test_support::DispatchPostgresTestDb {
+        crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_kanban_set_status",
+            "set_status_raw_pg review verdict windowing tests",
+        )
+        .await
+    }
+
+    /// Seed a card sitting in `review`, ready to attempt `review -> done`
+    /// (which is gated by `review_verdict_pass` in the default pipeline).
+    /// `review_entered_at` is set to `NOW() + offset_secs` so tests can place
+    /// the review-round boundary before/after seeded verdicts.
+    async fn seed_review_card(pool: &sqlx::PgPool, card_id: &str, entered_offset_secs: i64) {
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, review_round, review_entered_at, created_at, updated_at)
+             VALUES ($1, 'verdict window test', 'review', 1, NOW() + make_interval(secs => $2::double precision), NOW(), NOW())",
+        )
+        .bind(card_id)
+        .bind(entered_offset_secs as f64)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|err| panic!("seed review card {card_id}: {err}"));
+    }
+
+    async fn seed_review_card_null_entered(pool: &sqlx::PgPool, card_id: &str) {
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, review_round, review_entered_at, created_at, updated_at)
+             VALUES ($1, 'verdict window test', 'review', 1, NULL, NOW(), NOW())",
+        )
+        .bind(card_id)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|err| panic!("seed review card {card_id}: {err}"));
+    }
+
+    /// Seed a completed review dispatch whose verdict is stamped at
+    /// `NOW() + completed_offset_secs` (via both `completed_at` and `updated_at`,
+    /// matching the `COALESCE(completed_at, updated_at)` window predicate).
+    async fn seed_review_verdict(
+        pool: &sqlx::PgPool,
+        dispatch_id: &str,
+        card_id: &str,
+        verdict: &str,
+        completed_offset_secs: i64,
+    ) {
+        sqlx::query(
+            "INSERT INTO task_dispatches
+                (id, kanban_card_id, dispatch_type, status, result, completed_at, updated_at, created_at)
+             VALUES ($1, $2, 'review', 'completed', $3,
+                     NOW() + make_interval(secs => $4::double precision),
+                     NOW() + make_interval(secs => $4::double precision),
+                     NOW())",
+        )
+        .bind(dispatch_id)
+        .bind(card_id)
+        .bind(format!(r#"{{"verdict":"{verdict}"}}"#))
+        .bind(completed_offset_secs as f64)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|err| panic!("seed review verdict {dispatch_id}: {err}"));
+    }
+
+    /// True when the response is a `review_verdict_pass` gate block. After the
+    /// #3603 delegation the error text is produced by the FSM reducer
+    /// (`decide_pipeline_transition` → `evaluate_gates`), which wraps the gate
+    /// failure as `… failed gate '<gate>': BLOCKED: no review pass verdict …`.
+    fn is_review_pass_block(response: &str) -> bool {
+        let value: serde_json::Value =
+            serde_json::from_str(response).unwrap_or_else(|err| panic!("parse response: {err}"));
+        value
+            .get("error")
+            .and_then(|e| e.as_str())
+            .is_some_and(|e| e.contains("failed gate") && e.contains("review pass verdict"))
+    }
+
+    fn is_transition_ok_to(response: &str, expected_status: &str) -> bool {
+        let value: serde_json::Value =
+            serde_json::from_str(response).unwrap_or_else(|err| panic!("parse response: {err}"));
+        value.get("error").is_none()
+            && value.get("ok").and_then(|v| v.as_bool()) == Some(true)
+            && value.get("changed").and_then(|v| v.as_bool()) == Some(true)
+            && value.get("to").and_then(|v| v.as_str()) == Some(expected_status)
+    }
+
+    /// True when the JS-bridge response reports an error (Blocked transition).
+    fn is_error(response: &str) -> bool {
+        let value: serde_json::Value =
+            serde_json::from_str(response).unwrap_or_else(|err| panic!("parse response: {err}"));
+        value.get("error").is_some()
+    }
+
+    /// True when the response is a successful, status-changing transition
+    /// (`{ ok: true, changed: true }`), regardless of the target value.
+    fn is_changed(response: &str) -> bool {
+        let value: serde_json::Value =
+            serde_json::from_str(response).unwrap_or_else(|err| panic!("parse response: {err}"));
+        value.get("error").is_none() && value.get("changed").and_then(|v| v.as_bool()) == Some(true)
+    }
+
+    /// Stale verdict: the only `pass` was stamped BEFORE `review_entered_at`
+    /// (previous round). The current round has no verdict, so `review -> done`
+    /// must be blocked (fail-closed), matching the canonical reducer window.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_status_raw_pg_blocks_stale_pass_verdict_before_review_entered_at() {
+        let db = pg_test_db().await;
+        let pool = db.connect_and_migrate().await;
+        crate::pipeline::ensure_loaded();
+
+        let card_id = "card-stale-pass";
+        // review entered "now"; pass verdict 1h earlier -> outside the window.
+        seed_review_card(&pool, card_id, 0).await;
+        seed_review_verdict(&pool, "disp-stale-pass", card_id, "pass", -3600).await;
+
+        let response = set_status_raw_pg(&pool, card_id, "done", false);
+        assert!(
+            is_review_pass_block(&response),
+            "stale pass before review_entered_at must block review->done, got: {response}"
+        );
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// Fresh verdict: a `pass` stamped AFTER `review_entered_at` (current round)
+    /// satisfies the gate, so `review -> done` succeeds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_status_raw_pg_allows_fresh_pass_verdict_after_review_entered_at() {
+        let db = pg_test_db().await;
+        let pool = db.connect_and_migrate().await;
+        crate::pipeline::ensure_loaded();
+
+        let card_id = "card-fresh-pass";
+        // review entered 1h ago; pass verdict "now" -> inside the window.
+        seed_review_card(&pool, card_id, -3600).await;
+        seed_review_verdict(&pool, "disp-fresh-pass", card_id, "pass", 0).await;
+
+        let response = set_status_raw_pg(&pool, card_id, "done", false);
+        assert!(
+            is_transition_ok_to(&response, "done"),
+            "fresh pass after review_entered_at must allow review->done, got: {response}"
+        );
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// NULL `review_entered_at` must behave like the reducer window
+    /// (`$2::timestamptz IS NOT NULL` => no row): the gate blocks even when a
+    /// historical pass exists.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_status_raw_pg_blocks_when_review_entered_at_is_null() {
+        let db = pg_test_db().await;
+        let pool = db.connect_and_migrate().await;
+        crate::pipeline::ensure_loaded();
+
+        let card_id = "card-null-entered";
+        seed_review_card_null_entered(&pool, card_id).await;
+        seed_review_verdict(&pool, "disp-null-pass", card_id, "pass", -10).await;
+
+        let response = set_status_raw_pg(&pool, card_id, "done", false);
+        assert!(
+            is_review_pass_block(&response),
+            "null review_entered_at must block review->done, got: {response}"
+        );
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// The window applies regardless of verdict value: with a stale `pass`
+    /// (previous round) and a fresh `rework` (current round), the in-window
+    /// latest verdict is `rework`, so the `review_verdict_pass` gate is not
+    /// satisfied and `review -> done` is blocked. This proves the rework path
+    /// is windowed identically (the stale pass cannot leak through).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_status_raw_pg_windows_rework_over_stale_pass() {
+        let db = pg_test_db().await;
+        let pool = db.connect_and_migrate().await;
+        crate::pipeline::ensure_loaded();
+
+        let card_id = "card-rework-window";
+        // review entered 1h ago. Stale pass 2h ago (outside), fresh rework now.
+        seed_review_card(&pool, card_id, -3600).await;
+        seed_review_verdict(&pool, "disp-stale-pass-2", card_id, "pass", -7200).await;
+        seed_review_verdict(&pool, "disp-fresh-rework", card_id, "rework", 0).await;
+
+        let response = set_status_raw_pg(&pool, card_id, "done", false);
+        assert!(
+            is_review_pass_block(&response),
+            "fresh rework over stale pass must block review->done, got: {response}"
+        );
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    // ── #3603 delegation: matrix + differential equivalence ──────────
+    //
+    // These tests prove `set_status_raw_pg` (the delegating JS bridge) is
+    // semantically equivalent to the canonical intent reference
+    // `crate::kanban::transition_status_with_opts_pg_only`
+    // (transition_core.rs), and pin the specific divergences #3603 closes.
+
+    use crate::engine::PolicyEngine;
+    use crate::engine::transition::ForceIntent;
+
+    /// Seed a card in an arbitrary non-terminal state with no review metadata.
+    async fn seed_card(pool: &sqlx::PgPool, card_id: &str, status: &str) {
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, created_at, updated_at)
+             VALUES ($1, '3603 matrix', $2, NOW(), NOW())",
+        )
+        .bind(card_id)
+        .bind(status)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|err| panic!("seed card {card_id}: {err}"));
+    }
+
+    /// Seed an in-flight (pending) dispatch so `has_active_dispatch` is satisfied.
+    async fn seed_active_dispatch(pool: &sqlx::PgPool, dispatch_id: &str, card_id: &str) {
+        sqlx::query(
+            "INSERT INTO task_dispatches
+                (id, kanban_card_id, dispatch_type, status, created_at, updated_at)
+             VALUES ($1, $2, 'implementation', 'pending', NOW(), NOW())",
+        )
+        .bind(dispatch_id)
+        .bind(card_id)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|err| panic!("seed active dispatch {dispatch_id}: {err}"));
+    }
+
+    fn test_engine(pool: &sqlx::PgPool) -> PolicyEngine {
+        PolicyEngine::new_with_pg(&crate::config::Config::default(), Some(pool.clone()))
+            .expect("build test PolicyEngine")
+    }
+
+    /// Run the reference intent path and reduce its `Result<TransitionResult>`
+    /// to the same `(changed, is_error)` shape the JS bridge returns, so the two
+    /// can be compared directly.
+    async fn reference_outcome(
+        pool: &sqlx::PgPool,
+        engine: &PolicyEngine,
+        card_id: &str,
+        new_status: &str,
+        force: bool,
+    ) -> (bool, bool) {
+        let force_intent = if force {
+            ForceIntent::OperatorOverride
+        } else {
+            ForceIntent::None
+        };
+        match crate::kanban::transition_status_with_opts_pg_only(
+            pool,
+            engine,
+            card_id,
+            new_status,
+            "kanban::set_status_raw_pg",
+            force_intent,
+        )
+        .await
+        {
+            Ok(result) => (result.changed, false),
+            Err(_) => (false, true),
+        }
+    }
+
+    fn bridge_outcome(response: &str) -> (bool, bool) {
+        (is_changed(response), is_error(response))
+    }
+
+    /// ★ Differential equivalence. For each cell of the production status ×
+    /// target × gate-state × force matrix, seed two IDENTICAL cards and assert
+    /// the delegating bridge (`set_status_raw_pg`) and the intent reference
+    /// (`transition_status_with_opts_pg_only`) agree on `(changed, is_error)`.
+    /// This is the direct proof that the partial re-implementation no longer
+    /// diverges from the reducer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_status_raw_pg_matches_intent_reference_across_matrix() {
+        let db = pg_test_db().await;
+        let pool = db.connect_and_migrate().await;
+        crate::pipeline::ensure_loaded();
+        let engine = test_engine(&pool);
+
+        // (label, seed-closure, target, force)
+        // Each seed closure populates `<id>-b` (bridge) and `<id>-r` (reference)
+        // identically so the two paths see the same state.
+        struct Case {
+            label: &'static str,
+            target: &'static str,
+            force: bool,
+            // active dispatch present?
+            active: bool,
+            // base status to seed
+            status: &'static str,
+            // review-round verdict, if any (verdict, in_window)
+            verdict: Option<(&'static str, bool)>,
+        }
+
+        let cases = [
+            // requested → in_progress (gated: active_dispatch)
+            Case {
+                label: "requested→in_progress, active, !force",
+                target: "in_progress",
+                force: false,
+                active: true,
+                status: "requested",
+                verdict: None,
+            },
+            Case {
+                label: "requested→in_progress, no-active, !force",
+                target: "in_progress",
+                force: false,
+                active: false,
+                status: "requested",
+                verdict: None,
+            },
+            Case {
+                label: "requested→in_progress, no-active, force",
+                target: "in_progress",
+                force: true,
+                active: false,
+                status: "requested",
+                verdict: None,
+            },
+            // in_progress → review (gated: active_dispatch, review-enter)
+            Case {
+                label: "in_progress→review, active, !force",
+                target: "review",
+                force: false,
+                active: true,
+                status: "in_progress",
+                verdict: None,
+            },
+            Case {
+                label: "in_progress→review, no-active, !force",
+                target: "review",
+                force: false,
+                active: false,
+                status: "in_progress",
+                verdict: None,
+            },
+            // in_progress → requested (NO RULE — #3603 R3)
+            Case {
+                label: "in_progress→requested, !force (no-rule)",
+                target: "requested",
+                force: false,
+                active: false,
+                status: "in_progress",
+                verdict: None,
+            },
+            Case {
+                label: "in_progress→requested, force (no-rule bypass)",
+                target: "requested",
+                force: true,
+                active: false,
+                status: "in_progress",
+                verdict: None,
+            },
+            // review → done (gated: review_verdict_pass)
+            Case {
+                label: "review→done, window pass, !force",
+                target: "done",
+                force: false,
+                active: false,
+                status: "review",
+                verdict: Some(("pass", true)),
+            },
+            Case {
+                label: "review→done, window rework, !force",
+                target: "done",
+                force: false,
+                active: false,
+                status: "review",
+                verdict: Some(("rework", true)),
+            },
+            Case {
+                label: "review→done, no window verdict, !force",
+                target: "done",
+                force: false,
+                active: false,
+                status: "review",
+                verdict: None,
+            },
+            Case {
+                label: "review→done, stale pass only, !force",
+                target: "done",
+                force: false,
+                active: false,
+                status: "review",
+                verdict: Some(("pass", false)),
+            },
+            Case {
+                label: "review→done, no verdict, force",
+                target: "done",
+                force: true,
+                active: false,
+                status: "review",
+                verdict: None,
+            },
+            // review → in_progress (gated: review_verdict_rework — #3603 R1)
+            Case {
+                label: "review→in_progress, window rework, !force",
+                target: "in_progress",
+                force: false,
+                active: false,
+                status: "review",
+                verdict: Some(("rework", true)),
+            },
+            Case {
+                label: "review→in_progress, window pass, !force",
+                target: "in_progress",
+                force: false,
+                active: false,
+                status: "review",
+                verdict: Some(("pass", true)),
+            },
+            Case {
+                label: "review→in_progress, no window verdict, !force",
+                target: "in_progress",
+                force: false,
+                active: false,
+                status: "review",
+                verdict: None,
+            },
+            Case {
+                label: "review→in_progress, no verdict, force",
+                target: "in_progress",
+                force: true,
+                active: false,
+                status: "review",
+                verdict: None,
+            },
+        ];
+
+        for (idx, case) in cases.iter().enumerate() {
+            for variant in ["b", "r"] {
+                let id = format!("m{idx}-{variant}");
+                if case.status == "review" {
+                    // review_entered_at = now-1h so an in-window verdict is "now"
+                    // and a stale verdict is "-2h".
+                    seed_review_card(&pool, &id, -3600).await;
+                } else {
+                    seed_card(&pool, &id, case.status).await;
+                }
+                if case.active {
+                    seed_active_dispatch(&pool, &format!("md{idx}-{variant}"), &id).await;
+                }
+                if let Some((verdict, in_window)) = case.verdict {
+                    let offset = if in_window { 0 } else { -7200 };
+                    seed_review_verdict(&pool, &format!("mv{idx}-{variant}"), &id, verdict, offset)
+                        .await;
+                }
+            }
+
+            let bridge_id = format!("m{idx}-b");
+            let reference_id = format!("m{idx}-r");
+            let bridge = bridge_outcome(&set_status_raw_pg(
+                &pool,
+                &bridge_id,
+                case.target,
+                case.force,
+            ));
+            let reference =
+                reference_outcome(&pool, &engine, &reference_id, case.target, case.force).await;
+
+            assert_eq!(
+                bridge, reference,
+                "DIVERGENCE [{}]: bridge {:?} != reference {:?} (changed, is_error)",
+                case.label, bridge, reference
+            );
+        }
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// ★ review → in_progress with an in-window `rework` verdict and force=false
+    /// is ALLOWED — the rework gate passes, so #3603's hardening does not block
+    /// the normal rework recovery flow.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_status_raw_pg_allows_review_to_in_progress_with_window_rework() {
+        let db = pg_test_db().await;
+        let pool = db.connect_and_migrate().await;
+        crate::pipeline::ensure_loaded();
+
+        let card_id = "card-rework-allow";
+        seed_review_card(&pool, card_id, -3600).await;
+        seed_review_verdict(&pool, "disp-rework-allow", card_id, "rework", 0).await;
+
+        let response = set_status_raw_pg(&pool, card_id, "in_progress", false);
+        assert!(
+            is_transition_ok_to(&response, "in_progress"),
+            "in-window rework must allow review->in_progress, got: {response}"
+        );
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// ★ review → in_progress with NO in-window verdict and force=false is
+    /// BLOCKED — the `review_verdict_rework` gate fails closed. The OLD partial
+    /// re-implementation never evaluated this gate and would have issued a
+    /// direct UPDATE (fail-open, #3603 divergence R1).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_status_raw_pg_blocks_review_to_in_progress_without_window_verdict() {
+        let db = pg_test_db().await;
+        let pool = db.connect_and_migrate().await;
+        crate::pipeline::ensure_loaded();
+
+        let card_id = "card-rework-block";
+        // review entered now; a STALE rework 2h ago is out of window.
+        seed_review_card(&pool, card_id, 0).await;
+        seed_review_verdict(&pool, "disp-stale-rework", card_id, "rework", -7200).await;
+
+        let response = set_status_raw_pg(&pool, card_id, "in_progress", false);
+        assert!(
+            is_error(&response),
+            "no in-window rework verdict must block review->in_progress, got: {response}"
+        );
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// ★ in_progress → requested with force=false is BLOCKED — there is no
+    /// transition rule for it, and the reducer fails closed (#3603 R3). The OLD
+    /// body issued a direct UPDATE regardless of rule existence. (Reconciliation
+    /// now calls this transition with force=true, so this block is not exposed
+    /// on the live recovery path — see reconciliation.js:195.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_status_raw_pg_blocks_no_rule_in_progress_to_requested_unforced() {
+        let db = pg_test_db().await;
+        let pool = db.connect_and_migrate().await;
+        crate::pipeline::ensure_loaded();
+
+        let card_id = "card-norule-block";
+        seed_card(&pool, card_id, "in_progress").await;
+
+        let response = set_status_raw_pg(&pool, card_id, "requested", false);
+        assert!(
+            is_error(&response),
+            "no-rule in_progress->requested must block when unforced, got: {response}"
+        );
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// ★ in_progress → requested with force=true is ALLOWED — the reducer's
+    /// no-rule bypass arm carries forced transitions through. This is the
+    /// behaviour reconciliation.js:195 relies on after #3603 (force=true).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_status_raw_pg_allows_no_rule_in_progress_to_requested_forced() {
+        let db = pg_test_db().await;
+        let pool = db.connect_and_migrate().await;
+        crate::pipeline::ensure_loaded();
+
+        let card_id = "card-norule-allow";
+        seed_card(&pool, card_id, "in_progress").await;
+
+        let response = set_status_raw_pg(&pool, card_id, "requested", true);
+        assert!(
+            is_transition_ok_to(&response, "requested"),
+            "forced no-rule in_progress->requested must be allowed, got: {response}"
+        );
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// Normal forward transitions remain un-regressed: requested→in_progress
+    /// with an active dispatch is allowed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_status_raw_pg_allows_requested_to_in_progress_with_active_dispatch() {
+        let db = pg_test_db().await;
+        let pool = db.connect_and_migrate().await;
+        crate::pipeline::ensure_loaded();
+
+        let card_id = "card-fwd-active";
+        seed_card(&pool, card_id, "requested").await;
+        seed_active_dispatch(&pool, "disp-fwd-active", card_id).await;
+
+        let response = set_status_raw_pg(&pool, card_id, "in_progress", false);
+        assert!(
+            is_transition_ok_to(&response, "in_progress"),
+            "requested->in_progress with active dispatch must be allowed, got: {response}"
+        );
+
+        pool.close().await;
+        db.drop().await;
     }
 }

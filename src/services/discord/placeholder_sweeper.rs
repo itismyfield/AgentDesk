@@ -808,19 +808,6 @@ fn panel_reclaim_target(state: &InflightTurnState, age_secs: u64) -> Option<sere
     )
 }
 
-/// True when the placeholder abandoned branch below will NOT evict this row this
-/// pass — either it has no placeholder (`current_msg_id == 0`) or it already
-/// streamed partial output (the partial-response guard at the top of
-/// `run_placeholder_sweep_pass`). For those rows the panel sweep must clear the
-/// persisted `status_message_id` itself to converge; for rows the placeholder
-/// branch WILL evict, clearing here would only refresh the file mtime and defer
-/// that eviction (codex P2 r12).
-fn placeholder_sweep_leaves_row_unevicted(state: &InflightTurnState) -> bool {
-    state.current_msg_id == 0
-        || (!state.long_running_placeholder_active
-            && (!state.full_response.is_empty() || state.response_sent_offset > 0))
-}
-
 async fn sweep_orphan_status_panel(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -839,7 +826,23 @@ async fn sweep_orphan_status_panel(
         return;
     }
     let channel = serenity::ChannelId::new(state.channel_id);
-    let committed = match channel.delete_message(http, panel_msg).await {
+    if super::placeholder_cleanup::committed_terminal_panel_anchor_skip(
+        &shared.ui.placeholder_cleanup,
+        provider,
+        channel,
+        panel_msg,
+        state,
+    ) {
+        return; // #3607: a committed terminal cleanup owns this panel.
+    }
+    let delete_result = channel.delete_message(http, panel_msg).await;
+    super::placeholder_cleanup::emit_orphan_panel_sweep_delete(
+        provider,
+        channel,
+        panel_msg,
+        &delete_result,
+    );
+    let committed = match delete_result {
         Ok(_) => true,
         Err(serenity::Error::Http(http_err))
             if http_err
@@ -879,7 +882,7 @@ async fn sweep_orphan_status_panel(
             finalize_abandoned_mailbox(shared, provider, state).await;
             let _ = delete_inflight_state_file(provider, state.channel_id);
         }
-    } else if placeholder_sweep_leaves_row_unevicted(state)
+    } else if super::placeholder_cleanup::placeholder_sweep_leaves_row_unevicted(state)
         && let Some(panel_msg_id) = state.status_message_id
     {
         // Partial-response rows (real placeholder + streamed output) are owned by

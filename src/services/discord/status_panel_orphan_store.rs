@@ -268,6 +268,33 @@ fn delete_error_is_permanent(err: &serenity::Error) -> bool {
             .is_some_and(|status| matches!(status.as_u16(), 404 | 403 | 410)))
 }
 
+/// #3607: emit the durable `relay_delete` observation for the orphan-store drain
+/// delete (sweeper-class). Outcome mirrors the convergence branches:
+/// `Ok` → committed, permanent `Err` (404/403/410) → already_gone, other
+/// `Err` → failed. Panel deletes are non-terminal cleanups. Observation only —
+/// the caller's removal / retry logic is unchanged.
+fn emit_orphan_drain_delete(
+    provider: &ProviderKind,
+    channel_id: u64,
+    panel_msg_id: u64,
+    result: &Result<(), serenity::Error>,
+) {
+    let permanent = result.as_ref().err().is_some_and(delete_error_is_permanent);
+    let outcome = super::placeholder_cleanup::panel_sweep_delete_outcome(result.is_ok(), permanent);
+    let detail = result.as_ref().err().map(|err| err.to_string());
+    crate::services::observability::emit_relay_delete(
+        provider.as_str(),
+        channel_id,
+        panel_msg_id,
+        None,
+        None,
+        "status_panel_orphan_store_drain",
+        super::placeholder_cleanup::PlaceholderCleanupOperation::DeleteNonterminal.as_str(),
+        outcome,
+        detail.as_deref(),
+    );
+}
+
 /// #3351: pure drain-defer decision for relay-placeholder records — `true` when
 /// the live inflight row still anchors `candidate` as its `current_msg_id`.
 fn orphan_drain_placeholder_is_live(current_msg_id: Option<u64>, candidate: u64) -> bool {
@@ -328,7 +355,13 @@ pub(in crate::services::discord) async fn drain(
         }
         let channel = serenity::ChannelId::new(channel_id);
         let message = serenity::MessageId::new(panel_msg_id);
-        match channel.delete_message(http, message).await {
+        let delete_result = channel.delete_message(http, message).await;
+        // #3607: durable observability for the sweeper-class retry delete — classify
+        // committed / already_gone (permanent 404/403/410) / failed using the SAME
+        // `delete_error_is_permanent` match the convergence below uses (emit-only; no
+        // behaviour change).
+        emit_orphan_drain_delete(provider, channel_id, panel_msg_id, &delete_result);
+        match delete_result {
             Ok(_) => {
                 remove(provider, token_hash, channel_id, panel_msg_id);
                 cleared += 1;
@@ -438,5 +471,29 @@ mod tests {
             load_pending_in_root(root, &provider, "tok"),
             vec![(100, 5001)]
         );
+    }
+
+    /// #3607: the sweeper-class drain delete must also emit a durable
+    /// `relay_delete` (the gap codex flagged) — committed on Ok, attributed to
+    /// the orphan-store drain site as a non-terminal cleanup.
+    #[test]
+    fn drain_committed_delete_emits_relay_delete() {
+        let _guard = crate::services::observability::test_runtime_lock();
+        crate::services::observability::reset_for_tests();
+
+        let ok: Result<(), serenity::Error> = Ok(());
+        emit_orphan_drain_delete(&ProviderKind::Codex, 4242, 9001, &ok);
+
+        let events = crate::services::observability::events::recent(50);
+        let event = events
+            .iter()
+            .find(|event| event.event_type == "relay_delete")
+            .expect("relay_delete should be in the recent ring");
+        assert_eq!(event.channel_id, Some(4242));
+        assert_eq!(event.payload["message_id"], 9001);
+        assert_eq!(event.payload["source"], "status_panel_orphan_store_drain");
+        assert_eq!(event.payload["operation_kind"], "delete_nonterminal");
+        assert_eq!(event.payload["outcome"], "committed");
+        assert_eq!(event.payload["status"], "committed");
     }
 }

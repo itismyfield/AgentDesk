@@ -264,10 +264,10 @@ async fn render_channel_monitoring_from_store(
     let Some(content) = format_monitoring_message(&entries) else {
         if let Some(msg_id) = rendered_msg_id {
             wait_if_shared(shared, channel_id).await;
-            if let Err(error) = channel_id
+            let result = channel_id
                 .delete_message(http, MessageId::new(msg_id))
-                .await
-            {
+                .await;
+            if let Err(error) = &result {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(
                     "  [{ts}] ⚠ failed to delete monitoring status msg {} in channel {}: {}",
@@ -276,6 +276,15 @@ async fn render_channel_monitoring_from_store(
                     error
                 );
             }
+            // #3607: monitoring status messages are not provider-scoped.
+            crate::services::observability::emit_relay_delete_result(
+                "",
+                channel_id.get(),
+                msg_id,
+                "monitoring_status_clear",
+                "delete_nonterminal",
+                &result,
+            );
             let mut store = monitoring.lock().await;
             store.set_rendered_msg(channel_id.get(), None);
         }

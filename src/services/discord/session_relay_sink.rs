@@ -679,8 +679,16 @@ impl SessionBoundDiscordRelaySink {
         .await;
 
         // #3089 B1: shadow-mirror durable delivered frontier — flag-gated, observe-only, Delivered-only (I2), OFF=no-op.
-        let b1_delivered = dr::outcome_is_shadow_delivered(&outcome);
-        dr::shadow_mirror_delivered_frontier(shared, provider, channel, (start, end), b1_delivered);
+        // #3610 PR-1: anchor msg = `msg_id` (current_msg_id — true terminal anchor, not status_message_id). PR-1b: anchor channel = `channel` (same-channel path).
+        dr::shadow_mirror_delivered_frontier(
+            shared,
+            provider,
+            channel,
+            (start, end),
+            dr::outcome_is_shadow_delivered(&outcome),
+            Some(msg_id.get()),
+            Some(channel.get()),
+        );
 
         match outcome {
             // Confirmed POST (edit OR #2757 fallback): controller already ran advance + commit;

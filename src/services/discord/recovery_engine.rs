@@ -343,7 +343,9 @@ async fn relay_recovery_terminal_notice(
 /// permanent Discord rejection (404/403/410) can end the retry loop. #3297
 /// finding 2: the anchored path flattens errors into Strings, so a transient
 /// classification gets a second opinion from an active channel probe.
-async fn relay_recovered_terminal_text_to_placeholder(
+// #3610 PR-2: surfaced to `recovery_paths::restart` so the anchor-repost fallback
+// can drive the same delivery path (send-NEW via the `placeholder == None` arm).
+pub(in crate::services::discord) async fn relay_recovered_terminal_text_to_placeholder(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
@@ -2718,6 +2720,52 @@ pub(super) async fn restore_inflight_turns(
         };
 
         if recovery_terminal_delivery_already_committed(&state) {
+            // #3610 PR-2: the #3607 backstop — this row's terminal answer WAS
+            // committed, but it may have since vanished from Discord. Behind a
+            // default-OFF flag, probe the recorded anchor and repost (send-new) iff
+            // it is permanently gone. Flag OFF → `enabled()` is false so the whole
+            // block is skipped and the legacy finish+clear below runs byte-identically.
+            if recovery_paths::shared::recovery_anchor_repost_enabled() {
+                if let Some(outcome) = recovery_paths::restart::try_recover_anchor_repost(
+                    http,
+                    shared,
+                    provider,
+                    &state,
+                    &state.full_response,
+                )
+                .await
+                {
+                    // #3610 PR-2 (codex r2 Issue-2, storm guard): pass
+                    // `tmux_alive = false` to the dispose so a repeatedly
+                    // TransientFailure-ing send-new is BUDGET-BOUNDED. This row's
+                    // terminal answer is ALREADY committed — pane liveness is
+                    // irrelevant to whether the *anchor message* can be re-posted,
+                    // so the normal-turn "live pane may still own the answer"
+                    // preservation (`unrecoverable_relay_disposition`'s
+                    // `tmux_alive == true` arm, shared.rs) must NOT apply here.
+                    // Were the real probe passed, a live pane would force
+                    // `PreserveAndCount` every boot and a transient send-new
+                    // failure could loop FOREVER (preserve+retry each restart).
+                    // `tmux_alive` reaches only (a) the disposition's budget gate
+                    // and (b) the `termination_audit` `tmux_alive` column — never a
+                    // kill / extra force-clear path (verified) — so `false` is the
+                    // minimal, side-effect-free way to enforce the bound. The probe
+                    // call is dropped because its result is intentionally unused.
+                    recovery_paths::restart::dispose_recovery_relay_outcome(
+                        shared,
+                        provider,
+                        &state,
+                        outcome,
+                        false,
+                        "recovery_anchor_repost",
+                        "anchor_repost",
+                        &state.full_response,
+                        false,
+                    )
+                    .await;
+                    continue;
+                }
+            }
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
                 provider = %provider.as_str(),

@@ -1,4 +1,5 @@
 mod cancel_finalize_policy;
+mod chunk_compose;
 mod completion_guard;
 mod context_window;
 mod headless_delivery;
@@ -47,7 +48,7 @@ use crate::services::agent_protocol::{
     RuntimeHandoff, RuntimeHandoffKind, StatusEvent, TaskNotificationKind,
 };
 use crate::services::memory::{
-    CaptureRequest, SessionEndReason, TokenUsage, resolve_memory_role_id, resolve_memory_session_id,
+    CaptureRequest, TokenUsage, resolve_memory_role_id, resolve_memory_session_id,
 };
 use crate::services::observability::session_inventory::{
     format_child_inventory_progress, load_child_inventory_by_parent_key_pg,
@@ -73,8 +74,7 @@ pub(super) use completion_guard::{
     runtime_db_fallback_complete_with_result, streaming_final_complete_dispatch_with_result,
 };
 pub(super) use recovery_text::{
-    auto_retry_with_history, build_session_retry_context_from_history, release_retry_pending,
-    store_session_retry_context, take_session_retry_context_for_turn_with_audit,
+    auto_retry_with_history, release_retry_pending, take_session_retry_context_for_turn_with_audit,
 };
 use single_message_footer::*;
 pub(super) use stale_resume::result_event_has_stale_resume_error;
@@ -98,8 +98,8 @@ pub(super) use tmux_runtime::handoff_interrupted_message;
 pub(super) use tmux_runtime::stale_inflight_message;
 pub(super) use tmux_runtime::stop_active_turn;
 pub(super) use watcher_orphan_cleanup::{
-    record_watcher_orphan_spinner_cleanup, should_delete_bridge_created_watcher_orphan_response,
-    should_retry_watcher_orphan_spinner_cleanup, spawn_watcher_orphan_spinner_cleanup_retry,
+    cleanup_or_preserve_watcher_orphan_spinner,
+    should_delete_bridge_created_watcher_orphan_response,
 };
 
 /// #2452 H6 graduation: schedule the history-aware auto-retry via the
@@ -1868,7 +1868,10 @@ pub(super) fn spawn_turn_bridge(
                                 continue;
                             }
                             streamed_assistant_text_this_turn = true;
-                            full_response.push_str(&content);
+                            // #3608: normalize the chunk boundary so a tool-use
+                            // `\n\n` separator + a chunk that itself begins with
+                            // blank lines does not accumulate into `\n\n\n\n`.
+                            chunk_compose::append_streamed_text_chunk(&mut full_response, &content);
                             if (watcher_owns_assistant_relay
                                 && watcher_relay_available_for_turn)
                                 || standby_relay_owns_output
@@ -2196,9 +2199,12 @@ pub(super) fn spawn_turn_bridge(
                                 }
                             }
                             if !full_response.is_empty() {
-                                let trimmed = full_response.trim_end();
-                                full_response.truncate(trimmed.len());
-                                full_response.push_str("\n\n");
+                                // #3608: paragraph separator via the shared
+                                // composition primitive (matched pair with
+                                // `append_streamed_text_chunk`). inflight_state
+                                // / state_dirty stay inline (hot-file #3016:
+                                // only full_response composition is extracted).
+                                chunk_compose::append_tool_boundary_separator(&mut full_response);
                                 inflight_state.full_response = full_response.clone();
                                 state_dirty = true;
                             }
@@ -4695,55 +4701,20 @@ pub(super) fn spawn_turn_bridge(
                         bridge_created_response_placeholder_msg_id,
                         current_msg_id,
                     ) {
-                        let cleanup_outcome =
-                            match gateway.delete_message(channel_id, current_msg_id).await {
-                                Ok(()) => {
-                                    super::placeholder_cleanup::PlaceholderCleanupOutcome::Succeeded
-                                }
-                                Err(error) => {
-                                    super::placeholder_cleanup::classify_delete_error(&error)
-                                }
-                            };
-                        let cleanup_committed = cleanup_outcome.is_committed();
-                        let cleanup_should_retry =
-                            should_retry_watcher_orphan_spinner_cleanup(&cleanup_outcome);
-                        let cleanup_already_gone = matches!(
-                            cleanup_outcome,
-                            super::placeholder_cleanup::PlaceholderCleanupOutcome::AlreadyGone
-                        );
-                        record_watcher_orphan_spinner_cleanup(
-                            shared_owned.as_ref(),
+                        // #3607: terminal-anchor guard + durable delete
+                        // observability live in the sibling so the hot file only
+                        // dispatches. The guard skips deleting a committed
+                        // terminal anchor (the accident this fixes); a genuine
+                        // non-terminal orphan is deleted, recorded, and retried.
+                        cleanup_or_preserve_watcher_orphan_spinner(
+                            shared_owned.clone(),
                             &provider,
+                            gateway.clone(),
                             channel_id,
                             current_msg_id,
-                            inflight_state.tmux_session_name.as_deref(),
-                            cleanup_outcome,
-                            "turn_bridge_watcher_orphan_spinner_cleanup",
-                        );
-                        if cleanup_committed {
-                            if cleanup_already_gone {
-                                tracing::info!(
-                                    "  [{ts}] 🧹 bridge orphan watcher-handoff spinner card already gone (channel {}, msg {})",
-                                    channel_id,
-                                    current_msg_id
-                                );
-                            } else {
-                                tracing::info!(
-                                    "  [{ts}] 🧹 bridge removed orphan watcher-handoff spinner card (channel {}, msg {})",
-                                    channel_id,
-                                    current_msg_id
-                                );
-                            }
-                        } else if cleanup_should_retry {
-                            spawn_watcher_orphan_spinner_cleanup_retry(
-                                shared_owned.clone(),
-                                provider.clone(),
-                                gateway.clone(),
-                                channel_id,
-                                current_msg_id,
-                                inflight_state.tmux_session_name.clone(),
-                            );
-                        }
+                            &inflight_state,
+                        )
+                        .await;
                     }
                 }
                 BridgeOutputOwner::StandbyRelay => tracing::info!(
@@ -5156,7 +5127,7 @@ pub(super) fn spawn_turn_bridge(
                             )
                             .await
                             {
-                                Ok(_) => {
+                                Ok((_first, last_chunk_msg_id)) => {
                                     terminal_delivery_committed = true;
                                     terminal_body_visible = true;
                                     if single_message_panel_footer_mode {
@@ -5168,13 +5139,40 @@ pub(super) fn spawn_turn_bridge(
                                     // B6 (codex P1-b): advance ONLY via a successful
                                     // lease commit (Delivered). `NoRange` has no new
                                     // bytes to commit → no advance outside the lease.
+                                    // #3610 PR-1c: record the durable terminal anchor
+                                    // (last chunk msg id) on the SAME Delivered commit —
+                                    // frontier keyed by watcher_owner_channel_id, anchor
+                                    // pair in the delivery `channel_id`. Helper body +
+                                    // gating live in outbound/delivery_record.rs.
                                     if let Some(lease) = lease {
-                                        lease.commit_and_advance(
+                                        let lease_range = lease.range();
+                                        // #3610 (codex review): gate the durable
+                                        // anchor record on the commit ACTUALLY
+                                        // succeeding. `commit_and_advance` advances
+                                        // `confirmed_end_offset` IFF its inner
+                                        // `DeliveryLeaseCell::commit` succeeds and
+                                        // returns `true`; a non-Leased / identity-
+                                        // mismatch / reclaimed cell returns `false`
+                                        // and does NOT advance. Recording the durable
+                                        // `delivered_frontier.range = end` without an
+                                        // in-memory advance would violate M4 (durable
+                                        // frontier END must mirror confirmed_end_offset).
+                                        let committed = lease.commit_and_advance(
                                             shared_owned.as_ref(),
                                             watcher_owner_channel_id,
                                             inflight_state.tmux_session_name.as_deref(),
                                             crate::services::discord::LeaseOutcome::Delivered,
                                         );
+                                        if committed {
+                                            super::outbound::delivery_record::record_long_chunk_terminal_delivery(
+                                                shared_owned.as_ref(),
+                                                &provider,
+                                                watcher_owner_channel_id,
+                                                channel_id,
+                                                lease_range,
+                                                last_chunk_msg_id.map(|m| m.get()),
+                                            );
+                                        }
                                     }
                                 }
                                 Err(error) => {
@@ -5411,30 +5409,47 @@ pub(super) fn spawn_turn_bridge(
                     );
                 }
                 for frozen_msg_id in terminal_full_replay_cleanup_msg_ids.drain(..) {
+                    // #5413/#3607: current_msg_id is the terminal answer and is
+                    // already excluded here, so no terminal-anchor guard is
+                    // needed — every drained id is a non-terminal streamed prefix.
                     if frozen_msg_id == current_msg_id {
                         continue;
                     }
-                    match gateway.delete_message(channel_id, frozen_msg_id).await {
-                        Ok(()) => {
-                            tracing::info!(
-                                target: "agentdesk::codex_rollout_handoff",
-                                provider = %provider.as_str(),
-                                channel = channel_id.get(),
-                                message_id = frozen_msg_id.get(),
-                                "turn_bridge removed streamed rollover prefix after full terminal replay"
-                            );
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                target: "agentdesk::codex_rollout_handoff",
-                                provider = %provider.as_str(),
-                                channel = channel_id.get(),
-                                message_id = frozen_msg_id.get(),
-                                error = %error,
-                                "turn_bridge failed to remove streamed rollover prefix after full terminal replay"
-                            );
-                        }
-                    }
+                    let (replay_outcome, replay_detail) =
+                        match gateway.delete_message(channel_id, frozen_msg_id).await {
+                            Ok(()) => {
+                                tracing::info!(
+                                    target: "agentdesk::codex_rollout_handoff",
+                                    provider = %provider.as_str(),
+                                    channel = channel_id.get(),
+                                    message_id = frozen_msg_id.get(),
+                                    "turn_bridge removed streamed rollover prefix after full terminal replay"
+                                );
+                                ("committed", None)
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    target: "agentdesk::codex_rollout_handoff",
+                                    provider = %provider.as_str(),
+                                    channel = channel_id.get(),
+                                    message_id = frozen_msg_id.get(),
+                                    error = %error,
+                                    "turn_bridge failed to remove streamed rollover prefix after full terminal replay"
+                                );
+                                ("failed", Some(error))
+                            }
+                        };
+                    crate::services::observability::emit_relay_delete(
+                        provider.as_str(),
+                        channel_id.get(),
+                        frozen_msg_id.get(),
+                        adk_session_key.as_deref(),
+                        Some(turn_id.as_str()),
+                        "full_terminal_replay_prefix",
+                        "delete_nonterminal",
+                        replay_outcome,
+                        replay_detail.as_deref(),
+                    );
                 }
                 // #2236: look up the typed handoff marker stamped at dispatch
                 // time so multi-agent setups with overlapping background
@@ -5843,9 +5858,7 @@ pub(super) fn spawn_turn_bridge(
         let mut should_analyze_recall_feedback = false;
         let mut should_spawn_memory_capture = false;
         let mut reflect_request = None;
-        let mut session_end_reason = None;
         let mut clear_provider_session = false;
-        let mut retry_context_to_store = None;
         let capture_memory_settings = settings::memory_settings_for_binding(role_binding.as_ref());
         let session_id_to_persist = {
             let mut data = shared_owned.core.lock().await;
@@ -5858,7 +5871,6 @@ pub(super) fn spawn_turn_bridge(
                     terminal_session_reset_required,
                     should_record_final_turn,
                 ) {
-                    session_end_reason = memory_plan.session_end_reason;
                     clear_provider_session = memory_plan.clear_provider_session;
                     if memory_plan.persist_transcript {
                         session.history.push(HistoryItem {
@@ -5870,11 +5882,6 @@ pub(super) fn spawn_turn_bridge(
                             content: full_response.clone(),
                         });
                         should_persist_transcript = true;
-                        if memory_plan.session_end_reason == Some(SessionEndReason::TurnCapReached)
-                        {
-                            retry_context_to_store =
-                                build_session_retry_context_from_history(&session.history);
-                        }
                     }
                     if let Some(reason) = memory_plan.session_end_reason {
                         reflect_request = take_memento_reflect_request(
@@ -5902,42 +5909,12 @@ pub(super) fn spawn_turn_bridge(
             }
         };
 
-        if let Some(retry_context) = retry_context_to_store.as_deref()
-            && let Err(err) = store_session_retry_context(
-                None::<&crate::db::Db>,
-                shared_owned.pg_pool.as_ref(),
-                channel_id.get(),
-                retry_context,
-            )
-        {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!(
-                "  [{ts}] ⚠ failed to store retry context for channel {}: {}",
-                channel_id.get(),
-                err
-            );
-        }
-
         // Persist or clear provider session_id in DB so fresh-session transitions
         // survive dcserver restarts and idle cleanup.
         if clear_provider_session {
             if let Some(session_key) = adk_session_key.as_deref() {
                 super::adk_session::clear_provider_session_id(session_key, shared_owned.api_port)
                     .await;
-                if session_end_reason == Some(SessionEndReason::TurnCapReached) {
-                    crate::services::termination_audit::record_termination_with_handles(
-                        None::<&crate::db::Db>,
-                        shared_owned.pg_pool.as_ref(),
-                        session_key,
-                        dispatch_id.as_deref(),
-                        "turn_bridge",
-                        "turn_cap_reached",
-                        Some("provider session cleared after assistant turn cap"),
-                        None,
-                        None,
-                        None,
-                    );
-                }
             }
         } else if let (Some(session_key), Some(persisted_sid)) =
             (adk_session_key.as_deref(), session_id_to_persist.as_deref())

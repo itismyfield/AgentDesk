@@ -551,6 +551,8 @@ src/
 │   │   │   │   ├── pid_exit.rs
 │   │   │   │   └── process_table.rs
 │   │   │   ├── cancel_finalize_policy.rs
+│   │   │   ├── chunk_compose.rs
+│   │   │   ├── chunk_compose_tests.rs
 │   │   │   ├── completion_guard.rs
 │   │   │   ├── context_window.rs
 │   │   │   ├── headless_delivery.rs

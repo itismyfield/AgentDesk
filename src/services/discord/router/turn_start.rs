@@ -123,31 +123,12 @@ pub(in crate::services::discord) fn reserve_headless_turn() -> HeadlessTurnReser
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SessionResetReason {
-    IdleExpired,
-    AssistantTurnCap,
-}
-
-pub(super) fn session_reset_reason_for_turn(
-    session: &DiscordSession,
-    now: tokio::time::Instant,
-) -> Option<SessionResetReason> {
-    if now.duration_since(session.last_active) > super::super::SESSION_MAX_IDLE {
-        Some(SessionResetReason::IdleExpired)
-    } else if session.assistant_turn_count() >= super::super::SESSION_MAX_ASSISTANT_TURNS {
-        Some(SessionResetReason::AssistantTurnCap)
-    } else {
-        None
-    }
-}
-
-pub(super) fn session_reset_reason_lifecycle_code(reason: SessionResetReason) -> &'static str {
-    match reason {
-        SessionResetReason::IdleExpired => "idle_timeout",
-        SessionResetReason::AssistantTurnCap => "assistant_turn_cap",
-    }
-}
+// NOTE(#3588, #3591): idle 기반 + 턴수 기반(100턴) 세션 리셋이 모두 제거됨.
+// idle/턴수와 무관하게 provider session(claude resume id)을 보존해 다음 턴에
+// `--resume`으로 transcript를 이어간다. 컨텍스트 폭주는 auto-compact가 관리한다.
+// in-memory/tmux 메모리 회수는 `maybe_cleanup_sessions`/idle-kill이 담당하되
+// resume id는 남긴다. 명시적 초기화는 idle recap의 `새 세션 시작` 버튼
+// (idle_recap:clear) 또는 `/clear`로만 한다.
 
 pub(super) fn dispatch_reset_lifecycle_code(
     reset_provider_state: bool,

@@ -717,9 +717,19 @@ pub(crate) fn use_counter_model_channel(dispatch_type: Option<&str>) -> bool {
     // "review", "e2e-test" (#197), and "consultation" (#256) go to the counter-model channel.
     // "review-decision" is routed back to the original implementation provider
     // so it reuses the implementation-side thread rather than the reviewer channel.
+    //
+    // #3605 (T2): "scope-assessment" is intentionally NOT listed here. Unlike
+    // consultation, the assigned agent itself evaluates the scope, so the
+    // dispatch must stay on the assigned agent's PRIMARY channel (the default
+    // when this returns false).
+    //
+    // #3594 (T3): "plan-review" goes to the counter-model channel — like a
+    // review, the plan is checked by the counterpart model. "plan" itself is
+    // NOT listed (the assigned agent designs on its PRIMARY channel, mirroring
+    // implementation), so it is intentionally absent here.
     matches!(
         dispatch_type,
-        Some("review") | Some("e2e-test") | Some("consultation")
+        Some("review") | Some("e2e-test") | Some("consultation") | Some("plan-review")
     )
 }
 
@@ -768,6 +778,11 @@ fn dispatch_type_label(dispatch_type: Option<&str>) -> &'static str {
         Some("pm-decision") => "🎯 PM 판단",
         Some("e2e-test") => "🧪 E2E 테스트",
         Some("consultation") => "💬 상담",
+        Some("scope-assessment") => "📐 범위 평가",
+        // #3594 (T3): plan = design/implementation-plan stage; plan-review =
+        // counter-model check of that plan before implementation.
+        Some("plan") => "🗺️ 계획",
+        Some("plan-review") => "🧭 계획 리뷰",
         Some("phase-gate") => "🚦 Phase Gate",
         _ => "dispatch",
     }
@@ -919,6 +934,22 @@ fn dispatch_instruction_line(
         }
         Some("consultation") => {
             "한 줄 지시: 필요한 조사/판단만 수행하고 상세 기준과 완료 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
+                .to_string()
+        }
+        Some("scope-assessment") => {
+            // #3605 (T2): scale evaluation only — no implementation. Detailed
+            // scope_depth contract lives in the [Dispatch Contract] section.
+            "한 줄 지시: 구현하지 말고 이 이슈의 스케일(scope_depth)만 평가하세요. 상세 기준과 완료 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
+                .to_string()
+        }
+        Some("plan") => {
+            // #3594 (T3): design + implementation plan only, no implementation.
+            "한 줄 지시: 구현하지 말고 설계와 구현계획(result.plan)만 작성하세요. 상세 기준과 완료 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
+                .to_string()
+        }
+        Some("plan-review") => {
+            // #3594 (T3): review the parent plan; verdict pass|rework in result.
+            "한 줄 지시: 부모 plan의 구현계획을 검토하고 result.verdict를 pass|rework로 판정하세요. 상세 기준과 완료 규칙은 시스템 프롬프트의 [Current Task]를 따르세요."
                 .to_string()
         }
         Some("phase-gate") => {

@@ -128,6 +128,257 @@ test("timeouts card timeout module marks requested dispatches failed before retr
   assert.deepEqual(toPlain(state.executions[0].params), ["card-requested-1"]);
 });
 
+test("timeouts requested sweep skips consultation side-path dispatches (#256)", () => {
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { requested_timeout_min: 30 },
+    dbQuery: createSqlRouter([
+      {
+        match: "FROM kanban_cards kc LEFT JOIN task_dispatches td ON td.id = kc.latest_dispatch_id",
+        result: [
+          {
+            id: "card-consult-1",
+            assigned_agent_id: "agent-1",
+            latest_dispatch_id: "dispatch-consult-1",
+            retry_count: 0,
+            dispatch_type: "consultation"
+          }
+        ]
+      }
+    ])
+  });
+
+  policy._section_A();
+
+  // Consultation side-path: never marked failed, never retried/escalated.
+  assert.deepEqual(state.dispatchMarkFailedCalls, []);
+  assert.deepEqual(state.manualInterventions, []);
+  assert.equal(
+    state.executions.filter((e) => /UPDATE kanban_cards SET requested_at/.test(e.sql)).length,
+    0
+  );
+});
+
+test("timeouts requested sweep skips scope-assessment side-path even when overdue (#3605)", () => {
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { requested_timeout_min: 30 },
+    dbQuery: createSqlRouter([
+      {
+        match: "FROM kanban_cards kc LEFT JOIN task_dispatches td ON td.id = kc.latest_dispatch_id",
+        result: [
+          {
+            id: "card-scope-1",
+            assigned_agent_id: "agent-1",
+            latest_dispatch_id: "dispatch-scope-1",
+            retry_count: 0,
+            dispatch_type: "scope-assessment"
+          }
+        ]
+      }
+    ])
+  });
+
+  policy._section_A();
+
+  // #3605 (T2) inert side-path: the requested-timeout sweep must NOT mark the
+  // scope-assessment dispatch failed nor retry/escalate the card, exactly like
+  // consultation. A scope-assessment that lingers in `requested` is harmless.
+  assert.deepEqual(state.dispatchMarkFailedCalls, []);
+  assert.deepEqual(state.manualInterventions, []);
+  assert.equal(
+    state.executions.filter((e) => /UPDATE kanban_cards SET requested_at/.test(e.sql)).length,
+    0
+  );
+});
+
+test("timeouts reconcile fallback does not advance a completed scope-assessment (#3605)", () => {
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { pm_decision_gate_enabled: true },
+    dbQuery: createSqlRouter([
+      {
+        match: "SELECT key, value FROM kv_meta WHERE key LIKE 'reconcile_dispatch:%'",
+        result: [{ key: "reconcile_dispatch:dispatch-scope-r", value: "dispatch-scope-r" }]
+      },
+      {
+        match: "SELECT id, kanban_card_id, to_agent_id, dispatch_type, chain_depth, status, result, context FROM task_dispatches WHERE id = ?",
+        result: [
+          {
+            id: "dispatch-scope-r",
+            kanban_card_id: "card-scope-r",
+            to_agent_id: "agent-1",
+            dispatch_type: "scope-assessment",
+            chain_depth: 0,
+            status: "completed",
+            result: JSON.stringify({ scope_depth: "direct" }),
+            context: "{}"
+          }
+        ]
+      },
+      {
+        match: "SELECT id, status, priority, assigned_agent_id, deferred_dod_json FROM kanban_cards WHERE id = ?",
+        result: [
+          {
+            id: "card-scope-r",
+            status: "requested",
+            priority: "medium",
+            assigned_agent_id: "agent-1",
+            deferred_dod_json: null
+          }
+        ]
+      },
+      {
+        // #3605 (T2): the fallback now records scope_depth via the shared
+        // recorder, which reads the card metadata first.
+        match: "SELECT metadata FROM kanban_cards WHERE id = ?",
+        result: [{ metadata: JSON.stringify({ scope_depth: "direct", scope_assessment_status: "completed" }) }]
+      },
+      // #3594 (T3): the fallback now also GATES the depth flow (direct → impl).
+      // With no linked auto-queue entry it defers to the activate path (no
+      // dispatch created), so the no-review-advance assertions below still hold.
+      { match: "FROM auto_queue_entries e", result: [] }
+    ])
+  });
+
+  policy._section_R();
+
+  // Missed-hook fallback must mirror kanban-rules.js onDispatchCompleted: a
+  // completed scope-assessment never advances the card to REVIEW (no setStatus
+  // to review), grants no XP, and runs no PM-gate-driven status change. (T3 may
+  // create a depth-gated NEXT dispatch, but only when an auto-queue entry is
+  // linked — none here, so it defers.)
+  assert.deepEqual(state.statusCalls, []);
+  assert.deepEqual(state.reviewStatusCalls, []);
+  assert.deepEqual(state.reviewStateSyncs, []);
+  // XP UPDATE (agents SET xp = xp + ?) must not fire for a side-path.
+  assert.equal(
+    state.executions.filter((e) => /UPDATE agents SET xp = xp/.test(e.sql)).length,
+    0
+  );
+  // #3605 (T2): but the fallback MUST still record scope_depth (parity with the
+  // live hook) — previously it only `continue`d and lost the result entirely.
+  const metaWrite = state.executions.find((e) =>
+    /UPDATE kanban_cards SET metadata = \?/.test(e.sql)
+  );
+  assert.ok(metaWrite, "fallback must persist scope-assessment metadata");
+  const meta = metaWrite.params[0];
+  assert.equal(meta.scope_depth, "direct");
+  assert.equal(meta.scope_assessment_status, "completed");
+});
+
+test("timeouts reconcile fallback applies full fallback for an unparsable scope-assessment (#3605)", () => {
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { pm_decision_gate_enabled: true },
+    dbQuery: createSqlRouter([
+      {
+        match: "SELECT key, value FROM kv_meta WHERE key LIKE 'reconcile_dispatch:%'",
+        result: [{ key: "reconcile_dispatch:dispatch-scope-fb", value: "dispatch-scope-fb" }]
+      },
+      {
+        match: "SELECT id, kanban_card_id, to_agent_id, dispatch_type, chain_depth, status, result, context FROM task_dispatches WHERE id = ?",
+        result: [
+          {
+            id: "dispatch-scope-fb",
+            kanban_card_id: "card-scope-fb",
+            to_agent_id: "agent-1",
+            dispatch_type: "scope-assessment",
+            chain_depth: 0,
+            status: "completed",
+            result: "not json at all",
+            context: "{}"
+          }
+        ]
+      },
+      {
+        match: "SELECT id, status, priority, assigned_agent_id, deferred_dod_json FROM kanban_cards WHERE id = ?",
+        result: [
+          {
+            id: "card-scope-fb",
+            status: "requested",
+            priority: "medium",
+            assigned_agent_id: "agent-1",
+            deferred_dod_json: null
+          }
+        ]
+      },
+      {
+        match: "SELECT metadata FROM kanban_cards WHERE id = ?",
+        result: [{ metadata: "{}" }]
+      },
+      // #3594 (T3): full-fallback depth gates to a plan dispatch; no linked
+      // auto-queue entry → defers (no dispatch created), so the card stays inert.
+      { match: "FROM auto_queue_entries e", result: [] }
+    ])
+  });
+
+  policy._section_R();
+
+  // Unparsable result → cautious "full" fallback, recorded even on the
+  // missed-hook path; card never advances to review (no setStatus).
+  assert.deepEqual(state.statusCalls, []);
+  const metaWrite = state.executions.find((e) =>
+    /UPDATE kanban_cards SET metadata = \?/.test(e.sql)
+  );
+  assert.ok(metaWrite, "fallback must persist scope metadata even when unparsable");
+  assert.equal(metaWrite.params[0].scope_depth, "full");
+  assert.match(metaWrite.params[0].scope_reason, /fallback to full/);
+});
+
+test("timeouts reconcile fallback gates depth flow when an auto-queue entry is linked (#3594 T3)", () => {
+  // Parity with the live hook: a missed scope-assessment completion whose card
+  // has a linked auto-queue entry must create the depth-gated next dispatch
+  // (direct → implementation) so the run does not stall waiting for a hook that
+  // was dropped.
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { pm_decision_gate_enabled: true },
+    dbQuery: createSqlRouter([
+      {
+        match: "SELECT key, value FROM kv_meta WHERE key LIKE 'reconcile_dispatch:%'",
+        result: [{ key: "reconcile_dispatch:dispatch-scope-g", value: "dispatch-scope-g" }]
+      },
+      {
+        match: "SELECT id, kanban_card_id, to_agent_id, dispatch_type, chain_depth, status, result, context FROM task_dispatches WHERE id = ?",
+        result: [
+          {
+            id: "dispatch-scope-g",
+            kanban_card_id: "card-scope-g",
+            to_agent_id: "agent-1",
+            dispatch_type: "scope-assessment",
+            chain_depth: 0,
+            status: "completed",
+            result: JSON.stringify({ scope_depth: "direct" }),
+            context: "{}"
+          }
+        ]
+      },
+      {
+        match: "SELECT id, status, priority, assigned_agent_id, deferred_dod_json FROM kanban_cards WHERE id = ?",
+        result: [
+          {
+            id: "card-scope-g",
+            status: "requested",
+            priority: "medium",
+            assigned_agent_id: "agent-1",
+            deferred_dod_json: null
+          }
+        ]
+      },
+      {
+        match: "SELECT metadata FROM kanban_cards WHERE id = ?",
+        result: [{ metadata: JSON.stringify({ scope_depth: "direct", scope_assessment_status: "completed" }) }]
+      },
+      { match: "FROM auto_queue_entries e", result: [{ id: "entry-g", agent_id: "agent-1" }] }
+    ])
+  });
+
+  policy._section_R();
+
+  // No review advance, but the gated implementation dispatch IS created.
+  assert.deepEqual(state.statusCalls, []);
+  assert.equal(state.dispatchCreates.length, 1);
+  assert.equal(state.dispatchCreates[0].dispatchType, "implementation");
+  assert.equal(state.autoQueueStatusUpdates[0].status, "dispatched");
+  assert.equal(state.autoQueueStatusUpdates[0].reason, "scope_gate_direct_reconcile");
+});
+
 test("timeouts review timeout module escalates overdue DoD waits", () => {
   const { policy, state } = loadPolicy("policies/timeouts.js", {
     dbQuery: createSqlRouter([

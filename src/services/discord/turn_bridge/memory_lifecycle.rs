@@ -8,8 +8,6 @@ use crate::services::provider::ProviderKind;
 use crate::ui::ai_screen::{HistoryItem, HistoryType};
 use poise::serenity_prelude::ChannelId;
 
-pub(super) const PROVIDER_SESSION_ASSISTANT_TURN_CAP: usize = 100;
-
 pub(super) fn spawn_memory_capture_task(
     channel_id: ChannelId,
     capture_memory_settings: settings::ResolvedMemorySettings,
@@ -354,13 +352,6 @@ pub(super) struct TurnEndMemoryPlan {
     pub(super) spawn_capture: bool,
 }
 
-fn assistant_turn_count(history: &[HistoryItem]) -> usize {
-    history
-        .iter()
-        .filter(|item| item.item_type == HistoryType::Assistant && !item.content.trim().is_empty())
-        .count()
-}
-
 pub(super) fn plan_turn_end_memory(
     session: &DiscordSession,
     backend: settings::MemoryBackendKind,
@@ -384,18 +375,13 @@ pub(super) fn plan_turn_end_memory(
         });
     }
 
-    let assistant_turn_cap_reached = persist_transcript
-        && assistant_turn_count(&session.history).saturating_add(1)
-            >= PROVIDER_SESSION_ASSISTANT_TURN_CAP;
+    // #3591: 턴수 기반(100턴) 세션 리셋 제거. 컨텍스트 폭주는 auto-compact가 관리.
     let session_end_reason = if terminal_session_reset_required {
         Some(SessionEndReason::LocalSessionReset)
-    } else if assistant_turn_cap_reached {
-        Some(SessionEndReason::TurnCapReached)
     } else {
         None
     };
-    let clear_provider_session =
-        resume_failure_detected || terminal_session_reset_required || assistant_turn_cap_reached;
+    let clear_provider_session = resume_failure_detected || terminal_session_reset_required;
 
     Some(TurnEndMemoryPlan {
         session_end_reason,

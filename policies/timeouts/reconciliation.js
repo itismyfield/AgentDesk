@@ -1,3 +1,16 @@
+var _recordScopeAssessment = require("../lib/kanban-scope-assessment")._recordScopeAssessment;
+// #3594 (T3): the missed-hook replay must gate the depth flow IDENTICALLY to the
+// live kanban-rules onDispatchCompleted, otherwise a dropped scope-assessment /
+// plan / plan-review completion event would either bypass the gate (impl created
+// before depth is known) or strand the card (plan completed, no follow-up). Reuse
+// the same scope-gate helpers the live handler uses.
+var _scopeGate = require("../lib/kanban-scope-gate");
+var _resolveScopeFlow = _scopeGate._resolveScopeFlow;
+var _createImplDispatch = _scopeGate._createImplDispatch;
+var _createPlanDispatch = _scopeGate._createPlanDispatch;
+var _createPlanReviewDispatch = _scopeGate._createPlanReviewDispatch;
+var _loadCardMetadata = require("../lib/kanban-card-metadata")._loadCardMetadata;
+
 module.exports = function attachReconciliation(timeouts, helpers) {
   var sendDeadlockAlert = helpers.sendDeadlockAlert;
   var MAX_DISPATCH_RETRIES = helpers.MAX_DISPATCH_RETRIES;
@@ -68,6 +81,67 @@ module.exports = function attachReconciliation(timeouts, helpers) {
         var rPending = rInitial;
         if (agentdesk.pipeline.isTerminal(card.status, rCfg)) continue;
         if (di.dispatch_type === "review" || di.dispatch_type === "review-decision") continue;
+        // #3605 (T2) + #3594 (T3): scope-assessment missed-hook replay must
+        // mirror kanban-rules.js onDispatchCompleted EXACTLY. (1) Record
+        // scope_depth (same full-fallback for missing/unparsable results), then
+        // (2) ACTIVATE the depth gate: direct → impl now, plan_only/full → plan.
+        // It must NOT fall through to the PM gate / XP / review advance below.
+        // (_recordScopeAssessment merges status=completed, so it is idempotent if
+        // the live hook also fires; the dispatch helpers are no-ops if the entry
+        // was already resumed.)
+        if (di.dispatch_type === "scope-assessment") {
+          _recordScopeAssessment(di.kanban_card_id, di);
+          var rScopeMeta = _loadCardMetadata(di.kanban_card_id);
+          var rScopeDepth = rScopeMeta.scope_depth || "full";
+          var rFlow = _resolveScopeFlow(rScopeDepth);
+          if (!rFlow.needsPlan) {
+            _createImplDispatch(di.kanban_card_id, di, card, "scope_gate_direct_reconcile");
+          } else {
+            _createPlanDispatch(di.kanban_card_id, di, card, rScopeDepth);
+          }
+          agentdesk.log.info("[reconcile] " + card.id + " scope-assessment completed — recorded scope_depth=" + rScopeDepth + ", gated flow (no advance)");
+          continue;
+        }
+        // #3594 (T3): "plan" missed-hook replay — mirror the live plan arm.
+        // depth rides in the plan dispatch context: plan_only → impl, full →
+        // plan-review. Stays out of the PM gate / review advance below.
+        if (di.dispatch_type === "plan") {
+          var rPlanContext = {};
+          try { rPlanContext = JSON.parse(di.context || "{}"); } catch (e) { rPlanContext = {}; }
+          var rPlanDepth = rPlanContext.scope_depth || "full";
+          // #3594 (T3, codex Finding 3): forward the plan body to the next stage.
+          var rPlanResult = {};
+          try { rPlanResult = JSON.parse(di.result || "{}"); } catch (e) { rPlanResult = {}; }
+          var rPlanText = (rPlanResult && typeof rPlanResult.plan === "string") ? rPlanResult.plan : null;
+          if (_resolveScopeFlow(rPlanDepth).needsPlanReview) {
+            _createPlanReviewDispatch(di.kanban_card_id, di, card, rPlanDepth, rPlanText);
+          } else {
+            _createImplDispatch(di.kanban_card_id, di, card, "scope_gate_plan_done_reconcile", rPlanText);
+          }
+          agentdesk.log.info("[reconcile] " + card.id + " plan completed (depth=" + rPlanDepth + ") — gated next stage");
+          continue;
+        }
+        // #3594 (T3): "plan-review" missed-hook replay — mirror the live arm.
+        // Read result.verdict directly: pass → impl, otherwise re-plan.
+        if (di.dispatch_type === "plan-review") {
+          var rPrResult = {};
+          try { rPrResult = JSON.parse(di.result || "{}"); } catch (e) { rPrResult = {}; }
+          var rPrContext = {};
+          try { rPrContext = JSON.parse(di.context || "{}"); } catch (e) { rPrContext = {}; }
+          var rPrDepth = rPrContext.scope_depth || "full";
+          if (rPrResult.verdict === "pass") {
+            // #3594 (T3, codex Finding 3): forward the approved plan (carried in
+            // the plan-review context) into impl.
+            var rApprovedPlan = (rPrContext && typeof rPrContext.parent_plan === "string")
+              ? rPrContext.parent_plan
+              : null;
+            _createImplDispatch(di.kanban_card_id, di, card, "scope_gate_plan_review_pass_reconcile", rApprovedPlan);
+          } else {
+            _createPlanDispatch(di.kanban_card_id, di, card, rPrDepth);
+          }
+          agentdesk.log.info("[reconcile] " + card.id + " plan-review completed (verdict=" + (rPrResult.verdict || "<none>") + ") — gated next stage");
+          continue;
+        }
         if (di.dispatch_type === "rework") {
           agentdesk.kanban.setStatus(card.id, rReview);
           agentdesk.log.info("[reconcile] " + card.id + " rework done → " + rReview);
@@ -118,7 +192,15 @@ module.exports = function attachReconciliation(timeouts, helpers) {
               agentdesk.log.warn("[reconcile] Card " + card.id + " → " + rReview + "(awaiting_dod): " + reasons[0]);
               continue;
             }
-            agentdesk.kanban.setStatus(card.id, rPending);
+            // #3603: force=true. set_status_raw_pg now delegates to the FSM
+            // reducer (decide_pipeline_transition), which BLOCKs non-forced
+            // transitions that have no pipeline rule. This PM-gate recovery
+            // revert (in_progress → requested == rPending/kickoff) has no
+            // transition rule, so a non-forced call would be blocked and the
+            // missed-hook fallback would break. force=true routes through the
+            // reducer's no-rule bypass arm, preserving the prior behaviour.
+            // (Mirrors the live hot-path precedent kanban-rules.js:610.)
+            agentdesk.kanban.setStatus(card.id, rPending, true);
             agentdesk.kanban.setReviewStatus(card.id, null, {suggestion_pending_at: null});
             // #117: sync canonical review state
             agentdesk.reviewState.sync(card.id, "idle");

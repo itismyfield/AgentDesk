@@ -404,6 +404,50 @@
 
 ### Audited touches
 
+- #3610 (Phase B PR-1c) long-chunk terminal anchor recording: `turn_bridge/mod.rs`
+  gained a single helper call in the long-chunk terminal-delivery arm (site 4 —
+  `send_ordered_long_terminal_response`, the send-new-chunks + placeholder-delete
+  path) so a LONG (`len > DISCORD_MSG_LIMIT`) terminal answer records the durable
+  delivered-frontier anchor PR-1/PR-1b covered only for the short-replace sites.
+  The anchor is the LAST sent chunk's message id (the placeholder is deleted, so the
+  tail chunk is the only stable anchor); it is recorded on the SAME full-commit
+  `Delivered` lease commit, gated identically to the cutover. The frontier KEY stays
+  `watcher_owner_channel_id` (the offset authority — UNCHANGED), and the recorded
+  anchor PAIR is `(panel_channel_id = delivery channel_id, panel_msg_id = last chunk)`;
+  the helper body + gating live in `outbound/delivery_record.rs`
+  (`record_long_chunk_terminal_delivery`). This is purely worker-local delivery
+  instrumentation behind the existing shadow flag (`AGENTDESK_DELIVERY_RECORD_SHADOW`,
+  default OFF → no-op): the recorded panel fields have NO production reader (the sole
+  durable-frontier reader consumes only `.range.1`), so the #3593/#3520 dedup, #3604
+  window, and the `watcher_owner_channel_id` offset-authority key are all unaffected.
+  No leader election, gateway lease, PG ownership, startup order, worker ownership, or
+  singleton assumption is touched; the recovery-fallback re-post criterion remains
+  deferred to a later #3610 PR.
+- #3593 synthetic-resume relay-duplicate guard: `tmux_watcher.rs` extends the
+  resend-dedup decision so a non-reconciled, already-committed JSONL range (the
+  background-agent-completion synthetic resume that restores the placeholder and
+  rewinds `response_sent_offset`) routes to the EXISTING non-destructive
+  `SkipAlreadyCommitted` arm instead of re-sending the prior body. The dedup
+  reads the worker's OWN per-channel relay watermark (`effective_committed_offset`,
+  generation self-healed before the read) and preserves the restored placeholder —
+  it is a worker-local, in-memory/durable-record dedup, NOT a routing authority and
+  never read cross-node. The pure `range_already_committed` helper + tests live in
+  `outbound/delivery_record.rs`. No leader election, gateway lease, PG ownership,
+  startup order, worker ownership, or singleton assumption is touched.
+- #3607 terminal-delete protection guard + durable delete observability
+  (Phase A): `turn_bridge/mod.rs` gained a worker-local cleanup guard that
+  preserves a committed terminal anchor (a finished turn's retired message
+  recorded in the per-process `PlaceholderCleanupRegistry` tombstone, signal-c,
+  fused with the live-inflight fast path, signal-a) from the orphan-spinner
+  cleanup, plus `emit_relay_delete` observability on every wired delete site
+  (orphan-spinner, full-terminal replay-prefix). The hot-file body shrank
+  (orphan-spinner cleanup lifted whole into the `watcher_orphan_cleanup.rs`
+  sibling); only a dispatch call + guard remain inline. The guard reads the same
+  per-process tombstone registry the watcher already owns and the turn's OWN
+  inflight handle — it is NOT a routing authority, never read cross-node. No
+  leader election, gateway lease, PG ownership, startup order, worker ownership,
+  or singleton assumption is touched; the recovery-fallback criterion is
+  deferred to #3610.
 - #3560 single_message_panel default-ON + footer-mode migration guard: the
   `single_message_panel` flag is now default-ON (opt-out via
   `AGENTDESK_SINGLE_MESSAGE_PANEL=0|false`) and `turn_bridge/mod.rs` gained a

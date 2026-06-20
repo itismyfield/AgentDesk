@@ -114,7 +114,20 @@ pub(in crate::services::discord) struct DeliveredCommit {
     pub range: (u64, u64),
     pub generation_mtime_ns: i64,
     pub attempts: u32,
+    /// #3610 (Phase B PR-1): the durable TERMINAL ANCHOR — the Discord message id
+    /// terminal-replace edited in place (the assistant response `current_msg_id`).
     pub panel_msg_id: Option<u64>,
+    /// #3610 (Phase B PR-1b): the channel `panel_msg_id` lives in. The frontier is
+    /// KEYED by the offset-authority channel (`watcher_owner_channel_id`), which the
+    /// bridge cutover can resolve DIFFERENTLY from the edit-target channel the anchor
+    /// message belongs to (a recovered/reused-watcher bridge edits its own dispatch
+    /// channel while leasing on the resolved owner channel — terminal_controller_cutover
+    /// `Channel split`). PR-2's re-post must therefore know WHICH channel to edit, not
+    /// just which message. `#[serde(default)]` keeps PR-1 records (no field) and any
+    /// pre-#3610 record forward/backward compatible. Same-channel callers (sink,
+    /// watcher) set this to their single channel; null = no anchor recorded.
+    #[serde(default)]
+    pub panel_channel_id: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -395,6 +408,121 @@ fn durable_frontier_generation_current(durable_mtime: i64, current_gen_mtime: i6
     current_gen_mtime != 0 && durable_mtime == current_gen_mtime
 }
 
+/// Path-based core (pure-ish, testable): the durable `delivered_frontier` END,
+/// but ONLY when it was written by the CURRENT wrapper generation (#1270 guard,
+/// via [`durable_frontier_generation_current`]). `None` when the record is
+/// absent/malformed (I3 conservative) OR its frontier is from a PRIOR generation
+/// (stale-high → distrust). `current_gen_mtime == 0` (no/unreadable `.generation`
+/// file) → the guard distrusts everything → `None`. This is the SINGLE durable
+/// frontier reader; the env-resolved [`delivered_frontier_end_current_generation`]
+/// and the flag-gated [`effective_committed_offset`] both funnel through it so the
+/// generation-gating logic exists in exactly one place.
+fn current_generation_durable_frontier_end_at(path: &Path, current_gen_mtime: i64) -> Option<u64> {
+    read_record_at(path)
+        .and_then(|r| r.delivered_frontier)
+        .filter(|f| durable_frontier_generation_current(f.generation_mtime_ns, current_gen_mtime))
+        .map(|f| f.range.1)
+}
+
+/// #3610 PR-2: a recovery-time terminal delivery anchor, generation-validated.
+///
+/// `panel_msg_id` / `panel_channel_id` are the `(message, channel)` the committed
+/// terminal answer actually lives in (recorded by PR-1~1d's
+/// [`shadow_mirror_delivered_frontier`] anchor pair); `range` is the `(start, end)`
+/// JSONL slice that commit covered. All three come from the SAME
+/// `delivered_frontier`, so they are mutually consistent by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) struct CurrentGenerationAnchor {
+    pub panel_msg_id: u64,
+    pub panel_channel_id: u64,
+    pub range: (u64, u64),
+}
+
+/// #3610 PR-2 (stale-anchor guard, path-based core — pure-ish, testable): the
+/// durable `delivered_frontier`'s terminal anchor, but ONLY when (a) it was
+/// written by the CURRENT wrapper generation (the SAME #1270 guard
+/// [`current_generation_durable_frontier_end_at`] uses, so a stale prior-generation
+/// frontier from a same-named respawn can NEVER be reposted) AND (b) the anchor
+/// pair is fully populated (`panel_msg_id` and `panel_channel_id` both `Some` and
+/// non-zero — a zero id is the un-anchored / TUI-direct sentinel that
+/// `MessageId::new(0)` would panic on). `None` on any miss: absent/malformed
+/// record, no frontier, prior generation, or an incomplete/zero anchor pair.
+///
+/// This is the stale-anchor structural guard for the anchor-repost fallback: by
+/// funneling through the existing generation gate it adds NO new offset reader and
+/// distrusts exactly what the rest of the dedup machinery distrusts (dedup byte-0).
+fn current_generation_delivered_anchor_at(
+    path: &Path,
+    current_gen_mtime: i64,
+) -> Option<CurrentGenerationAnchor> {
+    let frontier = read_record_at(path)
+        .and_then(|r| r.delivered_frontier)
+        .filter(|f| {
+            durable_frontier_generation_current(f.generation_mtime_ns, current_gen_mtime)
+        })?;
+    let panel_msg_id = frontier.panel_msg_id.filter(|&id| id != 0)?;
+    let panel_channel_id = frontier.panel_channel_id.filter(|&id| id != 0)?;
+    Some(CurrentGenerationAnchor {
+        panel_msg_id,
+        panel_channel_id,
+        range: frontier.range,
+    })
+}
+
+/// #3610 PR-2: env-resolved wrapper over [`current_generation_delivered_anchor_at`].
+/// Returns the current-generation terminal anchor for `(provider, channel)` keyed by
+/// the same `delivery_record_path` the dedup gates use, or `None` when there is no
+/// trustworthy, fully-populated anchor (see the core's contract). The recovery
+/// anchor-repost fallback reads ONLY this — it never writes and never resolves a new
+/// offset, so a flag-OFF caller that does not invoke it is a byte-for-byte no-op.
+pub(in crate::services::discord) fn current_generation_delivered_anchor(
+    provider: &ProviderKind,
+    channel: ChannelId,
+    tmux_session_name: &str,
+) -> Option<CurrentGenerationAnchor> {
+    let path = delivery_record_path(provider, channel.get())?;
+    let current_gen = current_generation_mtime_ns(tmux_session_name);
+    current_generation_delivered_anchor_at(&path, current_gen)
+}
+
+/// Resolve the current wrapper-generation watermark for `tmux_session_name`. The
+/// `tmux` module is `#[cfg(unix)]`; on non-unix targets (windows CI cross-compile
+/// check) there is no wrapper generation file, so the generation is absent (`0`),
+/// which [`durable_frontier_generation_current`] treats as "distrust".
+fn current_generation_mtime_ns(tmux_session_name: &str) -> i64 {
+    #[cfg(unix)]
+    {
+        crate::services::discord::tmux::read_generation_file_mtime_ns(tmux_session_name)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tmux_session_name;
+        0
+    }
+}
+
+/// #3593 (flag-INDEPENDENT): the CURRENT-generation durable `delivered_frontier`
+/// END, or `0` when there is none to trust (absent/malformed record, or a stale
+/// prior-generation frontier per the #1270 guard). UNLIKE
+/// [`effective_committed_offset`], this NEVER consults
+/// `AGENTDESK_DELIVERY_RECORD_AUTHORITY` — it is the durable frontier the legacy
+/// #3520 new-message floor read, surfaced so the synthetic-resume dedup gate can
+/// fuse it (`max`) with the in-memory committed offset and remain a TRUE superset
+/// of #3520 under BOTH authority states. Returning `0` (not `None`) keeps the
+/// caller's `committed.max(this)` fusion a plain `u64` op; `0` is the safe floor
+/// (`range_already_committed` suppresses NOTHING at `committed == 0`).
+pub(in crate::services::discord) fn delivered_frontier_end_current_generation(
+    provider: &ProviderKind,
+    channel: ChannelId,
+    tmux_session_name: &str,
+) -> u64 {
+    let Some(path) = delivery_record_path(provider, channel.get()) else {
+        return 0;
+    };
+    let current_gen = current_generation_mtime_ns(tmux_session_name);
+    current_generation_durable_frontier_end_at(&path, current_gen).unwrap_or(0)
+}
+
 /// #3089 B2b: the effective "already-committed" offset the dedup/skip gates read.
 /// Flag OFF (default) → the legacy in-memory `committed_relay_offset` verbatim
 /// (no record read → deploy no-op). Flag ON → `max(delivered_frontier.end,
@@ -414,62 +542,67 @@ pub(in crate::services::discord) fn effective_committed_offset(
     if !delivery_record_authority_enabled() {
         return in_memory;
     }
-    // The `tmux` module is `#[cfg(unix)]`; on non-unix targets (windows CI
-    // cross-compile check) there is no wrapper generation file, so treat the
-    // generation as absent (`0`) — `durable_frontier_generation_current`
-    // returns false for `0`, which falls back to the in-memory offset.
-    #[cfg(unix)]
-    let current_gen =
-        crate::services::discord::tmux::read_generation_file_mtime_ns(tmux_session_name);
-    #[cfg(not(unix))]
-    let current_gen: i64 = {
-        let _ = tmux_session_name;
-        0
-    };
-    let durable_end = read_record(provider, channel.get())
-        .and_then(|r| r.delivered_frontier)
-        .filter(|f| durable_frontier_generation_current(f.generation_mtime_ns, current_gen))
-        .map(|f| f.range.1);
+    let durable_end = delivery_record_path(provider, channel.get()).and_then(|path| {
+        current_generation_durable_frontier_end_at(
+            &path,
+            current_generation_mtime_ns(tmux_session_name),
+        )
+    });
     fuse_committed_offset(durable_end, in_memory)
 }
 
-/// #3520: durable delivered-frontier END for the CURRENT tmux generation, INDEPENDENT of
-/// the `delivery_record_authority_enabled()` read-authority flag. A watcher-direct re-send
-/// whose consumed byte range is entirely `<=` this value is a warm-followup / restored-seed
-/// re-mirror of already-delivered text and must be suppressed (otherwise it re-posts the
-/// prior turn's answer as a NEW message at the same prompt anchor — #3520). Returns 0 when
-/// the frontier is absent or belongs to a stale generation, so a caller never suppresses
-/// genuinely-new content (no message loss).
-pub(in crate::services::discord) fn delivered_frontier_end_current_generation(
+/// #3593 (codex HIGH): the committed floor the synthetic-resume re-send dedup gate
+/// (`tmux_watcher.rs`, the non-reconciled `watcher_direct_fallback_intended` arm)
+/// reads — the `max` of [`effective_committed_offset`] and the FLAG-INDEPENDENT
+/// current-generation durable frontier ([`delivered_frontier_end_current_generation`]).
+///
+/// Why fuse here and not rely on `effective_committed_offset` alone: under
+/// `AGENTDESK_DELIVERY_RECORD_AUTHORITY=OFF` (the default), `effective_committed_offset`
+/// returns ONLY the in-memory `committed_relay_offset`. On a restart / synthetic
+/// resume that in-memory value is reset to `0`, while the durable frontier still
+/// holds the current-generation high watermark (e.g. 443154). With the in-memory
+/// floor alone the gate would compute `range_already_committed(422855, 0) == false`
+/// and RE-POST the already-delivered body — the legacy #3520 new-message guard read
+/// the durable frontier flag-independently, so the new placeholder-path gate must
+/// too to be a TRUE superset of #3520 under BOTH authority states.
+///
+/// Safety (no over-suppression): `max` only RAISES the floor, and the durable reader
+/// is current-generation-only (#1270 guard → stale prior-generation frontier yields
+/// `0`), so after a pane reset/respawn a genuinely-NEW answer — whose `range_end`
+/// sits ABOVE both signals — is never wrongly suppressed.
+pub(in crate::services::discord) fn committed_floor_for_resend_dedup(
+    shared: &crate::services::discord::SharedData,
     provider: &ProviderKind,
     channel: ChannelId,
     tmux_session_name: &str,
 ) -> u64 {
-    #[cfg(unix)]
-    let current_gen =
-        crate::services::discord::tmux::read_generation_file_mtime_ns(tmux_session_name);
-    #[cfg(not(unix))]
-    let current_gen: i64 = {
-        let _ = tmux_session_name;
-        0
-    };
-    delivered_frontier_end_for_generation(
-        read_record(provider, channel.get()).and_then(|r| r.delivered_frontier),
-        current_gen,
+    effective_committed_offset(shared, provider, channel, tmux_session_name).max(
+        delivered_frontier_end_current_generation(provider, channel, tmux_session_name),
     )
 }
 
-/// Pure core of [`delivered_frontier_end_current_generation`] (testable): the frontier END
-/// when it belongs to `current_gen`, else 0 (absent / stale generation => 0 => the caller
-/// suppresses nothing, so no genuinely-new message can be lost).
-fn delivered_frontier_end_for_generation(
-    frontier: Option<DeliveredCommit>,
-    current_gen: i64,
-) -> u64 {
-    frontier
-        .filter(|f| durable_frontier_generation_current(f.generation_mtime_ns, current_gen))
-        .map(|f| f.range.1)
-        .unwrap_or(0)
+/// #3593 JSONL-space monotonic dedup predicate (pure, testable). `range_end` is the
+/// END of the consumed JSONL byte range a watcher pass is about to relay;
+/// `committed` is the already-delivered committed JSONL offset (the relay coord's
+/// `confirmed_end_offset`, via [`effective_committed_offset`] — which also fuses the
+/// current-generation durable frontier when read-authority is enabled). Returns `true` iff this range was ALREADY
+/// delivered (`range_end <= committed`), i.e. a re-send would re-post text already
+/// relayed (the #3593 synthetic-resume duplicate, where range_end=422855 sits at or
+/// below committed=443154). MUST be the SAME JSONL byte-offset space on both sides
+/// (never `response_sent_offset`, which is assistant-text-byte space — mixing them
+/// is the category error warned about at the watcher resend site).
+///
+/// `range_end == 0` (empty/zero range) and `committed == 0` (e.g. just reset by a
+/// generation change / pane reset, so nothing is known-delivered) both return
+/// `false` — suppress NOTHING in those cases, so a genuinely-new answer is never
+/// dropped (message-loss prevention dominates duplicate-suppression). Mirror of the
+/// `already_relayed` decision both relay consumers make, with an explicit non-zero
+/// `range_end` guard so an empty range can never be treated as "already committed".
+pub(in crate::services::discord) fn range_already_committed(
+    range_end: u64,
+    committed: u64,
+) -> bool {
+    range_end > 0 && range_end <= committed
 }
 
 /// I2 outcome map (pure, testable): the shadow-write fires ONLY for a confirmed
@@ -500,12 +633,14 @@ fn delivered_frontier_end_diverged(durable_end: u64, in_memory_confirmed_end: u6
 /// Path-based core (testable): write the frontier and report whether its END
 /// diverged from the in-memory authority. `Err` only when the durable write
 /// itself failed. Caller invokes this ONLY for a confirmed `Delivered` (I2).
+#[allow(clippy::too_many_arguments)]
 fn record_delivered_frontier_shadow_at(
     path: &Path,
     range: (u64, u64),
     generation_mtime_ns: i64,
     attempts: u32,
     panel_msg_id: Option<u64>,
+    panel_channel_id: Option<u64>,
     in_memory_confirmed_end: u64,
 ) -> Result<bool, String> {
     write_delivered_frontier_at(
@@ -515,6 +650,7 @@ fn record_delivered_frontier_shadow_at(
             generation_mtime_ns,
             attempts,
             panel_msg_id,
+            panel_channel_id,
         },
     )?;
     Ok(delivered_frontier_end_diverged(
@@ -526,6 +662,7 @@ fn record_delivered_frontier_shadow_at(
 /// provider/channel core: resolve the sidecar path, shadow-write, and emit the
 /// observe-only signals. NEVER panics, NEVER changes delivery (the relay had
 /// incidents; B1 only observes). Caller invokes this ONLY for `Delivered` (I2).
+#[allow(clippy::too_many_arguments)]
 fn record_delivered_frontier_shadow(
     provider: &ProviderKind,
     channel_id: u64,
@@ -533,6 +670,7 @@ fn record_delivered_frontier_shadow(
     generation_mtime_ns: i64,
     attempts: u32,
     panel_msg_id: Option<u64>,
+    panel_channel_id: Option<u64>,
     in_memory_confirmed_end: u64,
 ) {
     let path = match record_path_or_err(provider, channel_id) {
@@ -553,6 +691,7 @@ fn record_delivered_frontier_shadow(
         generation_mtime_ns,
         attempts,
         panel_msg_id,
+        panel_channel_id,
         in_memory_confirmed_end,
     ) {
         Ok(false) => {}
@@ -576,15 +715,38 @@ fn record_delivered_frontier_shadow(
 /// Integration wrapper for owner `Delivered` arms. Gated by [`should_shadow_mirror`]
 /// (flag ON AND `is_delivered`, I2). When it fires it extracts the in-memory
 /// authority (`confirmed_end_offset` + `confirmed_end_generation_mtime_ns`) from
-/// the relay coord and the `panel_msg_id`/`attempts` mirror from the fresh
-/// inflight, then shadow-writes. OFF or non-`Delivered` → returns immediately
-/// (no coord/inflight access, no write) → behavioral no-op.
+/// the relay coord and the `attempts` mirror from the fresh inflight, then
+/// shadow-writes. OFF or non-`Delivered` → returns immediately (no coord/inflight
+/// access, no write) → behavioral no-op.
+///
+/// #3610 (Phase B PR-1): `terminal_anchor_msg_id` is the durable TERMINAL ANCHOR
+/// the caller resolved — the Discord message id terminal-replace edits in place
+/// (= the placeholder/active-slot `current_msg_id`, the assistant response
+/// message). It is recorded verbatim into [`DeliveredCommit::panel_msg_id`]. This
+/// REPLACES the prior `fresh.status_message_id` read, which was the WRONG datum:
+/// `status_message_id` is the status-panel-v2 id (inflight/model.rs: "current_msg_id
+/// remains the assistant response"), not the terminal anchor, and is `null` on
+/// channels that do not use the status panel — yielding `panel_msg_id = null` on
+/// the very incidents PR-2's re-post will key off.
+///
+/// #3610 (Phase B PR-1b): `terminal_anchor_channel_id` is the channel that anchor
+/// message LIVES IN — recorded into [`DeliveredCommit::panel_channel_id`]. The
+/// frontier is KEYED by `channel` (the OFFSET-AUTHORITY channel,
+/// `watcher_owner_channel_id` for the bridge cutover), which the cross-channel
+/// cutover can resolve DIFFERENTLY from the edit-target channel the `msg_id`
+/// belongs to. So PR-2 must record the (channel, msg) PAIR, not just the msg.
+/// Same-channel callers (sink, watcher) pass `Some(channel.get())`; the bridge
+/// cutover passes the edit-target `channel_id` it actually edits. `None`/`None`
+/// writes a null anchor pair (unchanged from the absent-status-panel case), so
+/// OFF/None paths stay behaviorally identical.
 pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
     shared: &crate::services::discord::SharedData,
     provider: &ProviderKind,
     channel: ChannelId,
     range: (u64, u64),
     is_delivered: bool,
+    terminal_anchor_msg_id: Option<u64>,
+    terminal_anchor_channel_id: Option<u64>,
 ) {
     if !should_shadow_mirror(is_delivered, delivery_record_shadow_enabled()) {
         return;
@@ -600,15 +762,63 @@ pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
         .as_ref()
         .map(|f| f.recovery_relay_attempts)
         .unwrap_or(0);
-    let panel_msg_id = fresh.as_ref().and_then(|f| f.status_message_id);
     record_delivered_frontier_shadow(
         provider,
         channel_id,
         range,
         generation_mtime_ns,
         attempts,
-        panel_msg_id,
+        terminal_anchor_msg_id,
+        terminal_anchor_channel_id,
         in_memory_confirmed_end,
+    );
+}
+
+/// #3610 PR-1c: record the durable terminal anchor for the BRIDGE long-chunk arm
+/// (`turn_bridge/mod.rs` site 4 — `send_ordered_long_terminal_response`). PR-1/1b
+/// instrumented only the short-replace sites (sink/watcher) and the bridge cutover,
+/// so a LONG (`len > DISCORD_MSG_LIMIT`) terminal answer — which routes through the
+/// send-new-chunks + placeholder-delete path — recorded NO anchor.
+///
+/// The caller invokes this ONLY on the FULL-COMMIT `Ok` arm of
+/// `send_ordered_long_terminal_response` (the send is all-or-nothing — a partial
+/// chunk failure rolls back and returns `Err`, never `Ok`) AND ONLY when
+/// `lease.commit_and_advance(.., Delivered)` returned `true` — i.e. the in-memory
+/// `confirmed_end_offset` actually advanced. That commit-success gate is the M4
+/// invariant: a non-Leased / identity-mismatch / reclaimed cell makes
+/// `commit_and_advance` return `false` WITHOUT advancing the offset, and recording
+/// `delivered_frontier.range = end` in that case would leave the durable frontier
+/// END ahead of `confirmed_end_offset` (M4 violation). With both gates satisfied
+/// `is_delivered = true` is correct here (mirrors the cutover's
+/// `outcome_is_shadow_delivered` gate, which for this arm is unconditionally
+/// `Delivered`).
+///
+/// Channel split (same as the cutover): the frontier is KEYED by
+/// `watcher_owner_channel_id` (the OFFSET-AUTHORITY channel where
+/// `confirmed_end_offset` advanced — unchanged), while the recorded anchor PAIR is
+/// `(panel_channel_id = delivery_channel_id, panel_msg_id = last_chunk_anchor_msg_id)`
+/// — the channel/message the tail chunk actually lives in. These differ for a
+/// recovered/reused-watcher bridge. `range` is the SAME `(start, end)` the bridge
+/// delivery lease acquired/committed (offset-space consistent — never mix spaces).
+/// `last_chunk_anchor_msg_id = None` (empty chunk Vec — impossible on the `Ok`
+/// path, but type-honest) records the range with a null anchor, identical to the
+/// absent-status-panel case. Shadow flag OFF (default) → no-op.
+pub(in crate::services::discord) fn record_long_chunk_terminal_delivery(
+    shared: &crate::services::discord::SharedData,
+    provider: &ProviderKind,
+    watcher_owner_channel_id: ChannelId,
+    delivery_channel_id: ChannelId,
+    range: (u64, u64),
+    last_chunk_anchor_msg_id: Option<u64>,
+) {
+    shadow_mirror_delivered_frontier(
+        shared,
+        provider,
+        watcher_owner_channel_id,
+        range,
+        true,
+        last_chunk_anchor_msg_id,
+        Some(delivery_channel_id.get()),
     );
 }
 
@@ -632,6 +842,7 @@ mod tests {
             generation_mtime_ns: 123_456_789,
             attempts: 1,
             panel_msg_id: Some(999),
+            panel_channel_id: Some(1234),
         }
     }
 
@@ -829,7 +1040,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 11);
         let diverged =
-            record_delivered_frontier_shadow_at(&path, (3, 10), 111, 2, Some(9), 10).unwrap();
+            record_delivered_frontier_shadow_at(&path, (3, 10), 111, 2, Some(9), Some(8), 10)
+                .unwrap();
         assert!(!diverged);
         let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
         assert_eq!(
@@ -839,6 +1051,7 @@ mod tests {
                 generation_mtime_ns: 111,
                 attempts: 2,
                 panel_msg_id: Some(9),
+                panel_channel_id: Some(8),
             }
         );
     }
@@ -850,7 +1063,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 12);
         let diverged =
-            record_delivered_frontier_shadow_at(&path, (3, 10), 222, 0, None, 9).unwrap();
+            record_delivered_frontier_shadow_at(&path, (3, 10), 222, 0, None, None, 9).unwrap();
         assert!(diverged); // 10 (durable end) != 9 (in-memory)
         assert_eq!(
             read_record_at(&path)
@@ -868,7 +1081,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 13);
         upsert_lease_at(&path, sample_lease()).unwrap();
-        record_delivered_frontier_shadow_at(&path, (0, 5), 5, 0, None, 5).unwrap();
+        record_delivered_frontier_shadow_at(&path, (0, 5), 5, 0, None, None, 5).unwrap();
         let after = read_record_at(&path).unwrap();
         assert_eq!(after.delivery_lease, Some(sample_lease()));
         assert_eq!(after.delivered_frontier.unwrap().range, (0, 5));
@@ -899,26 +1112,641 @@ mod tests {
         assert!(!durable_frontier_generation_current(0, 0)); // both unknown → distrust
     }
 
+    // ---- #3593 JSONL-space monotonic resend dedup (range_already_committed) ----
+
     #[test]
-    fn delivered_frontier_end_for_generation_3520() {
-        // #3520 safety: the watcher-direct re-mirror guard suppresses ONLY when the durable
-        // frontier belongs to the CURRENT generation. Absent / stale-generation => 0 => the
-        // caller suppresses nothing, so a genuinely-new answer can never be dropped.
-        let commit = DeliveredCommit {
-            range: (0, 500),
-            generation_mtime_ns: 123,
-            attempts: 0,
-            panel_msg_id: None,
-        };
-        assert_eq!(delivered_frontier_end_for_generation(None, 123), 0); // absent → 0
+    fn range_already_committed_suppresses_synthetic_resume_dup_3593() {
+        // The observed #3593 case: a synthetic-resume pass tries to re-relay the
+        // prior turn's body whose consumed JSONL range ends at 422855, but the
+        // committed/delivered JSONL offset has already advanced to 443154. The
+        // range is entirely below the committed floor → already delivered → suppress
+        // (no duplicate).
+        assert!(range_already_committed(422_855, 443_154));
+    }
+
+    #[test]
+    fn range_already_committed_allows_new_response_after_resume() {
+        // Over-suppression no-regression: a genuinely-NEW response produced AFTER the
+        // resume ends past the committed floor (range_end 443200 > committed 443154)
+        // → NOT already delivered → must be relayed.
+        assert!(!range_already_committed(443_200, 443_154));
+    }
+
+    #[test]
+    fn range_already_committed_boundary_equal_is_committed() {
+        // The boundary: range_end == committed means the committed floor already
+        // covers this exact range end → already delivered → suppress (inclusive `<=`,
+        // matching the `already_relayed` consumers' `committed >= range_end`).
+        assert!(range_already_committed(443_154, 443_154));
+    }
+
+    #[test]
+    fn range_already_committed_zero_range_never_suppressed() {
+        // Empty/zero consumed range (range_end == 0) must NEVER be treated as already
+        // committed regardless of the committed value — suppressing it could drop a
+        // message; message-loss prevention dominates duplicate-suppression.
+        assert!(!range_already_committed(0, 443_154));
+        assert!(!range_already_committed(0, 0));
+    }
+
+    #[test]
+    fn range_already_committed_reset_committed_never_suppresses() {
+        // After a generation change / pane reset the committed offset is reset to 0
+        // (nothing is known-delivered in the fresh generation). A real range_end then
+        // sits ABOVE the 0 floor → NOT already committed → fresh output is relayed,
+        // never wrongly suppressed by a stale-high pre-reset value.
+        assert!(!range_already_committed(422_855, 0));
+        assert!(!range_already_committed(1, 0));
+    }
+
+    // ---- #3593 flag-independent current-generation durable frontier reader ----
+    // (codex HIGH: the synthetic-resume dedup gate must fuse the durable frontier
+    // EVEN when AGENTDESK_DELIVERY_RECORD_AUTHORITY is OFF — `effective_committed_offset`
+    // hides it under the flag, so the gate reads this flag-INDEPENDENT path instead.)
+
+    /// The exact #3593 AUTHORITY-OFF regression codex flagged: a restart / synthetic
+    /// resume reset the in-memory `committed_relay_offset` to 0, but the durable
+    /// frontier still holds the CURRENT-generation high watermark (443154). The
+    /// flag-independent reader surfaces it, so the caller's `0.max(443154)=443154`
+    /// fusion makes `range_already_committed(422855, 443154)=true` → the already-
+    /// delivered body is suppressed (no #3520 new-message-guard regression).
+    #[test]
+    fn current_gen_durable_frontier_covers_authority_off_resume_dup_3593() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 3593);
+        let gen_ns = 700_000_000_i64;
+        write_delivered_frontier_at(
+            &path,
+            DeliveredCommit {
+                range: (0, 443_154),
+                generation_mtime_ns: gen_ns,
+                attempts: 1,
+                panel_msg_id: Some(1),
+                panel_channel_id: None,
+            },
+        )
+        .unwrap();
+        // Current generation matches the frontier's → trust the durable END.
+        let durable_end = current_generation_durable_frontier_end_at(&path, gen_ns);
+        assert_eq!(durable_end, Some(443_154));
+        // In-memory committed reset to 0 (the AUTHORITY-OFF restart hazard); the
+        // fused floor rises to the durable value → the synthetic-resume range is
+        // recognized as already-delivered.
+        let in_memory_committed = 0_u64;
+        let fused = in_memory_committed.max(durable_end.unwrap_or(0));
+        assert_eq!(fused, 443_154);
+        assert!(range_already_committed(422_855, fused));
+    }
+
+    /// Over-suppression no-regression: even with the durable frontier fused in, a
+    /// genuinely-NEW answer (range_end ABOVE the durable high watermark) is NOT
+    /// suppressed — the `max` only raises the floor to the known-delivered offset,
+    /// never above a fresh range_end.
+    #[test]
+    fn current_gen_durable_frontier_does_not_oversuppress_new_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 35930);
+        let gen_ns = 700_000_000_i64;
+        write_delivered_frontier_at(
+            &path,
+            DeliveredCommit {
+                range: (0, 443_154),
+                generation_mtime_ns: gen_ns,
+                attempts: 1,
+                panel_msg_id: None,
+                panel_channel_id: None,
+            },
+        )
+        .unwrap();
+        let fused =
+            0_u64.max(current_generation_durable_frontier_end_at(&path, gen_ns).unwrap_or(0));
+        // A new answer produced AFTER the durable high watermark.
+        assert!(!range_already_committed(443_200, fused));
+    }
+
+    /// #1270 generation gating: a STALE prior-generation durable frontier is
+    /// distrusted (→ `None` → fused floor stays at in-memory). This is what keeps
+    /// the fusion safe after a pane reset/respawn — a stale-high value can NEVER
+    /// over-suppress the new generation's fresh output.
+    #[test]
+    fn current_gen_durable_frontier_distrusts_stale_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 35931);
+        write_delivered_frontier_at(
+            &path,
+            DeliveredCommit {
+                range: (0, 443_154),
+                generation_mtime_ns: 100, // written by a PRIOR generation
+                attempts: 1,
+                panel_msg_id: None,
+                panel_channel_id: None,
+            },
+        )
+        .unwrap();
+        // Current generation differs → distrust → None.
+        assert_eq!(current_generation_durable_frontier_end_at(&path, 999), None);
+        // `current_gen == 0` (no .generation file) → also distrust.
+        assert_eq!(current_generation_durable_frontier_end_at(&path, 0), None);
+        // Fused floor stays at in-memory (here 0) → a real range above 0 is NOT
+        // suppressed (the new generation's fresh output is relayed).
+        let fused = 0_u64.max(current_generation_durable_frontier_end_at(&path, 999).unwrap_or(0));
+        assert!(!range_already_committed(422_855, fused));
+    }
+
+    /// I3 conservatism: an absent or malformed record yields no durable floor
+    /// (`None` → fuse contributes 0), so the fusion degrades to pure in-memory —
+    /// never an "assume delivered" that would drop a message.
+    #[test]
+    fn current_gen_durable_frontier_missing_or_malformed_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = delivery_record_path_in_root(dir.path(), &ProviderKind::Codex, 35932);
         assert_eq!(
-            delivered_frontier_end_for_generation(Some(commit.clone()), 123),
-            500
-        ); // current generation → frontier end
+            current_generation_durable_frontier_end_at(&missing, 5),
+            None
+        );
+
+        let malformed = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 35933);
+        fs::create_dir_all(malformed.parent().unwrap()).unwrap();
+        fs::write(&malformed, "{ not json").unwrap();
         assert_eq!(
-            delivered_frontier_end_for_generation(Some(commit.clone()), 100),
-            0
-        ); // stale generation → 0
-        assert_eq!(delivered_frontier_end_for_generation(Some(commit), 0), 0); // no .generation file → 0
+            current_generation_durable_frontier_end_at(&malformed, 5),
+            None
+        );
+    }
+
+    // ---- #3610 PR-2 (anchor-repost stale-anchor guard) -------------------------
+    // `current_generation_delivered_anchor_at` is the structural guard that gates
+    // the recovery anchor-repost fallback. It must return the anchor ONLY for a
+    // CURRENT-generation, fully-populated frontier — funneling through the same
+    // #1270 generation gate so a stale prior-generation anchor (from a same-named
+    // tmux respawn / a previous turn) can never drive a repost.
+
+    #[test]
+    fn current_gen_anchor_returns_populated_current_generation_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36101);
+        write_delivered_frontier_at(
+            &path,
+            DeliveredCommit {
+                range: (10, 443_154),
+                generation_mtime_ns: 700,
+                attempts: 1,
+                panel_msg_id: Some(555),
+                panel_channel_id: Some(777),
+            },
+        )
+        .unwrap();
+        // Matching generation + fully-populated anchor → Some.
+        assert_eq!(
+            current_generation_delivered_anchor_at(&path, 700),
+            Some(CurrentGenerationAnchor {
+                panel_msg_id: 555,
+                panel_channel_id: 777,
+                range: (10, 443_154),
+            })
+        );
+    }
+
+    #[test]
+    fn current_gen_anchor_distrusts_stale_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36102);
+        write_delivered_frontier_at(
+            &path,
+            DeliveredCommit {
+                range: (0, 100),
+                generation_mtime_ns: 100, // PRIOR generation
+                attempts: 1,
+                panel_msg_id: Some(555),
+                panel_channel_id: Some(777),
+            },
+        )
+        .unwrap();
+        // Current generation differs → distrust → None (no repost of a stale turn).
+        assert_eq!(current_generation_delivered_anchor_at(&path, 999), None);
+        // No `.generation` file (current_gen == 0) → also distrust.
+        assert_eq!(current_generation_delivered_anchor_at(&path, 0), None);
+    }
+
+    #[test]
+    fn current_gen_anchor_rejects_zero_or_missing_anchor_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        // panel_msg_id == 0 (un-anchored / TUI-direct sentinel) → None.
+        let zero_msg = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36103);
+        write_delivered_frontier_at(
+            &zero_msg,
+            DeliveredCommit {
+                range: (0, 42),
+                generation_mtime_ns: 700,
+                attempts: 1,
+                panel_msg_id: Some(0),
+                panel_channel_id: Some(777),
+            },
+        )
+        .unwrap();
+        assert_eq!(current_generation_delivered_anchor_at(&zero_msg, 700), None);
+
+        // panel_channel_id == 0 → None.
+        let zero_ch = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36104);
+        write_delivered_frontier_at(
+            &zero_ch,
+            DeliveredCommit {
+                range: (0, 42),
+                generation_mtime_ns: 700,
+                attempts: 1,
+                panel_msg_id: Some(555),
+                panel_channel_id: Some(0),
+            },
+        )
+        .unwrap();
+        assert_eq!(current_generation_delivered_anchor_at(&zero_ch, 700), None);
+
+        // Absent anchor pair (legacy short-replace frontier w/o anchor) → None.
+        let no_anchor = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36105);
+        write_delivered_frontier_at(
+            &no_anchor,
+            DeliveredCommit {
+                range: (0, 42),
+                generation_mtime_ns: 700,
+                attempts: 1,
+                panel_msg_id: None,
+                panel_channel_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            current_generation_delivered_anchor_at(&no_anchor, 700),
+            None
+        );
+    }
+
+    #[test]
+    fn current_gen_anchor_missing_or_malformed_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = delivery_record_path_in_root(dir.path(), &ProviderKind::Codex, 36106);
+        assert_eq!(current_generation_delivered_anchor_at(&missing, 5), None);
+
+        let malformed = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36107);
+        fs::create_dir_all(malformed.parent().unwrap()).unwrap();
+        fs::write(&malformed, "{ not json").unwrap();
+        assert_eq!(current_generation_delivered_anchor_at(&malformed, 5), None);
+    }
+
+    // ---- #3610 (Phase B PR-1 / PR-1b) terminal-anchor recording ----------------
+    // `shadow_mirror_delivered_frontier` forwards the caller's
+    // `terminal_anchor_msg_id` + `terminal_anchor_channel_id` verbatim as the
+    // `panel_msg_id` / `panel_channel_id` arguments to
+    // `record_delivered_frontier_shadow_at` (the path-based testable core), so
+    // these exercise that core with the anchor semantics the three call sites use:
+    //   - sink/watcher (same-channel) → (Some(channel), Some(current_msg_id))
+    //   - bridge cutover (PR-1b, cross-channel) → (Some(edit channel), Some(msg))
+    // The status-panel id (`status_message_id`) is no longer read; the recorded
+    // anchor is now the terminal `current_msg_id` the replace edits in place, and
+    // PR-1b also records WHICH channel that anchor message lives in.
+
+    #[test]
+    fn anchor_msg_id_recorded_as_panel_msg_id_3610() {
+        // The sink/watcher path: the caller resolves the terminal anchor =
+        // `current_msg_id` (the active-slot / PlaceholderEdit-target message) and
+        // passes it as the `panel_msg_id` argument, with `panel_channel_id` = the
+        // (same) channel. Both land in `DeliveredCommit` verbatim — NOT the
+        // status-panel id.
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36100);
+        // Anchor (current_msg_id) is a DIFFERENT value than any status-panel id
+        // would be — pinning that the recorded datum is the terminal anchor.
+        let terminal_anchor: u64 = 555_111_222;
+        let anchor_channel: u64 = 444_000_111;
+        record_delivered_frontier_shadow_at(
+            &path,
+            (0, 100),
+            700,
+            0,
+            Some(terminal_anchor),
+            Some(anchor_channel),
+            100,
+        )
+        .unwrap();
+        let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
+        assert_eq!(written.panel_msg_id, Some(terminal_anchor));
+        assert_eq!(written.panel_channel_id, Some(anchor_channel));
+        assert_eq!(written.range, (0, 100));
+    }
+
+    #[test]
+    fn cutover_records_cross_channel_anchor_pair_3610b() {
+        // #3610 PR-1b — the REAL prod/incident terminal path (bridge cutover). The
+        // frontier is KEYED by the offset-authority channel (`watcher_owner_channel_id`),
+        // but the anchor message lives in the (possibly DIFFERENT) edit-target channel.
+        // The cutover therefore records the (edit channel, edit msg) PAIR while the
+        // frontier key stays the owner channel — so the recorded `panel_msg_id` is NO
+        // LONGER null (the bug PR-1 left), and `panel_channel_id` tells PR-2 which
+        // channel to edit. This pins that the pair is recorded verbatim and non-null.
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36104);
+        let edit_msg: u64 = 700_111_222; // current_msg_id (edit target)
+        let edit_channel: u64 = 800_333_444; // delivery channel != owner channel
+        record_delivered_frontier_shadow_at(
+            &path,
+            (0, 100),
+            700,
+            0,
+            Some(edit_msg),
+            Some(edit_channel),
+            100,
+        )
+        .unwrap();
+        let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
+        assert_eq!(written.panel_msg_id, Some(edit_msg)); // NOT null (PR-1's bug)
+        assert_eq!(written.panel_channel_id, Some(edit_channel));
+        assert_eq!(written.range, (0, 100));
+    }
+
+    #[test]
+    fn anchor_none_records_null_panel_pair_3610() {
+        // The defensive `None`/`None` path (no resolvable anchor): the durable anchor
+        // pair stays null (unchanged from the absent-status-panel case), and the
+        // frontier still advances normally.
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36101);
+        record_delivered_frontier_shadow_at(&path, (0, 100), 700, 0, None, None, 100).unwrap();
+        let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
+        assert_eq!(written.panel_msg_id, None);
+        assert_eq!(written.panel_channel_id, None);
+        assert_eq!(written.range, (0, 100));
+    }
+
+    #[test]
+    fn panel_channel_id_backward_compatible_serde_default_3610b() {
+        // #3610 PR-1b backward compat: a PR-1 record (or any pre-#3610b record) has
+        // NO `panel_channel_id` field. `#[serde(default)]` must deserialize it to
+        // `None` without error, leaving the rest of the frontier intact.
+        let legacy_json = r#"{
+            "delivery_lease": null,
+            "delivered_frontier": {
+                "range": [0, 443154],
+                "generation_mtime_ns": 700000000,
+                "attempts": 1,
+                "panel_msg_id": 555111222
+            }
+        }"#;
+        let record: DeliveryRecord = serde_json::from_str(legacy_json).unwrap();
+        let frontier = record.delivered_frontier.unwrap();
+        assert_eq!(frontier.panel_msg_id, Some(555_111_222));
+        assert_eq!(frontier.panel_channel_id, None); // serde default — no field present
+        assert_eq!(frontier.range, (0, 443_154));
+    }
+
+    #[test]
+    fn anchor_value_is_dedup_byte_invariant_3610() {
+        // ★ #3593 byte-impact 0: the recorded anchor PAIR (`panel_msg_id` +
+        // #3610b `panel_channel_id`) is NEVER read by the offset-dedup path — the
+        // single durable-frontier reader (`current_generation_durable_frontier_end_at`)
+        // reads only `.range.1`. So two records with the SAME frontier END but
+        // DIFFERENT anchor pairs ((Some(msg), Some(channel)) vs (None, None), the old
+        // status_message_id=null incident case) MUST yield byte-identical dedup
+        // decisions.
+        let dir = tempfile::tempdir().unwrap();
+        let gen_ns = 700_000_000_i64;
+
+        let path_with_anchor =
+            delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36102);
+        write_delivered_frontier_at(
+            &path_with_anchor,
+            DeliveredCommit {
+                range: (0, 443_154),
+                generation_mtime_ns: gen_ns,
+                attempts: 1,
+                panel_msg_id: Some(999_888_777), // #3610: terminal anchor present
+                panel_channel_id: Some(111_222_333), // #3610b: anchor channel present
+            },
+        )
+        .unwrap();
+
+        let path_null_anchor =
+            delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36103);
+        write_delivered_frontier_at(
+            &path_null_anchor,
+            DeliveredCommit {
+                range: (0, 443_154),
+                generation_mtime_ns: gen_ns,
+                attempts: 1,
+                panel_msg_id: None, // pre-fix incident shape (status_message_id=null)
+                panel_channel_id: None,
+            },
+        )
+        .unwrap();
+
+        // Same durable frontier END read out regardless of anchor.
+        let end_with = current_generation_durable_frontier_end_at(&path_with_anchor, gen_ns);
+        let end_null = current_generation_durable_frontier_end_at(&path_null_anchor, gen_ns);
+        assert_eq!(end_with, end_null);
+        assert_eq!(end_with, Some(443_154));
+
+        // Same dedup decision regardless of anchor (the #3593 suppress + the
+        // over-suppression no-regression both unchanged).
+        let fused_with = 0_u64.max(end_with.unwrap_or(0));
+        let fused_null = 0_u64.max(end_null.unwrap_or(0));
+        assert_eq!(fused_with, fused_null);
+        assert_eq!(
+            range_already_committed(422_855, fused_with),
+            range_already_committed(422_855, fused_null)
+        );
+        assert!(range_already_committed(422_855, fused_with)); // suppressed
+        assert_eq!(
+            range_already_committed(443_200, fused_with),
+            range_already_committed(443_200, fused_null)
+        );
+        assert!(!range_already_committed(443_200, fused_with)); // new answer relayed
+    }
+
+    #[test]
+    fn shadow_off_is_anchor_noop_3610() {
+        // SHADOW OFF → no write at all, so the anchor (whatever the caller resolves)
+        // is never recorded. `shadow_mirror_delivered_frontier`'s first gate is
+        // `should_shadow_mirror(is_delivered, enabled)`; OFF short-circuits before
+        // any coord/inflight access or write. Pinned here at the gate level.
+        assert!(!should_shadow_mirror(true, false)); // flag OFF → no anchor write
+        assert!(!should_shadow_mirror(false, true)); // not delivered → no anchor write (I2)
+    }
+
+    // ---- #3610 PR-1c: long-chunk terminal arm anchor recording -----------------
+    // `record_long_chunk_terminal_delivery` is the BRIDGE long-chunk arm's anchor
+    // helper (turn_bridge/mod.rs site 4). It is a thin pass-through to
+    // `shadow_mirror_delivered_frontier` with `is_delivered = true` hardcoded
+    // (the caller invokes it ONLY on the full-commit `Ok` arm of
+    // `send_ordered_long_terminal_response`, which is all-or-nothing — a partial
+    // chunk failure rolls back and returns `Err`, so an `Ok` means every chunk
+    // committed). These pin the recorded shape via the path-based core the helper
+    // funnels into (same approach as the PR-1/PR-1b tests above), since the full
+    // helper's flag (OnceLock) + runtime-root resolution are env-global.
+
+    #[test]
+    fn long_chunk_full_commit_records_last_chunk_anchor_3610c() {
+        // The long-chunk arm deletes the placeholder, so the LAST sent chunk's
+        // message id is the only stable terminal anchor. On full commit the helper
+        // records (panel_msg_id = last_chunk, panel_channel_id = delivery channel)
+        // — proving panel_msg_id is NON-null on the long-message path PR-1/1b left
+        // uncovered. The frontier END is the lease range's `.1`.
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36110);
+        let last_chunk_anchor: u64 = 912_345_678; // tail chunk msg id (not the first)
+        let delivery_channel: u64 = 444_555_666;
+        // Mirrors the args record_long_chunk_terminal_delivery forwards: range =
+        // lease (start,end), panel_msg_id = last chunk, panel_channel_id = delivery.
+        record_delivered_frontier_shadow_at(
+            &path,
+            (0, 4096),
+            700,
+            0,
+            Some(last_chunk_anchor),
+            Some(delivery_channel),
+            4096,
+        )
+        .unwrap();
+        let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
+        assert_eq!(written.panel_msg_id, Some(last_chunk_anchor)); // NON-null
+        assert_eq!(written.panel_channel_id, Some(delivery_channel));
+        assert_eq!(written.range, (0, 4096));
+    }
+
+    #[test]
+    fn long_chunk_cross_channel_separates_owner_and_delivery_3610c() {
+        // Gate (C): the frontier is KEYED by `watcher_owner_channel_id` (offset
+        // authority — unchanged), while the recorded anchor PAIR points at the
+        // delivery `channel_id` (where the tail chunk lives). For a reused-watcher
+        // bridge these DIFFER; the helper must NOT swap them. The frontier key is the
+        // record PATH's channel (owner); the recorded `panel_channel_id` is delivery.
+        let dir = tempfile::tempdir().unwrap();
+        let owner_channel: u64 = 100_200_300; // watcher_owner_channel_id = frontier key
+        let delivery_channel: u64 = 900_800_700; // edit/delivery channel = anchor home
+        assert_ne!(owner_channel, delivery_channel);
+        // The record lives under the OWNER channel (the frontier key) ...
+        let owner_path =
+            delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, owner_channel);
+        // ... and its recorded anchor channel is the DELIVERY channel.
+        record_delivered_frontier_shadow_at(
+            &owner_path,
+            (10, 8192),
+            700,
+            0,
+            Some(777_111_222),
+            Some(delivery_channel),
+            8192,
+        )
+        .unwrap();
+        let written = read_record_at(&owner_path)
+            .unwrap()
+            .delivered_frontier
+            .unwrap();
+        assert_eq!(written.panel_channel_id, Some(delivery_channel)); // delivery, not owner
+        assert_eq!(written.range, (10, 8192));
+        // No record was written under the DELIVERY channel (the frontier key is owner).
+        let delivery_path =
+            delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, delivery_channel);
+        assert_eq!(read_record_at(&delivery_path), None);
+    }
+
+    #[test]
+    fn long_chunk_anchor_none_records_range_only_3610c() {
+        // Gate (D): an empty chunk Vec (impossible on the full-commit `Ok` path, but
+        // type-honest) → last = None → the helper records the range with a null
+        // anchor, identical to the absent-status-panel case. The frontier still
+        // advances (END = range.1) so the dedup floor is correct.
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36111);
+        record_delivered_frontier_shadow_at(&path, (0, 2048), 700, 0, None, Some(444), 2048)
+            .unwrap();
+        let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
+        assert_eq!(written.panel_msg_id, None);
+        assert_eq!(written.range, (0, 2048));
+    }
+
+    #[test]
+    fn long_chunk_partial_or_err_never_records_anchor_3610c() {
+        // Gate (A): the helper hardcodes `is_delivered = true` because the mod.rs
+        // call site lives ONLY inside the full-commit `Ok` arm — the long-chunk send
+        // (`send_long_message_with_rollback`) rolls back and returns `Err` on ANY
+        // chunk failure, so a partial delivery NEVER reaches the helper. The shadow
+        // gate then still requires the flag ON. This pins that an ambiguous/failed
+        // outcome (modelled here as `is_delivered = false`) can never advance the
+        // durable frontier, and that OFF is a full no-op.
+        assert!(!should_shadow_mirror(false, true)); // not-delivered → no anchor (I2)
+        assert!(!should_shadow_mirror(true, false)); // flag OFF → no anchor (deploy no-op)
+    }
+
+    #[test]
+    fn record_long_chunk_terminal_delivery_off_is_noop_3610c() {
+        // The REAL helper end-to-end under the default-OFF shadow flag: it must be a
+        // complete no-op (no panic, no write) regardless of the resolved anchor.
+        // (Tests never set AGENTDESK_DELIVERY_RECORD_SHADOW, so the OnceLock reads
+        // OFF; this exercises the helper's own short-circuit through
+        // `shadow_mirror_delivered_frontier`.)
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        // Does not panic; OFF → writes nothing.
+        super::record_long_chunk_terminal_delivery(
+            &shared,
+            &ProviderKind::Claude,
+            ChannelId::new(100_200_300), // owner (frontier key)
+            ChannelId::new(900_800_700), // delivery (anchor home)
+            (0, 4096),
+            Some(912_345_678),
+        );
+        // No durable record was created for either channel under the test root.
+        assert!(read_record(&ProviderKind::Claude, 100_200_300).is_none());
+        assert!(read_record(&ProviderKind::Claude, 900_800_700).is_none());
+    }
+
+    // ---- #3610 PR-1d: WATCHER legacy long-chunk arm (same-channel) --------------
+    // The watcher long-chunk fallback arm (tmux_watcher.rs — the
+    // `watcher_should_send_ordered_new_chunks_for_terminal_fallback` branch) is the
+    // watcher-owned counterpart of the bridge arm above. Its sibling helper
+    // `terminal_send::record_watcher_long_chunk_terminal_delivery` is SAME-CHANNEL:
+    // it forwards `watcher_owner_channel_id == delivery_channel_id == channel_id`
+    // into `record_long_chunk_terminal_delivery`. So the frontier key (record path)
+    // and the recorded `panel_channel_id` are the SAME channel — UNLIKE the bridge's
+    // cross-channel `long_chunk_cross_channel_separates_owner_and_delivery_3610c`.
+    // Pinned here via the path-core (the helper's flag is env-global OnceLock).
+
+    #[test]
+    fn watcher_long_chunk_same_channel_anchor_pair_3610d() {
+        // Gate (C) for the watcher arm: same-channel ⇒ panel_channel_id equals the
+        // frontier-key channel (the record path's channel), and panel_msg_id is the
+        // NON-null last-chunk anchor. Mirrors the args the watcher helper forwards:
+        // range = (watcher_lease_start, watcher_lease_end), both channels = channel_id.
+        let dir = tempfile::tempdir().unwrap();
+        let watcher_channel: u64 = 778_899_001; // owner + delivery (same for watcher)
+        let last_chunk_anchor: u64 = 654_321_987; // tail chunk msg id
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, watcher_channel);
+        // The watcher wrapper passes channel_id as BOTH the path channel (frontier
+        // key) and panel_channel_id; the path-core models that with the same value.
+        record_delivered_frontier_shadow_at(
+            &path,
+            (10, 16384),
+            700,
+            0,
+            Some(last_chunk_anchor),
+            Some(watcher_channel), // == the record path channel (same-channel)
+            16384,
+        )
+        .unwrap();
+        let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
+        assert_eq!(written.panel_msg_id, Some(last_chunk_anchor)); // NON-null
+        // The recorded anchor channel IS the frontier-key channel (same-channel).
+        assert_eq!(written.panel_channel_id, Some(watcher_channel));
+        assert_eq!(written.range, (10, 16384));
+    }
+
+    #[test]
+    fn watcher_long_chunk_partial_or_unadvanced_never_records_3610d() {
+        // Gates (A)+(M4) for the watcher arm: the helper is invoked ONLY inside the
+        // `if committed && Delivered { advance(); … }` block in tmux_watcher.rs, AND
+        // only when the anchor is `Some` (the full-commit `Ok` arm of
+        // `send_long_message_raw_with_rollback`, which is all-or-nothing — a partial
+        // chunk failure rolls back and returns `Err`). So a non-advanced commit
+        // (modelled as `is_delivered = false`) NEVER reaches the durable write, and
+        // OFF is a full no-op. Same gate the shared helper enforces.
+        assert!(!should_shadow_mirror(false, true)); // not-advanced/partial → no record (M4/I2)
+        assert!(!should_shadow_mirror(true, false)); // flag OFF → no record (deploy no-op)
     }
 }
