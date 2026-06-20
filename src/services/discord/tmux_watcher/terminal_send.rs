@@ -332,6 +332,8 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
     // #3610 PR-1: anchor = `msg_id` — the controller active-slot `current_msg_id`
     // (the assistant response message terminal-replace edits in place), NOT
     // `status_message_id`. Records the true terminal anchor for PR-2.
+    // #3610 PR-1b: the anchor pair's channel is this same `channel_id` (same-channel
+    // path — the frontier key, edit target, and placeholder all share `channel_id`).
     dr::shadow_mirror_delivered_frontier(
         shared,
         provider,
@@ -339,6 +341,7 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
         (start, end),
         dr::outcome_is_shadow_delivered(&outcome),
         Some(msg_id.get()),
+        Some(channel_id.get()),
     );
 
     match outcome {
