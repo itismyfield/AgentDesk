@@ -635,15 +635,30 @@ fn record_delivered_frontier_shadow(
 /// Integration wrapper for owner `Delivered` arms. Gated by [`should_shadow_mirror`]
 /// (flag ON AND `is_delivered`, I2). When it fires it extracts the in-memory
 /// authority (`confirmed_end_offset` + `confirmed_end_generation_mtime_ns`) from
-/// the relay coord and the `panel_msg_id`/`attempts` mirror from the fresh
-/// inflight, then shadow-writes. OFF or non-`Delivered` → returns immediately
-/// (no coord/inflight access, no write) → behavioral no-op.
+/// the relay coord and the `attempts` mirror from the fresh inflight, then
+/// shadow-writes. OFF or non-`Delivered` → returns immediately (no coord/inflight
+/// access, no write) → behavioral no-op.
+///
+/// #3610 (Phase B PR-1): `terminal_anchor_msg_id` is the durable TERMINAL ANCHOR
+/// the caller resolved — the Discord message id terminal-replace edits in place
+/// (= the placeholder/active-slot `current_msg_id`, the assistant response
+/// message). It is recorded verbatim into [`DeliveredCommit::panel_msg_id`]. This
+/// REPLACES the prior `fresh.status_message_id` read, which was the WRONG datum:
+/// `status_message_id` is the status-panel-v2 id (inflight/model.rs: "current_msg_id
+/// remains the assistant response"), not the terminal anchor, and is `null` on
+/// channels that do not use the status panel — yielding `panel_msg_id = null` on
+/// the very incidents PR-2's re-post will key off. Cross-channel callers (the
+/// bridge cutover, where the frontier-key channel differs from the edit-target
+/// channel) pass `None` and are out of this PR's scope. `None` writes a null
+/// anchor (unchanged from the absent-status-panel case), so OFF/None paths stay
+/// behaviorally identical.
 pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
     shared: &crate::services::discord::SharedData,
     provider: &ProviderKind,
     channel: ChannelId,
     range: (u64, u64),
     is_delivered: bool,
+    terminal_anchor_msg_id: Option<u64>,
 ) {
     if !should_shadow_mirror(is_delivered, delivery_record_shadow_enabled()) {
         return;
@@ -659,14 +674,13 @@ pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
         .as_ref()
         .map(|f| f.recovery_relay_attempts)
         .unwrap_or(0);
-    let panel_msg_id = fresh.as_ref().and_then(|f| f.status_message_id);
     record_delivered_frontier_shadow(
         provider,
         channel_id,
         range,
         generation_mtime_ns,
         attempts,
-        panel_msg_id,
+        terminal_anchor_msg_id,
         in_memory_confirmed_end,
     );
 }
@@ -1115,5 +1129,116 @@ mod tests {
             current_generation_durable_frontier_end_at(&malformed, 5),
             None
         );
+    }
+
+    // ---- #3610 (Phase B PR-1) terminal-anchor recording -----------------------
+    // `shadow_mirror_delivered_frontier` forwards the caller's
+    // `terminal_anchor_msg_id` verbatim as the `panel_msg_id` argument to
+    // `record_delivered_frontier_shadow_at` (the path-based testable core), so
+    // these exercise that core with the anchor semantics the three call sites use:
+    //   - sink/watcher (same-channel) → anchor = Some(current_msg_id)
+    //   - bridge cutover (cross-channel) → anchor = None
+    // The status-panel id (`status_message_id`) is no longer read; the recorded
+    // anchor is now the terminal `current_msg_id` the replace edits in place.
+
+    #[test]
+    fn anchor_msg_id_recorded_as_panel_msg_id_3610() {
+        // The sink/watcher path: the caller resolves the terminal anchor =
+        // `current_msg_id` (the active-slot / PlaceholderEdit-target message) and
+        // passes it as the `panel_msg_id` argument. It lands in
+        // `DeliveredCommit.panel_msg_id` verbatim — NOT the status-panel id.
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36100);
+        // Anchor (current_msg_id) is a DIFFERENT value than any status-panel id
+        // would be — pinning that the recorded datum is the terminal anchor.
+        let terminal_anchor: u64 = 555_111_222;
+        record_delivered_frontier_shadow_at(&path, (0, 100), 700, 0, Some(terminal_anchor), 100)
+            .unwrap();
+        let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
+        assert_eq!(written.panel_msg_id, Some(terminal_anchor));
+        assert_eq!(written.range, (0, 100));
+    }
+
+    #[test]
+    fn anchor_none_records_null_panel_msg_id_3610() {
+        // The bridge cutover (cross-channel) passes `None`: the durable anchor
+        // stays null (unchanged from the absent-status-panel case), and the
+        // frontier still advances normally.
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36101);
+        record_delivered_frontier_shadow_at(&path, (0, 100), 700, 0, None, 100).unwrap();
+        let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
+        assert_eq!(written.panel_msg_id, None);
+        assert_eq!(written.range, (0, 100));
+    }
+
+    #[test]
+    fn anchor_value_is_dedup_byte_invariant_3610() {
+        // ★ #3593 byte-impact 0: the recorded `panel_msg_id` (terminal anchor) is
+        // NEVER read by the offset-dedup path — the single durable-frontier reader
+        // (`current_generation_durable_frontier_end_at`) reads only `.range.1`. So
+        // two records with the SAME frontier END but DIFFERENT anchors
+        // (Some(current_msg_id) vs None, the old status_message_id=null incident
+        // case) MUST yield byte-identical dedup decisions.
+        let dir = tempfile::tempdir().unwrap();
+        let gen_ns = 700_000_000_i64;
+
+        let path_with_anchor =
+            delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36102);
+        write_delivered_frontier_at(
+            &path_with_anchor,
+            DeliveredCommit {
+                range: (0, 443_154),
+                generation_mtime_ns: gen_ns,
+                attempts: 1,
+                panel_msg_id: Some(999_888_777), // #3610: terminal anchor present
+            },
+        )
+        .unwrap();
+
+        let path_null_anchor =
+            delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36103);
+        write_delivered_frontier_at(
+            &path_null_anchor,
+            DeliveredCommit {
+                range: (0, 443_154),
+                generation_mtime_ns: gen_ns,
+                attempts: 1,
+                panel_msg_id: None, // pre-fix incident shape (status_message_id=null)
+            },
+        )
+        .unwrap();
+
+        // Same durable frontier END read out regardless of anchor.
+        let end_with = current_generation_durable_frontier_end_at(&path_with_anchor, gen_ns);
+        let end_null = current_generation_durable_frontier_end_at(&path_null_anchor, gen_ns);
+        assert_eq!(end_with, end_null);
+        assert_eq!(end_with, Some(443_154));
+
+        // Same dedup decision regardless of anchor (the #3593 suppress + the
+        // over-suppression no-regression both unchanged).
+        let fused_with = 0_u64.max(end_with.unwrap_or(0));
+        let fused_null = 0_u64.max(end_null.unwrap_or(0));
+        assert_eq!(fused_with, fused_null);
+        assert_eq!(
+            range_already_committed(422_855, fused_with),
+            range_already_committed(422_855, fused_null)
+        );
+        assert!(range_already_committed(422_855, fused_with)); // suppressed
+        assert_eq!(
+            range_already_committed(443_200, fused_with),
+            range_already_committed(443_200, fused_null)
+        );
+        assert!(!range_already_committed(443_200, fused_with)); // new answer relayed
+    }
+
+    #[test]
+    fn shadow_off_is_anchor_noop_3610() {
+        // SHADOW OFF → no write at all, so the anchor (whatever the caller resolves)
+        // is never recorded. `shadow_mirror_delivered_frontier`'s first gate is
+        // `should_shadow_mirror(is_delivered, enabled)`; OFF short-circuits before
+        // any coord/inflight access or write. Pinned here at the gate level.
+        assert!(!should_shadow_mirror(true, false)); // flag OFF → no anchor write
+        assert!(!should_shadow_mirror(false, true)); // not delivered → no anchor write (I2)
     }
 }

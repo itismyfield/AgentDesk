@@ -442,7 +442,10 @@
 "src/services/discord/session_runtime.rs" = 1753
 # #3034 batch-8: +1 for a test-only `#[allow(dead_code)]` on
 # `session_bound_terminal_delivery_route_decision` (#3041 route decision, tested).
-"src/services/discord/session_relay_sink.rs" = 1731
+# #3610 PR-1: 1731 -> 1738 — pass terminal anchor (current_msg_id) explicitly to
+# shadow_mirror_delivered_frontier at the sink delivery call site (Phase B prereq;
+# irreducible 6-arg rustfmt-wrapped call). panel_msg_id has 0 prod readers -> dedup unchanged.
+"src/services/discord/session_relay_sink.rs" = 1738
 # #3479: turn_bridge/tmux_runtime.rs decomposed into tmux_runtime/ directory
 # modules (root tmux_runtime.rs 964 prod LoC + sub-1000-LoC
 # tmux_runtime/{interrupt_policy,process_table,pid_exit}.rs) — dropped below the

@@ -329,12 +329,16 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
     .await;
 
     // #3089 B2a: shadow-mirror durable delivered frontier — flag-gated, observe-only, Delivered-only (I2), OFF=no-op. Extends B1's sink coverage to the watcher (A4) before B2b's authority flip.
+    // #3610 PR-1: anchor = `msg_id` — the controller active-slot `current_msg_id`
+    // (the assistant response message terminal-replace edits in place), NOT
+    // `status_message_id`. Records the true terminal anchor for PR-2.
     dr::shadow_mirror_delivered_frontier(
         shared,
         provider,
         channel_id,
         (start, end),
         dr::outcome_is_shadow_delivered(&outcome),
+        Some(msg_id.get()),
     );
 
     match outcome {

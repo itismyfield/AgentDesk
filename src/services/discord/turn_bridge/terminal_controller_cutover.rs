@@ -314,12 +314,18 @@ pub(super) async fn deliver_short_replace_via_controller(
     // OFFSET-AUTHORITY channel where `advance_tmux_relay_confirmed_end` advanced
     // `confirmed_end_offset`), NOT the edit-target `channel_id` — so the durable
     // frontier and the in-memory authority B2b fuses share one channel key.
+    // #3610 PR-1: anchor = `None`. The frontier is keyed by `watcher_owner_channel_id`
+    // (the OFFSET-AUTHORITY channel), which may DIFFER from the edit-target `channel_id`
+    // the `msg_id` belongs to — so this cross-channel cutover cannot assert the
+    // edit-target `msg_id` is the anchor on the frontier-key channel. Out of PR-1's
+    // scope (sink+watcher same-channel only); leave the anchor null as before.
     dr::shadow_mirror_delivered_frontier(
         shared,
         provider,
         watcher_owner_channel_id,
         (start, end),
         dr::outcome_is_shadow_delivered(&outcome),
+        None,
     );
     outcome
 }
