@@ -217,6 +217,7 @@ export default function OfficeManagerView({
           <div className="mt-4 space-y-2">
             {order.map((office, index) => {
               const active = !creating && office.id === selectedId;
+              const displayName = isKo ? office.name_ko || office.name : office.name;
               return (
                 <SurfaceCard
                   key={office.id}
@@ -258,6 +259,7 @@ export default function OfficeManagerView({
                         borderColor: "color-mix(in srgb, var(--th-border) 64%, transparent)",
                       }}
                       title={tr("위로", "Move Up")}
+                      aria-label={tr(`${displayName} 위로 이동`, `Move ${displayName} Up`)}
                     >
                       <ArrowUp size={13} />
                     </button>
@@ -273,6 +275,7 @@ export default function OfficeManagerView({
                         borderColor: "color-mix(in srgb, var(--th-border) 64%, transparent)",
                       }}
                       title={tr("아래로", "Move Down")}
+                      aria-label={tr(`${displayName} 아래로 이동`, `Move ${displayName} Down`)}
                     >
                       <ArrowDown size={13} />
                     </button>
