@@ -13,9 +13,11 @@
 //!
 //! Subsystems read the live snapshot via [`current`] each cycle, so settings
 //! they re-read per tick (e.g. routine tunables) take effect without a restart.
-//! Infra fields (`server` bind/port/auth, `database`, `data`) are bound into
-//! long-lived objects at boot and cannot be swapped under a running process; a
-//! change to those is still stored in the snapshot but reported by
+//! Infra fields (`server` bind/port/auth, `database`, `data`, `discord` client
+//! and bot bindings, `providers` runtimes, `mcp_servers` child processes, the
+//! `mcp` credential watcher, and the `memory` backend) are bound into long-lived
+//! objects at boot and cannot be swapped under a running process; a change to
+//! those is still stored in the snapshot but reported by
 //! [`restart_required_changes`] and logged as restart-required.
 //!
 //! The whole-`Config` value is NOT threaded through every reader — instead this
@@ -83,9 +85,17 @@ fn section_changed<T: Serialize>(old: &T, new: &T) -> bool {
     }
 }
 
-/// The infra sections that are bound at boot and cannot be hot-swapped under a
-/// running process. A change here is applied to the snapshot but needs a restart
-/// to take full effect.
+/// The infra sections that are bound into long-lived objects at boot and cannot
+/// be hot-swapped under a running process. A change here is applied to the
+/// snapshot but needs a restart to take full effect, so it is reported to the
+/// operator (logged as restart-required) instead of silently appearing to apply.
+///
+/// Without this list, editing e.g. a Discord bot token, an `mcp_servers` entry,
+/// or a `providers` runtime in `agentdesk.yaml` would swap into the snapshot
+/// with no observable effect and no warning — the exact "the edit did nothing"
+/// trap. Section-level granularity matches `section_changed`; note that fields
+/// marked `skip_serializing` (e.g. bot tokens) do not move the serialized form,
+/// so a token-only change is not detected here (same caveat as `server.auth_token`).
 pub fn restart_required_changes(old: &Config, new: &Config) -> Vec<&'static str> {
     let mut changed = Vec::new();
     if section_changed(&old.server, &new.server) {
@@ -96,6 +106,26 @@ pub fn restart_required_changes(old: &Config, new: &Config) -> Vec<&'static str>
     }
     if section_changed(&old.data, &new.data) {
         changed.push("data");
+    }
+    // The Discord client + bot bindings/ids are constructed at boot.
+    if section_changed(&old.discord, &new.discord) {
+        changed.push("discord");
+    }
+    // Provider runtimes (TUI hosting, remote SSH) are wired up at boot.
+    if section_changed(&old.providers, &new.providers) {
+        changed.push("providers");
+    }
+    // MCP servers are spawned as child processes at boot.
+    if section_changed(&old.mcp_servers, &new.mcp_servers) {
+        changed.push("mcp_servers");
+    }
+    // The MCP credential watcher (and its dedupe window) is started at boot.
+    if section_changed(&old.mcp, &new.mcp) {
+        changed.push("mcp");
+    }
+    // The memory backend (file paths / MCP endpoint) is bound at boot.
+    if section_changed(&old.memory, &new.memory) {
+        changed.push("memory");
     }
     changed
 }
@@ -338,5 +368,46 @@ mod tests {
         new.routines.max_agent_polls_per_tick =
             old.routines.max_agent_polls_per_tick.wrapping_add(1);
         assert!(restart_required_changes(&old, &new).is_empty());
+    }
+
+    // Each boot-bound section is surfaced as restart-required, so editing e.g. a
+    // Discord binding, a provider runtime, an MCP server, the credential watcher,
+    // or the memory backend in `agentdesk.yaml` is reported rather than silently
+    // swapped into the snapshot with no running effect.
+    #[test]
+    fn restart_required_changes_flags_boot_bound_sections() {
+        let base = Config::default();
+
+        let mut discord = base.clone();
+        discord.discord.owner_id = Some(42);
+        assert_eq!(restart_required_changes(&base, &discord), vec!["discord"]);
+
+        let mut providers = base.clone();
+        providers.providers.insert(
+            "codex".to_string(),
+            crate::config::ProviderConfig::default(),
+        );
+        assert_eq!(
+            restart_required_changes(&base, &providers),
+            vec!["providers"]
+        );
+
+        let mut mcp_servers = base.clone();
+        mcp_servers.mcp_servers.insert(
+            "memento".to_string(),
+            crate::config::McpServerConfig::default(),
+        );
+        assert_eq!(
+            restart_required_changes(&base, &mcp_servers),
+            vec!["mcp_servers"]
+        );
+
+        let mut mcp = base.clone();
+        mcp.mcp.watch_credentials = !base.mcp.watch_credentials;
+        assert_eq!(restart_required_changes(&base, &mcp), vec!["mcp"]);
+
+        let mut memory = base.clone();
+        memory.memory = Some(crate::config::MemoryConfig::default());
+        assert_eq!(restart_required_changes(&base, &memory), vec!["memory"]);
     }
 }

@@ -27,7 +27,16 @@ pub(crate) fn normalize_optional_string(value: Option<String>) -> Option<String>
 }
 
 /// Compute the escalation settings implied by static config (no override).
+///
+/// Prefers the hot-reloaded live config snapshot ([`crate::config_live_reload::current`])
+/// over the passed-in (boot-captured) `config`, so an `agentdesk.yaml` edit to the
+/// escalation owner / PM channel / schedule applies without a restart when no
+/// persisted Postgres override is set. Falls back to the passed `config` when the
+/// live snapshot is not installed (unit tests, pre-boot). Mirrors the
+/// `services::dispatch_gate` live-read precedent.
 pub(crate) fn escalation_defaults(config: &Config) -> EscalationSettings {
+    let live = crate::config_live_reload::current();
+    let config = live.as_deref().unwrap_or(config);
     EscalationSettings {
         mode: config.escalation.mode.clone(),
         owner_user_id: config.escalation.owner_user_id.or(config.discord.owner_id),

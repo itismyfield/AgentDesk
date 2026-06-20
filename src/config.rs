@@ -65,9 +65,11 @@ pub struct Config {
     /// without a restart, mirroring the policies watcher: the candidate file is
     /// pre-validated (parsed + runtime defaults applied) and only then atomically
     /// swapped in; a parse/validation failure keeps the running config. Infra
-    /// fields (`server` bind/port/auth, `database`, `data.dir`) are NOT
-    /// hot-swapped — a change to those is applied to the shared snapshot but
-    /// logged as restart-required, since live subsystems bound them at boot.
+    /// fields (`server` bind/port/auth, `database`, `data.dir`, `discord` client
+    /// and bot bindings, `providers` runtimes, `mcp_servers` child processes, the
+    /// `mcp` credential watcher, and the `memory` backend) are NOT hot-swapped —
+    /// a change to those is applied to the shared snapshot but logged as
+    /// restart-required, since live subsystems bound them at boot.
     #[serde(default = "default_true")]
     pub config_hot_reload: bool,
 }
