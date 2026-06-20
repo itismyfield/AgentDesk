@@ -395,6 +395,60 @@ fn durable_frontier_generation_current(durable_mtime: i64, current_gen_mtime: i6
     current_gen_mtime != 0 && durable_mtime == current_gen_mtime
 }
 
+/// Path-based core (pure-ish, testable): the durable `delivered_frontier` END,
+/// but ONLY when it was written by the CURRENT wrapper generation (#1270 guard,
+/// via [`durable_frontier_generation_current`]). `None` when the record is
+/// absent/malformed (I3 conservative) OR its frontier is from a PRIOR generation
+/// (stale-high → distrust). `current_gen_mtime == 0` (no/unreadable `.generation`
+/// file) → the guard distrusts everything → `None`. This is the SINGLE durable
+/// frontier reader; the env-resolved [`delivered_frontier_end_current_generation`]
+/// and the flag-gated [`effective_committed_offset`] both funnel through it so the
+/// generation-gating logic exists in exactly one place.
+fn current_generation_durable_frontier_end_at(path: &Path, current_gen_mtime: i64) -> Option<u64> {
+    read_record_at(path)
+        .and_then(|r| r.delivered_frontier)
+        .filter(|f| durable_frontier_generation_current(f.generation_mtime_ns, current_gen_mtime))
+        .map(|f| f.range.1)
+}
+
+/// Resolve the current wrapper-generation watermark for `tmux_session_name`. The
+/// `tmux` module is `#[cfg(unix)]`; on non-unix targets (windows CI cross-compile
+/// check) there is no wrapper generation file, so the generation is absent (`0`),
+/// which [`durable_frontier_generation_current`] treats as "distrust".
+fn current_generation_mtime_ns(tmux_session_name: &str) -> i64 {
+    #[cfg(unix)]
+    {
+        crate::services::discord::tmux::read_generation_file_mtime_ns(tmux_session_name)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tmux_session_name;
+        0
+    }
+}
+
+/// #3593 (flag-INDEPENDENT): the CURRENT-generation durable `delivered_frontier`
+/// END, or `0` when there is none to trust (absent/malformed record, or a stale
+/// prior-generation frontier per the #1270 guard). UNLIKE
+/// [`effective_committed_offset`], this NEVER consults
+/// `AGENTDESK_DELIVERY_RECORD_AUTHORITY` — it is the durable frontier the legacy
+/// #3520 new-message floor read, surfaced so the synthetic-resume dedup gate can
+/// fuse it (`max`) with the in-memory committed offset and remain a TRUE superset
+/// of #3520 under BOTH authority states. Returning `0` (not `None`) keeps the
+/// caller's `committed.max(this)` fusion a plain `u64` op; `0` is the safe floor
+/// (`range_already_committed` suppresses NOTHING at `committed == 0`).
+pub(in crate::services::discord) fn delivered_frontier_end_current_generation(
+    provider: &ProviderKind,
+    channel: ChannelId,
+    tmux_session_name: &str,
+) -> u64 {
+    let Some(path) = delivery_record_path(provider, channel.get()) else {
+        return 0;
+    };
+    let current_gen = current_generation_mtime_ns(tmux_session_name);
+    current_generation_durable_frontier_end_at(&path, current_gen).unwrap_or(0)
+}
+
 /// #3089 B2b: the effective "already-committed" offset the dedup/skip gates read.
 /// Flag OFF (default) → the legacy in-memory `committed_relay_offset` verbatim
 /// (no record read → deploy no-op). Flag ON → `max(delivered_frontier.end,
@@ -414,62 +468,67 @@ pub(in crate::services::discord) fn effective_committed_offset(
     if !delivery_record_authority_enabled() {
         return in_memory;
     }
-    // The `tmux` module is `#[cfg(unix)]`; on non-unix targets (windows CI
-    // cross-compile check) there is no wrapper generation file, so treat the
-    // generation as absent (`0`) — `durable_frontier_generation_current`
-    // returns false for `0`, which falls back to the in-memory offset.
-    #[cfg(unix)]
-    let current_gen =
-        crate::services::discord::tmux::read_generation_file_mtime_ns(tmux_session_name);
-    #[cfg(not(unix))]
-    let current_gen: i64 = {
-        let _ = tmux_session_name;
-        0
-    };
-    let durable_end = read_record(provider, channel.get())
-        .and_then(|r| r.delivered_frontier)
-        .filter(|f| durable_frontier_generation_current(f.generation_mtime_ns, current_gen))
-        .map(|f| f.range.1);
+    let durable_end = delivery_record_path(provider, channel.get()).and_then(|path| {
+        current_generation_durable_frontier_end_at(
+            &path,
+            current_generation_mtime_ns(tmux_session_name),
+        )
+    });
     fuse_committed_offset(durable_end, in_memory)
 }
 
-/// #3520: durable delivered-frontier END for the CURRENT tmux generation, INDEPENDENT of
-/// the `delivery_record_authority_enabled()` read-authority flag. A watcher-direct re-send
-/// whose consumed byte range is entirely `<=` this value is a warm-followup / restored-seed
-/// re-mirror of already-delivered text and must be suppressed (otherwise it re-posts the
-/// prior turn's answer as a NEW message at the same prompt anchor — #3520). Returns 0 when
-/// the frontier is absent or belongs to a stale generation, so a caller never suppresses
-/// genuinely-new content (no message loss).
-pub(in crate::services::discord) fn delivered_frontier_end_current_generation(
+/// #3593 (codex HIGH): the committed floor the synthetic-resume re-send dedup gate
+/// (`tmux_watcher.rs`, the non-reconciled `watcher_direct_fallback_intended` arm)
+/// reads — the `max` of [`effective_committed_offset`] and the FLAG-INDEPENDENT
+/// current-generation durable frontier ([`delivered_frontier_end_current_generation`]).
+///
+/// Why fuse here and not rely on `effective_committed_offset` alone: under
+/// `AGENTDESK_DELIVERY_RECORD_AUTHORITY=OFF` (the default), `effective_committed_offset`
+/// returns ONLY the in-memory `committed_relay_offset`. On a restart / synthetic
+/// resume that in-memory value is reset to `0`, while the durable frontier still
+/// holds the current-generation high watermark (e.g. 443154). With the in-memory
+/// floor alone the gate would compute `range_already_committed(422855, 0) == false`
+/// and RE-POST the already-delivered body — the legacy #3520 new-message guard read
+/// the durable frontier flag-independently, so the new placeholder-path gate must
+/// too to be a TRUE superset of #3520 under BOTH authority states.
+///
+/// Safety (no over-suppression): `max` only RAISES the floor, and the durable reader
+/// is current-generation-only (#1270 guard → stale prior-generation frontier yields
+/// `0`), so after a pane reset/respawn a genuinely-NEW answer — whose `range_end`
+/// sits ABOVE both signals — is never wrongly suppressed.
+pub(in crate::services::discord) fn committed_floor_for_resend_dedup(
+    shared: &crate::services::discord::SharedData,
     provider: &ProviderKind,
     channel: ChannelId,
     tmux_session_name: &str,
 ) -> u64 {
-    #[cfg(unix)]
-    let current_gen =
-        crate::services::discord::tmux::read_generation_file_mtime_ns(tmux_session_name);
-    #[cfg(not(unix))]
-    let current_gen: i64 = {
-        let _ = tmux_session_name;
-        0
-    };
-    delivered_frontier_end_for_generation(
-        read_record(provider, channel.get()).and_then(|r| r.delivered_frontier),
-        current_gen,
+    effective_committed_offset(shared, provider, channel, tmux_session_name).max(
+        delivered_frontier_end_current_generation(provider, channel, tmux_session_name),
     )
 }
 
-/// Pure core of [`delivered_frontier_end_current_generation`] (testable): the frontier END
-/// when it belongs to `current_gen`, else 0 (absent / stale generation => 0 => the caller
-/// suppresses nothing, so no genuinely-new message can be lost).
-fn delivered_frontier_end_for_generation(
-    frontier: Option<DeliveredCommit>,
-    current_gen: i64,
-) -> u64 {
-    frontier
-        .filter(|f| durable_frontier_generation_current(f.generation_mtime_ns, current_gen))
-        .map(|f| f.range.1)
-        .unwrap_or(0)
+/// #3593 JSONL-space monotonic dedup predicate (pure, testable). `range_end` is the
+/// END of the consumed JSONL byte range a watcher pass is about to relay;
+/// `committed` is the already-delivered committed JSONL offset (the relay coord's
+/// `confirmed_end_offset`, via [`effective_committed_offset`] — which also fuses the
+/// current-generation durable frontier when read-authority is enabled). Returns `true` iff this range was ALREADY
+/// delivered (`range_end <= committed`), i.e. a re-send would re-post text already
+/// relayed (the #3593 synthetic-resume duplicate, where range_end=422855 sits at or
+/// below committed=443154). MUST be the SAME JSONL byte-offset space on both sides
+/// (never `response_sent_offset`, which is assistant-text-byte space — mixing them
+/// is the category error warned about at the watcher resend site).
+///
+/// `range_end == 0` (empty/zero range) and `committed == 0` (e.g. just reset by a
+/// generation change / pane reset, so nothing is known-delivered) both return
+/// `false` — suppress NOTHING in those cases, so a genuinely-new answer is never
+/// dropped (message-loss prevention dominates duplicate-suppression). Mirror of the
+/// `already_relayed` decision both relay consumers make, with an explicit non-zero
+/// `range_end` guard so an empty range can never be treated as "already committed".
+pub(in crate::services::discord) fn range_already_committed(
+    range_end: u64,
+    committed: u64,
+) -> bool {
+    range_end > 0 && range_end <= committed
 }
 
 /// I2 outcome map (pure, testable): the shadow-write fires ONLY for a confirmed
@@ -899,26 +958,162 @@ mod tests {
         assert!(!durable_frontier_generation_current(0, 0)); // both unknown → distrust
     }
 
+    // ---- #3593 JSONL-space monotonic resend dedup (range_already_committed) ----
+
     #[test]
-    fn delivered_frontier_end_for_generation_3520() {
-        // #3520 safety: the watcher-direct re-mirror guard suppresses ONLY when the durable
-        // frontier belongs to the CURRENT generation. Absent / stale-generation => 0 => the
-        // caller suppresses nothing, so a genuinely-new answer can never be dropped.
-        let commit = DeliveredCommit {
-            range: (0, 500),
-            generation_mtime_ns: 123,
-            attempts: 0,
-            panel_msg_id: None,
-        };
-        assert_eq!(delivered_frontier_end_for_generation(None, 123), 0); // absent → 0
+    fn range_already_committed_suppresses_synthetic_resume_dup_3593() {
+        // The observed #3593 case: a synthetic-resume pass tries to re-relay the
+        // prior turn's body whose consumed JSONL range ends at 422855, but the
+        // committed/delivered JSONL offset has already advanced to 443154. The
+        // range is entirely below the committed floor → already delivered → suppress
+        // (no duplicate).
+        assert!(range_already_committed(422_855, 443_154));
+    }
+
+    #[test]
+    fn range_already_committed_allows_new_response_after_resume() {
+        // Over-suppression no-regression: a genuinely-NEW response produced AFTER the
+        // resume ends past the committed floor (range_end 443200 > committed 443154)
+        // → NOT already delivered → must be relayed.
+        assert!(!range_already_committed(443_200, 443_154));
+    }
+
+    #[test]
+    fn range_already_committed_boundary_equal_is_committed() {
+        // The boundary: range_end == committed means the committed floor already
+        // covers this exact range end → already delivered → suppress (inclusive `<=`,
+        // matching the `already_relayed` consumers' `committed >= range_end`).
+        assert!(range_already_committed(443_154, 443_154));
+    }
+
+    #[test]
+    fn range_already_committed_zero_range_never_suppressed() {
+        // Empty/zero consumed range (range_end == 0) must NEVER be treated as already
+        // committed regardless of the committed value — suppressing it could drop a
+        // message; message-loss prevention dominates duplicate-suppression.
+        assert!(!range_already_committed(0, 443_154));
+        assert!(!range_already_committed(0, 0));
+    }
+
+    #[test]
+    fn range_already_committed_reset_committed_never_suppresses() {
+        // After a generation change / pane reset the committed offset is reset to 0
+        // (nothing is known-delivered in the fresh generation). A real range_end then
+        // sits ABOVE the 0 floor → NOT already committed → fresh output is relayed,
+        // never wrongly suppressed by a stale-high pre-reset value.
+        assert!(!range_already_committed(422_855, 0));
+        assert!(!range_already_committed(1, 0));
+    }
+
+    // ---- #3593 flag-independent current-generation durable frontier reader ----
+    // (codex HIGH: the synthetic-resume dedup gate must fuse the durable frontier
+    // EVEN when AGENTDESK_DELIVERY_RECORD_AUTHORITY is OFF — `effective_committed_offset`
+    // hides it under the flag, so the gate reads this flag-INDEPENDENT path instead.)
+
+    /// The exact #3593 AUTHORITY-OFF regression codex flagged: a restart / synthetic
+    /// resume reset the in-memory `committed_relay_offset` to 0, but the durable
+    /// frontier still holds the CURRENT-generation high watermark (443154). The
+    /// flag-independent reader surfaces it, so the caller's `0.max(443154)=443154`
+    /// fusion makes `range_already_committed(422855, 443154)=true` → the already-
+    /// delivered body is suppressed (no #3520 new-message-guard regression).
+    #[test]
+    fn current_gen_durable_frontier_covers_authority_off_resume_dup_3593() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 3593);
+        let gen_ns = 700_000_000_i64;
+        write_delivered_frontier_at(
+            &path,
+            DeliveredCommit {
+                range: (0, 443_154),
+                generation_mtime_ns: gen_ns,
+                attempts: 1,
+                panel_msg_id: Some(1),
+            },
+        )
+        .unwrap();
+        // Current generation matches the frontier's → trust the durable END.
+        let durable_end = current_generation_durable_frontier_end_at(&path, gen_ns);
+        assert_eq!(durable_end, Some(443_154));
+        // In-memory committed reset to 0 (the AUTHORITY-OFF restart hazard); the
+        // fused floor rises to the durable value → the synthetic-resume range is
+        // recognized as already-delivered.
+        let in_memory_committed = 0_u64;
+        let fused = in_memory_committed.max(durable_end.unwrap_or(0));
+        assert_eq!(fused, 443_154);
+        assert!(range_already_committed(422_855, fused));
+    }
+
+    /// Over-suppression no-regression: even with the durable frontier fused in, a
+    /// genuinely-NEW answer (range_end ABOVE the durable high watermark) is NOT
+    /// suppressed — the `max` only raises the floor to the known-delivered offset,
+    /// never above a fresh range_end.
+    #[test]
+    fn current_gen_durable_frontier_does_not_oversuppress_new_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 35930);
+        let gen_ns = 700_000_000_i64;
+        write_delivered_frontier_at(
+            &path,
+            DeliveredCommit {
+                range: (0, 443_154),
+                generation_mtime_ns: gen_ns,
+                attempts: 1,
+                panel_msg_id: None,
+            },
+        )
+        .unwrap();
+        let fused =
+            0_u64.max(current_generation_durable_frontier_end_at(&path, gen_ns).unwrap_or(0));
+        // A new answer produced AFTER the durable high watermark.
+        assert!(!range_already_committed(443_200, fused));
+    }
+
+    /// #1270 generation gating: a STALE prior-generation durable frontier is
+    /// distrusted (→ `None` → fused floor stays at in-memory). This is what keeps
+    /// the fusion safe after a pane reset/respawn — a stale-high value can NEVER
+    /// over-suppress the new generation's fresh output.
+    #[test]
+    fn current_gen_durable_frontier_distrusts_stale_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 35931);
+        write_delivered_frontier_at(
+            &path,
+            DeliveredCommit {
+                range: (0, 443_154),
+                generation_mtime_ns: 100, // written by a PRIOR generation
+                attempts: 1,
+                panel_msg_id: None,
+            },
+        )
+        .unwrap();
+        // Current generation differs → distrust → None.
+        assert_eq!(current_generation_durable_frontier_end_at(&path, 999), None);
+        // `current_gen == 0` (no .generation file) → also distrust.
+        assert_eq!(current_generation_durable_frontier_end_at(&path, 0), None);
+        // Fused floor stays at in-memory (here 0) → a real range above 0 is NOT
+        // suppressed (the new generation's fresh output is relayed).
+        let fused = 0_u64.max(current_generation_durable_frontier_end_at(&path, 999).unwrap_or(0));
+        assert!(!range_already_committed(422_855, fused));
+    }
+
+    /// I3 conservatism: an absent or malformed record yields no durable floor
+    /// (`None` → fuse contributes 0), so the fusion degrades to pure in-memory —
+    /// never an "assume delivered" that would drop a message.
+    #[test]
+    fn current_gen_durable_frontier_missing_or_malformed_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = delivery_record_path_in_root(dir.path(), &ProviderKind::Codex, 35932);
         assert_eq!(
-            delivered_frontier_end_for_generation(Some(commit.clone()), 123),
-            500
-        ); // current generation → frontier end
+            current_generation_durable_frontier_end_at(&missing, 5),
+            None
+        );
+
+        let malformed = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 35933);
+        fs::create_dir_all(malformed.parent().unwrap()).unwrap();
+        fs::write(&malformed, "{ not json").unwrap();
         assert_eq!(
-            delivered_frontier_end_for_generation(Some(commit.clone()), 100),
-            0
-        ); // stale generation → 0
-        assert_eq!(delivered_frontier_end_for_generation(Some(commit), 0), 0); // no .generation file → 0
+            current_generation_durable_frontier_end_at(&malformed, 5),
+            None
+        );
     }
 }

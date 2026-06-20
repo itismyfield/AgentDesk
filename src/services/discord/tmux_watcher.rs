@@ -4398,12 +4398,19 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // `committed` is never strictly between start/end. Reconcile ONLY on the session-bound re-send path; plain watcher-direct unchanged.
         let watcher_resend_range_start = data_start_offset;
         let watcher_resend_range_end = terminal_event_consumed_offset(current_offset, &all_data);
-        let watcher_resend_committed = dr::effective_committed_offset(
+        // #3593: self-heal a stale-high watermark BEFORE the resend-dedup `committed` read (no-inflight-gate parity; generation change → committed 0 → no false skip).
+        reset_relay_watermark_on_generation_change(
+            &shared,
+            channel_id,
+            &tmux_session_name,
+            "watcher_terminal_resend_dedup",
+        );
+        let watcher_resend_committed = dr::committed_floor_for_resend_dedup(
             &shared,
             &watcher_provider,
             channel_id,
             &tmux_session_name,
-        ); // #3089 B2b
+        ); // #3089 B2b + #3593 (codex HIGH): in-memory committed ∪ flag-independent durable frontier
         let watcher_resend_reconciled = session_bound_terminal_delivery_attempted
             && watcher_direct_fallback_intended
             && !matches!(
@@ -4411,14 +4418,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 SessionBoundRelayAckOutcome::Delivered
             );
         let watcher_resend_action = if watcher_resend_reconciled {
-            // Self-heal a stale-high authority left by a respawned/truncated wrapper BEFORE
-            // consulting it (as the no-inflight gate and idle relay do) → fresh range never skipped (codex P2).
-            reset_relay_watermark_on_generation_change(
-                &shared,
-                channel_id,
-                &tmux_session_name,
-                "watcher_terminal_resend_reconcile",
-            );
+            // #3593: the stale-high self-heal ran unconditionally above (codex P2).
             // #3151: gate the re-send on the in-flight sink-delivery marker BEFORE
             // the committed-offset reconciliation. The marker is a `Leased{Sink}`
             // state on the SAME per-channel `DeliveryLeaseCell` the watcher's own
@@ -4460,6 +4460,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 gate_cell.reclaim_if_expired(now_ms);
             }
             Some(action)
+        } else if watcher_direct_fallback_intended
+            && dr::range_already_committed(watcher_resend_range_end, watcher_resend_committed)
+        {
+            // #3593: already-delivered range (`committed >= end`) on the non-reconciled
+            // synthetic-resume path (the placeholder path the #3520 new-message-only floor
+            // missed) → EXISTING non-destructive `SkipAlreadyCommitted` arm, which PRESERVES
+            // the restored placeholder (flipping `has_direct_terminal_response`/the fallback
+            // flag would delete the already-delivered body — #3520 codex BLOCKER).
+            Some(WatcherTerminalResendAction::SkipAlreadyCommitted)
         } else {
             None
         };
@@ -4527,16 +4536,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             response_sent_offset,
             session_bound_fallback_uses_full_body,
         );
-        // #3520: skip a watcher-direct NEW-MESSAGE re-mirror already within the durable delivered frontier (same gen; absent=>0=>no suppress, no loss). NEW-message anchor path ONLY (placeholder_msg_id none) — the placeholder-edit arm must keep its already-delivered body, never delete it via the empty-body cleanup (codex BLOCKER).
-        let has_direct_terminal_response = !direct_terminal_response.trim().is_empty()
-            && !(watcher_direct_fallback_after_session_bound_ack
-                && placeholder_msg_id.is_none()
-                && watcher_resend_range_end
-                    <= dr::delivered_frontier_end_current_generation(
-                        &watcher_provider,
-                        channel_id,
-                        &tmux_session_name,
-                    ));
+        let has_direct_terminal_response = !direct_terminal_response.trim().is_empty();
         // #2838/#3042 (relay-stability P0-1): count the primary duplicate-emit vector — a
         // session-bound terminal ACK that timed out while the watcher direct-sends (sink may
         // have already posted; rising counts ⇒ P1 dual-authority lease overdue). Gate on the
