@@ -193,6 +193,15 @@ test("timeouts requested sweep skips scope-assessment side-path even when overdu
 test("timeouts reconcile fallback does not advance a completed scope-assessment (#3605)", () => {
   const { policy, state } = loadPolicy("policies/timeouts.js", {
     config: { pm_decision_gate_enabled: true },
+    cards: {
+      "card-scope-r": {
+        id: "card-scope-r",
+        status: "requested",
+        priority: "medium",
+        assigned_agent_id: "agent-1",
+        deferred_dod_json: null
+      }
+    },
     dbQuery: createSqlRouter([
       {
         match: "SELECT key, value FROM kv_meta WHERE key LIKE 'reconcile_dispatch:%'",
@@ -213,18 +222,7 @@ test("timeouts reconcile fallback does not advance a completed scope-assessment 
           }
         ]
       },
-      {
-        match: "SELECT id, status, priority, assigned_agent_id, deferred_dod_json FROM kanban_cards WHERE id = ?",
-        result: [
-          {
-            id: "card-scope-r",
-            status: "requested",
-            priority: "medium",
-            assigned_agent_id: "agent-1",
-            deferred_dod_json: null
-          }
-        ]
-      },
+
       {
         // #3605 (T2): the fallback now records scope_depth via the shared
         // recorder, which reads the card metadata first.
@@ -267,6 +265,15 @@ test("timeouts reconcile fallback does not advance a completed scope-assessment 
 test("timeouts reconcile fallback applies full fallback for an unparsable scope-assessment (#3605)", () => {
   const { policy, state } = loadPolicy("policies/timeouts.js", {
     config: { pm_decision_gate_enabled: true },
+    cards: {
+      "card-scope-fb": {
+        id: "card-scope-fb",
+        status: "requested",
+        priority: "medium",
+        assigned_agent_id: "agent-1",
+        deferred_dod_json: null
+      }
+    },
     dbQuery: createSqlRouter([
       {
         match: "SELECT key, value FROM kv_meta WHERE key LIKE 'reconcile_dispatch:%'",
@@ -287,18 +294,7 @@ test("timeouts reconcile fallback applies full fallback for an unparsable scope-
           }
         ]
       },
-      {
-        match: "SELECT id, status, priority, assigned_agent_id, deferred_dod_json FROM kanban_cards WHERE id = ?",
-        result: [
-          {
-            id: "card-scope-fb",
-            status: "requested",
-            priority: "medium",
-            assigned_agent_id: "agent-1",
-            deferred_dod_json: null
-          }
-        ]
-      },
+
       {
         match: "SELECT metadata FROM kanban_cards WHERE id = ?",
         result: [{ metadata: "{}" }]
@@ -329,6 +325,15 @@ test("timeouts reconcile fallback gates depth flow when an auto-queue entry is l
   // was dropped.
   const { policy, state } = loadPolicy("policies/timeouts.js", {
     config: { pm_decision_gate_enabled: true },
+    cards: {
+      "card-scope-g": {
+        id: "card-scope-g",
+        status: "requested",
+        priority: "medium",
+        assigned_agent_id: "agent-1",
+        deferred_dod_json: null
+      }
+    },
     dbQuery: createSqlRouter([
       {
         match: "SELECT key, value FROM kv_meta WHERE key LIKE 'reconcile_dispatch:%'",
@@ -349,18 +354,7 @@ test("timeouts reconcile fallback gates depth flow when an auto-queue entry is l
           }
         ]
       },
-      {
-        match: "SELECT id, status, priority, assigned_agent_id, deferred_dod_json FROM kanban_cards WHERE id = ?",
-        result: [
-          {
-            id: "card-scope-g",
-            status: "requested",
-            priority: "medium",
-            assigned_agent_id: "agent-1",
-            deferred_dod_json: null
-          }
-        ]
-      },
+
       {
         match: "SELECT metadata FROM kanban_cards WHERE id = ?",
         result: [{ metadata: JSON.stringify({ scope_depth: "direct", scope_assessment_status: "completed" }) }]

@@ -68,12 +68,8 @@ module.exports = function attachReconciliation(timeouts, helpers) {
           continue;
         }
         // 2. For completed dispatches, replay kanban-rules onDispatchCompleted logic
-        var cards = agentdesk.db.query(
-          "SELECT id, status, priority, assigned_agent_id, deferred_dod_json FROM kanban_cards WHERE id = ?",
-          [di.kanban_card_id]
-        );
-        if (cards.length === 0) continue;
-        var card = cards[0];
+        var card = agentdesk.cards.get(di.kanban_card_id);
+        if (!card) continue;
         var rCfg = agentdesk.pipeline.resolveForCard(card.id);
         var rInitial = agentdesk.pipeline.kickoffState(rCfg);
         var rInProgress = agentdesk.pipeline.nextGatedTarget(rInitial, rCfg);
@@ -166,10 +162,14 @@ module.exports = function attachReconciliation(timeouts, helpers) {
           // Format: { items: ["task1", "task2"], verified: ["task1"] }
           if (card.deferred_dod_json) {
             try {
-              var dod = JSON.parse(card.deferred_dod_json);
-              var items = dod.items || [];
-              var verified = dod.verified || [];
-              if (items.length > 0) {
+              var dod = typeof card.deferred_dod_json === "string"
+                ? JSON.parse(card.deferred_dod_json)
+                : card.deferred_dod_json;
+              var items = dod && Array.isArray(dod.items) ? dod.items : [];
+              var verified = dod && Array.isArray(dod.verified)
+                ? dod.verified
+                : (dod && typeof dod.verified === "undefined" ? [] : null);
+              if (items.length > 0 && verified) {
                 var unverified = 0;
                 for (var di2 = 0; di2 < items.length; di2++) {
                   if (verified.indexOf(items[di2]) === -1) unverified++;
