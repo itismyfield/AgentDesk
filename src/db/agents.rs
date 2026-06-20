@@ -121,6 +121,16 @@ impl AgentChannelBindings {
     fn codex_channel(&self) -> Option<String> {
         normalized_channel(self.discord_channel_cdx.clone())
             .or_else(|| normalized_channel(self.discord_channel_alt.clone()))
+            // A Codex agent may be bound only via the legacy primary channel
+            // (discord_channel_id) without an explicit cdx/alt mailbox. Treat
+            // that primary channel as Codex-owned so provider resolution keeps
+            // Codex instead of falling back to the Claude counterpart, which
+            // would reserve a Claude turn on a Codex mailbox (P1, #3556).
+            .or_else(|| {
+                (self.configured_provider_kind() == Some(ProviderKind::Codex))
+                    .then(|| self.legacy_primary_channel())
+                    .flatten()
+            })
     }
 
     fn legacy_primary_channel(&self) -> Option<String> {
@@ -166,6 +176,23 @@ mod tests {
         assert_eq!(
             bindings.primary_channel().as_deref(),
             Some("1470000000000000002")
+        );
+    }
+
+    #[test]
+    fn resolved_primary_provider_keeps_codex_for_primary_only_binding() {
+        // A Codex agent bound only via discord_channel_id (no cdx/alt) must
+        // resolve to Codex, not slide to the Claude counterpart aliasing the
+        // same primary channel (#3556 P1 handoff fallback bug).
+        let bindings = binding("codex", "1470000000000000005");
+
+        assert_eq!(
+            bindings.resolved_primary_provider_kind(),
+            Some(ProviderKind::Codex)
+        );
+        assert_eq!(
+            bindings.primary_channel().as_deref(),
+            Some("1470000000000000005")
         );
     }
 

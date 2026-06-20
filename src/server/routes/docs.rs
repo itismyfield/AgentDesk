@@ -1578,8 +1578,8 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         )
         .with_error_example(
             422,
-            json!({"path": {"id": "adk-dashboard"}, "body": {"from_agent_id": "project-agentdesk", "message": "hello", "channel_kind": "cc"}}),
-            json!({"error": "channel_kind unset", "to_agent_id": "adk-dashboard", "channel_kind": "cc", "available_kinds": ["cdx"]}),
+            json!({"path": {"id": "ghost-agent"}, "body": {"from_agent_id": "project-agentdesk", "message": "hello", "channel_kind": "cc"}}),
+            json!({"error": "channel_kind unset", "to_agent_id": "ghost-agent", "channel_kind": "cc", "available_kinds": []}),
         )
         .with_curl("curl -X POST http://localhost:8787/api/agents/adk-dashboard/message -H 'Content-Type: application/json' -d '{\"from_agent_id\":\"project-agentdesk\",\"message\":\"hello\",\"channel_kind\":\"cc\",\"prefix\":true,\"expect_reply\":true}'"),
         ep(
