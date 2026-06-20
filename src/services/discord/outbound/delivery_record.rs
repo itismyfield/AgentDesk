@@ -114,7 +114,20 @@ pub(in crate::services::discord) struct DeliveredCommit {
     pub range: (u64, u64),
     pub generation_mtime_ns: i64,
     pub attempts: u32,
+    /// #3610 (Phase B PR-1): the durable TERMINAL ANCHOR — the Discord message id
+    /// terminal-replace edited in place (the assistant response `current_msg_id`).
     pub panel_msg_id: Option<u64>,
+    /// #3610 (Phase B PR-1b): the channel `panel_msg_id` lives in. The frontier is
+    /// KEYED by the offset-authority channel (`watcher_owner_channel_id`), which the
+    /// bridge cutover can resolve DIFFERENTLY from the edit-target channel the anchor
+    /// message belongs to (a recovered/reused-watcher bridge edits its own dispatch
+    /// channel while leasing on the resolved owner channel — terminal_controller_cutover
+    /// `Channel split`). PR-2's re-post must therefore know WHICH channel to edit, not
+    /// just which message. `#[serde(default)]` keeps PR-1 records (no field) and any
+    /// pre-#3610 record forward/backward compatible. Same-channel callers (sink,
+    /// watcher) set this to their single channel; null = no anchor recorded.
+    #[serde(default)]
+    pub panel_channel_id: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -559,12 +572,14 @@ fn delivered_frontier_end_diverged(durable_end: u64, in_memory_confirmed_end: u6
 /// Path-based core (testable): write the frontier and report whether its END
 /// diverged from the in-memory authority. `Err` only when the durable write
 /// itself failed. Caller invokes this ONLY for a confirmed `Delivered` (I2).
+#[allow(clippy::too_many_arguments)]
 fn record_delivered_frontier_shadow_at(
     path: &Path,
     range: (u64, u64),
     generation_mtime_ns: i64,
     attempts: u32,
     panel_msg_id: Option<u64>,
+    panel_channel_id: Option<u64>,
     in_memory_confirmed_end: u64,
 ) -> Result<bool, String> {
     write_delivered_frontier_at(
@@ -574,6 +589,7 @@ fn record_delivered_frontier_shadow_at(
             generation_mtime_ns,
             attempts,
             panel_msg_id,
+            panel_channel_id,
         },
     )?;
     Ok(delivered_frontier_end_diverged(
@@ -585,6 +601,7 @@ fn record_delivered_frontier_shadow_at(
 /// provider/channel core: resolve the sidecar path, shadow-write, and emit the
 /// observe-only signals. NEVER panics, NEVER changes delivery (the relay had
 /// incidents; B1 only observes). Caller invokes this ONLY for `Delivered` (I2).
+#[allow(clippy::too_many_arguments)]
 fn record_delivered_frontier_shadow(
     provider: &ProviderKind,
     channel_id: u64,
@@ -592,6 +609,7 @@ fn record_delivered_frontier_shadow(
     generation_mtime_ns: i64,
     attempts: u32,
     panel_msg_id: Option<u64>,
+    panel_channel_id: Option<u64>,
     in_memory_confirmed_end: u64,
 ) {
     let path = match record_path_or_err(provider, channel_id) {
@@ -612,6 +630,7 @@ fn record_delivered_frontier_shadow(
         generation_mtime_ns,
         attempts,
         panel_msg_id,
+        panel_channel_id,
         in_memory_confirmed_end,
     ) {
         Ok(false) => {}
@@ -647,11 +666,18 @@ fn record_delivered_frontier_shadow(
 /// `status_message_id` is the status-panel-v2 id (inflight/model.rs: "current_msg_id
 /// remains the assistant response"), not the terminal anchor, and is `null` on
 /// channels that do not use the status panel — yielding `panel_msg_id = null` on
-/// the very incidents PR-2's re-post will key off. Cross-channel callers (the
-/// bridge cutover, where the frontier-key channel differs from the edit-target
-/// channel) pass `None` and are out of this PR's scope. `None` writes a null
-/// anchor (unchanged from the absent-status-panel case), so OFF/None paths stay
-/// behaviorally identical.
+/// the very incidents PR-2's re-post will key off.
+///
+/// #3610 (Phase B PR-1b): `terminal_anchor_channel_id` is the channel that anchor
+/// message LIVES IN — recorded into [`DeliveredCommit::panel_channel_id`]. The
+/// frontier is KEYED by `channel` (the OFFSET-AUTHORITY channel,
+/// `watcher_owner_channel_id` for the bridge cutover), which the cross-channel
+/// cutover can resolve DIFFERENTLY from the edit-target channel the `msg_id`
+/// belongs to. So PR-2 must record the (channel, msg) PAIR, not just the msg.
+/// Same-channel callers (sink, watcher) pass `Some(channel.get())`; the bridge
+/// cutover passes the edit-target `channel_id` it actually edits. `None`/`None`
+/// writes a null anchor pair (unchanged from the absent-status-panel case), so
+/// OFF/None paths stay behaviorally identical.
 pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
     shared: &crate::services::discord::SharedData,
     provider: &ProviderKind,
@@ -659,6 +685,7 @@ pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
     range: (u64, u64),
     is_delivered: bool,
     terminal_anchor_msg_id: Option<u64>,
+    terminal_anchor_channel_id: Option<u64>,
 ) {
     if !should_shadow_mirror(is_delivered, delivery_record_shadow_enabled()) {
         return;
@@ -681,6 +708,7 @@ pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
         generation_mtime_ns,
         attempts,
         terminal_anchor_msg_id,
+        terminal_anchor_channel_id,
         in_memory_confirmed_end,
     );
 }
@@ -705,6 +733,7 @@ mod tests {
             generation_mtime_ns: 123_456_789,
             attempts: 1,
             panel_msg_id: Some(999),
+            panel_channel_id: Some(1234),
         }
     }
 
@@ -902,7 +931,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 11);
         let diverged =
-            record_delivered_frontier_shadow_at(&path, (3, 10), 111, 2, Some(9), 10).unwrap();
+            record_delivered_frontier_shadow_at(&path, (3, 10), 111, 2, Some(9), Some(8), 10)
+                .unwrap();
         assert!(!diverged);
         let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
         assert_eq!(
@@ -912,6 +942,7 @@ mod tests {
                 generation_mtime_ns: 111,
                 attempts: 2,
                 panel_msg_id: Some(9),
+                panel_channel_id: Some(8),
             }
         );
     }
@@ -923,7 +954,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 12);
         let diverged =
-            record_delivered_frontier_shadow_at(&path, (3, 10), 222, 0, None, 9).unwrap();
+            record_delivered_frontier_shadow_at(&path, (3, 10), 222, 0, None, None, 9).unwrap();
         assert!(diverged); // 10 (durable end) != 9 (in-memory)
         assert_eq!(
             read_record_at(&path)
@@ -941,7 +972,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 13);
         upsert_lease_at(&path, sample_lease()).unwrap();
-        record_delivered_frontier_shadow_at(&path, (0, 5), 5, 0, None, 5).unwrap();
+        record_delivered_frontier_shadow_at(&path, (0, 5), 5, 0, None, None, 5).unwrap();
         let after = read_record_at(&path).unwrap();
         assert_eq!(after.delivery_lease, Some(sample_lease()));
         assert_eq!(after.delivered_frontier.unwrap().range, (0, 5));
@@ -1042,6 +1073,7 @@ mod tests {
                 generation_mtime_ns: gen_ns,
                 attempts: 1,
                 panel_msg_id: Some(1),
+                panel_channel_id: None,
             },
         )
         .unwrap();
@@ -1073,6 +1105,7 @@ mod tests {
                 generation_mtime_ns: gen_ns,
                 attempts: 1,
                 panel_msg_id: None,
+                panel_channel_id: None,
             },
         )
         .unwrap();
@@ -1097,6 +1130,7 @@ mod tests {
                 generation_mtime_ns: 100, // written by a PRIOR generation
                 attempts: 1,
                 panel_msg_id: None,
+                panel_channel_id: None,
             },
         )
         .unwrap();
@@ -1131,55 +1165,120 @@ mod tests {
         );
     }
 
-    // ---- #3610 (Phase B PR-1) terminal-anchor recording -----------------------
+    // ---- #3610 (Phase B PR-1 / PR-1b) terminal-anchor recording ----------------
     // `shadow_mirror_delivered_frontier` forwards the caller's
-    // `terminal_anchor_msg_id` verbatim as the `panel_msg_id` argument to
+    // `terminal_anchor_msg_id` + `terminal_anchor_channel_id` verbatim as the
+    // `panel_msg_id` / `panel_channel_id` arguments to
     // `record_delivered_frontier_shadow_at` (the path-based testable core), so
     // these exercise that core with the anchor semantics the three call sites use:
-    //   - sink/watcher (same-channel) → anchor = Some(current_msg_id)
-    //   - bridge cutover (cross-channel) → anchor = None
+    //   - sink/watcher (same-channel) → (Some(channel), Some(current_msg_id))
+    //   - bridge cutover (PR-1b, cross-channel) → (Some(edit channel), Some(msg))
     // The status-panel id (`status_message_id`) is no longer read; the recorded
-    // anchor is now the terminal `current_msg_id` the replace edits in place.
+    // anchor is now the terminal `current_msg_id` the replace edits in place, and
+    // PR-1b also records WHICH channel that anchor message lives in.
 
     #[test]
     fn anchor_msg_id_recorded_as_panel_msg_id_3610() {
         // The sink/watcher path: the caller resolves the terminal anchor =
         // `current_msg_id` (the active-slot / PlaceholderEdit-target message) and
-        // passes it as the `panel_msg_id` argument. It lands in
-        // `DeliveredCommit.panel_msg_id` verbatim — NOT the status-panel id.
+        // passes it as the `panel_msg_id` argument, with `panel_channel_id` = the
+        // (same) channel. Both land in `DeliveredCommit` verbatim — NOT the
+        // status-panel id.
         let dir = tempfile::tempdir().unwrap();
         let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36100);
         // Anchor (current_msg_id) is a DIFFERENT value than any status-panel id
         // would be — pinning that the recorded datum is the terminal anchor.
         let terminal_anchor: u64 = 555_111_222;
-        record_delivered_frontier_shadow_at(&path, (0, 100), 700, 0, Some(terminal_anchor), 100)
-            .unwrap();
+        let anchor_channel: u64 = 444_000_111;
+        record_delivered_frontier_shadow_at(
+            &path,
+            (0, 100),
+            700,
+            0,
+            Some(terminal_anchor),
+            Some(anchor_channel),
+            100,
+        )
+        .unwrap();
         let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
         assert_eq!(written.panel_msg_id, Some(terminal_anchor));
+        assert_eq!(written.panel_channel_id, Some(anchor_channel));
         assert_eq!(written.range, (0, 100));
     }
 
     #[test]
-    fn anchor_none_records_null_panel_msg_id_3610() {
-        // The bridge cutover (cross-channel) passes `None`: the durable anchor
-        // stays null (unchanged from the absent-status-panel case), and the
+    fn cutover_records_cross_channel_anchor_pair_3610b() {
+        // #3610 PR-1b — the REAL prod/incident terminal path (bridge cutover). The
+        // frontier is KEYED by the offset-authority channel (`watcher_owner_channel_id`),
+        // but the anchor message lives in the (possibly DIFFERENT) edit-target channel.
+        // The cutover therefore records the (edit channel, edit msg) PAIR while the
+        // frontier key stays the owner channel — so the recorded `panel_msg_id` is NO
+        // LONGER null (the bug PR-1 left), and `panel_channel_id` tells PR-2 which
+        // channel to edit. This pins that the pair is recorded verbatim and non-null.
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36104);
+        let edit_msg: u64 = 700_111_222; // current_msg_id (edit target)
+        let edit_channel: u64 = 800_333_444; // delivery channel != owner channel
+        record_delivered_frontier_shadow_at(
+            &path,
+            (0, 100),
+            700,
+            0,
+            Some(edit_msg),
+            Some(edit_channel),
+            100,
+        )
+        .unwrap();
+        let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
+        assert_eq!(written.panel_msg_id, Some(edit_msg)); // NOT null (PR-1's bug)
+        assert_eq!(written.panel_channel_id, Some(edit_channel));
+        assert_eq!(written.range, (0, 100));
+    }
+
+    #[test]
+    fn anchor_none_records_null_panel_pair_3610() {
+        // The defensive `None`/`None` path (no resolvable anchor): the durable anchor
+        // pair stays null (unchanged from the absent-status-panel case), and the
         // frontier still advances normally.
         let dir = tempfile::tempdir().unwrap();
         let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36101);
-        record_delivered_frontier_shadow_at(&path, (0, 100), 700, 0, None, 100).unwrap();
+        record_delivered_frontier_shadow_at(&path, (0, 100), 700, 0, None, None, 100).unwrap();
         let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
         assert_eq!(written.panel_msg_id, None);
+        assert_eq!(written.panel_channel_id, None);
         assert_eq!(written.range, (0, 100));
+    }
+
+    #[test]
+    fn panel_channel_id_backward_compatible_serde_default_3610b() {
+        // #3610 PR-1b backward compat: a PR-1 record (or any pre-#3610b record) has
+        // NO `panel_channel_id` field. `#[serde(default)]` must deserialize it to
+        // `None` without error, leaving the rest of the frontier intact.
+        let legacy_json = r#"{
+            "delivery_lease": null,
+            "delivered_frontier": {
+                "range": [0, 443154],
+                "generation_mtime_ns": 700000000,
+                "attempts": 1,
+                "panel_msg_id": 555111222
+            }
+        }"#;
+        let record: DeliveryRecord = serde_json::from_str(legacy_json).unwrap();
+        let frontier = record.delivered_frontier.unwrap();
+        assert_eq!(frontier.panel_msg_id, Some(555_111_222));
+        assert_eq!(frontier.panel_channel_id, None); // serde default — no field present
+        assert_eq!(frontier.range, (0, 443_154));
     }
 
     #[test]
     fn anchor_value_is_dedup_byte_invariant_3610() {
-        // ★ #3593 byte-impact 0: the recorded `panel_msg_id` (terminal anchor) is
-        // NEVER read by the offset-dedup path — the single durable-frontier reader
-        // (`current_generation_durable_frontier_end_at`) reads only `.range.1`. So
-        // two records with the SAME frontier END but DIFFERENT anchors
-        // (Some(current_msg_id) vs None, the old status_message_id=null incident
-        // case) MUST yield byte-identical dedup decisions.
+        // ★ #3593 byte-impact 0: the recorded anchor PAIR (`panel_msg_id` +
+        // #3610b `panel_channel_id`) is NEVER read by the offset-dedup path — the
+        // single durable-frontier reader (`current_generation_durable_frontier_end_at`)
+        // reads only `.range.1`. So two records with the SAME frontier END but
+        // DIFFERENT anchor pairs ((Some(msg), Some(channel)) vs (None, None), the old
+        // status_message_id=null incident case) MUST yield byte-identical dedup
+        // decisions.
         let dir = tempfile::tempdir().unwrap();
         let gen_ns = 700_000_000_i64;
 
@@ -1192,6 +1291,7 @@ mod tests {
                 generation_mtime_ns: gen_ns,
                 attempts: 1,
                 panel_msg_id: Some(999_888_777), // #3610: terminal anchor present
+                panel_channel_id: Some(111_222_333), // #3610b: anchor channel present
             },
         )
         .unwrap();
@@ -1205,6 +1305,7 @@ mod tests {
                 generation_mtime_ns: gen_ns,
                 attempts: 1,
                 panel_msg_id: None, // pre-fix incident shape (status_message_id=null)
+                panel_channel_id: None,
             },
         )
         .unwrap();

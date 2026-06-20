@@ -314,18 +314,28 @@ pub(super) async fn deliver_short_replace_via_controller(
     // OFFSET-AUTHORITY channel where `advance_tmux_relay_confirmed_end` advanced
     // `confirmed_end_offset`), NOT the edit-target `channel_id` — so the durable
     // frontier and the in-memory authority B2b fuses share one channel key.
-    // #3610 PR-1: anchor = `None`. The frontier is keyed by `watcher_owner_channel_id`
-    // (the OFFSET-AUTHORITY channel), which may DIFFER from the edit-target `channel_id`
-    // the `msg_id` belongs to — so this cross-channel cutover cannot assert the
-    // edit-target `msg_id` is the anchor on the frontier-key channel. Out of PR-1's
-    // scope (sink+watcher same-channel only); leave the anchor null as before.
+    //
+    // #3610 PR-1b: record the (anchor channel, anchor msg) PAIR — the real prod /
+    // incident terminal path is THIS bridge cutover, and PR-1 left it null. The
+    // anchor message terminal-replace edits in place is `msg_id` (the `Active`
+    // placeholder slot's `message_id`, passed straight into
+    // `TurnOutputCtx.placeholder = Active { message_id: msg_id, .. }` →
+    // `replace_message_with_outcome(channel_id, msg_id, ..)`), and it LIVES IN the
+    // edit-target `channel_id` (the bridge's delivery channel — the EDIT TARGET per
+    // the `Channel split` doc above, NOT `watcher_owner_channel_id`). These two
+    // channels are cleanly separated function parameters here, so the anchor pair is
+    // unambiguous: `panel_channel_id = Some(channel_id)`, `panel_msg_id =
+    // Some(msg_id)`. The frontier KEY stays `watcher_owner_channel_id` (offset
+    // authority unchanged — B2b's fusion still shares one channel key); only the
+    // recorded anchor pair points at the edit channel/message.
     dr::shadow_mirror_delivered_frontier(
         shared,
         provider,
         watcher_owner_channel_id,
         (start, end),
         dr::outcome_is_shadow_delivered(&outcome),
-        None,
+        Some(msg_id.get()),
+        Some(channel_id.get()),
     );
     outcome
 }
