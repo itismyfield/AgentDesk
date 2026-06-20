@@ -407,6 +407,60 @@ mod tests {
         }
     }
 
+    /// #3610 PR-2 (codex r2 Issue-2, storm guard): the committed-branch
+    /// anchor-repost dispose call passes `tmux_alive = false` ON PURPOSE
+    /// (recovery_engine.rs anchor_repost branch), so a send-new that keeps
+    /// failing transiently is BUDGET-BOUNDED rather than preserved forever.
+    /// This pins the property the call site relies on: with `tmux_alive = false`,
+    /// a TransientFailure ALWAYS terminates at the budget — even if the pane is
+    /// (or would be) alive. Contrast `pane_alive_row_is_never_budget_cleared`,
+    /// which proves the OPPOSITE for the normal-turn callers that pass the real
+    /// `tmux_alive` (a live pane may still own a not-yet-committed answer). A
+    /// committed row's answer is already on the wire, so pane liveness is
+    /// irrelevant to the repost and the bound must hold.
+    #[test]
+    fn committed_repost_transient_is_budget_bounded_no_infinite_preserve() {
+        // Below budget: preserve+count (bounded retry across restarts) ...
+        for attempts in 0..(BUDGET - 1) {
+            assert_eq!(
+                unrecoverable_relay_disposition(
+                    RecoveryRelayOutcome::TransientFailure,
+                    attempts,
+                    BUDGET,
+                    // committed-repost ALWAYS passes false (pane liveness moot)
+                    false,
+                ),
+                RowDisposition::PreserveAndCount,
+                "attempt {attempts}: bounded retry must still preserve"
+            );
+        }
+        // ... and at the budget the loop TERMINATES — it cannot preserve+retry
+        // forever (the storm the codex review flagged). This is the key
+        // anti-infinite-loop guarantee for an already-committed row.
+        assert_eq!(
+            unrecoverable_relay_disposition(
+                RecoveryRelayOutcome::TransientFailure,
+                BUDGET - 1,
+                BUDGET,
+                false,
+            ),
+            RowDisposition::ClearBudgetExhausted,
+            "committed-repost transient MUST clear at the budget — no infinite preserve"
+        );
+        // Belt-and-suspenders: even an absurd attempt count past the budget
+        // never reverts to preserve (the failure is permanently bounded).
+        assert_eq!(
+            unrecoverable_relay_disposition(
+                RecoveryRelayOutcome::TransientFailure,
+                BUDGET + 100,
+                BUDGET,
+                false,
+            ),
+            RowDisposition::ClearBudgetExhausted,
+            "past-budget transient stays cleared (bound is monotone)"
+        );
+    }
+
     #[test]
     fn audit_reason_codes_are_pinned_for_clearing_dispositions() {
         assert_eq!(

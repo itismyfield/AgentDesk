@@ -2735,13 +2735,28 @@ pub(super) async fn restore_inflight_turns(
                 )
                 .await
                 {
-                    let tmux_alive = tmux_session_alive_with_retry(&tmux_session_name);
+                    // #3610 PR-2 (codex r2 Issue-2, storm guard): pass
+                    // `tmux_alive = false` to the dispose so a repeatedly
+                    // TransientFailure-ing send-new is BUDGET-BOUNDED. This row's
+                    // terminal answer is ALREADY committed — pane liveness is
+                    // irrelevant to whether the *anchor message* can be re-posted,
+                    // so the normal-turn "live pane may still own the answer"
+                    // preservation (`unrecoverable_relay_disposition`'s
+                    // `tmux_alive == true` arm, shared.rs) must NOT apply here.
+                    // Were the real probe passed, a live pane would force
+                    // `PreserveAndCount` every boot and a transient send-new
+                    // failure could loop FOREVER (preserve+retry each restart).
+                    // `tmux_alive` reaches only (a) the disposition's budget gate
+                    // and (b) the `termination_audit` `tmux_alive` column — never a
+                    // kill / extra force-clear path (verified) — so `false` is the
+                    // minimal, side-effect-free way to enforce the bound. The probe
+                    // call is dropped because its result is intentionally unused.
                     recovery_paths::restart::dispose_recovery_relay_outcome(
                         shared,
                         provider,
                         &state,
                         outcome,
-                        tmux_alive,
+                        false,
                         "recovery_anchor_repost",
                         "anchor_repost",
                         &state.full_response,

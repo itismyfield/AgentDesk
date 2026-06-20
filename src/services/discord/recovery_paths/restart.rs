@@ -224,6 +224,28 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
 
     // G2b: resolve the current-generation, fully-populated anchor (the reader is
     // the stale-anchor structural guard: generation-gated + non-zero pair).
+    //
+    // KNOWN LIMITATION (codex r2 Issue-1) — same-channel coverage only.
+    // The delivery record is FILE-KEYED by the offset-authority channel
+    // (`watcher_owner_channel_id`; delivery_record.rs `DeliveredCommit` doc), but
+    // here we can only key by `state.channel_id`, the DELIVERY channel. For the
+    // common case these are identical (sink / watcher-owned turns set
+    // `watcher_owner_channel_id == delivery_channel_id == channel_id`; the bulk of
+    // the watcher-owned recovery population), so this covers them.
+    //
+    // The bridge-reused-watcher CROSS-channel case (owner ≠ delivery — a recovered
+    // bridge edits its own dispatch channel while leasing on a DIFFERENT resolved
+    // owner channel; terminal_controller_cutover `Channel split`) is NOT covered:
+    // its record lives under the owner-channel file, so this owner-blind read
+    // returns `None` and the caller falls through to the byte-identical legacy
+    // finish+clear (a coverage GAP — a missed repost — NOT a mis-repost; current
+    // behavior is preserved). We deliberately do NOT guess the owner key:
+    // `InflightTurnState` carries no `watcher_owner_channel_id` (its only non-
+    // delivery channel field, `logical_channel_id`, is the THREAD→parent mapping,
+    // a different axis — keying on it would read the WRONG record and risk
+    // duplicating a live message). Extending coverage requires persisting the
+    // owner channel on the inflight row (or an owner→delivery index); until then
+    // cross-channel rows stay a no-op here.
     let channel = ChannelId::new(state.channel_id);
     let tmux_session_name = state.tmux_session_name.as_deref().unwrap_or("");
     let anchor =

@@ -920,7 +920,7 @@
     its G1/G2 snapshots from `external_input_relay_lease(...).map(|l| l.generation)`;
     +62 from #3304: slash-command canonical prompt keys for `<command-*>` XML vs
     `/command args` dedupe, plus focused loop skill-expansion regressions).
-  - `src/services/discord/recovery_engine.rs` (3382 lines; +33 from #3610 PR-2 anchor-repost fallback (flag-gated, default OFF); +9 from #3582 stamping
+  - `src/services/discord/recovery_engine.rs` (3397 lines; +15 from #3610 PR-2 codex r2 Issue-2 storm-guard comment at the committed-branch anchor-repost dispose (passes `tmux_alive = false` so a transient send-new is budget-bounded, not pane-preserved forever; the now-unused liveness probe is dropped); +33 from #3610 PR-2 anchor-repost fallback (flag-gated, default OFF); +9 from #3582 stamping
     `set_relay_owner_kind(Watcher)` at the rebind-origin birth site so the
     STALL-WATCHDOG force-clean -> respawn synthetic row (which lands here with
     `existing_inflight = None`) is watcher-owned instead of degrading to
