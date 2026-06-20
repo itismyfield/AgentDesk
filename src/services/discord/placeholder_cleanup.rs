@@ -389,6 +389,86 @@ pub(in crate::services::discord) fn committed_terminal_panel_anchor_skip(
     true
 }
 
+/// #3607: emit the durable `relay_delete` observation for the orphan
+/// status-panel sweeper's *actual* delete (the path that runs when the
+/// terminal-anchor guard above did NOT skip). Outcome mirrors the sweeper's own
+/// convergence branches: `Ok` → committed, an `Err` whose Discord status is a
+/// permanent message-gone (404/403/410, via
+/// [`super::placeholder_sweeper::is_permanent_message_gone_status`]) →
+/// already_gone, any other `Err` → failed. The panel is a non-terminal cleanup.
+/// Observation only — the caller's enqueue / convergence logic is unchanged, and
+/// this lives here (not in the near-1000-LoC sweeper) so that file carries only
+/// the compact call.
+pub(in crate::services::discord) fn emit_orphan_panel_sweep_delete<T>(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    panel_msg: MessageId,
+    result: &Result<T, poise::serenity_prelude::Error>,
+) {
+    let permanent = result
+        .as_ref()
+        .err()
+        .is_some_and(orphan_panel_delete_is_permanent_gone);
+    let outcome = panel_sweep_delete_outcome(result.is_ok(), permanent);
+    let detail = result.as_ref().err().map(|err| err.to_string());
+    crate::services::observability::emit_relay_delete(
+        provider.as_str(),
+        channel_id.get(),
+        panel_msg.get(),
+        None,
+        None,
+        "placeholder_sweeper_orphan_panel",
+        PlaceholderCleanupOperation::DeleteNonterminal.as_str(),
+        outcome,
+        detail.as_deref(),
+    );
+}
+
+/// #3607: pure 3-way outcome classifier for the orphan-panel sweep delete (and
+/// the orphan-store drain), split out from [`emit_orphan_panel_sweep_delete`] so
+/// the committed / already_gone / failed mapping is unit-testable without
+/// constructing a live `serenity::Error`. `permanent` is the caller's
+/// permanent-gone (404/403/410) match; it is only consulted on the error path.
+pub(in crate::services::discord) fn panel_sweep_delete_outcome(
+    committed: bool,
+    permanent: bool,
+) -> &'static str {
+    if committed {
+        "committed"
+    } else if permanent {
+        "already_gone"
+    } else {
+        "failed"
+    }
+}
+
+/// True when this delete error is a permanent message-gone status the sweeper
+/// treats as success (404/403/410, via
+/// [`super::placeholder_sweeper::is_permanent_message_gone_status`]).
+fn orphan_panel_delete_is_permanent_gone(err: &poise::serenity_prelude::Error) -> bool {
+    matches!(err, poise::serenity_prelude::Error::Http(http_err)
+    if http_err.status_code().is_some_and(|status| {
+        super::placeholder_sweeper::is_permanent_message_gone_status(status.as_u16())
+    }))
+}
+
+/// True when the placeholder abandoned branch in `sweep_orphan_status_panel`
+/// will NOT evict this row this pass — either it has no placeholder
+/// (`current_msg_id == 0`) or it already streamed partial output (the
+/// partial-response guard at the top of `run_placeholder_sweep_pass`). For those
+/// rows the panel sweep must clear the persisted `status_message_id` itself to
+/// converge; for rows the placeholder branch WILL evict, clearing there would
+/// only refresh the file mtime and defer that eviction (codex P2 r12). Lives
+/// here (not in the near-1000-LoC sweeper) so that file stays under the giant
+/// threshold (#3607).
+pub(in crate::services::discord) fn placeholder_sweep_leaves_row_unevicted(
+    state: &InflightTurnState,
+) -> bool {
+    state.current_msg_id == 0
+        || (!state.long_running_placeholder_active
+            && (!state.full_response.is_empty() || state.response_sent_offset > 0))
+}
+
 #[cfg(test)]
 mod terminal_anchor_guard_tests {
     use super::*;
@@ -543,5 +623,42 @@ mod terminal_anchor_guard_tests {
             anchor(),
             Some(&uncommitted),
         ));
+    }
+
+    #[test]
+    fn panel_sweep_delete_outcome_classifies_three_ways() {
+        // #3607: the actual-delete observation must split committed (Ok),
+        // already_gone (permanent 404/403/410 Err), and failed (transient Err) —
+        // the gap codex flagged was emitting only the guard-skip case.
+        assert_eq!(panel_sweep_delete_outcome(true, false), "committed");
+        // `committed` wins even if a stray permanent flag is set (Ok path).
+        assert_eq!(panel_sweep_delete_outcome(true, true), "committed");
+        assert_eq!(panel_sweep_delete_outcome(false, true), "already_gone");
+        assert_eq!(panel_sweep_delete_outcome(false, false), "failed");
+    }
+
+    #[test]
+    fn orphan_panel_sweep_committed_delete_emits_relay_delete() {
+        // #3607: the wired actual-delete path emits a durable `relay_delete`
+        // with outcome=committed on Ok, attributed to the sweeper panel site as a
+        // non-terminal cleanup — the result-side observation that was missing.
+        let _guard = crate::services::observability::test_runtime_lock();
+        crate::services::observability::reset_for_tests();
+
+        let ok: Result<(), poise::serenity_prelude::Error> = Ok(());
+        emit_orphan_panel_sweep_delete(&PROVIDER, channel(), anchor(), &ok);
+
+        let events = crate::services::observability::events::recent(50);
+        let event = events
+            .iter()
+            .find(|event| event.event_type == "relay_delete")
+            .expect("relay_delete should be in the recent ring");
+        assert_eq!(event.channel_id, Some(channel().get()));
+        assert_eq!(event.payload["message_id"], anchor().get());
+        assert_eq!(event.payload["source"], "placeholder_sweeper_orphan_panel");
+        assert_eq!(event.payload["operation_kind"], "delete_nonterminal");
+        assert_eq!(event.payload["outcome"], "committed");
+        // outcome doubles as the correlation status.
+        assert_eq!(event.payload["status"], "committed");
     }
 }
