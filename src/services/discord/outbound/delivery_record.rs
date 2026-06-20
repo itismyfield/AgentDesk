@@ -424,6 +424,67 @@ fn current_generation_durable_frontier_end_at(path: &Path, current_gen_mtime: i6
         .map(|f| f.range.1)
 }
 
+/// #3610 PR-2: a recovery-time terminal delivery anchor, generation-validated.
+///
+/// `panel_msg_id` / `panel_channel_id` are the `(message, channel)` the committed
+/// terminal answer actually lives in (recorded by PR-1~1d's
+/// [`shadow_mirror_delivered_frontier`] anchor pair); `range` is the `(start, end)`
+/// JSONL slice that commit covered. All three come from the SAME
+/// `delivered_frontier`, so they are mutually consistent by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) struct CurrentGenerationAnchor {
+    pub panel_msg_id: u64,
+    pub panel_channel_id: u64,
+    pub range: (u64, u64),
+}
+
+/// #3610 PR-2 (stale-anchor guard, path-based core — pure-ish, testable): the
+/// durable `delivered_frontier`'s terminal anchor, but ONLY when (a) it was
+/// written by the CURRENT wrapper generation (the SAME #1270 guard
+/// [`current_generation_durable_frontier_end_at`] uses, so a stale prior-generation
+/// frontier from a same-named respawn can NEVER be reposted) AND (b) the anchor
+/// pair is fully populated (`panel_msg_id` and `panel_channel_id` both `Some` and
+/// non-zero — a zero id is the un-anchored / TUI-direct sentinel that
+/// `MessageId::new(0)` would panic on). `None` on any miss: absent/malformed
+/// record, no frontier, prior generation, or an incomplete/zero anchor pair.
+///
+/// This is the stale-anchor structural guard for the anchor-repost fallback: by
+/// funneling through the existing generation gate it adds NO new offset reader and
+/// distrusts exactly what the rest of the dedup machinery distrusts (dedup byte-0).
+fn current_generation_delivered_anchor_at(
+    path: &Path,
+    current_gen_mtime: i64,
+) -> Option<CurrentGenerationAnchor> {
+    let frontier = read_record_at(path)
+        .and_then(|r| r.delivered_frontier)
+        .filter(|f| {
+            durable_frontier_generation_current(f.generation_mtime_ns, current_gen_mtime)
+        })?;
+    let panel_msg_id = frontier.panel_msg_id.filter(|&id| id != 0)?;
+    let panel_channel_id = frontier.panel_channel_id.filter(|&id| id != 0)?;
+    Some(CurrentGenerationAnchor {
+        panel_msg_id,
+        panel_channel_id,
+        range: frontier.range,
+    })
+}
+
+/// #3610 PR-2: env-resolved wrapper over [`current_generation_delivered_anchor_at`].
+/// Returns the current-generation terminal anchor for `(provider, channel)` keyed by
+/// the same `delivery_record_path` the dedup gates use, or `None` when there is no
+/// trustworthy, fully-populated anchor (see the core's contract). The recovery
+/// anchor-repost fallback reads ONLY this — it never writes and never resolves a new
+/// offset, so a flag-OFF caller that does not invoke it is a byte-for-byte no-op.
+pub(in crate::services::discord) fn current_generation_delivered_anchor(
+    provider: &ProviderKind,
+    channel: ChannelId,
+    tmux_session_name: &str,
+) -> Option<CurrentGenerationAnchor> {
+    let path = delivery_record_path(provider, channel.get())?;
+    let current_gen = current_generation_mtime_ns(tmux_session_name);
+    current_generation_delivered_anchor_at(&path, current_gen)
+}
+
 /// Resolve the current wrapper-generation watermark for `tmux_session_name`. The
 /// `tmux` module is `#[cfg(unix)]`; on non-unix targets (windows CI cross-compile
 /// check) there is no wrapper generation file, so the generation is absent (`0`),
@@ -1211,6 +1272,124 @@ mod tests {
             current_generation_durable_frontier_end_at(&malformed, 5),
             None
         );
+    }
+
+    // ---- #3610 PR-2 (anchor-repost stale-anchor guard) -------------------------
+    // `current_generation_delivered_anchor_at` is the structural guard that gates
+    // the recovery anchor-repost fallback. It must return the anchor ONLY for a
+    // CURRENT-generation, fully-populated frontier — funneling through the same
+    // #1270 generation gate so a stale prior-generation anchor (from a same-named
+    // tmux respawn / a previous turn) can never drive a repost.
+
+    #[test]
+    fn current_gen_anchor_returns_populated_current_generation_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36101);
+        write_delivered_frontier_at(
+            &path,
+            DeliveredCommit {
+                range: (10, 443_154),
+                generation_mtime_ns: 700,
+                attempts: 1,
+                panel_msg_id: Some(555),
+                panel_channel_id: Some(777),
+            },
+        )
+        .unwrap();
+        // Matching generation + fully-populated anchor → Some.
+        assert_eq!(
+            current_generation_delivered_anchor_at(&path, 700),
+            Some(CurrentGenerationAnchor {
+                panel_msg_id: 555,
+                panel_channel_id: 777,
+                range: (10, 443_154),
+            })
+        );
+    }
+
+    #[test]
+    fn current_gen_anchor_distrusts_stale_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36102);
+        write_delivered_frontier_at(
+            &path,
+            DeliveredCommit {
+                range: (0, 100),
+                generation_mtime_ns: 100, // PRIOR generation
+                attempts: 1,
+                panel_msg_id: Some(555),
+                panel_channel_id: Some(777),
+            },
+        )
+        .unwrap();
+        // Current generation differs → distrust → None (no repost of a stale turn).
+        assert_eq!(current_generation_delivered_anchor_at(&path, 999), None);
+        // No `.generation` file (current_gen == 0) → also distrust.
+        assert_eq!(current_generation_delivered_anchor_at(&path, 0), None);
+    }
+
+    #[test]
+    fn current_gen_anchor_rejects_zero_or_missing_anchor_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        // panel_msg_id == 0 (un-anchored / TUI-direct sentinel) → None.
+        let zero_msg = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36103);
+        write_delivered_frontier_at(
+            &zero_msg,
+            DeliveredCommit {
+                range: (0, 42),
+                generation_mtime_ns: 700,
+                attempts: 1,
+                panel_msg_id: Some(0),
+                panel_channel_id: Some(777),
+            },
+        )
+        .unwrap();
+        assert_eq!(current_generation_delivered_anchor_at(&zero_msg, 700), None);
+
+        // panel_channel_id == 0 → None.
+        let zero_ch = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36104);
+        write_delivered_frontier_at(
+            &zero_ch,
+            DeliveredCommit {
+                range: (0, 42),
+                generation_mtime_ns: 700,
+                attempts: 1,
+                panel_msg_id: Some(555),
+                panel_channel_id: Some(0),
+            },
+        )
+        .unwrap();
+        assert_eq!(current_generation_delivered_anchor_at(&zero_ch, 700), None);
+
+        // Absent anchor pair (legacy short-replace frontier w/o anchor) → None.
+        let no_anchor = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36105);
+        write_delivered_frontier_at(
+            &no_anchor,
+            DeliveredCommit {
+                range: (0, 42),
+                generation_mtime_ns: 700,
+                attempts: 1,
+                panel_msg_id: None,
+                panel_channel_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            current_generation_delivered_anchor_at(&no_anchor, 700),
+            None
+        );
+    }
+
+    #[test]
+    fn current_gen_anchor_missing_or_malformed_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = delivery_record_path_in_root(dir.path(), &ProviderKind::Codex, 36106);
+        assert_eq!(current_generation_delivered_anchor_at(&missing, 5), None);
+
+        let malformed = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36107);
+        fs::create_dir_all(malformed.parent().unwrap()).unwrap();
+        fs::write(&malformed, "{ not json").unwrap();
+        assert_eq!(current_generation_delivered_anchor_at(&malformed, 5), None);
     }
 
     // ---- #3610 (Phase B PR-1 / PR-1b) terminal-anchor recording ----------------

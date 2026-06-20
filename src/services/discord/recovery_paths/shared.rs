@@ -185,6 +185,29 @@ pub(in crate::services::discord) fn disposition_reason_code(
     }
 }
 
+/// #3610 PR-2: gate for the recovery anchor-repost fallback (`AGENTDESK_RECOVERY_ANCHOR_REPOST`).
+///
+/// DEFAULT OFF — a dark deploy. When OFF this is the outermost guard of
+/// [`super::restart::try_recover_anchor_repost`], which short-circuits to `None`
+/// before reading any record / probing / relaying, so the recovery loop is a
+/// byte-for-byte no-op (the committed-branch call site is skipped entirely).
+/// Telemetry is emitted ONLY when ENABLED, matching the A3 standby / recovery
+/// controller cutovers — the default-OFF first evaluation must have NO observable
+/// side effect.
+pub(in crate::services::discord) fn recovery_anchor_repost_enabled() -> bool {
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let on = std::env::var("AGENTDESK_RECOVERY_ANCHOR_REPOST")
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase())
+            .is_some_and(|v| v == "1" || v == "true");
+        if on {
+            tracing::info!("  ✓ recovery_anchor_repost: enabled");
+        }
+        on
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
