@@ -162,10 +162,8 @@ module.exports = function attachLongTurnMonitor(timeouts, helpers) {
           }
         }
         // Also clean up old cooldown keys
-        var oldKeys = agentdesk.db.query("SELECT key FROM kv_meta WHERE key LIKE 'long_turn_alert:%'");
-        for (var ok = 0; ok < oldKeys.length; ok++) {
-          agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [oldKeys[ok].key]);
-        }
+        agentdesk.db.execute("DELETE FROM kv_meta WHERE key LIKE 'long_turn_alert:%'");
+
         var extensionKeys = agentdesk.db.query("SELECT key FROM kv_meta WHERE key LIKE 'long_turn_watchdog_extension:%'");
         for (var ek = 0; ek < extensionKeys.length; ek++) {
           var eParts = extensionKeys[ek].key.split(":");
