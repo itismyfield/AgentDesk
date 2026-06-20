@@ -404,6 +404,17 @@
 
 ### Audited touches
 
+- #3593 synthetic-resume relay-duplicate guard: `tmux_watcher.rs` extends the
+  resend-dedup decision so a non-reconciled, already-committed JSONL range (the
+  background-agent-completion synthetic resume that restores the placeholder and
+  rewinds `response_sent_offset`) routes to the EXISTING non-destructive
+  `SkipAlreadyCommitted` arm instead of re-sending the prior body. The dedup
+  reads the worker's OWN per-channel relay watermark (`effective_committed_offset`,
+  generation self-healed before the read) and preserves the restored placeholder —
+  it is a worker-local, in-memory/durable-record dedup, NOT a routing authority and
+  never read cross-node. The pure `range_already_committed` helper + tests live in
+  `outbound/delivery_record.rs`. No leader election, gateway lease, PG ownership,
+  startup order, worker ownership, or singleton assumption is touched.
 - #3607 terminal-delete protection guard + durable delete observability
   (Phase A): `turn_bridge/mod.rs` gained a worker-local cleanup guard that
   preserves a committed terminal anchor (a finished turn's retired message

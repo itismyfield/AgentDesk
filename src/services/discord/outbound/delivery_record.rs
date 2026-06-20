@@ -433,43 +433,28 @@ pub(in crate::services::discord) fn effective_committed_offset(
     fuse_committed_offset(durable_end, in_memory)
 }
 
-/// #3520: durable delivered-frontier END for the CURRENT tmux generation, INDEPENDENT of
-/// the `delivery_record_authority_enabled()` read-authority flag. A watcher-direct re-send
-/// whose consumed byte range is entirely `<=` this value is a warm-followup / restored-seed
-/// re-mirror of already-delivered text and must be suppressed (otherwise it re-posts the
-/// prior turn's answer as a NEW message at the same prompt anchor — #3520). Returns 0 when
-/// the frontier is absent or belongs to a stale generation, so a caller never suppresses
-/// genuinely-new content (no message loss).
-pub(in crate::services::discord) fn delivered_frontier_end_current_generation(
-    provider: &ProviderKind,
-    channel: ChannelId,
-    tmux_session_name: &str,
-) -> u64 {
-    #[cfg(unix)]
-    let current_gen =
-        crate::services::discord::tmux::read_generation_file_mtime_ns(tmux_session_name);
-    #[cfg(not(unix))]
-    let current_gen: i64 = {
-        let _ = tmux_session_name;
-        0
-    };
-    delivered_frontier_end_for_generation(
-        read_record(provider, channel.get()).and_then(|r| r.delivered_frontier),
-        current_gen,
-    )
-}
-
-/// Pure core of [`delivered_frontier_end_current_generation`] (testable): the frontier END
-/// when it belongs to `current_gen`, else 0 (absent / stale generation => 0 => the caller
-/// suppresses nothing, so no genuinely-new message can be lost).
-fn delivered_frontier_end_for_generation(
-    frontier: Option<DeliveredCommit>,
-    current_gen: i64,
-) -> u64 {
-    frontier
-        .filter(|f| durable_frontier_generation_current(f.generation_mtime_ns, current_gen))
-        .map(|f| f.range.1)
-        .unwrap_or(0)
+/// #3593 JSONL-space monotonic dedup predicate (pure, testable). `range_end` is the
+/// END of the consumed JSONL byte range a watcher pass is about to relay;
+/// `committed` is the already-delivered committed JSONL offset (the relay coord's
+/// `confirmed_end_offset`, via [`effective_committed_offset`] — which also fuses the
+/// current-generation durable frontier when read-authority is enabled). Returns `true` iff this range was ALREADY
+/// delivered (`range_end <= committed`), i.e. a re-send would re-post text already
+/// relayed (the #3593 synthetic-resume duplicate, where range_end=422855 sits at or
+/// below committed=443154). MUST be the SAME JSONL byte-offset space on both sides
+/// (never `response_sent_offset`, which is assistant-text-byte space — mixing them
+/// is the category error warned about at the watcher resend site).
+///
+/// `range_end == 0` (empty/zero range) and `committed == 0` (e.g. just reset by a
+/// generation change / pane reset, so nothing is known-delivered) both return
+/// `false` — suppress NOTHING in those cases, so a genuinely-new answer is never
+/// dropped (message-loss prevention dominates duplicate-suppression). Mirror of the
+/// `already_relayed` decision both relay consumers make, with an explicit non-zero
+/// `range_end` guard so an empty range can never be treated as "already committed".
+pub(in crate::services::discord) fn range_already_committed(
+    range_end: u64,
+    committed: u64,
+) -> bool {
+    range_end > 0 && range_end <= committed
 }
 
 /// I2 outcome map (pure, testable): the shadow-write fires ONLY for a confirmed
@@ -899,26 +884,50 @@ mod tests {
         assert!(!durable_frontier_generation_current(0, 0)); // both unknown → distrust
     }
 
+    // ---- #3593 JSONL-space monotonic resend dedup (range_already_committed) ----
+
     #[test]
-    fn delivered_frontier_end_for_generation_3520() {
-        // #3520 safety: the watcher-direct re-mirror guard suppresses ONLY when the durable
-        // frontier belongs to the CURRENT generation. Absent / stale-generation => 0 => the
-        // caller suppresses nothing, so a genuinely-new answer can never be dropped.
-        let commit = DeliveredCommit {
-            range: (0, 500),
-            generation_mtime_ns: 123,
-            attempts: 0,
-            panel_msg_id: None,
-        };
-        assert_eq!(delivered_frontier_end_for_generation(None, 123), 0); // absent → 0
-        assert_eq!(
-            delivered_frontier_end_for_generation(Some(commit.clone()), 123),
-            500
-        ); // current generation → frontier end
-        assert_eq!(
-            delivered_frontier_end_for_generation(Some(commit.clone()), 100),
-            0
-        ); // stale generation → 0
-        assert_eq!(delivered_frontier_end_for_generation(Some(commit), 0), 0); // no .generation file → 0
+    fn range_already_committed_suppresses_synthetic_resume_dup_3593() {
+        // The observed #3593 case: a synthetic-resume pass tries to re-relay the
+        // prior turn's body whose consumed JSONL range ends at 422855, but the
+        // committed/delivered JSONL offset has already advanced to 443154. The
+        // range is entirely below the committed floor → already delivered → suppress
+        // (no duplicate).
+        assert!(range_already_committed(422_855, 443_154));
+    }
+
+    #[test]
+    fn range_already_committed_allows_new_response_after_resume() {
+        // Over-suppression no-regression: a genuinely-NEW response produced AFTER the
+        // resume ends past the committed floor (range_end 443200 > committed 443154)
+        // → NOT already delivered → must be relayed.
+        assert!(!range_already_committed(443_200, 443_154));
+    }
+
+    #[test]
+    fn range_already_committed_boundary_equal_is_committed() {
+        // The boundary: range_end == committed means the committed floor already
+        // covers this exact range end → already delivered → suppress (inclusive `<=`,
+        // matching the `already_relayed` consumers' `committed >= range_end`).
+        assert!(range_already_committed(443_154, 443_154));
+    }
+
+    #[test]
+    fn range_already_committed_zero_range_never_suppressed() {
+        // Empty/zero consumed range (range_end == 0) must NEVER be treated as already
+        // committed regardless of the committed value — suppressing it could drop a
+        // message; message-loss prevention dominates duplicate-suppression.
+        assert!(!range_already_committed(0, 443_154));
+        assert!(!range_already_committed(0, 0));
+    }
+
+    #[test]
+    fn range_already_committed_reset_committed_never_suppresses() {
+        // After a generation change / pane reset the committed offset is reset to 0
+        // (nothing is known-delivered in the fresh generation). A real range_end then
+        // sits ABOVE the 0 floor → NOT already committed → fresh output is relayed,
+        // never wrongly suppressed by a stale-high pre-reset value.
+        assert!(!range_already_committed(422_855, 0));
+        assert!(!range_already_committed(1, 0));
     }
 }
