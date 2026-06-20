@@ -4405,12 +4405,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             &tmux_session_name,
             "watcher_terminal_resend_dedup",
         );
-        let watcher_resend_committed = dr::effective_committed_offset(
+        let watcher_resend_committed = dr::committed_floor_for_resend_dedup(
             &shared,
             &watcher_provider,
             channel_id,
             &tmux_session_name,
-        ); // #3089 B2b
+        ); // #3089 B2b + #3593 (codex HIGH): in-memory committed ∪ flag-independent durable frontier
         let watcher_resend_reconciled = session_bound_terminal_delivery_attempted
             && watcher_direct_fallback_intended
             && !matches!(
