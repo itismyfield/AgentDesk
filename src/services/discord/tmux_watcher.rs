@@ -4638,6 +4638,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         };
         let watcher_lease_start = data_start_offset;
         let watcher_lease_end = terminal_event_consumed_offset(current_offset, &all_data);
+        // #3610 PR-1d: the legacy long-chunk fallback arm's terminal anchor (last
+        // sent chunk msg id), captured at the send arm but RECORDED only at the
+        // post-advance M4 site below (Some here ⇒ this turn took the long-chunk arm
+        // AND fully committed). Declared at lease scope so it survives the
+        // `let relay_ok = if … { … }` block that holds the send arm.
+        let mut watcher_long_chunk_anchor_msg_id: Option<MessageId> = None;
         let watcher_lease_cell = shared.delivery_lease(channel_id);
         // Only the watcher-direct fallback path direct-sends; acquire exactly when it
         // runs with a real body so the lease identity matches the delivered bytes (a
@@ -4869,13 +4875,18 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             )
                             .await
                             {
-                                Ok(_) => {
+                                Ok(message_ids) => {
                                     direct_send_delivered = true;
                                     tui_direct_anchor_terminal_body_visible = true;
                                     external_input_lease_consumed_by_relay =
                                         watcher_inflight_represents_external_input(
                                             inflight_before_relay.as_ref(),
                                         );
+                                    // #3610 PR-1d: the placeholder is DELETED below, so
+                                    // the LAST sent chunk is the durable terminal anchor
+                                    // (the tail carrying the END of the text). Captured
+                                    // here; recorded only after the M4 commit+advance.
+                                    watcher_long_chunk_anchor_msg_id = message_ids.last().copied();
                                     let cleanup = delete_terminal_placeholder(
                                         &http,
                                         channel_id,
@@ -5741,6 +5752,19 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     watcher_lease_end,
                     "src/services/discord/tmux_watcher.rs:watcher_lease_commit_advance",
                 );
+                // #3610 PR-1d: record the durable terminal anchor for the legacy
+                // long-chunk fallback arm ONLY here — gated on the SAME successful
+                // commit+advance (M4) AND `Some` anchor (⇒ the long-chunk arm ran and
+                // fully committed, (A)). Same-channel; logic in the sibling.
+                if let Some(anchor) = watcher_long_chunk_anchor_msg_id {
+                    terminal_send::record_watcher_long_chunk_terminal_delivery(
+                        &shared,
+                        &watcher_provider,
+                        channel_id,
+                        (watcher_lease_start, watcher_lease_end),
+                        Some(anchor.get()),
+                    );
+                }
             }
             // Release (Unleased for the next turn). Inline same-holder compare-and-
             // release; idempotent no-op if the identity no longer matches (e.g. a dead

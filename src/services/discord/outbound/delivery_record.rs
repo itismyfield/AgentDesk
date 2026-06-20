@@ -1517,4 +1517,57 @@ mod tests {
         assert!(read_record(&ProviderKind::Claude, 100_200_300).is_none());
         assert!(read_record(&ProviderKind::Claude, 900_800_700).is_none());
     }
+
+    // ---- #3610 PR-1d: WATCHER legacy long-chunk arm (same-channel) --------------
+    // The watcher long-chunk fallback arm (tmux_watcher.rs — the
+    // `watcher_should_send_ordered_new_chunks_for_terminal_fallback` branch) is the
+    // watcher-owned counterpart of the bridge arm above. Its sibling helper
+    // `terminal_send::record_watcher_long_chunk_terminal_delivery` is SAME-CHANNEL:
+    // it forwards `watcher_owner_channel_id == delivery_channel_id == channel_id`
+    // into `record_long_chunk_terminal_delivery`. So the frontier key (record path)
+    // and the recorded `panel_channel_id` are the SAME channel — UNLIKE the bridge's
+    // cross-channel `long_chunk_cross_channel_separates_owner_and_delivery_3610c`.
+    // Pinned here via the path-core (the helper's flag is env-global OnceLock).
+
+    #[test]
+    fn watcher_long_chunk_same_channel_anchor_pair_3610d() {
+        // Gate (C) for the watcher arm: same-channel ⇒ panel_channel_id equals the
+        // frontier-key channel (the record path's channel), and panel_msg_id is the
+        // NON-null last-chunk anchor. Mirrors the args the watcher helper forwards:
+        // range = (watcher_lease_start, watcher_lease_end), both channels = channel_id.
+        let dir = tempfile::tempdir().unwrap();
+        let watcher_channel: u64 = 778_899_001; // owner + delivery (same for watcher)
+        let last_chunk_anchor: u64 = 654_321_987; // tail chunk msg id
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, watcher_channel);
+        // The watcher wrapper passes channel_id as BOTH the path channel (frontier
+        // key) and panel_channel_id; the path-core models that with the same value.
+        record_delivered_frontier_shadow_at(
+            &path,
+            (10, 16384),
+            700,
+            0,
+            Some(last_chunk_anchor),
+            Some(watcher_channel), // == the record path channel (same-channel)
+            16384,
+        )
+        .unwrap();
+        let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
+        assert_eq!(written.panel_msg_id, Some(last_chunk_anchor)); // NON-null
+        // The recorded anchor channel IS the frontier-key channel (same-channel).
+        assert_eq!(written.panel_channel_id, Some(watcher_channel));
+        assert_eq!(written.range, (10, 16384));
+    }
+
+    #[test]
+    fn watcher_long_chunk_partial_or_unadvanced_never_records_3610d() {
+        // Gates (A)+(M4) for the watcher arm: the helper is invoked ONLY inside the
+        // `if committed && Delivered { advance(); … }` block in tmux_watcher.rs, AND
+        // only when the anchor is `Some` (the full-commit `Ok` arm of
+        // `send_long_message_raw_with_rollback`, which is all-or-nothing — a partial
+        // chunk failure rolls back and returns `Err`). So a non-advanced commit
+        // (modelled as `is_delivered = false`) NEVER reaches the durable write, and
+        // OFF is a full no-op. Same gate the shared helper enforces.
+        assert!(!should_shadow_mirror(false, true)); // not-advanced/partial → no record (M4/I2)
+        assert!(!should_shadow_mirror(true, false)); // flag OFF → no record (deploy no-op)
+    }
 }

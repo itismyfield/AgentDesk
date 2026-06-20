@@ -83,7 +83,8 @@
 # site documenting why the skipped-ack-wait benign case is now distinct from the
 # real `wait_for_session_bound_relay_delivery_ack` target-none failure. NO new
 # direct send / behavior change — provenance/aggregation classification only.
-"src/services/discord/tmux_watcher.rs" = 6946
+# #3610 PR-1d: watcher legacy long-chunk arm anchor instrumentation (+M4 reasoning comments)
+"src/services/discord/tmux_watcher.rs" = 6970
 # #3038 tmux_watcher S1 child modules, frozen at landed production LoC.
 "src/services/discord/tmux_watcher/commit_decisions.rs" = 140
 "src/services/discord/tmux_watcher/completion_gate.rs" = 275
