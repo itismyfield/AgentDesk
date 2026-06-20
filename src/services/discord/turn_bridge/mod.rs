@@ -5127,7 +5127,7 @@ pub(super) fn spawn_turn_bridge(
                             )
                             .await
                             {
-                                Ok(_) => {
+                                Ok((_first, last_chunk_msg_id)) => {
                                     terminal_delivery_committed = true;
                                     terminal_body_visible = true;
                                     if single_message_panel_footer_mode {
@@ -5139,12 +5139,26 @@ pub(super) fn spawn_turn_bridge(
                                     // B6 (codex P1-b): advance ONLY via a successful
                                     // lease commit (Delivered). `NoRange` has no new
                                     // bytes to commit → no advance outside the lease.
+                                    // #3610 PR-1c: record the durable terminal anchor
+                                    // (last chunk msg id) on the SAME Delivered commit —
+                                    // frontier keyed by watcher_owner_channel_id, anchor
+                                    // pair in the delivery `channel_id`. Helper body +
+                                    // gating live in outbound/delivery_record.rs.
                                     if let Some(lease) = lease {
+                                        let lease_range = lease.range();
                                         lease.commit_and_advance(
                                             shared_owned.as_ref(),
                                             watcher_owner_channel_id,
                                             inflight_state.tmux_session_name.as_deref(),
                                             crate::services::discord::LeaseOutcome::Delivered,
+                                        );
+                                        super::outbound::delivery_record::record_long_chunk_terminal_delivery(
+                                            shared_owned.as_ref(),
+                                            &provider,
+                                            watcher_owner_channel_id,
+                                            channel_id,
+                                            lease_range,
+                                            last_chunk_msg_id.map(|m| m.get()),
                                         );
                                     }
                                 }

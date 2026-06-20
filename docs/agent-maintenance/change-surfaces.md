@@ -1045,7 +1045,7 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6189 prod lines; the BRIDGE
+  - `src/services/discord/turn_bridge/mod.rs` (6162 prod lines; the BRIDGE
     spawn/turn-lifecycle surface — `spawn_turn_bridge` and the per-channel
     turn loop. #3479 extracted the task/session-panel line rendering +
     active-placeholder-card helpers into the `panel_lifecycle.rs` leaf.
