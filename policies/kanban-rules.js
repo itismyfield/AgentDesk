@@ -51,6 +51,17 @@ var _runPreflight = _preflight._runPreflight;
 var _scopeAssessment = require("./lib/kanban-scope-assessment");
 var _recordScopeAssessment = _scopeAssessment._recordScopeAssessment;
 
+// #3594 (T3): depth → flow resolver + next-dispatch helpers. The scope-assessment
+// completion handler reads the recorded scope_depth and branches:
+// direct → impl now, plan_only → plan (→impl), full → plan (→plan-review→impl).
+// Shared with timeouts/reconciliation.js so the missed-hook fallback gates the
+// flow identically instead of stranding the card after recording depth.
+var _scopeGate = require("./lib/kanban-scope-gate");
+var _resolveScopeFlow = _scopeGate._resolveScopeFlow;
+var _createImplDispatch = _scopeGate._createImplDispatch;
+var _createPlanDispatch = _scopeGate._createPlanDispatch;
+var _createPlanReviewDispatch = _scopeGate._createPlanReviewDispatch;
+
 // #3605 (T2): canonical inert side-path dispatch-type predicate (shared).
 var _sidePath = require("./lib/dispatch-side-path");
 var isSidePathDispatch = _sidePath.isSidePathDispatch;
@@ -252,13 +263,77 @@ var rules = {
     // #197: e2e-test dispatches — handled by deploy-pipeline policy
     if (dispatch.dispatch_type === "e2e-test") return;
 
-    // #3605 (T2): scope-assessment dispatch completed — record depth on the
-    // card metadata and stop. This is a side-path (the card never advanced to
-    // in_progress on attach — see transition.rs skip_kickoff), so completion
-    // must NOT flow into the PM gate / review / XP lifecycle below. The depth
-    // is inert in T2: no redispatch, no escalate, no manual intervention.
+    // #3605 (T2) + #3594 (T3): scope-assessment dispatch completed. First record
+    // the depth on the card metadata (T2 recorder, fail-safe to "full"). This is
+    // a side-path (the card never advanced to in_progress on attach — see
+    // transition.rs skip_kickoff), so completion must NOT flow into the PM gate /
+    // review / XP lifecycle below. T3 then ACTIVATES the recorded depth to gate
+    // the next stage instead of returning inert:
+    //   direct    → create the implementation dispatch directly (skip plan).
+    //   plan_only → create a "plan" dispatch (plan-completion arm creates impl).
+    //   full      → create a "plan" dispatch (plan → plan-review → impl).
+    //   unknown   → "full" (most cautious) via _resolveScopeFlow.
+    // The depth is read back from metadata after recording so a missed-hook
+    // replay (reconciliation.js) and the live hook branch identically.
     if (dispatch.dispatch_type === "scope-assessment") {
       _recordScopeAssessment(dispatch.kanban_card_id, dispatch);
+      var scopeMeta = _loadCardMetadata(dispatch.kanban_card_id);
+      var scopeDepth = scopeMeta.scope_depth || "full";
+      var flow = _resolveScopeFlow(scopeDepth);
+      if (!flow.needsPlan) {
+        // direct → implement now (consultation-resume path).
+        _createImplDispatch(dispatch.kanban_card_id, dispatch, card, "scope_gate_direct");
+        agentdesk.log.info("[scope-gate] " + dispatch.kanban_card_id + " depth=direct → implementation dispatch");
+      } else {
+        // plan_only / full → plan first; the plan-completion arm fans out.
+        _createPlanDispatch(dispatch.kanban_card_id, dispatch, card, scopeDepth);
+        agentdesk.log.info("[scope-gate] " + dispatch.kanban_card_id + " depth=" + scopeDepth + " → plan dispatch");
+      }
+      return;
+    }
+
+    // #3594 (T3): "plan" work-dispatch completed. depth rides in the plan
+    // dispatch context (set by _createPlanDispatch) so we branch without
+    // re-reading card metadata:
+    //   plan_only → create the implementation dispatch now.
+    //   full      → publish a "plan-review" (Option P: ordinary dispatch, NOT
+    //               the counter-model review kernel).
+    // The plan dispatch is a normal work-dispatch (not a side-path), so it kicked
+    // the card into in_progress on attach; it is intentionally NOT in
+    // dispatch_status.rs's ("implementation"|"rework") terminal-sync set, so its
+    // completion does not finalize the auto-queue entry — the JS follow-up below
+    // re-dispatches the bound entry instead.
+    if (dispatch.dispatch_type === "plan") {
+      var planDepth = (dispatchContext && dispatchContext.scope_depth) || "full";
+      var planFlow = _resolveScopeFlow(planDepth);
+      if (planFlow.needsPlanReview) {
+        _createPlanReviewDispatch(dispatch.kanban_card_id, dispatch, card, planDepth);
+        agentdesk.log.info("[scope-gate] " + dispatch.kanban_card_id + " plan done (depth=" + planDepth + ") → plan-review dispatch");
+      } else {
+        _createImplDispatch(dispatch.kanban_card_id, dispatch, card, "scope_gate_plan_done");
+        agentdesk.log.info("[scope-gate] " + dispatch.kanban_card_id + " plan done (depth=plan_only) → implementation dispatch");
+      }
+      return;
+    }
+
+    // #3594 (T3): "plan-review" completed (full depth only). Read result.verdict
+    // directly (Option P — no review-kernel verdict API):
+    //   pass   → create the implementation dispatch.
+    //   rework → re-publish a "plan" dispatch for another design pass.
+    // Any other/missing verdict is treated as rework (re-plan) — the cautious
+    // default, never silently advancing to impl on an ambiguous review.
+    if (dispatch.dispatch_type === "plan-review") {
+      var planReviewResult = {};
+      try { planReviewResult = JSON.parse(dispatch.result || "{}"); } catch (e) { planReviewResult = {}; }
+      var verdict = planReviewResult.verdict;
+      var prDepth = (dispatchContext && dispatchContext.scope_depth) || "full";
+      if (verdict === "pass") {
+        _createImplDispatch(dispatch.kanban_card_id, dispatch, card, "scope_gate_plan_review_pass");
+        agentdesk.log.info("[scope-gate] " + dispatch.kanban_card_id + " plan-review pass → implementation dispatch");
+      } else {
+        _createPlanDispatch(dispatch.kanban_card_id, dispatch, card, prDepth);
+        agentdesk.log.info("[scope-gate] " + dispatch.kanban_card_id + " plan-review verdict=" + (verdict || "<none>") + " → re-plan dispatch");
+      }
       return;
     }
 

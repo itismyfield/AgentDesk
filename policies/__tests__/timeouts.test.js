@@ -229,16 +229,22 @@ test("timeouts reconcile fallback does not advance a completed scope-assessment 
         // #3605 (T2): the fallback now records scope_depth via the shared
         // recorder, which reads the card metadata first.
         match: "SELECT metadata FROM kanban_cards WHERE id = ?",
-        result: [{ metadata: "{}" }]
-      }
+        result: [{ metadata: JSON.stringify({ scope_depth: "direct", scope_assessment_status: "completed" }) }]
+      },
+      // #3594 (T3): the fallback now also GATES the depth flow (direct → impl).
+      // With no linked auto-queue entry it defers to the activate path (no
+      // dispatch created), so the no-review-advance assertions below still hold.
+      { match: "FROM auto_queue_entries e", result: [] }
     ])
   });
 
   policy._section_R();
 
   // Missed-hook fallback must mirror kanban-rules.js onDispatchCompleted: a
-  // completed scope-assessment is an inert side-path. No card advance (no
-  // setStatus to review), no XP grant, no PM-gate-driven status changes.
+  // completed scope-assessment never advances the card to REVIEW (no setStatus
+  // to review), grants no XP, and runs no PM-gate-driven status change. (T3 may
+  // create a depth-gated NEXT dispatch, but only when an auto-queue entry is
+  // linked — none here, so it defers.)
   assert.deepEqual(state.statusCalls, []);
   assert.deepEqual(state.reviewStatusCalls, []);
   assert.deepEqual(state.reviewStateSyncs, []);
@@ -296,14 +302,17 @@ test("timeouts reconcile fallback applies full fallback for an unparsable scope-
       {
         match: "SELECT metadata FROM kanban_cards WHERE id = ?",
         result: [{ metadata: "{}" }]
-      }
+      },
+      // #3594 (T3): full-fallback depth gates to a plan dispatch; no linked
+      // auto-queue entry → defers (no dispatch created), so the card stays inert.
+      { match: "FROM auto_queue_entries e", result: [] }
     ])
   });
 
   policy._section_R();
 
   // Unparsable result → cautious "full" fallback, recorded even on the
-  // missed-hook path; card still inert (no advance).
+  // missed-hook path; card never advances to review (no setStatus).
   assert.deepEqual(state.statusCalls, []);
   const metaWrite = state.executions.find((e) =>
     /UPDATE kanban_cards SET metadata = \?/.test(e.sql)
@@ -311,6 +320,63 @@ test("timeouts reconcile fallback applies full fallback for an unparsable scope-
   assert.ok(metaWrite, "fallback must persist scope metadata even when unparsable");
   assert.equal(metaWrite.params[0].scope_depth, "full");
   assert.match(metaWrite.params[0].scope_reason, /fallback to full/);
+});
+
+test("timeouts reconcile fallback gates depth flow when an auto-queue entry is linked (#3594 T3)", () => {
+  // Parity with the live hook: a missed scope-assessment completion whose card
+  // has a linked auto-queue entry must create the depth-gated next dispatch
+  // (direct → implementation) so the run does not stall waiting for a hook that
+  // was dropped.
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { pm_decision_gate_enabled: true },
+    dbQuery: createSqlRouter([
+      {
+        match: "SELECT key, value FROM kv_meta WHERE key LIKE 'reconcile_dispatch:%'",
+        result: [{ key: "reconcile_dispatch:dispatch-scope-g", value: "dispatch-scope-g" }]
+      },
+      {
+        match: "SELECT id, kanban_card_id, to_agent_id, dispatch_type, chain_depth, status, result, context FROM task_dispatches WHERE id = ?",
+        result: [
+          {
+            id: "dispatch-scope-g",
+            kanban_card_id: "card-scope-g",
+            to_agent_id: "agent-1",
+            dispatch_type: "scope-assessment",
+            chain_depth: 0,
+            status: "completed",
+            result: JSON.stringify({ scope_depth: "direct" }),
+            context: "{}"
+          }
+        ]
+      },
+      {
+        match: "SELECT id, status, priority, assigned_agent_id, deferred_dod_json FROM kanban_cards WHERE id = ?",
+        result: [
+          {
+            id: "card-scope-g",
+            status: "requested",
+            priority: "medium",
+            assigned_agent_id: "agent-1",
+            deferred_dod_json: null
+          }
+        ]
+      },
+      {
+        match: "SELECT metadata FROM kanban_cards WHERE id = ?",
+        result: [{ metadata: JSON.stringify({ scope_depth: "direct", scope_assessment_status: "completed" }) }]
+      },
+      { match: "FROM auto_queue_entries e", result: [{ id: "entry-g", agent_id: "agent-1" }] }
+    ])
+  });
+
+  policy._section_R();
+
+  // No review advance, but the gated implementation dispatch IS created.
+  assert.deepEqual(state.statusCalls, []);
+  assert.equal(state.dispatchCreates.length, 1);
+  assert.equal(state.dispatchCreates[0].dispatchType, "implementation");
+  assert.equal(state.autoQueueStatusUpdates[0].status, "dispatched");
+  assert.equal(state.autoQueueStatusUpdates[0].reason, "scope_gate_direct_reconcile");
 });
 
 test("timeouts review timeout module escalates overdue DoD waits", () => {

@@ -210,6 +210,26 @@ pub(crate) async fn activate_with_deps_pg(
             continue;
         }
 
+        // #3594 (T3): defer impl creation while a scope-assessment is in flight.
+        // scope-assessment is a side-path excluded from has_active_dispatch()
+        // (#3605), so without this guard activate would fall through and create an
+        // implementation dispatch BEFORE the depth (direct/plan_only/full) is
+        // known — bypassing the depth gate entirely. Leaving the entry `pending`
+        // lets the next activate tick resume it once the policy layer completes
+        // scope-assessment (status → "completed") and creates the depth-gated
+        // dispatch. Strictly `"pending"`-only (absent ≠ pending), so cards that
+        // never ran scope-assessment are unaffected — the core no-regression
+        // invariant.
+        if initial_state.scope_assessment_pending() {
+            crate::auto_queue_log!(
+                info,
+                "activate_defer_scope_assessment_pending_pg_3594",
+                entry_log_ctx.clone(),
+                "[auto-queue] deferring entry {entry_id} for card {card_id}: scope-assessment pending — entry stays pending",
+            );
+            continue;
+        }
+
         if effective.is_terminal(&initial_state.status) || initial_state.status == "done" {
             if let Err(error) = crate::db::auto_queue::update_entry_status_on_pg(
                 pool,
@@ -1648,6 +1668,100 @@ mod tests {
             assert_eq!(
                 entry_status, "pending",
                 "impl entry must remain pending — not stuck `dispatched` nor wrongly `done`"
+            );
+
+            pool.close().await;
+            pg_db.drop().await;
+        }
+
+        // #3594 (T3) ─ impl-before-depth race gate. While a scope-assessment is
+        // in flight (`scope_assessment_status == "pending"`), the activate loop
+        // must DEFER creating an implementation dispatch — otherwise (because
+        // scope-assessment is excluded from has_active_dispatch, #3605) activate
+        // would fall through and create impl before the depth that gates the flow
+        // is known. The gate the loop reads is `scope_assessment_pending()`,
+        // computed by the real production loader from card metadata. These
+        // exercise that loader against real Postgres rows.
+        async fn set_scope_status(pool: &PgPool, status: Option<&str>) {
+            let metadata = match status {
+                Some(s) => serde_json::json!({ "scope_assessment_status": s }).to_string(),
+                None => "{}".to_string(),
+            };
+            sqlx::query("UPDATE kanban_cards SET metadata = $1::jsonb WHERE id = 'card-1'")
+                .bind(metadata)
+                .execute(pool)
+                .await
+                .expect("set scope metadata");
+        }
+
+        #[tokio::test]
+        async fn scope_assessment_pending_defers_impl_creation_pg() {
+            let pg_db = TestPostgresDb::create().await;
+            let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
+            seed_base(&pool).await;
+            // scope-assessment is in flight and is the card's latest dispatch; the
+            // impl entry is still pending — the gating-prone state.
+            attach_live_dispatch(&pool, "dispatch-scope", "scope-assessment").await;
+            set_scope_status(&pool, Some("pending")).await;
+
+            let state = load_activate_card_state_pg(&pool, "card-1", "entry-1")
+                .await
+                .expect("load card state");
+
+            // The activate loop's `if scope_assessment_pending() { continue; }`
+            // guard fires here → no impl dispatch is created, entry stays pending.
+            assert!(
+                state.scope_assessment_pending(),
+                "scope-assessment pending must defer impl creation"
+            );
+            // And the side-path is (independently) non-attachable, so even the
+            // attach path would not bind the entry.
+            assert!(!state.has_active_dispatch());
+
+            pool.close().await;
+            pg_db.drop().await;
+        }
+
+        #[tokio::test]
+        async fn scope_assessment_completed_releases_impl_creation_pg() {
+            let pg_db = TestPostgresDb::create().await;
+            let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
+            seed_base(&pool).await;
+            // After scope-assessment completes (direct depth), the policy layer
+            // flips status → "completed". The gate must release so activate
+            // resumes and creates the implementation dispatch on the next tick.
+            set_scope_status(&pool, Some("completed")).await;
+
+            let state = load_activate_card_state_pg(&pool, "card-1", "entry-1")
+                .await
+                .expect("load card state");
+
+            assert!(
+                !state.scope_assessment_pending(),
+                "completed scope-assessment must NOT block impl creation"
+            );
+
+            pool.close().await;
+            pg_db.drop().await;
+        }
+
+        #[tokio::test]
+        async fn card_without_scope_assessment_never_blocks_pg() {
+            let pg_db = TestPostgresDb::create().await;
+            let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
+            seed_base(&pool).await;
+            // CORE NO-REGRESSION: a card that never ran scope-assessment has NO
+            // scope_assessment_status key. absent ≠ pending, so the gate must NOT
+            // fire and activate behaves exactly as before T3 (creates impl).
+            set_scope_status(&pool, None).await;
+
+            let state = load_activate_card_state_pg(&pool, "card-1", "entry-1")
+                .await
+                .expect("load card state");
+
+            assert!(
+                !state.scope_assessment_pending(),
+                "a card with no scope-assessment must never be blocked (absent ≠ pending)"
             );
 
             pool.close().await;

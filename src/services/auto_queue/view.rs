@@ -81,6 +81,17 @@ pub(super) struct ActivateCardState {
     pub(super) entry_status: String,
     pub(super) repo_id: Option<String>,
     pub(super) assigned_agent_id: Option<String>,
+    /// #3594 (T3): whether the card's `scope_assessment_status` metadata is
+    /// exactly `"pending"`. While a scope-assessment is in flight the activate
+    /// loop must NOT create an implementation dispatch yet — the depth that
+    /// gates the flow (direct / plan_only / full) is not known until the
+    /// scope-assessment completes, and scope-assessment is a side-path that is
+    /// deliberately excluded from `has_active_dispatch()` (so activate would
+    /// otherwise fall through and create impl, bypassing the gate). This is the
+    /// only "pending" guard: a card that never ran scope-assessment has NO
+    /// `scope_assessment_status` key → `false` here → no behavior change (the
+    /// core no-regression invariant — absent ≠ pending).
+    pub(super) scope_assessment_pending: bool,
 }
 
 impl ActivateCardState {
@@ -119,6 +130,18 @@ impl ActivateCardState {
                 Some("pending") | Some("dispatched")
             )
             && !crate::dispatch::dispatch_is_side_path(self.latest_dispatch_type.as_deref())
+    }
+
+    /// #3594 (T3): whether the activate loop must defer creating an
+    /// implementation dispatch because a scope-assessment is still in flight for
+    /// this card (`scope_assessment_status == "pending"`). Once the
+    /// scope-assessment completes, the policy layer (kanban-rules onDispatch
+    /// completed) flips the status to `"completed"` and creates the depth-gated
+    /// next dispatch (impl directly for `direct`, or `plan`), so this returns
+    /// `false` and activate resumes normally on the next tick. Strictly
+    /// `"pending"`-only: a card with no scope-assessment never blocks here.
+    pub(super) fn scope_assessment_pending(&self) -> bool {
+        self.scope_assessment_pending
     }
 }
 
@@ -170,7 +193,9 @@ pub(super) async fn load_activate_card_state_pg(
     entry_id: &str,
 ) -> Result<ActivateCardState, String> {
     let row = sqlx::query(
-        "SELECT status, title, latest_dispatch_id, repo_id, assigned_agent_id
+        "SELECT status, title, latest_dispatch_id, repo_id, assigned_agent_id,
+                COALESCE(metadata->>'scope_assessment_status', '') = 'pending'
+                    AS scope_assessment_pending
          FROM kanban_cards
          WHERE id = $1",
     )
@@ -263,6 +288,9 @@ pub(super) async fn load_activate_card_state_pg(
         assigned_agent_id: row
             .try_get("assigned_agent_id")
             .map_err(|error| format!("decode assigned_agent_id for {card_id}: {error}"))?,
+        scope_assessment_pending: row
+            .try_get("scope_assessment_pending")
+            .map_err(|error| format!("decode scope_assessment_pending for {card_id}: {error}"))?,
     })
 }
 

@@ -110,7 +110,7 @@
   - `src/dispatch/dispatch_context.rs` (2805 lines).
   - `src/dispatch/dispatch_create.rs` (1385 lines).
   - `src/dispatch/dispatch_status.rs` (1495 lines).
-  - `src/services/dispatches/outbox_route.rs` (1101 lines; route extraction
+  - `src/services/dispatches/outbox_route.rs` (1120 lines; route extraction
     orchestration surface from #1722, split before adding non-bugfix behavior).
   - `src/services/dispatches/discord_delivery/orchestration.rs` (1490 lines;
     delivery orchestration surface extracted from the route layer in #1760,
@@ -1280,7 +1280,7 @@
   its query/command/view/FSM behavior lives under
   `src/services/auto_queue/{query,command,view,fsm,phase_gate}.rs` plus
   smaller route-delegation slices.
-  `src/services/auto_queue/activate_command.rs` (1457 lines, post-#1444
+  `src/services/auto_queue/activate_command.rs` (1477 lines, post-#1444
   idempotency-guard expansion + #3038 phase-helper decomposition) is the
   canonical activate/dispatch-next command surface; it is intentionally above
   the giant-file threshold and tracked here. The `activate_with_deps_pg`
@@ -1429,7 +1429,7 @@ Line counts are *production* LoC (the `Prod` column in `module-inventory.md`,
 which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync.
 
 - `src/services/auto_queue.rs` (1546) and
-  `src/services/auto_queue/activate_command.rs` (1457); auto-queue route
+  `src/services/auto_queue/activate_command.rs` (1477); auto-queue route
   behavior is split across `src/services/auto_queue/*` slices, with
   `activate_command.rs` now giant-file territory.
   `src/services/auto_queue/cancel_run.rs` (1032) is also giant-file territory;
@@ -1439,7 +1439,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   `src/services/settings.rs` (1114) — service-layer route support surfaces
   split out of the large dashboard route modules. (`src/services/onboarding.rs`
   and `src/services/api_friction.rs` have been removed/decomposed.)
-- `src/services/dispatches/outbox_route.rs` (1101) — dispatch outbox route
+- `src/services/dispatches/outbox_route.rs` (1120) — dispatch outbox route
   support extracted from the route layer; split before adding non-bugfix
   behavior.
 - `src/services/claude.rs` (2963), `src/services/gemini.rs` (1358),
