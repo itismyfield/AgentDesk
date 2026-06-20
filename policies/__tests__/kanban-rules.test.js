@@ -577,6 +577,12 @@ test("kanban-rules dispatches scope-assessment once when a card enters requested
       {
         match: "SELECT assigned_agent_id, title FROM kanban_cards WHERE id = ?",
         result: [{ assigned_agent_id: "agent-7", title: "Scope card" }]
+      },
+      {
+        // #3594 (T3, codex Finding 2): scope-assessment claims the card's pending
+        // auto-queue entry onto its dispatch (consultation pattern).
+        match: "FROM auto_queue_entries e JOIN auto_queue_runs r",
+        result: [{ id: "entry-scope-1", agent_id: "agent-7" }]
       }
     ])
   });
@@ -593,6 +599,19 @@ test("kanban-rules dispatches scope-assessment once when a card enters requested
   assert.ok(scopeMeta, "expected a scope metadata write");
   assert.equal(scopeMeta.scope_assessment_status, "pending");
   assert.ok(scopeMeta.scope_assessment_dispatch_id);
+
+  // #3594 (T3, codex Finding 2): the pending entry must be CLAIMED onto the
+  // scope-assessment dispatch — marked `dispatched` + linked (via the Rust
+  // updateEntryStatus path that writes auto_queue_entry_dispatch_history) — so
+  // scope-completion's resume finds it and the depth gate (plan/plan-review) is
+  // not bypassed by the activate fallback creating a plain implementation.
+  const claim = state.autoQueueStatusUpdates.find(
+    (u) => u.entryId === "entry-scope-1" && u.status === "dispatched"
+  );
+  assert.ok(claim, "scope-assessment must claim the pending entry as dispatched");
+  assert.equal(claim.extra.dispatchId, scopeMeta.scope_assessment_dispatch_id);
+  assert.equal(claim.reason, "scope_assessment_claim");
+
   // T2 is inert: no escalation/manual intervention from the trigger.
   assert.deepEqual(state.manualInterventions, []);
 });
@@ -791,7 +810,13 @@ test("kanban-rules records scope-assessment result on the card metadata and stay
       {
         match: "SELECT metadata FROM kanban_cards WHERE id = ?",
         result: [{ metadata: JSON.stringify({ keep: "yes", scope_assessment_status: "pending" }) }]
-      }
+      },
+      // #3594 (T3): no auto-queue entry exists for this card (manual/API path),
+      // so the plan stage finds nothing to claim and creates no entry-bound
+      // dispatch — the inert assertions below stay valid while still exercising
+      // the plan_only depth branch. (The full chain with a real entry is covered
+      // by the depth-gated-chain integration tests below.)
+      { match: "FROM auto_queue_entries e", result: [] }
     ])
   });
 
@@ -855,7 +880,10 @@ test("kanban-rules falls back to full when scope-assessment result is unusable",
         {
           match: "SELECT metadata FROM kanban_cards WHERE id = ?",
           result: [{ metadata: "{}" }]
-        }
+        },
+        // #3594 (T3): no auto-queue entry for this card → full-fallback plan
+        // stage creates no entry-bound dispatch (manual/API path).
+        { match: "FROM auto_queue_entries e", result: [] }
       ])
     });
 
@@ -901,7 +929,10 @@ test("kanban-rules normalizes scope_depth case and dashes", () => {
       {
         match: "SELECT metadata FROM kanban_cards WHERE id = ?",
         result: [{ metadata: "{}" }]
-      }
+      },
+      // #3594 (T3): normalized plan_only depth triggers a plan dispatch; no
+      // linked auto-queue entry → defers (no dispatch created).
+      { match: "FROM auto_queue_entries e", result: [] }
     ])
   });
 
@@ -911,4 +942,468 @@ test("kanban-rules normalizes scope_depth case and dashes", () => {
   assert.equal(written.scope_depth, "plan_only");
   assert.equal(written.scope_reason, "r");
   assert.equal(written.scope_risk, "k");
+});
+
+// ── #3594 (T3): depth-gated flow ─────────────────────────────────────────────
+
+// Build an onDispatchCompleted scenario for a scope/plan/plan-review dispatch
+// with a single linked auto-queue entry so the next-dispatch is actually
+// created (not deferred). `dispatchType` is the COMPLETED dispatch type;
+// `result`/`context` are its JSON strings; `metadata` is the card's current
+// metadata object (post-record for scope-assessment).
+function loadFlowScenario(opts) {
+  const cardId = opts.cardId || "card-flow";
+  const dispatchId = opts.dispatchId || "dispatch-flow";
+  const entries = Object.prototype.hasOwnProperty.call(opts, "entries")
+    ? opts.entries
+    : [{ id: "entry-flow", agent_id: "agent-flow" }];
+  return loadPolicy("policies/kanban-rules.js", {
+    cards: {
+      [cardId]: {
+        id: cardId,
+        title: opts.title || "Flow card",
+        status: opts.cardStatus || "requested",
+        priority: "medium",
+        assigned_agent_id: "agent-flow",
+        deferred_dod_json: null
+      }
+    },
+    dbQuery: createSqlRouter([
+      {
+        match: "FROM task_dispatches WHERE id = ?",
+        result: [
+          {
+            id: dispatchId,
+            kanban_card_id: cardId,
+            to_agent_id: "agent-flow",
+            dispatch_type: opts.dispatchType,
+            chain_depth: 0,
+            created_at: "2026-06-19 09:00:00",
+            result: opts.result || "{}",
+            context: opts.context || "{}",
+            status: "completed"
+          }
+        ]
+      },
+      {
+        match: "SELECT metadata FROM kanban_cards WHERE id = ?",
+        result: [{ metadata: JSON.stringify(opts.metadata || {}) }]
+      },
+      { match: "FROM auto_queue_entries e", result: entries }
+    ])
+  });
+}
+
+test("T3: scope-assessment depth=direct creates an implementation dispatch directly", () => {
+  const { policy, state } = loadFlowScenario({
+    cardId: "card-direct",
+    dispatchId: "dispatch-scope-direct",
+    dispatchType: "scope-assessment",
+    result: JSON.stringify({ scope_depth: "direct", scope_reason: "tiny", scope_risk: "low" }),
+    // metadata AFTER _recordScopeAssessment writes scope_depth=direct.
+    metadata: { scope_assessment_status: "pending", scope_depth: "direct" }
+  });
+
+  policy.onDispatchCompleted({ dispatch_id: "dispatch-scope-direct" });
+
+  assert.equal(state.dispatchCreates.length, 1, "direct should create exactly one dispatch");
+  assert.equal(state.dispatchCreates[0].dispatchType, "implementation");
+  assert.equal(state.dispatchCreates[0].cardId, "card-direct");
+  // entry resumed as dispatched, not plan/plan-review.
+  assert.equal(state.autoQueueStatusUpdates.length, 1);
+  assert.equal(state.autoQueueStatusUpdates[0].status, "dispatched");
+  assert.equal(state.autoQueueStatusUpdates[0].reason, "scope_gate_direct");
+  // no plan-review channel, no review/PM flow.
+  assert.deepEqual(state.statusCalls, []);
+  assert.deepEqual(state.manualInterventions, []);
+});
+
+test("T3: scope-assessment depth=plan_only creates a plan dispatch carrying depth", () => {
+  const { policy, state } = loadFlowScenario({
+    cardId: "card-plan-only",
+    dispatchId: "dispatch-scope-po",
+    dispatchType: "scope-assessment",
+    result: JSON.stringify({ scope_depth: "plan_only", scope_reason: "med", scope_risk: "mid" }),
+    metadata: { scope_assessment_status: "pending", scope_depth: "plan_only" }
+  });
+
+  policy.onDispatchCompleted({ dispatch_id: "dispatch-scope-po" });
+
+  assert.equal(state.dispatchCreates.length, 1);
+  assert.equal(state.dispatchCreates[0].dispatchType, "plan");
+  // depth rides in the plan dispatch context so the plan-completion arm branches
+  // without re-reading metadata.
+  assert.equal(state.dispatchCreates[0].context.scope_depth, "plan_only");
+  assert.equal(state.dispatchCreates[0].context.auto_queue, true);
+  assert.equal(state.autoQueueStatusUpdates[0].status, "dispatched");
+  assert.equal(state.autoQueueStatusUpdates[0].reason, "scope_gate_plan");
+});
+
+test("T3: scope-assessment depth=full creates a plan dispatch carrying full", () => {
+  const { policy, state } = loadFlowScenario({
+    cardId: "card-full",
+    dispatchId: "dispatch-scope-full",
+    dispatchType: "scope-assessment",
+    result: JSON.stringify({ scope_depth: "full", scope_reason: "big", scope_risk: "high" }),
+    metadata: { scope_assessment_status: "pending", scope_depth: "full" }
+  });
+
+  policy.onDispatchCompleted({ dispatch_id: "dispatch-scope-full" });
+
+  assert.equal(state.dispatchCreates.length, 1);
+  assert.equal(state.dispatchCreates[0].dispatchType, "plan");
+  assert.equal(state.dispatchCreates[0].context.scope_depth, "full");
+});
+
+test("T3: fail-safe — unknown/missing scope_depth metadata is treated as full (plan)", () => {
+  // _recordScopeAssessment already normalizes to "full", but guard the gate too:
+  // metadata with NO scope_depth must still resolve to the full flow → plan.
+  const { policy, state } = loadFlowScenario({
+    cardId: "card-unknown",
+    dispatchId: "dispatch-scope-unk",
+    dispatchType: "scope-assessment",
+    result: "{}",
+    metadata: { scope_assessment_status: "pending" } // no scope_depth at all
+  });
+
+  policy.onDispatchCompleted({ dispatch_id: "dispatch-scope-unk" });
+
+  assert.equal(state.dispatchCreates.length, 1);
+  assert.equal(state.dispatchCreates[0].dispatchType, "plan", "unknown depth must take the cautious full flow → plan");
+});
+
+test("T3: plan completion (depth=plan_only in context) creates the implementation dispatch", () => {
+  const { policy, state } = loadFlowScenario({
+    cardId: "card-plan-done-po",
+    dispatchId: "dispatch-plan-po",
+    dispatchType: "plan",
+    cardStatus: "in_progress",
+    context: JSON.stringify({ scope_depth: "plan_only", auto_queue: true }),
+    result: JSON.stringify({ plan: "design...", summary: "done" })
+  });
+
+  policy.onDispatchCompleted({ dispatch_id: "dispatch-plan-po" });
+
+  assert.equal(state.dispatchCreates.length, 1);
+  assert.equal(state.dispatchCreates[0].dispatchType, "implementation", "plan_only plan completion → impl, no plan-review");
+  assert.equal(state.autoQueueStatusUpdates[0].reason, "scope_gate_plan_done");
+});
+
+test("T3: plan completion (depth=full in context) publishes a plan-review dispatch", () => {
+  const { policy, state } = loadFlowScenario({
+    cardId: "card-plan-done-full",
+    dispatchId: "dispatch-plan-full",
+    dispatchType: "plan",
+    cardStatus: "in_progress",
+    context: JSON.stringify({ scope_depth: "full", auto_queue: true }),
+    result: JSON.stringify({ plan: "big design...", summary: "done" })
+  });
+
+  policy.onDispatchCompleted({ dispatch_id: "dispatch-plan-full" });
+
+  assert.equal(state.dispatchCreates.length, 1);
+  assert.equal(state.dispatchCreates[0].dispatchType, "plan-review", "full plan completion → plan-review");
+  assert.equal(state.dispatchCreates[0].context.scope_depth, "full");
+  // #3594 (T3, codex Finding 3): the plan body must be forwarded to the reviewer
+  // so it actually reviews the plan (not just {scope_depth}).
+  assert.equal(
+    state.dispatchCreates[0].context.parent_plan,
+    "big design...",
+    "plan-review dispatch must carry the plan body as parent_plan"
+  );
+  assert.equal(state.autoQueueStatusUpdates[0].reason, "scope_gate_plan_review");
+});
+
+test("T3: plan-review pass → implementation dispatch", () => {
+  const { policy, state } = loadFlowScenario({
+    cardId: "card-pr-pass",
+    dispatchId: "dispatch-pr-pass",
+    dispatchType: "plan-review",
+    cardStatus: "in_progress",
+    context: JSON.stringify({ scope_depth: "full", auto_queue: true, parent_plan: "approved design body" }),
+    result: JSON.stringify({ verdict: "pass", summary: "plan ok" })
+  });
+
+  policy.onDispatchCompleted({ dispatch_id: "dispatch-pr-pass" });
+
+  assert.equal(state.dispatchCreates.length, 1);
+  assert.equal(state.dispatchCreates[0].dispatchType, "implementation", "plan-review pass → impl");
+  // #3594 (T3, codex Finding 3): the approved plan (carried in the plan-review
+  // context) must flow into the impl dispatch so the implementer sees it.
+  assert.equal(
+    state.dispatchCreates[0].context.parent_plan,
+    "approved design body",
+    "impl dispatch must carry the approved plan body forward"
+  );
+  assert.equal(state.autoQueueStatusUpdates[0].reason, "scope_gate_plan_review_pass");
+});
+
+test("T3: plan-review rework → re-plan dispatch", () => {
+  const { policy, state } = loadFlowScenario({
+    cardId: "card-pr-rework",
+    dispatchId: "dispatch-pr-rework",
+    dispatchType: "plan-review",
+    cardStatus: "in_progress",
+    context: JSON.stringify({ scope_depth: "full", auto_queue: true }),
+    result: JSON.stringify({ verdict: "rework", notes: "missing migration step" })
+  });
+
+  policy.onDispatchCompleted({ dispatch_id: "dispatch-pr-rework" });
+
+  assert.equal(state.dispatchCreates.length, 1);
+  assert.equal(state.dispatchCreates[0].dispatchType, "plan", "plan-review rework → re-plan");
+  assert.equal(state.dispatchCreates[0].context.scope_depth, "full");
+});
+
+test("T3: plan-review with missing/ambiguous verdict re-plans (cautious default)", () => {
+  const { policy, state } = loadFlowScenario({
+    cardId: "card-pr-amb",
+    dispatchId: "dispatch-pr-amb",
+    dispatchType: "plan-review",
+    cardStatus: "in_progress",
+    context: JSON.stringify({ scope_depth: "full", auto_queue: true }),
+    result: JSON.stringify({ summary: "forgot the verdict" })
+  });
+
+  policy.onDispatchCompleted({ dispatch_id: "dispatch-pr-amb" });
+
+  assert.equal(state.dispatchCreates.length, 1);
+  assert.equal(state.dispatchCreates[0].dispatchType, "plan", "ambiguous verdict must NOT advance to impl — re-plan");
+});
+
+test("T3: scope/plan dispatches never enter the PM-gate / review lifecycle", () => {
+  // A plan completion must early-return before the PM gate, so it never queries
+  // the PM-gate card-detail shape nor sets review status.
+  const { policy, state } = loadFlowScenario({
+    cardId: "card-no-pmgate",
+    dispatchId: "dispatch-plan-nopm",
+    dispatchType: "plan",
+    cardStatus: "in_progress",
+    context: JSON.stringify({ scope_depth: "plan_only", auto_queue: true }),
+    result: JSON.stringify({ plan: "x" })
+  });
+
+  policy.onDispatchCompleted({ dispatch_id: "dispatch-plan-nopm" });
+
+  assert.deepEqual(state.statusCalls, [], "plan completion must not setStatus (no review advance)");
+  assert.deepEqual(state.reviewStatusCalls, []);
+  assert.deepEqual(state.manualInterventions, []);
+});
+
+// ── #3594 (T3) ★ depth-gated-chain integration tests ──────────────
+//
+// These drive the FULL multi-stage chain through the real kanban-rules
+// onDispatchCompleted arms with a STATEFUL auto-queue entry, asserting the
+// codex-required invariants end-to-end:
+//   - full:      scope → plan (NOT impl) → plan-review → impl. Each stage keeps
+//                the SAME entry alive (dispatched), only impl is the terminal
+//                work dispatch. The plan body flows plan → plan-review → impl.
+//   - plan_only: scope → plan → impl.
+//   - direct:    scope → impl (no plan).
+// The harness simulates the consultation-resume contract: a dispatch "claims" the
+// entry by linking it (auto_queue_entry_dispatch_history) + marking it dispatched,
+// and _findAutoQueueEntriesByDispatch returns the entry only while it is linked to
+// the queried dispatch AND still `dispatched`. That is exactly the lifecycle the
+// Rust updateEntryStatus path implements, so the JS chain is exercised faithfully.
+function makeChainHarness(initialScopeMeta) {
+  // Mutable simulation state.
+  const entry = { id: "entry-chain", agent_id: "agent-chain", status: "pending", linkedDispatchId: null };
+  let cardMeta = Object.assign({}, initialScopeMeta || {});
+  const dispatches = {}; // id → { dispatch_type, context, result, status }
+  let dispatchSeq = 0;
+
+  function registerDispatch(dispatchType, context, result) {
+    dispatchSeq += 1;
+    const id = "dispatch-chain-" + dispatchSeq;
+    dispatches[id] = {
+      id,
+      kanban_card_id: "card-chain",
+      to_agent_id: "agent-chain",
+      dispatch_type: dispatchType,
+      chain_depth: 0,
+      created_at: "2026-06-19 09:0" + dispatchSeq + ":00",
+      context: context || "{}",
+      result: result || "{}",
+      status: "completed"
+    };
+    return id;
+  }
+
+  const harness = loadPolicy("policies/kanban-rules.js", {
+    cards: {
+      "card-chain": {
+        id: "card-chain",
+        title: "Chain card",
+        status: "requested",
+        priority: "medium",
+        assigned_agent_id: "agent-chain",
+        deferred_dod_json: null
+      }
+    },
+    // dispatch.create registers a new (already-"completed") dispatch row so the
+    // next onDispatchCompleted can read its context. Returns the new id.
+    dispatchCreate(cardId, agentId, dispatchType, title, context) {
+      const ctxJson = context ? JSON.stringify(context) : "{}";
+      const id = registerDispatch(dispatchType, ctxJson, "{}");
+      harness.state.dispatchCreates.push({ cardId, agentId, dispatchType, title, context: context || null, id });
+      return id;
+    },
+    dbQuery: createSqlRouter([
+      {
+        match: "FROM task_dispatches WHERE id = ?",
+        result: (sql, params) => {
+          const row = dispatches[params[0]];
+          return row ? [row] : [];
+        }
+      },
+      {
+        match: "SELECT metadata FROM kanban_cards WHERE id = ?",
+        result: () => [{ metadata: JSON.stringify(cardMeta) }]
+      },
+      {
+        // _findAutoQueueEntriesByDispatch(dispatchId, false): entry is returned
+        // only while linked to the queried dispatch AND status 'dispatched'.
+        match: (sql) => /LEFT JOIN auto_queue_entry_dispatch_history/.test(sql),
+        result: (sql, params) => {
+          const dispatchId = params[0];
+          if (entry.status === "dispatched" && entry.linkedDispatchId === dispatchId) {
+            return [{ id: entry.id, agent_id: entry.agent_id }];
+          }
+          return [];
+        }
+      },
+      {
+        // _findPendingEntryForCard: returns the pending entry by card.
+        match: (sql) => /FROM auto_queue_entries e JOIN auto_queue_runs r/.test(sql),
+        result: () => (entry.status === "pending" ? [{ id: entry.id, agent_id: entry.agent_id }] : [])
+      }
+    ]),
+    dbExecute(sql, params) {
+      // Capture card metadata writes so scope_assessment_status flips persist.
+      if (/UPDATE kanban_cards SET metadata = \?/.test(sql) && params && typeof params[0] === "object") {
+        cardMeta = Object.assign({}, params[0]);
+      }
+      return { changes: 1 };
+    }
+  });
+
+  // updateEntryStatus mutates the simulated entry: 'dispatched' (re)links to the
+  // given dispatchId; terminal statuses settle it.
+  harness.agentdesk.autoQueue.updateEntryStatus = function (entryId, status, reason, opts) {
+    harness.state.autoQueueStatusUpdates.push({ entryId, status, reason, extra: opts || null });
+    if (entryId !== entry.id) return;
+    entry.status = status;
+    if (status === "dispatched" && opts && opts.dispatchId) {
+      entry.linkedDispatchId = opts.dispatchId;
+    }
+  };
+
+  return {
+    policy: harness.module.policy,
+    state: harness.state,
+    entry,
+    registerDispatch,
+    patchDispatchResult(dispatchId, result) {
+      if (dispatches[dispatchId]) {
+        dispatches[dispatchId].result = typeof result === "string" ? result : JSON.stringify(result);
+      }
+    },
+    setMeta(patch) { cardMeta = Object.assign({}, cardMeta, patch); },
+    getMeta() { return cardMeta; }
+  };
+}
+
+function lastCreate(state) {
+  return state.dispatchCreates[state.dispatchCreates.length - 1];
+}
+
+test("T3 ★ full chain: scope→plan→plan-review→impl keeps one entry alive, only impl is terminal work, plan body flows through", () => {
+  const h = makeChainHarness({ scope_assessment_status: "pending" });
+  // Stage 0: scope-assessment dispatch already exists + claimed the entry
+  // (as _maybeDispatchScopeAssessment does). Seed that linkage.
+  const scopeId = h.registerDispatch("scope-assessment", "{}",
+    JSON.stringify({ scope_depth: "full", scope_reason: "big", scope_risk: "high" }));
+  h.entry.status = "dispatched";
+  h.entry.linkedDispatchId = scopeId;
+
+  // Stage 1: scope-assessment completes (depth=full) → plan (NOT impl).
+  h.policy.onDispatchCompleted({ dispatch_id: scopeId });
+  let c = lastCreate(h.state);
+  assert.equal(c.dispatchType, "plan", "full scope completion must create a PLAN, not implementation");
+  const planId = c.id;
+  assert.equal(h.entry.status, "dispatched", "entry must stay alive (dispatched) after scope→plan");
+  assert.equal(h.entry.linkedDispatchId, planId, "entry must re-link to the plan dispatch");
+
+  // Stage 2: the SAME plan dispatch the chain created completes with a plan body
+  // → plan-review carrying that body. Patch the created plan dispatch's result
+  // (the agent's PATCH would set result.plan) and complete it by its id.
+  h.patchDispatchResult(planId, { plan: "PLAN-BODY-XYZ", summary: "planned" });
+  h.policy.onDispatchCompleted({ dispatch_id: planId });
+  c = lastCreate(h.state);
+  assert.equal(c.dispatchType, "plan-review", "full plan completion must create a plan-review");
+  assert.equal(c.context.parent_plan, "PLAN-BODY-XYZ", "plan-review must carry the plan body forward");
+  const reviewId = c.id;
+  assert.equal(h.entry.status, "dispatched", "entry stays alive after plan→plan-review");
+  assert.equal(h.entry.linkedDispatchId, reviewId, "entry re-links to plan-review dispatch");
+
+  // Stage 3: the SAME plan-review dispatch passes → impl carrying the approved
+  // plan body (which rode in the plan-review context, then forwarded to impl).
+  h.patchDispatchResult(reviewId, { verdict: "pass", summary: "ok" });
+  h.policy.onDispatchCompleted({ dispatch_id: reviewId });
+  c = lastCreate(h.state);
+  assert.equal(c.dispatchType, "implementation", "plan-review pass must create the implementation dispatch");
+  assert.equal(c.context.parent_plan, "PLAN-BODY-XYZ", "impl must carry the approved plan body");
+  const implId = c.id;
+  assert.equal(h.entry.linkedDispatchId, implId, "entry re-links to the impl dispatch");
+  assert.equal(h.entry.status, "dispatched", "entry bound to impl (review-enabled impl holds dispatched until card terminal)");
+
+  // Exactly 3 staged dispatches were created across the whole chain: plan,
+  // plan-review, implementation — no extra/duplicate dispatches.
+  assert.deepEqual(
+    h.state.dispatchCreates.map((d) => d.dispatchType),
+    ["plan", "plan-review", "implementation"],
+    "the full chain creates exactly plan → plan-review → implementation"
+  );
+  // Never escalated / never advanced via PM gate during the staged chain.
+  assert.deepEqual(h.state.manualInterventions, []);
+});
+
+test("T3 ★ plan_only chain: scope→plan→impl (no plan-review)", () => {
+  const h = makeChainHarness({ scope_assessment_status: "pending" });
+  const scopeId = h.registerDispatch("scope-assessment", "{}",
+    JSON.stringify({ scope_depth: "plan_only", scope_reason: "mid", scope_risk: "low" }));
+  h.entry.status = "dispatched";
+  h.entry.linkedDispatchId = scopeId;
+
+  h.policy.onDispatchCompleted({ dispatch_id: scopeId });
+  let c = lastCreate(h.state);
+  assert.equal(c.dispatchType, "plan", "plan_only scope completion → plan");
+  const planId = c.id;
+  assert.equal(h.entry.linkedDispatchId, planId);
+
+  // Complete the SAME plan dispatch (with a body) → impl, no plan-review.
+  h.patchDispatchResult(planId, { plan: "PLAN-PO", summary: "planned" });
+  h.policy.onDispatchCompleted({ dispatch_id: planId });
+  c = lastCreate(h.state);
+  assert.equal(c.dispatchType, "implementation", "plan_only plan completion → impl (no plan-review)");
+  assert.equal(c.context.parent_plan, "PLAN-PO", "impl carries plan body on plan_only path too");
+  assert.equal(h.entry.linkedDispatchId, c.id, "entry re-links to impl on plan_only path");
+  assert.deepEqual(
+    h.state.dispatchCreates.map((d) => d.dispatchType),
+    ["plan", "implementation"],
+    "plan_only chain creates exactly plan → implementation (no plan-review)"
+  );
+});
+
+test("T3 ★ direct chain: scope→impl (no plan)", () => {
+  const h = makeChainHarness({ scope_assessment_status: "pending" });
+  const scopeId = h.registerDispatch("scope-assessment", "{}",
+    JSON.stringify({ scope_depth: "direct", scope_reason: "tiny", scope_risk: "none" }));
+  h.entry.status = "dispatched";
+  h.entry.linkedDispatchId = scopeId;
+
+  h.policy.onDispatchCompleted({ dispatch_id: scopeId });
+  const c = lastCreate(h.state);
+  assert.equal(c.dispatchType, "implementation", "direct scope completion → impl immediately (no plan)");
+  assert.equal(h.entry.linkedDispatchId, c.id, "entry binds straight to the impl dispatch");
 });

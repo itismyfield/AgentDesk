@@ -592,6 +592,68 @@ fn scope_assessment_contract_requires_scope_depth_and_patch_completion() {
 }
 
 #[test]
+fn parent_plan_context_is_rendered_into_the_current_task_section() {
+    // #3594 (T3, codex Finding 3): a plan-review (or full→impl) dispatch carries
+    // the parent plan body in its context under `parent_plan`. It must surface in
+    // the [Current Task] / [Dispatch Context] block so the agent actually sees the
+    // plan it must review / implement.
+    use super::dispatch_contract::render_current_task_section;
+
+    let dispatch_context = serde_json::json!({
+        "auto_queue": true,
+        "scope_depth": "full",
+        "parent_plan": "Design: split module X.\nSteps: 1) extract Y 2) wire Z"
+    });
+    let dispatch_context_raw = dispatch_context.to_string();
+    let current_task = CurrentTaskContext {
+        dispatch_id: Some("dispatch-plan-review-1"),
+        dispatch_context: Some(&dispatch_context_raw),
+        ..CurrentTaskContext::default()
+    };
+
+    let section = render_current_task_section(&current_task, Some("plan-review"))
+        .expect("current task section");
+    assert!(
+        section.contains("Parent Plan (from the plan dispatch):"),
+        "the parent plan must be labelled in the prompt, got: {section}"
+    );
+    assert!(
+        section.contains("Design: split module X.")
+            && section.contains("Steps: 1) extract Y 2) wire Z"),
+        "the full plan body must be rendered verbatim, got: {section}"
+    );
+}
+
+#[test]
+fn parent_plan_is_truncated_when_oversized() {
+    // Defensive: an oversized plan must be truncated so it cannot blow up the
+    // system prompt, with an explicit truncation marker.
+    use super::dispatch_contract::render_current_task_section;
+
+    let huge_plan = "x".repeat(20_000);
+    let dispatch_context = serde_json::json!({ "parent_plan": huge_plan });
+    let dispatch_context_raw = dispatch_context.to_string();
+    let current_task = CurrentTaskContext {
+        dispatch_id: Some("dispatch-plan-review-2"),
+        dispatch_context: Some(&dispatch_context_raw),
+        ..CurrentTaskContext::default()
+    };
+
+    let section = render_current_task_section(&current_task, Some("plan-review"))
+        .expect("current task section");
+    assert!(
+        section.contains("… (plan truncated)"),
+        "oversized plan must be truncated with a marker"
+    );
+    // The rendered plan portion must be far smaller than the original 20k chars.
+    assert!(
+        section.chars().count() < 12_000,
+        "truncated section must be bounded, got {} chars",
+        section.chars().count()
+    );
+}
+
+#[test]
 fn review_lite_prompt_keeps_review_contract_while_trimming_full_sections() {
     use super::super::settings::RoleBinding;
 

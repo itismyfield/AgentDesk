@@ -88,6 +88,30 @@ fn render_dispatch_context_section(
         sections.push("Dispatch Trigger: auto-queue".to_string());
     }
 
+    // #3594 (T3, codex Finding 3): surface the parent PLAN dispatch's output so a
+    // plan-review (and full→impl) dispatch actually sees the plan body it must
+    // review / implement. The kanban-rules scope-gate copies the completed plan
+    // dispatch's `result.plan` into the downstream dispatch context under
+    // `parent_plan` (it already holds the plan result in hand at fan-out time),
+    // and this renders it verbatim into the prompt. Without this the agent only
+    // saw `{scope_depth}` and had to re-derive the plan from the issue alone.
+    // Truncated defensively so an oversized plan cannot blow up the system prompt.
+    if let Some(plan) = context
+        .get("parent_plan")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        const PARENT_PLAN_PROMPT_LIMIT: usize = 8000;
+        let rendered = if plan.chars().count() > PARENT_PLAN_PROMPT_LIMIT {
+            let truncated: String = plan.chars().take(PARENT_PLAN_PROMPT_LIMIT).collect();
+            format!("{truncated}\n… (plan truncated)")
+        } else {
+            plan.to_string()
+        };
+        sections.push(format!("Parent Plan (from the plan dispatch):\n{rendered}"));
+    }
+
     let reset_provider_state = context
         .get("reset_provider_state")
         .and_then(|value| value.as_bool())
@@ -423,6 +447,41 @@ pub(super) fn render_dispatch_contract(
                  - result에는 반드시 `scope_depth`(full|plan_only|direct), `scope_reason`(판단 근거), `scope_risk`(과소평가 시 위험)를 넣는다.\n\
                  - 예시 body: `{{\"status\":\"completed\",\"result\":{{\"scope_depth\":\"plan_only\",\"scope_reason\":\"...\",\"scope_risk\":\"...\"}}}}`\n\
                  - review verdict API는 사용하지 않는다."
+            ))
+        }
+        // #3594 (T3): plan — the assigned agent produces a DESIGN + implementation
+        // PLAN only; it must NOT implement or commit. Its completion is consumed
+        // by kanban-rules (plan_only → impl, full → plan-review). The plan text
+        // goes in `result.plan` so the downstream plan-review / impl dispatch can
+        // reference it.
+        Some("plan") => {
+            let dispatch_id = current_task.dispatch_id?;
+            Some(format!(
+                "[Dispatch Contract]\n\
+                 - 이 dispatch는 \"설계/구현계획\" 전용이다. 코드 구현/수정/커밋은 하지 않는다.\n\
+                 - 이슈를 분석해 (1) 설계 개요 (2) 단계별 구현 계획 (3) 영향 범위/리스크를 산출한다.\n\
+                 - 완료 시 `PATCH /api/dispatches/{dispatch_id}`로 dispatch를 종료한다.\n\
+                 - result에는 반드시 `plan`(설계+구현계획 본문)을 넣는다.\n\
+                 - 예시 body: `{{\"status\":\"completed\",\"result\":{{\"plan\":\"설계: ...\\n계획: 1) ... 2) ...\",\"summary\":\"계획 요약\"}}}}`\n\
+                 - review verdict API는 사용하지 않는다."
+            ))
+        }
+        // #3594 (T3): plan-review — review the parent plan dispatch's `plan`
+        // output and emit a verdict. Option P: this is NOT routed through the
+        // counter-model review kernel, so the agent must NOT call the review
+        // verdict API; the verdict is read directly from `result.verdict`
+        // (pass | rework) by kanban-rules (pass → impl, rework → re-plan).
+        Some("plan-review") => {
+            let dispatch_id = current_task.dispatch_id?;
+            Some(format!(
+                "[Dispatch Contract]\n\
+                 - 이 dispatch는 부모 plan dispatch가 산출한 구현계획(plan)을 \"검토\"한다. 코드 구현/커밋은 하지 않는다.\n\
+                 - 계획의 타당성/누락/리스크를 점검하고 통과 여부를 판정한다.\n\
+                 - 완료 시 `PATCH /api/dispatches/{dispatch_id}`로 dispatch를 종료한다.\n\
+                 - result.verdict는 반드시 `pass`(계획 승인 → 구현 진행) 또는 `rework`(계획 보완 필요 → 재계획) 중 하나로 넣는다.\n\
+                 - rework면 `notes`에 보완해야 할 지점을 구체적으로 적는다.\n\
+                 - 예시 body: `{{\"status\":\"completed\",\"result\":{{\"verdict\":\"pass\",\"summary\":\"계획 적절\"}}}}`\n\
+                 - review verdict API(`POST /api/reviews/verdict`)는 사용하지 않는다."
             ))
         }
         Some("e2e-test") | Some("consultation") | Some("pm-decision") => {
