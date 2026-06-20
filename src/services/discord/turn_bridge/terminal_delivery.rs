@@ -1493,6 +1493,77 @@ mod tests {
             );
         }
 
+        // #3610 (codex review): the M4 gate the long-chunk arm (mod.rs site 4)
+        // now relies on. `record_long_chunk_terminal_delivery` MUST only fire when
+        // `commit_and_advance` returned `true` — i.e. the in-memory
+        // `confirmed_end_offset` actually advanced. This pins the underlying
+        // coupling the bool gate depends on: in a RECLAIMED / identity-mismatch
+        // state the bridge's own `DeliveryLeaseCell::commit` returns `false` AND
+        // `confirmed_end_offset` does NOT advance. (The full `commit_and_advance`
+        // wrapper carries a `debug_assert!(committed)` — it deliberately panics on
+        // a false commit in debug/test builds because the bridge committing its OWN
+        // fresh lease is an invariant — so the false-commit path is exercised at the
+        // `cell.commit` boundary the wrapper delegates to. Were the durable frontier
+        // recorded here, its END (= range.1) would sit AHEAD of the un-advanced
+        // `confirmed_end_offset`, the exact M4 violation the bool gate prevents.)
+        #[tokio::test(start_paused = true)]
+        async fn reclaimed_lease_commit_is_false_and_never_advances_offset() {
+            let shared = make_shared_data_for_tests();
+            let ch = channel();
+            assert_eq!(shared.committed_relay_offset(ch), 0);
+
+            // The bridge acquires a real lease for (0, 64) on the channel's cell.
+            let _lease = match BridgeDeliveryLease::acquire(&shared, ch, turn(90), 0, Some(64)) {
+                BridgeLeaseAcquire::Held(lease) => lease,
+                _ => panic!("expected Held on a fresh cell"),
+            };
+
+            // The deadline passes and a reconciler reclaims the (presumed-dead)
+            // holder's lease → the cell flips back to Unleased.
+            let cell = shared.delivery_lease(ch);
+            assert!(
+                cell.reclaim_if_expired(
+                    lease_now_ms().saturating_add(DELIVERY_LEASE_DEADLINE_MS + 1),
+                ),
+                "an expired lease must be reclaimable"
+            );
+
+            // A REPLACEMENT holder (a fresh watcher) takes the reclaimed range.
+            let watcher = LeaseHolder::Watcher { instance_id: 91 };
+            assert!(cell.try_acquire(
+                turn(90),
+                watcher,
+                0,
+                64,
+                lease_now_ms().saturating_add(DELIVERY_LEASE_DEADLINE_MS),
+            ));
+
+            // The original bridge's commit (same identity `commit_and_advance`
+            // delegates to) now hits a DIFFERENT holder → identity mismatch →
+            // `false`. This is the commit==false branch the mod.rs bool gate guards.
+            let committed = cell.commit(
+                LeaseHolder::Bridge,
+                turn(90),
+                0,
+                64,
+                LeaseOutcome::Delivered,
+            );
+            assert!(
+                !committed,
+                "a reclaimed-then-reacquired cell rejects the original holder's commit"
+            );
+            // Because the commit failed, `confirmed_end_offset` did NOT advance —
+            // so recording `delivered_frontier.range = (0, 64)` would put the
+            // durable END (64) ahead of the in-memory authority (0): M4 violation.
+            // The mod.rs `if committed { record_long_chunk_terminal_delivery(..) }`
+            // gate is what keeps the durable frontier a faithful mirror.
+            assert_eq!(
+                shared.committed_relay_offset(ch),
+                0,
+                "a failed commit must never advance confirmed_end (M4 — durable frontier mirrors it)"
+            );
+        }
+
         #[tokio::test(start_paused = true)]
         async fn empty_range_routes_to_no_range() {
             let shared = make_shared_data_for_tests();

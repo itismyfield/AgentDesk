@@ -5146,20 +5146,33 @@ pub(super) fn spawn_turn_bridge(
                                     // gating live in outbound/delivery_record.rs.
                                     if let Some(lease) = lease {
                                         let lease_range = lease.range();
-                                        lease.commit_and_advance(
+                                        // #3610 (codex review): gate the durable
+                                        // anchor record on the commit ACTUALLY
+                                        // succeeding. `commit_and_advance` advances
+                                        // `confirmed_end_offset` IFF its inner
+                                        // `DeliveryLeaseCell::commit` succeeds and
+                                        // returns `true`; a non-Leased / identity-
+                                        // mismatch / reclaimed cell returns `false`
+                                        // and does NOT advance. Recording the durable
+                                        // `delivered_frontier.range = end` without an
+                                        // in-memory advance would violate M4 (durable
+                                        // frontier END must mirror confirmed_end_offset).
+                                        let committed = lease.commit_and_advance(
                                             shared_owned.as_ref(),
                                             watcher_owner_channel_id,
                                             inflight_state.tmux_session_name.as_deref(),
                                             crate::services::discord::LeaseOutcome::Delivered,
                                         );
-                                        super::outbound::delivery_record::record_long_chunk_terminal_delivery(
-                                            shared_owned.as_ref(),
-                                            &provider,
-                                            watcher_owner_channel_id,
-                                            channel_id,
-                                            lease_range,
-                                            last_chunk_msg_id.map(|m| m.get()),
-                                        );
+                                        if committed {
+                                            super::outbound::delivery_record::record_long_chunk_terminal_delivery(
+                                                shared_owned.as_ref(),
+                                                &provider,
+                                                watcher_owner_channel_id,
+                                                channel_id,
+                                                lease_range,
+                                                last_chunk_msg_id.map(|m| m.get()),
+                                            );
+                                        }
                                     }
                                 }
                                 Err(error) => {

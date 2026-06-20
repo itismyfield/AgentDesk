@@ -721,9 +721,16 @@ pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
 ///
 /// The caller invokes this ONLY on the FULL-COMMIT `Ok` arm of
 /// `send_ordered_long_terminal_response` (the send is all-or-nothing — a partial
-/// chunk failure rolls back and returns `Err`, never `Ok`), so `is_delivered = true`
-/// is always correct here (mirrors the cutover's `outcome_is_shadow_delivered` gate,
-/// which for this arm is unconditionally `Delivered`).
+/// chunk failure rolls back and returns `Err`, never `Ok`) AND ONLY when
+/// `lease.commit_and_advance(.., Delivered)` returned `true` — i.e. the in-memory
+/// `confirmed_end_offset` actually advanced. That commit-success gate is the M4
+/// invariant: a non-Leased / identity-mismatch / reclaimed cell makes
+/// `commit_and_advance` return `false` WITHOUT advancing the offset, and recording
+/// `delivered_frontier.range = end` in that case would leave the durable frontier
+/// END ahead of `confirmed_end_offset` (M4 violation). With both gates satisfied
+/// `is_delivered = true` is correct here (mirrors the cutover's
+/// `outcome_is_shadow_delivered` gate, which for this arm is unconditionally
+/// `Delivered`).
 ///
 /// Channel split (same as the cutover): the frontier is KEYED by
 /// `watcher_owner_channel_id` (the OFFSET-AUTHORITY channel where
