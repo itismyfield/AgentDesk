@@ -1,7 +1,8 @@
 use poise::CreateReply;
 
 use super::super::sidecar_interaction::{
-    build_sidecar_components, list_sidecar_devices, remember_sidecar_pending,
+    SIDECAR_DEFAULT_MAC, build_sidecar_components, list_sidecar_devices_on,
+    remember_sidecar_pending,
 };
 use super::super::{Context, Error, check_auth};
 
@@ -17,15 +18,17 @@ pub(in crate::services::discord) async fn cmd_sidecar(ctx: Context<'_>) -> Resul
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!("  [{ts}] ◀ [{user_name}] /sidecar");
 
-    let devices = list_sidecar_devices().await;
-    let components = build_sidecar_components(&devices);
+    // Start with the host Mac pre-selected and its device list; selecting a
+    // different Mac re-queries that Mac and re-renders the device dropdown.
+    let devices = list_sidecar_devices_on(SIDECAR_DEFAULT_MAC).await;
+    let components = build_sidecar_components(&devices, Some(SIDECAR_DEFAULT_MAC), None);
 
     let posted = ctx
         .send(
             CreateReply::default()
                 .ephemeral(true)
                 .content(
-                    "**Sidecar 연결**\n호스트 Mac과 기기를 선택한 뒤 `연결`(또는 `해제`)을 누르세요.",
+                    "**Sidecar 연결**\n호스트 Mac을 고르면 기기 목록이 그 Mac 기준으로 갱신됩니다. 기기 선택 후 `연결`(또는 `해제`)을 누르세요.",
                 )
                 .components(components),
         )
@@ -33,6 +36,6 @@ pub(in crate::services::discord) async fn cmd_sidecar(ctx: Context<'_>) -> Resul
         .into_message()
         .await?;
 
-    remember_sidecar_pending(posted.id, user_id);
+    remember_sidecar_pending(posted.id, user_id, Some(SIDECAR_DEFAULT_MAC.to_string()));
     Ok(())
 }

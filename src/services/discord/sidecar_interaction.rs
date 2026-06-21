@@ -2,9 +2,12 @@
 //!
 //! Deterministic (no AI turn): `/sidecar` posts an ephemeral card with two
 //! string-select dropdowns (host Mac + target device) plus 연결/해제 buttons.
-//! Selections are stored in an in-memory pending map keyed by the card's
-//! message id; on button click the chosen `SidecarLauncher` action runs either
-//! locally (mac-book — the dcserver host) or over SSH (mac-mini).
+//! Selecting the host Mac re-queries that Mac's connectable devices and
+//! re-renders the device dropdown, so the list reflects whichever Mac is
+//! chosen and refreshes on each (re)selection. Selections are stored in an
+//! in-memory pending map keyed by the card's message id; on button click the
+//! chosen `SidecarLauncher` action runs either locally (mac-book — the
+//! dcserver host) or over SSH (mac-mini).
 
 use std::process::Stdio;
 use std::sync::LazyLock;
@@ -14,12 +17,16 @@ use poise::serenity_prelude as serenity;
 
 use super::{Data, Error, check_auth};
 
+/// Host Mac selected by default when the card is first posted (dcserver host).
+pub(in crate::services::discord) const SIDECAR_DEFAULT_MAC: &str = "mac-book";
+
 /// How long a posted picker stays interactive before it is considered stale.
 const SIDECAR_PENDING_TTL: Duration = Duration::from_secs(30 * 60);
 /// Hard cap on how long a connect/disconnect (incl. SSH) may run.
 const SIDECAR_ACTION_TIMEOUT: Duration = Duration::from_secs(20);
-/// Cap on the device-listing probe so `/sidecar` stays within Discord's ack window.
-const SIDECAR_DEVICES_TIMEOUT: Duration = Duration::from_secs(2);
+/// Cap on the device-listing probe. Generous enough for the mac-mini SSH probe;
+/// the local mac-book probe returns near-instantly so it never approaches this.
+const SIDECAR_DEVICES_TIMEOUT: Duration = Duration::from_secs(8);
 
 struct SidecarPending {
     mac: Option<String>,
@@ -32,14 +39,16 @@ static SIDECAR_PENDING: LazyLock<dashmap::DashMap<serenity::MessageId, SidecarPe
     LazyLock::new(dashmap::DashMap::new);
 
 /// Record a freshly-posted picker so its dropdown selections can be tracked.
+/// `mac` is the host pre-selected at post time (the device list was queried for it).
 pub(in crate::services::discord) fn remember_sidecar_pending(
     message_id: serenity::MessageId,
     owner: serenity::UserId,
+    mac: Option<String>,
 ) {
     SIDECAR_PENDING.insert(
         message_id,
         SidecarPending {
-            mac: None,
+            mac,
             device: None,
             owner,
             updated_at: Instant::now(),
@@ -51,15 +60,32 @@ fn home_dir() -> String {
     std::env::var("HOME").unwrap_or_else(|_| "/Users/itismyfield".to_string())
 }
 
-/// List Sidecar-connectable devices as seen by the local (mac-book) host.
-/// The iPad is the same physical device regardless of which Mac drives it, so
-/// the local list is a valid source for both host options. Returns empty on
-/// timeout/error; the caller falls back to a static option.
-pub(in crate::services::discord) async fn list_sidecar_devices() -> Vec<String> {
-    let bin = format!("{}/bin/SidecarLauncher", home_dir());
-    let mut cmd = tokio::process::Command::new(&bin);
-    cmd.arg("devices")
-        .stdin(Stdio::null())
+/// List Sidecar-connectable devices as seen by the given host Mac.
+/// `mac-book` → local binary; `mac-mini` → over SSH (key/agent auth).
+/// Returns empty on timeout/error; the caller falls back to a static option.
+pub(in crate::services::discord) async fn list_sidecar_devices_on(mac: &str) -> Vec<String> {
+    let mut cmd = if mac == "mac-mini" {
+        let mut c = tokio::process::Command::new("/usr/bin/ssh");
+        c.args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=8",
+            "-o",
+            "ServerAliveInterval=3",
+            "-o",
+            "ServerAliveCountMax=3",
+            "mac-mini",
+            "~/bin/SidecarLauncher devices",
+        ]);
+        c
+    } else {
+        let bin = format!("{}/bin/SidecarLauncher", home_dir());
+        let mut c = tokio::process::Command::new(bin);
+        c.arg("devices");
+        c
+    };
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     let output = match tokio::time::timeout(SIDECAR_DEVICES_TIMEOUT, cmd.output()).await {
@@ -75,16 +101,33 @@ pub(in crate::services::discord) async fn list_sidecar_devices() -> Vec<String> 
         .collect()
 }
 
-/// Build the picker components: host-Mac dropdown, device dropdown, 연결/해제 buttons.
+fn select_option(
+    label: &str,
+    value: &str,
+    selected: Option<&str>,
+) -> serenity::CreateSelectMenuOption {
+    let option = serenity::CreateSelectMenuOption::new(label, value);
+    if selected == Some(value) {
+        option.default_selection(true)
+    } else {
+        option
+    }
+}
+
+/// Build the picker components: host-Mac dropdown, device dropdown, 연결/해제
+/// buttons. `selected_mac`/`selected_device` mark the matching option as the
+/// default so a re-rendered card keeps the user's visible choice.
 pub(in crate::services::discord) fn build_sidecar_components(
     devices: &[String],
+    selected_mac: Option<&str>,
+    selected_device: Option<&str>,
 ) -> Vec<serenity::CreateActionRow> {
     let mac_menu = serenity::CreateSelectMenu::new(
         "sidecar:mac",
         serenity::CreateSelectMenuKind::String {
             options: vec![
-                serenity::CreateSelectMenuOption::new("mac-book (이 머신)", "mac-book"),
-                serenity::CreateSelectMenuOption::new("mac-mini", "mac-mini"),
+                select_option("mac-book (이 머신)", "mac-book", selected_mac),
+                select_option("mac-mini", "mac-mini", selected_mac),
             ],
         },
     )
@@ -93,14 +136,11 @@ pub(in crate::services::discord) fn build_sidecar_components(
     .max_values(1);
 
     let device_options: Vec<serenity::CreateSelectMenuOption> = if devices.is_empty() {
-        vec![serenity::CreateSelectMenuOption::new(
-            "Oh의 iPad",
-            "Oh의 iPad",
-        )]
+        vec![select_option("Oh의 iPad", "Oh의 iPad", selected_device)]
     } else {
         devices
             .iter()
-            .map(|d| serenity::CreateSelectMenuOption::new(d.as_str(), d.as_str()))
+            .map(|d| select_option(d.as_str(), d.as_str(), selected_device))
             .collect()
     };
     let device_menu = serenity::CreateSelectMenu::new(
@@ -129,6 +169,13 @@ pub(in crate::services::discord) fn build_sidecar_components(
 
 pub(super) fn is_sidecar_custom_id(custom_id: &str) -> bool {
     custom_id.starts_with("sidecar:")
+}
+
+fn selected_string_value(component: &serenity::ComponentInteraction) -> Option<String> {
+    match &component.data.kind {
+        serenity::ComponentInteractionDataKind::StringSelect { values } => values.first().cloned(),
+        _ => None,
+    }
 }
 
 async fn ephemeral_reply(
@@ -245,21 +292,41 @@ pub(super) async fn handle_sidecar_interaction(
     }
 
     match action {
-        "mac" | "device" => {
-            let selected = match &component.data.kind {
-                serenity::ComponentInteractionDataKind::StringSelect { values } => {
-                    values.first().cloned()
-                }
-                _ => None,
+        "mac" => {
+            let Some(mac) = selected_string_value(component) else {
+                component
+                    .create_response(ctx, serenity::CreateInteractionResponse::Acknowledge)
+                    .await?;
+                return Ok(());
             };
-            if let Some(value) = selected
+            // Switching host invalidates the previously-picked device, since the
+            // device list is re-queried per Mac.
+            if let Some(mut state) = SIDECAR_PENDING.get_mut(&message_id) {
+                state.mac = Some(mac.clone());
+                state.device = None;
+                state.updated_at = Instant::now();
+            }
+            // Defer the update (15-min window) so the per-Mac device probe (SSH
+            // for mac-mini) can run without risking the 3-second ack timeout,
+            // then re-render the device dropdown with that Mac's devices.
+            component
+                .create_response(ctx, serenity::CreateInteractionResponse::Acknowledge)
+                .await?;
+            let devices = list_sidecar_devices_on(&mac).await;
+            let components = build_sidecar_components(&devices, Some(&mac), None);
+            component
+                .edit_response(
+                    ctx,
+                    serenity::EditInteractionResponse::new().components(components),
+                )
+                .await?;
+            Ok(())
+        }
+        "device" => {
+            if let Some(value) = selected_string_value(component)
                 && let Some(mut state) = SIDECAR_PENDING.get_mut(&message_id)
             {
-                if action == "mac" {
-                    state.mac = Some(value);
-                } else {
-                    state.device = Some(value);
-                }
+                state.device = Some(value);
                 state.updated_at = Instant::now();
             }
             // Acknowledge without changing the card; the client keeps the
