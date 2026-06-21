@@ -93,7 +93,10 @@ pub(in crate::services::discord) fn build_sidecar_components(
     .max_values(1);
 
     let device_options: Vec<serenity::CreateSelectMenuOption> = if devices.is_empty() {
-        vec![serenity::CreateSelectMenuOption::new("Oh의 iPad", "Oh의 iPad")]
+        vec![serenity::CreateSelectMenuOption::new(
+            "Oh의 iPad",
+            "Oh의 iPad",
+        )]
     } else {
         devices
             .iter()
