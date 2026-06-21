@@ -5322,17 +5322,36 @@ pub(super) fn spawn_turn_bridge(
                                 );
                                 // #3041 P1-2 / B6: confirmed_end advance flows ONLY through the lease commit — `Delivered` on a committed replace, `NotDelivered` otherwise (mirrors pre-P1-2).
                                 let outcome = if let Some(lease) = lease {
+                                    let lease_range = lease.range();
                                     let outcome = if replace_committed {
                                         crate::services::discord::LeaseOutcome::Delivered
                                     } else {
                                         crate::services::discord::LeaseOutcome::NotDelivered
                                     };
-                                    lease.commit_and_advance(
+                                    let committed = lease.commit_and_advance(
                                         shared_owned.as_ref(),
                                         watcher_owner_channel_id,
                                         inflight_state.tmux_session_name.as_deref(),
                                         outcome,
                                     );
+                                    // #3630: durably mirror the delivered frontier (like
+                                    // the cutover/long-chunk paths). This legacy path
+                                    // advanced only the in-memory `confirmed_end_offset`,
+                                    // so after a restart (resets to 0) the no-inflight
+                                    // watcher re-relayed the already-delivered body as a
+                                    // DUPLICATE. Gated on `committed` to preserve M4
+                                    // (durable END mirrors confirmed_end_offset, #3610).
+                                    if committed {
+                                        super::outbound::delivery_record::shadow_mirror_delivered_frontier(
+                                            shared_owned.as_ref(),
+                                            &provider,
+                                            watcher_owner_channel_id,
+                                            lease_range,
+                                            true,
+                                            Some(current_msg_id.get()),
+                                            Some(channel_id.get()),
+                                        );
+                                    }
                                     replace_committed
                                 } else {
                                     // NoRange (zero/inverted range or no tmux session): NO new bytes → deliver without a lease and WITHOUT advancing (codex P1-b: no advance outside a commit).
