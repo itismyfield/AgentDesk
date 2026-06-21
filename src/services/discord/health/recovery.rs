@@ -1410,13 +1410,24 @@ pub(crate) fn inflight_completed_stale_leak_detected(
 ///   fill and that no live turn owns, so it never self-clears and the external
 ///   deadlock monitor flags it every ~30 min forever (#3629). CLEAN it.
 ///
-/// The actual removal at the call site is identity-guarded, so a newer turn's
-/// row is never clobbered — this predicate only decides intent. Kept as a pure
-/// seam so the fork is unit-testable without driving the watchdog loop.
+/// The removal at the call site is identity-guarded against the on-disk
+/// `user_msg_id`, so a newer turn's row is never clobbered — this predicate only
+/// decides intent. Kept as a pure seam so the fork is unit-testable without
+/// driving the watchdog loop.
+///
+/// `this_turn_user_msg_id == 0` is NEVER cleaned (codex #3629 review): a zero-id
+/// row cannot be distinguished from a LIVE recovery/TUI-direct turn
+/// (`RecoveryKickoff` holds a live cancel_token with `active_user_message_id =
+/// None`, so the "no active mailbox turn" precondition does not prove it is
+/// dead) nor from a NEWER pinned zero-id turn (the zero-owned guard only checks
+/// `user_msg_id == 0`, not identity). Only a real, non-zero user_msg_id can be
+/// identity-guarded safely, so zero-id rows keep the prior detection-only
+/// behavior.
 pub(crate) fn completed_stale_no_answer_orphan_should_clean(
     terminal_delivery_committed: bool,
+    this_turn_user_msg_id: u64,
 ) -> bool {
-    !terminal_delivery_committed
+    !terminal_delivery_committed && this_turn_user_msg_id != 0
 }
 
 fn outbound_activity_is_recent(
@@ -1784,33 +1795,31 @@ pub(crate) async fn run_stall_watchdog_pass(
                 if !has_unrelayed_answer {
                     // #3629: a completed-stale row with no unrelayed answer is
                     // either a delivered-and-idle turn (committed → preserve) or
-                    // a never-committed NO_REPLY/empty orphan (clean). See
-                    // `completed_stale_no_answer_orphan_should_clean`. We only
+                    // a never-committed NO_REPLY/empty orphan (clean). We only
                     // reach here when the mailbox has NO active turn and the
-                    // relay is healthy, so a real live/hung turn (which holds an
-                    // active mailbox turn) can never be cleaned here.
+                    // relay is healthy. Only a real, NON-ZERO user_msg_id is
+                    // cleaned — zero-id rows are never auto-cleaned because they
+                    // can be a live recovery/TUI-direct turn or a newer pinned
+                    // zero-id turn (codex #3629 review). See
+                    // `completed_stale_no_answer_orphan_should_clean`.
                     let terminal_committed = leak_inflight
                         .as_ref()
                         .is_some_and(|s| s.terminal_delivery_committed);
-                    if completed_stale_no_answer_orphan_should_clean(terminal_committed) {
+                    let this_turn_user_msg_id =
+                        leak_inflight.as_ref().map(|s| s.user_msg_id).unwrap_or(0);
+                    if completed_stale_no_answer_orphan_should_clean(
+                        terminal_committed,
+                        this_turn_user_msg_id,
+                    ) {
                         // Identity-guarded removal: a newer turn that has since
                         // written this channel's row yields UserMsgMismatch and
                         // is preserved; planned-restart / rebind-origin rows are
                         // skipped. We only ever delete THIS leaked turn's row.
-                        let this_turn_user_msg_id =
-                            leak_inflight.as_ref().map(|s| s.user_msg_id).unwrap_or(0);
-                        let clear_outcome = if this_turn_user_msg_id != 0 {
-                            discord::inflight::clear_inflight_state_if_matches(
-                                provider,
-                                channel_id.get(),
-                                this_turn_user_msg_id,
-                            )
-                        } else {
-                            discord::inflight::clear_inflight_state_if_matches_zero_owned(
-                                provider,
-                                channel_id.get(),
-                            )
-                        };
+                        let clear_outcome = discord::inflight::clear_inflight_state_if_matches(
+                            provider,
+                            channel_id.get(),
+                            this_turn_user_msg_id,
+                        );
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         tracing::warn!(
                             "  [{ts}] 🧹 #3629 cleaned NO_REPLY/empty orphan inflight on channel {} (provider={}, outcome={:?})",
@@ -3039,14 +3048,24 @@ mod stall_watchdog_pure_tests {
     }
 
     /// #3629: a completed-stale, no-unrelayed-answer row is cleaned ONLY when it
-    /// never committed a terminal delivery (NO_REPLY/empty orphan). A committed
-    /// delivered-and-idle row (#3126 wakeup-waiting) must be preserved.
+    /// never committed a terminal delivery (NO_REPLY/empty orphan) AND it has a
+    /// real, non-zero user_msg_id. A committed delivered-and-idle row (#3126
+    /// wakeup-waiting) and any zero-id row (live recovery / newer pinned zero-id
+    /// turn, codex #3629 review) must be preserved.
     #[test]
-    fn completed_stale_no_answer_orphan_cleans_only_uncommitted() {
-        // NO_REPLY / empty terminal turn: nothing delivered → orphan → clean.
-        assert!(completed_stale_no_answer_orphan_should_clean(false));
-        // Delivered-and-idle turn (#3126): committed → preserve, never clean.
-        assert!(!completed_stale_no_answer_orphan_should_clean(true));
+    fn completed_stale_no_answer_orphan_cleans_only_uncommitted_nonzero() {
+        let real_id = 9_100_084_013_837_195_159u64;
+        // NO_REPLY / empty terminal turn with a real id: orphan → clean.
+        assert!(completed_stale_no_answer_orphan_should_clean(
+            false, real_id
+        ));
+        // Delivered-and-idle turn (#3126): committed → preserve.
+        assert!(!completed_stale_no_answer_orphan_should_clean(
+            true, real_id
+        ));
+        // Zero-id rows are NEVER auto-cleaned, regardless of committed state.
+        assert!(!completed_stale_no_answer_orphan_should_clean(false, 0));
+        assert!(!completed_stale_no_answer_orphan_should_clean(true, 0));
     }
 
     /// `inflight_completed_stale_leak_detected` requires every signal of the
