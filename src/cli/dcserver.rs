@@ -1436,6 +1436,13 @@ pub fn handle_dcserver(token: Option<String>) {
         match PolicyEngine::new_with_pg(&ad_config, Some(discord_pg_pool.clone())) {
             Ok(engine) => {
                 discord_engine = Some(engine.clone());
+                crate::engine::ops::turn_ops::set_global_health_registry(&health_registry);
+                // #3587: capture the main runtime handle so the policy thread
+                // drives turn-start on the durable runtime (a throwaway runtime
+                // would abort the turn's spawned streaming/bridge tasks).
+                crate::engine::ops::turn_ops::set_global_runtime_handle(
+                    tokio::runtime::Handle::current(),
+                );
                 let http_config = ad_config.clone();
                 let registry_for_http = health_registry.clone();
                 let http_pg_pool = Some(discord_pg_pool.clone());
