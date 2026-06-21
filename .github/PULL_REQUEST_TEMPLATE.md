@@ -10,7 +10,7 @@
 - [ ] **Duplicate PR guard:** I have checked for overlapping open PRs before creating this PR (especially for generated refresh work).
 - [ ] **No-change verification:** If this PR claims no change, I have verified it modifies zero files using `gh pr view --json files`. (If an unavoidable no-change PR is opened, its body lists the exact overlapping PR numbers and branches).
 - [ ] **Stale branch cleanup:** I am not salvaging a stale broad branch in-place. Instead, I am closing stale branches and recreating clean branches from main.
-- [ ] **Scratch file cleanup:** I have run `git status` or a changed-file audit to ensure no ad-hoc scratch files (e.g. `plan.md`) or unrelated test scripts are included in this PR.
+- [ ] **Scratch file cleanup:** I have run `git status` or a changed-file audit to ensure no ad-hoc scratch files (e.g. `plan.md`, `pr-body.md`) or unrelated test scripts (e.g. `.sh`, `.sql`) are included in this PR.
 
 ## Dashboard / UI checklist
 - [ ] **시안에 없는 기존 기능을 임의로 삭제하지 않았다.** Reference 시안(redesign reference)에서 빠진 위젯·필터·탭이라도 기존 dashboard에 있던 기능은 사용자 명시 제거 요청 없이 삭제하지 않는다. 시안의 톤·간격·타이포에 맞춰 확장하거나 별도 sub-issue로 분리한다. (관련 결정: #1254 audit, 2026-04-15 결정 기록)

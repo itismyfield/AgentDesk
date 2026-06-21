@@ -166,6 +166,25 @@ def main():
         stat, _ = run(f"gh pr diff {num} --repo {repo} --stat")
         print(f"Stat:\n{stat}")
 
+        # PR files
+        files_json, _ = run(f"gh pr view {num} --repo {repo} --json files")
+        files_data = {}
+        try:
+            if files_json:
+                files_data = json.loads(files_json)
+        except Exception:
+            pass
+
+        # Scratch file detection
+        if files_data.get("files") is not None:
+            scratch_files = []
+            for f in files_data["files"]:
+                path = f.get("path", "")
+                if path in ["pr-body.md", "plan.md"] or path.endswith((".sh", ".sql")):
+                    scratch_files.append(path)
+            if scratch_files:
+                print(f"  [!] SCRATCH FILE DETECTED: PR includes scratch files like pr-body.md, plan.md, or test scripts ({', '.join(scratch_files)}).")
+
         if is_stale:
             print(f"  [!] STALE BRANCH: Head commit is > 14 days old. Treat as queue debt. Close or recommend closing instead of salvaging in place.")
             if not has_stale_branch_cleanup_ack(body):
@@ -175,18 +194,13 @@ def main():
         if "no-change" in title.lower():
             if not has_no_change_verification_ack(body):
                 print("  [!] MISSING NO-CHANGE VERIFICATION CHECK: PR body lacks a completed no-change verification acknowledgement.")
-            files_json, _ = run(f"gh pr view {num} --repo {repo} --json files")
-            try:
-                files_data = json.loads(files_json)
-                if files_data.get("files") is not None:
-                    if len(files_data["files"]) > 0:
-                        print(f"  [!] UNSAFE NO-CHANGE PR: Title claims no-change but modifies {len(files_data['files'])} files.")
-                    else:
-                        print(f"  [i] EMPTY NO-CHANGE PR: No changed files. If no durable queue-hygiene artifact is changed, it is a close candidate (report only).")
-                        if not has_overlap_reference(body):
-                            print("  [!] MISSING OVERLAP REFERENCE: Empty no-change PR body must explicitly list the exact overlapping PR numbers and branches.")
-            except Exception:
-                pass
+            if files_data.get("files") is not None:
+                if len(files_data["files"]) > 0:
+                    print(f"  [!] UNSAFE NO-CHANGE PR: Title claims no-change but modifies {len(files_data['files'])} files.")
+                else:
+                    print(f"  [i] EMPTY NO-CHANGE PR: No changed files. If no durable queue-hygiene artifact is changed, it is a close candidate (report only).")
+                    if not has_overlap_reference(body):
+                        print("  [!] MISSING OVERLAP REFERENCE: Empty no-change PR body must explicitly list the exact overlapping PR numbers and branches.")
 
         # PR #199/#200/#201 lesson: check for multiple inventory refreshes
         if "inventory" in title.lower() and "refresh" in title.lower():
