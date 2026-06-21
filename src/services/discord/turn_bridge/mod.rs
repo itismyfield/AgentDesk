@@ -5322,17 +5322,39 @@ pub(super) fn spawn_turn_bridge(
                                 );
                                 // #3041 P1-2 / B6: confirmed_end advance flows ONLY through the lease commit — `Delivered` on a committed replace, `NotDelivered` otherwise (mirrors pre-P1-2).
                                 let outcome = if let Some(lease) = lease {
+                                    let lease_range = lease.range();
                                     let outcome = if replace_committed {
                                         crate::services::discord::LeaseOutcome::Delivered
                                     } else {
                                         crate::services::discord::LeaseOutcome::NotDelivered
                                     };
-                                    lease.commit_and_advance(
+                                    let committed = lease.commit_and_advance(
                                         shared_owned.as_ref(),
                                         watcher_owner_channel_id,
                                         inflight_state.tmux_session_name.as_deref(),
                                         outcome,
                                     );
+                                    // #3630: durably mirror the delivered frontier (like
+                                    // the cutover/long-chunk paths) so a post-restart
+                                    // no-inflight watcher dedups it instead of re-relaying
+                                    // the already-delivered body as a DUPLICATE. Gate on
+                                    // `replace_committed && committed`: commit_and_advance
+                                    // returns true on ANY successful lease commit (incl.
+                                    // NotDelivered) but only Delivered advances
+                                    // confirmed_end_offset — recording on NotDelivered would
+                                    // break M4 (durable END must mirror confirmed_end) and
+                                    // wrongly suppress a retry (#3610, codex #3630 review).
+                                    if replace_committed && committed {
+                                        super::outbound::delivery_record::shadow_mirror_delivered_frontier(
+                                            shared_owned.as_ref(),
+                                            &provider,
+                                            watcher_owner_channel_id,
+                                            lease_range,
+                                            true,
+                                            Some(current_msg_id.get()),
+                                            Some(channel_id.get()),
+                                        );
+                                    }
                                     replace_committed
                                 } else {
                                     // NoRange (zero/inverted range or no tmux session): NO new bytes → deliver without a lease and WITHOUT advancing (codex P1-b: no advance outside a commit).
