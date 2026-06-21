@@ -448,10 +448,14 @@ pub async fn replace_transcripts_pg(
     meeting_id: &str,
     entries: &[TranscriptEntry],
 ) -> Result<i64, sqlx::Error> {
-    sqlx::query("DELETE FROM meeting_transcripts WHERE meeting_id = $1")
+    // Behavior-preserving: the original route ignored DELETE failures and
+    // proceeded to insert replacement entries (see git history of
+    // src/server/routes/meetings.rs). Keep that semantics — a failed DELETE
+    // must not short-circuit the replacement insert.
+    let _ = sqlx::query("DELETE FROM meeting_transcripts WHERE meeting_id = $1")
         .bind(meeting_id)
         .execute(pool)
-        .await?;
+        .await;
 
     let mut next_seq = 1i64;
     for entry in entries {
