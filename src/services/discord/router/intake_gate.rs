@@ -1665,6 +1665,14 @@ pub(in crate::services::discord) async fn handle_event(
                     )
                     .await;
                 }
+                if super::super::sidecar_interaction::is_sidecar_custom_id(
+                    &component.data.custom_id,
+                ) {
+                    return super::super::sidecar_interaction::handle_sidecar_interaction(
+                        ctx, component, data,
+                    )
+                    .await;
+                }
             }
         }
         serenity::FullEvent::ReactionRemove { removed_reaction } => {

@@ -213,6 +213,7 @@ pub(super) fn run_bot_build_slash_commands() -> Vec<poise::Command<Data, Error>>
         commands::cmd_cc(),
         commands::cmd_metrics(),
         commands::cmd_model(),
+        commands::cmd_sidecar(),
         commands::cmd_fast(),
         commands::cmd_goals(),
         commands::cmd_effort(),

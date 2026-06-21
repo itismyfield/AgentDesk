@@ -329,7 +329,10 @@
 # `handle_event` (restores the announce branch removed by #3478). The call
 # site lives in the root event handler; the gate logic itself stays in the
 # non-giant `dispatch_policy.rs`.
-"src/services/discord/router/intake_gate.rs" = 2978
+# /sidecar component dispatch: +8 (2978 -> 2986) for the `is_sidecar_custom_id`
+# check + handler delegation in the `InteractionCreate` arm of `handle_event`;
+# the handler logic itself lives in the non-giant `sidecar_interaction.rs`.
+"src/services/discord/router/intake_gate.rs" = 2986
 "src/services/discord/formatting.rs" = 2802
 # #3038 run_bot S0/S1: lowered 2802 -> 1918 by adding characterization tests and
 # moving restored_state, queued_placeholders, startup_doctor, orphan_recovery,
