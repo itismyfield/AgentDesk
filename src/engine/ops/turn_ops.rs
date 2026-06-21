@@ -33,6 +33,38 @@ fn get_health_registry() -> Option<std::sync::Arc<HealthRegistry>> {
         .and_then(Weak::upgrade)
 }
 
+// ── Main runtime handle ─────────────────────────────────────────────────────
+//
+// #3587: the policy-engine thread is a plain std::thread with no tokio runtime,
+// so driving the handoff through the generic async bridge builds a *throwaway*
+// runtime. `start_agent_handoff_turn` spawns the turn's streaming/bridge/
+// watchdog tasks onto the current runtime and returns immediately — but the
+// throwaway runtime is dropped the moment `block_on` returns, aborting those
+// tasks (JS would see `{ok:true}` for a turn that never actually runs).
+//
+// To fix this we drive the future on the *main* runtime handle (captured at
+// dcserver startup), which lives for the whole process, so the spawned tasks
+// survive after this synchronous call returns.
+static GLOBAL_RUNTIME_HANDLE: Mutex<Option<tokio::runtime::Handle>> = Mutex::new(None);
+
+/// Called once from dcserver setup (from within the async runtime) so the
+/// policy-engine thread can drive turn-start on the durable main runtime.
+pub fn set_global_runtime_handle(handle: tokio::runtime::Handle) {
+    if let Ok(mut slot) = GLOBAL_RUNTIME_HANDLE.lock() {
+        *slot = Some(handle);
+    }
+}
+
+fn get_runtime_handle() -> Option<tokio::runtime::Handle> {
+    GLOBAL_RUNTIME_HANDLE.lock().ok()?.clone()
+}
+
+/// Max time the policy thread blocks waiting for a turn to *start* (spawn). The
+/// turn itself runs on the main runtime past this point — this only bounds the
+/// synchronous start (binding lookup + headless spawn), so the policy engine
+/// never wedges if Postgres or the registry stalls.
+const TURN_START_BRIDGE_TIMEOUT_SECS: u64 = 30;
+
 // ── Host binding ───────────────────────────────────────────────────────────
 
 pub(super) fn register_turn_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> JsResult<()> {
@@ -79,7 +111,14 @@ pub(super) fn register_turn_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) ->
                     optJson
                 );
                 var result = JSON.parse(raw);
-                if (!result.ok) throw new Error(result.error || "turn.start failed");
+                if (!result.ok) {
+                    var err = new Error(result.error || "turn.start failed");
+                    // Preserve the structured status (conflict/unavailable/
+                    // timeout/error) so callers can branch instead of regex-ing
+                    // the message.
+                    err.status = result.status;
+                    throw err;
+                }
                 return result;
             };
         })();
@@ -137,31 +176,53 @@ fn start_turn_raw(
         return err_json("Discord not available (standalone mode)", "unavailable");
     };
 
-    // Run the async handoff synchronously via the bridge.
+    let Some(runtime) = get_runtime_handle() else {
+        return err_json("policy runtime handle unavailable", "unavailable");
+    };
+
+    // The policy-engine host fn runs on a non-async thread. If it is somehow
+    // invoked from inside a runtime, `Handle::block_on` would panic — return a
+    // clean error instead of crashing the engine.
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return err_json("turn.start cannot run inside an async context", "error");
+    }
+
     let agent_id_owned = agent_id.to_string();
     let prompt_owned = prompt.to_string();
     let from_owned = from_agent_id.to_string();
-
     let pool_owned = pool.clone();
-    let result = crate::utils::async_bridge::block_on_result(
-        async move {
-            crate::services::discord::agent_handoff::start_agent_handoff_turn(
-                &registry,
-                &pool_owned,
-                &from_owned,
-                &agent_id_owned,
-                &prompt_owned,
-                channel_kind,
-                prefix,
-                None, // expect_reply: None → no contract appended
-                Some("js:turn.start".to_string()),
-                None, // metadata
-            )
-            .await
-            .map_err(|e| e.one_line())
-        },
-        |e: String| e,
-    );
+
+    // Drive the handoff on the MAIN runtime so the turn's spawned background
+    // tasks outlive this call (#3587). Bound only the *start* with a timeout —
+    // the turn itself keeps running on the main runtime afterwards.
+    let result: Result<
+        crate::services::discord::agent_handoff::AgentHandoffTurnResponse,
+        (u16, String),
+    > = runtime.block_on(async move {
+        let start_fut = crate::services::discord::agent_handoff::start_agent_handoff_turn(
+            &registry,
+            &pool_owned,
+            &from_owned,
+            &agent_id_owned,
+            &prompt_owned,
+            channel_kind,
+            prefix,
+            None, // expect_reply: None → no contract appended
+            Some("js:turn.start".to_string()),
+            None, // metadata
+        );
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(TURN_START_BRIDGE_TIMEOUT_SECS),
+            start_fut,
+        )
+        .await
+        {
+            Ok(Ok(response)) => Ok(response),
+            // Preserve the precise HTTP status so JS can distinguish 409/503.
+            Ok(Err(e)) => Err((e.status().as_u16(), e.one_line())),
+            Err(_) => Err((504, "turn.start timed out while starting".to_string())),
+        }
+    });
 
     match result {
         Ok(response) => {
@@ -169,14 +230,16 @@ fn start_turn_raw(
             v["ok"] = serde_json::Value::Bool(true);
             v.to_string()
         }
-        Err(err_msg) => {
-            // Detect conflict vs generic failure from the error string.
-            let status = if err_msg.contains("conflict") || err_msg.contains("409") {
-                "conflict"
-            } else if err_msg.contains("unavailable") || err_msg.contains("503") {
-                "unavailable"
-            } else {
-                "error"
+        Err((code, err_msg)) => {
+            // Classify by the real HTTP status, not by string-sniffing (the
+            // busy-mailbox conflict message is "agent mailbox is busy ...",
+            // which never contained "conflict"/"409").
+            let status = match code {
+                409 => "conflict",
+                503 => "unavailable",
+                404 => "not_found",
+                504 => "timeout",
+                _ => "error",
             };
             err_json(&err_msg, status)
         }
