@@ -24,6 +24,7 @@ mod queue_ops;
 mod review_automation_ops;
 mod review_ops;
 mod runtime_ops;
+pub(crate) mod turn_ops;
 
 pub(crate) use db_ops::execute_policy_sql;
 pub(crate) use review_ops::{ADVANCE_REVIEW_ROUND_HINT_KEY, ensure_js_error_json};
@@ -81,7 +82,8 @@ fn register_globals_pg_only(
     exec_ops::register_exec_ops(ctx)?;
     pipeline_ops::register_pipeline_ops(ctx, pg_pool.clone())?;
     dm_reply_ops::register_dm_reply_ops(ctx, pg_pool.clone())?;
-    agent_ops::register_agent_ops(ctx, pg_pool)?;
+    agent_ops::register_agent_ops(ctx, pg_pool.clone())?;
+    turn_ops::register_turn_ops(ctx, pg_pool)?;
 
     Ok(())
 }

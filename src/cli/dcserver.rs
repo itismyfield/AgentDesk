@@ -1436,6 +1436,7 @@ pub fn handle_dcserver(token: Option<String>) {
         match PolicyEngine::new_with_pg(&ad_config, Some(discord_pg_pool.clone())) {
             Ok(engine) => {
                 discord_engine = Some(engine.clone());
+                crate::engine::ops::turn_ops::set_global_health_registry(&health_registry);
                 let http_config = ad_config.clone();
                 let registry_for_http = health_registry.clone();
                 let http_pg_pool = Some(discord_pg_pool.clone());
