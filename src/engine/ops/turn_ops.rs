@@ -73,8 +73,10 @@ pub(super) fn register_turn_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) ->
     //   prefix: bool                 (default: true)
     //
     // Returns JSON that the JS wrapper parses into:
-    //   { ok: true,  turn_id, to_agent_id, channel_id, channel_kind, status }
-    //   { ok: false, error, status: "conflict" | "unavailable" | "error" }
+    //   { ok: true,  status: "dispatched", to_agent_id }   (turn started async)
+    //   { ok: false, error, status: "unavailable" | "error" }   (sync validation)
+    // The turn is dispatched fire-and-forget onto the main runtime; its outcome
+    // (started/conflict/error) is logged, not returned synchronously (#3587).
     let pg = pg_pool;
     turn_obj.set(
         "__startRaw",
@@ -174,33 +176,28 @@ fn start_turn_raw(
         return err_json("policy runtime handle unavailable", "unavailable");
     };
 
-    // The policy-engine host fn runs on a non-async thread. If it is somehow
-    // invoked from inside a runtime, `Handle::block_on` would panic — return a
-    // clean error instead of crashing the engine.
-    if tokio::runtime::Handle::try_current().is_ok() {
-        return err_json("turn.start cannot run inside an async context", "error");
-    }
-
     let agent_id_owned = agent_id.to_string();
     let prompt_owned = prompt.to_string();
     let from_owned = from_agent_id.to_string();
     let pool_owned = pool.clone();
 
-    // Drive the handoff on the MAIN runtime so the turn's spawned background
-    // tasks outlive this call (#3587).
+    // Fire-and-forget on the MAIN runtime — do NOT block the policy thread.
     //
-    // No timeout wrapper here: the start future is NOT cancel-safe — it claims
-    // the agent mailbox before spawning the turn, so dropping it mid-flight
-    // (e.g. on a timeout) would strand the mailbox as busy (#3587 re-review).
-    // It only awaits a bounded binding lookup + the headless spawn (which
-    // returns immediately, not after the turn), so we let it run to completion
-    // exactly like the HTTP handoff path. DB awaits are bounded by the pool's
-    // acquire/statement timeouts.
-    let result: Result<
-        crate::services::discord::agent_handoff::AgentHandoffTurnResponse,
-        (u16, String),
-    > = runtime.block_on(async move {
-        crate::services::discord::agent_handoff::start_agent_handoff_turn(
+    // The policy-engine host fn runs on a non-async thread that must return
+    // quickly (cf. agentdesk.message.queue, which only does a fast outbox
+    // insert). The turn-start path is the opposite: it claims the agent mailbox
+    // and *then* performs fallible pre-spawn work (session/workspace resolution,
+    // Discord REST) before spawning the turn's background tasks. Driving that
+    // synchronously from the policy thread is unsafe either way (#3587 reviews):
+    //   - with a timeout, cancelling mid-flight strands the claimed mailbox;
+    //   - without one, a slow/stalled start wedges the policy actor while the
+    //     mailbox stays claimed.
+    // So we spawn it onto the durable runtime (where its tasks must live anyway)
+    // and return immediately. The task is never cancelled, so the mailbox path
+    // always runs to completion exactly like the HTTP handoff caller; conflicts
+    // and errors are logged rather than surfaced synchronously to JS.
+    runtime.spawn(async move {
+        match crate::services::discord::agent_handoff::start_agent_handoff_turn(
             &registry,
             &pool_owned,
             &from_owned,
@@ -213,29 +210,36 @@ fn start_turn_raw(
             None, // metadata
         )
         .await
-        // Preserve the precise HTTP status so JS can distinguish 409/503.
-        .map_err(|e| (e.status().as_u16(), e.one_line()))
+        {
+            Ok(response) => {
+                tracing::info!(
+                    to_agent = %agent_id_owned,
+                    result = %response.to_value(),
+                    "js turn.start dispatched"
+                );
+            }
+            Err(e) => {
+                // Classify by the real HTTP status (the busy-mailbox conflict
+                // message is "agent mailbox is busy ...", not "conflict"/"409").
+                tracing::warn!(
+                    to_agent = %agent_id_owned,
+                    status = e.status().as_u16(),
+                    error = %e.one_line(),
+                    "js turn.start failed"
+                );
+            }
+        }
     });
 
-    match result {
-        Ok(response) => {
-            let mut v = response.to_value();
-            v["ok"] = serde_json::Value::Bool(true);
-            v.to_string()
-        }
-        Err((code, err_msg)) => {
-            // Classify by the real HTTP status, not by string-sniffing (the
-            // busy-mailbox conflict message is "agent mailbox is busy ...",
-            // which never contained "conflict"/"409").
-            let status = match code {
-                409 => "conflict",
-                503 => "unavailable",
-                404 => "not_found",
-                _ => "error",
-            };
-            err_json(&err_msg, status)
-        }
-    }
+    // The turn-start was dispatched onto the main runtime. We acknowledge the
+    // dispatch synchronously; the actual start outcome (started/conflict/error)
+    // is observable via logs and the target agent's activity.
+    serde_json::json!({
+        "ok": true,
+        "status": "dispatched",
+        "to_agent_id": agent_id,
+    })
+    .to_string()
 }
 
 fn err_json(error: &str, status: &str) -> String {
