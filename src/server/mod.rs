@@ -2732,13 +2732,6 @@ async fn routine_runtime_loop(
         // alert the operator instead of letting it silently never run again. The
         // knob defaults to 0 (disabled), so this is a no-op for deployments that
         // have not opted in.
-        //
-        // Visibility only — we intentionally do NOT auto-resume here. Reliably
-        // telling a failure-induced pause apart from a deliberate one needs a
-        // structural pause-cause field on the routine (the `last_result`
-        // heuristic has both false positives and false negatives), which is out
-        // of scope for this change; opt-in auto-resume is deferred to a
-        // follow-up that adds a pause-cause column.
         let stale_paused_alert_secs = routines_config.stale_paused_alert_secs;
         if stale_paused_alert_secs > 0 {
             let now = chrono::Utc::now();
@@ -2761,6 +2754,47 @@ async fn routine_runtime_loop(
                 }
                 Err(error) => {
                     tracing::warn!(error = %error, "routine stale-paused scan failed")
+                }
+            }
+        }
+        // #3573: opt-in auto-resume for failure-paused routines. Only routines
+        // with `pause_reason = 'failure'` are eligible; manual/migration_invalid/
+        // NULL rows are never touched. The `ResumeRequiresNextDueAt` guard is
+        // applied inside `auto_resume_failure_paused_routine`. The knob defaults
+        // to 0 (disabled); set to e.g. 3600 to enable with a 1-hour backoff.
+        let auto_resume_secs = routines_config.failure_pause_auto_resume_secs;
+        if auto_resume_secs > 0 {
+            let now = chrono::Utc::now();
+            let cutoff = now - chrono::Duration::seconds(auto_resume_secs as i64);
+            match store.list_failure_paused_routines(cutoff).await {
+                Ok(candidates) => {
+                    for routine in &candidates {
+                        match store.auto_resume_failure_paused_routine(&routine.id).await {
+                            Ok(true) => {
+                                tracing::info!(
+                                    routine_id = %routine.id,
+                                    routine_name = %routine.name,
+                                    "auto-resumed failure-paused routine"
+                                );
+                            }
+                            Ok(false) => {
+                                tracing::debug!(
+                                    routine_id = %routine.id,
+                                    "auto-resume: routine no longer eligible (already resumed or re-paused)"
+                                );
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    routine_id = %routine.id,
+                                    error = %error,
+                                    "auto-resume failure-paused routine failed"
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "routine auto-resume scan failed")
                 }
             }
         }

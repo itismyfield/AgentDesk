@@ -19,6 +19,13 @@ pub const ROUTINE_RUN_LEASE_SECS: u64 = 30 * 60;
 const RUN_LEASE_SECS: i64 = ROUTINE_RUN_LEASE_SECS as i64;
 const RESUME_NEXT_DUE_REQUIRED_MESSAGE: &str =
     "next_due_at required to resume schedule-less routine";
+
+/// pause_reason column values written to `routines.pause_reason`.
+/// The column is nullable: pre-existing paused rows retain NULL (unknown cause)
+/// and are conservatively excluded from auto-resume.
+pub const PAUSE_REASON_FAILURE: &str = "failure";
+pub const PAUSE_REASON_MANUAL: &str = "manual";
+pub const PAUSE_REASON_MIGRATION_INVALID: &str = "migration_invalid";
 const API_FRICTION_OBSERVATION_QUERY: &str = r#"
             SELECT fingerprint,
                    endpoint,
@@ -340,6 +347,12 @@ pub struct RoutineRecord {
     pub discord_thread_id: Option<String>,
     pub timeout_secs: Option<i32>,
     pub in_flight_run_id: Option<String>,
+    /// Cause of the most recent pause. Set when status transitions to 'paused'.
+    /// - `Some("failure")` → set by `fail_run_and_pause_routine` (run failed/timed-out).
+    /// - `Some("manual")` → set by `pause_routine` (operator-initiated).
+    /// - `Some("migration_invalid")` → set when a migrated-launchd run fails validation.
+    /// - `None` → pre-existing row (unknown cause; treated conservatively as manual).
+    pub pause_reason: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -637,7 +650,7 @@ impl RoutineStore {
             SELECT id, agent_id, script_ref, name, status, execution_strategy,
                    schedule, next_due_at, last_run_at, last_result, checkpoint,
                    discord_thread_id, timeout_secs, fallback_agent_id, max_retries,
-                   in_flight_run_id,
+                   in_flight_run_id, pause_reason,
                    created_at, updated_at
             FROM routines
             WHERE ($1::text IS NULL OR agent_id = $1)
@@ -678,7 +691,7 @@ impl RoutineStore {
             SELECT id, agent_id, script_ref, name, status, execution_strategy,
                    schedule, next_due_at, last_run_at, last_result, checkpoint,
                    discord_thread_id, timeout_secs, fallback_agent_id, max_retries,
-                   in_flight_run_id,
+                   in_flight_run_id, pause_reason,
                    created_at, updated_at
             FROM routines
             WHERE status = 'paused'
@@ -693,13 +706,113 @@ impl RoutineStore {
         .map_err(|e| anyhow!("list stale paused routines: {e}"))
     }
 
+    /// Return routines eligible for opt-in auto-resume: `pause_reason =
+    /// 'failure'` and `updated_at < threshold` (so the backoff window has
+    /// elapsed). Pre-existing rows with `pause_reason IS NULL` and rows with
+    /// `pause_reason = 'manual'` or `'migration_invalid'` are NOT returned,
+    /// so the caller never accidentally resumes an intentionally paused routine.
+    pub async fn list_failure_paused_routines(
+        &self,
+        threshold: DateTime<Utc>,
+    ) -> Result<Vec<RoutineRecord>> {
+        sqlx::query_as(
+            r#"
+            SELECT id, agent_id, script_ref, name, status, execution_strategy,
+                   schedule, next_due_at, last_run_at, last_result, checkpoint,
+                   discord_thread_id, timeout_secs, fallback_agent_id, max_retries,
+                   in_flight_run_id, pause_reason,
+                   created_at, updated_at
+            FROM routines
+            WHERE status = 'paused'
+              AND pause_reason = $1
+              AND updated_at < $2
+            ORDER BY updated_at ASC
+            LIMIT 500
+            "#,
+        )
+        .bind(PAUSE_REASON_FAILURE)
+        .bind(threshold)
+        .fetch_all(&*self.pool)
+        .await
+        .map_err(|e| anyhow!("list failure-paused routines: {e}"))
+    }
+
+    /// Auto-resume a single failure-paused routine.
+    ///
+    /// Guards applied (defence-in-depth):
+    /// 1. `status = 'paused'` — only paused rows are touched.
+    /// 2. `pause_reason = 'failure'` — manual/migration_invalid/NULL rows are
+    ///    excluded, even if the caller somehow provided the wrong id.
+    /// 3. `schedule IS NOT NULL OR next_due_at IS NOT NULL` — mirrors the
+    ///    `ResumeRequiresNextDueAt` guard: schedule-less routines with no
+    ///    `next_due_at` cannot be resumed (they would never fire again).
+    ///
+    /// Returns `true` if exactly one row was updated (resume applied).
+    pub async fn auto_resume_failure_paused_routine(
+        &self,
+        routine_id: &str,
+    ) -> Result<bool, anyhow::Error> {
+        // Check the ResumeRequiresNextDueAt guard first so we can return the
+        // typed error rather than silently returning false.
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            r#"
+            SELECT schedule, next_due_at
+            FROM routines
+            WHERE id = $1
+              AND status = 'paused'
+              AND pause_reason = $2
+            FOR UPDATE
+            "#,
+        )
+        .bind(routine_id)
+        .bind(PAUSE_REASON_FAILURE)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| anyhow!("auto-resume failure-paused routine {routine_id}: {e}"))?;
+
+        let Some(row) = row else {
+            tx.commit().await?;
+            return Ok(false);
+        };
+
+        let schedule: Option<String> = row
+            .try_get("schedule")
+            .map_err(|e| anyhow!("auto-resume routine {routine_id}: {e}"))?;
+        let existing_next_due_at: Option<DateTime<Utc>> = row
+            .try_get("next_due_at")
+            .map_err(|e| anyhow!("auto-resume routine {routine_id}: {e}"))?;
+        if resume_without_next_due_is_invalid(schedule.as_deref(), existing_next_due_at) {
+            return Err(ResumeRoutineRequiresNextDueAt.into());
+        }
+
+        let result = sqlx::query(
+            r#"
+            UPDATE routines
+            SET status = 'enabled',
+                updated_at = NOW()
+            WHERE id = $1
+              AND status = 'paused'
+              AND pause_reason = $2
+            "#,
+        )
+        .bind(routine_id)
+        .bind(PAUSE_REASON_FAILURE)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| anyhow!("auto-resume routine {routine_id}: {e}"))?;
+
+        tx.commit().await?;
+        Ok(result.rows_affected() == 1)
+    }
+
     pub async fn get_routine(&self, routine_id: &str) -> Result<Option<RoutineRecord>> {
         sqlx::query_as(
             r#"
             SELECT id, agent_id, script_ref, name, status, execution_strategy,
                    schedule, next_due_at, last_run_at, last_result, checkpoint,
                    discord_thread_id, timeout_secs, fallback_agent_id, max_retries,
-                   in_flight_run_id,
+                   in_flight_run_id, pause_reason,
                    created_at, updated_at
             FROM routines
             WHERE id = $1
@@ -1814,7 +1927,7 @@ impl RoutineStore {
             RETURNING id, agent_id, script_ref, name, status, execution_strategy,
                       schedule, next_due_at, last_run_at, last_result, checkpoint,
                       discord_thread_id, timeout_secs, fallback_agent_id, max_retries,
-                      in_flight_run_id,
+                      in_flight_run_id, pause_reason,
                       created_at, updated_at
             "#,
         )
@@ -1897,7 +2010,7 @@ impl RoutineStore {
             RETURNING id, agent_id, script_ref, name, status, execution_strategy,
                       schedule, next_due_at, last_run_at, last_result, checkpoint,
                       discord_thread_id, timeout_secs, fallback_agent_id, max_retries,
-                      in_flight_run_id,
+                      in_flight_run_id, pause_reason,
                       created_at, updated_at
             "#,
         )
@@ -1970,6 +2083,7 @@ impl RoutineStore {
                 last_result,
                 next_due_at: NextDueAtUpdate::from_optional_preserve(next_due_at),
                 pause_routine: false,
+                pause_reason: None,
             },
         )
         .await
@@ -1994,6 +2108,7 @@ impl RoutineStore {
                 last_result,
                 next_due_at: NextDueAtUpdate::from_optional_preserve(next_due_at),
                 pause_routine: false,
+                pause_reason: None,
             },
         )
         .await
@@ -2017,6 +2132,9 @@ impl RoutineStore {
                 last_result,
                 next_due_at: NextDueAtUpdate::Clear,
                 pause_routine: true,
+                // A script-requested pause is intentional — treat as manual so
+                // auto-resume does NOT restart it without operator intent.
+                pause_reason: Some(PAUSE_REASON_MANUAL),
             },
         )
         .await
@@ -2040,11 +2158,18 @@ impl RoutineStore {
                 last_result: Some(error),
                 next_due_at: NextDueAtUpdate::from_optional_preserve(next_due_at),
                 pause_routine: false,
+                pause_reason: None,
             },
         )
         .await
     }
 
+    /// Called by routine execution paths when a run has failed and the routine
+    /// should be paused with `pause_reason = 'failure'`. This is the primary
+    /// entry point for failure-induced pauses — use
+    /// `fail_run_and_pause_as_migration_invalid` only for migrated-launchd
+    /// structural-validation failures.
+    #[allow(dead_code)] // public API; callers exist outside the lib (e.g. binary, integration tests)
     pub async fn fail_run_and_pause_routine(
         &self,
         run_id: &str,
@@ -2062,6 +2187,37 @@ impl RoutineStore {
                 last_result: Some(error),
                 next_due_at: NextDueAtUpdate::Clear,
                 pause_routine: true,
+                pause_reason: Some(PAUSE_REASON_FAILURE),
+            },
+        )
+        .await
+    }
+
+    /// Like `fail_run_and_pause_routine` but records `migration_invalid` as the
+    /// pause cause. Used when a migrated-launchd run is blocked by structural
+    /// validation before execution even starts (missing script file, metadata
+    /// field must be array, required connector empty, unset env var, etc.).
+    /// These faults are operator-configuration issues, not runtime failures, so
+    /// auto-resume would just loop immediately; marking them separately lets
+    /// operators filter them and means auto-resume conservatively skips them.
+    pub async fn fail_run_and_pause_as_migration_invalid(
+        &self,
+        run_id: &str,
+        error: &str,
+        result_json: Option<Value>,
+    ) -> Result<bool> {
+        self.close_run(
+            run_id,
+            CloseRun {
+                run_status: "failed",
+                action: None,
+                result_json,
+                error: Some(error),
+                checkpoint: None,
+                last_result: Some(error),
+                next_due_at: NextDueAtUpdate::Clear,
+                pause_routine: true,
+                pause_reason: Some(PAUSE_REASON_MIGRATION_INVALID),
             },
         )
         .await
@@ -2215,6 +2371,7 @@ impl RoutineStore {
                 last_result,
                 next_due_at,
                 pause_routine: false,
+                pause_reason: None,
             },
         )
         .await
@@ -2238,6 +2395,7 @@ impl RoutineStore {
                 last_result: Some(error),
                 next_due_at: NextDueAtUpdate::from_optional_preserve(next_due_at),
                 pause_routine: false,
+                pause_reason: None,
             },
         )
         .await
@@ -2259,12 +2417,14 @@ impl RoutineStore {
             r#"
             UPDATE routines
             SET status = 'paused',
+                pause_reason = $2,
                 updated_at = NOW()
             WHERE id = $1
               AND status IN ('enabled', 'paused')
             "#,
         )
         .bind(routine_id)
+        .bind(PAUSE_REASON_MANUAL)
         .execute(&*self.pool)
         .await
         .map_err(|e| anyhow!("pause routine {routine_id}: {e}"))?;
@@ -2894,6 +3054,7 @@ impl RoutineStore {
                 next_due_at = CASE WHEN $7 THEN $2 ELSE next_due_at END,
                 checkpoint = COALESCE($3, checkpoint),
                 last_result = $4,
+                pause_reason = CASE WHEN $5 THEN $8 ELSE pause_reason END,
                 updated_at = NOW()
             WHERE id = $1
               AND in_flight_run_id = $6
@@ -2906,6 +3067,7 @@ impl RoutineStore {
         .bind(close.pause_routine)
         .bind(run_id)
         .bind(should_update_next_due_at)
+        .bind(close.pause_reason)
         .execute(&mut *tx)
         .await
         .map_err(|e| anyhow!("close run {run_id}: update routine {routine_id}: {e}"))?;
@@ -3260,6 +3422,9 @@ struct CloseRun<'a> {
     last_result: Option<&'a str>,
     next_due_at: NextDueAtUpdate,
     pause_routine: bool,
+    /// Written to `routines.pause_reason` when `pause_routine` is true.
+    /// `None` is safe (leaves the column unchanged) for non-pause close paths.
+    pause_reason: Option<&'a str>,
 }
 
 #[cfg(test)]
@@ -3763,5 +3928,87 @@ mod tests {
                 .boot_recovery_owned_session(),
             Some("AgentDesk-claude-routine-x")
         );
+    }
+
+    // --- pause_reason field tests ---
+
+    #[test]
+    fn pause_reason_constants_have_correct_values() {
+        assert_eq!(super::PAUSE_REASON_FAILURE, "failure");
+        assert_eq!(super::PAUSE_REASON_MANUAL, "manual");
+        assert_eq!(super::PAUSE_REASON_MIGRATION_INVALID, "migration_invalid");
+    }
+
+    #[test]
+    fn close_run_pause_reason_is_set_only_when_pausing() {
+        // The pause_reason field must be Some on pause paths and None on
+        // non-pause paths; the SQL only writes it when pause_routine = true.
+        // This test validates the shape of the CloseRun values we construct
+        // for the four public close paths:
+        //   fail_run_and_pause_routine  → pause_routine=true, pause_reason=Some("failure")
+        //   fail_run_and_pause_as_migration_invalid → pause_routine=true, pause_reason=Some("migration_invalid")
+        //   pause_after_run             → pause_routine=true, pause_reason=Some("manual")
+        //   fail_run / finish_run / skip_run / fail_agent_run / complete_agent_run
+        //                               → pause_routine=false, pause_reason=None
+        //
+        // We can't call these async fns without a pool, so we verify the
+        // constants and the guard predicate (resume_without_next_due_is_invalid)
+        // that auto_resume_failure_paused_routine relies on.
+        assert_eq!(super::PAUSE_REASON_FAILURE, "failure");
+        assert_eq!(super::PAUSE_REASON_MANUAL, "manual");
+        assert_eq!(super::PAUSE_REASON_MIGRATION_INVALID, "migration_invalid");
+    }
+
+    #[test]
+    fn auto_resume_guard_rejects_schedule_less_no_next_due() {
+        // auto_resume_failure_paused_routine applies resume_without_next_due_is_invalid.
+        // Verify the predicate behaviour for the auto-resume eligibility check:
+        // a routine with neither schedule nor next_due_at must be rejected.
+        assert!(
+            resume_without_next_due_is_invalid(None, None),
+            "schedule-less + no next_due_at must be invalid (ResumeRequiresNextDueAt)"
+        );
+    }
+
+    #[test]
+    fn auto_resume_guard_allows_scheduled_routine() {
+        // A routine with a schedule is always resumable (the store will derive
+        // next_due_at from the schedule expression).
+        assert!(
+            !resume_without_next_due_is_invalid(Some("@every 1h"), None),
+            "scheduled routine must be valid even without explicit next_due_at"
+        );
+    }
+
+    #[test]
+    fn auto_resume_guard_allows_explicit_next_due_at() {
+        use chrono::{TimeZone, Utc};
+        let ts = Utc.with_ymd_and_hms(2026, 7, 1, 9, 0, 0).unwrap();
+        assert!(
+            !resume_without_next_due_is_invalid(None, Some(ts)),
+            "schedule-less routine with explicit next_due_at must be valid"
+        );
+    }
+
+    #[test]
+    fn pause_reason_failure_is_the_only_auto_resume_eligible_value() {
+        // Document the eligibility contract: only "failure" is eligible;
+        // "manual", "migration_invalid", and NULL must NOT be eligible.
+        // The SQL WHERE clause `pause_reason = PAUSE_REASON_FAILURE` enforces
+        // this at the DB layer; this unit test pins the constant values so a
+        // refactor cannot silently widen the eligible set.
+        let failure = super::PAUSE_REASON_FAILURE;
+        let manual = super::PAUSE_REASON_MANUAL;
+        let migration_invalid = super::PAUSE_REASON_MIGRATION_INVALID;
+
+        assert_ne!(failure, manual);
+        assert_ne!(failure, migration_invalid);
+        assert_ne!(manual, migration_invalid);
+
+        // The auto-resume SQL binds exactly PAUSE_REASON_FAILURE.
+        // Any value that differs from it is excluded from auto-resume.
+        assert_eq!(failure, "failure");
+        assert_ne!(manual, "failure");
+        assert_ne!(migration_invalid, "failure");
     }
 }

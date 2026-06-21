@@ -1364,8 +1364,8 @@
   (supervised-worker registry / leader-only lifecycle).
 - legacy_modules: none — these are shared runtime coordination surfaces.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/config.rs` (2447 lines).
-  - `src/server/mod.rs` (2593 lines; +6 from #3557 (A) long_turn_watchdog spawn).
+  - `src/config.rs` (2458 lines; +11 from #3573 failure_pause_auto_resume_secs config field).
+  - `src/server/mod.rs` (2627 lines; +34 from #3573 auto-resume tick in routine supervisor).
   - `src/receipt.rs` (1842 lines).
   - `src/github/sync.rs` (1513 lines).
   - `src/reconcile.rs` (1816 lines; periodic reconcile loop covering stale

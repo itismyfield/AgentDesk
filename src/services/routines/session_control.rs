@@ -920,6 +920,7 @@ mod tests {
             discord_thread_id: discord_thread_id.map(ToOwned::to_owned),
             timeout_secs: None,
             in_flight_run_id: None,
+            pause_reason: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

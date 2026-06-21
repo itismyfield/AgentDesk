@@ -56,7 +56,7 @@ pub async fn run_due_tick(
                 "blocked_by": "migrated_launchd_validation",
             }));
             let closed = store
-                .fail_run_and_pause_routine(&run.run_id, &message, result_json.clone())
+                .fail_run_and_pause_as_migration_invalid(&run.run_id, &message, result_json.clone())
                 .await?;
             if closed {
                 let outcome = RoutineRunOutcome {

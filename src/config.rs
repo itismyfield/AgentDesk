@@ -2103,6 +2103,16 @@ pub struct RoutinesConfig {
     /// day per routine).
     #[serde(default = "default_routines_stale_paused_alert_ttl_secs")]
     pub stale_paused_alert_ttl_secs: u64,
+    /// Opt-in auto-resume: automatically re-enable routines whose
+    /// `pause_reason = 'failure'` and that have been paused for at least this
+    /// many seconds (backoff window). Routines with `pause_reason = 'manual'`,
+    /// `'migration_invalid'`, or `NULL` (pre-existing rows) are NEVER touched.
+    /// The `ResumeRequiresNextDueAt` guard also applies: schedule-less routines
+    /// with no `next_due_at` are skipped.
+    ///
+    /// Defaults to 0 (disabled). Set to e.g. 3600 (1 hour) to enable.
+    #[serde(default)]
+    pub failure_pause_auto_resume_secs: u64,
 }
 
 impl Default for RoutinesConfig {
@@ -2120,6 +2130,7 @@ impl Default for RoutinesConfig {
             hot_reload: true,
             stale_paused_alert_secs: 0,
             stale_paused_alert_ttl_secs: default_routines_stale_paused_alert_ttl_secs(),
+            failure_pause_auto_resume_secs: 0,
         }
     }
 }
