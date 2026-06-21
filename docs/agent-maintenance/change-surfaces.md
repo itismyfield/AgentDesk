@@ -1304,7 +1304,7 @@
     paired example + 409 conflict error example + curl; +16 documenting the
     `expect_reply` reply-expectation param on /message and /handoff).
   - `src/server/routes/escalation.rs` (1376 lines).
-  - `src/server/routes/meetings.rs` (1265 lines; SQL extracted to `src/db/meetings.rs` in #3570 slice 1).
+  - `src/server/routes/meetings.rs` (1266 lines; SQL extracted to `src/db/meetings.rs` in #3570 slice 1).
   - `src/server/routes/review_verdict/decision_route.rs` was decomposed in
     #3038 slice 1 and S1-relocated into a 26-line route shim delegating to
     `src/services/review_decision.rs` plus sub-1000-line service modules under
