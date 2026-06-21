@@ -30,6 +30,7 @@ mod model_picker_interaction;
 pub(crate) mod monitoring_status;
 mod org_schema;
 pub(crate) mod org_writer;
+mod sidecar_interaction;
 pub(crate) mod outbound;
 mod placeholder_cleanup;
 mod placeholder_controller;
