@@ -6,10 +6,18 @@ use axum::{
 use poise::serenity_prelude::ChannelId;
 use serde::Deserialize;
 use serde_json::json;
-use sqlx::{PgPool, Row};
 use std::collections::{HashMap, HashSet};
 
 use super::AppState;
+use crate::db::meetings::{
+    TranscriptEntry, UpsertMeetingParams, delete_meeting_pg, discard_all_issues_pg,
+    discard_issue_pg, get_effective_rounds_pg, get_issue_url_pg, get_latest_summary_id_pg,
+    get_meeting_issue_repo_pg, get_meeting_summaries_pg, get_meeting_thread_id_pg,
+    get_next_transcript_seq_pg, insert_summary_transcript_pg, is_issue_discarded_pg,
+    list_meetings_pg, load_meeting_pg, meeting_existed_pg, meeting_exists_pg,
+    persist_meeting_query_hashes_pg, replace_transcripts_pg, store_issue_url_pg,
+    update_summary_transcript_pg, upsert_issue_repo_pg, upsert_meeting_record_pg,
+};
 use crate::services::discord::meeting_artifact_store::UpsertMeetingBody;
 use crate::services::discord::{health, meeting, settings};
 use crate::services::provider::ProviderKind;
@@ -106,7 +114,8 @@ fn clean_reason_signal_fragment(value: &str) -> Option<String> {
         }
     }
 
-    trimmed = trimmed.trim_matches(|ch: char| matches!(ch, '"' | '\'' | '`' | '“' | '”'));
+    trimmed =
+        trimmed.trim_matches(|ch: char| matches!(ch, '"' | '\'' | '`' | '\u{201C}' | '\u{201D}'));
     trimmed = trimmed.trim_start_matches(|ch: char| !ch.is_alphanumeric());
     trimmed = trimmed.trim_end_matches(|ch: char| !ch.is_alphanumeric());
 
@@ -501,146 +510,6 @@ fn apply_selection_reason_fallback(
     }
 }
 
-async fn load_transcripts_pg(pool: &PgPool, meeting_id: &str) -> Vec<serde_json::Value> {
-    sqlx::query(
-        "SELECT id, seq, round, speaker_agent_id, speaker_name, content, is_summary
-         FROM meeting_transcripts
-         WHERE meeting_id = $1
-         ORDER BY seq ASC, id ASC",
-    )
-    .bind(meeting_id)
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .map(|row| {
-        let speaker_agent_id = row
-            .try_get::<Option<String>, _>("speaker_agent_id")
-            .ok()
-            .flatten();
-        json!({
-            "id": row.try_get::<i64, _>("id").unwrap_or(0),
-            "seq": row.try_get::<Option<i64>, _>("seq").ok().flatten(),
-            "round": row.try_get::<Option<i64>, _>("round").ok().flatten(),
-            "speaker_role_id": speaker_agent_id,
-            "speaker_agent_id": row.try_get::<Option<String>, _>("speaker_agent_id").ok().flatten(),
-            "speaker_name": row.try_get::<Option<String>, _>("speaker_name").ok().flatten(),
-            "content": row.try_get::<Option<String>, _>("content").ok().flatten(),
-            "is_summary": row.try_get::<Option<bool>, _>("is_summary").ok().flatten().unwrap_or(false),
-        })
-    })
-    .collect()
-}
-
-async fn enrich_meeting_with_issue_data_pg(
-    pool: &PgPool,
-    meeting_id: &str,
-    obj: &mut serde_json::Map<String, serde_json::Value>,
-) {
-    let issue_repo = sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1")
-        .bind(format!("meeting_issue_repo:{meeting_id}"))
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten();
-    obj.insert("issue_repo".to_string(), json!(issue_repo));
-
-    let rows = sqlx::query("SELECT key, value FROM kv_meta WHERE key LIKE $1 ORDER BY key")
-        .bind(format!("meeting:{meeting_id}:issue:%:url"))
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
-    let mut issue_urls = serde_json::Map::new();
-    for row in rows {
-        let key = row.try_get::<String, _>("key").unwrap_or_default();
-        let value = row.try_get::<Option<String>, _>("value").ok().flatten();
-        if let Some(issue_key) = key
-            .strip_prefix(&format!("meeting:{meeting_id}:issue:"))
-            .and_then(|rest| rest.strip_suffix(":url"))
-        {
-            issue_urls.insert(issue_key.to_string(), json!(value));
-        }
-    }
-    obj.insert(
-        "issue_urls".to_string(),
-        serde_json::Value::Object(issue_urls),
-    );
-}
-
-async fn enrich_meeting_with_query_hashes_pg(
-    pool: &PgPool,
-    meeting_id: &str,
-    obj: &mut serde_json::Map<String, serde_json::Value>,
-) {
-    let meeting_hash = sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1")
-        .bind(format!("meeting_query_hash:{meeting_id}"))
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten();
-    obj.insert("meeting_hash".to_string(), json!(meeting_hash));
-
-    let thread_hash = sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1")
-        .bind(format!("meeting_thread_hash:{meeting_id}"))
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten();
-    obj.insert("thread_hash".to_string(), json!(thread_hash));
-}
-
-fn meeting_row_to_json_pg(row: &sqlx::postgres::PgRow) -> serde_json::Value {
-    let participant_names = row
-        .try_get::<Option<String>, _>("participant_names")
-        .ok()
-        .flatten()
-        .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
-        .unwrap_or_else(|| json!([]));
-    json!({
-        "id": row.try_get::<String, _>("id").unwrap_or_default(),
-        "channel_id": row.try_get::<Option<String>, _>("channel_id").ok().flatten(),
-        "thread_id": row.try_get::<Option<String>, _>("thread_id").ok().flatten(),
-        "agenda": row.try_get::<Option<String>, _>("title").ok().flatten(),
-        "title": row.try_get::<Option<String>, _>("title").ok().flatten(),
-        "status": row.try_get::<Option<String>, _>("status").ok().flatten(),
-        "effective_rounds": row.try_get::<Option<i64>, _>("effective_rounds").ok().flatten(),
-        "started_at": row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("started_at").ok().flatten().map(|ts| ts.timestamp_millis()),
-        "completed_at": row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("completed_at").ok().flatten().map(|ts| ts.timestamp_millis()),
-        "summary": row.try_get::<Option<String>, _>("summary").ok().flatten(),
-        "primary_provider": row.try_get::<Option<String>, _>("primary_provider").ok().flatten(),
-        "reviewer_provider": row.try_get::<Option<String>, _>("reviewer_provider").ok().flatten(),
-        "participant_names": participant_names,
-        "selection_reason": row.try_get::<Option<String>, _>("selection_reason").ok().flatten(),
-        "created_at": row.try_get::<Option<i64>, _>("created_at").ok().flatten(),
-    })
-}
-
-async fn load_meeting_pg(
-    pool: &PgPool,
-    id: &str,
-) -> Result<Option<serde_json::Value>, sqlx::Error> {
-    let Some(row) = sqlx::query(
-        "SELECT id, channel_id, thread_id, title, status, effective_rounds::BIGINT AS effective_rounds, started_at, completed_at, summary,
-                primary_provider, reviewer_provider, participant_names, selection_reason, created_at
-         FROM meetings WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?
-    else {
-        return Ok(None);
-    };
-    let mut meeting = meeting_row_to_json_pg(&row);
-    let transcripts = load_transcripts_pg(pool, id).await;
-    let obj = meeting.as_object_mut().expect("meeting json object");
-    obj.insert("transcripts".to_string(), json!(&transcripts));
-    obj.insert("entries".to_string(), json!(&transcripts));
-    enrich_meeting_with_issue_data_pg(pool, id, obj).await;
-    enrich_meeting_with_query_hashes_pg(pool, id, obj).await;
-    apply_selection_reason_fallback(obj, &transcripts);
-    Ok(Some(meeting))
-}
-
 // ── Handlers ───────────────────────────────────────────────────
 
 /// GET /api/round-table-meetings
@@ -652,44 +521,13 @@ pub async fn list_meetings(State(state): State<AppState>) -> (StatusCode, Json<s
         );
     };
 
-    let rows = match sqlx::query(
-        "SELECT id, channel_id, thread_id, title, status, effective_rounds::BIGINT AS effective_rounds, started_at, completed_at, summary,
-                primary_provider, reviewer_provider, participant_names, selection_reason, created_at
-         FROM meetings
-         ORDER BY started_at DESC",
-    )
-    .fetch_all(pool)
-    .await
-    {
-        Ok(rows) => rows,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("query: {e}")})),
-            );
-        }
-    };
-
-    let mut meetings: Vec<serde_json::Value> = rows.iter().map(meeting_row_to_json_pg).collect();
-
-    // Attach transcripts + issue data to each meeting
-    for meeting in meetings.iter_mut() {
-        let meeting_id = meeting
-            .get("id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        if let Some(mid) = meeting_id {
-            let transcripts = load_transcripts_pg(pool, &mid).await;
-            let obj = meeting.as_object_mut().unwrap();
-            obj.insert("transcripts".to_string(), json!(&transcripts));
-            obj.insert("entries".to_string(), json!(&transcripts));
-            enrich_meeting_with_issue_data_pg(pool, &mid, obj).await;
-            enrich_meeting_with_query_hashes_pg(pool, &mid, obj).await;
-            apply_selection_reason_fallback(obj, &transcripts);
-        }
+    match list_meetings_pg(pool, apply_selection_reason_fallback).await {
+        Ok(meetings) => (StatusCode::OK, Json(json!({"meetings": meetings}))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("query: {e}")})),
+        ),
     }
-
-    (StatusCode::OK, Json(json!({"meetings": meetings})))
 }
 
 /// GET /api/round-table-meetings/channels
@@ -761,7 +599,7 @@ pub async fn get_meeting(
         );
     };
 
-    match load_meeting_pg(pool, &id).await {
+    match load_meeting_pg(pool, &id, apply_selection_reason_fallback).await {
         Ok(Some(meeting)) => (StatusCode::OK, Json(json!({"meeting": meeting}))),
         Ok(None) => (
             StatusCode::NOT_FOUND,
@@ -786,21 +624,12 @@ pub async fn delete_meeting(
         );
     };
 
-    let _ = sqlx::query("DELETE FROM meeting_transcripts WHERE meeting_id = $1")
-        .bind(&id)
-        .execute(pool)
-        .await;
-
-    match sqlx::query("DELETE FROM meetings WHERE id = $1")
-        .bind(&id)
-        .execute(pool)
-        .await
-    {
-        Ok(result) if result.rows_affected() == 0 => (
+    match delete_meeting_pg(pool, &id).await {
+        Ok(true) => (StatusCode::OK, Json(json!({"ok": true}))),
+        Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(json!({"error": "meeting not found"})),
         ),
-        Ok(_) => (StatusCode::OK, Json(json!({"ok": true}))),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("{e}")})),
@@ -821,15 +650,7 @@ pub async fn update_issue_repo(
         );
     };
 
-    let exists =
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM meetings WHERE id = $1")
-            .bind(&id)
-            .fetch_one(pool)
-            .await
-            .map(|count| count > 0)
-            .unwrap_or(false);
-
-    if !exists {
+    if !meeting_exists_pg(pool, &id).await {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({"error": "meeting not found"})),
@@ -837,25 +658,15 @@ pub async fn update_issue_repo(
     }
 
     // Store issue_repo in kv_meta (meetings table doesn't have issue_repo column)
-    let key = format!("meeting_issue_repo:{}", id);
-    let value = body.repo.as_deref().unwrap_or("");
-
-    if let Err(e) = sqlx::query(
-        "INSERT INTO kv_meta (key, value) VALUES ($1, $2)
-         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-    )
-    .bind(key)
-    .bind(value)
-    .execute(pool)
-    .await
-    {
+    let repo_str = body.repo.as_deref().unwrap_or("");
+    if let Err(e) = upsert_issue_repo_pg(pool, &id, repo_str).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("{e}")})),
         );
     }
 
-    match load_meeting_pg(pool, &id).await {
+    match load_meeting_pg(pool, &id, apply_selection_reason_fallback).await {
         Ok(Some(mut meeting)) => {
             meeting
                 .as_object_mut()
@@ -897,14 +708,7 @@ pub async fn create_issues(
         );
     };
     let (repo, summaries) = {
-        let meeting_exists =
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM meetings WHERE id = $1")
-                .bind(&id)
-                .fetch_one(pool)
-                .await
-                .map(|count| count > 0)
-                .unwrap_or(false);
-        if !meeting_exists {
+        if !meeting_exists_pg(pool, &id).await {
             return (
                 StatusCode::NOT_FOUND,
                 Json(json!({"error": "meeting not found"})),
@@ -915,12 +719,7 @@ pub async fn create_issues(
         let repo: Option<String> = if body.repo.is_some() {
             body.repo.clone()
         } else {
-            sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1")
-                .bind(format!("meeting_issue_repo:{id}"))
-                .fetch_optional(pool)
-                .await
-                .ok()
-                .flatten()
+            get_meeting_issue_repo_pg(pool, &id).await
         };
 
         let Some(repo) = repo else {
@@ -932,17 +731,7 @@ pub async fn create_issues(
             );
         };
 
-        // Get summary transcripts (action items)
-        let summaries: Vec<String> = sqlx::query_scalar::<_, String>(
-            "SELECT content FROM meeting_transcripts
-             WHERE meeting_id = $1 AND is_summary = true
-             ORDER BY seq ASC",
-        )
-        .bind(&id)
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
-
+        let summaries = get_meeting_summaries_pg(pool, &id).await;
         (repo, summaries)
     };
 
@@ -965,27 +754,14 @@ pub async fn create_issues(
     for (i, summary) in summaries.iter().enumerate() {
         let key = format!("item-{i}");
         // Check if already discarded
-        let discarded = sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1")
-            .bind(format!("meeting:{id}:issue:{key}:discarded"))
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten()
-            .map(|v| v == "true")
-            .unwrap_or(false);
+        let discarded = is_issue_discarded_pg(pool, &id, &key).await;
         if discarded {
             results.push(json!({"key": key, "title": summary.lines().next().unwrap_or(""), "assignee": "", "ok": true, "discarded": true, "attempted_at": 0}));
             continue;
         }
 
         // Check if already created
-        let already_url =
-            sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1")
-                .bind(format!("meeting:{id}:issue:{key}:url"))
-                .fetch_optional(pool)
-                .await
-                .ok()
-                .flatten();
+        let already_url = get_issue_url_pg(pool, &id, &key).await;
         if let Some(url) = already_url {
             results.push(json!({"key": key, "title": summary.lines().next().unwrap_or(""), "assignee": "", "ok": true, "issue_url": url, "attempted_at": 0}));
             created += 1;
@@ -1010,14 +786,7 @@ pub async fn create_issues(
             Ok(issue) => {
                 let url = issue.url;
                 // Store result
-                let _ = sqlx::query(
-                    "INSERT INTO kv_meta (key, value) VALUES ($1, $2)
-                     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-                )
-                .bind(format!("meeting:{id}:issue:{key}:url"))
-                .bind(&url)
-                .execute(pool)
-                .await;
+                let _ = store_issue_url_pg(pool, &id, &key, &url).await;
                 results.push(json!({"key": key, "title": title, "assignee": "", "ok": true, "issue_url": url, "attempted_at": chrono::Utc::now().timestamp()}));
                 created += 1;
             }
@@ -1079,16 +848,10 @@ pub async fn discard_issue(
         );
     };
 
-    let _ = sqlx::query(
-        "INSERT INTO kv_meta (key, value) VALUES ($1, 'true')
-         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-    )
-    .bind(format!("meeting:{id}:issue:{key}:discarded"))
-    .execute(pool)
-    .await;
+    let _ = discard_issue_pg(pool, &id, key).await;
 
     // Return meeting + summary for UI refresh
-    let meeting = load_meeting_pg(pool, &id)
+    let meeting = load_meeting_pg(pool, &id, apply_selection_reason_fallback)
         .await
         .ok()
         .flatten()
@@ -1114,26 +877,9 @@ pub async fn discard_all_issues(
         );
     };
 
-    // Count summary items and mark all as discarded
-    let count = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::BIGINT FROM meeting_transcripts WHERE meeting_id = $1 AND is_summary = true",
-    )
-    .bind(&id)
-    .fetch_one(pool)
-    .await
-    .unwrap_or(0);
+    let count = discard_all_issues_pg(pool, &id).await;
 
-    for i in 0..count {
-        let _ = sqlx::query(
-            "INSERT INTO kv_meta (key, value) VALUES ($1, 'true')
-             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-        )
-        .bind(format!("meeting:{id}:issue:item-{i}:discarded"))
-        .execute(pool)
-        .await;
-    }
-
-    let meeting = load_meeting_pg(pool, &id)
+    let meeting = load_meeting_pg(pool, &id, apply_selection_reason_fallback)
         .await
         .ok()
         .flatten()
@@ -1305,13 +1051,7 @@ pub async fn upsert_meeting(
 
     // #2050 P1 finding 1 — detect whether this upsert creates or updates a meeting
     // so we can broadcast the correct round_table_new / round_table_update event.
-    let meeting_existed = sqlx::query_scalar::<_, i64>("SELECT 1 FROM meetings WHERE id = $1")
-        .bind(&body.id)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()
-        .is_some();
+    let meeting_existed = meeting_existed_pg(pool, &body.id).await;
 
     let started_at_dt = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(started_at)
         .unwrap_or_else(chrono::Utc::now);
@@ -1319,50 +1059,29 @@ pub async fn upsert_meeting(
         .completed_at
         .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis);
 
-    if let Err(e) = sqlx::query(
-        "INSERT INTO meetings (
-            id, channel_id, thread_id, title, status, effective_rounds, started_at, completed_at, summary,
-            primary_provider, reviewer_provider, participant_names, selection_reason, created_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-        ON CONFLICT(id) DO UPDATE SET
-            channel_id = COALESCE(EXCLUDED.channel_id, meetings.channel_id),
-            thread_id = COALESCE(EXCLUDED.thread_id, meetings.thread_id),
-            title = COALESCE($15, meetings.title),
-            status = COALESCE($16, meetings.status),
-            effective_rounds = COALESCE($17, meetings.effective_rounds),
-            started_at = COALESCE(meetings.started_at, excluded.started_at),
-            completed_at = COALESCE($18, meetings.completed_at),
-            summary = COALESCE($19, meetings.summary),
-            primary_provider = COALESCE($20, meetings.primary_provider),
-            reviewer_provider = COALESCE($21, meetings.reviewer_provider),
-            participant_names = COALESCE($22, meetings.participant_names),
-            selection_reason = COALESCE($23, meetings.selection_reason),
-            created_at = COALESCE(meetings.created_at, EXCLUDED.created_at)",
+    if let Err(e) = upsert_meeting_record_pg(
+        pool,
+        &UpsertMeetingParams {
+            id: &body.id,
+            channel_id: body.channel_id.as_deref(),
+            thread_id: body.thread_id.as_deref(),
+            agenda,
+            status,
+            total_rounds,
+            started_at_dt,
+            completed_at_dt,
+            summary,
+            primary_provider: primary_provider.as_ref().map(ProviderKind::as_str),
+            reviewer_provider: reviewer_provider.as_ref().map(ProviderKind::as_str),
+            participant_names_json: &participant_names_json,
+            selection_reason: selection_reason.as_deref(),
+            created_at: started_at,
+            agenda_update,
+            status_update,
+            total_rounds_update,
+            participant_names_update_json: participant_names_update_json.as_deref(),
+        },
     )
-    .bind(&body.id)
-    .bind(body.channel_id.as_deref())
-    .bind(body.thread_id.as_deref())
-    .bind(agenda)
-    .bind(status)
-    .bind(total_rounds)
-    .bind(started_at_dt)
-    .bind(completed_at_dt)
-    .bind(summary)
-    .bind(primary_provider.as_ref().map(ProviderKind::as_str))
-    .bind(reviewer_provider.as_ref().map(ProviderKind::as_str))
-    .bind(&participant_names_json)
-    .bind(selection_reason.as_deref())
-    .bind(started_at)
-    .bind(agenda_update)
-    .bind(status_update)
-    .bind(total_rounds_update)
-    .bind(completed_at_dt)
-    .bind(summary)
-    .bind(primary_provider.as_ref().map(ProviderKind::as_str))
-    .bind(reviewer_provider.as_ref().map(ProviderKind::as_str))
-    .bind(participant_names_update_json.as_deref())
-    .bind(selection_reason.as_deref())
-    .execute(pool)
     .await
     {
         return (
@@ -1371,13 +1090,7 @@ pub async fn upsert_meeting(
         );
     }
 
-    let saved_thread_id =
-        sqlx::query_scalar::<_, String>("SELECT thread_id FROM meetings WHERE id = $1")
-            .bind(&body.id)
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten();
+    let saved_thread_id = get_meeting_thread_id_pg(pool, &body.id).await;
     if let Err(e) =
         persist_meeting_query_hashes_pg(pool, &body.id, saved_thread_id.as_deref()).await
     {
@@ -1387,41 +1100,32 @@ pub async fn upsert_meeting(
         );
     }
 
-    let mut next_seq = sqlx::query_scalar::<_, i64>(
-        "SELECT COALESCE(MAX(seq), 0)::BIGINT + 1 FROM meeting_transcripts WHERE meeting_id = $1",
-    )
-    .bind(&body.id)
-    .fetch_one(pool)
-    .await
-    .unwrap_or(1);
+    let mut next_seq = get_next_transcript_seq_pg(pool, &body.id).await;
     let entries = body.entries;
     let replacing_entries = entries.is_some();
 
     if let Some(entries) = entries {
-        let _ = sqlx::query("DELETE FROM meeting_transcripts WHERE meeting_id = $1")
-            .bind(&body.id)
-            .execute(pool)
-            .await;
+        let transcript_entries: Vec<TranscriptEntry> = entries
+            .into_iter()
+            .enumerate()
+            .map(|(idx, entry)| {
+                let seq = entry.seq.unwrap_or((idx as i64) + 1);
+                TranscriptEntry {
+                    seq,
+                    round: entry.round,
+                    speaker_role_id: entry.speaker_role_id,
+                    speaker_name: entry.speaker_name,
+                    content: entry.content,
+                    is_summary: entry.is_summary.unwrap_or(false),
+                }
+            })
+            .collect();
 
-        next_seq = 1;
-        for (idx, entry) in entries.into_iter().enumerate() {
-            let seq = entry.seq.unwrap_or((idx as i64) + 1);
-            next_seq = next_seq.max(seq + 1);
-            if let Err(e) = sqlx::query(
-                "INSERT INTO meeting_transcripts (
-                    meeting_id, seq, round, speaker_agent_id, speaker_name, content, is_summary
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-            )
-            .bind(&body.id)
-            .bind(seq)
-            .bind(entry.round)
-            .bind(entry.speaker_role_id.as_deref())
-            .bind(entry.speaker_name.as_deref())
-            .bind(entry.content.as_deref())
-            .bind(entry.is_summary.unwrap_or(false))
-            .execute(pool)
-            .await
-            {
+        match replace_transcripts_pg(pool, &body.id, &transcript_entries).await {
+            Ok(new_next_seq) => {
+                next_seq = new_next_seq;
+            }
+            Err(e) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({"error": format!("{e}")})),
@@ -1431,61 +1135,20 @@ pub async fn upsert_meeting(
     }
 
     if let Some(summary_text) = summary {
-        let summary_round = sqlx::query_scalar::<_, i64>(
-            "SELECT effective_rounds::BIGINT FROM meetings WHERE id = $1",
-        )
-        .bind(&body.id)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or(total_rounds);
+        let summary_round = get_effective_rounds_pg(pool, &body.id)
+            .await
+            .unwrap_or(total_rounds);
         let existing_summary_id = if replacing_entries {
             None
         } else {
-            sqlx::query_scalar::<_, i64>(
-                "SELECT id
-                 FROM meeting_transcripts
-                 WHERE meeting_id = $1 AND is_summary = true
-                 ORDER BY seq DESC, id DESC
-                 LIMIT 1",
-            )
-            .bind(&body.id)
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten()
+            get_latest_summary_id_pg(pool, &body.id).await
         };
 
         let summary_result = if let Some(summary_id) = existing_summary_id {
-            sqlx::query(
-                "UPDATE meeting_transcripts
-                 SET round = $2,
-                     speaker_agent_id = NULL,
-                     speaker_name = $3,
-                     content = $4,
-                     is_summary = true
-                 WHERE id = $1",
-            )
-            .bind(summary_id)
-            .bind(summary_round)
-            .bind("Summary")
-            .bind(summary_text)
-            .execute(pool)
-            .await
+            update_summary_transcript_pg(pool, summary_id, summary_round, summary_text).await
         } else {
-            sqlx::query(
-                "INSERT INTO meeting_transcripts (
-                    meeting_id, seq, round, speaker_agent_id, speaker_name, content, is_summary
-                ) VALUES ($1, $2, $3, NULL, $4, $5, true)",
-            )
-            .bind(&body.id)
-            .bind(next_seq)
-            .bind(summary_round)
-            .bind("Summary")
-            .bind(summary_text)
-            .execute(pool)
-            .await
+            insert_summary_transcript_pg(pool, &body.id, next_seq, summary_round, summary_text)
+                .await
         };
 
         if let Err(e) = summary_result {
@@ -1496,7 +1159,7 @@ pub async fn upsert_meeting(
         }
     }
 
-    match load_meeting_pg(pool, &body.id).await {
+    match load_meeting_pg(pool, &body.id, apply_selection_reason_fallback).await {
         Ok(Some(meeting)) => {
             // #2050 P1 finding 1 — broadcast round_table_new / round_table_update so
             // other dashboard clients reflect the upsert without manual refresh.
@@ -1600,76 +1263,4 @@ fn direct_start_error_status(error: &str) -> StatusCode {
     }
 
     StatusCode::INTERNAL_SERVER_ERROR
-}
-
-fn short_query_hash(input: &str) -> String {
-    use sha2::{Digest, Sha256};
-
-    let digest = Sha256::digest(input.as_bytes());
-    hex::encode(&digest[..6])
-}
-
-fn meeting_query_hash(meeting_id: &str) -> String {
-    format!(
-        "#meeting-{}",
-        short_query_hash(&format!("meeting:{meeting_id}"))
-    )
-}
-
-fn thread_query_hash(thread_id: &str) -> String {
-    format!(
-        "#thread-{}",
-        short_query_hash(&format!("thread:{thread_id}"))
-    )
-}
-
-async fn persist_meeting_query_hashes_pg(
-    pool: &PgPool,
-    meeting_id: &str,
-    thread_id: Option<&str>,
-) -> Result<(), sqlx::Error> {
-    let meeting_hash = meeting_query_hash(meeting_id);
-    let normalized_thread_id = thread_id.map(str::trim).filter(|value| !value.is_empty());
-    let thread_hash = normalized_thread_id.map(thread_query_hash);
-    upsert_kv_meta_pg(
-        pool,
-        &format!("meeting_query_hash:{meeting_id}"),
-        &meeting_hash,
-    )
-    .await?;
-    upsert_kv_meta_pg(
-        pool,
-        &format!("meeting_query_hash_lookup:{meeting_hash}"),
-        meeting_id,
-    )
-    .await?;
-
-    if let (Some(thread_id), Some(thread_hash)) = (normalized_thread_id, thread_hash.as_deref()) {
-        upsert_kv_meta_pg(
-            pool,
-            &format!("meeting_thread_hash:{meeting_id}"),
-            thread_hash,
-        )
-        .await?;
-        upsert_kv_meta_pg(
-            pool,
-            &format!("meeting_thread_hash_lookup:{thread_hash}"),
-            &json!({"meeting_id": meeting_id, "thread_id": thread_id}).to_string(),
-        )
-        .await?;
-    }
-    Ok(())
-}
-
-async fn upsert_kv_meta_pg(pool: &PgPool, key: &str, value: &str) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO kv_meta (key, value)
-         VALUES ($1, $2)
-         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-    )
-    .bind(key)
-    .bind(value)
-    .execute(pool)
-    .await
-    .map(|_| ())
 }
