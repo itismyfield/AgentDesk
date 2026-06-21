@@ -351,7 +351,12 @@
 # #3034 batch-8: lowered 2655 -> 2645 (dead-code removal: `stop_provider_channel_runtime`).
 # #3293: lowered 2645 -> 2641 (mailbox probe routed through the non-creating
 # `health/mailbox.rs::peeked_provider_mailbox_state`).
-"src/services/discord/health/recovery.rs" = 2641
+"src/services/discord/health/recovery.rs" = 2722
+# #3629: +81 (2641 -> 2722) for the NO_REPLY/empty orphan inflight cleanup in the
+# completed-stale leak-detection path: the `completed_stale_no_answer_orphan_should_clean`
+# pure seam (+ safety doc), the identity-guarded clear + lifecycle telemetry at the
+# call site, and its unit test. P1 bugfix (#3629); the clean logic needs the
+# file-private detection context so it lives here until the inflight/recovery split.
 # #3293: +11 for the additive `recovery_relay_attempts` restart-budget counter
 # (field + `RECOVERY_RELAY_RESTART_ATTEMPT_BUDGET`), lowered 2466 -> 2465 to
 # lock the net position.
