@@ -726,6 +726,10 @@ impl RoutineStore {
             WHERE status = 'paused'
               AND pause_reason = $1
               AND updated_at < $2
+              -- Skip schedule-less rows with no next_due_at: they can never be
+              -- resumed (ResumeRequiresNextDueAt guard) and would otherwise be
+              -- re-attempted (and warn-logged) every tick — a tight loop (#3573).
+              AND (schedule IS NOT NULL OR next_due_at IS NOT NULL)
             ORDER BY updated_at ASC
             LIMIT 500
             "#,
@@ -746,11 +750,18 @@ impl RoutineStore {
     /// 3. `schedule IS NOT NULL OR next_due_at IS NOT NULL` — mirrors the
     ///    `ResumeRequiresNextDueAt` guard: schedule-less routines with no
     ///    `next_due_at` cannot be resumed (they would never fire again).
+    /// 4. `updated_at < threshold` — re-checks the backoff window *atomically*
+    ///    under the row lock. Without this, a concurrent update that refreshes
+    ///    `updated_at` between the list scan and this call could be resumed
+    ///    before the configured backoff elapsed (#3573).
+    ///
+    /// `threshold` must be the same cutoff used by `list_failure_paused_routines`.
     ///
     /// Returns `true` if exactly one row was updated (resume applied).
     pub async fn auto_resume_failure_paused_routine(
         &self,
         routine_id: &str,
+        threshold: DateTime<Utc>,
     ) -> Result<bool, anyhow::Error> {
         // Check the ResumeRequiresNextDueAt guard first so we can return the
         // typed error rather than silently returning false.
@@ -762,11 +773,13 @@ impl RoutineStore {
             WHERE id = $1
               AND status = 'paused'
               AND pause_reason = $2
+              AND updated_at < $3
             FOR UPDATE
             "#,
         )
         .bind(routine_id)
         .bind(PAUSE_REASON_FAILURE)
+        .bind(threshold)
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| anyhow!("auto-resume failure-paused routine {routine_id}: {e}"))?;
@@ -794,10 +807,12 @@ impl RoutineStore {
             WHERE id = $1
               AND status = 'paused'
               AND pause_reason = $2
+              AND updated_at < $3
             "#,
         )
         .bind(routine_id)
         .bind(PAUSE_REASON_FAILURE)
+        .bind(threshold)
         .execute(&mut *tx)
         .await
         .map_err(|e| anyhow!("auto-resume routine {routine_id}: {e}"))?;

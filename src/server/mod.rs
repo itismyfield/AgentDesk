@@ -2762,6 +2762,11 @@ async fn routine_runtime_loop(
         // NULL rows are never touched. The `ResumeRequiresNextDueAt` guard is
         // applied inside `auto_resume_failure_paused_routine`. The knob defaults
         // to 0 (disabled); set to e.g. 3600 to enable with a 1-hour backoff.
+        //
+        // NOTE (#3628): no production path writes `pause_reason = 'failure'`
+        // yet (the only writer is uncalled), so this scan is intentionally
+        // dormant — it resumes rows a future failure→pause wiring will create.
+        // That wiring is a separate behavior change tracked in #3628.
         let auto_resume_secs = routines_config.failure_pause_auto_resume_secs;
         if auto_resume_secs > 0 {
             let now = chrono::Utc::now();
@@ -2769,7 +2774,10 @@ async fn routine_runtime_loop(
             match store.list_failure_paused_routines(cutoff).await {
                 Ok(candidates) => {
                     for routine in &candidates {
-                        match store.auto_resume_failure_paused_routine(&routine.id).await {
+                        match store
+                            .auto_resume_failure_paused_routine(&routine.id, cutoff)
+                            .await
+                        {
                             Ok(true) => {
                                 tracing::info!(
                                     routine_id = %routine.id,
