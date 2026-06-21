@@ -1563,6 +1563,14 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "prefix",
                 body_param("boolean", false, "Add the handoff prefix").with_default(true),
             ),
+            (
+                "expect_reply",
+                body_param(
+                    "boolean",
+                    false,
+                    "Reply-expectation contract appended to the body: true → 회신 필수, false → 회신 불필요, omitted → no contract",
+                ),
+            ),
         ])
         .with_example(
             json!({"path": {"id": "adk-dashboard"}, "body": {"from_agent_id": "project-agentdesk", "message": "hello", "channel_kind": "cc", "prefix": true}}),
@@ -1593,6 +1601,14 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             (
                 "prefix",
                 body_param("boolean", false, "Add the from->to handoff prefix to the prompt").with_default(true),
+            ),
+            (
+                "expect_reply",
+                body_param(
+                    "boolean",
+                    false,
+                    "Reply-expectation contract appended to the prompt: true → 회신 필수, false → 회신 불필요, omitted → no contract",
+                ),
             ),
             (
                 "source",

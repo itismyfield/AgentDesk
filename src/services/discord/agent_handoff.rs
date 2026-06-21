@@ -193,19 +193,43 @@ impl AgentHandoffError {
     }
 }
 
+/// Reply-expectation contract (#3620 follow-up) appended to the end of a handoff
+/// body. `true` → 회신 필수 (the receiver must report back to the requester),
+/// `false` → 회신 불필요 (no callback expected). Kept aligned with the role
+/// response-contract: replies follow the request's callback info + channel rules.
+fn reply_expectation_contract(from_agent_id: &str, expect_reply: bool) -> String {
+    if expect_reply {
+        format!(
+            "──────────\n📨 **회신 필수 계약**: 이 핸드오프는 회신을 요구합니다. 작업/검토를 마치면 결과·결론을 요청자 `{from_agent_id}`에게 반드시 회신하세요. 회신은 `agentdesk send-to-agent --from <self> --to {from_agent_id} --message \"...\"` 로 보냅니다(현재 요청의 callback 정보·채널 규칙 우선)."
+        )
+    } else {
+        "──────────\n📭 **회신 불필요 계약**: 이 핸드오프는 회신을 요구하지 않습니다. 별도 보고 없이 처리하세요(중대한 이슈를 발견한 경우에만 자율적으로 회신).".to_string()
+    }
+}
+
+/// Build the handoff body. When `expect_reply` is `Some`, a reply-expectation
+/// contract is appended to the end of the message; `None` keeps the legacy
+/// behavior (no contract) for backward compatibility.
 pub(crate) fn build_agent_handoff_content(
     from_agent_id: &str,
     to_agent_id: &str,
     message: &str,
     prefix: bool,
+    expect_reply: Option<bool>,
 ) -> String {
-    if prefix {
+    let mut content = if prefix {
         format!("[{from_agent_id} → {to_agent_id} 핸드오프]\n\n{message}")
     } else {
         message.to_string()
+    };
+    if let Some(expect_reply) = expect_reply {
+        content.push_str("\n\n");
+        content.push_str(&reply_expectation_contract(from_agent_id, expect_reply));
     }
+    content
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn send_agent_handoff(
     registry: &HealthRegistry,
     pg_pool: &PgPool,
@@ -214,6 +238,7 @@ pub(crate) async fn send_agent_handoff(
     message: &str,
     channel_kind: AgentHandoffChannelKind,
     prefix: bool,
+    expect_reply: Option<bool>,
 ) -> Result<AgentHandoffResponse, AgentHandoffError> {
     let from_agent_id = from_agent_id.trim();
     if from_agent_id.is_empty() {
@@ -240,7 +265,8 @@ pub(crate) async fn send_agent_handoff(
         ));
     };
 
-    let content = build_agent_handoff_content(from_agent_id, to_agent_id, message, prefix);
+    let content =
+        build_agent_handoff_content(from_agent_id, to_agent_id, message, prefix, expect_reply);
     let target = format!("channel:{channel_id}");
     let (status, response_body) = health::send_message_with_backends(
         registry,
@@ -324,6 +350,7 @@ pub(crate) struct AgentHandoffTurnTarget {
     pub(crate) content: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_agent_handoff_turn_target(
     bindings: &AgentChannelBindings,
     from_agent_id: &str,
@@ -331,6 +358,7 @@ fn resolve_agent_handoff_turn_target(
     prompt: &str,
     channel_kind: AgentHandoffChannelKind,
     prefix: bool,
+    expect_reply: Option<bool>,
 ) -> Result<AgentHandoffTurnTarget, AgentHandoffError> {
     let from_agent_id = from_agent_id.trim();
     if from_agent_id.is_empty() {
@@ -363,7 +391,8 @@ fn resolve_agent_handoff_turn_target(
         )));
     };
 
-    let content = build_agent_handoff_content(from_agent_id, to_agent_id, prompt, prefix);
+    let content =
+        build_agent_handoff_content(from_agent_id, to_agent_id, prompt, prefix, expect_reply);
 
     Ok(AgentHandoffTurnTarget {
         to_agent_id: to_agent_id.to_string(),
@@ -411,6 +440,7 @@ pub(crate) async fn start_agent_handoff_turn(
     prompt: &str,
     channel_kind: AgentHandoffChannelKind,
     prefix: bool,
+    expect_reply: Option<bool>,
     source: Option<String>,
     metadata: Option<Value>,
 ) -> Result<AgentHandoffTurnResponse, AgentHandoffError> {
@@ -427,6 +457,7 @@ pub(crate) async fn start_agent_handoff_turn(
         prompt,
         channel_kind,
         prefix,
+        expect_reply,
     )?;
 
     let result = health::start_headless_agent_turn(
@@ -552,13 +583,35 @@ mod tests {
     #[test]
     fn handoff_prefix_can_be_enabled_or_disabled() {
         assert_eq!(
-            build_agent_handoff_content("project-agentdesk", "adk-dashboard", "hello", true),
+            build_agent_handoff_content("project-agentdesk", "adk-dashboard", "hello", true, None),
             "[project-agentdesk → adk-dashboard 핸드오프]\n\nhello"
         );
         assert_eq!(
-            build_agent_handoff_content("project-agentdesk", "adk-dashboard", "hello", false),
+            build_agent_handoff_content("project-agentdesk", "adk-dashboard", "hello", false, None),
             "hello"
         );
+    }
+
+    #[test]
+    fn handoff_reply_expectation_appends_contract() {
+        // None → no contract (backward compatible).
+        assert_eq!(
+            build_agent_handoff_content("a", "b", "hi", false, None),
+            "hi"
+        );
+        // Some(true) → 회신 필수 contract referencing the requester.
+        let required = build_agent_handoff_content("a", "b", "hi", false, Some(true));
+        assert!(required.starts_with("hi\n\n"));
+        assert!(required.contains("회신 필수 계약"));
+        assert!(required.contains("`a`"));
+        // Some(false) → 회신 불필요 contract.
+        let not_required = build_agent_handoff_content("a", "b", "hi", false, Some(false));
+        assert!(not_required.starts_with("hi\n\n"));
+        assert!(not_required.contains("회신 불필요 계약"));
+        // Contract appends after the prefix envelope too.
+        let prefixed = build_agent_handoff_content("a", "b", "hi", true, Some(true));
+        assert!(prefixed.starts_with("[a → b 핸드오프]\n\nhi\n\n"));
+        assert!(prefixed.contains("회신 필수 계약"));
     }
 
     #[test]
@@ -622,6 +675,7 @@ mod tests {
             "리뷰 반영해줘",
             AgentHandoffChannelKind::Cdx,
             true,
+            None,
         )
         .expect("cdx binding resolves");
         assert_eq!(target.to_agent_id, "adk-dashboard");
@@ -644,6 +698,7 @@ mod tests {
             "raw prompt",
             AgentHandoffChannelKind::Cc,
             false,
+            None,
         )
         .expect("cc binding resolves");
         assert_eq!(target.content, "raw prompt");
@@ -658,6 +713,7 @@ mod tests {
             "prompt",
             AgentHandoffChannelKind::Cc,
             true,
+            None,
         )
         .unwrap_err();
         assert_eq!(error.status(), StatusCode::UNPROCESSABLE_ENTITY);
@@ -673,6 +729,7 @@ mod tests {
             "   ",
             AgentHandoffChannelKind::Cc,
             true,
+            None,
         )
         .unwrap_err();
         assert_eq!(error.status(), StatusCode::BAD_REQUEST);
@@ -688,6 +745,7 @@ mod tests {
             "prompt",
             AgentHandoffChannelKind::Cc,
             true,
+            None,
         )
         .unwrap_err();
         assert_eq!(error.status(), StatusCode::INTERNAL_SERVER_ERROR);

@@ -101,6 +101,11 @@ pub(crate) enum Commands {
         /// Send the body without the automatic handoff prefix
         #[arg(long = "no-prefix")]
         no_prefix: bool,
+        /// Reply-expectation contract appended to the handoff body:
+        /// `--expect-reply true` → 회신 필수, `--expect-reply false` → 회신 불필요,
+        /// omitted → no contract.
+        #[arg(long = "expect-reply")]
+        expect_reply: Option<bool>,
         /// #3556 — reserve a headless turn on the target mailbox instead of
         /// posting an announce message. Authoritative wake-up: exits non-zero
         /// on 409 (mailbox busy). Mutually exclusive with the default

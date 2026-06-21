@@ -93,6 +93,10 @@ pub struct AgentMessageBody {
     pub channel_kind: Option<String>,
     #[serde(default)]
     pub prefix: Option<bool>,
+    /// Reply-expectation contract appended to the handoff body. `Some(true)` →
+    /// 회신 필수, `Some(false)` → 회신 불필요, omitted → no contract (default).
+    #[serde(default)]
+    pub expect_reply: Option<bool>,
 }
 
 /// #3556 — turn-trigger handoff. Unlike `AgentMessageBody` (announce post),
@@ -106,6 +110,10 @@ pub struct AgentHandoffBody {
     pub channel_kind: Option<String>,
     #[serde(default)]
     pub prefix: Option<bool>,
+    /// Reply-expectation contract appended to the handoff body. `Some(true)` →
+    /// 회신 필수, `Some(false)` → 회신 불필요, omitted → no contract (default).
+    #[serde(default)]
+    pub expect_reply: Option<bool>,
     #[serde(default)]
     pub source: Option<String>,
     #[serde(default)]
@@ -1114,6 +1122,7 @@ pub async fn agent_message(
         &body.message,
         channel_kind,
         body.prefix.unwrap_or(true),
+        body.expect_reply,
     )
     .await
     {
@@ -1161,6 +1170,7 @@ pub async fn agent_handoff(
         &body.prompt,
         channel_kind,
         body.prefix.unwrap_or(true),
+        body.expect_reply,
         body.source,
         body.metadata,
     )

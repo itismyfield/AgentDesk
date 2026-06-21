@@ -21,7 +21,7 @@ pub fn print_help() {
     println!("    discord-sendmessage --channel <ID> --message <TEXT> [--key <HASH>]");
     println!("    discord-senddm --user <ID> --message <TEXT> [--key <HASH>]");
     println!(
-        "    send-to-agent --from <AGENT> --to <AGENT> --message <TEXT> [--channel-kind cc|cdx] [--no-prefix]"
+        "    send-to-agent --from <AGENT> --to <AGENT> --message <TEXT> [--channel-kind cc|cdx] [--no-prefix] [--expect-reply true|false]"
     );
     println!("    reset-tmux              Kill all AgentDesk-* tmux sessions");
     println!(
