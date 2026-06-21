@@ -5335,13 +5335,16 @@ pub(super) fn spawn_turn_bridge(
                                         outcome,
                                     );
                                     // #3630: durably mirror the delivered frontier (like
-                                    // the cutover/long-chunk paths). This legacy path
-                                    // advanced only the in-memory `confirmed_end_offset`,
-                                    // so after a restart (resets to 0) the no-inflight
-                                    // watcher re-relayed the already-delivered body as a
-                                    // DUPLICATE. Gated on `committed` to preserve M4
-                                    // (durable END mirrors confirmed_end_offset, #3610).
-                                    if committed {
+                                    // the cutover/long-chunk paths) so a post-restart
+                                    // no-inflight watcher dedups it instead of re-relaying
+                                    // the already-delivered body as a DUPLICATE. Gate on
+                                    // `replace_committed && committed`: commit_and_advance
+                                    // returns true on ANY successful lease commit (incl.
+                                    // NotDelivered) but only Delivered advances
+                                    // confirmed_end_offset — recording on NotDelivered would
+                                    // break M4 (durable END must mirror confirmed_end) and
+                                    // wrongly suppress a retry (#3610, codex #3630 review).
+                                    if replace_committed && committed {
                                         super::outbound::delivery_record::shadow_mirror_delivered_frontier(
                                             shared_owned.as_ref(),
                                             &provider,
