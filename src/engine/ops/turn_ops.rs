@@ -59,12 +59,6 @@ fn get_runtime_handle() -> Option<tokio::runtime::Handle> {
     GLOBAL_RUNTIME_HANDLE.lock().ok()?.clone()
 }
 
-/// Max time the policy thread blocks waiting for a turn to *start* (spawn). The
-/// turn itself runs on the main runtime past this point — this only bounds the
-/// synchronous start (binding lookup + headless spawn), so the policy engine
-/// never wedges if Postgres or the registry stalls.
-const TURN_START_BRIDGE_TIMEOUT_SECS: u64 = 30;
-
 // ── Host binding ───────────────────────────────────────────────────────────
 
 pub(super) fn register_turn_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> JsResult<()> {
@@ -193,13 +187,20 @@ fn start_turn_raw(
     let pool_owned = pool.clone();
 
     // Drive the handoff on the MAIN runtime so the turn's spawned background
-    // tasks outlive this call (#3587). Bound only the *start* with a timeout —
-    // the turn itself keeps running on the main runtime afterwards.
+    // tasks outlive this call (#3587).
+    //
+    // No timeout wrapper here: the start future is NOT cancel-safe — it claims
+    // the agent mailbox before spawning the turn, so dropping it mid-flight
+    // (e.g. on a timeout) would strand the mailbox as busy (#3587 re-review).
+    // It only awaits a bounded binding lookup + the headless spawn (which
+    // returns immediately, not after the turn), so we let it run to completion
+    // exactly like the HTTP handoff path. DB awaits are bounded by the pool's
+    // acquire/statement timeouts.
     let result: Result<
         crate::services::discord::agent_handoff::AgentHandoffTurnResponse,
         (u16, String),
     > = runtime.block_on(async move {
-        let start_fut = crate::services::discord::agent_handoff::start_agent_handoff_turn(
+        crate::services::discord::agent_handoff::start_agent_handoff_turn(
             &registry,
             &pool_owned,
             &from_owned,
@@ -210,18 +211,10 @@ fn start_turn_raw(
             None, // expect_reply: None → no contract appended
             Some("js:turn.start".to_string()),
             None, // metadata
-        );
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(TURN_START_BRIDGE_TIMEOUT_SECS),
-            start_fut,
         )
         .await
-        {
-            Ok(Ok(response)) => Ok(response),
-            // Preserve the precise HTTP status so JS can distinguish 409/503.
-            Ok(Err(e)) => Err((e.status().as_u16(), e.one_line())),
-            Err(_) => Err((504, "turn.start timed out while starting".to_string())),
-        }
+        // Preserve the precise HTTP status so JS can distinguish 409/503.
+        .map_err(|e| (e.status().as_u16(), e.one_line()))
     });
 
     match result {
@@ -238,7 +231,6 @@ fn start_turn_raw(
                 409 => "conflict",
                 503 => "unavailable",
                 404 => "not_found",
-                504 => "timeout",
                 _ => "error",
             };
             err_json(&err_msg, status)
