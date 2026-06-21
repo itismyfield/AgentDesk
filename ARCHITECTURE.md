@@ -101,6 +101,7 @@ src/
 │   ├── idempotency.rs
 │   ├── intake_outbox.rs
 │   ├── kanban.rs
+│   ├── meetings.rs
 │   ├── memento_feedback_stats.rs
 │   ├── mod.rs
 │   ├── postgres.rs
@@ -389,6 +390,7 @@ src/
 │   │   │   ├── recovery_ops.rs
 │   │   │   ├── restart.rs
 │   │   │   ├── session.rs
+│   │   │   ├── sidecar.rs
 │   │   │   ├── skill.rs
 │   │   │   ├── steer.rs
 │   │   │   ├── text_commands.rs
@@ -648,6 +650,7 @@ src/
 │   │   ├── settings.rs
 │   │   ├── shared_memory.rs
 │   │   ├── shared_state.rs
+│   │   ├── sidecar_interaction.rs
 │   │   ├── single_message_panel.rs
 │   │   ├── stall_recovery.rs
 │   │   ├── standby_relay.rs

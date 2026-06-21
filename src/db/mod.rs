@@ -9,6 +9,7 @@ pub mod idempotency;
 pub mod intake_outbox;
 pub mod kanban;
 pub mod kanban_cards;
+pub mod meetings;
 pub mod memento_feedback_stats;
 pub mod postgres;
 pub mod prompt_manifests;
