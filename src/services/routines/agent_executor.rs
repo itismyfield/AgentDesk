@@ -14,6 +14,7 @@ use super::runtime::RoutineRunOutcome;
 use super::session_control::RoutineSessionController;
 use super::store::{
     ClaimedRoutineRun, NextDueAtUpdate, RecoveredRoutineRun, RoutineStore, RunningAgentRoutineRun,
+    terminal_failure_should_pause,
 };
 
 const FRESH_CONTEXT_GUARANTEED: bool = false;
@@ -96,6 +97,7 @@ impl RoutineAgentExecutor {
         checkpoint: Option<Value>,
         last_result: Option<String>,
         next_due_at: Option<DateTime<Utc>>,
+        pause_on_terminal_failure: bool,
     ) -> Result<RoutineRunOutcome> {
         let action = "agent".to_string();
         let agent_id = claimed
@@ -114,6 +116,7 @@ impl RoutineAgentExecutor {
                 dm_user_id.as_deref(),
                 &checkpoint,
                 next_due_at,
+                pause_on_terminal_failure,
             )
             .await;
         match result {
@@ -177,6 +180,7 @@ impl RoutineAgentExecutor {
                     "primary",
                     &message,
                     action,
+                    pause_on_terminal_failure,
                 )
                 .await
             }
@@ -196,6 +200,7 @@ impl RoutineAgentExecutor {
         attempt_kind: &str,
         message: &str,
         action: String,
+        pause_on_terminal_failure: bool,
     ) -> Result<RoutineRunOutcome> {
         match claimed_failure_recovery_plan(&claimed, failed_agent_id, attempt_kind) {
             AgentFailureRecoveryPlan::Retry {
@@ -253,6 +258,7 @@ impl RoutineAgentExecutor {
                         dm_user_id.as_deref(),
                         &checkpoint,
                         next_due_at,
+                        pause_on_terminal_failure,
                     )
                     .await
                 {
@@ -316,6 +322,7 @@ impl RoutineAgentExecutor {
                             combined,
                             Some(&fallback_agent_id),
                             "fallback",
+                            pause_on_terminal_failure,
                         )
                         .await;
                     }
@@ -331,6 +338,7 @@ impl RoutineAgentExecutor {
             message.to_string(),
             Some(failed_agent_id),
             attempt_kind,
+            pause_on_terminal_failure,
         )
         .await
     }
@@ -339,13 +347,17 @@ impl RoutineAgentExecutor {
         &self,
         store: &RoutineStore,
         limit: u32,
+        pause_on_terminal_failure: bool,
     ) -> Result<Vec<RoutineRunOutcome>> {
         store.heartbeat_running_agent_runs().await?;
         let pending = store.list_running_agent_runs(limit).await?;
         let mut outcomes = Vec::new();
         for run in pending {
             if run.turn_id.is_none() {
-                if let Some(outcome) = self.restart_due_retry(store, run).await? {
+                if let Some(outcome) = self
+                    .restart_due_retry(store, run, pause_on_terminal_failure)
+                    .await?
+                {
                     outcomes.push(outcome);
                 }
                 continue;
@@ -420,6 +432,7 @@ impl RoutineAgentExecutor {
                         result_json,
                         failed_agent_id.as_deref(),
                         &attempt_kind,
+                        pause_on_terminal_failure,
                     )
                     .await?
                 {
@@ -435,6 +448,7 @@ impl RoutineAgentExecutor {
         &self,
         store: &RoutineStore,
         run: RunningAgentRoutineRun,
+        pause_on_terminal_failure: bool,
     ) -> Result<Option<RoutineRunOutcome>> {
         let prompt = match pending_prompt(run.result_json.as_ref()) {
             Some(prompt) => prompt.to_string(),
@@ -491,6 +505,7 @@ impl RoutineAgentExecutor {
                 None,
                 &checkpoint,
                 next_due_at,
+                pause_on_terminal_failure,
             )
             .await
         {
@@ -544,6 +559,7 @@ impl RoutineAgentExecutor {
                     result_json,
                     Some(&agent_id),
                     "retry",
+                    pause_on_terminal_failure,
                 )
                 .await
             }
@@ -558,6 +574,7 @@ impl RoutineAgentExecutor {
         result_json: Option<Value>,
         failed_agent_id: Option<&str>,
         attempt_kind: &str,
+        pause_on_terminal_failure: bool,
     ) -> Result<Option<RoutineRunOutcome>> {
         match running_failure_recovery_plan(&run, failed_agent_id, attempt_kind) {
             AgentFailureRecoveryPlan::Retry {
@@ -609,9 +626,15 @@ impl RoutineAgentExecutor {
             } => {
                 let Some(prompt) = pending_prompt(run.result_json.as_ref()).map(str::to_string)
                 else {
-                    let closed = store
-                        .fail_agent_run(&run.run_id, message, result_json.clone(), None)
-                        .await?;
+                    let closed = if terminal_failure_should_pause(pause_on_terminal_failure) {
+                        store
+                            .fail_run_and_pause_routine(&run.run_id, message, result_json.clone())
+                            .await?
+                    } else {
+                        store
+                            .fail_agent_run(&run.run_id, message, result_json.clone(), None)
+                            .await?
+                    };
                     return Ok(closed.then(|| RoutineRunOutcome {
                         run_id: run.run_id,
                         routine_id: run.routine_id,
@@ -636,6 +659,7 @@ impl RoutineAgentExecutor {
                         None,
                         &checkpoint,
                         next_due_at,
+                        pause_on_terminal_failure,
                     )
                     .await
                 {
@@ -683,9 +707,19 @@ impl RoutineAgentExecutor {
                         );
                         let result_json =
                             Some(merge_pending_result(&run, "failed", Some(&combined), None));
-                        let closed = store
-                            .fail_agent_run(&run.run_id, &combined, result_json.clone(), None)
-                            .await?;
+                        let closed = if terminal_failure_should_pause(pause_on_terminal_failure) {
+                            store
+                                .fail_run_and_pause_routine(
+                                    &run.run_id,
+                                    &combined,
+                                    result_json.clone(),
+                                )
+                                .await?
+                        } else {
+                            store
+                                .fail_agent_run(&run.run_id, &combined, result_json.clone(), None)
+                                .await?
+                        };
                         return Ok(closed.then(|| RoutineRunOutcome {
                             run_id: run.run_id,
                             routine_id: run.routine_id,
@@ -704,9 +738,15 @@ impl RoutineAgentExecutor {
 
         let result_json =
             result_json.or_else(|| Some(merge_pending_result(&run, "failed", Some(message), None)));
-        let closed = store
-            .fail_agent_run(&run.run_id, message, result_json.clone(), None)
-            .await?;
+        let closed = if terminal_failure_should_pause(pause_on_terminal_failure) {
+            store
+                .fail_run_and_pause_routine(&run.run_id, message, result_json.clone())
+                .await?
+        } else {
+            store
+                .fail_agent_run(&run.run_id, message, result_json.clone(), None)
+                .await?
+        };
         Ok(closed.then(|| RoutineRunOutcome {
             run_id: run.run_id,
             routine_id: run.routine_id,
@@ -885,6 +925,7 @@ impl RoutineAgentExecutor {
         dm_user_id: Option<&str>,
         checkpoint: &Option<Value>,
         next_due_at: Option<DateTime<Utc>>,
+        _pause_on_terminal_failure: bool,
     ) -> Result<StartedAgentTurn> {
         let Some(registry) = self.health_registry.as_deref() else {
             return Err(anyhow!(
@@ -1522,6 +1563,7 @@ async fn fail_claimed_agent_run(
     message: String,
     failed_agent_id: Option<&str>,
     attempt_kind: &str,
+    pause_on_terminal_failure: bool,
 ) -> Result<RoutineRunOutcome> {
     let result_json = Some(json!({
         "status": "failed_to_start",
@@ -1533,9 +1575,15 @@ async fn fail_claimed_agent_run(
         "script_ref": claimed.script_ref,
         "fresh_context_guaranteed": FRESH_CONTEXT_GUARANTEED,
     }));
-    let closed = store
-        .fail_agent_run(&claimed.run_id, &message, result_json.clone(), None)
-        .await?;
+    let closed = if terminal_failure_should_pause(pause_on_terminal_failure) {
+        store
+            .fail_run_and_pause_routine(&claimed.run_id, &message, result_json.clone())
+            .await?
+    } else {
+        store
+            .fail_agent_run(&claimed.run_id, &message, result_json.clone(), None)
+            .await?
+    };
     if !closed {
         return Err(anyhow!(
             "routine agent run {} was already closed before failed outcome",

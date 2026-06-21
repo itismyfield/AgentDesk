@@ -495,12 +495,14 @@ pub async fn run_routine_now(
     let discord_logger = routine_discord_logger(&state)?;
     discord_logger.log_run_started(&store, &claimed).await;
     let run_id = claimed.run_id.clone();
+    let pause_on_terminal_failure = state.config.routines.failure_pause_auto_resume_secs > 0;
     let Some(outcome) = execute_claimed_script_run(
         &store,
         &loader,
         Some(&agent_executor),
         Some(&discord_logger),
         claimed,
+        pause_on_terminal_failure,
     )
     .await
     .map_err(store_error)?

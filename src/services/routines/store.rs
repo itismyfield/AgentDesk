@@ -26,6 +26,15 @@ const RESUME_NEXT_DUE_REQUIRED_MESSAGE: &str =
 pub const PAUSE_REASON_FAILURE: &str = "failure";
 pub const PAUSE_REASON_MANUAL: &str = "manual";
 pub const PAUSE_REASON_MIGRATION_INVALID: &str = "migration_invalid";
+
+pub(crate) fn terminal_failure_should_pause(pause_on_terminal_failure: bool) -> bool {
+    terminal_failure_pause_reason(pause_on_terminal_failure).is_some()
+}
+
+fn terminal_failure_pause_reason(pause_on_terminal_failure: bool) -> Option<&'static str> {
+    pause_on_terminal_failure.then_some(PAUSE_REASON_FAILURE)
+}
+
 const API_FRICTION_OBSERVATION_QUERY: &str = r#"
             SELECT fingerprint,
                    endpoint,
@@ -3952,6 +3961,18 @@ mod tests {
         assert_eq!(super::PAUSE_REASON_FAILURE, "failure");
         assert_eq!(super::PAUSE_REASON_MANUAL, "manual");
         assert_eq!(super::PAUSE_REASON_MIGRATION_INVALID, "migration_invalid");
+    }
+
+    #[test]
+    fn terminal_failure_pause_gate_controls_failure_pause_reason() {
+        assert!(!super::terminal_failure_should_pause(false));
+        assert_eq!(super::terminal_failure_pause_reason(false), None);
+
+        assert!(super::terminal_failure_should_pause(true));
+        assert_eq!(
+            super::terminal_failure_pause_reason(true),
+            Some(super::PAUSE_REASON_FAILURE)
+        );
     }
 
     #[test]

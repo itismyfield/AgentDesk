@@ -2757,18 +2757,15 @@ async fn routine_runtime_loop(
                 }
             }
         }
-        // #3573: opt-in auto-resume for failure-paused routines. Only routines
-        // with `pause_reason = 'failure'` are eligible; manual/migration_invalid/
-        // NULL rows are never touched. The `ResumeRequiresNextDueAt` guard is
-        // applied inside `auto_resume_failure_paused_routine`. The knob defaults
-        // to 0 (disabled); set to e.g. 3600 to enable with a 1-hour backoff.
-        //
-        // NOTE (#3628): no production path writes `pause_reason = 'failure'`
-        // yet (the only writer is uncalled), so this scan is intentionally
-        // dormant — it resumes rows a future failure→pause wiring will create.
-        // That wiring is a separate behavior change tracked in #3628.
+        // #3573/#3628: opt-in auto-resume for failure-paused routines. Only
+        // routines with `pause_reason = 'failure'` are eligible; manual/
+        // migration_invalid/NULL rows are never touched. The
+        // `ResumeRequiresNextDueAt` guard is applied inside
+        // `auto_resume_failure_paused_routine`. The knob defaults to 0
+        // (disabled); set to e.g. 3600 to enable with a 1-hour backoff.
         let auto_resume_secs = routines_config.failure_pause_auto_resume_secs;
-        if auto_resume_secs > 0 {
+        let pause_on_terminal_failure = routines_config.failure_pause_auto_resume_secs > 0;
+        if pause_on_terminal_failure {
             let now = chrono::Utc::now();
             let cutoff = now - chrono::Duration::seconds(auto_resume_secs as i64);
             match store.list_failure_paused_routines(cutoff).await {
@@ -2810,6 +2807,7 @@ async fn routine_runtime_loop(
             &store,
             &agent_executor,
             routines_config.max_agent_polls_per_tick,
+            pause_on_terminal_failure,
         )
         .await
         {
@@ -2829,6 +2827,7 @@ async fn routine_runtime_loop(
             Some(&agent_executor),
             Some(&discord_logger),
             routines_config.max_due_per_tick,
+            pause_on_terminal_failure,
         )
         .await
         {
