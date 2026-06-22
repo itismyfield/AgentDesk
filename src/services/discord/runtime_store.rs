@@ -129,6 +129,14 @@ pub(super) fn discord_status_panel_orphans_root() -> Option<PathBuf> {
     runtime_root().map(|root| root.join("discord_status_panel_orphans"))
 }
 
+/// #3607: durable UI-only obligations for terminal-delivered turns whose TUI
+/// quiescence gate timed out after the answer was already committed. This store
+/// owns only status-card edits; it is intentionally separate from inflight and
+/// delivery-record relay frontiers.
+pub(crate) fn discord_terminal_ui_obligations_root() -> Option<PathBuf> {
+    runtime_root().map(|root| root.join("discord_terminal_ui_obligations"))
+}
+
 /// #1332 round-3 codex review P2: per-channel sidecar root for the
 /// `queued_placeholders` mapping. Persisted next to `discord_pending_queue/`
 /// so a dcserver restart can re-attach restored mailbox queue entries to the

@@ -77,6 +77,7 @@ mod status_panel_orphan_store;
 mod steering;
 pub(in crate::services::discord) mod streaming_finalizer;
 pub(in crate::services::discord) mod task_supervisor;
+mod terminal_ui_obligation;
 #[cfg(unix)]
 mod tmux;
 #[cfg(unix)]

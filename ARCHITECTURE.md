@@ -660,6 +660,7 @@ src/
 │   │   ├── steering.rs
 │   │   ├── streaming_finalizer.rs
 │   │   ├── task_supervisor.rs
+│   │   ├── terminal_ui_obligation.rs
 │   │   ├── tmux.rs
 │   │   ├── tmux_error_detect.rs
 │   │   ├── tmux_kill_policy.rs

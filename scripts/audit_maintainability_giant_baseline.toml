@@ -142,7 +142,10 @@
 # #3560: +9 (6189 -> 6198) for the footer-mode migration reconcile — the
 # migrate_separate_status_panel_to_footer call + comment at the footer-mode entry
 # (helper body itself extracted to turn_bridge/status_panel.rs, net decomposition).
-"src/services/discord/turn_bridge/mod.rs" = 6221 # #3630 frontier mirror for cancel/stop + prompt_too_long terminal arms
+# #3607: +20 raw / +20 prod for the TimedOut+committed terminal-UI obligation
+# hook. The durable sidecar store + isolated sweeper live in
+# terminal_ui_obligation.rs; this keeps the hot-file cost to the call-site hook.
+"src/services/discord/turn_bridge/mod.rs" = 6241 # #3607 terminal-UI obligation hook
 # #3038 turn_bridge S1 child modules, frozen at landed production LoC.
 "src/services/discord/turn_bridge/headless_delivery.rs" = 415
 "src/services/discord/turn_bridge/status_panel.rs" = 437
