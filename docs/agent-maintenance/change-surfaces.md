@@ -1474,12 +1474,13 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   detector and prompt delivery surface (#2399 hardened the post-turn
   handoff deadline). Treat as giant-file territory; split before adding
   non-bugfix behavior beyond the readiness/cancel contract.
-- `src/services/claude_tui/input.rs` (1636) — Claude TUI input readiness
+- `src/services/claude_tui/input.rs` (1656) — Claude TUI input readiness
   detector, prompt delivery, and cancellation/offset handoff surface. Treat as
   giant-file territory; split before adding non-bugfix behavior beyond the
   readiness/cancel contract. (+191 from the #685/#720 reliability fixes:
   startup-dialog auto-dismiss and keeping the follow-up readiness wait alive
-  while the prior turn streams.)
+  while the prior turn streams; +20 from #3637 centralizing post-paste error
+  cleanup and making draft clearing cancel-agnostic.)
 - `src/services/memory/memento.rs` (1893).
 - `src/services/dispatched_sessions.rs` (1328) — dispatched session domain
   service. This is the post-#1515 SRP extraction target for route/database
