@@ -150,9 +150,9 @@ def main():
             print("  [!] MISSING OVERLAP CHECK: PR body lacks a completed duplicate/overlap guard acknowledgement.")
         if not has_scratch_file_cleanup_ack(body):
             print("  [!] MISSING SCRATCH FILE CLEANUP CHECK: PR body lacks a completed scratch file cleanup acknowledgement.")
-        if "verification" not in normalized_body:
+        if not has_non_empty_body_field(body, ["verification commands and results", "verification"]):
             print("  [!] MISSING VERIFICATION: PR body lacks the required 'verification' commands and results.")
-        if "skipped checks" not in normalized_body:
+        if not has_non_empty_body_field(body, ["skipped checks with reasons", "skipped checks"]):
             print("  [!] MISSING SKIPPED CHECKS: PR body fails to mention 'skipped checks' with reasons.")
         if not has_non_empty_body_field(body, ["risk", "risk assessment"]):
             print("  [!] MISSING RISK: PR body fails to mention 'risk' assessment.")
