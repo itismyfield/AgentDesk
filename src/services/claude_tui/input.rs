@@ -32,6 +32,7 @@ const PROMPT_READY_POST_EVENT_SETTLE: Duration = Duration::from_millis(50);
 const PROMPT_SUBMIT_INITIAL_SETTLE: Duration = Duration::from_millis(120);
 const PROMPT_SUBMIT_RETRY_SETTLE: Duration = Duration::from_millis(350);
 const PROMPT_SUBMIT_CONFIRM_RETRIES: usize = 2;
+const PROMPT_DRAFT_CLEANUP_CANCEL_TOKEN: Option<&CancelToken> = None;
 /// Upper bound for how long we wait for an interactive selector overlay (e.g.
 /// `/effort`) to mount after submitting the slash command, before giving up and
 /// reporting failure rather than sending navigation keys into a composer.
@@ -682,8 +683,23 @@ fn run_actions_with_submission_confirmation(
     actions: &[TuiInputAction],
     cancel_token: Option<&CancelToken>,
 ) -> Result<(), String> {
-    run_actions(session_name, actions, cancel_token)?;
-    confirm_prompt_submission_left_editor(session_name, cancel_token)
+    let actions_contained_paste = actions_contain_paste_buffer(actions);
+    let result = run_actions(session_name, actions, cancel_token)
+        .and_then(|()| confirm_prompt_submission_left_editor(session_name, cancel_token));
+    if should_clear_draft_on_error(actions_contained_paste, result.is_err()) {
+        clear_prompt_draft_before_error(session_name);
+    }
+    result
+}
+
+fn actions_contain_paste_buffer(actions: &[TuiInputAction]) -> bool {
+    actions
+        .iter()
+        .any(|action| matches!(action, TuiInputAction::PasteBuffer(_)))
+}
+
+fn should_clear_draft_on_error(actions_contained_paste: bool, result_is_err: bool) -> bool {
+    actions_contained_paste && result_is_err
 }
 
 fn confirm_prompt_submission_left_editor(
@@ -712,7 +728,6 @@ fn confirm_prompt_submission_left_editor(
             }
             PromptSubmitConfirmationDecision::FailedDraftStuck => {
                 log_prompt_submit_left_draft(session_name, &snapshot);
-                clear_prompt_draft_before_error(session_name, cancel_token);
                 return Err(format!(
                     "claude tui prompt submit left draft after {} enter retries; prompt_marker_detected={}; prompt_draft_detected={}; capture_available={}",
                     PROMPT_SUBMIT_CONFIRM_RETRIES,
@@ -776,8 +791,19 @@ fn prompt_submit_settle_for_attempt(attempt: usize) -> Duration {
     }
 }
 
-fn clear_prompt_draft_before_error(session_name: &str, cancel_token: Option<&CancelToken>) {
+fn clear_prompt_draft_before_error(session_name: &str) {
     let snapshot = prompt_readiness_snapshot(session_name);
+    let actions = prompt_draft_cleanup_actions(&snapshot);
+    if let Err(error) = run_actions(session_name, &actions, PROMPT_DRAFT_CLEANUP_CANCEL_TOKEN) {
+        tracing::warn!(
+            tmux_session_name = session_name,
+            error = %error,
+            "failed to clear Claude TUI draft after prompt submit retries"
+        );
+    }
+}
+
+fn prompt_draft_cleanup_actions(snapshot: &PromptReadinessSnapshot) -> Vec<TuiInputAction> {
     let mut actions = vec![
         TuiInputAction::CtrlU,
         TuiInputAction::Escape,
@@ -786,13 +812,7 @@ fn clear_prompt_draft_before_error(session_name: &str, cancel_token: Option<&Can
     if let Some(count) = claude_prompt_draft_backspace_budget_from_tail(&snapshot.pane_tail) {
         actions.push(TuiInputAction::Backspace(count));
     }
-    if let Err(error) = run_actions(session_name, &actions, cancel_token) {
-        tracing::warn!(
-            tmux_session_name = session_name,
-            error = %error,
-            "failed to clear Claude TUI draft after prompt submit retries"
-        );
-    }
+    actions
 }
 
 pub(crate) fn claude_prompt_draft_backspace_budget_from_tail(pane_tail: &str) -> Option<usize> {
@@ -1338,7 +1358,7 @@ fn wait_for_prompt_ready_polling(
                     readiness = readiness.label(),
                     "claude_tui clearing stranded follow-up prompt draft after readiness timeout so retry can re-inject cleanly"
                 );
-                clear_prompt_draft_before_error(session_name, cancel_token);
+                clear_prompt_draft_before_error(session_name);
             }
             return Err(format!(
                 "{PROMPT_READY_TIMEOUT_ERROR_PREFIX} {} prompt input readiness after {}s; reason={}; previous_tui_turn_still_running={}; prompt_marker_detected={}; prompt_draft_detected={}; capture_available={}",
@@ -2039,6 +2059,46 @@ mod tests {
         assert_eq!(
             prompt_submit_confirmation_decision(&dead, 0, 2),
             PromptSubmitConfirmationDecision::FailedSessionDead
+        );
+    }
+
+    #[test]
+    fn prompt_submit_cleanup_on_error_is_limited_to_paste_actions() {
+        let literal_actions = vec![
+            TuiInputAction::Literal("abc".to_string()),
+            TuiInputAction::Enter,
+        ];
+        assert!(!actions_contain_paste_buffer(&literal_actions));
+        assert!(!should_clear_draft_on_error(false, true));
+
+        let paste_actions = vec![
+            TuiInputAction::PasteBuffer("line1\nline2".to_string()),
+            TuiInputAction::Enter,
+        ];
+        assert!(actions_contain_paste_buffer(&paste_actions));
+        assert!(!should_clear_draft_on_error(true, false));
+        assert!(should_clear_draft_on_error(true, true));
+    }
+
+    #[test]
+    fn prompt_draft_cleanup_actions_are_cancel_agnostic() {
+        let snapshot = PromptReadinessSnapshot {
+            prompt_marker_detected: true,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "❯\u{00a0}commit this".to_string(),
+        };
+
+        assert!(PROMPT_DRAFT_CLEANUP_CANCEL_TOKEN.is_none());
+        assert_eq!(
+            prompt_draft_cleanup_actions(&snapshot),
+            vec![
+                TuiInputAction::CtrlU,
+                TuiInputAction::Escape,
+                TuiInputAction::CtrlU,
+                TuiInputAction::Backspace("commit this".chars().count() + 4),
+            ]
         );
     }
 
