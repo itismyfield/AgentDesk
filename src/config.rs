@@ -1960,7 +1960,15 @@ fn default_database_user() -> String {
     "agentdesk".into()
 }
 fn default_database_pool_max() -> u32 {
-    12
+    // Sized for the always-on background DB consumers (cluster heartbeat,
+    // dispatch/message outbox claiming, observability flush, session-discovery,
+    // policy-tick, routine recovery) plus foreground turn ingestion. At 12 the
+    // steady-state pool was already near-saturated and any burst (e.g. a
+    // post-restart catch-up sweep coinciding with a turn) pushed it into
+    // sustained `acquire_timeout` errors, delaying message ingestion. 24 leaves
+    // headroom while staying well under Postgres `max_connections` even with
+    // the 1.5x startup warmup pool and a second cluster node sharing the DB.
+    24
 }
 fn default_cluster_role() -> String {
     "auto".into()
