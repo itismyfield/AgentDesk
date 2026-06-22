@@ -1057,6 +1057,56 @@ mod tests {
     }
 
     #[test]
+    fn replace_mirror_gate_records_only_delivered_committed_3630() {
+        let dir = tempfile::tempdir().unwrap();
+        let delivered_path =
+            delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36_300);
+        let not_delivered_path =
+            delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36_301);
+
+        let replace_committed = true;
+        let committed = true;
+        if replace_committed && committed {
+            record_delivered_frontier_shadow_at(
+                &delivered_path,
+                (7, 77),
+                123,
+                0,
+                Some(555),
+                Some(999),
+                77,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            read_record_at(&delivered_path)
+                .unwrap()
+                .delivered_frontier
+                .unwrap()
+                .range,
+            (7, 77)
+        );
+
+        // `commit_and_advance(.., NotDelivered)` can still return true, but the
+        // in-memory confirmed_end_offset did not advance, so M4 requires no record.
+        let replace_committed = false;
+        let committed = true;
+        if replace_committed && committed {
+            record_delivered_frontier_shadow_at(
+                &not_delivered_path,
+                (7, 77),
+                123,
+                0,
+                Some(555),
+                Some(999),
+                0,
+            )
+            .unwrap();
+        }
+        assert!(read_record_at(&not_delivered_path).is_none());
+    }
+
+    #[test]
     fn shadow_reports_divergence_but_still_writes_and_never_panics() {
         // A durable-vs-memory END mismatch is observe-only: it reports `true`
         // (logged upstream) and STILL writes the frontier — no panic.

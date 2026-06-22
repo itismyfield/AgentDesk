@@ -56,4 +56,4 @@
 # #3560: 6612 -> 6621 (+9), reviewable admission — footer-mode separate-panel
 # migration reconcile call + comment at the resume entry. Helper body lives in
 # turn_bridge/status_panel.rs; this is the minimal call-site cost.
-"src/services/discord/turn_bridge/mod.rs" = 6621
+"src/services/discord/turn_bridge/mod.rs" = 6644 # #3630 frontier mirror for cancel/stop + prompt_too_long arms

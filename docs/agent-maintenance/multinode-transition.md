@@ -404,6 +404,12 @@
 
 ### Audited touches
 
+- #3630 frontier mirror for cancel/stop + prompt_too_long terminal arms:
+  turn_bridge now mirrors only Delivered+committed terminal-replace lease ranges
+  into the durable delivery-record frontier keyed by `watcher_owner_channel_id`.
+  Classification: worker-local relay frontier; no leader election, PG lease, or
+  cross-node gossip change.
+
 - #3573 `pause_reason` DB field + opt-in failure-pause auto-resume:
   `routines` table gains a nullable TEXT column (`pause_reason`) populated with
   `'failure'` (run failed/timed-out), `'manual'` (operator pause), or

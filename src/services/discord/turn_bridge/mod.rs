@@ -4580,17 +4580,29 @@ pub(super) fn spawn_turn_bridge(
                 // `NoRange` has NO new bytes → no advance outside a lease (codex
                 // P1-b: a degenerate equal-nonzero range must not advance).
                 if let Some(lease) = stop_lease {
+                    let lease_range = lease.range();
                     let outcome = if replace_committed {
                         crate::services::discord::LeaseOutcome::Delivered
                     } else {
                         crate::services::discord::LeaseOutcome::NotDelivered
                     };
-                    lease.commit_and_advance(
+                    let committed = lease.commit_and_advance(
                         shared_owned.as_ref(),
                         watcher_owner_channel_id,
                         inflight_state.tmux_session_name.as_deref(),
                         outcome,
                     );
+                    if replace_committed && committed {
+                        super::outbound::delivery_record::shadow_mirror_delivered_frontier(
+                            shared_owned.as_ref(),
+                            &provider,
+                            watcher_owner_channel_id,
+                            lease_range,
+                            true,
+                            Some(current_msg_id.get()),
+                            Some(channel_id.get()),
+                        );
+                    }
                 }
                 if !replace_committed {
                     preserve_inflight_for_cleanup_retry = true;
@@ -4664,17 +4676,29 @@ pub(super) fn spawn_turn_bridge(
                 // B6 (codex P1-b): advance ONLY via a successful lease commit.
                 // NoRange has no new bytes → no advance outside the lease.
                 if let Some(lease) = plt_lease {
+                    let lease_range = lease.range();
                     let outcome = if replace_committed {
                         crate::services::discord::LeaseOutcome::Delivered
                     } else {
                         crate::services::discord::LeaseOutcome::NotDelivered
                     };
-                    lease.commit_and_advance(
+                    let committed = lease.commit_and_advance(
                         shared_owned.as_ref(),
                         watcher_owner_channel_id,
                         inflight_state.tmux_session_name.as_deref(),
                         outcome,
                     );
+                    if replace_committed && committed {
+                        super::outbound::delivery_record::shadow_mirror_delivered_frontier(
+                            shared_owned.as_ref(),
+                            &provider,
+                            watcher_owner_channel_id,
+                            lease_range,
+                            true,
+                            Some(current_msg_id.get()),
+                            Some(channel_id.get()),
+                        );
+                    }
                 }
                 if !replace_committed {
                     preserve_inflight_for_cleanup_retry = true;
