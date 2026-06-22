@@ -198,6 +198,45 @@ pub(super) fn run_bot_spawn_upload_cleanup() {
     });
 }
 
+fn periodic_catch_up_interval() -> std::time::Duration {
+    const DEFAULT_SECS: u64 = 60;
+    const MIN_SECS: u64 = 10;
+    let secs = std::env::var("AGENTDESK_CATCH_UP_POLL_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map(|secs| secs.max(MIN_SECS))
+        .unwrap_or(DEFAULT_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Background: bounded REST backstop for gateway message gaps. Startup
+/// recovery covers restart windows; this loop covers the rarer case where the
+/// gateway stays connected but a provider channel misses a MessageCreate event.
+pub(super) fn run_bot_spawn_periodic_catch_up(
+    http: Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+) {
+    let shared_for_catch_up = shared.clone();
+    let provider_for_catch_up = provider.clone();
+    task_supervisor::spawn_observed("periodic_catch_up", async move {
+        let is_utility_bot = {
+            let settings = shared_for_catch_up.settings.read().await;
+            settings.agent.is_some()
+        };
+        if is_utility_bot {
+            return;
+        }
+
+        let interval = periodic_catch_up_interval();
+        tokio::time::sleep(interval).await;
+        loop {
+            catch_up_missed_messages(&http, &shared_for_catch_up, &provider_for_catch_up).await;
+            tokio::time::sleep(interval).await;
+        }
+    });
+}
+
 /// Background: periodic GC for stale thread sessions in DB. Normal
 /// idle/disconnected thread rows expire after 1 hour, but rows still carrying
 /// an active_dispatch_id stay until the 3-hour safety TTL so warm-resume

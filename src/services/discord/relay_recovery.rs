@@ -312,7 +312,9 @@ fn eligible_reattach_watcher(snapshot: &RelayHealthSnapshot) -> bool {
     snapshot.tmux_alive == Some(true)
         && snapshot.bridge_inflight_present
         && snapshot.mailbox_has_cancel_token
-        && (!snapshot.watcher_attached || snapshot.watcher_attached_stale)
+        && (!snapshot.watcher_attached
+            || snapshot.watcher_attached_stale
+            || !snapshot.watcher_owns_live_relay)
         && snapshot.desynced
         && is_agentdesk_tmux_session(snapshot.tmux_session.as_deref())
 }
@@ -1075,10 +1077,11 @@ mod tests {
         assert_eq!(decision.evidence.active_turn, RelayActiveTurn::Foreground);
     }
 
-    /// #3277 (Defect D) eligibility table: a DEAD attached watcher handle
-    /// (`watcher_attached_stale`) no longer blocks the bounded reattach, while
-    /// a genuinely-live attached watcher still does, and the legacy
-    /// detached-watcher case stays eligible.
+    /// #3277 (Defect D) + deploy-preserved ownerless restore eligibility table:
+    /// a DEAD attached watcher handle (`watcher_attached_stale`) no longer
+    /// blocks the bounded reattach; a genuinely-live watcher that already owns
+    /// the relay still does; and a live-but-ownerless watcher is eligible
+    /// because rebind only needs to restamp ownership and reuse the incumbent.
     #[test]
     fn reattach_eligibility_distinguishes_stale_attached_watcher_from_live() {
         let base = || RelayHealthSnapshot {
@@ -1110,8 +1113,10 @@ mod tests {
         );
         assert_eq!(stale_attached.auto_heal.skipped_reason, None);
 
-        // attached + LIVE handle → never auto-replace a live watcher.
-        let live_attached = plan_relay_recovery(
+        // attached + LIVE ownerless handle → eligible; this is the
+        // post-deploy `watcher_attached=true` / `watcher_owns_live_relay=false`
+        // gap where the handle exists but cannot relay the current inflight.
+        let live_ownerless_attached = plan_relay_recovery(
             &RelayHealthSnapshot {
                 watcher_attached: true,
                 watcher_attached_stale: false,
@@ -1121,11 +1126,28 @@ mod tests {
             1_000,
         );
         assert!(
-            !live_attached.auto_heal.eligible,
-            "a fresh-heartbeat live watcher must keep reattach operator-gated"
+            live_ownerless_attached.auto_heal.eligible,
+            "a live but ownerless watcher should be reused and restamped by reattach"
+        );
+        assert_eq!(live_ownerless_attached.auto_heal.skipped_reason, None);
+
+        // attached + LIVE owner → never auto-replace a live relay owner.
+        let live_owned_attached = plan_relay_recovery(
+            &RelayHealthSnapshot {
+                watcher_attached: true,
+                watcher_attached_stale: false,
+                watcher_owns_live_relay: true,
+                ..base()
+            },
+            RelayStallState::TmuxAliveRelayDead,
+            1_000,
+        );
+        assert!(
+            !live_owned_attached.auto_heal.eligible,
+            "a fresh-heartbeat live watcher that owns relay must keep reattach operator-gated"
         );
         assert_eq!(
-            live_attached.auto_heal.skipped_reason,
+            live_owned_attached.auto_heal.skipped_reason,
             Some("reattach_missing_required_live_evidence")
         );
 

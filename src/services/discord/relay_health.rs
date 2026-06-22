@@ -131,7 +131,10 @@ impl RelayStallClassifier {
     pub(in crate::services::discord) fn classify(
         snapshot: &RelayHealthSnapshot,
     ) -> RelayStallState {
-        if snapshot.tmux_alive == Some(true) && snapshot.desynced {
+        let live_watcher_owns_relay = snapshot.watcher_attached
+            && !snapshot.watcher_attached_stale
+            && snapshot.watcher_owns_live_relay;
+        if snapshot.tmux_alive == Some(true) && snapshot.desynced && !live_watcher_owns_relay {
             return RelayStallState::TmuxAliveRelayDead;
         }
 
@@ -195,7 +198,24 @@ mod tests {
                 RelayStallState::ExplicitBackgroundWork,
             ),
             (
-                "live tmux plus desync is relay-dead even during a foreground turn",
+                "live owned watcher plus foreground desync remains an active stream",
+                RelayHealthSnapshot {
+                    active_turn: RelayActiveTurn::Foreground,
+                    bridge_inflight_present: true,
+                    mailbox_has_cancel_token: true,
+                    tmux_alive: Some(true),
+                    watcher_attached: true,
+                    watcher_owns_live_relay: true,
+                    last_capture_offset: Some(128),
+                    last_relay_offset: 0,
+                    unread_bytes: Some(128),
+                    desynced: true,
+                    ..RelayHealthSnapshot::test_snapshot()
+                },
+                RelayStallState::ActiveForegroundStream,
+            ),
+            (
+                "live tmux plus ownerless desync is relay-dead even during a foreground turn",
                 RelayHealthSnapshot {
                     active_turn: RelayActiveTurn::Foreground,
                     bridge_inflight_present: true,

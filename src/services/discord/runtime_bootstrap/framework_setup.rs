@@ -109,6 +109,11 @@ pub(super) async fn run_bot_framework_setup(
         &health_registry_for_setup,
         api_port,
     );
+    super::spawns::run_bot_spawn_periodic_catch_up(
+        ctx.http.clone(),
+        &shared_for_tmux,
+        &provider_for_setup,
+    );
 
     // Background: periodic cleanup for stale Discord upload files
     super::spawns::run_bot_spawn_upload_cleanup();

@@ -20,12 +20,29 @@ fn can_replace_stale_rebind_inflight(state: &inflight::InflightTurnState) -> boo
 }
 
 fn can_resume_existing_rebind_inflight(state: &inflight::InflightTurnState) -> bool {
+    let ownerless_live_relay = state.effective_relay_owner_kind() == inflight::RelayOwnerKind::None;
+    let unstarted_relay =
+        state.full_response.trim().is_empty() && state.last_watcher_relayed_offset.is_none();
+    let has_restore_anchor = state
+        .tmux_session_name
+        .as_deref()
+        .is_some_and(|name| !name.trim().is_empty())
+        && state
+            .output_path
+            .as_deref()
+            .is_some_and(|path| !path.trim().is_empty());
+    let planned_restart_ownerless_restore = state.restart_mode.is_some()
+        && ownerless_live_relay
+        && has_restore_anchor
+        && recovery_has_post_work_ready_evidence(state);
+
     !state.rebind_origin
         && state.request_owner_user_id != 0
         && state.user_msg_id != 0
         && state.current_msg_id != 0
-        && state.full_response.trim().is_empty()
-        && state.last_watcher_relayed_offset.is_none()
+        && !state.terminal_delivery_committed
+        && ((state.restart_mode.is_none() && (unstarted_relay || ownerless_live_relay))
+            || planned_restart_ownerless_restore)
 }
 
 pub(super) fn recovery_phase_for_existing_inflight_rebind(
@@ -83,6 +100,79 @@ pub(super) fn recovery_has_post_work_ready_evidence(state: &inflight::InflightTu
             .last_tool_summary
             .as_deref()
             .is_some_and(|summary| !summary.trim().is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::provider::ProviderKind;
+
+    #[test]
+    fn ownerless_live_inflight_with_partial_response_can_reattach_watcher() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+        let mut state = inflight::InflightTurnState::new(
+            ProviderKind::Codex,
+            1_479_671_301_387_059_200,
+            Some("adk-cdx".to_string()),
+            343_742_347_365_974_026,
+            1_518_710_986_180_137_051,
+            1_518_719_883_708_207_285,
+            "diagnose relay".to_string(),
+            Some("session".to_string()),
+            None,
+            Some("/tmp/rollout.jsonl".to_string()),
+            None,
+            0,
+        );
+        state.full_response = "partial response".to_string();
+        state.response_sent_offset = state.full_response.len();
+        state.set_relay_owner_kind(inflight::RelayOwnerKind::None);
+
+        assert_eq!(
+            recovery_phase_for_existing_inflight_rebind(&state),
+            RecoveryPhase::InflightRestore,
+            "relay recovery must be able to reattach a watcher to a real live inflight whose watcher owner was lost"
+        );
+    }
+
+    #[test]
+    fn planned_restart_ownerless_live_inflight_with_restore_anchor_can_reattach_watcher() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+        let mut state = inflight::InflightTurnState::new(
+            ProviderKind::Codex,
+            1_479_671_301_387_059_200,
+            Some("adk-cdx".to_string()),
+            343_742_347_365_974_026,
+            1_518_710_986_180_137_051,
+            1_518_719_883_708_207_285,
+            "diagnose relay".to_string(),
+            Some("session".to_string()),
+            Some("AgentDesk-codex-adk-cdx".to_string()),
+            Some("/tmp/rollout.jsonl".to_string()),
+            None,
+            0,
+        );
+        state.restart_mode = Some(crate::services::discord::InflightRestartMode::DrainRestart);
+        state.full_response = "partial response".to_string();
+        state.response_sent_offset = state.full_response.len();
+        state.set_relay_owner_kind(inflight::RelayOwnerKind::None);
+
+        assert_eq!(
+            recovery_phase_for_existing_inflight_rebind(&state),
+            RecoveryPhase::InflightRestore,
+            "planned restart markers from deploy must not block restoring an ownerless real turn"
+        );
+    }
 }
 
 pub(super) fn recovery_ready_without_output_already_delivered(

@@ -3555,10 +3555,13 @@ pub(crate) async fn rebind_inflight_for_channel(
     }
 
     let (default_output_path, input_fifo) = tmux_runtime_paths(&tmux_session_name);
+    let fallback_output_path = existing_saved_output_path
+        .clone()
+        .unwrap_or_else(|| default_output_path.clone());
     let (output_path, synthetic_initial_offset) = {
         #[cfg(unix)]
         {
-            match detect_live_tmux_output_path(&tmux_session_name, &default_output_path) {
+            match detect_live_tmux_output_path(&tmux_session_name, &fallback_output_path) {
                 Ok(Some(detected)) => {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!(
@@ -3571,15 +3574,15 @@ pub(crate) async fn rebind_inflight_for_channel(
                     (detected.path, detected.initial_offset)
                 }
                 Ok(None) => {
-                    let synthetic_initial_offset = std::fs::metadata(&default_output_path)
+                    let synthetic_initial_offset = std::fs::metadata(&fallback_output_path)
                         .map(|m| m.len())
                         .unwrap_or(0);
-                    (default_output_path.clone(), synthetic_initial_offset)
+                    (fallback_output_path.clone(), synthetic_initial_offset)
                 }
                 Err(stale) => {
                     return Err(RebindError::StaleOutputPath {
                         tmux_session: tmux_session_name.clone(),
-                        output_path: default_output_path.clone(),
+                        output_path: fallback_output_path.clone(),
                         live_fd: stale.fd,
                         live_inode: stale.inode,
                         live_path: stale.raw_path,
@@ -3589,10 +3592,10 @@ pub(crate) async fn rebind_inflight_for_channel(
         }
         #[cfg(not(unix))]
         {
-            let synthetic_initial_offset = std::fs::metadata(&default_output_path)
+            let synthetic_initial_offset = std::fs::metadata(&fallback_output_path)
                 .map(|m| m.len())
                 .unwrap_or(0);
-            (default_output_path.clone(), synthetic_initial_offset)
+            (fallback_output_path.clone(), synthetic_initial_offset)
         }
     };
 
@@ -3622,7 +3625,16 @@ pub(crate) async fn rebind_inflight_for_channel(
         synthetic_initial_offset
     };
 
-    let recovered_state_for_session = if let Some(existing) = existing_inflight.clone() {
+    let recovered_state_for_session = if let Some(mut existing) = existing_inflight.clone() {
+        existing.tmux_session_name = Some(tmux_session_name.clone());
+        existing.output_path = Some(output_path.clone());
+        existing.input_fifo_path = Some(input_fifo.clone());
+        existing.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
+        if let Err(error) = super::inflight::save_inflight_state(&existing) {
+            return Err(RebindError::Internal(format!(
+                "stamp existing inflight for watcher reattach: {error}"
+            )));
+        }
         existing
     } else {
         // Build and persist the new inflight state. No request_owner / msg_ids
@@ -3728,6 +3740,12 @@ pub(crate) async fn rebind_inflight_for_channel(
         restore_recovered_session_worktree(session, &recovered_state_for_session);
     }
 
+    let finish_mailbox_on_completion = if existing_inflight.is_some() {
+        reregister_active_turn_from_inflight(shared, &recovered_state_for_session).await
+    } else {
+        false
+    };
+
     // #1135: claim with the single-watcher policy. A live watcher for this
     // same tmux session is reused; a cancelled same-session handle or a
     // different-session channel incumbent is replaced so recovery is not
@@ -3765,12 +3783,17 @@ pub(crate) async fn rebind_inflight_for_channel(
             );
             if claim.should_spawn() {
                 shared.record_tmux_watcher_reconnect(discord_channel_id);
+                let restored_turn = super::tmux::restored_watcher_turn_from_inflight(
+                    &recovered_state_for_session,
+                    &tmux_session_name,
+                    finish_mailbox_on_completion,
+                );
                 super::task_supervisor::spawn_observed_tmux_watcher(
                     "recovery_restore_inflight_tmux_output_watcher",
                     shared.clone(),
                     tmux_session_name.clone(),
                     cancel.clone(),
-                    super::tmux::tmux_output_watcher(
+                    super::tmux::tmux_output_watcher_with_restore(
                         discord_channel_id,
                         http.clone(),
                         shared.clone(),
@@ -3783,6 +3806,7 @@ pub(crate) async fn rebind_inflight_for_channel(
                         pause_epoch,
                         turn_delivered,
                         last_heartbeat_ts_ms,
+                        restored_turn,
                     ),
                 );
             }

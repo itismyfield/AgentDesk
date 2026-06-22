@@ -49,6 +49,44 @@ fn catch_up_checkpoint_for_scan(
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CatchUpFetchMode {
+    After(u64),
+    Recent,
+}
+
+impl CatchUpFetchMode {
+    fn checkpoint(self) -> Option<u64> {
+        match self {
+            Self::After(checkpoint) => Some(checkpoint),
+            Self::Recent => None,
+        }
+    }
+}
+
+fn catch_up_fetch_mode_for_scan(
+    candidate: &CatchUpChannelCandidate,
+    live_checkpoint: Option<u64>,
+    retry_checkpoint: Option<u64>,
+) -> CatchUpFetchMode {
+    if let Some(disk_checkpoint) = candidate.disk_checkpoint {
+        return CatchUpFetchMode::After(catch_up_checkpoint_for_scan(
+            disk_checkpoint,
+            live_checkpoint,
+            retry_checkpoint,
+        ));
+    }
+
+    if let Some(retry_checkpoint) = retry_checkpoint {
+        return CatchUpFetchMode::After(retry_checkpoint);
+    }
+    if let Some(live_checkpoint) = live_checkpoint {
+        return CatchUpFetchMode::After(live_checkpoint);
+    }
+
+    CatchUpFetchMode::Recent
+}
+
 #[derive(Debug, Clone)]
 struct CatchUpChannelCandidate {
     channel_id: ChannelId,
@@ -335,14 +373,11 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
     }
 
     for candidate in candidates.values() {
-        let Some(disk_last_id) = candidate.disk_checkpoint else {
-            continue;
-        };
         let channel_id = candidate.channel_id;
         let retry_checkpoint = retry_checkpoints.get(&channel_id).copied();
         let live_checkpoint = shared.last_message_ids.get(&channel_id).map(|entry| *entry);
-        let last_id = catch_up_checkpoint_for_scan(disk_last_id, live_checkpoint, retry_checkpoint);
-        let after_msg = MessageId::new(last_id);
+        let fetch_mode = catch_up_fetch_mode_for_scan(candidate, live_checkpoint, retry_checkpoint);
+        let scan_checkpoint = fetch_mode.checkpoint();
 
         // #429: skip channels this bot cannot access.  Utility bots
         // (notify/announce) share the claude provider checkpoint dir but
@@ -375,7 +410,10 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
             RuntimeChannelBindingStatus::Unknown => continue,
         }
 
-        // Fetch messages after last_id (Discord returns oldest first with after=)
+        // Fetch messages after the saved cursor when one exists. Configured
+        // channels can legitimately have no last_message checkpoint yet (for
+        // example after `/clear` or stale-checkpoint pruning), so fall back to a
+        // bounded recent-message scan instead of silently skipping the channel.
         // #1227: limit was 10 — channels with bursty bot activity (streaming
         // replies + many short turns) routinely fill that window with bot
         // messages, pushing user messages outside the page. Discord applies
@@ -383,15 +421,11 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
         // headroom for the realistic
         // bot:user ratio. Discord per-channel rate limit (5 req / 5 sec)
         // has plenty of margin for this 5x cost.
-        let messages = match channel_id
-            .messages(
-                http,
-                serenity::builder::GetMessages::new()
-                    .after(after_msg)
-                    .limit(CATCH_UP_FETCH_LIMIT),
-            )
-            .await
-        {
+        let mut request = serenity::builder::GetMessages::new().limit(CATCH_UP_FETCH_LIMIT);
+        if let CatchUpFetchMode::After(last_id) = fetch_mode {
+            request = request.after(MessageId::new(last_id));
+        }
+        let mut messages = match channel_id.messages(http, request).await {
             Ok(msgs) => msgs,
             Err(e) => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -412,6 +446,7 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
         if messages.is_empty() {
             continue;
         }
+        messages.sort_by_key(|msg| msg.id.get());
 
         // Get bot's own user ID to filter out self-messages
         // Collect existing message IDs in queue for dedup
@@ -470,13 +505,15 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
             // the last actually-queued message — newer entries that we
             // declined are still > `after_msg` for the next pass.
             if outcome == CatchUpClassification::Recover && stats.recovered >= remaining_capacity {
-                let retry_after = max_recovered_id.unwrap_or(last_id);
-                shared
-                    .catch_up_retry_pending
-                    .insert(channel_id, retry_after);
+                let retry_after = max_recovered_id.or(scan_checkpoint);
+                if let Some(retry_after) = retry_after {
+                    shared
+                        .catch_up_retry_pending
+                        .insert(channel_id, retry_after);
+                }
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
-                    "  [{ts}] 🔁 catch-up: queue cap reached for channel {}; retry armed after checkpoint {}",
+                    "  [{ts}] 🔁 catch-up: queue cap reached for channel {}; retry armed after checkpoint {:?}",
                     channel_id,
                     retry_after
                 );
@@ -554,7 +591,7 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
 
         // Only advance checkpoint if we actually recovered messages
         if let Some(newest) = max_recovered_id {
-            shared.last_message_ids.insert(channel_id, newest);
+            advance_last_message_checkpoint(shared, provider, channel_id, MessageId::new(newest));
             if retry_checkpoint.is_some()
                 && !shared.catch_up_retry_pending.contains_key(&channel_id)
             {
@@ -736,8 +773,9 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
 #[cfg(test)]
 mod catch_up_recovery_tests {
     use super::{
-        CatchUpClassification, CatchUpMessageView, ChannelId, ProviderKind,
-        classify_catch_up_message, insert_configured_catch_up_candidate,
+        CatchUpChannelCandidate, CatchUpClassification, CatchUpFetchMode, CatchUpMessageView,
+        ChannelId, ProviderKind, catch_up_fetch_mode_for_scan, classify_catch_up_message,
+        insert_configured_catch_up_candidate,
     };
     use std::collections::{BTreeMap, HashSet};
 
@@ -758,6 +796,10 @@ mod catch_up_recovery_tests {
         assert_eq!(candidate.fallback_name.as_deref(), Some("adk-cc"));
         assert!(candidate.checkpoint_path.is_none());
         assert!(candidate.disk_checkpoint.is_none());
+        assert_eq!(
+            catch_up_fetch_mode_for_scan(candidate, None, None),
+            CatchUpFetchMode::Recent
+        );
     }
 
     #[test]
@@ -787,6 +829,29 @@ mod catch_up_recovery_tests {
         assert_eq!(candidate.disk_checkpoint, Some(1504812094456070174));
         assert!(candidate.checkpoint_path.is_some());
         assert_eq!(candidate.fallback_name.as_deref(), Some("adk-cc"));
+        assert_eq!(
+            catch_up_fetch_mode_for_scan(candidate, Some(1504812094456070175), None),
+            CatchUpFetchMode::After(1504812094456070175)
+        );
+    }
+
+    #[test]
+    fn retry_checkpoint_overrides_live_cursor_for_recent_scan_retry() {
+        let candidate = CatchUpChannelCandidate {
+            channel_id: ChannelId::new(1479671298497183835),
+            fallback_name: Some("adk-cc".to_string()),
+            checkpoint_path: None,
+            disk_checkpoint: None,
+        };
+
+        assert_eq!(
+            catch_up_fetch_mode_for_scan(
+                &candidate,
+                Some(1504812094456070999),
+                Some(1504812094456070000)
+            ),
+            CatchUpFetchMode::After(1504812094456070000)
+        );
     }
 
     #[test]
