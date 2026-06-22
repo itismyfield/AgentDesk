@@ -1045,7 +1045,7 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6221 prod lines; the BRIDGE
+  - `src/services/discord/turn_bridge/mod.rs` (6241 lines; production LoC; the BRIDGE
     spawn/turn-lifecycle surface — `spawn_turn_bridge` and the per-channel
     turn loop. #3479 extracted the task/session-panel line rendering +
     active-placeholder-card helpers into the `panel_lifecycle.rs` leaf.
@@ -1070,7 +1070,17 @@
     into `streaming_edit_text.rs` and the watcher-orphan spinner-cleanup
     decision + retry-spawn helpers into `watcher_orphan_cleanup.rs` (both
     re-exported, call sites byte-identical).
+    #3607 adds only the TimedOut+committed terminal-UI obligation hook in the
+    hot branch; the durable sidecar store + isolated sweeper live in
+    `terminal_ui_obligation.rs`. It edits only the turn's status card and does
+    not touch body delivery, offset authority, or `delivery_record.rs`.
     Hotfile — bugfix only outside the #3038 decompose plan).
+  - `src/services/discord/terminal_ui_obligation.rs` (545 prod LoC; #3607
+    worker-local durable terminal-UI obligation sidecar store plus isolated
+    status-card reconciliation sweeper. The file owns
+    `discord_terminal_ui_obligations/<provider>/<channel_id>.json`, pure
+    record/reconcile predicates, and boot-resumed status-card edit convergence.
+    It is below the giant-file threshold).
   - `src/services/discord/turn_bridge/cancel_finalize_policy.rs` (131 prod
     lines; pure cancel/finalize-policy decisions extracted from `mod.rs` by
     #3479: `classify_turn_finished_dispatch_kind`,

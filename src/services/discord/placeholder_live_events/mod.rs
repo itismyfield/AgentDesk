@@ -31,7 +31,7 @@ use completion_footer::{CompletionFooterRender, render_completion_footer};
 use context_panel::ContextPanelSnapshot;
 use recent_events::render_events;
 use session_panel::SessionPanelSnapshot;
-use status_panel::{StatusPanelState, render_status_panel};
+use status_panel::{CompletedKind, DerivedStatus, StatusPanelState, render_status_panel};
 pub(in crate::services::discord) use task_panel::TaskPanelInfo;
 use task_panel::{TaskPanelSnapshot, clean_task_panel_value};
 
@@ -41,9 +41,7 @@ use common::{
     STATUS_PANEL_WORKFLOW_LIMIT, STATUS_PANEL_WORKFLOW_PHASE_LIMIT,
 };
 #[cfg(test)]
-use status_panel::{
-    CompletedKind, DerivedStatus, render_recent_section_header, truncate_status_panel_sections,
-};
+use status_panel::{render_recent_section_header, truncate_status_panel_sections};
 
 pub(in crate::services::discord) use recent_events::RecentPlaceholderEvent;
 pub(in crate::services::discord) use status_events::{
@@ -86,6 +84,13 @@ pub(in crate::services::discord) struct LiveContextPanelSnapshot {
     pub(in crate::services::discord) provider_session_id: Option<String>,
     pub(in crate::services::discord) used_tokens: u64,
     pub(in crate::services::discord) context_window_tokens: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum TerminalUiObligationPanelStatus {
+    Pending,
+    Completed,
+    Deadline,
 }
 
 impl PlaceholderLiveEvents {
@@ -433,6 +438,41 @@ impl PlaceholderLiveEvents {
             provider,
             started_at_unix,
             chrono::Utc::now().timestamp(),
+        )
+    }
+
+    pub(in crate::services::discord) fn render_terminal_ui_obligation_panel(
+        &self,
+        channel_id: ChannelId,
+        provider: &ProviderKind,
+        started_at_unix: i64,
+        status: TerminalUiObligationPanelStatus,
+    ) -> String {
+        let mut snapshot = self
+            .status_by_channel
+            .get(&channel_id)
+            .map(|entry| {
+                entry
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone()
+            })
+            .unwrap_or_default();
+        snapshot.status = match status {
+            TerminalUiObligationPanelStatus::Pending => DerivedStatus::TerminalDeliveryPending,
+            TerminalUiObligationPanelStatus::Completed => DerivedStatus::Completed {
+                kind: CompletedKind::Foreground,
+            },
+            TerminalUiObligationPanelStatus::Deadline => DerivedStatus::TerminalDeliveryUnconfirmed,
+        };
+        let completed = matches!(status, TerminalUiObligationPanelStatus::Completed);
+        render_status_panel(
+            snapshot,
+            self.render_block(channel_id),
+            provider,
+            started_at_unix,
+            chrono::Utc::now().timestamp(),
+            !completed,
         )
     }
 

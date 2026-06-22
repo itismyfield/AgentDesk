@@ -469,6 +469,15 @@
   leader election, gateway lease, PG ownership, startup order, worker ownership,
   or singleton assumption is touched; the recovery-fallback criterion is
   deferred to #3610.
+- #3607 terminal-UI obligation durable sidecar + sweeper: the
+  TimedOut+committed terminal path writes a worker-local sidecar obligation and
+  edits only the existing status card to "delivered / session-end confirming";
+  `terminal_ui_obligation.rs` owns the durable sidecar and isolated sweeper that
+  converges the same card to ✅ on pane idle or ⚠ on deadline. This is a
+  worker-local UI reconcile over per-channel runtime state, not a body-delivery
+  authority: no assistant body repost, no response/confirmed offset movement,
+  no `delivery_record.rs` frontier reuse, and no new leader election, gateway
+  lease, PG ownership, startup order, worker ownership, or singleton assumption.
 - #3560 single_message_panel default-ON + footer-mode migration guard: the
   `single_message_panel` flag is now default-ON (opt-out via
   `AGENTDESK_SINGLE_MESSAGE_PANEL=0|false`) and `turn_bridge/mod.rs` gained a
