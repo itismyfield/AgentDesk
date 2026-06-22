@@ -13,7 +13,7 @@ use super::loader::{
     RoutineScriptLoader, RoutineTickAgent, RoutineTickContext, RoutineTickRoutine, RoutineTickRun,
 };
 use super::migrated::{is_migrated_launchd_script_ref, validate_migrated_launchd_activation};
-use super::store::{ClaimedRoutineRun, RoutineStore};
+use super::store::{ClaimedRoutineRun, RoutineStore, terminal_failure_should_pause};
 use crate::error::{AppError, AppResult, ErrorCode};
 
 #[derive(Debug, Clone, Serialize)]
@@ -35,6 +35,7 @@ pub async fn run_due_tick(
     agent_executor: Option<&RoutineAgentExecutor>,
     discord_logger: Option<&RoutineDiscordLogger>,
     max_due_per_tick: u32,
+    pause_on_terminal_failure: bool,
 ) -> Result<Vec<RoutineRunOutcome>> {
     let claimed = store.claim_due_runs(max_due_per_tick).await?;
     let mut outcomes = Vec::with_capacity(claimed.len());
@@ -81,7 +82,16 @@ pub async fn run_due_tick(
             }
             continue;
         }
-        match execute_claimed_script_run(store, loader, agent_executor, discord_logger, run).await {
+        match execute_claimed_script_run(
+            store,
+            loader,
+            agent_executor,
+            discord_logger,
+            run,
+            pause_on_terminal_failure,
+        )
+        .await
+        {
             Ok(Some(outcome)) => {
                 if let Some(logger) = discord_logger {
                     logger.log_run_outcome(store, &outcome).await;
@@ -131,8 +141,11 @@ pub async fn poll_agent_turns(
     store: &RoutineStore,
     agent_executor: &RoutineAgentExecutor,
     max_per_tick: u32,
+    pause_on_terminal_failure: bool,
 ) -> Result<Vec<RoutineRunOutcome>> {
-    agent_executor.poll_agent_runs(store, max_per_tick).await
+    agent_executor
+        .poll_agent_runs(store, max_per_tick, pause_on_terminal_failure)
+        .await
 }
 
 pub async fn execute_claimed_script_run(
@@ -141,6 +154,7 @@ pub async fn execute_claimed_script_run(
     agent_executor: Option<&RoutineAgentExecutor>,
     discord_logger: Option<&RoutineDiscordLogger>,
     claimed: ClaimedRoutineRun,
+    pause_on_terminal_failure: bool,
 ) -> Result<Option<RoutineRunOutcome>> {
     let fresh_context_guaranteed = false;
     let agent = load_tick_agent_context(store, claimed.agent_id.as_deref()).await?;
@@ -247,9 +261,15 @@ pub async fn execute_claimed_script_run(
                 "error": message,
                 "script_ref": claimed.script_ref,
             }));
-            let closed = store
-                .fail_run(&claimed.run_id, &message, result_json.clone(), None)
-                .await?;
+            let closed = if terminal_failure_should_pause(pause_on_terminal_failure) {
+                store
+                    .fail_run_and_pause_routine(&claimed.run_id, &message, result_json.clone())
+                    .await?
+            } else {
+                store
+                    .fail_run(&claimed.run_id, &message, result_json.clone(), None)
+                    .await?
+            };
             if !closed {
                 return Ok(None);
             }
@@ -284,6 +304,7 @@ pub async fn execute_claimed_script_run(
         claimed,
         action,
         fresh_context_guaranteed,
+        pause_on_terminal_failure,
     )
     .await
 }
@@ -608,6 +629,7 @@ async fn close_action(
     claimed: ClaimedRoutineRun,
     action: RoutineAction,
     fresh_context_guaranteed: bool,
+    pause_on_terminal_failure: bool,
 ) -> Result<Option<RoutineRunOutcome>> {
     let action_name = action.action_name().to_string();
     match action {
@@ -762,6 +784,7 @@ async fn close_action(
                     checkpoint,
                     last_result,
                     next_due_at,
+                    pause_on_terminal_failure,
                 )
                 .await
                 .map(Some)

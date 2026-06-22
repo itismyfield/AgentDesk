@@ -1,5 +1,7 @@
 use super::*;
 
+static ORPHAN_INFLIGHT_LOCK_SWEEP_ONCE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
 /// Restore inflight turns FIRST, then flush restart reports (leader-only).
 /// Recovery skips channels that have a pending restart report, so the report
 /// must still be on disk when recovery runs. After recovery completes, the
@@ -213,6 +215,12 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
                 // stranded on the channel.
                 stale_cards_to_delete = filter_outcome.stale_cards;
             }
+
+            // #3641: orphan `.json.lock` sidecars are invisible to the `.json`
+            // row scans below, so sweep them once per process before inflight
+            // recovery starts. The sweep itself enumerates provider subdirs.
+            let _ = ORPHAN_INFLIGHT_LOCK_SWEEP_ONCE
+                .get_or_init(super::inflight::reap_orphan_inflight_locks);
 
             // #2437 (#2427 C wire) boot-time generation
             // invalidate. Remove non-planned-restart inflight

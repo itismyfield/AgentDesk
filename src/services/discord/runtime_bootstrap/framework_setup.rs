@@ -141,6 +141,15 @@ pub(super) async fn run_bot_framework_setup(
         health_registry_for_setup.started_at_unix(),
     );
 
+    // #3607: durable UI-only reconciliation for terminal-delivered turns whose
+    // TUI quiescence confirmation timed out. The sidecar survives restart; the
+    // sweeper picks up existing records on its first immediate tick.
+    super::terminal_ui_obligation::spawn_terminal_ui_obligation_sweeper(
+        ctx.http.clone(),
+        shared_clone.clone(),
+        provider_for_setup.clone(),
+    );
+
     // #2436 (#2427 B wire): heartbeat-gap → explicit
     // inflight cleanup. Faster cadence than the placeholder
     // sweeper so a silently hung watcher loop is evicted

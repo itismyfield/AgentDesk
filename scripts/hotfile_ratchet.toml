@@ -56,4 +56,6 @@
 # #3560: 6612 -> 6621 (+9), reviewable admission — footer-mode separate-panel
 # migration reconcile call + comment at the resume entry. Helper body lives in
 # turn_bridge/status_panel.rs; this is the minimal call-site cost.
-"src/services/discord/turn_bridge/mod.rs" = 6621
+# #3607: 6644 -> 6664 (+20), TimedOut+committed terminal-UI obligation hook;
+# durable sidecar + sweeper body lives in terminal_ui_obligation.rs.
+"src/services/discord/turn_bridge/mod.rs" = 6664 # #3607 terminal-UI obligation hook

@@ -1573,7 +1573,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             ),
         ])
         .with_example(
-            json!({"path": {"id": "adk-dashboard"}, "body": {"from_agent_id": "project-agentdesk", "message": "hello", "channel_kind": "cc", "prefix": true}}),
+            json!({"path": {"id": "adk-dashboard"}, "body": {"from_agent_id": "project-agentdesk", "message": "hello", "channel_kind": "cc", "prefix": true, "expect_reply": true}}),
             json!({"to_agent_id": "adk-dashboard", "channel_id": "1473922824350601297", "channel_kind": "cc", "message_id": "1500000000000000002", "bot": "announce", "prefixed": true}),
         )
         .with_error_example(
@@ -1581,7 +1581,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             json!({"path": {"id": "ghost-agent"}, "body": {"from_agent_id": "project-agentdesk", "message": "hello", "channel_kind": "cc"}}),
             json!({"error": "channel_kind unset", "to_agent_id": "ghost-agent", "channel_kind": "cc", "available_kinds": []}),
         )
-        .with_curl("curl -X POST http://localhost:8787/api/agents/adk-dashboard/message -H 'Content-Type: application/json' -d '{\"from_agent_id\":\"project-agentdesk\",\"message\":\"hello\",\"channel_kind\":\"cc\",\"prefix\":true}'"),
+        .with_curl("curl -X POST http://localhost:8787/api/agents/adk-dashboard/message -H 'Content-Type: application/json' -d '{\"from_agent_id\":\"project-agentdesk\",\"message\":\"hello\",\"channel_kind\":\"cc\",\"prefix\":true,\"expect_reply\":true}'"),
         ep(
             "POST",
             "/api/agents/{id}/handoff",
@@ -1620,7 +1620,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             ),
         ])
         .with_example(
-            json!({"path": {"id": "adk-dashboard"}, "body": {"from_agent_id": "project-agentdesk", "prompt": "리뷰 코멘트 반영해서 PR 업데이트해줘", "channel_kind": "cc", "source": "agent-relay"}}),
+            json!({"path": {"id": "adk-dashboard"}, "body": {"from_agent_id": "project-agentdesk", "prompt": "리뷰 코멘트 반영해서 PR 업데이트해줘", "channel_kind": "cc", "expect_reply": true, "source": "agent-relay"}}),
             json!({"ok": true, "to_agent_id": "adk-dashboard", "channel_id": "1473922824350601297", "channel_kind": "cc", "turn_id": "discord:1473922824350601297:9100000000000000000", "status": "started"}),
         )
         .with_error_example(
@@ -1628,7 +1628,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             json!({"path": {"id": "adk-dashboard"}, "body": {"from_agent_id": "project-agentdesk", "prompt": "do it"}}),
             json!({"error": "turn already active for this agent mailbox", "status": "conflict"}),
         )
-        .with_curl("curl -X POST http://localhost:8787/api/agents/adk-dashboard/handoff -H 'Content-Type: application/json' -d '{\"from_agent_id\":\"project-agentdesk\",\"prompt\":\"리뷰 반영해줘\",\"channel_kind\":\"cc\"}'"),
+        .with_curl("curl -X POST http://localhost:8787/api/agents/adk-dashboard/handoff -H 'Content-Type: application/json' -d '{\"from_agent_id\":\"project-agentdesk\",\"prompt\":\"리뷰 반영해줘\",\"channel_kind\":\"cc\",\"expect_reply\":true}'"),
         ep(
             "GET",
             "/api/agents/{id}/cron",

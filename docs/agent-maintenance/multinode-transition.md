@@ -404,6 +404,12 @@
 
 ### Audited touches
 
+- #3630 frontier mirror for cancel/stop + prompt_too_long terminal arms:
+  turn_bridge now mirrors only Delivered+committed terminal-replace lease ranges
+  into the durable delivery-record frontier keyed by `watcher_owner_channel_id`.
+  Classification: worker-local relay frontier; no leader election, PG lease, or
+  cross-node gossip change.
+
 - #3573 `pause_reason` DB field + opt-in failure-pause auto-resume:
   `routines` table gains a nullable TEXT column (`pause_reason`) populated with
   `'failure'` (run failed/timed-out), `'manual'` (operator pause), or
@@ -463,6 +469,15 @@
   leader election, gateway lease, PG ownership, startup order, worker ownership,
   or singleton assumption is touched; the recovery-fallback criterion is
   deferred to #3610.
+- #3607 terminal-UI obligation durable sidecar + sweeper: the
+  TimedOut+committed terminal path writes a worker-local sidecar obligation and
+  edits only the existing status card to "delivered / session-end confirming";
+  `terminal_ui_obligation.rs` owns the durable sidecar and isolated sweeper that
+  converges the same card to ✅ on pane idle or ⚠ on deadline. This is a
+  worker-local UI reconcile over per-channel runtime state, not a body-delivery
+  authority: no assistant body repost, no response/confirmed offset movement,
+  no `delivery_record.rs` frontier reuse, and no new leader election, gateway
+  lease, PG ownership, startup order, worker ownership, or singleton assumption.
 - #3560 single_message_panel default-ON + footer-mode migration guard: the
   `single_message_panel` flag is now default-ON (opt-out via
   `AGENTDESK_SINGLE_MESSAGE_PANEL=0|false`) and `turn_bridge/mod.rs` gained a
@@ -842,6 +857,12 @@
   token-built Http fallback on standby nodes) are byte-identical and stay
   process-local. No new multinode ownership, singleton, or lease assumption
   is introduced.
+- #3641 (boot-time orphan inflight `.lock` sweep): `inflight.rs` now removes
+  old `discord_inflight/{provider}/*.json.lock` sidecars only when the matching
+  `.json` inflight row is absent and the lock mtime is past the conservative
+  age floor. This is worker-local filesystem hygiene for advisory-lock sidecars:
+  it does not touch live `.json` rows, durable queues, leases, leader/standby
+  ownership, or cross-node routing semantics.
 - Active-session audit: `active_session_audit` adds read-only health diagnostics
   plus optional local repair-path metadata for stale running-session rows. It
   does not move Discord gateway startup, worker ownership, durable queue claims,
