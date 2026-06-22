@@ -200,7 +200,7 @@ impl AgentHandoffError {
 fn reply_expectation_contract(from_agent_id: &str, expect_reply: bool) -> String {
     if expect_reply {
         format!(
-            "──────────\n📨 **회신 필수 계약**: 이 핸드오프는 회신을 요구합니다. 작업/검토를 마치면 결과·결론을 요청자 `{from_agent_id}`에게 반드시 회신하세요. 회신은 `agentdesk send-to-agent --from <self> --to {from_agent_id} --message \"...\"` 로 보냅니다(현재 요청의 callback 정보·채널 규칙 우선)."
+            "──────────\n📨 **회신 필수 계약**: 이 핸드오프는 회신을 요구합니다. 작업/검토를 마치면 결과·결론을 요청자 `{from_agent_id}`에게 반드시 회신하세요. 회신은 `agentdesk send-to-agent --from <self> --to {from_agent_id} --message \"...\" --expect-reply false` 로 보냅니다(현재 요청의 callback 정보·채널 규칙 우선)."
         )
     } else {
         "──────────\n📭 **회신 불필요 계약**: 이 핸드오프는 회신을 요구하지 않습니다. 별도 보고 없이 처리하세요(중대한 이슈를 발견한 경우에만 자율적으로 회신).".to_string()

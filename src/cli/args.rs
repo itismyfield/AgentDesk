@@ -101,11 +101,9 @@ pub(crate) enum Commands {
         /// Send the body without the automatic handoff prefix
         #[arg(long = "no-prefix")]
         no_prefix: bool,
-        /// Reply-expectation contract appended to the handoff body:
-        /// `--expect-reply true` → 회신 필수, `--expect-reply false` → 회신 불필요,
-        /// omitted → no contract.
-        #[arg(long = "expect-reply")]
-        expect_reply: Option<bool>,
+        /// Required: `true` → 회신 필수, `false` → 회신 불필요.
+        #[arg(long = "expect-reply", action = clap::ArgAction::Set, required = true)]
+        expect_reply: bool,
         /// #3556 — reserve a headless turn on the target mailbox instead of
         /// posting an announce message. Authoritative wake-up: exits non-zero
         /// on 409 (mailbox busy). Mutually exclusive with the default
@@ -975,6 +973,75 @@ pub(crate) fn parse() -> ParseOutcome {
                 std::process::exit(1);
             }
             ParseOutcome::RunServer
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::{Parser, error::ErrorKind};
+
+    #[test]
+    fn send_to_agent_requires_expect_reply() {
+        let result = Cli::try_parse_from([
+            "agentdesk",
+            "send-to-agent",
+            "--from",
+            "a",
+            "--to",
+            "b",
+            "--message",
+            "hi",
+        ]);
+        let Err(error) = result else {
+            panic!("send-to-agent without --expect-reply should fail");
+        };
+
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn send_to_agent_parses_expect_reply_true() {
+        let cli = Cli::try_parse_from([
+            "agentdesk",
+            "send-to-agent",
+            "--from",
+            "a",
+            "--to",
+            "b",
+            "--message",
+            "hi",
+            "--expect-reply",
+            "true",
+        ])
+        .expect("send-to-agent with --expect-reply true should parse");
+
+        match cli.command.expect("subcommand") {
+            Commands::SendToAgent { expect_reply, .. } => assert!(expect_reply),
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn send_to_agent_parses_expect_reply_false() {
+        let cli = Cli::try_parse_from([
+            "agentdesk",
+            "send-to-agent",
+            "--from",
+            "a",
+            "--to",
+            "b",
+            "--message",
+            "hi",
+            "--expect-reply",
+            "false",
+        ])
+        .expect("send-to-agent with --expect-reply false should parse");
+
+        match cli.command.expect("subcommand") {
+            Commands::SendToAgent { expect_reply, .. } => assert!(!expect_reply),
+            _ => panic!("unexpected command"),
         }
     }
 }

@@ -306,7 +306,7 @@ pub(crate) async fn cmd_send_to_agent(
     message: &str,
     channel_kind: crate::services::discord::agent_handoff::AgentHandoffChannelKind,
     prefix: bool,
-    expect_reply: Option<bool>,
+    expect_reply: bool,
     start_turn: bool,
 ) -> Result<(), String> {
     run_command(true, false, |state| async move {
@@ -328,7 +328,7 @@ pub(crate) async fn cmd_send_to_agent(
                 message,
                 channel_kind,
                 prefix,
-                expect_reply,
+                Some(expect_reply),
                 Some("cli:send-to-agent".to_string()),
                 None,
             )
@@ -344,7 +344,7 @@ pub(crate) async fn cmd_send_to_agent(
             message,
             channel_kind,
             prefix,
-            expect_reply,
+            Some(expect_reply),
         )
         .await
         .map_err(|error| error.one_line())?;
