@@ -1241,8 +1241,8 @@
     `giant-file-registry.md` (owner `automation-pipeline`, deadline
     2026-08-31, #3036)).
   - `src/services/discord/{commands/text_commands.rs,
-    discord_config_audit.rs, router/intake_gate.rs, inflight.rs}`
-    (all 1000+ production lines).
+    discord_config_audit.rs, router/intake_gate.rs}` (all 1000+ production
+    lines) and `src/services/discord/inflight.rs` (2771 lines).
 - active_callsite_coverage: n/a.
 - invariants: watcher single-owner per #1222; placeholder lifecycle invariants
   per #1112; `/api/inflight/rebind` is the only path that synthesises an

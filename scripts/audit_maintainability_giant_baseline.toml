@@ -425,7 +425,12 @@
 # path now route their unlink through this single helper (the boot branch loses
 # its inline lock+reload). The bulk is load-bearing doc comments; the 4 new
 # boundary tests live in the excluded `rebind_origin_reap_tests` module.
-"src/services/discord/inflight.rs" = 2660
+# #3641 raised 2660 -> 2771 (+111): boot-time orphan `.json.lock` sweep for
+# `discord_inflight/{provider}` sidecars whose matching `.json` row is gone.
+# Adds the 1h conservative age floor, lock-name/base-path helpers, root-explicit
+# testable sweep, runtime-root wrapper, and boot hook. Tests live in the excluded
+# `orphan_lock_reap_tests` module.
+"src/services/discord/inflight.rs" = 2771 # #3641 orphan-lock sweep
 # #3038 Phase A: health.rs decomposed into health/ directory modules (root 402
 # prod LoC + 6 sub-1000-LoC submodules) — dropped below the giant threshold, so
 # its ratchet entry is deleted (win; no baseline raises).

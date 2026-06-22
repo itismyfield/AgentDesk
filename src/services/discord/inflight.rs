@@ -99,6 +99,13 @@ pub(super) const INFLIGHT_STALENESS_THRESHOLD_SECS: u64 = 300;
 /// is never raced. Overridable via `AGENTDESK_REBIND_ORIGIN_DEADLINE_SECS`.
 pub(super) const REBIND_ORIGIN_DEADLINE_SECS_DEFAULT: u64 = 120;
 
+/// #3641: orphan sidecar lock files are cosmetic after process death because
+/// `flock` releases with the fd, but stale paths can accumulate forever once the
+/// matching `.json` state row has been cleaned/quarantined. Keep the reap
+/// conservative so a fresh lock created just before its `.json` row is written is
+/// never touched.
+pub(super) const ORPHAN_LOCK_REAP_MIN_AGE_SECS: i64 = 3600;
+
 /// #3581: floor for the env-overridden rebind-origin deadline. Guards against a
 /// pathologically small (or zero) override reaping rows before the adoption
 /// backstop window can complete.
@@ -236,6 +243,109 @@ pub(super) fn emit_reap_abandoned_rebind_origin(
 
 pub(super) fn inflight_runtime_root() -> Option<PathBuf> {
     discord_inflight_root()
+}
+
+fn is_inflight_json_lock_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".json.lock"))
+}
+
+fn inflight_json_path_for_lock(lock_path: &Path) -> Option<PathBuf> {
+    let file_name = lock_path.file_name()?.to_str()?;
+    let json_file_name = file_name.strip_suffix(".lock")?;
+    Some(lock_path.with_file_name(json_file_name))
+}
+
+fn metadata_mtime_unix_secs(metadata: &fs::Metadata) -> Option<i64> {
+    metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs() as i64)
+}
+
+/// #3641: boot-time cleanup for orphan `discord_inflight/{provider}/*.json.lock`
+/// sidecars whose matching `.json` state file no longer exists. The lock file is
+/// never authoritative by itself: live turns are protected by the existence of
+/// the `.json` row, and fresh first-acquire locks are protected by the age floor.
+pub(super) fn reap_orphan_inflight_locks_in_root(root: &Path, now_unix: i64) -> usize {
+    let mut removed = 0usize;
+    for provider in [ProviderKind::Claude, ProviderKind::Codex] {
+        let provider_dir = inflight_provider_dir(root, &provider);
+        let provider_name = provider.as_str();
+        let Ok(lock_entries) = fs::read_dir(&provider_dir) else {
+            continue;
+        };
+
+        for lock_entry in lock_entries {
+            let Ok(lock_entry) = lock_entry else {
+                continue;
+            };
+            let lock_path = lock_entry.path();
+            if !is_inflight_json_lock_path(&lock_path) {
+                continue;
+            }
+            let Some(json_path) = inflight_json_path_for_lock(&lock_path) else {
+                continue;
+            };
+            if json_path.exists() {
+                continue;
+            }
+
+            let Ok(metadata) = lock_entry.metadata() else {
+                tracing::warn!(
+                    provider = provider_name,
+                    path = %lock_path.display(),
+                    "#3641 failed to stat inflight orphan-lock candidate"
+                );
+                continue;
+            };
+            if !metadata.is_file() {
+                continue;
+            }
+            let Some(mtime_unix) = metadata_mtime_unix_secs(&metadata) else {
+                continue;
+            };
+            let age_secs = now_unix.saturating_sub(mtime_unix).max(0);
+            if age_secs < ORPHAN_LOCK_REAP_MIN_AGE_SECS {
+                continue;
+            }
+            if json_path.exists() {
+                continue;
+            }
+
+            match fs::remove_file(&lock_path) {
+                Ok(()) => removed += 1,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::warn!(
+                        provider = provider_name,
+                        path = %lock_path.display(),
+                        error = %error,
+                        "#3641 failed to remove orphan inflight lock file"
+                    );
+                }
+            }
+        }
+    }
+
+    if removed > 0 {
+        tracing::info!(
+            removed,
+            root = %root.display(),
+            "#3641 reaped orphan inflight lock file(s)"
+        );
+    }
+    removed
+}
+
+pub(super) fn reap_orphan_inflight_locks() -> usize {
+    let Some(root) = inflight_runtime_root() else {
+        return 0;
+    };
+    reap_orphan_inflight_locks_in_root(&root, now_unix())
 }
 
 /// #2235: expose the local `INFLIGHT_STATE_VERSION` so the recovery engine
@@ -5474,6 +5584,82 @@ mod stall_recovery_tests {
         assert!(
             reason.contains("removing stale inflight state file"),
             "unexpected removal reason: {reason}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod orphan_lock_reap_tests {
+    //! #3641: orphan `.json.lock` sidecars are not seen by the `.json` row scans.
+    use super::{ORPHAN_LOCK_REAP_MIN_AGE_SECS, reap_orphan_inflight_locks_in_root};
+    use crate::services::provider::ProviderKind;
+    use filetime::{FileTime, set_file_mtime};
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    fn write_file_with_age(path: &Path, now_unix: i64, age_secs: i64) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, b"lock").unwrap();
+        set_file_mtime(
+            path,
+            FileTime::from_unix_time(now_unix.saturating_sub(age_secs), 0),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn reaps_only_old_orphan_json_lock_files() {
+        let temp = TempDir::new().unwrap();
+        let now_unix = 1_800_000_000;
+        let old_age = ORPHAN_LOCK_REAP_MIN_AGE_SECS + 10;
+        let recent_age = ORPHAN_LOCK_REAP_MIN_AGE_SECS - 10;
+        let provider_dir = temp.path().join(ProviderKind::Codex.as_str());
+
+        let old_orphan_lock = provider_dir.join("101.json.lock");
+        write_file_with_age(&old_orphan_lock, now_unix, old_age);
+
+        let matched_json = provider_dir.join("202.json");
+        let matched_lock = provider_dir.join("202.json.lock");
+        std::fs::write(&matched_json, b"{}").unwrap();
+        write_file_with_age(&matched_lock, now_unix, old_age);
+
+        let recent_orphan_lock = provider_dir.join("303.json.lock");
+        write_file_with_age(&recent_orphan_lock, now_unix, recent_age);
+
+        let quarantine_marker = provider_dir.join("404.json.rebind-stall-123");
+        write_file_with_age(&quarantine_marker, now_unix, old_age);
+
+        let non_json_lock = provider_dir.join("505.lock");
+        write_file_with_age(&non_json_lock, now_unix, old_age);
+
+        let removed = reap_orphan_inflight_locks_in_root(temp.path(), now_unix);
+
+        assert_eq!(removed, 1, "only the old orphan .json.lock is reaped");
+        assert!(
+            !old_orphan_lock.exists(),
+            "old orphan lock with no matching .json must be removed"
+        );
+        assert!(
+            matched_json.exists(),
+            "matching .json state row must never be touched"
+        );
+        assert!(
+            matched_lock.exists(),
+            "lock with matching .json state row must be kept even when old"
+        );
+        assert!(
+            recent_orphan_lock.exists(),
+            "recent orphan lock must stay below the age floor"
+        );
+        assert!(
+            quarantine_marker.exists(),
+            "quarantine marker must not match the .json.lock sweep"
+        );
+        assert!(
+            non_json_lock.exists(),
+            "non-.json.lock files are out of scope"
         );
     }
 }

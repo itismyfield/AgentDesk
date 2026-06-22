@@ -848,6 +848,12 @@
   token-built Http fallback on standby nodes) are byte-identical and stay
   process-local. No new multinode ownership, singleton, or lease assumption
   is introduced.
+- #3641 (boot-time orphan inflight `.lock` sweep): `inflight.rs` now removes
+  old `discord_inflight/{provider}/*.json.lock` sidecars only when the matching
+  `.json` inflight row is absent and the lock mtime is past the conservative
+  age floor. This is worker-local filesystem hygiene for advisory-lock sidecars:
+  it does not touch live `.json` rows, durable queues, leases, leader/standby
+  ownership, or cross-node routing semantics.
 - Active-session audit: `active_session_audit` adds read-only health diagnostics
   plus optional local repair-path metadata for stale running-session rows. It
   does not move Discord gateway startup, worker ownership, durable queue claims,
