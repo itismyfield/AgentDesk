@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use sqlx::PgPool;
 
 use crate::db::Db;
@@ -29,6 +31,49 @@ fn normalized_session_key(target: &str, session_key: Option<&str>) -> Option<Str
 
 fn normalized_reason_code(reason_code: Option<&str>) -> Option<&str> {
     reason_code.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn parse_channel_target(target: &str) -> Option<u64> {
+    target
+        .trim()
+        .strip_prefix("channel:")?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|id| *id > 0)
+}
+
+fn is_dm_session_channel_segment(value: &str) -> bool {
+    value
+        .strip_prefix("dm-")
+        .is_some_and(|user_id| !user_id.is_empty() && user_id.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+fn private_session_provider_from_key(session_key: Option<&str>) -> Option<String> {
+    let session_key = session_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let parsed = crate::services::discord::session_identity::SessionIdentity::parse(session_key);
+    let tmux_name = parsed
+        .as_ref()
+        .map(|identity| identity.tmux_name.as_str())
+        .unwrap_or(session_key);
+    let (provider, channel_segment) =
+        crate::services::provider::parse_provider_and_channel_from_tmux_name(tmux_name)?;
+    is_dm_session_channel_segment(&channel_segment).then(|| provider.as_str().to_string())
+}
+
+pub(crate) fn delivery_bot_for_target_session<'a>(
+    target: &str,
+    configured_bot: &'a str,
+    session_key: Option<&str>,
+) -> Cow<'a, str> {
+    if parse_channel_target(target).is_some()
+        && let Some(provider_bot) = private_session_provider_from_key(session_key)
+    {
+        return Cow::Owned(provider_bot);
+    }
+    Cow::Borrowed(configured_bot)
 }
 
 fn dedupe_key_for_message(
@@ -77,7 +122,7 @@ pub(crate) fn dedupe_key_for_message_for_test(
 
 #[cfg(test)]
 mod dedupe_key_tests {
-    use super::dedupe_key_for_message;
+    use super::{dedupe_key_for_message, delivery_bot_for_target_session};
 
     #[test]
     fn reason_code_dedupe_key_ignores_content() {
@@ -103,6 +148,51 @@ mod dedupe_key_tests {
         let second = dedupe_key_for_message("channel:123", "second", None, Some("session-abc"));
 
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn dm_session_routes_outbox_delivery_through_provider_bot() {
+        let bot = delivery_bot_for_target_session(
+            "channel:1479662682909966490",
+            "announce",
+            Some("claude/tok/mac-mini:AgentDesk-claude-dm-343742347"),
+        );
+
+        assert_eq!(bot.as_ref(), "claude");
+        let notify_bot = delivery_bot_for_target_session(
+            "channel:1479662682909966490",
+            "notify",
+            Some("claude/tok/mac-mini:AgentDesk-claude-dm-343742347"),
+        );
+        assert_eq!(notify_bot.as_ref(), "claude");
+        let raw_tmux_bot = delivery_bot_for_target_session(
+            "channel:1479662682909966490",
+            "announce",
+            Some("AgentDesk-claude-dm-343742347"),
+        );
+        assert_eq!(raw_tmux_bot.as_ref(), "claude");
+    }
+
+    #[test]
+    fn guild_session_keeps_configured_announce_bot() {
+        let bot = delivery_bot_for_target_session(
+            "channel:1504455726595051591",
+            "announce",
+            Some("claude/tok/mac-mini:AgentDesk-claude-adk-cc"),
+        );
+
+        assert_eq!(bot.as_ref(), "announce");
+    }
+
+    #[test]
+    fn notify_guild_delivery_keeps_info_only_bot() {
+        let bot = delivery_bot_for_target_session(
+            "channel:1504455726595051591",
+            "notify",
+            Some("codex/tok/mac-mini:AgentDesk-codex-adk-cc"),
+        );
+
+        assert_eq!(bot.as_ref(), "notify");
     }
 }
 

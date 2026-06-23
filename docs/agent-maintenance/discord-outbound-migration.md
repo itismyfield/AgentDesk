@@ -2,6 +2,15 @@
 
 Last refreshed: 2026-06-16 (against `main` @ `8ec7336e32eb6ef89e1143fab2543f2fc644ebac`)
 
+> #3664 outbound bot-selection note: the outbox drain (`src/server/mod.rs`)
+> now resolves the delivery bot via `message_outbox::delivery_bot_for_target_session`.
+> For a private (DM) session — tmux name `AgentDesk-<provider>-dm-<digits>` with a
+> `channel:<id>` target — outbound delivery routes through the **provider bot**
+> (e.g. claude), because the announce/notify bots are not participants in a user
+> DM and Discord rejects their send (`Missing Access` → 403). Guild channels keep
+> their configured announce/notify bot. The `send_gate` `dm_default_agent`
+> authorization still gates the provider-bot DM path (no #2047 weakening).
+
 > Implementation refresh for #1457 / #2368 / #2533 / #2535: v3 delivery now
 > covers dispatch outbox, review followups, issue announcements, monitoring
 > status, meeting notifications, short manual/DM notifications, gateway
