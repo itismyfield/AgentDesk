@@ -414,6 +414,7 @@ src/
 │   │   │   └── scrollback.rs
 │   │   ├── inflight/
 │   │   │   ├── budget.rs
+│   │   │   ├── finalizer_identity.rs
 │   │   │   ├── model.rs
 │   │   │   └── store.rs
 │   │   ├── outbound/

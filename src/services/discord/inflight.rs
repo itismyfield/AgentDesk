@@ -6,6 +6,7 @@
 //! relay producers/consumers must keep the invariants there satisfied.
 
 pub(in crate::services::discord) mod budget;
+mod finalizer_identity;
 mod model;
 
 // #3479: the pure domain model moved to `model.rs`; re-export every public
@@ -29,6 +30,10 @@ pub(in crate::services::discord::inflight) use store::{
     inflight_state_path, lock_inflight_state_path,
 };
 
+use finalizer_identity::{
+    backfill_finalizer_turn_id_under_lock, parse_inflight_state_content,
+    parse_inflight_state_content_with_finalizer_backfill, read_inflight_state_content,
+};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -380,7 +385,7 @@ pub(super) fn load_inflight_states_for_sweep(
         let Ok(content) = fs::read_to_string(&path) else {
             continue;
         };
-        let Ok(state) = serde_json::from_str::<InflightTurnState>(&content) else {
+        let Ok(state) = parse_inflight_state_content(&content) else {
             continue;
         };
         if state.provider_kind().as_ref() != Some(provider) {
@@ -829,13 +834,14 @@ fn save_inflight_state_create_new_in_root(
         fs::create_dir_all(parent).map_err(|e| CreateNewInflightError::Internal(e.to_string()))?;
     }
     let _lock = lock_inflight_state_path(&path).map_err(CreateNewInflightError::Internal)?;
+    let mut updated = state.clone();
+    updated.ensure_finalizer_turn_id();
     validate_inflight_state_for_save(
         root,
         &path,
-        state,
+        &updated,
         "src/services/discord/inflight.rs:save_inflight_state_create_new_in_root",
     );
-    let mut updated = state.clone();
     updated.updated_at = now_string();
     let json = serde_json::to_string_pretty(&updated)
         .map_err(|e| CreateNewInflightError::Internal(e.to_string()))?;
@@ -872,15 +878,16 @@ fn save_inflight_state_in_root(root: &Path, state: &InflightTurnState) -> Result
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let _lock = lock_inflight_state_path(&path)?;
+    let mut updated = state.clone();
+    updated.ensure_finalizer_turn_id();
     if !validate_inflight_state_for_save(
         root,
         &path,
-        state,
+        &updated,
         "src/services/discord/inflight.rs:save_inflight_state_in_root",
     ) {
         return Ok(());
     }
-    let mut updated = state.clone();
     updated.updated_at = now_string();
     let json = serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())?;
     atomic_write(&path, &json)
@@ -921,13 +928,14 @@ fn save_inflight_state_if_absent_in_root(
     if path.exists() {
         return Ok(false);
     }
+    let mut updated = state.clone();
+    updated.ensure_finalizer_turn_id();
     validate_inflight_state_for_save(
         root,
         &path,
-        state,
+        &updated,
         "src/services/discord/inflight.rs:save_inflight_state_if_absent_in_root",
     );
-    let mut updated = state.clone();
     updated.updated_at = now_string();
     let json = serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())?;
     atomic_write(&path, &json)?;
@@ -1027,13 +1035,14 @@ pub(super) fn save_inflight_state_if_matches_identity_in_root(
     }
     // #3089 B3: verdict observe-only here — this path already identity/offset-
     // gates above; the #3416 backward vector is the plain overwrite tails.
+    let mut updated = state.clone();
+    updated.ensure_finalizer_turn_id();
     let _ = validate_inflight_state_for_save(
         root,
         &path,
-        state,
+        &updated,
         "src/services/discord/inflight.rs:save_inflight_state_if_matches_identity_in_root",
     );
-    let mut updated = state.clone();
     updated.updated_at = now_string();
     let Ok(json) = serde_json::to_string_pretty(&updated) else {
         return GuardedSaveOutcome::IoError;
@@ -1339,7 +1348,7 @@ fn status_panel_id_is_real(id: Option<u64>) -> bool {
 /// posture as `load_inflight_state`).
 fn load_inflight_state_unlocked(path: &Path) -> Option<InflightTurnState> {
     let data = fs::read_to_string(path).ok()?;
-    serde_json::from_str(&data).ok()
+    parse_inflight_state_content(&data).ok()
 }
 
 /// Shared lock-held persist tail: validate, stamp `updated_at`, atomic-write.
@@ -1350,10 +1359,11 @@ fn persist_under_lock(
     state: &InflightTurnState,
     caller: &'static str,
 ) -> Result<(), String> {
-    if !validate_inflight_state_for_save(root, path, state, caller) {
+    let mut updated = state.clone();
+    updated.ensure_finalizer_turn_id();
+    if !validate_inflight_state_for_save(root, path, &updated, caller) {
         return Ok(());
     }
-    let mut updated = state.clone();
     updated.updated_at = now_string();
     let json = serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())?;
     atomic_write(path, &json)
@@ -1406,10 +1416,9 @@ pub(crate) enum GuardedClearOutcome {
 /// on-disk inflight still describes the turn we believe just finished.
 ///
 /// Guards:
-/// * `expected_user_msg_id` — required to defeat the Pitfall #1 race where
-///   a stale `TurnCompleted` arrives after the next turn has already
-///   written its inflight. `0` is treated as "no guard available" and we
-///   refuse to delete to stay on the conservative side.
+/// * `expected_user_msg_id` — required to defeat the Pitfall #1 race. It
+///   matches either the Discord `user_msg_id` or the row's `finalizer_turn_id`;
+///   `0` is treated as "no guard available" and refused.
 /// * `restart_mode = Some(_)` — preserved (planned drain/hot-swap turns
 ///   must survive across the dcserver restart they were saved for).
 /// * `rebind_origin = true` — preserved (Pitfall #5).
@@ -1501,7 +1510,7 @@ pub(super) fn clear_inflight_state_if_matches_in_root(
     let Ok(data) = fs::read_to_string(&path) else {
         return GuardedClearOutcome::Missing;
     };
-    let Ok(state) = serde_json::from_str::<InflightTurnState>(&data) else {
+    let Ok(state) = parse_inflight_state_content(&data) else {
         // Malformed file: treat like Missing — the loader-side eviction
         // will GC the malformed payload on the next read.
         return GuardedClearOutcome::Missing;
@@ -1512,7 +1521,7 @@ pub(super) fn clear_inflight_state_if_matches_in_root(
     if state.rebind_origin {
         return GuardedClearOutcome::RebindOriginSkipped;
     }
-    if expected_user_msg_id == 0 || state.user_msg_id != expected_user_msg_id {
+    if !state.matches_finalizer_turn_id(expected_user_msg_id) {
         return GuardedClearOutcome::UserMsgMismatch;
     }
     // #2450: save and guarded-clear share the same sidecar lock, so the
@@ -1536,10 +1545,10 @@ pub(super) fn clear_inflight_state_if_matches_in_root(
         let Ok(reread) = fs::read_to_string(&path) else {
             return GuardedClearOutcome::Missing;
         };
-        let Ok(restate) = serde_json::from_str::<InflightTurnState>(&reread) else {
+        let Ok(restate) = parse_inflight_state_content(&reread) else {
             return GuardedClearOutcome::Missing;
         };
-        if restate.user_msg_id != expected_user_msg_id
+        if !restate.matches_finalizer_turn_id(expected_user_msg_id)
             || restate.restart_mode.is_some()
             || restate.rebind_origin
         {
@@ -1720,6 +1729,7 @@ fn clear_inflight_state_if_matches_identity_after_delivery_in_root(
     delivered_state.response_sent_offset =
         normalize_response_sent_offset(full_response, response_sent_offset);
     delivered_state.last_offset = last_offset;
+    delivered_state.ensure_finalizer_turn_id();
     delivered_state.updated_at = now_string();
 
     let mirrored_delivery = match serde_json::to_string_pretty(&delivered_state)
@@ -1900,6 +1910,7 @@ fn refresh_inflight_last_offset_if_matches_identity_in_root(
     }
 
     state.last_offset = last_offset;
+    state.ensure_finalizer_turn_id();
     state.updated_at = now_string();
     serde_json::to_string_pretty(&state)
         .map_err(|error| error.to_string())
@@ -2472,8 +2483,13 @@ pub(super) fn load_inflight_state(
 ) -> Option<InflightTurnState> {
     let root = inflight_runtime_root()?;
     let path = inflight_state_path(&root, provider, channel_id);
-    let data = fs::read_to_string(path).ok()?;
-    serde_json::from_str(&data).ok()
+    let data = fs::read_to_string(&path).ok()?;
+    let (state, backfilled) = parse_inflight_state_content_with_finalizer_backfill(&data).ok()?;
+    if backfilled {
+        backfill_finalizer_turn_id_under_lock(&root, &path, provider).or(Some(state))
+    } else {
+        Some(state)
+    }
 }
 
 pub(super) fn load_inflight_states(provider: &ProviderKind) -> Vec<InflightTurnState> {
@@ -2597,35 +2613,6 @@ fn stale_removal_reason(
     }
 }
 
-fn parse_inflight_state_content(content: &str) -> serde_json::Result<InflightTurnState> {
-    let mut state = serde_json::from_str::<InflightTurnState>(content)?;
-    // #2235: the tolerant `runtime_kind` deserializer collapses both
-    // "field absent" (legacy v7 rows) and "present-but-unknown variant"
-    // (rows written by a future binary) to `runtime_kind = None`.
-    // Recovery treats these two cases differently — absent legacy rows
-    // recover via heuristics; present-unknown rows silent-skip. Re-parse
-    // the JSON as a value to disambiguate and record the verdict on the
-    // transient `runtime_kind_unknown_on_disk` flag.
-    if state.runtime_kind.is_none()
-        && let Ok(raw_value) = serde_json::from_str::<serde_json::Value>(content)
-        && let Some(raw_runtime) = raw_value.get("runtime_kind")
-        && let Some(raw_str) = raw_runtime.as_str()
-        && !raw_str.is_empty()
-        && !matches!(
-            raw_str,
-            "legacy_tmux_wrapper" | "claude_tui" | "codex_tui" | "process_backend"
-        )
-    {
-        state.runtime_kind_unknown_on_disk = true;
-    }
-    Ok(state)
-}
-
-fn read_inflight_state_content(path: &Path) -> Option<InflightTurnState> {
-    let content = fs::read_to_string(path).ok()?;
-    parse_inflight_state_content(&content).ok()
-}
-
 fn stale_removal_reason_for_path(
     path: &Path,
     state: &InflightTurnState,
@@ -2658,26 +2645,27 @@ fn load_inflight_states_from_root(root: &Path, provider: &ProviderKind) -> Vec<I
             );
             continue;
         };
-        let mut state = match parse_inflight_state_content(&content) {
-            Ok(state) => state,
-            Err(_) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] ⚠ removing malformed inflight state file: {}",
-                    path.display()
-                );
-                let Ok(_lock) = lock_inflight_state_path(&path) else {
-                    continue;
-                };
-                match read_inflight_state_content(&path) {
-                    Some(locked_state) => locked_state,
-                    None => {
-                        let _ = fs::remove_file(&path);
+        let (mut state, mut finalizer_backfilled) =
+            match parse_inflight_state_content_with_finalizer_backfill(&content) {
+                Ok(parsed) => parsed,
+                Err(_) => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::info!(
+                        "  [{ts}] ⚠ removing malformed inflight state file: {}",
+                        path.display()
+                    );
+                    let Ok(_lock) = lock_inflight_state_path(&path) else {
                         continue;
+                    };
+                    match read_inflight_state_content(&path) {
+                        Some(locked_state) => (locked_state, false),
+                        None => {
+                            let _ = fs::remove_file(&path);
+                            continue;
+                        }
                     }
                 }
-            }
-        };
+            };
         if state.provider_kind().as_ref() != Some(provider) {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
@@ -2695,6 +2683,7 @@ fn load_inflight_states_from_root(root: &Path, provider: &ProviderKind) -> Vec<I
                 let _ = fs::remove_file(&path);
                 continue;
             }
+            finalizer_backfilled = false;
             state = locked_state;
         }
         if stale_removal_reason_for_path(&path, &state, current_generation).is_some() {
@@ -2717,6 +2706,12 @@ fn load_inflight_states_from_root(root: &Path, provider: &ProviderKind) -> Vec<I
                 let _ = fs::remove_file(&path);
                 continue;
             }
+            finalizer_backfilled = false;
+            state = locked_state;
+        }
+        if finalizer_backfilled
+            && let Some(locked_state) = backfill_finalizer_turn_id_under_lock(root, &path, provider)
+        {
             state = locked_state;
         }
         if let Some(tmux_session_name) = state
@@ -6321,8 +6316,8 @@ mod recovery_relay_attempts_tests {
     //! (the infinite-WARN-loop carrier), and never weaken the pane-alive
     //! stale-removal guard.
     use super::{
-        InflightTurnState, RECOVERY_RELAY_RESTART_ATTEMPT_BUDGET, load_inflight_states_from_root,
-        save_inflight_state_in_root,
+        InflightTurnState, RECOVERY_RELAY_RESTART_ATTEMPT_BUDGET, inflight_state_path,
+        load_inflight_states_from_root, save_inflight_state_in_root,
     };
     use crate::services::discord::InflightRestartMode;
     use crate::services::provider::ProviderKind;
@@ -6399,6 +6394,61 @@ mod recovery_relay_attempts_tests {
         let loaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].recovery_relay_attempts, 2);
+    }
+
+    #[test]
+    fn finalizer_turn_id_uses_injected_prompt_and_round_trips() {
+        let temp = TempDir::new().unwrap();
+        let mut state = make_state(932_932);
+        state.user_msg_id = 0;
+        state.current_msg_id = 0;
+        state.injected_prompt_message_id = Some(555_777);
+        save_inflight_state_in_root(temp.path(), &state).expect("save");
+
+        let loaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
+        assert_eq!(loaded[0].finalizer_turn_id, 555_777);
+
+        let reloaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
+        assert_eq!(reloaded[0].finalizer_turn_id, loaded[0].finalizer_turn_id);
+    }
+
+    #[test]
+    fn missing_finalizer_turn_id_is_backfilled_and_restart_stable() {
+        let temp = TempDir::new().unwrap();
+        let mut state = make_state(932_933);
+        state.user_msg_id = 0;
+        state.current_msg_id = 0;
+        state.injected_prompt_message_id = None;
+        let path = inflight_state_path(temp.path(), &ProviderKind::Codex, state.channel_id);
+        save_inflight_state_in_root(temp.path(), &state).expect("save");
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        raw.as_object_mut().unwrap().remove("finalizer_turn_id");
+        std::fs::write(&path, serde_json::to_string_pretty(&raw).unwrap()).unwrap();
+
+        let loaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
+        assert_ne!(loaded[0].finalizer_turn_id, 0);
+        let backfilled = loaded[0].finalizer_turn_id;
+        let reloaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
+        assert_eq!(reloaded[0].finalizer_turn_id, backfilled);
+    }
+
+    #[test]
+    fn guarded_clear_accepts_finalizer_turn_id_for_zero_user_msg_id() {
+        let temp = TempDir::new().unwrap();
+        let mut state = make_state(932_934);
+        state.user_msg_id = 0;
+        state.current_msg_id = 0;
+        state.finalizer_turn_id = 812_934;
+        save_inflight_state_in_root(temp.path(), &state).expect("save");
+
+        let outcome = super::clear_inflight_state_if_matches_in_root(
+            temp.path(),
+            &ProviderKind::Codex,
+            state.channel_id,
+            state.finalizer_turn_id,
+        );
+        assert_eq!(outcome, super::GuardedClearOutcome::Cleared);
     }
 
     /// The boot-time `mark_all_inflight_states_restart_mode` pass rewrites
