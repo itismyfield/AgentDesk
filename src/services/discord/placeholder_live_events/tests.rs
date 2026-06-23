@@ -4964,6 +4964,95 @@ fn task_notification_xml_bridge_inert_when_footer_mode_off() {
     );
 }
 
+#[test]
+fn task_completion_card_suppression_requires_footer_mode_and_matching_background_slot() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_654_001);
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id_for_footer_mode(
+            "Bash",
+            &json!({
+                "command": "gh run watch",
+                "description": "Watch CI",
+                "run_in_background": true
+            })
+            .to_string(),
+            Some("toolu_bg_match"),
+            true,
+        ),
+    );
+
+    let completed = "<task-notification><task-id>bg1</task-id>\
+        <tool-use-id>toolu_bg_match</tool-use-id><status>completed</status>\
+        <summary>Background command \"Watch CI\" completed (exit code 0)</summary></task-notification>";
+    assert!(
+        events
+            .task_notification_completion_visible_in_footer_for_mode(channel_id, completed, true,),
+        "footer-on matching background completion should suppress the notify card"
+    );
+    assert!(
+        !events
+            .task_notification_completion_visible_in_footer_for_mode(channel_id, completed, false,),
+        "footer-off/legacy mode must keep the notify card"
+    );
+
+    let unknown = "<task-notification><task-id>bg2</task-id>\
+        <tool-use-id>toolu_bg_unknown</tool-use-id><status>completed</status>\
+        <summary>Background command \"Other\" completed (exit code 0)</summary></task-notification>";
+    assert!(
+        !events.task_notification_completion_visible_in_footer_for_mode(channel_id, unknown, true),
+        "unknown tool-use-id has no footer completion surface, so the card must remain"
+    );
+
+    let failed = "<task-notification><task-id>bg3</task-id>\
+        <tool-use-id>toolu_bg_match</tool-use-id><status>failed</status>\
+        <summary>Background command \"Watch CI\" failed (exit code 1)</summary></task-notification>";
+    assert!(
+        !events.task_notification_completion_visible_in_footer_for_mode(channel_id, failed, true),
+        "failure/error notifications keep their card for details instead of being footer-suppressed"
+    );
+}
+
+#[test]
+fn task_completion_card_suppression_requires_idful_matching_subagent_slot() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_654_002);
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({
+                "subagent_type": "scout",
+                "description": "Scout issue #3654",
+                "run_in_background": true
+            })
+            .to_string(),
+            Some("toolu_subagent_match"),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_result_with_id(Some("Task"), false, Some("toolu_subagent_match")),
+    );
+
+    let completed = "<task-notification><task-id>sub1</task-id>\
+        <tool-use-id>toolu_subagent_match</tool-use-id><status>completed</status>\
+        <summary>Agent \"Scout issue #3654\" completed</summary></task-notification>";
+    assert!(
+        events
+            .task_notification_completion_visible_in_footer_for_mode(channel_id, completed, true,),
+        "matching idful subagent completion should suppress the duplicate card"
+    );
+
+    let idless = "<task-notification><task-id>sub2</task-id><status>completed</status>\
+        <summary>Agent \"Scout issue #3654\" completed</summary></task-notification>";
+    assert!(
+        !events.task_notification_completion_visible_in_footer_for_mode(channel_id, idless, true),
+        "id-less subagent completion cannot safely map to a footer slot"
+    );
+}
+
 // #3393 finding 1: an id-LESS subagent `<task-notification>` XML (no
 // `<tool-use-id>` child) must produce NO terminal effect. Before the fix the XML
 // bridge emitted `SubagentEnd { tool_use_id: None }`, the panel fell back to "the
@@ -5073,6 +5162,39 @@ fn task_notification_xml_workflow_gates_workflow_end_on_terminal_status() {
             .iter()
             .any(|e| matches!(e, StatusEvent::WorkflowEnd { success: false, .. })),
         "status=failed workflow XML must emit WorkflowEnd{{success:false}}: {failed_events:?}"
+    );
+}
+
+#[test]
+fn task_completion_card_suppression_allows_visible_workflow_completion_only() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_654_003);
+
+    let completed = "<task-notification><task-id>wf-visible</task-id><status>completed</status>\
+        <summary>Dynamic workflow \"probe\" completed</summary></task-notification>";
+    assert!(
+        events
+            .task_notification_completion_visible_in_footer_for_mode(channel_id, completed, true,),
+        "workflow completion is itself visible in the footer workflow section"
+    );
+    assert!(
+        !events
+            .task_notification_completion_visible_in_footer_for_mode(channel_id, completed, false,),
+        "footer-off/legacy mode must keep workflow completion cards"
+    );
+
+    let running = "<task-notification><task-id>wf-running</task-id><status>running</status>\
+        <summary>Dynamic workflow \"probe\" running</summary></task-notification>";
+    assert!(
+        !events.task_notification_completion_visible_in_footer_for_mode(channel_id, running, true),
+        "non-terminal workflow notifications are not duplicate completion cards"
+    );
+
+    let failed = "<task-notification><task-id>wf-failed</task-id><status>failed</status>\
+        <summary>Dynamic workflow \"probe\" failed</summary></task-notification>";
+    assert!(
+        !events.task_notification_completion_visible_in_footer_for_mode(channel_id, failed, true),
+        "failed workflow notifications keep their card for details"
     );
 }
 

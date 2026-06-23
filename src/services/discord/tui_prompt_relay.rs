@@ -811,19 +811,26 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             // its card but pushes NO terminal events, so a quoted live tool-use-id
             // cannot false-close a running slot. Layered with finding 1 (the XML
             // bridge requires a tool_use_id for any terminal End).
-            if is_start_anchored_task_notification(&prompt.prompt) {
-                bridge_task_notification_to_live_panel(shared, channel_id, &prompt.prompt);
+            let start_anchored_task_notification =
+                is_start_anchored_task_notification(&prompt.prompt);
+            if start_anchored_task_notification {
+                shared
+                    .ui
+                    .placeholder_live_events
+                    .bridge_task_notification_xml(channel_id, &prompt.prompt);
             }
             match super::tui_task_card::resolve_task_card_content(
                 &notify_http,
                 shared,
                 channel_id,
                 &prompt.prompt,
+                start_anchored_task_notification,
             )
             .await
             {
                 super::tui_task_card::TaskCardOutcome::Post { content } => content,
-                super::tui_task_card::TaskCardOutcome::Repeat => {
+                super::tui_task_card::TaskCardOutcome::Repeat
+                | super::tui_task_card::TaskCardOutcome::SuppressedByFooter => {
                     // #3075 codex P1 #2: a repeat early-returns before the bridge-tail
                     // lease-guard cleanup, but the lease recorded above would dangle and
                     // make `session_bound_external_lease_blocks_delivery` skip legitimate
@@ -4218,34 +4225,6 @@ fn resolve_owner_channel_authoritatively(
         }
         (None, None) => None,
     }
-}
-
-/// #3393: bridge an observed `<task-notification>` XML user-record into the live
-/// footer panel's terminal StatusEvents for `channel_id`. Background-task and
-/// subagent completions reach the transcript ONLY as this XML; the panel's own
-/// `system_status_events` parses a stream-json `system` record that never
-/// occurs, so without this bridge footer Tasks/Subagents never flip ✓ from real
-/// traffic and the #3391 delivered-ack eviction never triggers. The bridge is
-/// footer-mode gated INSIDE `status_events_from_task_notification_xml` (empty vec
-/// in legacy mode), and a terminal End for an unknown/id-less tool-use-id is a
-/// slot no-op, so a double notification cannot flip a slot back.
-fn bridge_task_notification_to_live_panel(shared: &SharedData, channel_id: ChannelId, raw: &str) {
-    let events = super::placeholder_live_events::status_events_from_task_notification_xml(raw);
-    if events.is_empty() {
-        return;
-    }
-    let parsed = super::tui_task_card::parse_task_notification(raw);
-    tracing::info!(
-        channel_id = channel_id.get(),
-        kind = parsed.kind(),
-        tool_use_id = parsed.tool_use_id.as_deref().unwrap_or(""),
-        status = parsed.status.as_deref().unwrap_or(""),
-        "#3393: bridged user-record <task-notification> XML to live panel terminal StatusEvents"
-    );
-    shared
-        .ui
-        .placeholder_live_events
-        .push_status_events(channel_id, events);
 }
 
 /// Local-completing slash-control prompts skip synthetic turn ownership.
