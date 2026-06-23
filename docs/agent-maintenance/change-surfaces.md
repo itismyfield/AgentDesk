@@ -1007,7 +1007,7 @@
     force-clean watcher-respawn follow-through + always-run cross-tick
     retry/dead-man (P1-a: no early return on zero candidates), delegating the
     new behaviour to `health/watcher_respawn.rs`).
-  - `src/services/discord/router/message_handler/intake_turn.rs` (3680 lines; -40 from #3591 100턴 세션 리셋(AssistantTurnCap) 제거: reset 판정/clear/DB clear/display 블록 삭제; -2 from #3588 idle 세션 리셋 제거(IdleExpired display arm + `now` 인자 정리); +23 from #3557 Codex review: cap the INITIAL watchdog deadline at the provider hard ceiling (+one-shot ceiling warn); +27 from #3557 (A) per-turn hard-ceiling clamp wired into the watchdog auto-extend block; +1 from #3479 item-3 `shared.dispatch.<field>` nesting;
+  - `src/services/discord/router/message_handler/intake_turn.rs` (3615 lines; -65 from #3653 removing the separate session-restore notify bot send path so restore is absorbed by the session/status panel; -40 from #3591 100턴 세션 리셋(AssistantTurnCap) 제거: reset 판정/clear/DB clear/display 블록 삭제; -2 from #3588 idle 세션 리셋 제거(IdleExpired display arm + `now` 인자 정리); +23 from #3557 Codex review: cap the INITIAL watchdog deadline at the provider hard ceiling (+one-shot ceiling warn); +27 from #3557 (A) per-turn hard-ceiling clamp wired into the watchdog auto-extend block; +1 from #3479 item-3 `shared.dispatch.<field>` nesting;
     Discord message intake turn orchestration split from the router message
     handler; bugfix only outside a further extraction plan; #3464 extracted the
     unauthorized-voice-announcement scope decision to `voice_announcement_scope.rs`;

@@ -199,10 +199,10 @@ pub(super) async fn emit_session_strategy_lifecycle(
     let provider_session_id = provider_session_id
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    let resumed = provider_session_id.is_some();
-    if resumed && !cli_was_just_spawned {
+    if !should_emit_session_strategy_lifecycle(provider_session_id, reason, cli_was_just_spawned) {
         return;
     }
+    let resumed = provider_session_id.is_some();
     let event = session_strategy_lifecycle_event(
         provider_session_id,
         reason,
@@ -235,6 +235,21 @@ pub(super) async fn emit_session_strategy_lifecycle(
             turn_id
         );
     }
+}
+
+pub(super) fn should_emit_session_strategy_lifecycle(
+    provider_session_id: Option<&str>,
+    reason: &str,
+    cli_was_just_spawned: bool,
+) -> bool {
+    let resumed = provider_session_id.is_some_and(|value| !value.trim().is_empty());
+    if !resumed || cli_was_just_spawned {
+        return true;
+    }
+
+    // This reason is assigned only at the cold DB restore boundary where
+    // in-memory session_id was None before fetching the persisted provider id.
+    reason == "db_provider_session_restored"
 }
 
 pub(super) fn session_strategy_lifecycle_event(

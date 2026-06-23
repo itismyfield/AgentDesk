@@ -61,6 +61,59 @@ fn session_strategy_lifecycle_event_records_fresh_and_resumed_details() {
 }
 
 #[test]
+fn db_provider_session_restore_existing_cli_renders_session_panel_line() {
+    assert!(
+        should_emit_session_strategy_lifecycle(
+            Some("provider-session-123"),
+            "db_provider_session_restored",
+            false,
+        ),
+        "cold DB restore must surface a session lifecycle row even when tmux survived restart"
+    );
+    assert!(
+        !should_emit_session_strategy_lifecycle(
+            Some("provider-session-123"),
+            "runtime_cached_provider_session",
+            false,
+        ),
+        "steady-state turn-to-turn continuation must stay suppressed"
+    );
+
+    let event = session_strategy_lifecycle_event(
+        Some("provider-session-123"),
+        "db_provider_session_restored",
+        None,
+    );
+    let kind = event.meta().kind;
+    let details = event.details_json();
+
+    match &event {
+        TurnEvent::SessionResumed(details) => {
+            assert_eq!(details.reason, "db_provider_session_restored");
+            assert_eq!(
+                details.provider_session_id.as_deref(),
+                Some("provider-session-123")
+            );
+        }
+        other => panic!("expected session_resumed event, got {other:?}"),
+    }
+
+    let events =
+        crate::services::discord::placeholder_live_events::PlaceholderLiveEvents::default();
+    let channel_id = serenity::ChannelId::new(3_653);
+    assert!(events.set_session_panel_lifecycle_event(channel_id, None, kind, &details));
+
+    let rendered = events.render_status_panel(
+        channel_id,
+        &crate::services::provider::ProviderKind::Claude,
+        1_700_000_000,
+    );
+    assert!(rendered.contains("기존 세션 복원"));
+    assert!(rendered.contains("provider session claude#provider…"));
+    assert!(!rendered.contains("📋 세션 복원"));
+}
+
+#[test]
 fn cli_just_spawned_for_emit_handles_none_and_blank_session_names() {
     // Non-tmux mode (ProcessBackend / no managed session) always
     // re-spawns the CLI per turn, so the helper must report "just

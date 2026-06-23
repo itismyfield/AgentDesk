@@ -15,8 +15,6 @@ use super::response_format::{
     merge_reply_contexts, should_note_memento_context_loaded, wrap_user_prompt_with_author,
 };
 pub(in crate::services::discord) use super::turn_start::reserve_headless_turn;
-#[cfg(test)]
-use super::turn_start::session_strategy_lifecycle_event;
 pub(crate) use super::turn_start::{
     HeadlessTurnReservation, HeadlessTurnStartError, HeadlessTurnStartOutcome,
     HeadlessTurnStartStatus,
@@ -28,6 +26,8 @@ use super::turn_start::{
     release_mailbox_after_placeholder_post_failure, session_runtime_state_after_redirect,
     take_session_retry_context,
 };
+#[cfg(test)]
+use super::turn_start::{session_strategy_lifecycle_event, should_emit_session_strategy_lifecycle};
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::memory::{
     RecallMode, RecallRequest, RecallResponse, RecallSizeBucket, build_memory_backend,
