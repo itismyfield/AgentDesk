@@ -43,9 +43,12 @@ fn soft_clear_lifecycle_notify_row(
     clear_source: &str,
     notify_mode: SoftClearNotifyMode,
 ) -> Option<(&'static str, String)> {
-    notify_mode
-        .should_enqueue()
-        .then(|| (SOFT_CLEAR_REASON_CODE, format!("🧹 세션 클리어 ({clear_source})")))
+    notify_mode.should_enqueue().then(|| {
+        (
+            SOFT_CLEAR_REASON_CODE,
+            format!("🧹 세션 클리어 ({clear_source})"),
+        )
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -427,8 +430,7 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
         ManagedSessionClearBehavior::Noop => {}
     }
 
-    if let Some((reason_code, content)) =
-        soft_clear_lifecycle_notify_row(clear_source, notify_mode)
+    if let Some((reason_code, content)) = soft_clear_lifecycle_notify_row(clear_source, notify_mode)
     {
         // Notify bot message for clear paths that have no direct provider reply.
         let sqlite_runtime_db = if shared.pg_pool.is_some() {
