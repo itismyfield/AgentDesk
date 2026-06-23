@@ -147,6 +147,7 @@ pub(super) async fn handle_idle_recap_clear_interaction(
         &data.provider,
         component.channel_id,
         "idle_recap_clear",
+        crate::services::discord::commands::SoftClearNotifyMode::Enqueue,
     )
     .await;
     delete_previous_card(&ctx.http, channel_id, message_id).await;

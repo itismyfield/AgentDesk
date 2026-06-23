@@ -431,6 +431,7 @@ pub(in crate::services::discord) async fn handle_text_command(
                 &data.provider,
                 channel_id,
                 "!clear",
+                super::SoftClearNotifyMode::Suppress,
             )
             .await;
             let _ = msg.reply(&ctx.http, "Session cleared.").await;
