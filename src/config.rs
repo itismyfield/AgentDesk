@@ -1960,7 +1960,23 @@ fn default_database_user() -> String {
     "agentdesk".into()
 }
 fn default_database_pool_max() -> u32 {
-    12
+    // Sized for the always-on background DB consumers (cluster heartbeat,
+    // dispatch/message outbox claiming, observability flush, session-discovery,
+    // policy-tick, routine recovery) plus foreground turn ingestion. At 12 the
+    // steady-state pool was already near-saturated and any burst (e.g. a
+    // post-restart catch-up sweep coinciding with a turn) pushed it into
+    // sustained `acquire_timeout` errors, delaying message ingestion.
+    //
+    // Upper bound is the shared Postgres `max_connections` (100, minus 3
+    // superuser-reserved = 97 usable). During boot a node runs BOTH the runtime
+    // pool (this value) AND the startup warmup pool (1.5x, see
+    // `startup_pool_settings`) concurrently until boot reconcile drops the
+    // warmup pool — a per-node peak of `2.5 * pool_max`. With two cluster nodes
+    // potentially booting at once (coordinated deploy), the worst case is
+    // `2 * 2.5 * pool_max`, which must stay under 97. 18 → 2*(18+27)=90, leaving
+    // headroom for psql/admin. Going higher requires raising Postgres
+    // `max_connections` or capping the warmup multiplier first.
+    18
 }
 fn default_cluster_role() -> String {
     "auto".into()

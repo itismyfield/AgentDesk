@@ -207,6 +207,55 @@ fn collect_catch_up_channel_candidates(
 /// user messages.
 const CATCH_UP_FETCH_LIMIT: u8 = 50;
 
+/// Inter-channel pacing for the catch-up REST sweep.
+///
+/// Startup recovery and the periodic backstop scan every configured channel
+/// back-to-back (two REST round-trips each — binding-status + message fetch).
+/// On a fresh restart, dozens of channels are scanned with no checkpoint at
+/// once, and that tight, un-paced burst monopolises the async executor and
+/// Discord REST budget right as every background DB consumer is also spinning
+/// up — starving DB-bound tasks of the time they need to acquire a pooled
+/// connection within `acquire_timeout`. Spacing the per-channel scans by a
+/// small delay spreads the burst so the rest of the runtime keeps making
+/// progress. `AGENTDESK_CATCH_UP_SCAN_PACE_MS` overrides the gap (0 disables —
+/// used by tests and by operators who want the old unthrottled behaviour).
+const CATCH_UP_SCAN_PACE_DEFAULT_MS: u64 = 100;
+
+/// Pure parse of the pacing override. Missing or unparseable values fall back
+/// to the default; `0` is honoured and yields a zero (no-op) gap. Kept env-free
+/// so it is deterministically unit-testable without touching process globals.
+fn parse_catch_up_scan_pace(raw: Option<&str>) -> std::time::Duration {
+    let ms = raw
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(CATCH_UP_SCAN_PACE_DEFAULT_MS);
+    std::time::Duration::from_millis(ms)
+}
+
+fn catch_up_scan_pace() -> std::time::Duration {
+    parse_catch_up_scan_pace(
+        std::env::var("AGENTDESK_CATCH_UP_SCAN_PACE_MS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Whether to wait the pacing gap before the next per-channel scan. The first
+/// scan in a sweep runs immediately (`already_scanned == false`); every later
+/// scan is paced. Extracted as a named predicate so the first-immediate /
+/// subsequent-paced contract is covered by a unit test.
+fn should_pace_before_scan(already_scanned: bool) -> bool {
+    already_scanned
+}
+
+/// Sleep the configured catch-up pacing gap before the next per-channel scan.
+/// No-op when pacing is disabled (0 ms) so test runs stay fast.
+async fn catch_up_scan_pace_gap() {
+    let pace = catch_up_scan_pace();
+    if !pace.is_zero() {
+        tokio::time::sleep(pace).await;
+    }
+}
+
 /// Filter outcome categories for the catch-up REST scan. Used both at runtime
 /// (to emit per-channel breakdown logs even when nothing was recovered) and in
 /// unit tests as a pure-function check on the buried-user-message regression.
@@ -372,6 +421,10 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
         return;
     }
 
+    // Pace successive per-channel REST scans so a many-channel sweep doesn't
+    // fire as one tight burst (see `catch_up_scan_pace`). The first eligible
+    // channel runs immediately; subsequent scans wait the configured gap.
+    let mut paced_scan = false;
     for candidate in candidates.values() {
         let channel_id = candidate.channel_id;
         let retry_checkpoint = retry_checkpoints.get(&channel_id).copied();
@@ -388,6 +441,11 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
                 continue;
             }
         }
+
+        if should_pace_before_scan(paced_scan) {
+            catch_up_scan_pace_gap().await;
+        }
+        paced_scan = true;
 
         match resolve_runtime_channel_binding_status(http, channel_id).await {
             RuntimeChannelBindingStatus::Owned => {}
@@ -624,6 +682,8 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
     };
     let announce_bot_id_phase2 = resolve_announce_bot_user_id(shared).await;
 
+    // Same per-channel pacing as phase 1 (see `catch_up_scan_pace`).
+    let mut paced_scan_phase2 = false;
     for candidate in candidates.values() {
         let channel_id = candidate.channel_id;
 
@@ -633,6 +693,11 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
                 continue;
             }
         }
+
+        if should_pace_before_scan(paced_scan_phase2) {
+            catch_up_scan_pace_gap().await;
+        }
+        paced_scan_phase2 = true;
 
         match resolve_runtime_channel_binding_status(http, channel_id).await {
             RuntimeChannelBindingStatus::Owned => {}
@@ -773,11 +838,51 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
 #[cfg(test)]
 mod catch_up_recovery_tests {
     use super::{
-        CatchUpChannelCandidate, CatchUpClassification, CatchUpFetchMode, CatchUpMessageView,
-        ChannelId, ProviderKind, catch_up_fetch_mode_for_scan, classify_catch_up_message,
-        insert_configured_catch_up_candidate,
+        CATCH_UP_SCAN_PACE_DEFAULT_MS, CatchUpChannelCandidate, CatchUpClassification,
+        CatchUpFetchMode, CatchUpMessageView, ChannelId, ProviderKind,
+        catch_up_fetch_mode_for_scan, classify_catch_up_message,
+        insert_configured_catch_up_candidate, parse_catch_up_scan_pace, should_pace_before_scan,
     };
     use std::collections::{BTreeMap, HashSet};
+
+    #[test]
+    fn scan_pace_parses_valid_zero_invalid_and_missing() {
+        // Explicit value is honoured.
+        assert_eq!(
+            parse_catch_up_scan_pace(Some("250")).as_millis(),
+            250,
+            "valid value should be used verbatim"
+        );
+        // 0 is honoured and yields a no-op (zero) gap — the documented disable.
+        assert!(
+            parse_catch_up_scan_pace(Some("0")).is_zero(),
+            "0 must disable pacing"
+        );
+        // Surrounding whitespace is tolerated.
+        assert_eq!(parse_catch_up_scan_pace(Some("  75 ")).as_millis(), 75);
+        // Unparseable and missing both fall back to the default.
+        assert_eq!(
+            parse_catch_up_scan_pace(Some("abc")).as_millis(),
+            CATCH_UP_SCAN_PACE_DEFAULT_MS as u128,
+            "garbage falls back to default"
+        );
+        assert_eq!(
+            parse_catch_up_scan_pace(None).as_millis(),
+            CATCH_UP_SCAN_PACE_DEFAULT_MS as u128,
+            "missing env falls back to default"
+        );
+    }
+
+    #[test]
+    fn first_scan_runs_immediately_then_subsequent_scans_pace() {
+        // Mirrors the loop contract: the very first eligible channel scans with
+        // no delay; once one scan has happened, every later channel is paced.
+        assert!(!should_pace_before_scan(false), "first scan must not wait");
+        assert!(
+            should_pace_before_scan(true),
+            "subsequent scans must wait the pacing gap"
+        );
+    }
 
     #[test]
     fn configured_channel_is_scanned_without_checkpoint_file() {

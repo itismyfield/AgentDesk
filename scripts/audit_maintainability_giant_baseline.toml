@@ -290,7 +290,11 @@
 # call itself drops the now-unused `tmux_session_alive_with_retry` probe — logic
 # shrank by one line; the net +15 is comment LoC explaining the storm-prevention
 # invariant. No new behavior at this site beyond the literal `false` argument.
-"src/services/discord/recovery_engine.rs" = 3397
+# f12b09366 (backstop missed turn intake): +24 (3397 -> 3421) for drain-restart
+# ownerless-inflight recovery predicates (phase_policy/relay_recovery/relay_health).
+# Hotfix was deployed via direct push to main and bypassed CI, so this baseline
+# re-inflation surfaced only when PR #3655 (which bases on it) ran the gate.
+"src/services/discord/recovery_engine.rs" = 3421
 # #3034 batch-8: lowered 3771 -> 3770 (dead-code removal).
 # #3038 S1: +1 (3770 -> 3771) for the mechanical `shared.queued_placeholders` ->
 # `shared.queued.queued_placeholders` re-wire (one extra method-chain line) forced
