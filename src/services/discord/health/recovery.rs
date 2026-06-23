@@ -1317,11 +1317,7 @@ async fn preserve_resume_selector_on_force_clean(
 /// giving the watcher a full `threshold_secs` window after restart to re-sync
 /// (which clears `desynced` and the kill never happens). A genuinely hung turn
 /// stays desynced past that window and is still cleaned.
-///
-/// #3656: use the current turn identity's `started_at`, not `updated_at`.
-/// Session/channel scoped inflight update timestamps can be refreshed across
-/// consecutive turns; anchoring cleanup to `started_at` prevents one session key
-/// from accumulating several short turns into a fake 30-minute stall.
+/// #3656: age from the current turn's `started_at` (not `updated_at`) so consecutive short turns under one session key don't accumulate into a fake stall.
 pub(crate) fn stall_watchdog_should_force_clean(
     attached: bool,
     desynced: bool,
