@@ -478,6 +478,7 @@ fn status_panel_renders_session_resumed_line_from_lifecycle_details() {
     assert!(rendered.contains("기존 세션 복원"));
     assert!(rendered.contains("provider session claude#8f21abcd…"));
     assert!(rendered.contains("tmux kept"));
+    assert!(!rendered.contains("📋 세션 복원"));
 }
 
 /// #3087 — when a new session INSTANCE begins (a new tmux spawn → new

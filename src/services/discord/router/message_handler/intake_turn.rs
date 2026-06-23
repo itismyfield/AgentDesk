@@ -19,62 +19,6 @@ pub(super) const fn queue_pending_reactions_to_clear() -> [char; 2] {
     ['📬', '➕']
 }
 
-pub(super) async fn send_restore_notification(
-    shared: &Arc<SharedData>,
-    fallback_http: &Arc<serenity::Http>,
-    channel_id: ChannelId,
-    provider: &ProviderKind,
-    restored_session_id: Option<&str>,
-) {
-    let sid_full = restored_session_id.unwrap_or("?");
-    let sid_short: String = sid_full.chars().take(8).collect();
-    let restore_msg = format!(
-        "📋 세션 복원: {} (session: {})",
-        provider.as_str(),
-        sid_short
-    );
-
-    if let Some(registry) = shared.health_registry() {
-        match super::super::super::health::resolve_bot_http(registry.as_ref(), "notify").await {
-            Ok(notify_http) => match channel_id.say(&*notify_http, &restore_msg).await {
-                Ok(_) => return,
-                Err(err) => {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::warn!(
-                        "  [{ts}] ⚠ Restore notify send failed in channel {}: {} — falling back to provider bot",
-                        channel_id,
-                        err
-                    );
-                }
-            },
-            Err((status, body)) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ⚠ Restore notify bot unavailable in channel {}: {} {} — falling back to provider bot",
-                    channel_id,
-                    status,
-                    body
-                );
-            }
-        }
-    } else {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!(
-            "  [{ts}] ⚠ Restore notify bot unavailable in channel {}: health registry dropped — falling back to provider bot",
-            channel_id
-        );
-    }
-
-    if let Err(err) = channel_id.say(fallback_http, &restore_msg).await {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!(
-            "  [{ts}] ⚠ Restore fallback send failed in channel {}: {}",
-            channel_id,
-            err
-        );
-    }
-}
-
 /// Bundle of Discord-runtime dependencies that `handle_text_message`
 /// reads from outside its per-message parameters. Phase 2-pre.2 of
 /// intake-node-routing (docs/design/intake-node-routing.md): the body
@@ -1417,15 +1361,6 @@ pub(in crate::services::discord) async fn handle_text_message(
                     session.restore_provider_session(Some(restored_session_id.clone()));
                     memento_context_loaded = session.memento_context_loaded;
                 }
-                // Notify: session restored — send before placeholder so it appears first
-                send_restore_notification(
-                    shared,
-                    http,
-                    channel_id,
-                    &provider,
-                    Some(restored_session_id.as_str()),
-                )
-                .await;
                 session_id = Some(restored_session_id);
             } else if let Some((recovered, recovered_memento_context_loaded)) =
                 restore_live_tui_provider_session_from_binding(

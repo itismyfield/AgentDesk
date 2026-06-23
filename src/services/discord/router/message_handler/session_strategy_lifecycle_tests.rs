@@ -61,6 +61,34 @@ fn session_strategy_lifecycle_event_records_fresh_and_resumed_details() {
 }
 
 #[test]
+fn db_provider_session_restore_success_does_not_request_notify_message() {
+    let event = session_strategy_lifecycle_event(
+        Some("provider-session-123"),
+        "db_provider_session_restored",
+        None,
+    );
+
+    assert_eq!(event.meta().kind, "session_resumed");
+    assert!(!event.meta().notify_user);
+    assert_eq!(event.notification_reason_code(), None);
+    assert!(
+        event.notification_content().is_none(),
+        "successful DB session restore must not emit the old `📋 세션 복원` notify message"
+    );
+
+    match event {
+        TurnEvent::SessionResumed(details) => {
+            assert_eq!(details.reason, "db_provider_session_restored");
+            assert_eq!(
+                details.provider_session_id.as_deref(),
+                Some("provider-session-123")
+            );
+        }
+        other => panic!("expected session_resumed event, got {other:?}"),
+    }
+}
+
+#[test]
 fn cli_just_spawned_for_emit_handles_none_and_blank_session_names() {
     // Non-tmux mode (ProcessBackend / no managed session) always
     // re-spawns the CLI per turn, so the helper must report "just
