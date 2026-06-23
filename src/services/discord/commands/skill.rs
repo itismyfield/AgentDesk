@@ -177,14 +177,6 @@ async fn run_skill_slash_command(
                         &format!("{invoked_as} stop"),
                     )
                     .await;
-                    super::control::notify_turn_stop(
-                        &ctx.serenity_context().http,
-                        &ctx.data().shared,
-                        &ctx.data().provider,
-                        channel_id,
-                        &format!("{invoked_as} stop"),
-                    )
-                    .await;
                     tracing::info!("  [{ts}] ■ Cancel signal sent");
                 }
                 None => {

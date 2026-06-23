@@ -1581,18 +1581,9 @@ async fn handle_reaction_remove(
                         removed_reaction.message_id,
                         channel_id
                     );
-                    super::super::commands::notify_turn_stop(
-                        &ctx.http,
-                        &data.shared,
-                        &data.provider,
-                        channel_id,
-                        "reaction remove ⏳",
-                    )
-                    .await;
-                    // Removed `Turn cancelled.` reply — the in-place
-                    // `[Stopped]` edit on the assistant message + the
-                    // `🛑 현재 턴 중단` outbox lifecycle notice from
-                    // `notify_turn_stop` already cover the same signal.
+                    // #3650: no separate notify-bot stop message — the in-place
+                    // `[Stopped]` edit on the assistant message and the 🛑
+                    // reaction already cover the stop signal.
                 }
                 super::message_handler::TextStopLookup::AlreadyStopping => {
                     send_reaction_control_reply(

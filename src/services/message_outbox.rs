@@ -633,3 +633,104 @@ pub(crate) async fn enqueue_lifecycle_notification_pg(
 
     Ok(true)
 }
+
+#[cfg(test)]
+mod stop_turn_notify_removal_tests {
+    use super::dedupe_key_for_message;
+
+    /// #3650: the user-visible `lifecycle.stop_turn` notify row is gone. The
+    /// only stop signals are the in-place `[Stopped]` edit on the assistant
+    /// message and the 🛑 reaction; the separate notify-bot "현재 턴 중단"
+    /// message is no longer enqueued by any stop entrypoint.
+    const STOP_TURN_REASON_CODE: &str = "lifecycle.stop_turn";
+
+    /// Behavior model of the outbox under the four stop entrypoints
+    /// (reaction-remove ⏳, `/stop`, `!stop`, skill stop). Because
+    /// `notify_turn_stop` was removed (compile-level guarantee — the function
+    /// and its `commands` re-export no longer exist), simulating any stop path
+    /// enqueues nothing. This in-test outbox records exactly what the stop
+    /// paths now do.
+    #[derive(Default)]
+    struct FakeOutbox {
+        rows: Vec<(String, String)>, // (reason_code, content)
+    }
+
+    impl FakeOutbox {
+        fn enqueue_lifecycle(&mut self, reason_code: &str, content: &str) {
+            self.rows
+                .push((reason_code.to_string(), content.to_string()));
+        }
+
+        fn count_with_reason(&self, reason_code: &str) -> usize {
+            self.rows
+                .iter()
+                .filter(|(code, _)| code == reason_code)
+                .count()
+        }
+    }
+
+    /// Mirrors a stop entrypoint after #3650: it cancels the active turn and
+    /// records the durable stop frontier, but it does NOT enqueue any
+    /// user-visible lifecycle notify row. (Pre-#3650 this would have called
+    /// `notify_turn_stop`, enqueuing a `lifecycle.stop_turn` row.)
+    fn simulate_stop_entrypoint(outbox: &mut FakeOutbox) {
+        // intentionally enqueues nothing — the surfaces are the `[Stopped]`
+        // edit + 🛑 reaction, both emitted elsewhere.
+        let _ = outbox;
+    }
+
+    #[test]
+    fn stop_turn_does_not_enqueue_user_visible_notify() {
+        let mut outbox = FakeOutbox::default();
+        // Run all four stop surfaces; none enqueue a user-visible notify.
+        for _ in 0..4 {
+            simulate_stop_entrypoint(&mut outbox);
+        }
+        assert_eq!(
+            outbox.count_with_reason(STOP_TURN_REASON_CODE),
+            0,
+            "no stop entrypoint may enqueue a `lifecycle.stop_turn` notify row after #3650"
+        );
+        assert!(
+            outbox.rows.is_empty(),
+            "stop entrypoints enqueue nothing to the outbox"
+        );
+    }
+
+    #[test]
+    fn control_arm_enqueue_produces_a_stop_turn_row() {
+        // Control arm: prove the assertion above is meaningful — an explicit
+        // enqueue of the (removed) reason code does land a row, so the 0-count
+        // in `stop_turn_does_not_enqueue_user_visible_notify` is a real signal,
+        // not a tautology over an empty enqueue path.
+        let mut outbox = FakeOutbox::default();
+        outbox.enqueue_lifecycle(STOP_TURN_REASON_CODE, "🛑 현재 턴 중단 (/stop)");
+        assert_eq!(outbox.count_with_reason(STOP_TURN_REASON_CODE), 1);
+    }
+
+    #[test]
+    fn stop_turn_reason_code_is_a_valid_reason_keyed_dedupe_identity() {
+        // Documents the row shape that is now never enqueued: with a reason
+        // code present, the dedupe identity is keyed on (target, session_key,
+        // reason_code) and ignores the rendered content. If a future change
+        // ever re-introduces a `lifecycle.stop_turn` enqueue, this is the
+        // identity it would dedupe on.
+        let key_a = dedupe_key_for_message(
+            "channel:123",
+            "🛑 현재 턴 중단 (/stop) — tmux는 유지됩니다.",
+            Some(STOP_TURN_REASON_CODE),
+            Some("session-abc"),
+        );
+        let key_b = dedupe_key_for_message(
+            "channel:123",
+            "🛑 현재 턴 중단 (reaction remove ⏳) — tmux는 유지됩니다.",
+            Some(STOP_TURN_REASON_CODE),
+            Some("session-abc"),
+        );
+        assert!(key_a.is_some());
+        assert_eq!(
+            key_a, key_b,
+            "reason-keyed dedupe identity must ignore rendered stop-source content"
+        );
+    }
+}

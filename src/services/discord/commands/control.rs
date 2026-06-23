@@ -253,31 +253,6 @@ pub(in crate::services::discord) async fn reset_channel_provider_state(
     tmux_name
 }
 
-pub(in crate::services::discord) async fn notify_turn_stop(
-    http: &Arc<serenity::Http>,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: serenity::ChannelId,
-    stop_source: &str,
-) {
-    let session_key = resolve_session_key_for_clear(http, shared, channel_id, provider)
-        .await
-        .unwrap_or_else(|| format!("channel:{}", channel_id.get()));
-    let sqlite_runtime_db = if shared.pg_pool.is_some() {
-        None
-    } else {
-        None::<&crate::db::Db>
-    };
-    crate::services::message_outbox::enqueue_lifecycle_notification_best_effort(
-        sqlite_runtime_db,
-        shared.pg_pool.as_ref(),
-        &format!("channel:{}", channel_id.get()),
-        Some(&session_key),
-        "lifecycle.stop_turn",
-        &format!("🛑 현재 턴 중단 ({stop_source}) — tmux는 유지됩니다."),
-    );
-}
-
 pub(in crate::services::discord) async fn reset_provider_session_if_pending(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -482,14 +457,6 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
                 &ctx.data().provider,
                 &token,
                 super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession,
-                "/stop",
-            )
-            .await;
-            notify_turn_stop(
-                &ctx.serenity_context().http,
-                &ctx.data().shared,
-                &ctx.data().provider,
-                channel_id,
                 "/stop",
             )
             .await;
