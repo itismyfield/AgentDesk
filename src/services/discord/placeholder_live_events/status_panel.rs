@@ -31,7 +31,7 @@ pub(super) struct SubagentSlot {
     pub(super) finished: Option<bool>,
     /// #3084: Task tool-use id that opened this slot, so `SubagentEnd` closes the
     /// exact slot among parallels instead of the first unfinished one.
-    tool_use_id: Option<String>,
+    pub(super) tool_use_id: Option<String>,
     /// #3086: TUI-parity accounting from the finishing `SubagentEnd`; drives the
     /// `Done (N tools · M tokens · Xs)` summary on the render line.
     summary: Option<SubagentSummary>,

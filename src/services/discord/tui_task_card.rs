@@ -543,14 +543,13 @@ pub(super) enum CardSlot {
     /// place rather than posting a new message. `update_count` is the new
     /// (incremented) count.
     Edit { message_id: u64, update_count: u32 },
-    /// A card for this task-id has been RESERVED (a [`CardSlot::Post`] was handed
-    /// out) but its real message id has not been recorded yet via
-    /// [`record_card_message`] — another post for the same task-id is still in
-    /// flight. The caller MUST treat this as a no-op (drop this repeat) rather
-    /// than attempting to edit: there is no real message id to target, and
+    /// A card for this task-id has been RESERVED but has no Discord message id:
+    /// either a [`CardSlot::Post`] is still in flight or footer/status integration
+    /// intentionally suppressed the card. The caller MUST treat this as a no-op
+    /// rather than attempting to edit: there is no real message id to target, and
     /// constructing `MessageId::new(0)` would panic. The reserved slot is left
-    /// intact so the in-flight post still records its id and subsequent repeats
-    /// resolve to [`CardSlot::Edit`].
+    /// intact so an in-flight post can still record its id, while a footer-owned
+    /// task keeps later repeats collapsed.
     Pending,
 }
 
@@ -632,6 +631,25 @@ pub(super) fn record_posted_card(channel_id: u64, raw_prompt: &str, message_id: 
     record_card_message(channel_id, task_id.as_deref(), message_id);
 }
 
+/// Remember a footer-integrated task notification so repeat notifications with
+/// the same task-id stay collapsed even though no Discord card message exists.
+pub(super) fn record_footer_suppressed_card(channel_id: u64, raw_prompt: &str) {
+    let task_id = parse_task_notification(raw_prompt).task_id;
+    let Some(task_id) = task_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    let mut store = CARD_STORE.lock().unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    purge_and_bound(&mut store, channel_id, now);
+    let channel = store.by_channel.entry(channel_id).or_default();
+    let entry = channel.entry(task_id.to_string()).or_insert(TaskCardEntry {
+        message_id: 0,
+        update_count: 1,
+        touched_at: now,
+    });
+    entry.touched_at = now;
+}
+
 /// Drop the tracked card for a task-id (e.g. after an edit failed because the
 /// message is gone) so the next notification posts a fresh card.
 pub(super) fn forget_card(channel_id: u64, task_id: Option<&str>) {
@@ -647,9 +665,9 @@ pub(super) fn forget_card(channel_id: u64, task_id: Option<&str>) {
     }
 }
 
-/// Clear ONLY a still-reserved placeholder slot for a task-id — i.e. an entry a
-/// [`CardSlot::Post`] handed out whose real message id was never recorded
-/// (`message_id == 0`) because the first post FAILED (#3075 codex P2).
+/// Clear ONLY a still-reserved placeholder slot for a task-id — i.e. an entry
+/// with no real Discord message id (`message_id == 0`) because the first post
+/// FAILED (#3075 codex P2).
 ///
 /// Unlike [`forget_card`], this is an EXACT-MATCH on the placeholder we own: if
 /// the entry has since recorded a real message id (a concurrent post landed) or
@@ -657,7 +675,8 @@ pub(super) fn forget_card(channel_id: u64, task_id: Option<&str>) {
 /// untouched. This is the failure-path counterpart to [`record_card_message`]:
 /// a post either commits its real id (record) or releases its reservation
 /// (this), so a later same-task notification reserves fresh and reposts instead
-/// of being suppressed as `Pending` until the 1h stale purge.
+/// of being suppressed as `Pending` until the 1h stale purge. Footer-suppressed
+/// slots also use `message_id == 0`, but they never enter the post-failure path.
 ///
 /// Returns `true` if a placeholder was actually cleared.
 pub(super) fn forget_reserved_card(channel_id: u64, task_id: Option<&str>) -> bool {
@@ -717,6 +736,11 @@ pub(super) enum TaskCardOutcome {
     /// observation so a dangling lease cannot block session-bound / bridge-tail
     /// delivery (#3075 codex P1 #2).
     Repeat,
+    /// The live footer/status panel owns the visible successful completion for
+    /// this task notification. The caller must NOT post a notify card and should
+    /// early-return like [`TaskCardOutcome::Repeat`] after clearing its just-recorded
+    /// lease.
+    SuppressedByFooter,
 }
 
 /// Render the structured card for a `<task-notification>` and apply the #3075
@@ -728,14 +752,40 @@ pub(super) enum TaskCardOutcome {
 /// resulting message id. On a repeat sighting it edits the live card in place
 /// (or, if that message is gone, forgets it and reposts once; or, if the first
 /// post is still in flight, drops the repeat as a no-op) and returns
-/// [`TaskCardOutcome::Repeat`].
+/// [`TaskCardOutcome::Repeat`]. When footer suppression is allowed and active, the
+/// footer/status panel is the visible completion surface; no card is posted, but
+/// the task-id is still remembered so later repeats do not leak a delayed card.
 pub(super) async fn resolve_task_card_content(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
     raw_prompt: &str,
+    allow_footer_suppression: bool,
 ) -> TaskCardOutcome {
     let parsed = parse_task_notification(raw_prompt);
+    let suppress_card_for_footer = allow_footer_suppression
+        && shared
+            .ui
+            .placeholder_live_events
+            .task_notification_completion_visible_in_footer_for_mode(
+                channel_id,
+                raw_prompt,
+                super::single_message_panel::footer_mode_enabled(
+                    super::single_message_panel::enabled(),
+                    shared.ui.status_panel_v2_enabled,
+                ),
+            );
+    if suppress_card_for_footer {
+        record_footer_suppressed_card(channel_id.get(), raw_prompt);
+        tracing::info!(
+            channel_id = channel_id.get(),
+            task_id = parsed.task_id.as_deref().unwrap_or(""),
+            kind = parsed.kind(),
+            status = parsed.status.as_deref().unwrap_or(""),
+            "#3654: suppressed task completion notify card because footer/status panel owns the completion surface"
+        );
+        return TaskCardOutcome::SuppressedByFooter;
+    }
     let task_id = parsed.task_id.clone();
     match reserve_card_slot(channel_id.get(), task_id.as_deref()) {
         CardSlot::Post { update_count } => TaskCardOutcome::Post {
@@ -969,6 +1019,31 @@ mod tests {
         );
         assert!(card.contains("updated 5x"));
         assert!(card.contains("Latest: latest detail"));
+    }
+
+    #[test]
+    fn footer_suppressed_task_id_dedupes_later_repeats() {
+        let _guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        reset_card_store_for_tests();
+        let channel = 3_654_u64;
+        let raw = payload(&[
+            ("task-id", "footer-owned-task"),
+            ("tool-use-id", "toolu_footer_owned"),
+            ("status", "completed"),
+            (
+                "summary",
+                "Background command \"Watch CI\" completed (exit code 0)",
+            ),
+        ]);
+
+        record_footer_suppressed_card(channel, &raw);
+        assert_eq!(
+            reserve_card_slot(channel, Some("footer-owned-task")),
+            CardSlot::Pending,
+            "a footer-integrated completion must reserve the task-id so repeats do not post a late card"
+        );
     }
 
     // #3075: a notification that OMITS tool-use-id (and even task-id) must still

@@ -215,6 +215,55 @@ impl PlaceholderLiveEvents {
         }
     }
 
+    /// #3393: bridge an observed `<task-notification>` XML user-record into the
+    /// live-panel terminal StatusEvents for `channel_id`.
+    pub(in crate::services::discord) fn bridge_task_notification_xml(
+        &self,
+        channel_id: ChannelId,
+        raw: &str,
+    ) {
+        let events = status_events::status_events_from_task_notification_xml(raw);
+        if events.is_empty() {
+            return;
+        }
+        let parsed = super::tui_task_card::parse_task_notification(raw);
+        tracing::info!(
+            channel_id = channel_id.get(),
+            kind = parsed.kind(),
+            tool_use_id = parsed.tool_use_id.as_deref().unwrap_or(""),
+            status = parsed.status.as_deref().unwrap_or(""),
+            "#3393: bridged user-record <task-notification> XML to live panel terminal StatusEvents"
+        );
+        self.push_status_events(channel_id, events);
+    }
+
+    pub(in crate::services::discord) fn task_notification_completion_visible_in_footer_for_mode(
+        &self,
+        channel_id: ChannelId,
+        raw: &str,
+        footer_mode_enabled: bool,
+    ) -> bool {
+        if !footer_mode_enabled {
+            return false;
+        }
+        let events =
+            status_events::status_events_from_task_notification_xml_for_footer_mode(raw, true);
+        if events.is_empty() {
+            return false;
+        }
+        let snapshot = self
+            .status_by_channel
+            .get(&channel_id)
+            .map(|entry| {
+                entry
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone()
+            })
+            .unwrap_or_default();
+        task_notification_success_completion_visible_in_snapshot(&snapshot, &events)
+    }
+
     pub(in crate::services::discord) fn set_session_panel_lifecycle_event(
         &self,
         channel_id: ChannelId,
@@ -563,4 +612,31 @@ impl PlaceholderLiveEvents {
             .unwrap_or_default();
         render_completion_footer(snapshot, provider, indicator)
     }
+}
+
+fn task_notification_success_completion_visible_in_snapshot(
+    snapshot: &StatusPanelState,
+    events: &[StatusEvent],
+) -> bool {
+    events.iter().any(|event| match event {
+        StatusEvent::BackgroundTaskEnd {
+            tool_use_id,
+            success: true,
+        } => snapshot.tasks.iter().any(|slot| {
+            slot.background && slot.tool_use_id.as_deref() == Some(tool_use_id.as_str())
+        }),
+        StatusEvent::SubagentEnd {
+            success: true,
+            tool_use_id: Some(tool_use_id),
+            ack_only: false,
+            ..
+        } => snapshot
+            .subagents
+            .iter()
+            .any(|slot| slot.tool_use_id.as_deref() == Some(tool_use_id.as_str())),
+        // Completion footers render Tasks/Subagents only. Suppressing Workflow
+        // completion cards here would drop the only completion signal.
+        StatusEvent::WorkflowEnd { .. } => false,
+        _ => false,
+    })
 }
