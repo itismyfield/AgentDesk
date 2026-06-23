@@ -87,8 +87,10 @@ python3 -m unittest \
 echo "=== Generate inventory docs (also gates giant-file registry, #3036) ==="
 # The generator hard-fails (exit 2) on giant-file registry drift: unregistered
 # new giants, ghost registrations left after decomposition, or deadline-less
-# [[entry]] tables in scripts/giant_file_registry.toml.
-python3 scripts/generate_inventory_docs.py
+# [[entry]] tables in scripts/giant_file_registry.toml. Generated-docs drift
+# (exit 1) is a hard fail in PRs to prevent drift merging and spawning
+# duplicate downstream inventory refresh PRs.
+python3 scripts/generate_inventory_docs.py --check
 
 echo "=== Agent maintenance freshness gate (warn, #1432; LoC hard-gate, #3036) ==="
 # --warning-only keeps the #1432 freshness/touch rollout non-fatal, while

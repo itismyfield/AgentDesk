@@ -1374,8 +1374,8 @@
   (supervised-worker registry / leader-only lifecycle).
 - legacy_modules: none — these are shared runtime coordination surfaces.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/config.rs` (2458 lines; +11 from #3573 failure_pause_auto_resume_secs config field; +6 from #3557 (A) long_turn_watchdog spawn is included in this baseline).
-  - `src/server/mod.rs` (2635 lines; +42 from #3573 auto-resume tick + backoff-race fix + #3628 wires failure→pause producer behind the same knob, net -1 line from comment condensation; +6 from #3557 (A) long_turn_watchdog spawn is included in this baseline).
+  - `src/config.rs` (2460 lines; +11 from #3573 failure_pause_auto_resume_secs config field; +6 from #3557 (A) long_turn_watchdog spawn is included in this baseline).
+  - `src/server/mod.rs` (2634 lines; +42 from #3573 auto-resume tick + backoff-race fix + #3628 wires failure→pause producer behind the same knob, net -1 line from comment condensation; +6 from #3557 (A) long_turn_watchdog spawn is included in this baseline).
   - `src/receipt.rs` (1842 lines).
   - `src/github/sync.rs` (1513 lines).
   - `src/reconcile.rs` (1816 lines; periodic reconcile loop covering stale
