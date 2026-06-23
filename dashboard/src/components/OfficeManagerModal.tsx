@@ -237,12 +237,14 @@ export default function OfficeManagerModal({
                 <div className="space-y-4">
                   <div>
                 <label
+                  htmlFor="office-name-en"
                   className="block text-xs font-medium mb-1"
                   style={{ color: "var(--th-text-secondary)" }}
                 >
                   {tr("이름 (영문)", "Name (EN)")}
                 </label>
                 <input
+                  id="office-name-en"
                   value={draft.name}
                   onChange={(e) => setDraft((prev) => ({ ...prev, name: e.target.value }))}
                   className="w-full px-3 py-2 rounded-lg text-sm"
@@ -256,12 +258,14 @@ export default function OfficeManagerModal({
               </div>
                   <div>
                     <label
+                      htmlFor="office-name-ko"
                       className="block text-xs font-medium mb-1"
                       style={{ color: "var(--th-text-secondary)" }}
                     >
                       {tr("이름 (한국어)", "Name (KO)")}
                     </label>
                     <input
+                      id="office-name-ko"
                       value={draft.name_ko}
                       onChange={(e) => setDraft((prev) => ({ ...prev, name_ko: e.target.value }))}
                       className="w-full px-3 py-2 rounded-lg text-sm"
