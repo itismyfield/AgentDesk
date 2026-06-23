@@ -460,9 +460,9 @@ mod send_source_tests {
 
     #[test]
     fn dm_default_agent_allows_headless_private_channel_when_provider_bound() {
-        let _lock = crate::config::shared_test_env_lock().lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(temp.path().join("config")).unwrap();
+        let _lock = crate::config::shared_test_env_lock().lock().unwrap(); // agentdesk-audit: allow-unwrap — test setup in #[cfg(test)] mod
+        let temp = tempfile::tempdir().unwrap(); // agentdesk-audit: allow-unwrap — test setup in #[cfg(test)] mod
+        std::fs::create_dir_all(temp.path().join("config")).unwrap(); // agentdesk-audit: allow-unwrap — test setup in #[cfg(test)] mod
         std::fs::write(
             temp.path().join("config/agentdesk.yaml"),
             r#"
@@ -480,7 +480,7 @@ agents:
         provider: claude
 "#,
         )
-        .unwrap();
+        .unwrap(); // agentdesk-audit: allow-unwrap — test setup in #[cfg(test)] mod
         let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
         unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
 

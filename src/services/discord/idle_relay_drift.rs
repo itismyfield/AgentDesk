@@ -336,6 +336,18 @@ fn try_begin_repair(tmux_session_name: &str, now: Instant) -> Option<RepairInfli
     })
 }
 
+/// Cross-OS no-op: tmux-based relay drift self-heal is unix-only, but the
+/// owner-resolution chokepoint that invokes this lives in non-`cfg(unix)` code,
+/// so a stub is required for the workspace to compile on non-unix targets (CI
+/// `Fast check cross OS`). The relay machinery never runs on those targets.
+#[cfg(not(unix))]
+pub(super) fn on_idle_relay_drift(
+    _shared: &std::sync::Arc<super::SharedData>,
+    _provider: crate::services::provider::ProviderKind,
+    _tmux_session_name: &str,
+) {
+}
+
 /// Entry point invoked from the owner-resolution chokepoint's drift (drop)
 /// branch. The resolver owns the single rate-limited drift WARN; this path only
 /// fires the Claude one-shot async repair (cooldown + single-flight gated).
