@@ -1,12 +1,12 @@
-//! #3306: registry/dedupe-mirror drift self-heal for the idle transcript relay.
+//! #3306/#3656: registry/dedupe-mirror drift self-heal for TUI relay owner lookup.
 //!
 //! ## Problem
 //!
-//! `claude_idle_transcript_relay` resolves a tmux-session→channel owner from the
-//! authoritative `tmux_watchers` registry. #3018 made the registry the SINGLE
-//! authority: a registry miss while the `tui_prompt_dedupe` mirror still holds a
-//! mapping is observable DRIFT, and the resolver drops (never routes from the
-//! mirror, which is not a reverse authority). That decision is preserved.
+//! TUI relay paths resolve a tmux-session→channel owner from the authoritative
+//! `tmux_watchers` registry. #3018 made the registry the SINGLE authority: a
+//! registry miss while the `tui_prompt_dedupe` mirror still holds a mapping is
+//! observable DRIFT, and the resolver drops (never routes from the mirror, which
+//! is not a reverse authority). That decision is preserved.
 //!
 //! For ROUTINE tmux sessions (e.g. `…claude-routine-token-daily-report-…`) the
 //! drift becomes PERMANENT: the watcher slot is freed when the routine turn ends
@@ -336,9 +336,9 @@ fn try_begin_repair(tmux_session_name: &str, now: Instant) -> Option<RepairInfli
     })
 }
 
-/// Entry point invoked from the idle relay loop's drift (drop) branch. The
-/// resolver owns the single rate-limited drift WARN; this path only fires the
-/// Claude one-shot async repair (cooldown + single-flight gated).
+/// Entry point invoked from the owner-resolution chokepoint's drift (drop)
+/// branch. The resolver owns the single rate-limited drift WARN; this path only
+/// fires the Claude one-shot async repair (cooldown + single-flight gated).
 #[cfg(unix)]
 pub(super) fn on_idle_relay_drift(
     shared: &Arc<SharedData>,
@@ -349,6 +349,9 @@ pub(super) fn on_idle_relay_drift(
     // durable DB column is written by the Claude/routine hook flow. Codex drift
     // is WARN-only at the resolver.
     if provider != ProviderKind::Claude {
+        return;
+    }
+    if tokio::runtime::Handle::try_current().is_err() {
         return;
     }
 
@@ -501,6 +504,15 @@ pub(super) fn reset_drift_state_for_tests() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     map.clear();
+}
+
+#[cfg(test)]
+pub(super) fn repair_attempt_recorded_for_tests(tmux_session_name: &str) -> bool {
+    let map = DRIFT_STATE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    map.get(tmux_session_name)
+        .is_some_and(|state| state.last_repair_attempt_at.is_some())
 }
 
 #[cfg(test)]

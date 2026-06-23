@@ -2487,15 +2487,11 @@ fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
                     RuntimeHandoffKind::ClaudeTui,
                 )
             {
-                let Some(channel_id) = owner_channel_for_tmux_session(&shared, &tmux_session_name)
+                let Some(channel_id) =
+                    owner_channel_for_tmux_session(&shared, &ProviderKind::Claude, &tmux_session_name)
                 else {
-                    // #3018/#3306: registry miss ⇒ drop. The drift handler
-                    // rate-limits the WARN and self-heals from a durable source.
-                    super::idle_relay_drift::on_idle_relay_drift(
-                        &shared,
-                        ProviderKind::Claude,
-                        &tmux_session_name,
-                    );
+                    // #3018/#3306/#3656: registry miss ⇒ drop. The resolver
+                    // rate-limits the WARN and the chokepoint triggers repair.
                     continue;
                 };
                 if super::inflight::load_inflight_state(&ProviderKind::Claude, channel_id.get())
@@ -3058,15 +3054,11 @@ fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                 if active_tails.contains(&tmux_session_name) {
                     continue;
                 }
-                let Some(channel_id) = owner_channel_for_tmux_session(&shared, &tmux_session_name)
+                let Some(channel_id) =
+                    owner_channel_for_tmux_session(&shared, &ProviderKind::Codex, &tmux_session_name)
                 else {
-                    // #3018/#3306: registry miss ⇒ drop. Codex gets the
-                    // rate-limited drift WARN only (no settings/DB self-heal).
-                    super::idle_relay_drift::on_idle_relay_drift(
-                        &shared,
-                        ProviderKind::Codex,
-                        &tmux_session_name,
-                    );
+                    // #3018/#3306/#3656: registry miss ⇒ drop. The resolver
+                    // rate-limits the WARN; Codex remains repair-ineligible.
                     continue;
                 };
                 if super::inflight::load_inflight_state(&ProviderKind::Codex, channel_id.get())
@@ -4171,7 +4163,8 @@ fn owner_channel_for_prompt(
     shared: &Arc<SharedData>,
     prompt: &ObservedTuiPrompt,
 ) -> Option<ChannelId> {
-    owner_channel_for_tmux_session(shared, &prompt.tmux_session_name)
+    let provider = ProviderKind::from_str(&prompt.provider)?;
+    owner_channel_for_tmux_session(shared, &provider, &prompt.tmux_session_name)
 }
 
 /// Resolve the owner channel for a tmux session.
@@ -4188,6 +4181,7 @@ fn owner_channel_for_prompt(
 /// surfaced rather than silently papered over by routing to the stale mirror.
 fn owner_channel_for_tmux_session(
     shared: &Arc<SharedData>,
+    provider: &ProviderKind,
     tmux_session_name: &str,
 ) -> Option<ChannelId> {
     let registry_owner = shared
@@ -4195,7 +4189,12 @@ fn owner_channel_for_tmux_session(
         .owner_channel_for_tmux_session(tmux_session_name);
     let dedupe_owner =
         crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(tmux_session_name);
-    resolve_owner_channel_authoritatively(tmux_session_name, registry_owner, dedupe_owner)
+    let resolved =
+        resolve_owner_channel_authoritatively(tmux_session_name, registry_owner, dedupe_owner);
+    if resolved.is_none() && registry_owner.is_none() && dedupe_owner.is_some() {
+        super::idle_relay_drift::on_idle_relay_drift(shared, provider.clone(), tmux_session_name);
+    }
+    resolved
 }
 
 /// Pure decision core for [`owner_channel_for_tmux_session`], split out so the
@@ -4661,6 +4660,32 @@ mod tests {
         );
     }
 
+    // #3656: repair must be triggered at the owner-resolution chokepoint, not
+    // only by the idle loops' `None` branches. This pins the first drift drop:
+    // registry miss + mirror hit still returns None (single authority), but it
+    // immediately arms the repair single-flight so settings/live-pane promotion
+    // can happen on the async repair path without waiting for watchdog reconcile.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn owner_channel_chokepoint_triggers_drift_repair_on_drift_drop() {
+        let shared = super::super::make_shared_data_for_tests();
+        let tmux = "AgentDesk-claude-drift-chokepoint-fix3656";
+        let owner = ChannelId::new(1_504_468_805_772_903_656);
+
+        crate::services::tui_prompt_dedupe::register_tmux_channel(tmux, owner.get());
+        assert_eq!(
+            owner_channel_for_tmux_session(&shared, &ProviderKind::Claude, tmux),
+            None,
+            "registry miss + mirror hit still drops rather than routing from the mirror"
+        );
+        assert!(
+            super::super::idle_relay_drift::repair_attempt_recorded_for_tests(tmux),
+            "the chokepoint must arm a repair attempt on the first drift drop"
+        );
+
+        crate::services::tui_prompt_dedupe::evict_dead_tmux_mirror(tmux);
+    }
+
     // #3105: a LIVE TUI session where the dedupe mirror holds a channel but the
     // `tmux_watchers` registry is missing must NOT be permanently dropped. The
     // fix self-heals by promoting the authoritative (settings-derived) channel
@@ -4686,7 +4711,7 @@ mod tests {
         // (1)+(2): the mirror alone must never be used as the delivery owner —
         // the resolver drops (the #3018 single-authority rule stays intact).
         assert_eq!(
-            owner_channel_for_tmux_session(&shared, tmux),
+            owner_channel_for_tmux_session(&shared, &ProviderKind::Claude, tmux),
             None,
             "registry miss + dedupe mirror hit must drop, never route from the mirror"
         );
@@ -4701,7 +4726,7 @@ mod tests {
             "first restore reports a change (single bounded incident)"
         );
         assert_eq!(
-            owner_channel_for_tmux_session(&shared, tmux),
+            owner_channel_for_tmux_session(&shared, &ProviderKind::Claude, tmux),
             Some(owner),
             "after authoritative re-registration the live session must route again"
         );
@@ -4735,7 +4760,7 @@ mod tests {
         // Drift precondition: mirror holds a mapping, registry misses ⇒ drop.
         crate::services::tui_prompt_dedupe::register_tmux_channel(tmux, owner.get());
         assert_eq!(
-            owner_channel_for_tmux_session(&shared, tmux),
+            owner_channel_for_tmux_session(&shared, &ProviderKind::Claude, tmux),
             None,
             "registry miss + mirror hit must drop (drift), never route from mirror"
         );
@@ -4748,7 +4773,7 @@ mod tests {
             .restore_owner_channel_for_tmux_session(tmux, owner);
         assert!(repaired, "first drift-triggered restore reports a change");
         assert_eq!(
-            owner_channel_for_tmux_session(&shared, tmux),
+            owner_channel_for_tmux_session(&shared, &ProviderKind::Claude, tmux),
             Some(owner),
             "after the drift-triggered authoritative restore the session routes again"
         );
@@ -4817,7 +4842,7 @@ mod tests {
             "precondition: dead session's binding is in the relay loop's iteration set"
         );
         assert_eq!(
-            owner_channel_for_tmux_session(&shared, tmux),
+            owner_channel_for_tmux_session(&shared, &ProviderKind::Claude, tmux),
             None,
             "precondition: registry misses + mirror hit == the drift the relay loop hits"
         );

@@ -38,6 +38,8 @@ struct StallLivenessKey {
     provider: String,
     channel_id: u64,
     tmux_session: Option<String>,
+    user_msg_id: Option<u64>,
+    started_at: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -152,12 +154,12 @@ impl StallWatchdogJudgmentBasis {
         now_unix_secs: i64,
         boot_unix_secs: i64,
     ) -> Self {
-        let updated_at_unix = snapshot
-            .inflight_updated_at
+        let started_at_unix = snapshot
+            .inflight_started_at
             .as_deref()
             .and_then(crate::services::discord::inflight::parse_updated_at_unix);
         let inflight_age_anchor_unix_secs =
-            updated_at_unix.map(|updated| updated.max(boot_unix_secs));
+            started_at_unix.map(|started| started.max(boot_unix_secs));
         Self {
             inflight_age_secs: inflight_age_anchor_unix_secs
                 .map(|anchor| saturating_age_secs(anchor, now_unix_secs)),
@@ -183,7 +185,7 @@ pub(super) fn evaluate_stall_watchdog_liveness(
     freshness_secs: u64,
     max_deferrals: u8,
 ) -> StallWatchdogLivenessDecision {
-    let key = StallLivenessKey::new(provider, channel_id, snapshot.tmux_session.as_deref());
+    let key = StallLivenessKey::from_snapshot(provider, channel_id, snapshot);
     let evidence = StallWatchdogLivenessEvidence::collect(&key, snapshot, inflight, now_unix_secs);
     if !evidence.has_positive_liveness(freshness_secs) {
         DEFERRAL_STATE.remove(&key);
@@ -229,9 +231,9 @@ pub(super) fn clear_stall_watchdog_liveness_state(
     channel_id: ChannelId,
     tmux_session: Option<&str>,
 ) {
-    let key = StallLivenessKey::new(provider, channel_id, tmux_session);
-    DEFERRAL_STATE.remove(&key);
-    OFFSET_OBSERVATIONS.remove(&key);
+    let probe = StallLivenessKey::new(provider, channel_id, tmux_session, None, None);
+    DEFERRAL_STATE.retain(|key, _| !key.matches_session(&probe));
+    OFFSET_OBSERVATIONS.retain(|key, _| !key.matches_session(&probe));
 }
 
 pub(super) fn clear_stall_watchdog_liveness_state_if_healthy(
@@ -388,12 +390,40 @@ pub(super) fn log_stall_watchdog_force_cleanup_judgment(
 }
 
 impl StallLivenessKey {
-    fn new(provider: &ProviderKind, channel_id: ChannelId, tmux_session: Option<&str>) -> Self {
+    fn new(
+        provider: &ProviderKind,
+        channel_id: ChannelId,
+        tmux_session: Option<&str>,
+        user_msg_id: Option<u64>,
+        started_at: Option<&str>,
+    ) -> Self {
         Self {
             provider: provider.as_str().to_string(),
             channel_id: channel_id.get(),
             tmux_session: tmux_session.map(str::to_string),
+            user_msg_id,
+            started_at: started_at.map(str::to_string),
         }
+    }
+
+    fn from_snapshot(
+        provider: &ProviderKind,
+        channel_id: ChannelId,
+        snapshot: &WatcherStateSnapshot,
+    ) -> Self {
+        Self::new(
+            provider,
+            channel_id,
+            snapshot.tmux_session.as_deref(),
+            snapshot.inflight_user_msg_id,
+            snapshot.inflight_started_at.as_deref(),
+        )
+    }
+
+    fn matches_session(&self, probe: &Self) -> bool {
+        self.provider == probe.provider
+            && self.channel_id == probe.channel_id
+            && self.tmux_session == probe.tmux_session
     }
 }
 
@@ -569,6 +599,7 @@ mod tests {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};
 
+    use chrono::TimeZone;
     use poise::serenity_prelude::ChannelId;
     use tracing_subscriber::fmt::MakeWriter;
 
@@ -702,7 +733,13 @@ mod tests {
         channel: ChannelId,
         tmux_session: &str,
     ) -> StallLivenessKey {
-        StallLivenessKey::new(provider, channel, Some(tmux_session))
+        StallLivenessKey::new(
+            provider,
+            channel,
+            Some(tmux_session),
+            Some(9001),
+            Some("2026-06-12 00:00:00"),
+        )
     }
 
     fn liveness_state_presence(key: &StallLivenessKey) -> (bool, bool) {
@@ -794,6 +831,28 @@ mod tests {
     }
 
     #[test]
+    fn judgment_basis_uses_started_at_not_updated_at() {
+        let channel = ChannelId::new(3370);
+        let tmux_session = "AgentDesk-codex-liveness-started-anchor";
+        let mut snap = snapshot(channel.get(), tmux_session, None);
+        snap.inflight_started_at = Some("2026-06-12 00:10:00".to_string());
+        snap.inflight_updated_at = Some("2026-06-12 00:00:00".to_string());
+
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 6, 12, 0, 10, 5)
+            .single()
+            .expect("valid local time")
+            .timestamp();
+        let basis = StallWatchdogJudgmentBasis::from_snapshot(&snap, now, now - 10_000);
+
+        assert_eq!(
+            basis.inflight_age_secs,
+            Some(5),
+            "watchdog liveness logs/judgment must age the current turn from started_at"
+        );
+    }
+
+    #[test]
     fn liveness_deferral_cap_allows_cleanup_after_max_passes_and_logs_limit() {
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(3363);
@@ -862,6 +921,62 @@ mod tests {
             logs.contains("liveness_deferral_limit_reached=true"),
             "{logs}"
         );
+    }
+
+    #[test]
+    fn liveness_deferrals_are_scoped_to_current_turn_identity() {
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(3371);
+        let tmux_session = "AgentDesk-codex-liveness-turn-identity";
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+        let file = tempfile::NamedTempFile::new().expect("temp transcript");
+        let inflight = inflight_with_output(
+            channel.get(),
+            tmux_session,
+            Some(file.path().display().to_string()),
+        );
+        let snap = snapshot(channel.get(), tmux_session, Some(20));
+        let now = chrono::Utc::now().timestamp();
+
+        for expected_count in 1..=2 {
+            let decision = evaluate_stall_watchdog_liveness(
+                &provider,
+                channel,
+                &snap,
+                Some(&inflight),
+                now,
+                STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+                STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+            );
+            assert_eq!(
+                decision.action,
+                StallWatchdogLivenessAction::Defer {
+                    deferral_count: expected_count
+                }
+            );
+        }
+
+        let mut next_turn = snap.clone();
+        next_turn.inflight_user_msg_id = Some(9003);
+        next_turn.mailbox_active_user_msg_id = Some(9003);
+        next_turn.inflight_started_at = Some("2026-06-12 00:05:00".to_string());
+        let decision = evaluate_stall_watchdog_liveness(
+            &provider,
+            channel,
+            &next_turn,
+            Some(&inflight),
+            now,
+            STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+            STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+        );
+
+        assert_eq!(
+            decision.action,
+            StallWatchdogLivenessAction::Defer { deferral_count: 1 },
+            "a new user_msg_id + started_at under the same tmux session gets a fresh deferral budget"
+        );
+
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
     }
 
     /// #3582 regression: the 2026-06-18 12:07 false-positive. A live turn that
