@@ -876,15 +876,20 @@ pub struct DatabaseConfig {
     pub password: Option<String>,
     #[serde(default = "default_database_pool_max")]
     pub pool_max: u32,
-    /// #3651: number of `pool_max` connections reserved exclusively for
-    /// foreground turn ingestion. Background chore loops (cluster stale-GC,
-    /// outbox claiming, observability retention/snapshot, session-discovery)
-    /// voluntarily yield their tick whenever doing so would push the live
-    /// in-flight connection count into this reserved band, so a burst of
-    /// background work can never starve foreground acquire(). `0` disables the
-    /// backpressure entirely (behavior identical to pre-#3651). Default `6`
-    /// leaves `pool_max - 6 = 12` connections for background work, matching the
-    /// historical saturation threshold.
+    /// #3651: best-effort advisory headroom (in connections) for foreground
+    /// turn ingestion. Selected high-frequency background chore loops (cluster
+    /// stale-GC, outbox claiming, observability retention/snapshot,
+    /// session-discovery) voluntarily yield their tick whenever doing so would
+    /// push the live in-flight connection count into this band, making
+    /// foreground acquire() much less likely to wait under background bursts.
+    /// This is an advisory momentary snapshot, NOT a semaphore-backed exclusive
+    /// reservation: under churn a few background loops may transiently dip into
+    /// the band (self-healing next tick), and not every DB consumer participates
+    /// — so it reduces, but does not guarantee elimination of, foreground
+    /// starvation. Clamped at startup to keep `pool_max - reserve >= 1`. `0`
+    /// disables the backpressure entirely (behavior identical to pre-#3651).
+    /// Default `6` leaves `pool_max - 6 = 12` connections for background work,
+    /// matching the historical saturation threshold.
     #[serde(default = "default_database_foreground_reserve")]
     pub foreground_reserve: u32,
 }
@@ -2011,11 +2016,13 @@ fn default_database_pool_max() -> u32 {
     18
 }
 fn default_database_foreground_reserve() -> u32 {
-    // #3651: connections held back from background chore loops so foreground
-    // turn ingestion always has acquire headroom. With pool_max=18 this leaves
-    // 12 connections for background work — the same level at which the pool was
-    // historically near-saturated, so steady-state background behaviour is
-    // unchanged. `0` disables the backpressure (behaviour-preserving).
+    // #3651: best-effort advisory headroom held back from selected background
+    // chore loops so foreground turn ingestion is much less likely to wait for
+    // a connection (not a hard guarantee — see DatabaseConfig::foreground_reserve).
+    // With pool_max=18 this leaves 12 connections for background work — the same
+    // level at which the pool was historically near-saturated, so steady-state
+    // background behaviour is unchanged. `0` disables the backpressure
+    // (behaviour-preserving).
     6
 }
 fn default_cluster_role() -> String {
