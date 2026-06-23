@@ -5166,16 +5166,16 @@ fn task_notification_xml_workflow_gates_workflow_end_on_terminal_status() {
 }
 
 #[test]
-fn task_completion_card_suppression_allows_visible_workflow_completion_only() {
+fn workflow_completion_card_never_suppressed_because_footer_lacks_workflow_section() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(3_654_003);
 
     let completed = "<task-notification><task-id>wf-visible</task-id><status>completed</status>\
         <summary>Dynamic workflow \"probe\" completed</summary></task-notification>";
     assert!(
-        events
+        !events
             .task_notification_completion_visible_in_footer_for_mode(channel_id, completed, true,),
-        "workflow completion is itself visible in the footer workflow section"
+        "completion footers do not render Workflow sections, so workflow completion cards must stay"
     );
     assert!(
         !events

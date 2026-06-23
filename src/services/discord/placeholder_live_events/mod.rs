@@ -634,7 +634,9 @@ fn task_notification_success_completion_visible_in_snapshot(
             .subagents
             .iter()
             .any(|slot| slot.tool_use_id.as_deref() == Some(tool_use_id.as_str())),
-        StatusEvent::WorkflowEnd { success: true, .. } => true,
+        // Completion footers render Tasks/Subagents only. Suppressing Workflow
+        // completion cards here would drop the only completion signal.
+        StatusEvent::WorkflowEnd { .. } => false,
         _ => false,
     })
 }
