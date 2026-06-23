@@ -2518,12 +2518,7 @@ async fn message_outbox_loop(pg_pool: Arc<PgPool>, health_registry: Option<Arc<H
 
     let mut poll_interval = Duration::from_millis(500);
     let max_interval = Duration::from_secs(5);
-    // Periodic stale-row GC: prunes failed rows older than 7d and sent rows
-    // older than 30d. Without this, every config-rejected send (`unknown
-    // source role`, `channel not in role-map`) accumulates indefinitely; the
-    // 2026-05-09 incident found 7163+149+188 stale failed rows from sources
-    // that are now allowed but whose historical rejections were never cleaned
-    // up.
+    // Periodic stale-row GC: prune old terminal rows so config rejections do not accumulate.
     let mut next_gc_at = std::time::Instant::now() + Duration::from_secs(60);
 
     loop {
@@ -2553,6 +2548,11 @@ async fn message_outbox_loop(pg_pool: Arc<PgPool>, health_registry: Option<Arc<H
                 let pg_pool = pg_pool.clone();
                 async move {
                     let (correlation_id, semantic_event_id) = row.delivery_ids();
+                    let bot = crate::services::message_outbox::delivery_bot_for_target_session(
+                        &row.target,
+                        &row.bot,
+                        row.session_key.as_deref(),
+                    );
                     let (status, err_text) =
                         crate::services::discord::health::send_message_with_backends_and_delivery_options(
                             &health_registry,
@@ -2561,7 +2561,7 @@ async fn message_outbox_loop(pg_pool: Arc<PgPool>, health_registry: Option<Arc<H
                             &row.target,
                             &row.content,
                             &row.source,
-                            &row.bot,
+                            bot.as_ref(),
                             None,
                             Some(crate::services::discord::health::ManualOutboundDeliveryId {
                                 correlation_id: &correlation_id,

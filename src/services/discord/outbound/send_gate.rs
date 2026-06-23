@@ -373,7 +373,11 @@ pub fn is_allowed_send_source_for(source: &str, caller: SendCallerClass) -> bool
 
 #[cfg(test)]
 mod send_source_tests {
-    use super::{SendCallerClass, is_allowed_send_source, is_allowed_send_source_for};
+    use super::{
+        SendCallerClass, dm_default_agent_authorizes_unmapped_private_channel,
+        is_allowed_send_source, is_allowed_send_source_for,
+    };
+    use crate::services::provider::ProviderKind;
 
     #[test]
     fn headless_turn_is_allowed_internal_send_source() {
@@ -451,6 +455,57 @@ mod send_source_tests {
                 is_allowed_send_source_for(label, SendCallerClass::LoopbackInternal),
                 "loopback caller must keep accepting `{label}`"
             );
+        }
+    }
+
+    #[test]
+    fn dm_default_agent_allows_headless_private_channel_when_provider_bound() {
+        let _lock = crate::config::shared_test_env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("config")).unwrap();
+        std::fs::write(
+            temp.path().join("config/agentdesk.yaml"),
+            r#"
+discord:
+  dm_default_agent: family-counsel
+agents:
+  - id: family-counsel
+    name: Family Counsel
+    provider: claude
+    channels:
+      claude:
+        id: "123"
+        prompt_file: "/tmp/family-counsel.md"
+        workspace: "/tmp"
+        provider: claude
+"#,
+        )
+        .unwrap();
+        let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
+        assert!(dm_default_agent_authorizes_unmapped_private_channel(
+            true,
+            "headless_turn",
+            &ProviderKind::Claude,
+            true,
+        ));
+        assert!(!dm_default_agent_authorizes_unmapped_private_channel(
+            true,
+            "headless_turn",
+            &ProviderKind::Claude,
+            false,
+        ));
+        assert!(!dm_default_agent_authorizes_unmapped_private_channel(
+            false,
+            "headless_turn",
+            &ProviderKind::Claude,
+            true,
+        ));
+
+        match previous_root {
+            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
         }
     }
 
