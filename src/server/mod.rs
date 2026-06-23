@@ -2520,28 +2520,15 @@ async fn message_outbox_loop(pg_pool: Arc<PgPool>, health_registry: Option<Arc<H
     let max_interval = Duration::from_secs(5);
     // Periodic stale-row GC: prune old terminal rows so config rejections do not accumulate.
     let mut next_gc_at = std::time::Instant::now() + Duration::from_secs(60);
-    // #3651: throttle for the backpressure yield log.
-    let mut last_pressure_log =
-        std::time::Instant::now() - crate::db::postgres::BACKPRESSURE_LOG_THROTTLE;
-
     loop {
         tokio::time::sleep(poll_interval).await;
 
-        // #3651: under foreground pool pressure, back off to the max poll
-        // interval and skip both the GC and the drain this tick. The message
-        // outbox is a background relay path — foreground turn ingestion does not
-        // traverse it — so backing off never delays a turn. Work resumes on the
-        // next tick once in_flight drops below the background budget.
-        if crate::db::postgres::background_should_yield(pg_pool.as_ref()) {
-            if last_pressure_log.elapsed() >= crate::db::postgres::BACKPRESSURE_LOG_THROTTLE {
-                tracing::warn!(
-                    "[outbox] yielding message outbox drain to foreground under pool pressure"
-                );
-                last_pressure_log = std::time::Instant::now();
-            }
-            poll_interval = max_interval;
-            continue;
-        }
+        // #3651: the message outbox drain delivers headless terminal responses
+        // — foreground turns enqueue here and synchronously block on the row
+        // becoming `sent` — so this loop is NOT backpressured. Yielding it under
+        // pool pressure would delay (and risk later duplicate-recovery of)
+        // user-visible delivery. Only genuinely low-priority chore loops gate on
+        // `background_should_yield`.
 
         if std::time::Instant::now() >= next_gc_at {
             match gc_stale_message_outbox_rows(pg_pool.as_ref()).await {

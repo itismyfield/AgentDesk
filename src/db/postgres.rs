@@ -38,8 +38,14 @@ pub(crate) const BACKPRESSURE_LOG_THROTTLE: Duration = Duration::from_secs(30);
 /// background DB operation right now would risk dipping into the slots reserved
 /// for foreground turn ingestion. Background loops call this immediately before
 /// their DB work and, when it returns `true`, yield the current tick (skip +
-/// retry next tick / via adaptive backoff) so foreground acquire() always has
-/// headroom.
+/// retry next tick / via adaptive backoff) so foreground acquire() is very
+/// likely to find headroom. Best-effort, **not** a hard guarantee: this is an
+/// advisory momentary snapshot, not a semaphore-backed reservation, and it
+/// gates only the highest-frequency background chore loops. Under churn several
+/// background loops may pass the check and transiently dip into the reserved
+/// band; that self-heals on the next tick once in_flight falls below the
+/// budget. Foreground-visible delivery paths (e.g. the message outbox drain)
+/// must NOT call this — they are never backpressured.
 ///
 /// Pure, stateless, O(1), no locks / awaits / allocation — throttled logging of
 /// the yield is the caller's responsibility. When the reserve is `0` the
@@ -70,6 +76,15 @@ fn should_yield_for_counters(reserve: u32, size: u32, num_idle: u32, max_connect
     let in_flight = size.saturating_sub(num_idle);
     let budget = max_connections.saturating_sub(reserve);
     in_flight >= budget
+}
+
+/// #3651: clamp a configured `foreground_reserve` so the background budget
+/// (`pool_max - reserve`) is always at least 1. A reserve `>= pool_max` (e.g.
+/// the default 6 against a small `pool_max: 4`) would leave a zero budget and
+/// make every background tick yield forever — a backward-compat regression for
+/// pre-existing small-pool configs. Pure / unit-testable.
+fn clamp_foreground_reserve(requested: u32, pool_max: u32) -> u32 {
+    requested.min(pool_max.max(1).saturating_sub(1))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -241,7 +256,24 @@ pub async fn connect(config: &Config) -> Result<Option<PgPool>, String> {
         // warmup pool (`connect_for_startup`) deliberately leaves the reserve at
         // 0 so boot-time background work is never throttled before the runtime
         // pool exists.
-        FOREGROUND_RESERVE.store(config.database.foreground_reserve, Ordering::Release);
+        //
+        // Clamp the reserve so the background budget (`max - reserve`) is always
+        // >= 1. A configured `foreground_reserve >= pool_max` (e.g. the default
+        // 6 with a small `pool_max: 4`) would otherwise make the budget 0 and
+        // yield every background tick forever — a regression for pre-existing
+        // small-pool configs. We keep at least one background slot.
+        let pool_max = config.database.pool_max.max(1);
+        let requested = config.database.foreground_reserve;
+        let effective = clamp_foreground_reserve(requested, pool_max);
+        if effective != requested {
+            tracing::warn!(
+                requested,
+                pool_max,
+                effective,
+                "#3651: foreground_reserve >= pool_max; clamped to preserve a background budget"
+            );
+        }
+        FOREGROUND_RESERVE.store(effective, Ordering::Release);
     }
     Ok(pool)
 }
@@ -1086,7 +1118,7 @@ pub(crate) async fn close_test_pool(pool: PgPool, label: &str) -> Result<(), Str
 mod tests {
     use super::{
         AdvisoryLockLease, POSTGRES_MIGRATOR, STARTUP_PG_ACQUIRE_TIMEOUT_SECS, checksum_hex,
-        close_test_pool, config_database_summary, connect_options,
+        clamp_foreground_reserve, close_test_pool, config_database_summary, connect_options,
         connect_test_pool_and_migrate_config, create_test_database, database_enabled,
         database_summary, health_check, run_test_postgres_sqlx_op_with_timeout,
         runtime_pool_settings, should_yield_for_counters, startup_pool_settings, startup_reseed,
@@ -1388,6 +1420,23 @@ mod tests {
         assert!(should_yield_for_counters(20, 1, 0, 18));
         // reserve == max with a fully-idle pool: in_flight=0 >= budget 0 → yield.
         assert!(should_yield_for_counters(18, 5, 5, 18));
+    }
+
+    #[test]
+    fn clamp_foreground_reserve_always_leaves_a_background_slot() {
+        // Normal: a reserve comfortably below pool_max is unchanged.
+        assert_eq!(clamp_foreground_reserve(6, 18), 6);
+        // reserve == pool_max → clamp to max-1 so the background budget stays >= 1.
+        assert_eq!(clamp_foreground_reserve(6, 6), 5);
+        // reserve > pool_max (default 6 against a small pool_max: 4) → clamp to 3.
+        // This is the backward-compat regression case codex flagged.
+        assert_eq!(clamp_foreground_reserve(6, 4), 3);
+        // pool_max 1 → no slot can be reserved → 0 (disables backpressure entirely).
+        assert_eq!(clamp_foreground_reserve(6, 1), 0);
+        // pool_max 0 is normalised to 1 → reserve 0 (no panic, no infinite yield).
+        assert_eq!(clamp_foreground_reserve(6, 0), 0);
+        // reserve 0 stays 0 (backpressure disabled / behaviour-preserving).
+        assert_eq!(clamp_foreground_reserve(0, 18), 0);
     }
 
     #[tokio::test]
