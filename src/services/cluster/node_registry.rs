@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -299,6 +299,8 @@ fn spawn_heartbeat_loop(
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
         interval.tick().await;
+        // #3651: throttle for the leader-only stale-GC backpressure yield log.
+        let mut last_pressure_log = Instant::now() - crate::db::postgres::BACKPRESSURE_LOG_THROTTLE;
         loop {
             interval.tick().await;
             if let Some(lease) = leader_lease.as_mut()
@@ -362,8 +364,19 @@ fn spawn_heartbeat_loop(
             // worker_nodes.status='offline' when a peer's last_heartbeat_at is
             // beyond stale_threshold_secs. Without this, dead nodes keep
             // status='online' and split-brain diagnostics remain unreliable.
+            //
+            // #3651: the heartbeat upsert above is NEVER gated (liveness /
+            // leader-lease signal — gating it would risk false failover). Only
+            // this deferrable GC backs off under pool pressure; it self-heals on
+            // the next heartbeat tick once pressure clears.
             if leader_active.load(Ordering::Acquire) {
-                if let Err(error) =
+                let throttle = crate::db::postgres::BACKPRESSURE_LOG_THROTTLE;
+                if crate::db::postgres::background_should_yield(&pool) {
+                    if last_pressure_log.elapsed() >= throttle {
+                        tracing::debug!("[cluster] stale GC yielding under pool pressure");
+                        last_pressure_log = Instant::now();
+                    }
+                } else if let Err(error) =
                     mark_stale_worker_nodes_offline(&pool, stale_threshold_secs, &instance_id).await
                 {
                     tracing::warn!("[cluster] stale worker_node GC failed: {error}");
@@ -382,9 +395,24 @@ fn spawn_stale_claim_owner_reassignment_loop(
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // #3651: throttle for the backpressure yield log.
+        let mut last_pressure_log = Instant::now() - crate::db::postgres::BACKPRESSURE_LOG_THROTTLE;
         loop {
             interval.tick().await;
             if !leader_active.load(Ordering::Acquire) {
+                continue;
+            }
+            // #3651: this leader-only loop holds the longest-lived background tx
+            // (reassignment + routing CPU), so it yields first under foreground
+            // pool pressure. Skipping is safe — stale claims are reassigned on
+            // the next tick once pressure clears.
+            if crate::db::postgres::background_should_yield(&pool) {
+                if last_pressure_log.elapsed() >= crate::db::postgres::BACKPRESSURE_LOG_THROTTLE {
+                    tracing::warn!(
+                        "[cluster] yielding stale dispatch_outbox claim-owner reassignment to foreground under pool pressure"
+                    );
+                    last_pressure_log = Instant::now();
+                }
                 continue;
             }
             match crate::services::dispatches::outbox_claiming::reassign_stale_dispatch_outbox_claim_owners_with_cluster_config_pg(

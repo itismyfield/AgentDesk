@@ -859,7 +859,7 @@ pub struct DataConfig {
     pub db_name: String,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct DatabaseConfig {
     #[serde(default)]
@@ -876,6 +876,38 @@ pub struct DatabaseConfig {
     pub password: Option<String>,
     #[serde(default = "default_database_pool_max")]
     pub pool_max: u32,
+    /// #3651: number of `pool_max` connections reserved exclusively for
+    /// foreground turn ingestion. Background chore loops (cluster stale-GC,
+    /// outbox claiming, observability retention/snapshot, session-discovery)
+    /// voluntarily yield their tick whenever doing so would push the live
+    /// in-flight connection count into this reserved band, so a burst of
+    /// background work can never starve foreground acquire(). `0` disables the
+    /// backpressure entirely (behavior identical to pre-#3651). Default `6`
+    /// leaves `pool_max - 6 = 12` connections for background work, matching the
+    /// historical saturation threshold.
+    #[serde(default = "default_database_foreground_reserve")]
+    pub foreground_reserve: u32,
+}
+
+impl Default for DatabaseConfig {
+    /// Manual impl so that `DatabaseConfig::default()` (the `Config::default()`
+    /// path used when no config file is present) agrees with the per-field
+    /// `#[serde(default = ...)]` values used when deserializing a config file.
+    /// In particular `foreground_reserve` must be `6` in both paths — a derived
+    /// `Default` would give `0`, silently disabling #3651 backpressure in the
+    /// no-config-file path.
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: default_database_host(),
+            port: default_database_port(),
+            dbname: default_database_name(),
+            user: default_database_user(),
+            password: None,
+            pool_max: default_database_pool_max(),
+            foreground_reserve: default_database_foreground_reserve(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -1978,6 +2010,14 @@ fn default_database_pool_max() -> u32 {
     // `max_connections` or capping the warmup multiplier first.
     18
 }
+fn default_database_foreground_reserve() -> u32 {
+    // #3651: connections held back from background chore loops so foreground
+    // turn ingestion always has acquire headroom. With pool_max=18 this leaves
+    // 12 connections for background work — the same level at which the pool was
+    // historically near-saturated, so steady-state background behaviour is
+    // unchanged. `0` disables the backpressure (behaviour-preserving).
+    6
+}
 fn default_cluster_role() -> String {
     "auto".into()
 }
@@ -2248,6 +2288,34 @@ mod routine_config_unit_tests {
         .expect("routines config with stale-paused knobs");
         assert_eq!(config.stale_paused_alert_secs, 86_400);
         assert_eq!(config.stale_paused_alert_ttl_secs, 43_200);
+    }
+
+    #[test]
+    fn database_foreground_reserve_default_is_consistent_across_paths() {
+        // #3651: the `Config::default()` path (used when no config file exists)
+        // and the serde-deserialization path (used for an on-disk config) must
+        // agree on the foreground reserve. A derived `Default` would give 0 here
+        // and silently disable the backpressure in the no-config-file path.
+        assert_eq!(DatabaseConfig::default().foreground_reserve, 6);
+        assert_eq!(default_database_foreground_reserve(), 6);
+
+        let from_empty: DatabaseConfig = serde_json::from_str("{}").expect("empty database config");
+        assert_eq!(from_empty.foreground_reserve, 6);
+        // The hand-written Default must match a fully-defaulted deserialization
+        // for every field, not just the reserve.
+        assert_eq!(from_empty, DatabaseConfig::default());
+    }
+
+    #[test]
+    fn database_foreground_reserve_deserializes_when_provided() {
+        // Operators can set 0 to disable the backpressure entirely.
+        let disabled: DatabaseConfig =
+            serde_json::from_str(r#"{ "foreground_reserve": 0 }"#).expect("reserve 0");
+        assert_eq!(disabled.foreground_reserve, 0);
+
+        let custom: DatabaseConfig =
+            serde_json::from_str(r#"{ "foreground_reserve": 9 }"#).expect("reserve 9");
+        assert_eq!(custom.foreground_reserve, 9);
     }
 }
 

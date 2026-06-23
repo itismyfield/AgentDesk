@@ -389,9 +389,29 @@ pub(crate) async fn dispatch_outbox_loop(
     let wake_interval =
         Duration::from_secs(cluster_config.dispatch_routing.wake_interval_secs.max(1));
     let mut last_wake = Instant::now() - wake_interval;
+    // #3651: throttle for the backpressure yield log.
+    let mut last_pressure_log = Instant::now() - crate::db::postgres::BACKPRESSURE_LOG_THROTTLE;
 
     loop {
         tokio::time::sleep(poll_interval).await;
+
+        // #3651: under foreground pool pressure, back this background drain off
+        // to the max poll interval and skip this tick entirely. Outbox claiming
+        // is the AC-named contention source; it self-resumes on the next tick
+        // once in_flight drops below the background budget. Foreground turn
+        // ingestion never goes through this loop, so backing off never delays a
+        // turn relay.
+        if crate::db::postgres::background_should_yield(notifier.pg_pool.as_ref()) {
+            if last_pressure_log.elapsed() >= crate::db::postgres::BACKPRESSURE_LOG_THROTTLE {
+                tracing::warn!(
+                    claim_owner,
+                    "[dispatch-outbox] yielding drain to foreground under pool pressure"
+                );
+                last_pressure_log = Instant::now();
+            }
+            poll_interval = max_interval;
+            continue;
+        }
 
         if cluster_runtime.is_leader() && last_wake.elapsed() >= wake_interval {
             match crate::services::dispatches::wait_queue::wake_waiting_dispatch_outbox_pg(
