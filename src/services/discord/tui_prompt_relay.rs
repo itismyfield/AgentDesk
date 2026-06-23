@@ -2490,8 +2490,7 @@ fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
                 let Some(channel_id) =
                     owner_channel_for_tmux_session(&shared, &ProviderKind::Claude, &tmux_session_name)
                 else {
-                    // #3018/#3306/#3656: registry miss ⇒ drop. The resolver
-                    // rate-limits the WARN and the chokepoint triggers repair.
+                    // #3018/#3306/#3656: registry miss ⇒ drop; chokepoint repairs.
                     continue;
                 };
                 if super::inflight::load_inflight_state(&ProviderKind::Claude, channel_id.get())
@@ -3057,8 +3056,7 @@ fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                 let Some(channel_id) =
                     owner_channel_for_tmux_session(&shared, &ProviderKind::Codex, &tmux_session_name)
                 else {
-                    // #3018/#3306/#3656: registry miss ⇒ drop. The resolver
-                    // rate-limits the WARN; Codex remains repair-ineligible.
+                    // #3018/#3306/#3656: registry miss ⇒ drop; Codex repair-ineligible.
                     continue;
                 };
                 if super::inflight::load_inflight_state(&ProviderKind::Codex, channel_id.get())
@@ -4660,11 +4658,7 @@ mod tests {
         );
     }
 
-    // #3656: repair must be triggered at the owner-resolution chokepoint, not
-    // only by the idle loops' `None` branches. This pins the first drift drop:
-    // registry miss + mirror hit still returns None (single authority), but it
-    // immediately arms the repair single-flight so settings/live-pane promotion
-    // can happen on the async repair path without waiting for watchdog reconcile.
+    // #3656: the owner-resolution chokepoint must arm repair on the first drift drop.
     #[cfg(unix)]
     #[tokio::test]
     async fn owner_channel_chokepoint_triggers_drift_repair_on_drift_drop() {
