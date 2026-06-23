@@ -232,7 +232,11 @@ fn parse_catch_up_scan_pace(raw: Option<&str>) -> std::time::Duration {
 }
 
 fn catch_up_scan_pace() -> std::time::Duration {
-    parse_catch_up_scan_pace(std::env::var("AGENTDESK_CATCH_UP_SCAN_PACE_MS").ok().as_deref())
+    parse_catch_up_scan_pace(
+        std::env::var("AGENTDESK_CATCH_UP_SCAN_PACE_MS")
+            .ok()
+            .as_deref(),
+    )
 }
 
 /// Whether to wait the pacing gap before the next per-channel scan. The first
@@ -873,10 +877,7 @@ mod catch_up_recovery_tests {
     fn first_scan_runs_immediately_then_subsequent_scans_pace() {
         // Mirrors the loop contract: the very first eligible channel scans with
         // no delay; once one scan has happened, every later channel is paced.
-        assert!(
-            !should_pace_before_scan(false),
-            "first scan must not wait"
-        );
+        assert!(!should_pace_before_scan(false), "first scan must not wait");
         assert!(
             should_pace_before_scan(true),
             "subsequent scans must wait the pacing gap"
