@@ -1190,7 +1190,7 @@ pub fn spawn_watchdog(port: u16) {
 /// All gates must hold:
 /// - `attached == true` and `desynced == true` (snapshot already classified
 ///   the watcher as detached/diverged), AND
-/// - `inflight_updated_at` is older than `threshold_secs` seconds
+/// - `inflight_started_at` is older than `threshold_secs` seconds
 ///   (defaults to `2 * INFLIGHT_STALENESS_THRESHOLD_SECS`), AND
 /// - `terminal_delivery_committed == false` (the in-flight row is NOT a
 ///   normally-completed turn that is merely sleeping; see below).
@@ -1308,21 +1308,21 @@ async fn preserve_resume_selector_on_force_clean(
 /// turns keeps the watchdog targeting only genuinely hung (never-completed)
 /// turns.
 ///
-/// #3041 post-restart grace: `inflight_updated_at` is frozen at the wall-clock
-/// time of the last relay write *before* a dcserver restart. Right after a
-/// deploy/restart every watcher is transiently `desynced` (relay offsets not
-/// yet re-synced) while its inflight row already reads arbitrarily stale — so
-/// the bare `now - updated_at >= threshold` test fires immediately and
-/// force-kills a perfectly healthy work session that simply hadn't re-synced
-/// yet. Anchoring the age at `max(updated_at, boot)` restarts the staleness
-/// clock at boot, giving the watcher a full `threshold_secs` window after the
-/// restart to re-sync (which clears `desynced` and the kill never happens).
-/// A genuinely hung turn stays desynced past that window and is still cleaned.
+/// #3041 post-restart grace: the current turn's `started_at` may predate a
+/// dcserver restart. Right after deploy/restart every watcher is transiently
+/// `desynced` (relay offsets not yet re-synced), so the bare
+/// `now - started_at >= threshold` test could fire immediately and force-kill
+/// a perfectly healthy work session that simply hadn't re-synced yet. Anchoring
+/// the age at `max(started_at, boot)` restarts the staleness clock at boot,
+/// giving the watcher a full `threshold_secs` window after restart to re-sync
+/// (which clears `desynced` and the kill never happens). A genuinely hung turn
+/// stays desynced past that window and is still cleaned.
+/// #3656: age from the current turn's `started_at` (not `updated_at`) so consecutive short turns under one session key don't accumulate into a fake stall.
 pub(crate) fn stall_watchdog_should_force_clean(
     attached: bool,
     desynced: bool,
     inflight_terminal_delivery_committed: bool,
-    inflight_updated_at: Option<&str>,
+    inflight_started_at: Option<&str>,
     now_unix_secs: i64,
     threshold_secs: u64,
     boot_unix_secs: i64,
@@ -1335,16 +1335,16 @@ pub(crate) fn stall_watchdog_should_force_clean(
     if inflight_terminal_delivery_committed {
         return false;
     }
-    let Some(updated_at) = inflight_updated_at else {
+    let Some(started_at) = inflight_started_at else {
         return false;
     };
-    let Some(updated_at_unix) = discord::inflight::parse_updated_at_unix(updated_at) else {
+    let Some(started_at_unix) = discord::inflight::parse_updated_at_unix(started_at) else {
         return false;
     };
     // #3041: never count staleness that accrued before this process booted —
-    // a pre-restart-frozen `updated_at` must not instantly satisfy the
+    // a pre-restart turn `started_at` must not instantly satisfy the
     // threshold the moment the watchdog's initial delay elapses.
-    let age_anchor = updated_at_unix.max(boot_unix_secs);
+    let age_anchor = started_at_unix.max(boot_unix_secs);
     let age_secs = now_unix_secs.saturating_sub(age_anchor);
     age_secs >= 0 && (age_secs as u64) >= threshold_secs
 }
@@ -1713,7 +1713,7 @@ pub(crate) async fn run_stall_watchdog_pass(
             snapshot.attached,
             snapshot.desynced,
             snapshot.inflight_terminal_delivery_committed,
-            snapshot.inflight_updated_at.as_deref(),
+            snapshot.inflight_started_at.as_deref(),
             now_unix_secs,
             STALL_WATCHDOG_THRESHOLD_SECS,
             registry.started_at_unix(),
@@ -3540,8 +3540,8 @@ mod stall_watchdog_pure_tests {
         };
         let stale_str = to_local(stale_unix);
         let fresh_str = to_local(now_unix - 5);
-        // Boot far in the past so `max(updated_at, boot)` resolves to
-        // `updated_at` — these cases assert the pre-#3041 semantics.
+        // Boot far in the past so `max(started_at, boot)` resolves to
+        // `started_at` — these cases assert the pre-#3041 semantics.
         let boot_unix = stale_unix - 100;
 
         // Happy path: attached + desynced + stale + not-committed → clean.
@@ -3577,7 +3577,7 @@ mod stall_watchdog_pure_tests {
             boot_unix,
         ));
 
-        // fresh updated_at → no clean (live-turn safety net).
+        // fresh started_at → no clean (live-turn safety net).
         assert!(!stall_watchdog_should_force_clean(
             true,
             true,
@@ -3588,7 +3588,7 @@ mod stall_watchdog_pure_tests {
             boot_unix,
         ));
 
-        // missing updated_at → no clean.
+        // missing started_at → no clean.
         assert!(!stall_watchdog_should_force_clean(
             true,
             true,
@@ -3599,7 +3599,7 @@ mod stall_watchdog_pure_tests {
             boot_unix,
         ));
 
-        // unparseable updated_at → no clean.
+        // unparseable started_at → no clean.
         assert!(!stall_watchdog_should_force_clean(
             true,
             true,
@@ -3638,6 +3638,35 @@ mod stall_watchdog_pure_tests {
             STALL_WATCHDOG_THRESHOLD_SECS,
             /* boot_unix_secs */ now_unix - (STALL_WATCHDOG_THRESHOLD_SECS as i64) - 1,
         ));
+    }
+
+    /// #3656: consecutive short turns under the same session key must not
+    /// inherit an old channel-level update anchor. The force-clean age is based
+    /// on the current turn's `started_at`, so a freshly-started turn is not
+    /// killed just because a prior turn in the same session was old.
+    #[test]
+    fn stall_watchdog_age_uses_current_turn_started_at() {
+        let now_unix = chrono::Utc::now().timestamp();
+        let fresh_started_unix = now_unix - 5;
+        let fresh_started = chrono::Local
+            .timestamp_opt(fresh_started_unix, 0)
+            .single()
+            .expect("valid local time")
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+
+        assert!(
+            !stall_watchdog_should_force_clean(
+                true,
+                true,
+                false,
+                Some(fresh_started.as_str()),
+                now_unix,
+                STALL_WATCHDOG_THRESHOLD_SECS,
+                now_unix - 10_000,
+            ),
+            "a fresh current-turn started_at must reset the watchdog age even for the same session"
+        );
     }
 
     /// #3126 false-positive guard: a normally-completed turn that is now idle
