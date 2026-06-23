@@ -87,6 +87,7 @@ pub(in crate::services::discord) fn bump_recovery_relay_attempts_if_matches_iden
         return GuardedSaveOutcome::IdentityMismatch;
     }
     on_disk.recovery_relay_attempts = on_disk.recovery_relay_attempts.saturating_add(1);
+    on_disk.ensure_finalizer_turn_id();
     on_disk.updated_at = super::now_string();
     let Ok(json) = serde_json::to_string_pretty(&on_disk) else {
         return GuardedSaveOutcome::IoError;

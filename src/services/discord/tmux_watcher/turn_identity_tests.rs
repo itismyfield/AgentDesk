@@ -129,6 +129,20 @@ fn pinned_finalize_id_zero_user_msg_id_returns_zero() {
 }
 
 #[test]
+fn pinned_finalizer_turn_id_uses_synthetic_identity_for_zero_user_msg_id() {
+    let mut state = state_with_offsets(0, "AgentDesk-codex-adk-cdx", Some(10), 10);
+    state.finalizer_turn_id = 1_234_567;
+    assert_eq!(
+        pinned_finalizer_turn_id(Some(&state), "AgentDesk-codex-adk-cdx", 50),
+        1_234_567
+    );
+    assert_eq!(
+        pinned_finalizer_turn_id(Some(&state), "AgentDesk-codex-adk-cdx", 10),
+        0
+    );
+}
+
+#[test]
 fn pinned_finalize_id_none_returns_zero() {
     // (e) No pre-relay snapshot → 0.
     assert_eq!(

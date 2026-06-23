@@ -211,6 +211,20 @@ pub(super) fn pinned_finalize_user_msg_id(
         .unwrap_or(0)
 }
 
+pub(super) fn pinned_finalizer_turn_id(
+    inflight_before_relay: Option<&crate::services::discord::inflight::InflightTurnState>,
+    tmux_session_name: &str,
+    current_offset: u64,
+) -> u64 {
+    inflight_before_relay
+        .filter(|state| {
+            state.tmux_session_name.as_deref().map(str::trim) == Some(tmux_session_name.trim())
+                && state.turn_start_offset.unwrap_or(state.last_offset) < current_offset
+        })
+        .map(|state| state.effective_finalizer_turn_id())
+        .unwrap_or(0)
+}
+
 /// #3016 (codex R3): the watcher's `terminal_output_committed &&
 /// !lifecycle_stage_paused` block runs MORE destructive side-effects than the
 /// finalize on a LATE re-read `inflight_state` (loaded AFTER the relay, NOT

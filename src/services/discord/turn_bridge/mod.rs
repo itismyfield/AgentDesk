@@ -1175,7 +1175,7 @@ fn handle_watcher_runtime_handoff(
             shared_owned.turn_finalizer.register_start(
                 super::turn_finalizer::TurnKey::new(
                     channel_id,
-                    inflight_state.user_msg_id,
+                    inflight_state.effective_finalizer_turn_id(),
                     shared_owned.restart.current_generation,
                 ),
                 provider.clone(),
@@ -3086,18 +3086,16 @@ pub(super) fn spawn_turn_bridge(
                                     // `handle_watcher_runtime_handoff` helper.
                                     // This legacy `StreamMessage::TmuxReady`
                                     // handoff does NOT go through that helper, so
-                                    // without this the watcher's channel-only
-                                    // (id-0) GateTimeout/Complete submissions
-                                    // would create a `RelayOwnerKind::None`
-                                    // ledger entry — and a busy-pane gate-timeout
-                                    // would then finalize immediately instead of
-                                    // arming the deadline-backstop. Registering
-                                    // here with the Watcher owner makes the
-                                    // gate-timeout defer correctly.
+                                    // without this the watcher terminal would
+                                    // have no Watcher-owned ledger entry — and
+                                    // a busy-pane gate-timeout would finalize
+                                    // immediately instead of arming the
+                                    // deadline-backstop. Registering here with
+                                    // the same finalizer id makes it defer.
                                     shared_owned.turn_finalizer.register_start(
                                         super::turn_finalizer::TurnKey::new(
                                             channel_id,
-                                            inflight_state.user_msg_id,
+                                            inflight_state.effective_finalizer_turn_id(),
                                             shared_owned.restart.current_generation,
                                         ),
                                         provider.clone(),
@@ -4134,10 +4132,7 @@ pub(super) fn spawn_turn_bridge(
                     .submit_terminal(
                         super::turn_finalizer::TurnKey::new(
                             channel_id,
-                            // user_msg_id == 0 collapses to the channel-only
-                            // terminal that `turn_finalizer` already supports
-                            // (recovery/orphan path) instead of panicking.
-                            user_msg_id.map(|id| id.get()).unwrap_or(0),
+                            inflight_state.effective_finalizer_turn_id(),
                             shared_owned.restart.current_generation,
                         ),
                         provider.clone(),
@@ -4226,9 +4221,7 @@ pub(super) fn spawn_turn_bridge(
                 .submit_terminal(
                     super::turn_finalizer::TurnKey::new(
                         channel_id,
-                        // user_msg_id == 0 → channel-only terminal key, which
-                        // turn_finalizer already supports (recovery/orphan path).
-                        user_msg_id.map(|id| id.get()).unwrap_or(0),
+                        inflight_state.effective_finalizer_turn_id(),
                         shared_owned.restart.current_generation,
                     ),
                     provider.clone(),

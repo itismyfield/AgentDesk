@@ -2437,11 +2437,10 @@ async fn finish_restored_watcher_active_turn(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
-    // #3016: the turn's real `user_msg_id`, captured by the caller BEFORE it
-    // cleared inflight (a reload here returns `None`). 0 means "unknown" (true
-    // orphan); a real id makes the finalizer ledger match exact so a stale
-    // channel-only terminal cannot finalize a queued follow-up turn.
-    user_msg_id: u64,
+    // #3016/#3645: finalizer ledger identity captured by the caller BEFORE it
+    // cleared inflight (a reload here returns `None`). Real Discord turns use
+    // `user_msg_id`; id-0 synthetic turns use their persisted finalizer_turn_id.
+    finalizer_turn_id: u64,
     finish_mailbox_on_completion: bool,
     // #3016 option A: the caller observed a *normal completion* (terminal output
     // committed / pane confirmed idle past the relay) and wants the single-
@@ -2456,8 +2455,8 @@ async fn finish_restored_watcher_active_turn(
     kickoff_queue: bool,
     // #3350 codex r1-1: the caller's PRE-CLEAR row snapshot for the #3303
     // DeferredClaim marker ensure — inflight is cleared before this helper
-    // (see `user_msg_id`), so a row re-load cannot authenticate the watcher's
-    // synthetic turns. `None` keeps the row-reload fallback.
+    // (see `finalizer_turn_id`), so a row re-load cannot authenticate the
+    // watcher's synthetic turns. `None` keeps the row-reload fallback.
     claim_snapshot: Option<super::turn_finalizer::SyntheticClaimSnapshot>,
     stop_source: &'static str,
 ) -> bool {
@@ -2490,7 +2489,7 @@ async fn finish_restored_watcher_active_turn(
     // instead of calling mailbox_finish_turn + counter + side-effects inline. The ledger
     // phase gate makes this exactly-once across bridge and watcher: whichever submits
     // first finalizes; the loser gets `AlreadyFinalized` and the watcher simply skips
-    // the queue kickoff (the winner already owns it). Use the REAL `user_msg_id` the
+    // the queue kickoff (the winner already owns it). Use the finalizer id the
     // caller captured BEFORE clearing inflight (reloading inflight here returns `None`
     // because the watcher already wiped it). The exact id makes the ledger match
     // precise: a stale terminal from an already-finalized turn resolves to that turn's
@@ -2504,7 +2503,7 @@ async fn finish_restored_watcher_active_turn(
         .submit_terminal_with_claim_snapshot(
             super::turn_finalizer::TurnKey::new(
                 channel_id,
-                user_msg_id,
+                finalizer_turn_id,
                 shared.restart.current_generation,
             ),
             provider.clone(),

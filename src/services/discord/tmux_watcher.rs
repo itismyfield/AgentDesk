@@ -4613,7 +4613,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             prompt_anchor_present_before_relay || external_input_lease_before_relay;
 
         // #3041 P1-1: acquire the delivery lease BEFORE the watcher direct-sends. Lease
-        // identity = the turn-pinned id (`pinned_finalize_user_msg_id`, the #3141
+        // identity = the turn-pinned id (`pinned_finalizer_turn_id`, the #3141
         // id-pinning) + the byte range `[data_start_offset, terminal_event_consumed_offset)`
         // — the SAME consumed end the commit/advance uses, so acquire and commit carry one
         // identity. Acquire only on the watcher-direct path (delegation is the sink's lease
@@ -4626,7 +4626,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // The actor CommitDelivery/ReleaseDelivery messages remain dormant.
         let watcher_lease_turn = crate::services::discord::turn_finalizer::TurnKey::new(
             channel_id,
-            pinned_finalize_user_msg_id(
+            pinned_finalizer_turn_id(
                 inflight_before_relay.as_ref(),
                 &tmux_session_name,
                 current_offset,
@@ -5528,29 +5528,24 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             );
             // #3016 phase 3: the silent SKIP the EPIC targets. The
             // `terminal_output_committed && !lifecycle_stage_paused` blocks below are
-            // skipped, so nothing finalizes until the 1800s placeholder sweeper —
-            // which never fires if the pane stays busy. Instead submit a gate-timeout
-            // with `pane_quiescent: Some(false)`: the finalizer arms a SHORT bounded
-            // deadline (GATE_BACKSTOP) and its reconciler finalizes when it elapses.
-            // The mailbox release does NOT inject into a busy pane (the hosted-TUI
-            // pre-submit guard requeues follow-up input). Only fire when terminal
-            // output was actually committed, matching the skipped block's precondition.
+            // skipped, so submit a busy gate-timeout: the finalizer arms the short
+            // GATE_BACKSTOP and reconciles later. Only fire after committed output.
             if terminal_output_committed {
-                // Prefer the real `user_msg_id` from inflight so this resolves to the
-                // exact Watcher-owned ledger entry (→ DEFERS to the backstop); a
-                // channel-only id-0 could resolve onto a different live entry.
-                let gate_user_msg_id = crate::services::discord::inflight::load_inflight_state(
-                    &watcher_provider,
-                    channel_id.get(),
-                )
-                .map(|s| s.user_msg_id)
-                .unwrap_or(0);
+                // Prefer the persisted finalizer id from inflight so this resolves
+                // to the exact Watcher-owned ledger entry (→ DEFERS to backstop).
+                let gate_finalizer_turn_id =
+                    crate::services::discord::inflight::load_inflight_state(
+                        &watcher_provider,
+                        channel_id.get(),
+                    )
+                    .map(|s| s.effective_finalizer_turn_id())
+                    .unwrap_or(0);
                 let _ = shared
                     .turn_finalizer
                     .submit_terminal(
                         crate::services::discord::turn_finalizer::TurnKey::new(
                             channel_id,
-                            gate_user_msg_id,
+                            gate_finalizer_turn_id,
                             shared.restart.current_generation,
                         ),
                         watcher_provider.clone(),
@@ -6295,7 +6290,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // removed — exactly-once is the ledger phase gate's job.
             // #3016 (codex R3): do NOT delete on-disk inflight owned by a
             // NEWER follow-up turn — the same offset decision that zeroes
-            // `pinned_finalize_user_msg_id` below gates this clear, so a
+            // `pinned_finalizer_turn_id` below gates this clear, so a
             // stale-range pass cannot wipe it. Only the on-disk file is gated;
             // the in-memory `inflight_state` and `cleared_by_watcher` keep
             // their semantics.
@@ -6366,32 +6361,20 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // queue-kickoff side-effect stays gated on `dispatch_ok`. The redundant
             // `should_kickoff_queue` block further below is also `dispatch_ok`-gated
             // as a fallback for paths where the helper short-circuited.
-            // #3016 (codex R1+R2): derive the finalize id from the TURN-PINNED
-            // pre-relay snapshot, never the late `inflight_state` re-read — the
-            // watcher loop is not turn-scoped (L~7327 warning), so a follow-up may
-            // rewrite on-disk inflight after relay/emit and a stale-id match would
-            // `finish_turn_if_matches` the WRONG follow-up turn.
-            //
-            // R2 (offset-aliasing): even `inflight_before_relay` is not pinned to the
-            // OUTPUT RANGE — the watcher-yield guard (tmux.rs:2110-2111) proceeds on
-            // this old range when a follow-up starts AT/AFTER `current_offset`,
-            // leaving the newer id in the snapshot. `pinned_finalize_user_msg_id`
-            // mirrors the guard's range test (`turn_start_offset.unwrap_or(last) <
-            // current_offset`), so a newer turn yields 0 (turn_finalizer L~526 refuses
-            // the mismatch); session-match + `user_msg_id != 0` kept. `current_offset`
-            // is this range's end (same as `commit_watcher_direct_terminal_session_idle`).
-            //
-            // R3 cross-ref: `completion_is_stale_for_newer_turn` (complement of that
-            // `< current_offset` test) gates the `⏳ → ✅` / transcript / analytics
-            // block and the `clear_inflight_state` above, keeping "yields 0" and
-            // "skip destructive side-effects" consistent by construction.
-            let restored_user_msg_id = pinned_finalize_user_msg_id(
+            // #3016/#3645: derive the finalizer id from the TURN-PINNED pre-relay
+            // snapshot, with `pinned_finalizer_turn_id` mirroring the output-range
+            // guard so newer same-session follow-ups yield 0 and skip destructive
+            // completion side effects consistently.
+            let restored_finalizer_turn_id = pinned_finalizer_turn_id(
                 inflight_before_relay.as_ref(),
                 &tmux_session_name,
                 current_offset,
             );
+            let same_session_snapshot_present = inflight_before_relay.as_ref().is_some_and(|s| {
+                s.tmux_session_name.as_deref().map(str::trim) == Some(tmux_session_name.trim())
+            });
             // #3016 (codex B1): SKIP the normal-completion finalize ENTIRELY in the
-            // stale-newer-turn case — do NOT call it with `restored_user_msg_id == 0`.
+            // stale-newer-turn case — do NOT call it with a channel-only id 0.
             // A 0-id submit is unsafe, not a no-op: `normal_completion = true`
             // finalizes UNCONDITIONALLY, and a 0-id `TurnKey` reaches
             // `resolve_channel_only` (turn_finalizer.rs:161-181) which collapses onto
@@ -6402,18 +6385,21 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // NOTHING here; the newer turn finalizes itself when ITS output commits in
             // a later loop iteration. `completion_is_stale_for_newer_turn` is the exact
             // complement of the `< current_offset` range test in
-            // `pinned_finalize_user_msg_id`, so "id == 0" and "skip" are one predicate.
+            // `pinned_finalizer_turn_id`; a same-session snapshot whose pinned id
+            // resolves to 0 is skipped rather than submitted channel-only.
             //
             // Skip-path bookkeeping: `watcher_drove_finalize = false`. #3016
             // phase-5b2: the legacy `mailbox_finalize_owed` flag is removed — the
             // newer turn finalizes via its own real-id path, and the stale-skip is
             // already kickoff-suppressed by `has_active_turn` (the newer live turn).
-            let watcher_drove_finalize = if !completion_is_stale_for_newer_turn {
+            let watcher_drove_finalize = if !completion_is_stale_for_newer_turn
+                && (restored_finalizer_turn_id != 0 || !same_session_snapshot_present)
+            {
                 finish_restored_watcher_active_turn(
                     &shared,
                     &provider_kind,
                     channel_id,
-                    restored_user_msg_id,
+                    restored_finalizer_turn_id,
                     finish_mailbox_on_completion,
                     // #3016 option A: terminal output was committed above
                     // (`terminal_output_committed && !lifecycle_stage_paused`), the

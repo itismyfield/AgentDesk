@@ -29,6 +29,48 @@ pub(in crate::services::discord) fn optional_message_id(
     }
 }
 
+const SYNTHETIC_FINALIZER_TURN_ID_MASK: u64 = i64::MAX as u64;
+const SYNTHETIC_FINALIZER_TURN_ID_FLOOR: u64 = 1_000_000_000_000_000_000;
+
+fn mix_finalizer_hash(mut hash: u64, bytes: &[u8]) -> u64 {
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+fn synthetic_finalizer_turn_id(
+    provider: &str,
+    channel_id: u64,
+    started_at: &str,
+    tmux_session_name: Option<&str>,
+    output_path: Option<&str>,
+    turn_start_offset: Option<u64>,
+    last_offset: u64,
+    born_generation: u64,
+) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325;
+    let offset = turn_start_offset.unwrap_or(last_offset);
+    hash = mix_finalizer_hash(hash, provider.as_bytes());
+    hash = mix_finalizer_hash(hash, &[0xff]);
+    hash = mix_finalizer_hash(hash, &channel_id.to_le_bytes());
+    hash = mix_finalizer_hash(hash, &[0xff]);
+    hash = mix_finalizer_hash(hash, started_at.as_bytes());
+    hash = mix_finalizer_hash(hash, &[0xff]);
+    hash = mix_finalizer_hash(hash, tmux_session_name.unwrap_or("").as_bytes());
+    hash = mix_finalizer_hash(hash, &[0xff]);
+    hash = mix_finalizer_hash(hash, output_path.unwrap_or("").as_bytes());
+    hash = mix_finalizer_hash(hash, &[0xff]);
+    hash = mix_finalizer_hash(hash, &offset.to_le_bytes());
+    hash = mix_finalizer_hash(hash, &[0xff]);
+    hash = mix_finalizer_hash(hash, &born_generation.to_le_bytes());
+    hash = mix_finalizer_hash(hash, &[0xff]);
+    (hash % (SYNTHETIC_FINALIZER_TURN_ID_MASK - SYNTHETIC_FINALIZER_TURN_ID_FLOOR))
+        + SYNTHETIC_FINALIZER_TURN_ID_FLOOR
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(in crate::services::discord) struct InflightTurnState {
     pub version: u32,
@@ -43,6 +85,11 @@ pub(in crate::services::discord) struct InflightTurnState {
     pub thread_title: Option<String>,
     pub request_owner_user_id: u64,
     pub user_msg_id: u64,
+    /// Nonzero identity used by the single-authority finalizer ledger. It is
+    /// independent of Discord user-message anchoring: real user id wins, then a
+    /// pinned injected prompt id, then a persisted synthetic id for id-0 turns.
+    #[serde(default)]
+    pub finalizer_turn_id: u64,
     /// Discord message id for the live status panel when status-panel-v2 is
     /// enabled. `current_msg_id` remains the assistant response message.
     #[serde(default)]
@@ -540,13 +587,29 @@ impl InflightTurnState {
         last_offset: u64,
     ) -> Self {
         let now = now_string();
+        let provider_name = provider.as_str().to_string();
+        let born_generation = super::super::runtime_store::load_generation();
+        let finalizer_turn_id = if user_msg_id != 0 {
+            user_msg_id
+        } else {
+            synthetic_finalizer_turn_id(
+                &provider_name,
+                channel_id,
+                &now,
+                tmux_session_name.as_deref(),
+                output_path.as_deref(),
+                Some(last_offset),
+                last_offset,
+                born_generation,
+            )
+        };
         let runtime_kind = input_fifo_path
             .as_deref()
             .filter(|path| !path.is_empty())
             .map(|_| RuntimeHandoffKind::LegacyTmuxWrapper);
         Self {
             version: INFLIGHT_STATE_VERSION,
-            provider: provider.as_str().to_string(),
+            provider: provider_name,
             channel_id,
             channel_name,
             logical_channel_id: Some(channel_id),
@@ -554,6 +617,7 @@ impl InflightTurnState {
             thread_title: None,
             request_owner_user_id,
             user_msg_id,
+            finalizer_turn_id,
             status_message_id: None,
             current_msg_id,
             current_msg_len: 0,
@@ -580,7 +644,7 @@ impl InflightTurnState {
             task_notification_kind: None,
             started_at: now.clone(),
             updated_at: now,
-            born_generation: super::super::runtime_store::load_generation(),
+            born_generation,
             recovery_relay_attempts: 0,
             any_tool_used: false,
             has_post_tool_text: false,
@@ -612,6 +676,43 @@ impl InflightTurnState {
 
     pub fn provider_kind(&self) -> Option<ProviderKind> {
         ProviderKind::from_str(&self.provider)
+    }
+
+    pub(in crate::services::discord) fn effective_finalizer_turn_id(&self) -> u64 {
+        if self.user_msg_id != 0 {
+            return self.user_msg_id;
+        }
+        if let Some(id) = self.injected_prompt_message_id.filter(|id| *id != 0) {
+            return id;
+        }
+        if self.finalizer_turn_id != 0 {
+            return self.finalizer_turn_id;
+        }
+        synthetic_finalizer_turn_id(
+            &self.provider,
+            self.channel_id,
+            &self.started_at,
+            self.tmux_session_name.as_deref(),
+            self.output_path.as_deref(),
+            self.turn_start_offset,
+            self.last_offset,
+            self.born_generation,
+        )
+    }
+
+    pub(in crate::services::discord) fn ensure_finalizer_turn_id(&mut self) -> bool {
+        let resolved = self.effective_finalizer_turn_id();
+        if self.finalizer_turn_id == resolved {
+            false
+        } else {
+            self.finalizer_turn_id = resolved;
+            true
+        }
+    }
+
+    pub(in crate::services::discord) fn matches_finalizer_turn_id(&self, expected: u64) -> bool {
+        expected != 0
+            && (self.user_msg_id == expected || self.effective_finalizer_turn_id() == expected)
     }
 
     pub(in crate::services::discord) fn effective_relay_owner_kind(&self) -> RelayOwnerKind {

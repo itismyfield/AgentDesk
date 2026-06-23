@@ -427,7 +427,7 @@ pub(super) fn maybe_hand_off_busy_turn_to_watcher(
         shared_owned.turn_finalizer.register_start(
             TurnKey::new(
                 channel_id,
-                inflight_state.user_msg_id,
+                inflight_state.effective_finalizer_turn_id(),
                 shared_owned.restart.current_generation,
             ),
             provider.clone(),
