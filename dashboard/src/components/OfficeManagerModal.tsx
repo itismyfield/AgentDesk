@@ -446,8 +446,18 @@ export default function OfficeManagerModal({
                 return (
                   <SurfaceCard
                     key={a.id}
+                    role="switch"
+                    aria-checked={inOffice}
+                    aria-label={tr(`${a.name_ko || a.name} - 오피스 멤버 토글`, `Toggle ${a.name} in office members`)}
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        toggleAgent(a.id);
+                      }
+                    }}
                     onClick={() => toggleAgent(a.id)}
-                    className="w-full cursor-pointer p-2.5 text-left transition-all"
+                    className="w-full cursor-pointer p-2.5 text-left transition-all focus:outline-none focus:ring-2 focus:ring-[var(--th-accent-primary)] focus:ring-offset-2 focus:ring-offset-[var(--th-bg-surface)]"
                     style={{
                       background: inOffice
                         ? "color-mix(in srgb, var(--th-accent-primary-soft) 22%, var(--th-bg-surface) 78%)"
