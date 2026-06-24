@@ -14,21 +14,33 @@ pub async fn group_has_pending_entries_pg(
     thread_group: i64,
     current_phase: Option<i64>,
 ) -> Result<bool, sqlx::Error> {
-    let rows = sqlx::query_scalar::<_, i64>(
-        "SELECT COALESCE(batch_phase, 0)::BIGINT
-         FROM auto_queue_entries
-         WHERE run_id = $1
-           AND COALESCE(thread_group, 0) = $2
-           AND status = 'pending'
-         ORDER BY priority_rank ASC",
-    )
-    .bind(run_id)
-    .bind(thread_group)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .any(|batch_phase| batch_phase_is_eligible(batch_phase, current_phase)))
+    let query = match current_phase {
+        Some(phase) => sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(batch_phase, 0)::BIGINT
+                 FROM auto_queue_entries
+                 WHERE run_id = $1
+                   AND COALESCE(thread_group, 0) = $2
+                   AND status = 'pending'
+                   AND COALESCE(batch_phase, 0) = $3
+                 LIMIT 1",
+        )
+        .bind(run_id)
+        .bind(thread_group)
+        .bind(phase),
+        None => sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(batch_phase, 0)::BIGINT
+                 FROM auto_queue_entries
+                 WHERE run_id = $1
+                   AND COALESCE(thread_group, 0) = $2
+                   AND status = 'pending'
+                 LIMIT 1",
+        )
+        .bind(run_id)
+        .bind(thread_group),
+    };
+
+    let row = query.fetch_optional(pool).await?;
+    Ok(row.is_some())
 }
 
 pub async fn first_pending_entry_for_group_pg(
@@ -37,37 +49,60 @@ pub async fn first_pending_entry_for_group_pg(
     thread_group: i64,
     current_phase: Option<i64>,
 ) -> Result<Option<(String, String, String, i64, i64)>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT e.id,
-                COALESCE(e.kanban_card_id, '') AS kanban_card_id,
-                e.agent_id,
-                COALESCE(e.batch_phase, 0)::BIGINT AS batch_phase,
-                COALESCE(e.retry_count, 0)::BIGINT AS retry_count
-         FROM auto_queue_entries e
-         WHERE e.run_id = $1
-           AND COALESCE(e.thread_group, 0) = $2
-           AND e.status = 'pending'
-         ORDER BY e.priority_rank ASC",
-    )
-    .bind(run_id)
-    .bind(thread_group)
-    .fetch_all(pool)
-    .await?;
-
-    for row in rows {
-        let batch_phase = row.try_get::<i64, _>("batch_phase")?;
-        if batch_phase_is_eligible(batch_phase, current_phase) {
-            return Ok(Some((
-                row.try_get("id")?,
-                row.try_get("kanban_card_id")?,
-                row.try_get("agent_id")?,
-                batch_phase,
-                row.try_get("retry_count")?,
-            )));
+    let row_opt = match current_phase {
+        Some(phase) => {
+            sqlx::query(
+                "SELECT e.id,
+                        COALESCE(e.kanban_card_id, '') AS kanban_card_id,
+                        e.agent_id,
+                        COALESCE(e.batch_phase, 0)::BIGINT AS batch_phase,
+                        COALESCE(e.retry_count, 0)::BIGINT AS retry_count
+                 FROM auto_queue_entries e
+                 WHERE e.run_id = $1
+                   AND COALESCE(e.thread_group, 0) = $2
+                   AND e.status = 'pending'
+                   AND COALESCE(e.batch_phase, 0) = $3
+                 ORDER BY e.priority_rank ASC
+                 LIMIT 1",
+            )
+            .bind(run_id)
+            .bind(thread_group)
+            .bind(phase)
+            .fetch_optional(pool)
+            .await?
         }
-    }
+        None => {
+            sqlx::query(
+                "SELECT e.id,
+                        COALESCE(e.kanban_card_id, '') AS kanban_card_id,
+                        e.agent_id,
+                        COALESCE(e.batch_phase, 0)::BIGINT AS batch_phase,
+                        COALESCE(e.retry_count, 0)::BIGINT AS retry_count
+                 FROM auto_queue_entries e
+                 WHERE e.run_id = $1
+                   AND COALESCE(e.thread_group, 0) = $2
+                   AND e.status = 'pending'
+                 ORDER BY e.priority_rank ASC
+                 LIMIT 1",
+            )
+            .bind(run_id)
+            .bind(thread_group)
+            .fetch_optional(pool)
+            .await?
+        }
+    };
 
-    Ok(None)
+    if let Some(row) = row_opt {
+        Ok(Some((
+            row.try_get("id")?,
+            row.try_get("kanban_card_id")?,
+            row.try_get("agent_id")?,
+            row.try_get("batch_phase")?,
+            row.try_get("retry_count")?,
+        )))
+    } else {
+        Ok(None)
+    }
 }
 
 #[allow(dead_code)]
