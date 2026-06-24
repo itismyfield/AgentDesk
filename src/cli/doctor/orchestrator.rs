@@ -569,7 +569,7 @@ fn check_qwen_settings_files(configured: bool) -> Check {
         );
     }
 
-    let guidance = "Qwen은 settings 없이도 동작할 수 있지만, 모델 picker와 운영 surface를 안정적으로 쓰려면 ~/.qwen/settings.json 또는 <workspace>/.qwen/settings.json 구성을 권장합니다.";
+    let guidance = "Qwen can operate without settings, but for reliable model picker and operational surface usage, configuring ~/.qwen/settings.json or <workspace>/.qwen/settings.json is recommended.";
     if configured {
         Check::warn(
             "provider_qwen_settings",
@@ -643,7 +643,7 @@ fn check_qwen_auth_hints(configured: bool) -> Check {
         ]);
     }
 
-    let guidance = "API key 경로는 project .qwen/.env 우선, 그다음 .env를 확인하세요. Qwen CLI는 env-file을 merge하지 않습니다. 사용량/제한은 숫자를 doctor에 고정하지 말고 DashScope 웹 콘솔 또는 공식 문서를 확인하세요.";
+    let guidance = "Check the API key path in the project .qwen/.env first, then .env. The Qwen CLI does not merge env-files. Check DashScope web console or official documentation for usage/limits instead of hardcoding numbers in doctor.";
     if configured {
         Check::warn(
             "provider_qwen_auth",
@@ -966,7 +966,7 @@ fn check_opencode_mcp_config(configured: bool) -> Check {
             CheckGroup::ProviderRuntime,
             "OpenCode MCP config",
             "memento MCP not visible for OpenCode",
-            "runtime mcp_servers 또는 ~/.config/opencode/opencode.json top-level mcp에 memento 서버를 설정하세요.",
+            "configure the memento server in runtime mcp_servers or the top-level mcp in ~/.config/opencode/opencode.json.",
         )
         .with_expected_actual("memento MCP configured", "memento MCP missing")
         .with_next_steps(vec![
@@ -2964,7 +2964,7 @@ fn check_server_running(snapshot: &HealthSnapshot) -> Check {
                 (
                     "unauthorized",
                     Severity::Error,
-                    "auth token 또는 /api/health/detail 권한을 확인하세요.",
+                    "check the auth token or /api/health/detail permissions.",
                 )
             } else if error.contains("--allow-remote") {
                 (
@@ -3015,7 +3015,7 @@ fn check_runtime_root() -> Check {
             CheckGroup::Core,
             "Runtime Root",
             format!("{} — missing", path.display()),
-            "agentdesk doctor --fix 로 기본 runtime 디렉터리를 생성할 수 있습니다.",
+            "you can create the default runtime directory with agentdesk doctor --fix.",
         )
         .with_path(path.display().to_string())
         .with_expected_actual("runtime root exists", "runtime root missing")
@@ -3025,7 +3025,7 @@ fn check_runtime_root() -> Check {
             CheckGroup::Core,
             "Runtime Root",
             "unable to determine runtime root",
-            "AGENTDESK_ROOT_DIR 또는 기본 ~/.adk/release 경로를 확인하세요.",
+            "check AGENTDESK_ROOT_DIR or the default ~/.adk/release path.",
         )
         .with_expected_actual(
             "runtime root path resolvable",
@@ -3641,7 +3641,7 @@ fn check_service_manager() -> Check {
             CheckGroup::Core,
             "Service Manager",
             "systemd --user — agentdesk-dcserver enabled but inactive",
-            "`systemctl --user status agentdesk-dcserver` 로 상태를 확인하거나 `agentdesk doctor --fix`로 restart를 시도하세요.",
+            "check the status with `systemctl --user status agentdesk-dcserver` or try restarting with `agentdesk doctor --fix`.",
         )
         .with_expected_actual("systemd user service active", "systemd user service enabled but inactive")
         .with_next_steps(vec![
@@ -3684,7 +3684,7 @@ fn check_service_manager() -> Check {
             CheckGroup::Core,
             "Service Manager",
             "Windows service — AgentDeskDcserver installed but not running",
-            "`sc query AgentDeskDcserver` 로 상태를 확인하거나 `agentdesk doctor --fix`로 restart를 시도하세요.",
+            "check the status with `sc query AgentDeskDcserver` or try restarting with `agentdesk doctor --fix`.",
         )
         .with_expected_actual("Windows service running", "Windows service installed but not running")
         .with_next_steps(vec![
@@ -3697,7 +3697,7 @@ fn check_service_manager() -> Check {
             CheckGroup::Core,
             "Service Manager",
             "Windows service — AgentDeskDcserver not installed",
-            "Windows service 또는 수동 실행 방식 중 어떤 배포인지 확인하세요.",
+            "check whether the deployment is a Windows service or a manual execution.",
         )
         .with_expected_actual("Windows service installed", "Windows service not installed")
         .with_next_steps(vec!["sc query AgentDeskDcserver".to_string()])
@@ -3871,7 +3871,7 @@ fn check_postgres_connection(cfg: &config::Config) -> Check {
             CheckGroup::Core,
             "PostgreSQL",
             format!("{summary} — failed"),
-            "DATABASE_URL 또는 database 설정값(host/port/dbname/user/password)을 확인하세요.",
+            "check the DATABASE_URL or database configuration values (host/port/dbname/user/password).",
         )
         .with_expected_actual("postgres connection succeeds", error)
         .with_next_steps(vec![
@@ -4086,7 +4086,7 @@ fn check_disk_usage() -> Check {
             CheckGroup::Core,
             "Disk Usage",
             format!("{} — runtime root missing", path.display()),
-            "agentdesk doctor --fix 로 기본 runtime 디렉터리를 생성할 수 있습니다.",
+            "you can create the default runtime directory with agentdesk doctor --fix.",
         )
         .with_path(path.display().to_string())
         .with_expected_actual(
@@ -4208,7 +4208,7 @@ fn check_disk_usage() -> Check {
             CheckGroup::Core,
             "Disk Usage",
             "cannot determine runtime root",
-            "AGENTDESK_ROOT_DIR 또는 기본 ~/.adk/release 경로를 확인하세요.",
+            "check AGENTDESK_ROOT_DIR or the default ~/.adk/release path.",
         )
         .with_expected_actual(
             "runtime root path resolvable",
