@@ -291,19 +291,18 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
             channel_id.get()
         )));
     }
-    // #family-profile-probe: a fresh-strategy DM routine turn must start from a
-    // fresh provider context. Computed once and used in TWO places that together
-    // guarantee no `--resume`: (1) the in-memory per-channel session clear below,
-    // and (2) skipping the DB / live-TUI provider-session restore further down
-    // (mirroring the `/goal fresh` path). Clearing only the in-memory id is
-    // insufficient — turn end persists provider ids to the DB, so the next run
-    // would otherwise restore and resume the previous session (codex review P1).
+    // #family-profile-probe: is this a fresh-strategy DM routine turn that must
+    // start from a fresh provider context? Computed once at the turn-start
+    // boundary; the full fresh-session handling (thorough clear + restore skip +
+    // launch fresh flag) is routed through the shared `/goal fresh` machinery
+    // below. memento (caseId) is the only cross-run continuity.
     let dm_fresh = dm_fresh_routine_turn(metadata.as_ref());
     let (mut session_id, mut memento_context_loaded, mut current_path) = {
         let mut data = shared.core.lock().await;
-        // Clear the resumed per-channel provider session BEFORE loading runtime
-        // state, at the turn-start boundary (never mid-turn). memento (caseId)
-        // remains the only cross-run continuity.
+        // Defense: pre-clear the in-memory per-channel session before load so no
+        // stale resume id flows through the load bookkeeping. The authoritative
+        // clear (in-memory + DB + stale id) is `clear_codex_goal_start_provider_
+        // session` further down, gated on the same `dm_fresh`.
         if dm_fresh && let Some(session) = data.sessions.get_mut(&channel_id) {
             session.clear_provider_session();
         }
@@ -618,7 +617,18 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
             status: HeadlessTurnStartStatus::Consumed,
         });
     }
-    let force_fresh_provider_session = matches!(headless_goal_kind, GoalCommandKind::FreshStart);
+    let goal_fresh = matches!(headless_goal_kind, GoalCommandKind::FreshStart);
+    // #family-profile-probe (codex review P1/R2): a fresh DM routine turn must
+    // route through the SAME proven fresh-session machinery as `/goal fresh`, so
+    // it (a) thoroughly clears in-memory + DB + stale provider session via
+    // `clear_codex_goal_start_provider_session`, (b) skips the DB/live-TUI
+    // restore below, AND (c) passes the fresh flag to the provider launch so the
+    // live tmux pane is not reused (Claude TUI would otherwise recover a runtime
+    // binding and flip back to resume; the Codex wrapper reuses on
+    // `!force_fresh_provider_session`). Clearing the in-memory id alone is
+    // insufficient on all three counts. Only the `/goal fresh` PROMPT REWRITE is
+    // gated separately (goal-only) — the probe prompt must be sent verbatim.
+    let force_fresh_provider_session = goal_fresh || dm_fresh;
     let fresh_codex_goal_session_requested = force_fresh_provider_session;
     if force_fresh_provider_session {
         clear_codex_goal_start_provider_session(
@@ -631,7 +641,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         )
         .await;
     }
-    let effective_prompt: std::borrow::Cow<str> = if force_fresh_provider_session {
+    let effective_prompt: std::borrow::Cow<str> = if goal_fresh {
         std::borrow::Cow::Owned(rewrite_fresh_goal_prompt(prompt))
     } else {
         std::borrow::Cow::Borrowed(prompt)
@@ -639,19 +649,13 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     if session_id.is_none() {
         if fresh_codex_goal_session_requested {
             let ts = chrono::Local::now().format("%H:%M:%S");
+            let reason = if goal_fresh {
+                "/goal fresh session request"
+            } else {
+                "fresh DM routine turn"
+            };
             tracing::info!(
-                "  [{ts}] ↻ Skipping DB provider session restore for headless channel {} due to /goal fresh session request",
-                channel_id.get()
-            );
-        } else if dm_fresh {
-            // #family-profile-probe (codex review P1): a fresh DM routine turn
-            // must NOT resume the prior session, so skip the DB / live-TUI
-            // restore entirely. Without this, the in-memory clear above is undone
-            // here by the persisted provider id and the turn resumes after all.
-            session_strategy_reason = "dm_fresh_routine_no_restore";
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] ↻ Skipping DB/live provider session restore for fresh DM routine turn on channel {}",
+                "  [{ts}] ↻ Skipping DB/live provider session restore for headless channel {} due to {reason}",
                 channel_id.get()
             );
         } else if session_was_cleared {
