@@ -84,7 +84,7 @@
 | `db` | `src/db/mod.rs` | 138 | 138 | 0 |  |
 | `db::agents` | `src/db/agents.rs` | 392 | 253 | 139 |  |
 | `db::auto_queue` | `src/db/auto_queue/mod.rs` | 21 | 21 | 0 |  |
-| `db::auto_queue::claim` | `src/db/auto_queue/claim.rs` | 699 | 699 | 0 |  |
+| `db::auto_queue::claim` | `src/db/auto_queue/claim.rs` | 734 | 734 | 0 |  |
 | `db::auto_queue::consultation` | `src/db/auto_queue/consultation.rs` | 112 | 112 | 0 |  |
 | `db::auto_queue::entries` | `src/db/auto_queue/entries.rs` | 1508 | 1508 | 0 | giant-file |
 | `db::auto_queue::phase_gates` | `src/db/auto_queue/phase_gates.rs` | 3116 | 1639 | 1477 | giant-file |
