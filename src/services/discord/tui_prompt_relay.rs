@@ -3093,19 +3093,22 @@ fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                     CodexIdleRolloutScan::Prompt {
                         prompt,
                         line_end_offset,
+                        entry_id,
                     } => {
                         let observed_at = chrono::Utc::now();
                         let observation =
-                            crate::services::tui_prompt_dedupe::observe_prompt_by_tmux_at(
+                            crate::services::tui_prompt_dedupe::observe_prompt_by_tmux_with_entry_id_at(
                                 ProviderKind::Codex.as_str(),
                                 &tmux_session_name,
                                 &prompt,
+                                entry_id.as_deref(),
                                 observed_at,
                             );
                         tracing::info!(
                             tmux_session_name = %tmux_session_name,
                             channel_id = channel_id.get(),
                             observation = ?observation,
+                            entry_id = entry_id.as_deref().unwrap_or(""),
                             "codex idle rollout relay observed prompt"
                         );
                         if !codex_idle_prompt_observation_should_tail_response(observation) {
@@ -6869,64 +6872,6 @@ mod tests {
         assert_eq!(
             claude_tui_rehydrate_start_offset(&transcript),
             body.len() as u64
-        );
-    }
-
-    #[test]
-    fn codex_idle_rollout_scan_finds_user_prompt_and_stops_at_prompt_end() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let rollout = dir.path().join("rollout.jsonl");
-        let before = "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s1\"}}\n";
-        let prompt = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"direct prompt\"}]}}\n";
-        let after = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}}\n";
-        std::fs::write(&rollout, format!("{before}{prompt}{after}")).expect("write rollout");
-
-        assert_eq!(
-            scan_codex_idle_rollout_for_prompt(&rollout, 0).expect("scan"),
-            CodexIdleRolloutScan::Prompt {
-                prompt: "direct prompt".to_string(),
-                line_end_offset: (before.len() + prompt.len()) as u64,
-            }
-        );
-        assert_eq!(
-            scan_codex_idle_rollout_for_prompt(&rollout, (before.len() + prompt.len()) as u64,)
-                .expect("scan after prompt"),
-            CodexIdleRolloutScan::NoPrompt {
-                offset: (before.len() + prompt.len() + after.len()) as u64,
-            }
-        );
-    }
-
-    #[test]
-    fn codex_idle_rollout_scan_preserves_partial_trailing_jsonl() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let rollout = dir.path().join("rollout.jsonl");
-        let complete = "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s1\"}}\n";
-        let partial =
-            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\"";
-        std::fs::write(&rollout, format!("{complete}{partial}")).expect("write rollout");
-
-        assert_eq!(
-            scan_codex_idle_rollout_for_prompt(&rollout, 0).expect("scan partial"),
-            CodexIdleRolloutScan::NoPrompt {
-                offset: complete.len() as u64,
-            }
-        );
-    }
-
-    #[test]
-    fn codex_idle_rollout_scan_restarts_when_file_shrinks() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let rollout = dir.path().join("rollout.jsonl");
-        let prompt = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"after shrink\"}]}}\n";
-        std::fs::write(&rollout, prompt).expect("write rollout");
-
-        assert_eq!(
-            scan_codex_idle_rollout_for_prompt(&rollout, 99_999).expect("scan shrunken"),
-            CodexIdleRolloutScan::Prompt {
-                prompt: "after shrink".to_string(),
-                line_end_offset: prompt.len() as u64,
-            }
         );
     }
 

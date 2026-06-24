@@ -1394,7 +1394,8 @@ fn observe_rollout_user_prompt(json: &Value, state: &mut RolloutParseState) {
     let Some(tmux_session_name) = state.tmux_session_name.clone() else {
         return;
     };
-    let Some(prompt) = crate::services::tui_prompt_dedupe::extract_codex_rollout_user_prompt(json)
+    let Some((prompt, entry_id)) =
+        crate::services::tui_prompt_dedupe::extract_codex_rollout_user_prompt_with_entry_id(json)
     else {
         return;
     };
@@ -1417,14 +1418,17 @@ fn observe_rollout_user_prompt(json: &Value, state: &mut RolloutParseState) {
         );
         return;
     }
-    let observation = crate::services::tui_prompt_dedupe::observe_prompt_by_tmux(
+    let observation = crate::services::tui_prompt_dedupe::observe_prompt_by_tmux_with_entry_id_at(
         "codex",
         &tmux_session_name,
         &prompt,
+        entry_id.as_deref(),
+        chrono::Utc::now(),
     );
     tracing::debug!(
         tmux_session_name,
         observation = ?observation,
+        entry_id = entry_id.as_deref().unwrap_or(""),
         "observed Codex rollout user prompt"
     );
 }

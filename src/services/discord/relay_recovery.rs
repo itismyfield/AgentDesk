@@ -87,6 +87,7 @@ pub(in crate::services::discord) struct RelayRecoveryEvidence {
     pub desynced: bool,
     pub last_capture_offset: Option<u64>,
     pub last_relay_offset: u64,
+    pub last_relay_ts_ms: Option<i64>,
     pub unread_bytes: Option<u64>,
     pub last_outbound_activity_ms: Option<i64>,
 }
@@ -268,6 +269,7 @@ fn evidence_from_snapshot(snapshot: &RelayHealthSnapshot) -> RelayRecoveryEviden
         desynced: snapshot.desynced,
         last_capture_offset: snapshot.last_capture_offset,
         last_relay_offset: snapshot.last_relay_offset,
+        last_relay_ts_ms: snapshot.last_relay_ts_ms,
         unread_bytes: snapshot.unread_bytes,
         last_outbound_activity_ms: snapshot.last_outbound_activity_ms,
     }
@@ -314,7 +316,8 @@ fn eligible_reattach_watcher(snapshot: &RelayHealthSnapshot) -> bool {
         && snapshot.mailbox_has_cancel_token
         && (!snapshot.watcher_attached
             || snapshot.watcher_attached_stale
-            || !snapshot.watcher_owns_live_relay)
+            || !snapshot.watcher_owns_live_relay
+            || snapshot.relay_frontier_never_advanced_with_unread_tail())
         && snapshot.desynced
         && is_agentdesk_tmux_session(snapshot.tmux_session.as_deref())
 }
@@ -613,6 +616,29 @@ fn reattach_apply_status(watcher_spawned: bool) -> &'static str {
     }
 }
 
+fn relay_frontier_dead_reattach_owner(decision: &RelayRecoveryDecision) -> Option<ChannelId> {
+    let evidence = &decision.evidence;
+    if decision.relay_stall_state != RelayStallState::TmuxAliveRelayDead
+        || !evidence.desynced
+        || evidence.tmux_alive != Some(true)
+        || !evidence.watcher_attached
+        || !evidence.watcher_owns_live_relay
+        || evidence.last_relay_ts_ms.is_some()
+        || evidence.last_relay_offset != 0
+        || !evidence
+            .last_capture_offset
+            .is_some_and(|capture| capture > evidence.last_relay_offset)
+        || !evidence.unread_bytes.is_some_and(|bytes| bytes > 0)
+    {
+        return None;
+    }
+    Some(ChannelId::new(
+        evidence
+            .watcher_owner_channel_id
+            .unwrap_or(decision.channel_id),
+    ))
+}
+
 fn forget_completion_footer_for_relay_recovery(channel_id: ChannelId) {
     super::single_message_panel::completion_footer_forget_registered_target(channel_id);
 }
@@ -800,6 +826,21 @@ async fn apply_relay_recovery_decision(
                     reattach_initial_offset: None,
                     reattach_error: None,
                 };
+            }
+            if let Some(owner_channel_id) = relay_frontier_dead_reattach_owner(decision)
+                && let Some((_, watcher)) = shared.tmux_watchers.remove(&owner_channel_id)
+            {
+                watcher.cancel.store(true, Ordering::Relaxed);
+                tracing::warn!(
+                    target: "agentdesk::discord::relay_recovery",
+                    provider = provider.as_str(),
+                    channel_id = decision.channel_id,
+                    watcher_owner_channel_id = owner_channel_id.get(),
+                    last_relay_offset = decision.evidence.last_relay_offset,
+                    last_capture_offset = ?decision.evidence.last_capture_offset,
+                    unread_bytes = ?decision.evidence.unread_bytes,
+                    "relay recovery cancelled live-looking watcher with dead relay frontier before reattach"
+                );
             }
             match registry
                 .rebind_inflight(
@@ -1111,6 +1152,11 @@ mod tests {
         assert_ne!(decision.action, RelayRecoveryActionKind::ObserveOnly);
         assert_eq!(decision.action, RelayRecoveryActionKind::ReattachWatcher);
         assert!(
+            decision.auto_heal.eligible,
+            "zero-frontier unread relay-dead turns must be eligible for bounded reattach"
+        );
+        assert_eq!(decision.auto_heal.skipped_reason, None);
+        assert!(
             decision.auto_heal.bounded,
             "relay-dead foreground turns must surface bounded recovery metadata"
         );
@@ -1129,6 +1175,49 @@ mod tests {
         );
         assert!(decision.evidence.watcher_owns_live_relay);
         assert_eq!(decision.evidence.active_turn, RelayActiveTurn::Foreground);
+        assert_eq!(
+            relay_frontier_dead_reattach_owner(&decision),
+            Some(ChannelId::new(1509350393350459434))
+        );
+    }
+
+    #[test]
+    fn watcher_owned_live_relay_with_relay_progress_is_not_frontier_dead_takeover() {
+        let snapshot = RelayHealthSnapshot {
+            provider: "claude".to_string(),
+            channel_id: 1509350393350459434,
+            active_turn: RelayActiveTurn::Foreground,
+            tmux_session: Some("AgentDesk-claude-adk-claude-pipe-e2e".to_string()),
+            tmux_alive: Some(true),
+            watcher_attached: true,
+            watcher_owner_channel_id: Some(1509350393350459434),
+            watcher_owns_live_relay: true,
+            bridge_inflight_present: true,
+            mailbox_has_cancel_token: true,
+            mailbox_active_user_msg_id: Some(9001),
+            bridge_current_msg_id: Some(9002),
+            last_relay_ts_ms: Some(1_777_001_234_000),
+            last_capture_offset: Some(7968),
+            last_relay_offset: 4096,
+            unread_bytes: Some(3872),
+            desynced: true,
+            ..snapshot()
+        };
+        let relay_stall_state = RelayStallClassifier::classify(&snapshot);
+        let decision = plan_relay_recovery(&snapshot, relay_stall_state, 1_000);
+
+        assert_eq!(relay_stall_state, RelayStallState::ActiveForegroundStream);
+        assert_eq!(decision.action, RelayRecoveryActionKind::ObserveOnly);
+        assert_eq!(relay_frontier_dead_reattach_owner(&decision), None);
+
+        let forced_dead_decision =
+            plan_relay_recovery(&snapshot, RelayStallState::TmuxAliveRelayDead, 1_000);
+        assert_eq!(
+            relay_frontier_dead_reattach_owner(&forced_dead_decision),
+            None,
+            "a live-owned watcher that already advanced its relay frontier must never be \
+             cancelled by the dead-frontier reattach path"
+        );
     }
 
     /// #3277 (Defect D) + deploy-preserved ownerless restore eligibility table:

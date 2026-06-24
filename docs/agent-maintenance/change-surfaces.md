@@ -886,9 +886,13 @@
     normal long SILENT tool run (e.g. a big build) is never mistaken for an idle
     hang, with the 4h hard ceiling as the real backstop, and noted the limitation
     in the idle-kill error message + a delayed-event test).
-  - `src/services/tui_prompt_dedupe.rs` (1613 lines; shared TUI prompt
+  - `src/services/tui_prompt_dedupe.rs` (1633 lines; shared TUI prompt
     fingerprinting/dedupe state for hook and rollout relay paths, bugfix only
-    outside an extraction plan; +176 from #3540: stable JSONL entry-identity
+    outside an extraction plan; +20 from #3676: Codex rollout user prompts now
+    prefer the stable message entry id when present so Codex TUI direct prompt
+    relay can use the same entry-identity replay suppression as Claude while
+    distinct Codex message ids still publish distinct direct prompts; +176
+    from #3540: stable JSONL entry-identity
     (`uuid`) dedup — `extract_claude_transcript_user_prompt_with_entry_id`
     returns `(prompt, Option<uuid>)`, a `relayed_entry_ids_by_tmux` ledger
     (PROMPT_ANCHOR_TTL-purged, ring-capped) + `PromptObservation::SuppressedReplayedEntry`,
@@ -993,7 +997,11 @@
     children (`send_target`, `send_gate`, `send_api`, `manual_delivery`) to
     `outbound/` while preserving the `health::` re-export API; #1879
     snapshot/mailbox extraction, and #3082 answer-flush-barrier field).
-  - `src/services/discord/health/recovery.rs` (2736 lines; +3 from #3671 passing the turn's RAW restart-invariant age (`judgment_basis.turn_age_secs`, not the boot-floored anchor age) into `evaluate_stall_watchdog_liveness` so the stall-watchdog force-clean defers indefinitely under positive liveness up to an age-based absolute backstop (4h, aligned to the Codex per-turn hard ceiling) that repeated restarts cannot reset, instead of a brittle 20-tick count — fixes the ~40-minute restart-survived deploy turn that was force-killed while demonstrably live; +11 from #3668 F2 watchdog loop-top tail-answer guard — one early-`continue` that skips BOTH destructive branches (idle-clear + desynced force-clean) for the channel this tick when JSONL still holds an unrelayed final answer after last_offset; #3656 stall-watchdog force-clean ages from current turn `started_at` not `updated_at` (turn-scoped, net 0 after comment condense); +85 from #3629 NO_REPLY/empty orphan inflight identity-guarded cleanup in the completed-stale leak detection path; +3 from #3479 item-3 `shared.dispatch.<field>` nesting; health recovery
+  - `src/services/discord/health/recovery.rs` (2730 lines; #3676 moved
+    `tmux_alive_relay_dead` watchdog reattach logic into sibling
+    `health/relay_dead_reattach.rs`, leaving recovery.rs with only the
+    pre-cleanup hook so final transcript output can be delivered without
+    cancelling a healthy mid-first-output watcher; +3 from #3671 passing the turn's RAW restart-invariant age (`judgment_basis.turn_age_secs`, not the boot-floored anchor age) into `evaluate_stall_watchdog_liveness` so the stall-watchdog force-clean defers indefinitely under positive liveness up to an age-based absolute backstop (4h, aligned to the Codex per-turn hard ceiling) that repeated restarts cannot reset, instead of a brittle 20-tick count — fixes the ~40-minute restart-survived deploy turn that was force-killed while demonstrably live; +11 from #3668 F2 watchdog loop-top tail-answer guard — one early-`continue` that skips BOTH destructive branches (idle-clear + desynced force-clean) for the channel this tick when JSONL still holds an unrelayed final answer after last_offset; #3656 stall-watchdog force-clean ages from current turn `started_at` not `updated_at` (turn-scoped, net 0 after comment condense); +85 from #3629 NO_REPLY/empty orphan inflight identity-guarded cleanup in the completed-stale leak detection path; +3 from #3479 item-3 `shared.dispatch.<field>` nesting; health recovery
     extraction surface, split further before adding non-bugfix behavior; +70
     from #3126 stall-watchdog completed-idle false-positive guard tests; +88
     from #3169 stall-watchdog jsonl-mtime liveness guard + tests, closing the
@@ -1482,12 +1490,14 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   `src/services/claude_tui/hosting/` child modules, ratchets claude.rs at 2950
   production LoC, and leaves the #3262 turn-lock machinery in the claude.rs
   root.)
-- `src/services/codex_tui/rollout_tail.rs` (1768) — Codex TUI rollout tail
+- `src/services/codex_tui/rollout_tail.rs` (1772) — Codex TUI rollout tail
   parsing and resume identity surface; split before adding non-bugfix behavior
   beyond the #2169 session identity fix and the #3343 message-boundary
   separator unified across the streamed `StreamMessage::Text` surface and the
   `final_text` assembly (one shared `push_message_text` boundary writer; the
-  newline witness is the single source of truth so the two surfaces mirror).
+  newline witness is the single source of truth so the two surfaces mirror);
+  +4 from #3676 threading Codex rollout user-message entry ids into TUI prompt
+  dedupe so restart/offset rewind cannot mint duplicate direct-input anchors.
 - `src/services/codex_tui/input.rs` (1366) — Codex TUI input readiness
   detector and prompt delivery surface (#2399 hardened the post-turn
   handoff deadline). Treat as giant-file territory; split before adding
