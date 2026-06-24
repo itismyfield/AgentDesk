@@ -25,12 +25,40 @@ pub(super) const STALL_WATCHDOG_POSITIVE_LIVENESS_SECS: u64 = 120;
 /// `pane_offset_advanced_recently,transcript_mtime_recent` — the confirmed
 /// 2026-06-18 12:07 false-positive (a "Response sent" landed 5s after the
 /// force-clean). The window is only ~90s of grace over the threshold, far short of
-/// a long but live turn. 20 deferrals = `20 * INTERVAL_SECS` (~600s) of extra
-/// grace, so the watchdog still only kills a turn that has been quiet (no
-/// liveness signal) — and a true live-spinner hang (pane bytes flow but no answer
-/// ever lands) is still bounded: once the cap is reached the force-clean proceeds,
-/// so the detection ceiling stays finite (R1).
+/// a long but live turn.
+///
+/// #3671: a ~40-minute single turn (a release self-deploy that recompiled the whole
+/// tree) survived a mid-turn SIGTERM restart, was preserved by drain_restart, and
+/// kept showing positive liveness (pane offset advancing, fresh transcript mtime)
+/// — yet the 20-tick cap (`20 * INTERVAL_SECS` ~= 600s of grace) was still reached
+/// and force-cleaned a demonstrably *live* turn. A tick-count ceiling is a brittle
+/// proxy for wall-clock (ticks drift when the interval changes or ticks are
+/// skipped), so the cleanup gate is no longer the tick count. While positive
+/// liveness keeps being observed the force-clean is deferred indefinitely; the
+/// finite detection ceiling required by #3582 R1 is now an *age*-based absolute
+/// backstop (`STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS`) measured against the turn's
+/// real invariant — its age. `STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS` is retained as
+/// a telemetry field only (`deferral_count` / `max_deferrals` log fields); it no
+/// longer gates cleanup.
 pub(super) const STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS: u8 = 20;
+/// Absolute, age-based detection ceiling for the stall watchdog. While positive
+/// liveness is observed a force-clean is deferred indefinitely *up to* this bound;
+/// once the in-flight turn's age (anchored at `started_at.max(boot)`, the same
+/// anchor `StallWatchdogJudgmentBasis::from_snapshot` uses) reaches it, a
+/// genuine forever-spinner (pane bytes flow but no answer ever lands) is
+/// force-cleaned. This keeps the detection ceiling finite as #3582 R1 requires.
+///
+/// Aligned to the 4h Codex per-turn hard ceiling
+/// (`codex_tmux_wrapper::DEFAULT_CODEX_TURN_HARD_CEILING_SECS`) and well above any
+/// legitimate turn measured from the post-restart anchor. The anchor resets to
+/// `boot` on restart (#3557), so a turn that survives a restart is re-granted a
+/// full 4h window from the restart instant — the ~40-minute #3671 deploy turn
+/// sits far below this bound and is never killed while live. This watchdog-level
+/// backstop is independent of the process-level hard ceiling (Codex 4h /
+/// other providers 6h via `AGENTDESK_TURN_HARD_CEILING_SECS`): defense in depth,
+/// so the watchdog alone still guarantees a finite ceiling even if the process
+/// ceiling is overridden away.
+pub(super) const STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS: u64 = 4 * 3600;
 pub(super) const STALL_LIVENESS_STATE_TTL_SECS: u64 = 1800;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -64,7 +92,7 @@ static DEFERRAL_STATE: LazyLock<dashmap::DashMap<StallLivenessKey, DeferralState
 pub(super) enum StallWatchdogLivenessAction {
     ProceedNoEvidence,
     Defer { deferral_count: u8 },
-    ProceedAfterDeferralLimit { previous_deferrals: u8 },
+    ProceedAfterAbsoluteBackstop { age_secs: u64, deferral_count: u8 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,17 +110,17 @@ impl StallWatchdogLivenessDecision {
     fn deferral_count(&self) -> Option<u8> {
         match self.action {
             StallWatchdogLivenessAction::Defer { deferral_count } => Some(deferral_count),
-            StallWatchdogLivenessAction::ProceedAfterDeferralLimit { previous_deferrals } => {
-                Some(previous_deferrals)
-            }
+            StallWatchdogLivenessAction::ProceedAfterAbsoluteBackstop {
+                deferral_count, ..
+            } => Some(deferral_count),
             StallWatchdogLivenessAction::ProceedNoEvidence => None,
         }
     }
 
-    fn limit_reached(&self) -> bool {
+    fn absolute_backstop_reached(&self) -> bool {
         matches!(
             self.action,
-            StallWatchdogLivenessAction::ProceedAfterDeferralLimit { .. }
+            StallWatchdogLivenessAction::ProceedAfterAbsoluteBackstop { .. }
         )
     }
 }
@@ -184,10 +212,14 @@ pub(super) fn evaluate_stall_watchdog_liveness(
     now_unix_secs: i64,
     freshness_secs: u64,
     max_deferrals: u8,
+    inflight_age_secs: Option<u64>,
 ) -> StallWatchdogLivenessDecision {
     let key = StallLivenessKey::from_snapshot(provider, channel_id, snapshot);
     let evidence = StallWatchdogLivenessEvidence::collect(&key, snapshot, inflight, now_unix_secs);
     if !evidence.has_positive_liveness(freshness_secs) {
+        // A genuinely dead relay (every signal stale ⇒ reason_codes == none) is
+        // cleaned on the very first tick, untouched by the deferral state or the
+        // absolute backstop. This branch is invariant (#3582 / #3671).
         DEFERRAL_STATE.remove(&key);
         return StallWatchdogLivenessDecision {
             action: StallWatchdogLivenessAction::ProceedNoEvidence,
@@ -200,11 +232,22 @@ pub(super) fn evaluate_stall_watchdog_liveness(
         .get(&key)
         .map(|state| state.count)
         .unwrap_or(0);
-    if prior_deferrals >= max_deferrals {
+    // #3671: positive liveness defers indefinitely up to the age-based absolute
+    // backstop. The backstop is the only cleanup gate now — the tick count is
+    // telemetry. `inflight_age_secs` is the turn's age at the same
+    // started_at.max(boot) anchor `StallWatchdogJudgmentBasis::from_snapshot`
+    // uses, so a restart-survived turn (anchor resets to boot) gets a fresh full
+    // window and a ~40-minute deploy turn stays far below the ceiling. When the
+    // age is unknown (no started_at) the backstop cannot fire; that only matters
+    // under positive liveness, which is abnormal without a started_at and is
+    // still bounded by the process-level hard ceiling killing the pane (next tick
+    // takes the ProceedNoEvidence branch above).
+    if inflight_age_secs.is_some_and(|age| age >= STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS) {
         DEFERRAL_STATE.remove(&key);
         return StallWatchdogLivenessDecision {
-            action: StallWatchdogLivenessAction::ProceedAfterDeferralLimit {
-                previous_deferrals: prior_deferrals,
+            action: StallWatchdogLivenessAction::ProceedAfterAbsoluteBackstop {
+                age_secs: inflight_age_secs.unwrap_or(0),
+                deferral_count: prior_deferrals,
             },
             evidence,
             max_deferrals,
@@ -346,7 +389,8 @@ pub(super) fn log_stall_watchdog_force_cleanup_judgment(
             StallWatchdogLivenessAction::ProceedNoEvidence
         )
     });
-    let limit_reached = decision.is_some_and(StallWatchdogLivenessDecision::limit_reached);
+    let absolute_backstop_reached =
+        decision.is_some_and(StallWatchdogLivenessDecision::absolute_backstop_reached);
     let liveness_reasons = decision
         .map(|decision| decision.evidence.reason_codes_csv(freshness_secs))
         .unwrap_or_else(|| "not_evaluated".to_string());
@@ -381,7 +425,7 @@ pub(super) fn log_stall_watchdog_force_cleanup_judgment(
         liveness_freshness_secs = freshness_secs,
         liveness_reasons = liveness_reasons,
         liveness_no_evidence = no_evidence,
-        liveness_deferral_limit_reached = limit_reached,
+        liveness_absolute_backstop_reached = absolute_backstop_reached,
         deferral_count = ?decision.and_then(StallWatchdogLivenessDecision::deferral_count),
         max_deferrals = decision.map(|decision| decision.max_deferrals).unwrap_or(0),
         "  [{ts}] ⚡ STALL-WATCHDOG: forced cleanup for desynced channel {}",
@@ -776,6 +820,7 @@ mod tests {
             now,
             STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
             STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+            Some(0),
         );
         assert!(decision.should_defer());
         assert_eq!(
@@ -822,6 +867,7 @@ mod tests {
             1_800_000_000,
             STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
             STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+            Some(0),
         );
         assert_eq!(
             decision.action,
@@ -852,8 +898,15 @@ mod tests {
         );
     }
 
+    /// #3671: positive liveness defers indefinitely up to the *age*-based
+    /// absolute backstop — it is no longer the tick count that triggers cleanup.
+    /// We first prove that far more than the old 20-tick cap of deferrals all
+    /// stay `Defer` while the turn's age is below the backstop, then that a turn
+    /// whose age has crossed `STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS` (a genuine
+    /// forever-spinner, #3582 R1 finite ceiling) force-cleans and logs the
+    /// reason. [acceptance 3]
     #[test]
-    fn liveness_deferral_cap_allows_cleanup_after_max_passes_and_logs_limit() {
+    fn liveness_force_clean_after_absolute_backstop_and_logs_reason() {
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(3363);
         let tmux_session = "AgentDesk-codex-liveness-cap";
@@ -867,7 +920,9 @@ mod tests {
         let snap = snapshot(channel.get(), tmux_session, Some(20));
         let now = chrono::Utc::now().timestamp();
 
-        for expected_count in 1..=STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS {
+        // Age below the backstop: every tick well past the old cap stays a Defer.
+        let below_backstop = STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS - 1;
+        for expected_count in 1..=(STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS + 5) {
             let decision = evaluate_stall_watchdog_liveness(
                 &provider,
                 channel,
@@ -876,15 +931,19 @@ mod tests {
                 now,
                 STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
                 STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+                Some(below_backstop),
             );
             assert_eq!(
                 decision.action,
                 StallWatchdogLivenessAction::Defer {
                     deferral_count: expected_count
-                }
+                },
+                "pass {expected_count} below the absolute backstop must defer"
             );
         }
 
+        // Age at/over the backstop: the forever-spinner is force-cleaned.
+        let over_backstop = STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS + 3600;
         let decision = evaluate_stall_watchdog_liveness(
             &provider,
             channel,
@@ -893,11 +952,13 @@ mod tests {
             now,
             STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
             STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+            Some(over_backstop),
         );
         assert_eq!(
             decision.action,
-            StallWatchdogLivenessAction::ProceedAfterDeferralLimit {
-                previous_deferrals: STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS
+            StallWatchdogLivenessAction::ProceedAfterAbsoluteBackstop {
+                age_secs: over_backstop,
+                deferral_count: STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS + 5,
             }
         );
 
@@ -918,7 +979,7 @@ mod tests {
             "{logs}"
         );
         assert!(
-            logs.contains("liveness_deferral_limit_reached=true"),
+            logs.contains("liveness_absolute_backstop_reached=true"),
             "{logs}"
         );
     }
@@ -947,6 +1008,7 @@ mod tests {
                 now,
                 STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
                 STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+                Some(0),
             );
             assert_eq!(
                 decision.action,
@@ -968,6 +1030,7 @@ mod tests {
             now,
             STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
             STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+            Some(0),
         );
 
         assert_eq!(
@@ -979,19 +1042,17 @@ mod tests {
         clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
     }
 
-    /// #3582 regression: the 2026-06-18 12:07 false-positive. A live turn that
-    /// keeps emitting output (fresh transcript mtime every tick) was force-cleaned
-    /// the instant the OLD cap of 3 was hit, even though `reason_codes` still
-    /// listed positive liveness — a "Response sent" landed 5s later. With the cap
-    /// raised to 20 the same strong-liveness streak that previously died at pass 4
-    /// keeps deferring, so a live-but-quiet turn survives well past the old window.
+    /// #3582 + #3671 regression: the 2026-06-18 12:07 false-positive AND the
+    /// #3671 ~40-minute deploy turn. A live turn that keeps emitting output (fresh
+    /// transcript mtime every tick) was force-cleaned the instant a tick *count*
+    /// cap was hit (3 originally, then 20), even though `reason_codes` still listed
+    /// positive liveness. #3671 removes the tick-count cleanup gate entirely: while
+    /// the turn's age is below the absolute backstop, *every* tick — far past the
+    /// old cap — stays a `Defer`, so a live-but-quiet turn survives indefinitely.
+    /// [acceptance 1]
     #[test]
-    fn strong_liveness_past_old_cap_still_defers_under_new_cap() {
-        const OLD_CAP: u8 = 3;
-        assert!(
-            STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS > OLD_CAP,
-            "this regression only has teeth when the new cap exceeds the old one"
-        );
+    fn strong_liveness_defers_indefinitely_below_absolute_backstop() {
+        const OLD_CAP: u8 = 20;
 
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(3368);
@@ -1008,10 +1069,11 @@ mod tests {
         let snap = snapshot(channel.get(), tmux_session, Some(20));
         let now = chrono::Utc::now().timestamp();
 
-        // Every tick from 1..=OLD_CAP+1 must STILL defer — at the old cap the
-        // (OLD_CAP+1)th pass returned ProceedAfterDeferralLimit and killed the
-        // live turn. Under the new cap it stays a Defer.
-        for expected_count in 1..=(OLD_CAP + 1) {
+        // Every tick well beyond the old cap must STILL defer. Under the old
+        // tick-count cap the (OLD_CAP+1)th pass force-cleaned a live turn; under
+        // the age-based backstop (age held below the ceiling) it stays a Defer.
+        let below_backstop = STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS - 1;
+        for expected_count in 1..=(OLD_CAP * 3) {
             let decision = evaluate_stall_watchdog_liveness(
                 &provider,
                 channel,
@@ -1020,23 +1082,80 @@ mod tests {
                 now,
                 STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
                 STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+                Some(below_backstop),
             );
             assert_eq!(
                 decision.action,
                 StallWatchdogLivenessAction::Defer {
                     deferral_count: expected_count
                 },
-                "pass {expected_count} should still defer under the raised cap"
+                "pass {expected_count} must still defer below the absolute backstop"
             );
         }
 
         clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
     }
 
-    /// #3582 corollary: the cap raise must NOT weaken detection of a genuinely
-    /// dead relay. When no liveness signal is present (`reason_codes == none`),
-    /// the decision is `ProceedNoEvidence` on the very first tick regardless of
-    /// the cap — exactly the 11:52 / 12:38 immediate-clean cases.
+    /// #3671 deploy scenario, end-to-end: a ~40-minute turn that survived a
+    /// mid-turn restart. `started_at` is 40 minutes in the past, but the anchor
+    /// resets to `boot` (the restart instant) so its age is ~0; with positive
+    /// liveness it must keep deferring, never force-cleaned. [acceptance 1]
+    #[test]
+    fn deploy_restart_40min_turn_survives() {
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(3372);
+        let tmux_session = "AgentDesk-codex-liveness-deploy-restart";
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+        let file = tempfile::NamedTempFile::new().expect("temp transcript");
+        let inflight = inflight_with_output(
+            channel.get(),
+            tmux_session,
+            Some(file.path().display().to_string()),
+        );
+        let now = chrono::Utc::now().timestamp();
+        // started_at = 40 minutes ago, boot = now (the restart). The anchor is
+        // started_at.max(boot) = now, so the basis age is ~0.
+        let mut snap = snapshot(channel.get(), tmux_session, Some(20));
+        let started_at = chrono::Utc
+            .timestamp_opt(now - 2400, 0)
+            .single()
+            .expect("valid started_at")
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        snap.inflight_started_at = Some(started_at);
+        let basis = StallWatchdogJudgmentBasis::from_snapshot(&snap, now, now);
+        assert!(
+            basis.inflight_age_secs.is_some_and(|age| age < 60),
+            "post-restart anchor resets to boot ⇒ age is ~0, got {:?}",
+            basis.inflight_age_secs
+        );
+
+        let decision = evaluate_stall_watchdog_liveness(
+            &provider,
+            channel,
+            &snap,
+            Some(&inflight),
+            now,
+            STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+            STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+            basis.inflight_age_secs,
+        );
+        assert!(
+            decision.should_defer(),
+            "a live ~40-minute deploy turn that survived a restart must keep deferring, got {:?}",
+            decision.action
+        );
+
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+    }
+
+    /// #3582 + #3671 corollary: the deferral changes must NOT weaken detection of
+    /// a genuinely dead relay. When no liveness signal is present
+    /// (`reason_codes == none`), the decision is `ProceedNoEvidence` on the very
+    /// first tick regardless of age or the absolute backstop — exactly the
+    /// 11:52 / 12:38 immediate-clean cases. Here the age is held below the
+    /// backstop to prove the no-evidence branch fires *before* any backstop
+    /// consideration. [acceptance 2]
     #[test]
     fn no_liveness_still_proceeds_immediately_under_raised_cap() {
         let provider = ProviderKind::Codex;
@@ -1057,6 +1176,7 @@ mod tests {
             1_800_000_000,
             STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
             STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+            Some(STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS - 1),
         );
         assert_eq!(
             decision.action,
@@ -1082,8 +1202,10 @@ mod tests {
         );
         let snap = snapshot(channel.get(), tmux_session, Some(20));
         let now = chrono::Utc::now().timestamp();
+        // Age held below the absolute backstop: cleanup never fires on tick count.
+        let below_backstop = STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS - 1;
 
-        // Build the streak up to one short of the cap.
+        // Build the streak up to one short of the old cap.
         for expected_count in 1..STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS {
             let decision = evaluate_stall_watchdog_liveness(
                 &provider,
@@ -1093,6 +1215,7 @@ mod tests {
                 now,
                 STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
                 STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+                Some(below_backstop),
             );
             assert_eq!(
                 decision.action,
@@ -1115,8 +1238,9 @@ mod tests {
         ));
         assert_eq!(deferral_count(&key), Some(pre_flap_count));
 
-        // The next tick reaches the cap (the final defer), then the one after
-        // proceeds with the force-clean.
+        // #3671: the next ticks reach and then exceed the old tick-count cap, yet
+        // because the turn's age is still below the absolute backstop they all
+        // stay `Defer` — the tick count no longer triggers cleanup.
         let at_cap = evaluate_stall_watchdog_liveness(
             &provider,
             channel,
@@ -1125,6 +1249,7 @@ mod tests {
             now,
             STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
             STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+            Some(below_backstop),
         );
         assert_eq!(
             at_cap.action,
@@ -1141,12 +1266,14 @@ mod tests {
             now,
             STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
             STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+            Some(below_backstop),
         );
         assert_eq!(
             decision.action,
-            StallWatchdogLivenessAction::ProceedAfterDeferralLimit {
-                previous_deferrals: STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS
-            }
+            StallWatchdogLivenessAction::Defer {
+                deferral_count: STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS + 1
+            },
+            "past the old cap but below the absolute backstop must keep deferring"
         );
 
         clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
@@ -1176,6 +1303,7 @@ mod tests {
             now,
             STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
             STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+            Some(0),
         );
         assert!(decision.should_defer());
         assert_eq!(liveness_state_presence(&key), (true, true));
