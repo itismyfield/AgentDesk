@@ -34,7 +34,7 @@ echo "=== CI runner hardening guard ==="
 
 echo "=== Scratch file guard ==="
 FAIL=0
-for scratch_file in plan.md scratch.md scratch.txt scratchpad.md scratchpad.txt test_scratch.rs plan.txt pr-body.md test.sh; do
+for scratch_file in plan.md scratch.md scratch.txt scratchpad.md scratchpad.txt sql_test.rs test_scratch.rs plan.txt pr-body.md test.sh; do
   if [ -f "$scratch_file" ]; then
     echo "ERROR: Scratch file detected in repository root: $scratch_file"
     FAIL=1
