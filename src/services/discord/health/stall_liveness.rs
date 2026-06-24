@@ -170,8 +170,15 @@ impl StallWatchdogLivenessEvidence {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct StallWatchdogJudgmentBasis {
+    /// Age at the `started_at.max(boot)` anchor — used by the initial destructive
+    /// `should_clean` threshold gate so a turn freshly recovered across a restart
+    /// gets a post-boot grace window before it is reconsidered for cleanup.
     pub(super) inflight_age_secs: Option<u64>,
     pub(super) inflight_age_anchor_unix_secs: Option<i64>,
+    /// Raw age from `started_at` with NO boot floor — the turn's true wall-clock
+    /// age, invariant across dcserver restarts. The absolute backstop measures
+    /// this so repeated restarts cannot reset the finite detection ceiling (#3671).
+    pub(super) turn_age_secs: Option<u64>,
     pub(super) last_relay_age_secs: Option<u64>,
     pub(super) last_outbound_activity_age_secs: Option<u64>,
 }
@@ -192,6 +199,8 @@ impl StallWatchdogJudgmentBasis {
             inflight_age_secs: inflight_age_anchor_unix_secs
                 .map(|anchor| saturating_age_secs(anchor, now_unix_secs)),
             inflight_age_anchor_unix_secs,
+            turn_age_secs: started_at_unix
+                .map(|started| saturating_age_secs(started, now_unix_secs)),
             last_relay_age_secs: unix_millis_age_secs(
                 positive_millis(snapshot.last_relay_ts_ms),
                 now_unix_secs,
@@ -212,7 +221,7 @@ pub(super) fn evaluate_stall_watchdog_liveness(
     now_unix_secs: i64,
     freshness_secs: u64,
     max_deferrals: u8,
-    inflight_age_secs: Option<u64>,
+    backstop_age_secs: Option<u64>,
 ) -> StallWatchdogLivenessDecision {
     let key = StallLivenessKey::from_snapshot(provider, channel_id, snapshot);
     let evidence = StallWatchdogLivenessEvidence::collect(&key, snapshot, inflight, now_unix_secs);
@@ -234,19 +243,22 @@ pub(super) fn evaluate_stall_watchdog_liveness(
         .unwrap_or(0);
     // #3671: positive liveness defers indefinitely up to the age-based absolute
     // backstop. The backstop is the only cleanup gate now — the tick count is
-    // telemetry. `inflight_age_secs` is the turn's age at the same
-    // started_at.max(boot) anchor `StallWatchdogJudgmentBasis::from_snapshot`
-    // uses, so a restart-survived turn (anchor resets to boot) gets a fresh full
-    // window and a ~40-minute deploy turn stays far below the ceiling. When the
-    // age is unknown (no started_at) the backstop cannot fire; that only matters
-    // under positive liveness, which is abnormal without a started_at and is
-    // still bounded by the process-level hard ceiling killing the pane (next tick
-    // takes the ProceedNoEvidence branch above).
-    if inflight_age_secs.is_some_and(|age| age >= STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS) {
+    // telemetry. `backstop_age_secs` is the turn's RAW age from `started_at`
+    // (`StallWatchdogJudgmentBasis::turn_age_secs`), with NO boot floor — so a
+    // forever-spinner cannot reset the finite detection ceiling by surviving
+    // repeated dcserver restarts (each restart only re-arms the post-boot grace
+    // on the separate `should_clean` threshold gate, which uses the boot-floored
+    // `inflight_age_secs`). A ~40-minute deploy turn stays far below the 4h
+    // ceiling regardless of how many restarts it rode through. When the age is
+    // unknown (no started_at) the backstop cannot fire; that only matters under
+    // positive liveness, which is abnormal without a started_at and is still
+    // bounded by the process-level hard ceiling killing the pane (next tick takes
+    // the ProceedNoEvidence branch above).
+    if backstop_age_secs.is_some_and(|age| age >= STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS) {
         DEFERRAL_STATE.remove(&key);
         return StallWatchdogLivenessDecision {
             action: StallWatchdogLivenessAction::ProceedAfterAbsoluteBackstop {
-                age_secs: inflight_age_secs.unwrap_or(0),
+                age_secs: backstop_age_secs.unwrap_or(0),
                 deferral_count: prior_deferrals,
             },
             evidence,
@@ -640,6 +652,7 @@ fn is_recent_age(age_secs: Option<u64>, freshness_secs: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};
 
@@ -650,6 +663,43 @@ mod tests {
     use crate::services::discord::relay_health::{RelayHealthSnapshot, RelayStallState};
 
     use super::*;
+
+    /// Restores an env var to its prior value on drop (mirrors the helper in the
+    /// sibling `recovery.rs` test module).
+    struct EnvVarReset {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarReset {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarReset {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    /// The liveness evidence path reaches `latest_runtime_activity_unix_nanos`,
+    /// which trips the #3293 runtime-store guard when `AGENTDESK_ROOT_DIR` points
+    /// at a live release root (the normal dev-machine env). Point it at a throw-
+    /// away temp root so these tests run anywhere, not just under CI's temp root.
+    /// Hold the returned tuple for the whole test — the `TempDir` keeps the dir
+    /// alive and the `EnvVarReset` restores the prior value on drop.
+    #[must_use]
+    fn isolated_runtime_root() -> (tempfile::TempDir, EnvVarReset) {
+        let dir = tempfile::tempdir().expect("temp runtime root");
+        let guard = EnvVarReset::set("AGENTDESK_ROOT_DIR", dir.path());
+        (dir, guard)
+    }
 
     #[derive(Clone)]
     struct CapturingWriter {
@@ -802,6 +852,7 @@ mod tests {
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(3361);
         let tmux_session = "AgentDesk-codex-liveness-defers";
+        let _root = isolated_runtime_root();
         clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
         let file = tempfile::NamedTempFile::new().expect("temp transcript");
         let inflight = inflight_with_output(
@@ -854,6 +905,7 @@ mod tests {
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(3362);
         let tmux_session = "AgentDesk-codex-no-liveness";
+        let _root = isolated_runtime_root();
         clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
         let snap = snapshot(channel.get(), tmux_session, None);
         let mut inflight = inflight_with_output(channel.get(), tmux_session, None);
@@ -910,6 +962,7 @@ mod tests {
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(3363);
         let tmux_session = "AgentDesk-codex-liveness-cap";
+        let _root = isolated_runtime_root();
         clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
         let file = tempfile::NamedTempFile::new().expect("temp transcript");
         let inflight = inflight_with_output(
@@ -989,6 +1042,7 @@ mod tests {
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(3371);
         let tmux_session = "AgentDesk-codex-liveness-turn-identity";
+        let _root = isolated_runtime_root();
         clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
         let file = tempfile::NamedTempFile::new().expect("temp transcript");
         let inflight = inflight_with_output(
@@ -1057,6 +1111,7 @@ mod tests {
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(3368);
         let tmux_session = "AgentDesk-codex-liveness-12-07";
+        let _root = isolated_runtime_root();
         clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
         // A fresh temp transcript => `transcript_mtime_recent` is positive on
         // every tick, mirroring the live turn whose JSONL kept being written.
@@ -1097,14 +1152,18 @@ mod tests {
     }
 
     /// #3671 deploy scenario, end-to-end: a ~40-minute turn that survived a
-    /// mid-turn restart. `started_at` is 40 minutes in the past, but the anchor
-    /// resets to `boot` (the restart instant) so its age is ~0; with positive
-    /// liveness it must keep deferring, never force-cleaned. [acceptance 1]
+    /// mid-turn restart. `started_at` is 40 minutes in the past and `boot` = now
+    /// (the restart instant). The backstop measures the RAW turn age
+    /// (`turn_age_secs` = ~40m, NOT the boot-floored anchor), which is far below
+    /// the 4h ceiling, so with positive liveness it must keep deferring, never
+    /// force-cleaned. The boot-floored `inflight_age_secs` is ~0 here (it only
+    /// governs the separate post-boot grace on the threshold gate). [acceptance 1]
     #[test]
     fn deploy_restart_40min_turn_survives() {
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(3372);
         let tmux_session = "AgentDesk-codex-liveness-deploy-restart";
+        let _root = isolated_runtime_root();
         clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
         let file = tempfile::NamedTempFile::new().expect("temp transcript");
         let inflight = inflight_with_output(
@@ -1113,10 +1172,10 @@ mod tests {
             Some(file.path().display().to_string()),
         );
         let now = chrono::Utc::now().timestamp();
-        // started_at = 40 minutes ago, boot = now (the restart). The anchor is
-        // started_at.max(boot) = now, so the basis age is ~0.
         let mut snap = snapshot(channel.get(), tmux_session, Some(20));
-        let started_at = chrono::Utc
+        // `parse_updated_at_unix` interprets the stamp as LOCAL time, so build it
+        // in Local to round-trip to exactly `now - 2400` (see judgment_basis test).
+        let started_at = chrono::Local
             .timestamp_opt(now - 2400, 0)
             .single()
             .expect("valid started_at")
@@ -1124,10 +1183,19 @@ mod tests {
             .to_string();
         snap.inflight_started_at = Some(started_at);
         let basis = StallWatchdogJudgmentBasis::from_snapshot(&snap, now, now);
+        // Boot-floored anchor (threshold-gate grace) is ~0 after the restart...
         assert!(
             basis.inflight_age_secs.is_some_and(|age| age < 60),
-            "post-restart anchor resets to boot ⇒ age is ~0, got {:?}",
+            "post-restart boot-floored anchor ⇒ age is ~0, got {:?}",
             basis.inflight_age_secs
+        );
+        // ...but the backstop sees the turn's RAW ~40-minute age, well below 4h.
+        assert!(
+            basis
+                .turn_age_secs
+                .is_some_and(|age| (2340..=2460).contains(&age)),
+            "raw turn age must be ~40 minutes regardless of restart, got {:?}",
+            basis.turn_age_secs
         );
 
         let decision = evaluate_stall_watchdog_liveness(
@@ -1138,11 +1206,81 @@ mod tests {
             now,
             STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
             STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
-            basis.inflight_age_secs,
+            basis.turn_age_secs,
         );
         assert!(
             decision.should_defer(),
             "a live ~40-minute deploy turn that survived a restart must keep deferring, got {:?}",
+            decision.action
+        );
+
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+    }
+
+    /// #3671 regression — the codex-review finding that the "absolute" backstop
+    /// must survive restarts. A genuine forever-spinner started 5h ago but the
+    /// dcserver just restarted (boot = now), so the boot-floored anchor age is ~0
+    /// and the OLD design (backstop on the boot-floored age) would defer forever,
+    /// re-armed by every restart. The backstop now measures the RAW turn age
+    /// (5h ≥ 4h ceiling), so it force-cleans even immediately after a restart —
+    /// the finite detection ceiling (#3582 R1) cannot be reset by restart churn.
+    #[test]
+    fn forever_spinner_survives_restarts_still_bounded_by_absolute_backstop() {
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(3373);
+        let tmux_session = "AgentDesk-codex-liveness-forever-spinner-restart";
+        let _root = isolated_runtime_root();
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+        let file = tempfile::NamedTempFile::new().expect("temp transcript");
+        let inflight = inflight_with_output(
+            channel.get(),
+            tmux_session,
+            Some(file.path().display().to_string()),
+        );
+        let now = chrono::Utc::now().timestamp();
+        let mut snap = snapshot(channel.get(), tmux_session, Some(20));
+        // Turn started 5h ago; backstop ceiling is 4h. boot = now (just restarted).
+        let raw_age_secs = STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS as i64 + 3600;
+        // Built in Local so it round-trips through `parse_updated_at_unix`.
+        let started_at = chrono::Local
+            .timestamp_opt(now - raw_age_secs, 0)
+            .single()
+            .expect("valid started_at")
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        snap.inflight_started_at = Some(started_at);
+        let basis = StallWatchdogJudgmentBasis::from_snapshot(&snap, now, now);
+        // The boot-floored anchor hides the true age (this is the bug surface)...
+        assert!(
+            basis.inflight_age_secs.is_some_and(|age| age < 60),
+            "boot-floored anchor resets to ~0 on restart, got {:?}",
+            basis.inflight_age_secs
+        );
+        // ...but the RAW turn age the backstop uses is past the ceiling.
+        assert!(
+            basis
+                .turn_age_secs
+                .is_some_and(|age| age >= STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS),
+            "raw turn age must cross the backstop despite the restart, got {:?}",
+            basis.turn_age_secs
+        );
+
+        let decision = evaluate_stall_watchdog_liveness(
+            &provider,
+            channel,
+            &snap,
+            Some(&inflight),
+            now,
+            STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+            STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+            basis.turn_age_secs,
+        );
+        assert!(
+            matches!(
+                decision.action,
+                StallWatchdogLivenessAction::ProceedAfterAbsoluteBackstop { .. }
+            ),
+            "a 5h forever-spinner must force-clean even right after a restart, got {:?}",
             decision.action
         );
 
@@ -1161,6 +1299,7 @@ mod tests {
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(3369);
         let tmux_session = "AgentDesk-codex-liveness-dead-relay";
+        let _root = isolated_runtime_root();
         clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
         // No transcript path => no transcript mtime signal; stale inflight =>
         // no other positive signal either.
@@ -1192,6 +1331,7 @@ mod tests {
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(3364);
         let tmux_session = "AgentDesk-codex-liveness-flap";
+        let _root = isolated_runtime_root();
         let key = liveness_key(&provider, channel, tmux_session);
         clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
         let file = tempfile::NamedTempFile::new().expect("temp transcript");
@@ -1284,6 +1424,7 @@ mod tests {
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(3365);
         let tmux_session = "AgentDesk-codex-liveness-healthy-clear";
+        let _root = isolated_runtime_root();
         let key = liveness_key(&provider, channel, tmux_session);
         clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
         let file = tempfile::NamedTempFile::new().expect("temp transcript");

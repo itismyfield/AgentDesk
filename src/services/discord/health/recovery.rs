@@ -1747,7 +1747,9 @@ pub(crate) async fn run_stall_watchdog_pass(
                 now_unix_secs,
                 stall_liveness::STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
                 stall_liveness::STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
-                judgment_basis.inflight_age_secs,
+                // #3671: backstop measures the turn's RAW age (restart-invariant),
+                // NOT the boot-floored age the threshold gate above uses.
+                judgment_basis.turn_age_secs,
             );
             if decision.should_defer() {
                 stall_liveness::log_stall_watchdog_liveness_deferred(
