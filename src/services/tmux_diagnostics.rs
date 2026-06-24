@@ -16,6 +16,14 @@ pub fn tmux_session_has_live_pane(tmux_session_name: &str) -> bool {
     crate::services::platform::tmux::has_live_pane(tmux_session_name)
 }
 
+/// #3635: three-state pane liveness (`Live` / `DeadOrAbsent` / `ProbeError`).
+/// Use when a transient tmux probe failure must NOT be mistaken for death.
+pub fn tmux_session_pane_liveness(
+    tmux_session_name: &str,
+) -> crate::services::platform::tmux::PaneLiveness {
+    crate::services::platform::tmux::pane_liveness(tmux_session_name)
+}
+
 /// #3208: the current working directory of the live pane for a tmux session.
 /// Used by the follow-up readiness path to resolve the running Claude session's
 /// JSONL transcript when it lives in a rotating worktree that differs from the

@@ -241,6 +241,7 @@ pub(super) struct RuntimeWatcherLiveness;
 
 impl WatcherLiveness for RuntimeWatcherLiveness {
     fn is_proven_dead(&self, state: &InflightTurnState) -> bool {
+        use crate::services::platform::tmux::PaneLiveness;
         // No session name to probe ⇒ cannot prove death ⇒ never reap.
         let Some(session) = state.tmux_session_name.as_deref() else {
             return false;
@@ -249,28 +250,36 @@ impl WatcherLiveness for RuntimeWatcherLiveness {
         if session.is_empty() {
             return false;
         }
-        // A live tmux pane is a hard "alive" signal.
-        if crate::services::tmux_diagnostics::tmux_session_has_live_pane(session) {
-            return false;
+        // #3635 (codex review): use the THREE-state pane probe. A transient tmux
+        // probe failure (`ProbeError`) is "unknown", NOT "dead" — it must never
+        // license reaping a live-but-idle watcher. Only a *definitive* dead/absent
+        // answer is even a candidate for reap; any live signal or unknown answer
+        // preserves the row (the #3154/#3540 live-protection invariant at its
+        // weakest point).
+        match crate::services::tmux_diagnostics::tmux_session_pane_liveness(session) {
+            PaneLiveness::Live => return false,       // hard "alive" signal
+            PaneLiveness::ProbeError => return false, // unknown ⇒ preserve
+            PaneLiveness::DeadOrAbsent => {}          // candidate — confirm via activity
         }
-        // Fresh runtime activity (jsonl / .generation mtime) within the proven-
-        // dead window is also "alive". `latest_runtime_activity_unix_nanos`
-        // returns 0 when nothing is observable; a 0 (no resolvable temp file)
-        // is treated as "no recent activity" — but only the conjunction with a
-        // dead pane makes a row reapable, so a missing-file 0 alone never reaps.
-        let latest_nanos =
-            crate::services::dispatched_sessions::latest_runtime_activity_unix_nanos(session);
-        let activity_recent = latest_nanos > 0 && {
-            let age_secs = now_unix()
-                .saturating_sub(latest_nanos / 1_000_000_000)
-                .max(0) as u64;
-            age_secs < DEAD_WATCHER_PROVEN_DEAD_SECS
-        };
-        if activity_recent {
-            return false;
-        }
-        // Dead pane AND no recent runtime activity ⇒ proven dead.
-        true
+        // No live pane, definitively. Fresh runtime activity (jsonl / .generation
+        // mtime) within the window is still "alive" — a just-restarting watcher.
+        // Only a dead/absent session AND no recent activity is provably dead.
+        !watcher_runtime_activity_recent(session)
+    }
+}
+
+/// #3635: true when the watcher's runtime files (jsonl / `.generation` mtime)
+/// advanced within [`DEAD_WATCHER_PROVEN_DEAD_SECS`]. Pure fs stat — no tmux
+/// subprocess — so it is safe to call under the inflight sidecar lock. A 0
+/// (no resolvable temp file) is "no recent activity".
+fn watcher_runtime_activity_recent(session: &str) -> bool {
+    let latest_nanos =
+        crate::services::dispatched_sessions::latest_runtime_activity_unix_nanos(session);
+    latest_nanos > 0 && {
+        let age_secs = now_unix()
+            .saturating_sub(latest_nanos / 1_000_000_000)
+            .max(0) as u64;
+        age_secs < DEAD_WATCHER_PROVEN_DEAD_SECS
     }
 }
 
@@ -292,20 +301,38 @@ impl WatcherLiveness for RuntimeWatcherLiveness {
 /// protection invariant holds verbatim. Every non-owner live signal (adoption,
 /// streamed bytes, anchor, terminal commit, offset progress, planned restart)
 /// still independently blocks the reap via the shared structural conjunction.
+#[cfg(test)]
 pub(super) fn should_reap_dead_watcher_rebind_origin(
     state: &InflightTurnState,
     age_secs: u64,
     current_generation: u64,
     liveness: &dyn WatcherLiveness,
 ) -> bool {
+    dead_watcher_rebind_structurally_reapable(state, age_secs, current_generation)
+        // FINAL gate: only reap when the owning watcher is provably dead. A live
+        // watcher (tmux pane up or recent runtime activity) is never reaped; an
+        // unknown tmux probe also preserves (see `RuntimeWatcherLiveness`).
+        && liveness.is_proven_dead(state)
+}
+
+/// #3635: the structural + deadline/generation half of the dead-watcher reap
+/// predicate, WITHOUT the liveness probe. Split out so the locked re-validation
+/// can re-check these cheap, fs-only conditions under the sidecar lock without
+/// re-running a tmux subprocess (codex review ISSUE 2). The structural
+/// conjunction is byte-identical to [`should_reap_abandoned_rebind_origin`]
+/// EXCEPT the owner conjunct flips from `== None` to `== Watcher` (the #897
+/// rebind birth shape the None predicate can never match); every other conjunct
+/// keeps all the live-protection signals (adoption / streamed bytes / anchor /
+/// terminal / offset progress / planned restart) blocking the reap exactly as
+/// before.
+fn dead_watcher_rebind_structurally_reapable(
+    state: &InflightTurnState,
+    age_secs: u64,
+    current_generation: u64,
+) -> bool {
     if !state.rebind_origin {
         return false;
     }
-    // Same structural-abandoned shape as the None-owner predicate, but pinned to
-    // a Watcher relay owner (the #897 rebind birth shape the None predicate can
-    // never match). Every other conjunct is identical so all the live-protection
-    // signals (adoption / streamed bytes / anchor / terminal / offset progress /
-    // planned restart) keep blocking the reap exactly as before.
     let structurally_abandoned = state.turn_source == TurnSource::ExternalAdopted
         && state.effective_relay_owner_kind() == RelayOwnerKind::Watcher
         && state.user_msg_id == 0
@@ -328,13 +355,7 @@ pub(super) fn should_reap_dead_watcher_rebind_origin(
     let stale_generation = state
         .rebind_origin_birth_generation
         .is_some_and(|birth| birth != current_generation);
-    if !(past_deadline || stale_generation) {
-        return false;
-    }
-
-    // FINAL gate: only reap when the owning watcher is provably dead. A live
-    // watcher (tmux pane up or recent runtime activity) is never reaped.
-    liveness.is_proven_dead(state)
+    past_deadline || stale_generation
 }
 
 /// #3581: best-effort age (seconds) for a rebind-origin row. Prefers the
@@ -666,19 +687,26 @@ pub(super) fn reap_abandoned_rebind_origin_locked(
 }
 
 /// #3635: locked re-validate-then-unlink for the *dead-watcher* rebind-origin
-/// reap path. Structurally identical to
-/// [`reap_abandoned_rebind_origin_locked_in_root`] but re-validates under the
-/// lock with [`should_reap_dead_watcher_rebind_origin`] (which includes a FRESH
-/// `liveness.is_proven_dead` probe). This closes the TOCTOU window where a
-/// watcher re-spawns between the unlocked snapshot and the lock: the locked
-/// re-probe sees the freshly-live pane / runtime activity and the helper Skips,
-/// so a watcher that came back to life is never reaped.
+/// reap path. The expensive tmux liveness probe runs OUTSIDE this lock (see
+/// [`sweep_reap_dead_watcher_rebind_origin`], off the async runtime via
+/// `spawn_blocking`); under the lock we re-check only CHEAP, fs-only conditions —
+/// no tmux subprocess — so the per-channel sidecar lock is never held across
+/// blocking subprocess I/O (codex review ISSUE 2).
+///
+/// What the lock DOES close: the row-replacement race — a replacement turn that
+/// rewrote this sidecar path is rejected by the birth-identity guard, and a row
+/// that progressed (structural conjunction) is rejected. What it does NOT fully
+/// close (codex review ISSUE 3): a watcher whose tmux *pane* re-appears between
+/// the unlocked probe and this unlink. That window is tiny and the consequence
+/// is benign — the reaped artifact is a zero-msg-id orphan that a genuinely
+/// re-adopting watcher simply re-creates. As a last cheap guard we re-read the
+/// runtime-activity mtime under the lock, so a watcher that resumed *writing*
+/// (the most common resurrection signal) is still observed and the reap Skips.
 fn reap_dead_watcher_rebind_origin_locked_in_root(
     root: &Path,
     provider: &ProviderKind,
     snapshot: &InflightTurnState,
     current_generation: u64,
-    liveness: &dyn WatcherLiveness,
 ) -> RebindReapOutcome {
     let path = inflight_state_path(root, provider, snapshot.channel_id);
     let Ok(_lock) = lock_inflight_state_path(&path) else {
@@ -693,11 +721,20 @@ fn reap_dead_watcher_rebind_origin_locked_in_root(
         return RebindReapOutcome::Skipped;
     }
     let age_secs = rebind_origin_age_secs(&path, &locked);
-    // Re-run the FULL dead-watcher predicate (structure + deadline/generation +
-    // FRESH liveness probe) under the lock. A watcher that re-spawned since the
-    // snapshot now reads `is_proven_dead == false` ⇒ Skipped.
-    if !should_reap_dead_watcher_rebind_origin(&locked, age_secs, current_generation, liveness) {
+    // Re-check the cheap, fs-only half of the predicate under the lock (structure
+    // + deadline/generation). The tmux liveness probe already ran unlocked; we do
+    // NOT re-spawn it here (ISSUE 2 — no subprocess under the sidecar lock).
+    if !dead_watcher_rebind_structurally_reapable(&locked, age_secs, current_generation) {
         return RebindReapOutcome::Skipped;
+    }
+    // Last cheap guard: a watcher that resumed writing its jsonl/`.generation`
+    // since the unlocked probe reads as recent activity ⇒ alive ⇒ Skip. Pure fs
+    // stat (no subprocess), safe under the lock.
+    if let Some(session) = locked.tmux_session_name.as_deref() {
+        let session = session.trim();
+        if !session.is_empty() && watcher_runtime_activity_recent(session) {
+            return RebindReapOutcome::Skipped;
+        }
     }
     match fs::remove_file(&path) {
         Ok(()) => RebindReapOutcome::Reaped,
@@ -717,48 +754,60 @@ fn reap_dead_watcher_rebind_origin_locked_in_root(
 /// #3635: env-rooted wrapper around
 /// [`reap_dead_watcher_rebind_origin_locked_in_root`] for the periodic
 /// placeholder-sweeper path. Returns `true` iff the row was re-validated under
-/// the lock (with a fresh liveness probe) and unlinked.
+/// the lock (cheap fs-only re-checks; no tmux subprocess) and unlinked.
 pub(super) fn reap_dead_watcher_rebind_origin_locked(
     provider: &ProviderKind,
     snapshot: &InflightTurnState,
     current_generation: u64,
-    liveness: &dyn WatcherLiveness,
 ) -> bool {
     let Some(root) = inflight_runtime_root() else {
         return false;
     };
-    reap_dead_watcher_rebind_origin_locked_in_root(
-        &root,
-        provider,
-        snapshot,
-        current_generation,
-        liveness,
-    ) == RebindReapOutcome::Reaped
+    reap_dead_watcher_rebind_origin_locked_in_root(&root, provider, snapshot, current_generation)
+        == RebindReapOutcome::Reaped
 }
 
 /// #3635: the placeholder sweeper's single-call entry point for the dead-watcher
-/// rebind-origin reap. Wraps the unlocked pre-check
-/// ([`should_reap_dead_watcher_rebind_origin`]) and the locked re-validate
-/// ([`reap_dead_watcher_rebind_origin_locked`]) behind the production
-/// [`RuntimeWatcherLiveness`] oracle, returning `true` only when the row was
-/// genuinely unlinked. Keeping the oracle construction and the predicate/lock
-/// pairing here (not at the sweeper call site) keeps the warm-path wiring in one
-/// auditable place and the sweeper a one-liner.
+/// rebind-origin reap. Returns `true` only when the row was genuinely unlinked.
+/// Three stages, ordered cheapest-first:
+///   1. fs-only structural gate ([`dead_watcher_rebind_structurally_reapable`]) —
+///      most rows fail here with no tmux probe;
+///   2. the production [`RuntimeWatcherLiveness`] proven-dead probe, run on a
+///      `spawn_blocking` thread (it spawns tmux subprocesses) so the async
+///      sweeper runtime is never blocked, and OUTSIDE any lock (codex review
+///      ISSUE 2);
+///   3. the locked re-validate ([`reap_dead_watcher_rebind_origin_locked`]),
+///      which re-checks only cheap fs-only conditions under the sidecar lock.
 ///
 /// Deliberately NOT called from the boot path
 /// (`invalidate_stale_generation_in_root`): at cold start a just-restarted live
 /// watcher's session reads as dead, so the liveness gate only ever fires in the
 /// warm 30s sweeper where a real runtime probe is meaningful (#3154/#3540 / the
 /// keystone boot-preservation invariant).
-pub(super) fn sweep_reap_dead_watcher_rebind_origin(
+pub(super) async fn sweep_reap_dead_watcher_rebind_origin(
     provider: &ProviderKind,
     state: &InflightTurnState,
     age_secs: u64,
     current_generation: u64,
 ) -> bool {
-    let liveness = RuntimeWatcherLiveness;
-    should_reap_dead_watcher_rebind_origin(state, age_secs, current_generation, &liveness)
-        && reap_dead_watcher_rebind_origin_locked(provider, state, current_generation, &liveness)
+    // (1) Cheap, fs-only structural gate first — skip the subprocess entirely for
+    // the common case.
+    if !dead_watcher_rebind_structurally_reapable(state, age_secs, current_generation) {
+        return false;
+    }
+    // (2) The proven-dead probe spawns tmux subprocesses; run it off the async
+    // runtime via `spawn_blocking`, outside any lock. A join failure (panic /
+    // runtime shutdown) is treated as "unknown ⇒ preserve".
+    let probe_state = state.clone();
+    let proven_dead =
+        tokio::task::spawn_blocking(move || RuntimeWatcherLiveness.is_proven_dead(&probe_state))
+            .await
+            .unwrap_or(false);
+    if !proven_dead {
+        return false;
+    }
+    // (3) Locked re-validate (cheap fs-only re-checks; no subprocess under lock).
+    reap_dead_watcher_rebind_origin_locked(provider, state, current_generation)
 }
 
 fn now_string() -> String {
@@ -6738,9 +6787,10 @@ mod rebind_origin_reap_tests {
     }
 
     #[test]
-    fn locked_dead_watcher_reap_unlinks_when_still_proven_dead() {
-        // End-to-end through the locked re-validate helper: a proven-dead
-        // Watcher orphan that is unchanged under the lock is unlinked.
+    fn locked_dead_watcher_reap_unlinks_when_unlocked_probe_already_proved_dead() {
+        // End-to-end through the locked re-validate helper after the unlocked
+        // liveness probe already proved death: an unchanged Watcher orphan is
+        // unlinked by the cheap fs-only locked checks.
         let temp = TempDir::new().unwrap();
         let orphan = watcher_owned_rebind(7101, 4096, 1); // prior gen → reap disjunct
         save_inflight_state_in_root(temp.path(), &orphan).expect("save");
@@ -6756,7 +6806,6 @@ mod rebind_origin_reap_tests {
             &ProviderKind::Codex,
             &orphan,
             CURRENT_GEN,
-            &DEAD,
         );
         assert_eq!(outcome, RebindReapOutcome::Reaped);
         let after = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
@@ -6764,30 +6813,53 @@ mod rebind_origin_reap_tests {
     }
 
     #[test]
-    fn locked_dead_watcher_reap_skips_when_watcher_becomes_live() {
-        // TOCTOU: the snapshot was proven-dead, but between the unlocked check
-        // and the lock the watcher re-spawned. The locked helper re-probes
-        // liveness (ALIVE) and must SKIP the unlink — a watcher that came back
-        // to life is never reaped. This is the #3154/#3540 live-protection
-        // invariant enforced at the lock boundary.
+    fn locked_dead_watcher_reap_skips_when_runtime_activity_resumes() {
+        // TOCTOU: the snapshot was proven-dead by the unlocked tmux probe, but
+        // between that probe and the lock the watcher resumed writing runtime
+        // files. The locked helper must observe that cheap fs-only activity
+        // signal and skip the unlink without spawning tmux under the lock.
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let temp = TempDir::new().unwrap();
+        struct EnvReset(Option<std::ffi::OsString>);
+        impl Drop for EnvReset {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+                }
+            }
+        }
+        let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
         let snapshot = watcher_owned_rebind(7102, 4096, 1); // prior gen, snapshot looked dead
         save_inflight_state_in_root(temp.path(), &snapshot).expect("save");
+        let session = snapshot
+            .tmux_session_name
+            .as_deref()
+            .expect("watcher-owned test row has a tmux session");
+        let generation_path =
+            crate::services::tmux_common::session_temp_path(session, "generation");
+        if let Some(parent) = std::path::Path::new(&generation_path).parent() {
+            std::fs::create_dir_all(parent).expect("create runtime sessions dir");
+        }
+        std::fs::write(&generation_path, "resumed").expect("touch generation marker");
 
         let outcome = reap_dead_watcher_rebind_origin_locked_in_root(
             temp.path(),
             &ProviderKind::Codex,
             &snapshot,
             CURRENT_GEN,
-            &ALIVE, // re-spawned watcher: now alive under the lock
         );
         assert_eq!(
             outcome,
             RebindReapOutcome::Skipped,
-            "a watcher that re-spawned mid-sweep must NOT be reaped"
+            "a watcher that resumed runtime writes mid-sweep must NOT be reaped"
         );
         let after = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
-        assert_eq!(after.len(), 1, "the re-spawned watcher's row must survive");
+        assert_eq!(after.len(), 1, "the resumed watcher's row must survive");
         assert!(after[0].rebind_origin);
     }
 
@@ -6802,7 +6874,22 @@ mod rebind_origin_reap_tests {
         // sweeper, with a real runtime probe, may reap it). This is the keystone
         // `invalidate_stale_generation_preserves_live_owned_rebind_prior_generation`
         // invariant, re-pinned for the #3635 owner-Watcher dead shape.
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let temp = TempDir::new().unwrap();
+        struct EnvReset(Option<std::ffi::OsString>);
+        impl Drop for EnvReset {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+                }
+            }
+        }
+        let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
         let dead_shape = watcher_owned_rebind(7103, 4096, 1); // prior gen
         save_inflight_state_in_root(temp.path(), &dead_shape).expect("save");
 

@@ -851,6 +851,68 @@ pub fn has_live_pane(session_name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// #3635: three-state liveness of a tmux session's panes. Unlike [`has_live_pane`]
+/// (which collapses both "session absent" and "probe failed" to `false`), this
+/// distinguishes a *definitive* negative (`DeadOrAbsent`) from a *probe failure*
+/// (`ProbeError`). Callers deciding to destroy state on death MUST treat
+/// `ProbeError` as "unknown ⇒ preserve" — a transient tmux hiccup is not proof
+/// the owner died.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneLiveness {
+    /// Session exists and has at least one non-dead pane.
+    Live,
+    /// Session is definitively gone, or exists with only dead panes (the owning
+    /// process has exited). A clean negative answer from tmux.
+    DeadOrAbsent,
+    /// tmux could not be queried (binary spawn failure / non-success status on a
+    /// present session). The answer is unknown — callers must not treat this as
+    /// death.
+    ProbeError,
+}
+
+const PANE_LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Probe a session's pane liveness as a three-state answer (see [`PaneLiveness`]).
+pub fn pane_liveness(session_name: &str) -> PaneLiveness {
+    if is_blank_session_name(session_name) {
+        return PaneLiveness::DeadOrAbsent;
+    }
+    let mut has_session = tmux_command();
+    has_session.args(["has-session", "-t", &exact_target(session_name)]);
+    match wait_for_tmux_output(has_session, PANE_LIVENESS_PROBE_TIMEOUT, "tmux has-session") {
+        // Spawn/exec failure ⇒ we never reached tmux: unknown, not dead.
+        Err(_) => return PaneLiveness::ProbeError,
+        // Clean non-zero exit ⇒ no such session (or no server running): the
+        // session — and the process that lived in it — is gone.
+        Ok(output) if !output.status.success() => return PaneLiveness::DeadOrAbsent,
+        Ok(_) => {}
+    }
+    let mut list_panes = tmux_command();
+    list_panes.args([
+        "list-panes",
+        "-t",
+        &exact_target(session_name),
+        "-F",
+        "#{pane_dead}",
+    ]);
+    match wait_for_tmux_output(list_panes, PANE_LIVENESS_PROBE_TIMEOUT, "tmux list-panes") {
+        // list-panes failed on a session we just confirmed present ⇒ unknown.
+        Err(_) => PaneLiveness::ProbeError,
+        Ok(output) if !output.status.success() => PaneLiveness::ProbeError,
+        Ok(output) => {
+            if String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line.trim() == "0")
+            {
+                PaneLiveness::Live
+            } else {
+                // Present but every pane is dead ⇒ the process exited.
+                PaneLiveness::DeadOrAbsent
+            }
+        }
+    }
+}
+
 /// Set a tmux session option. Errors are silently ignored (fire-and-forget).
 pub fn set_option(session_name: &str, key: &str, value: &str) {
     let _ = tmux_command()

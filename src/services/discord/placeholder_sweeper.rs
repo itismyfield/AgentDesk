@@ -369,7 +369,9 @@ async fn run_placeholder_sweep_pass(
                 &state,
                 age_secs,
                 current_generation,
-            ) {
+            )
+            .await
+            {
                 // #3635: the None-owner predicate above can NEVER touch a
                 // Watcher-owned rebind orphan (the #897 birth shape), so it leaked
                 // forever after its watcher died. `sweep_reap_dead_watcher_*`
