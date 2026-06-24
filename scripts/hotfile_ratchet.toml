@@ -51,7 +51,21 @@
 # with load-bearing comments. The record/format LOGIC lives in the sibling
 # terminal_send.rs (a thin pass-through to delivery_record.rs's PR-1c helper); this is
 # the minimal frozen-file call-site cost.
-"src/services/discord/tmux_watcher.rs" = 10135
+# #3646: 10135 -> 10224 (+89), reviewable admission — OBSERVATION-ONLY relay-owner
+# split + three terminal lifecycle events (NO relay/cleanup behaviour change). The
+# flight-recorder owner field split (one tracing field -> `inflight_relay_owner`) plus
+# three thin pass-through emit call sites (`terminal_body_commit` at the commit
+# chokepoint, `terminal_ui_transition` after the visible-completion block,
+# `inflight_clear` + a NON-FATAL invariant signal at the committed-output clear — the
+# #3607 chokepoint). All emit orchestration + payload builders + the invariant live in
+# the sibling NON-hot `relay_owner_observability.rs`; this is the minimal frozen-file
+# cost (the emits are guarded only to gate the EMIT, never the cleanup, and the
+# invariant's bool return is discarded). See #3646.
+# #3646 codex review #3678: 10224 -> 10230 (+6) — preserve the legacy
+# `relay_owner_kind` tracing field as a back-compat alias alongside the new
+# `inflight_relay_owner` (lifted the owner-string into a `let` so both fields can
+# emit it). Tracing fields only, no control-flow change.
+"src/services/discord/tmux_watcher.rs" = 10230
 "src/services/discord/tui_prompt_relay.rs" = 7789
 # #3560: 6612 -> 6621 (+9), reviewable admission — footer-mode separate-panel
 # migration reconcile call + comment at the resume entry. Helper body lives in
