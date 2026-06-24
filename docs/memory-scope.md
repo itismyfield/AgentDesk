@@ -91,7 +91,7 @@ A fragment-level audit of existing `scope: permanent` entries was NOT performed 
 5. **Inferred / unverified claims** — fragments with `assertionStatus = inferred` that were never amended to `verified`. Demote to `workspace` or `forget`.
 6. **Cache copies of source-of-truth** — fragments that summarize `docs/source-of-truth.md` rows. If the summary is genuinely user-facing, mark the fragment with a `cache` note linking back to the doc; otherwise delete.
 
-The audit pass itself is owned by the agent that next runs `mcp__memento__memory_consolidate` with `scope=permanent` selected; no automated migration is required by this issue.
+The audit pass itself is now driven periodically by the weekly `memory.memento_consolidation` maintenance job (see `src/services/maintenance/jobs/memento_consolidation.rs`), which calls the `memory_consolidate` MCP tool to deduplicate and sweep low-importance fragments.
 
 ## Related Documents
 
