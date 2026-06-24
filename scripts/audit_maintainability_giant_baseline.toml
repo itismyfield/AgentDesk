@@ -450,7 +450,24 @@
 # Adds the 1h conservative age floor, lock-name/base-path helpers, root-explicit
 # testable sweep, runtime-root wrapper, and boot hook. Tests live in the excluded
 # `orphan_lock_reap_tests` module.
-"src/services/discord/inflight.rs" = 2771 # #3641 orphan-lock sweep
+# #3635 raised 2771 -> 3003 (+232): dead-watcher rebind-origin reap. A
+# Watcher-owned rebind orphan (the #897 birth shape, `relay_owner_kind =
+# Watcher`) can never satisfy the existing `should_reap_abandoned_rebind_origin`
+# `== None` owner conjunct, so it leaked on disk forever after the watcher died.
+# This adds a SEPARATE gate that leaves the byte-for-byte-unchanged None-owner
+# predicate (and its 19 live-protection pinning tests) intact: the new
+# `WatcherLiveness` DI trait + `RuntimeWatcherLiveness` operational oracle (tmux
+# has-live-pane + dispatched-sessions runtime-activity age, reused from #3169 /
+# #3629), `should_reap_dead_watcher_rebind_origin` (owner == Watcher + structural
+# conjunction + deadline/generation disjunct + proven-dead liveness gate), a
+# locked re-validate helper `reap_dead_watcher_rebind_origin_locked_in_root` that
+# re-probes liveness under the lock (TOCTOU: a watcher re-spawning mid-sweep is
+# never reaped), and the `sweep_reap_dead_watcher_rebind_origin` one-call sweeper
+# entry point. recovery_engine.rs (#3016 birth) is 0 lines changed; only the
+# warm placeholder-sweeper carries the liveness gate (never the boot path) so a
+# freshly-restarted live watcher is never false-classified as dead. Tests live in
+# the excluded `rebind_origin_reap_tests` module.
+"src/services/discord/inflight.rs" = 3003 # #3635 dead-watcher rebind reap
 # #3038 Phase A: health.rs decomposed into health/ directory modules (root 402
 # prod LoC + 6 sub-1000-LoC submodules) — dropped below the giant threshold, so
 # its ratchet entry is deleted (win; no baseline raises).
@@ -494,6 +511,14 @@
 # shadow_mirror_delivered_frontier at the sink delivery call site (Phase B prereq;
 # irreducible 6-arg rustfmt-wrapped call). panel_msg_id has 0 prod readers -> dedup unchanged.
 "src/services/discord/session_relay_sink.rs" = 1738
+# #3635: placeholder_sweeper.rs crossed the 1000-prod-LoC giant threshold (993 ->
+# 1002) when the dead-watcher rebind-origin reap branch was added to the
+# rebind-origin arm of the sweep loop (the watcher-owned #897 orphan the #3581
+# None-owner predicate can never touch). Registered as a tracked [[entry]] in
+# scripts/giant_file_registry.toml (discord-relay, decompose_issue #3405). The
+# reap-eligibility logic lives in inflight.rs; this arm is the orchestration
+# shell. Frozen here so future sweep-arm growth is reviewable.
+"src/services/discord/placeholder_sweeper.rs" = 1002
 # #3479: turn_bridge/tmux_runtime.rs decomposed into tmux_runtime/ directory
 # modules (root tmux_runtime.rs 964 prod LoC + sub-1000-LoC
 # tmux_runtime/{interrupt_policy,process_table,pid_exit}.rs) — dropped below the

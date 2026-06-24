@@ -116,6 +116,20 @@ pub(super) const ORPHAN_LOCK_REAP_MIN_AGE_SECS: i64 = 3600;
 /// backstop window can complete.
 const REBIND_ORIGIN_DEADLINE_SECS_MIN: u64 = 30;
 
+/// #3635: minimum quiescence (seconds) of *all* runtime liveness signals before
+/// a Watcher-owned rebind-origin row is treated as "proven dead" and made
+/// eligible for the dead-watcher reap path. Deliberately far larger than the
+/// stall-watchdog's positive-liveness window
+/// (`STALL_WATCHDOG_POSITIVE_LIVENESS_SECS` = 120s): a live Watcher that is
+/// merely between turns (mailbox idle, no fresh jsonl byte) must NEVER be
+/// false-classified as dead and reaped, because #3154/#3540 require a live
+/// Watcher rebind to survive so it can re-adopt the session across a restart.
+/// A 10-minute conservative floor means a false-negative (a genuinely dead
+/// watcher whose reap is merely delayed) is the only failure mode — never a
+/// false-positive (a live watcher reaped). The orphan is harmless while it
+/// lingers (#3631/PR #3634 classifies it idle), so delay is acceptable.
+pub(super) const DEAD_WATCHER_PROVEN_DEAD_SECS: u64 = 600;
+
 /// #3581: resolve the rebind-origin reap deadline. Reads
 /// `AGENTDESK_REBIND_ORIGIN_DEADLINE_SECS`; on absence / parse failure falls
 /// back to [`REBIND_ORIGIN_DEADLINE_SECS_DEFAULT`]. Any explicit value is
@@ -194,6 +208,133 @@ pub(super) fn should_reap_abandoned_rebind_origin(
         .rebind_origin_birth_generation
         .is_some_and(|birth| birth != current_generation);
     past_deadline || stale_generation
+}
+
+/// #3635: runtime-liveness oracle for the dead-watcher rebind-origin reap path.
+///
+/// A Watcher-owned rebind-origin orphan (born by `recovery_engine` with
+/// `relay_owner_kind = Watcher`, #897) can never satisfy
+/// [`should_reap_abandoned_rebind_origin`]'s `== None` owner conjunct, so the
+/// strict predicate leaves it on disk forever even after the watcher process
+/// has died (#3635). It must NOT be reaped on shape alone, though: #3154/#3540
+/// require a *live* Watcher rebind to survive so the watcher can re-adopt the
+/// session across a restart, and an idle-stuck dead-watcher row is shape-
+/// identical to a live-but-between-turns one. The only safe discriminator is a
+/// *runtime* liveness probe, which is injected here so unit tests can stub it
+/// (and so the keystone pinning tests, which run with no real tmux/jsonl, are
+/// never evaluated against a naive oracle that would mis-judge their synthetic
+/// session as dead).
+pub(super) trait WatcherLiveness {
+    /// True only when the watcher owning `state` is *provably* dead: its tmux
+    /// session has no live pane AND no runtime activity (jsonl/.generation
+    /// mtime) has advanced within [`DEAD_WATCHER_PROVEN_DEAD_SECS`]. Any
+    /// positive signal (or an unknown session name) yields `false` — the
+    /// conservative, live-protecting default.
+    fn is_proven_dead(&self, state: &InflightTurnState) -> bool;
+}
+
+/// #3635: production [`WatcherLiveness`] backed by the same runtime signals the
+/// stall-watchdog (#3169) and #3629 stall-liveness already trust:
+/// `tmux_diagnostics::tmux_session_has_live_pane` and
+/// `dispatched_sessions::latest_runtime_activity_unix_nanos`.
+pub(super) struct RuntimeWatcherLiveness;
+
+impl WatcherLiveness for RuntimeWatcherLiveness {
+    fn is_proven_dead(&self, state: &InflightTurnState) -> bool {
+        // No session name to probe ⇒ cannot prove death ⇒ never reap.
+        let Some(session) = state.tmux_session_name.as_deref() else {
+            return false;
+        };
+        let session = session.trim();
+        if session.is_empty() {
+            return false;
+        }
+        // A live tmux pane is a hard "alive" signal.
+        if crate::services::tmux_diagnostics::tmux_session_has_live_pane(session) {
+            return false;
+        }
+        // Fresh runtime activity (jsonl / .generation mtime) within the proven-
+        // dead window is also "alive". `latest_runtime_activity_unix_nanos`
+        // returns 0 when nothing is observable; a 0 (no resolvable temp file)
+        // is treated as "no recent activity" — but only the conjunction with a
+        // dead pane makes a row reapable, so a missing-file 0 alone never reaps.
+        let latest_nanos =
+            crate::services::dispatched_sessions::latest_runtime_activity_unix_nanos(session);
+        let activity_recent = latest_nanos > 0 && {
+            let age_secs = now_unix()
+                .saturating_sub(latest_nanos / 1_000_000_000)
+                .max(0) as u64;
+            age_secs < DEAD_WATCHER_PROVEN_DEAD_SECS
+        };
+        if activity_recent {
+            return false;
+        }
+        // Dead pane AND no recent runtime activity ⇒ proven dead.
+        true
+    }
+}
+
+/// #3635: decide whether a *Watcher-owned* abandoned rebind-origin row is safe
+/// to reap because its owning watcher is provably dead.
+///
+/// This is a separate gate that runs alongside (OR'd with)
+/// [`should_reap_abandoned_rebind_origin`] at the periodic sweeper call site —
+/// NOT at boot (see `invalidate_stale_generation_in_root`). It exists so the
+/// `relay_owner_kind == Watcher` orphan that the strict `== None` predicate can
+/// never touch is finally reaped once the watcher has demonstrably exited.
+///
+/// The structural conjunction is byte-identical to
+/// [`should_reap_abandoned_rebind_origin`] EXCEPT the owner conjunct flips from
+/// `== None` to `== Watcher`, and the reap is additionally gated on
+/// `liveness.is_proven_dead(state)`. A live watcher (positive tmux pane or
+/// recent runtime activity) is `is_proven_dead == false`, so this predicate is
+/// `false` and the row is preserved — the #3154/#3540 / keystone live-
+/// protection invariant holds verbatim. Every non-owner live signal (adoption,
+/// streamed bytes, anchor, terminal commit, offset progress, planned restart)
+/// still independently blocks the reap via the shared structural conjunction.
+pub(super) fn should_reap_dead_watcher_rebind_origin(
+    state: &InflightTurnState,
+    age_secs: u64,
+    current_generation: u64,
+    liveness: &dyn WatcherLiveness,
+) -> bool {
+    if !state.rebind_origin {
+        return false;
+    }
+    // Same structural-abandoned shape as the None-owner predicate, but pinned to
+    // a Watcher relay owner (the #897 rebind birth shape the None predicate can
+    // never match). Every other conjunct is identical so all the live-protection
+    // signals (adoption / streamed bytes / anchor / terminal / offset progress /
+    // planned restart) keep blocking the reap exactly as before.
+    let structurally_abandoned = state.turn_source == TurnSource::ExternalAdopted
+        && state.effective_relay_owner_kind() == RelayOwnerKind::Watcher
+        && state.user_msg_id == 0
+        && state.current_msg_id == 0
+        && !state.terminal_delivery_committed
+        && state.response_sent_offset == 0
+        && state.full_response.is_empty()
+        && state.last_offset == state.turn_start_offset.unwrap_or(state.last_offset)
+        && state.restart_mode.is_none();
+    if !structurally_abandoned {
+        return false;
+    }
+
+    // Past-deadline OR stale-generation matches the None-owner predicate's
+    // disjunct, so a dead-watcher orphan is not reaped the instant it is born.
+    let deadline = state
+        .rebind_origin_deadline_secs
+        .unwrap_or_else(rebind_origin_deadline_secs_env);
+    let past_deadline = age_secs >= deadline;
+    let stale_generation = state
+        .rebind_origin_birth_generation
+        .is_some_and(|birth| birth != current_generation);
+    if !(past_deadline || stale_generation) {
+        return false;
+    }
+
+    // FINAL gate: only reap when the owning watcher is provably dead. A live
+    // watcher (tmux pane up or recent runtime activity) is never reaped.
+    liveness.is_proven_dead(state)
 }
 
 /// #3581: best-effort age (seconds) for a rebind-origin row. Prefers the
@@ -522,6 +663,102 @@ pub(super) fn reap_abandoned_rebind_origin_locked(
     };
     reap_abandoned_rebind_origin_locked_in_root(&root, provider, snapshot, current_generation)
         == RebindReapOutcome::Reaped
+}
+
+/// #3635: locked re-validate-then-unlink for the *dead-watcher* rebind-origin
+/// reap path. Structurally identical to
+/// [`reap_abandoned_rebind_origin_locked_in_root`] but re-validates under the
+/// lock with [`should_reap_dead_watcher_rebind_origin`] (which includes a FRESH
+/// `liveness.is_proven_dead` probe). This closes the TOCTOU window where a
+/// watcher re-spawns between the unlocked snapshot and the lock: the locked
+/// re-probe sees the freshly-live pane / runtime activity and the helper Skips,
+/// so a watcher that came back to life is never reaped.
+fn reap_dead_watcher_rebind_origin_locked_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    snapshot: &InflightTurnState,
+    current_generation: u64,
+    liveness: &dyn WatcherLiveness,
+) -> RebindReapOutcome {
+    let path = inflight_state_path(root, provider, snapshot.channel_id);
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return RebindReapOutcome::LockUnavailable;
+    };
+    let Some(locked) = read_inflight_state_content(&path) else {
+        return RebindReapOutcome::Missing;
+    };
+    // Birth-identity guard (same as the None-owner path): a replacement turn at
+    // the same sidecar path must never be mistaken for the snapshotted orphan.
+    if !rebind_row_identity_unchanged(snapshot, &locked) {
+        return RebindReapOutcome::Skipped;
+    }
+    let age_secs = rebind_origin_age_secs(&path, &locked);
+    // Re-run the FULL dead-watcher predicate (structure + deadline/generation +
+    // FRESH liveness probe) under the lock. A watcher that re-spawned since the
+    // snapshot now reads `is_proven_dead == false` ⇒ Skipped.
+    if !should_reap_dead_watcher_rebind_origin(&locked, age_secs, current_generation, liveness) {
+        return RebindReapOutcome::Skipped;
+    }
+    match fs::remove_file(&path) {
+        Ok(()) => RebindReapOutcome::Reaped,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => RebindReapOutcome::Missing,
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = snapshot.channel_id,
+                error = %error,
+                "#3635 dead-watcher rebind reap remove_file failed under lock; treating as Missing"
+            );
+            RebindReapOutcome::Missing
+        }
+    }
+}
+
+/// #3635: env-rooted wrapper around
+/// [`reap_dead_watcher_rebind_origin_locked_in_root`] for the periodic
+/// placeholder-sweeper path. Returns `true` iff the row was re-validated under
+/// the lock (with a fresh liveness probe) and unlinked.
+pub(super) fn reap_dead_watcher_rebind_origin_locked(
+    provider: &ProviderKind,
+    snapshot: &InflightTurnState,
+    current_generation: u64,
+    liveness: &dyn WatcherLiveness,
+) -> bool {
+    let Some(root) = inflight_runtime_root() else {
+        return false;
+    };
+    reap_dead_watcher_rebind_origin_locked_in_root(
+        &root,
+        provider,
+        snapshot,
+        current_generation,
+        liveness,
+    ) == RebindReapOutcome::Reaped
+}
+
+/// #3635: the placeholder sweeper's single-call entry point for the dead-watcher
+/// rebind-origin reap. Wraps the unlocked pre-check
+/// ([`should_reap_dead_watcher_rebind_origin`]) and the locked re-validate
+/// ([`reap_dead_watcher_rebind_origin_locked`]) behind the production
+/// [`RuntimeWatcherLiveness`] oracle, returning `true` only when the row was
+/// genuinely unlinked. Keeping the oracle construction and the predicate/lock
+/// pairing here (not at the sweeper call site) keeps the warm-path wiring in one
+/// auditable place and the sweeper a one-liner.
+///
+/// Deliberately NOT called from the boot path
+/// (`invalidate_stale_generation_in_root`): at cold start a just-restarted live
+/// watcher's session reads as dead, so the liveness gate only ever fires in the
+/// warm 30s sweeper where a real runtime probe is meaningful (#3154/#3540 / the
+/// keystone boot-preservation invariant).
+pub(super) fn sweep_reap_dead_watcher_rebind_origin(
+    provider: &ProviderKind,
+    state: &InflightTurnState,
+    age_secs: u64,
+    current_generation: u64,
+) -> bool {
+    let liveness = RuntimeWatcherLiveness;
+    should_reap_dead_watcher_rebind_origin(state, age_secs, current_generation, &liveness)
+        && reap_dead_watcher_rebind_origin_locked(provider, state, current_generation, &liveness)
 }
 
 fn now_string() -> String {
@@ -5895,10 +6132,12 @@ mod rebind_origin_reap_tests {
     //! reap so a genuinely-live rebind is never destroyed (#3154 / #3540
     //! no-regression pins).
     use super::{
-        InflightTurnState, REBIND_ORIGIN_DEADLINE_SECS_DEFAULT, RebindReapOutcome, RelayOwnerKind,
-        TurnSource, invalidate_stale_generation_in_root, load_inflight_states_from_root,
-        reap_abandoned_rebind_origin_locked_in_root, save_inflight_state_in_root,
-        should_reap_abandoned_rebind_origin,
+        DEAD_WATCHER_PROVEN_DEAD_SECS, InflightTurnState, REBIND_ORIGIN_DEADLINE_SECS_DEFAULT,
+        RebindReapOutcome, RelayOwnerKind, TurnSource, WatcherLiveness,
+        invalidate_stale_generation_in_root, load_inflight_states_from_root,
+        reap_abandoned_rebind_origin_locked_in_root,
+        reap_dead_watcher_rebind_origin_locked_in_root, save_inflight_state_in_root,
+        should_reap_abandoned_rebind_origin, should_reap_dead_watcher_rebind_origin,
     };
     use crate::services::discord::InflightRestartMode;
     use crate::services::provider::ProviderKind;
@@ -6302,6 +6541,291 @@ mod rebind_origin_reap_tests {
             CURRENT_GEN,
         );
         assert_eq!(outcome, RebindReapOutcome::Missing);
+    }
+
+    // ----------------------------------------------------------------------
+    // #3635: dead-watcher rebind-origin reap. A Watcher-owned rebind orphan
+    // (the #897 birth shape) is invisible to `should_reap_abandoned_rebind_origin`
+    // (its `== None` owner conjunct can never hold), so it leaked forever even
+    // after the watcher died. `should_reap_dead_watcher_rebind_origin` reaps it
+    // ONLY when a runtime-liveness probe proves the watcher dead. A LIVE watcher
+    // (tmux pane up or recent runtime activity) is never reaped — the injected
+    // `WatcherLiveness` oracle lets us pin both directions without real tmux.
+    // ----------------------------------------------------------------------
+
+    /// Test [`WatcherLiveness`] oracle: returns a fixed proven-dead verdict so a
+    /// unit test can pin the alive vs proven-dead branch without spawning tmux or
+    /// touching jsonl/.generation files.
+    struct StubLiveness {
+        proven_dead: bool,
+    }
+    impl WatcherLiveness for StubLiveness {
+        fn is_proven_dead(&self, _state: &InflightTurnState) -> bool {
+            self.proven_dead
+        }
+    }
+    const DEAD: StubLiveness = StubLiveness { proven_dead: true };
+    const ALIVE: StubLiveness = StubLiveness { proven_dead: false };
+
+    /// A Watcher-owned reapable rebind orphan: identical to `reapable_rebind`
+    /// but with `relay_owner_kind = Watcher` (the #897 birth shape). This is the
+    /// row the None-owner predicate can never touch.
+    fn watcher_owned_rebind(
+        channel_id: u64,
+        last_offset: u64,
+        birth_generation: u64,
+    ) -> InflightTurnState {
+        let mut state = reapable_rebind(channel_id, last_offset, birth_generation);
+        state.set_relay_owner_kind(RelayOwnerKind::Watcher);
+        // Sanity: the legacy None-owner predicate refuses this row outright.
+        assert!(!should_reap_abandoned_rebind_origin(
+            &state,
+            PAST_DEADLINE,
+            CURRENT_GEN
+        ));
+        state
+    }
+
+    #[test]
+    fn dead_watcher_rebind_reaps_when_proven_dead() {
+        // (A) Watcher-owned + past deadline + proven dead → reap. This is the
+        // exact #3635 leaked-row signature finally made reapable.
+        let state = watcher_owned_rebind(7001, 4096, CURRENT_GEN);
+        assert!(should_reap_dead_watcher_rebind_origin(
+            &state,
+            PAST_DEADLINE,
+            CURRENT_GEN,
+            &DEAD
+        ));
+    }
+
+    #[test]
+    fn dead_watcher_rebind_reaps_on_prior_generation_when_dead() {
+        // (A') Generation disjunct mirrors the None-owner predicate: a prior-
+        // generation dead-watcher orphan reaps even within the deadline.
+        let state = watcher_owned_rebind(7002, 4096, 1); // prior gen
+        assert!(should_reap_dead_watcher_rebind_origin(
+            &state,
+            WITHIN_DEADLINE,
+            CURRENT_GEN,
+            &DEAD
+        ));
+    }
+
+    #[test]
+    fn live_watcher_rebind_never_reaped_when_alive() {
+        // (B) THE LIVE-PROTECTION INVARIANT (#3154/#3540 homologue): a Watcher
+        // that is still alive (tmux pane up OR recent runtime activity) is NEVER
+        // reaped, even past the deadline and even from a prior generation.
+        let past = watcher_owned_rebind(7003, 4096, CURRENT_GEN);
+        assert!(!should_reap_dead_watcher_rebind_origin(
+            &past,
+            PAST_DEADLINE,
+            CURRENT_GEN,
+            &ALIVE
+        ));
+        let prior_gen = watcher_owned_rebind(7004, 4096, 1);
+        assert!(!should_reap_dead_watcher_rebind_origin(
+            &prior_gen,
+            WITHIN_DEADLINE,
+            CURRENT_GEN,
+            &ALIVE
+        ));
+    }
+
+    #[test]
+    fn dead_watcher_rebind_never_reaped_within_deadline_same_generation() {
+        // (B') Even proven-dead, a current-generation orphan within its deadline
+        // is preserved — the deadline/generation disjunct gates first, before
+        // liveness. Matches the None-owner predicate's timing exactly.
+        let state = watcher_owned_rebind(7005, 4096, CURRENT_GEN);
+        assert!(!should_reap_dead_watcher_rebind_origin(
+            &state,
+            WITHIN_DEADLINE,
+            CURRENT_GEN,
+            &DEAD
+        ));
+    }
+
+    #[test]
+    fn dead_watcher_reap_respects_structural_conjunction() {
+        // (C) Every non-owner live signal still independently blocks the reap,
+        // even with a proven-dead liveness verdict: adoption, anchor, terminal
+        // commit, streamed bytes, offset progress, planned restart.
+        let mut adopted = watcher_owned_rebind(7006, 4096, CURRENT_GEN);
+        adopted.user_msg_id = 42;
+        assert!(!should_reap_dead_watcher_rebind_origin(
+            &adopted,
+            PAST_DEADLINE,
+            CURRENT_GEN,
+            &DEAD
+        ));
+
+        let mut anchored = watcher_owned_rebind(7007, 4096, CURRENT_GEN);
+        anchored.current_msg_id = 777;
+        assert!(!should_reap_dead_watcher_rebind_origin(
+            &anchored,
+            PAST_DEADLINE,
+            CURRENT_GEN,
+            &DEAD
+        ));
+
+        let mut committed = watcher_owned_rebind(7008, 4096, CURRENT_GEN);
+        committed.terminal_delivery_committed = true;
+        assert!(!should_reap_dead_watcher_rebind_origin(
+            &committed,
+            PAST_DEADLINE,
+            CURRENT_GEN,
+            &DEAD
+        ));
+
+        let mut sent = watcher_owned_rebind(7009, 4096, CURRENT_GEN);
+        sent.response_sent_offset = 10;
+        assert!(!should_reap_dead_watcher_rebind_origin(
+            &sent,
+            PAST_DEADLINE,
+            CURRENT_GEN,
+            &DEAD
+        ));
+
+        let mut progressed = watcher_owned_rebind(7010, 4096, CURRENT_GEN);
+        progressed.last_offset = progressed.turn_start_offset.unwrap() + 100;
+        assert!(!should_reap_dead_watcher_rebind_origin(
+            &progressed,
+            PAST_DEADLINE,
+            CURRENT_GEN,
+            &DEAD
+        ));
+
+        let mut planned = watcher_owned_rebind(7011, 4096, CURRENT_GEN);
+        planned.set_restart_mode(InflightRestartMode::DrainRestart);
+        assert!(!should_reap_dead_watcher_rebind_origin(
+            &planned,
+            PAST_DEADLINE,
+            CURRENT_GEN,
+            &DEAD
+        ));
+    }
+
+    #[test]
+    fn none_owner_orphan_not_matched_by_dead_watcher_gate() {
+        // The two predicates are disjoint on the owner conjunct: a None-owner
+        // orphan (handled by the legacy predicate) is NOT in scope for the
+        // dead-watcher gate even when proven dead, so no double-reap path.
+        let none_owner = reapable_rebind(7012, 4096, CURRENT_GEN);
+        assert_eq!(
+            none_owner.effective_relay_owner_kind(),
+            RelayOwnerKind::None
+        );
+        assert!(!should_reap_dead_watcher_rebind_origin(
+            &none_owner,
+            PAST_DEADLINE,
+            CURRENT_GEN,
+            &DEAD
+        ));
+    }
+
+    #[test]
+    fn non_rebind_row_never_matched_by_dead_watcher_gate() {
+        let mut state = watcher_owned_rebind(7013, 4096, CURRENT_GEN);
+        state.rebind_origin = false;
+        assert!(!should_reap_dead_watcher_rebind_origin(
+            &state,
+            PAST_DEADLINE,
+            CURRENT_GEN,
+            &DEAD
+        ));
+    }
+
+    #[test]
+    fn locked_dead_watcher_reap_unlinks_when_still_proven_dead() {
+        // End-to-end through the locked re-validate helper: a proven-dead
+        // Watcher orphan that is unchanged under the lock is unlinked.
+        let temp = TempDir::new().unwrap();
+        let orphan = watcher_owned_rebind(7101, 4096, 1); // prior gen → reap disjunct
+        save_inflight_state_in_root(temp.path(), &orphan).expect("save");
+        assert!(should_reap_dead_watcher_rebind_origin(
+            &orphan,
+            0,
+            CURRENT_GEN,
+            &DEAD
+        ));
+
+        let outcome = reap_dead_watcher_rebind_origin_locked_in_root(
+            temp.path(),
+            &ProviderKind::Codex,
+            &orphan,
+            CURRENT_GEN,
+            &DEAD,
+        );
+        assert_eq!(outcome, RebindReapOutcome::Reaped);
+        let after = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
+        assert!(after.is_empty(), "dead-watcher orphan must be gone");
+    }
+
+    #[test]
+    fn locked_dead_watcher_reap_skips_when_watcher_becomes_live() {
+        // TOCTOU: the snapshot was proven-dead, but between the unlocked check
+        // and the lock the watcher re-spawned. The locked helper re-probes
+        // liveness (ALIVE) and must SKIP the unlink — a watcher that came back
+        // to life is never reaped. This is the #3154/#3540 live-protection
+        // invariant enforced at the lock boundary.
+        let temp = TempDir::new().unwrap();
+        let snapshot = watcher_owned_rebind(7102, 4096, 1); // prior gen, snapshot looked dead
+        save_inflight_state_in_root(temp.path(), &snapshot).expect("save");
+
+        let outcome = reap_dead_watcher_rebind_origin_locked_in_root(
+            temp.path(),
+            &ProviderKind::Codex,
+            &snapshot,
+            CURRENT_GEN,
+            &ALIVE, // re-spawned watcher: now alive under the lock
+        );
+        assert_eq!(
+            outcome,
+            RebindReapOutcome::Skipped,
+            "a watcher that re-spawned mid-sweep must NOT be reaped"
+        );
+        let after = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
+        assert_eq!(after.len(), 1, "the re-spawned watcher's row must survive");
+        assert!(after[0].rebind_origin);
+    }
+
+    #[test]
+    fn boot_path_preserves_dead_watcher_rebind() {
+        // The boot path (`invalidate_stale_generation_in_root`) is intentionally
+        // NOT wired to the dead-watcher liveness gate: at cold start a just-
+        // restarted live watcher's synthetic session reads as dead, so applying
+        // the gate at boot would risk reaping a row a recovering watcher is about
+        // to re-adopt. A Watcher-owned dead-shape orphan from a PRIOR generation
+        // must therefore survive the boot pass entirely (only the warm 30s
+        // sweeper, with a real runtime probe, may reap it). This is the keystone
+        // `invalidate_stale_generation_preserves_live_owned_rebind_prior_generation`
+        // invariant, re-pinned for the #3635 owner-Watcher dead shape.
+        let temp = TempDir::new().unwrap();
+        let dead_shape = watcher_owned_rebind(7103, 4096, 1); // prior gen
+        save_inflight_state_in_root(temp.path(), &dead_shape).expect("save");
+
+        let removed =
+            invalidate_stale_generation_in_root(temp.path(), &ProviderKind::Codex, CURRENT_GEN);
+        assert!(
+            removed.is_empty(),
+            "boot must NOT reap a Watcher-owned rebind (no liveness gate at boot)"
+        );
+        let after = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
+        assert_eq!(after.len(), 1);
+        assert!(after[0].rebind_origin);
+    }
+
+    #[test]
+    fn proven_dead_window_is_conservative() {
+        // The proven-dead floor must be far larger than the stall-watchdog's
+        // 120s positive-liveness window so a live-but-between-turns watcher is
+        // never false-classified as dead.
+        assert!(
+            DEAD_WATCHER_PROVEN_DEAD_SECS >= 600,
+            "proven-dead floor must be conservative (>= 10 minutes)"
+        );
     }
 }
 
