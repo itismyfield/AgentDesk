@@ -119,6 +119,19 @@ opt-level = "z"
 lto = true
 strip = true
 
+# #3673: do NOT strip proc-macro / build-script artifacts. Under the current
+# macOS toolchain (rustc 1.94.1, ld-27031, Darwin 27) `strip = true` on a
+# proc-macro cdylib produces a mis-aligned LINKEDIT string pool, so the compiler
+# can no longer `dlopen` it (observed: `libsqlx_macros-*.dylib` ... "mis-aligned
+# LINKEDIT string pool" -> E0432 on sqlx's Encode/Decode/Type/FromRow re-exports),
+# breaking the optimized release build that `deploy-release.sh` runs.
+# `build-override` covers build scripts, proc-macros and their deps — keeping them
+# unstripped fixes dlopen while the final delivered binary stays fully stripped
+# (size benefit retained). Verified: `cargo build --release -p sqlx` fails without
+# this override and succeeds with it on the affected toolchain.
+[profile.release.build-override]
+strip = false
+
 [profile.release-fast]
 inherits = "release"
 opt-level = 1
