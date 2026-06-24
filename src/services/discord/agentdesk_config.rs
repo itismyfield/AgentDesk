@@ -128,6 +128,7 @@ pub(crate) fn ensure_agent_setup_config(
         keywords: Vec::new(),
         department: None,
         avatar_emoji: None,
+        preferred_intake_node_labels: None,
     });
 
     if let Err(error) = crate::voice::commands::validate_agent_alias_collisions(&next_agents) {
