@@ -31,6 +31,13 @@ function withPendingDelivery(checkpoint, pendingDelivery) {
   return Object.assign({}, checkpoint, {
     plan: pendingDelivery.plan,
     pendingDelivery,
+    // #family-profile-probe: mark today as triggered so the once-per-day guard
+    // (`checkpoint.lastTriggeredDate === now.date`) actually fires on the next
+    // tick. Without this the action:"agent" checkpoint never recorded the
+    // trigger date, so the guard stayed false and re-dispatched a headless DM
+    // turn every tick after the daily slot (trigger storm). `triggerDate` is
+    // `now.date` set at dispatch time.
+    lastTriggeredDate: pendingDelivery.triggerDate,
   });
 }
 

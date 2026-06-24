@@ -1318,7 +1318,15 @@ pub async fn stale_mailbox_repair_handler(
                     } else {
                         true
                     };
-                    if inflight_safe {
+                    // #3668 F2: never destructively idle-clear when a final
+                    // answer is still persisted in JSONL after `last_offset` —
+                    // let normal recovery deliver it instead of dropping it.
+                    let unrelayed_tail =
+                        crate::services::discord::relay_recovery::idle_tmux_repair_has_unrelayed_tail_answer(
+                            &provider,
+                            request.channel_id,
+                        );
+                    if inflight_safe && !unrelayed_tail {
                         health::clear_idle_tmux_stale_turn(
                             registry,
                             provider.as_str(),

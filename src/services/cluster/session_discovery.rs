@@ -549,6 +549,14 @@ async fn run_single_tick(
     pool: &PgPool,
     registry: &SessionRegistry,
 ) -> TickReport {
+    // #3651: under pool pressure, yield this tick to foreground turn ingestion.
+    // Returning a default report leaves the registry untouched (same invariant
+    // as the PG-failure abort below), so a yielded tick never wipes live entries
+    // and the next tick re-discovers once pressure clears.
+    if crate::db::postgres::background_should_yield(pool) {
+        tracing::debug!("session-discovery: yielding tick to foreground under pool pressure",);
+        return TickReport::default();
+    }
     // PG load failure → ABORT THE TICK. Returning a default report leaves the
     // registry untouched, so a transient PG hiccup never wipes live entries.
     let directory = match build_channel_directory_from_pg(pool).await {

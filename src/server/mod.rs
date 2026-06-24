@@ -2520,9 +2520,15 @@ async fn message_outbox_loop(pg_pool: Arc<PgPool>, health_registry: Option<Arc<H
     let max_interval = Duration::from_secs(5);
     // Periodic stale-row GC: prune old terminal rows so config rejections do not accumulate.
     let mut next_gc_at = std::time::Instant::now() + Duration::from_secs(60);
-
     loop {
         tokio::time::sleep(poll_interval).await;
+
+        // #3651: the message outbox drain delivers headless terminal responses
+        // — foreground turns enqueue here and synchronously block on the row
+        // becoming `sent` — so this loop is NOT backpressured. Yielding it under
+        // pool pressure would delay (and risk later duplicate-recovery of)
+        // user-visible delivery. Only genuinely low-priority chore loops gate on
+        // `background_should_yield`.
 
         if std::time::Instant::now() >= next_gc_at {
             match gc_stale_message_outbox_rows(pg_pool.as_ref()).await {

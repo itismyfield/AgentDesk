@@ -1182,13 +1182,33 @@ pub fn extract_prompt_from_hook_payload(payload: &Value) -> Option<String> {
 }
 
 pub fn extract_codex_rollout_user_prompt(json: &Value) -> Option<String> {
+    extract_codex_rollout_user_prompt_with_entry_id(json).map(|(prompt, _)| prompt)
+}
+
+pub fn extract_codex_rollout_user_prompt_with_entry_id(
+    json: &Value,
+) -> Option<(String, Option<String>)> {
     let payload = json.get("payload")?;
     if payload.get("type").and_then(Value::as_str) != Some("message")
         || payload.get("role").and_then(Value::as_str) != Some("user")
     {
         return None;
     }
-    reject_synthetic_tui_user_prompt(extract_message_content_text(payload)?)
+    let prompt = reject_synthetic_tui_user_prompt(extract_message_content_text(payload)?)?;
+    let entry_id = extract_codex_rollout_entry_id(json, payload);
+    Some((prompt, entry_id))
+}
+
+fn extract_codex_rollout_entry_id(json: &Value, payload: &Value) -> Option<String> {
+    payload
+        .get("id")
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("item_id").and_then(Value::as_str))
+        .or_else(|| json.get("id").and_then(Value::as_str))
+        .or_else(|| json.get("item_id").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 pub fn extract_claude_transcript_user_prompt(json: &Value) -> Option<String> {
@@ -2902,6 +2922,7 @@ mod tests {
         let json = serde_json::json!({
             "type": "response_item",
             "payload": {
+                "id": "codex-entry-1",
                 "type": "message",
                 "role": "user",
                 "content": [
@@ -2914,6 +2935,97 @@ mod tests {
         assert_eq!(
             extract_codex_rollout_user_prompt(&json).as_deref(),
             Some("hello\nworld")
+        );
+        let (prompt, entry_id) =
+            extract_codex_rollout_user_prompt_with_entry_id(&json).expect("codex user prompt");
+        assert_eq!(prompt, "hello\nworld");
+        assert_eq!(entry_id.as_deref(), Some("codex-entry-1"));
+    }
+
+    #[test]
+    fn extracts_codex_rollout_top_level_entry_id() {
+        let json = serde_json::json!({
+            "type": "response_item",
+            "id": "codex-top-entry",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    { "type": "input_text", "text": "hello from codex" }
+                ]
+            }
+        });
+
+        let (prompt, entry_id) =
+            extract_codex_rollout_user_prompt_with_entry_id(&json).expect("codex user prompt");
+        assert_eq!(prompt, "hello from codex");
+        assert_eq!(entry_id.as_deref(), Some("codex-top-entry"));
+    }
+
+    #[test]
+    fn codex_distinct_message_entry_ids_publish_distinct_direct_prompts() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+        let first = serde_json::json!({
+            "type": "response_item",
+            "id": "codex-turn-container",
+            "payload": {
+                "id": "codex-message-entry-1",
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "first direct prompt" }]
+            }
+        });
+        let second = serde_json::json!({
+            "type": "response_item",
+            "id": "codex-turn-container",
+            "payload": {
+                "id": "codex-message-entry-2",
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "second direct prompt" }]
+            }
+        });
+        let (first_prompt, first_entry_id) =
+            extract_codex_rollout_user_prompt_with_entry_id(&first).expect("first codex prompt");
+        let (second_prompt, second_entry_id) =
+            extract_codex_rollout_user_prompt_with_entry_id(&second).expect("second codex prompt");
+        assert_eq!(first_entry_id.as_deref(), Some("codex-message-entry-1"));
+        assert_eq!(second_entry_id.as_deref(), Some("codex-message-entry-2"));
+
+        let now = Utc::now();
+        assert_eq!(
+            observe_prompt_by_tmux_with_entry_id_at(
+                "codex",
+                "tmux-codex-distinct-ids",
+                &first_prompt,
+                first_entry_id.as_deref(),
+                now,
+            ),
+            PromptObservation::PublishedSshDirect
+        );
+        assert_eq!(
+            observe_prompt_by_tmux_with_entry_id_at(
+                "codex",
+                "tmux-codex-distinct-ids",
+                &second_prompt,
+                second_entry_id.as_deref(),
+                now,
+            ),
+            PromptObservation::PublishedSshDirect,
+            "distinct Codex message item ids must not collapse separate direct prompts \
+             even when the top-level response_item id is shared"
+        );
+        assert_eq!(
+            observe_prompt_by_tmux_with_entry_id_at(
+                "codex",
+                "tmux-codex-distinct-ids",
+                &first_prompt,
+                first_entry_id.as_deref(),
+                now,
+            ),
+            PromptObservation::SuppressedReplayedEntry,
+            "only the exact already-relayed Codex message item id is replay-suppressed"
         );
     }
 

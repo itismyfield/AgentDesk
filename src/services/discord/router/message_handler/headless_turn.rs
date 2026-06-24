@@ -1,5 +1,39 @@
 use super::*;
 
+/// #family-profile-probe: should this headless turn start from a FRESH provider
+/// session? This is the INTENDED runtime contract for `execution_strategy=fresh`
+/// DM routine turns: a fresh-strategy DM routine run must NOT resume the
+/// per-channel provider session — each run is a fresh provider context with
+/// memento (caseId) as the only cross-run continuity. The per-channel session
+/// cache otherwise keeps resuming the same Claude session, accumulating context
+/// and leaking intermediate narrative across runs.
+///
+/// Scope is deliberately ALL fresh DM routine turns, not just family-profile-
+/// probe (today only the two probe scripts use `dmUserId`, but any future
+/// fresh-strategy DM routine inherits the same correct fresh-context semantics).
+/// Gated to DM turns (`is_dm`, set only by the routine agent-executor for
+/// `dmUserId` actions); user-facing DM messages carry no routine metadata, and
+/// non-DM / explicitly-"persistent" routine turns return false and keep their
+/// resumed session.
+fn dm_fresh_routine_turn(metadata: Option<&serde_json::Value>) -> bool {
+    let Some(metadata) = metadata else {
+        return false;
+    };
+    let is_dm = metadata
+        .get("is_dm")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if !is_dm {
+        return false;
+    }
+    // Only an explicit "persistent" strategy keeps the resumed session; an absent
+    // or "fresh" strategy resets (the routine default is "fresh").
+    metadata
+        .get("execution_strategy")
+        .and_then(|value| value.as_str())
+        != Some("persistent")
+}
+
 pub(in crate::services::discord) async fn start_headless_turn(
     ctx: &serenity::Context,
     channel_id: ChannelId,
@@ -257,8 +291,21 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
             channel_id.get()
         )));
     }
+    // #family-profile-probe: is this a fresh-strategy DM routine turn that must
+    // start from a fresh provider context? Computed once at the turn-start
+    // boundary; the full fresh-session handling (thorough clear + restore skip +
+    // launch fresh flag) is routed through the shared `/goal fresh` machinery
+    // below. memento (caseId) is the only cross-run continuity.
+    let dm_fresh = dm_fresh_routine_turn(metadata.as_ref());
     let (mut session_id, mut memento_context_loaded, mut current_path) = {
         let mut data = shared.core.lock().await;
+        // Defense: pre-clear the in-memory per-channel session before load so no
+        // stale resume id flows through the load bookkeeping. The authoritative
+        // clear (in-memory + DB + stale id) is `clear_codex_goal_start_provider_
+        // session` further down, gated on the same `dm_fresh`.
+        if dm_fresh && let Some(session) = data.sessions.get_mut(&channel_id) {
+            session.clear_provider_session();
+        }
         if let Some(info) = load_session_runtime_state(&mut data.sessions, channel_id) {
             if let Some(channel_name) = resolved_channel_name_for_session.as_ref()
                 && let Some(session) = data.sessions.get_mut(&channel_id)
@@ -570,7 +617,18 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
             status: HeadlessTurnStartStatus::Consumed,
         });
     }
-    let force_fresh_provider_session = matches!(headless_goal_kind, GoalCommandKind::FreshStart);
+    let goal_fresh = matches!(headless_goal_kind, GoalCommandKind::FreshStart);
+    // #family-profile-probe (codex review P1/R2): a fresh DM routine turn must
+    // route through the SAME proven fresh-session machinery as `/goal fresh`, so
+    // it (a) thoroughly clears in-memory + DB + stale provider session via
+    // `clear_codex_goal_start_provider_session`, (b) skips the DB/live-TUI
+    // restore below, AND (c) passes the fresh flag to the provider launch so the
+    // live tmux pane is not reused (Claude TUI would otherwise recover a runtime
+    // binding and flip back to resume; the Codex wrapper reuses on
+    // `!force_fresh_provider_session`). Clearing the in-memory id alone is
+    // insufficient on all three counts. Only the `/goal fresh` PROMPT REWRITE is
+    // gated separately (goal-only) — the probe prompt must be sent verbatim.
+    let force_fresh_provider_session = goal_fresh || dm_fresh;
     let fresh_codex_goal_session_requested = force_fresh_provider_session;
     if force_fresh_provider_session {
         clear_codex_goal_start_provider_session(
@@ -582,8 +640,18 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
             &mut session_strategy_reason,
         )
         .await;
+        // #family-profile-probe (codex review R3): the in-memory/DB/stale clears
+        // above do NOT touch the Claude TUI runtime binding. With a live tmux
+        // pane, `recover_claude_tui_session_resolution_from_runtime_binding`
+        // (claude.rs) flips `resume` back on even when `session_id` is None, so
+        // the pane is warm-reused. Clear that binding too so a fresh DM/goal turn
+        // cold-starts instead of resuming the live pane. (The Codex wrapper path
+        // already honors `force_fresh_provider_session` at launch.)
+        if let Some(ref tmux_session) = tmux_session_name {
+            crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(tmux_session);
+        }
     }
-    let effective_prompt: std::borrow::Cow<str> = if force_fresh_provider_session {
+    let effective_prompt: std::borrow::Cow<str> = if goal_fresh {
         std::borrow::Cow::Owned(rewrite_fresh_goal_prompt(prompt))
     } else {
         std::borrow::Cow::Borrowed(prompt)
@@ -591,8 +659,13 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     if session_id.is_none() {
         if fresh_codex_goal_session_requested {
             let ts = chrono::Local::now().format("%H:%M:%S");
+            let reason = if goal_fresh {
+                "/goal fresh session request"
+            } else {
+                "fresh DM routine turn"
+            };
             tracing::info!(
-                "  [{ts}] ↻ Skipping DB provider session restore for headless channel {} due to /goal fresh session request",
+                "  [{ts}] ↻ Skipping DB/live provider session restore for headless channel {} due to {reason}",
                 channel_id.get()
             );
         } else if session_was_cleared {
@@ -1557,5 +1630,58 @@ mod headless_hard_ceiling_tests {
             new_dl < proposed_dl,
             "the clamp must lower the proposed extension to the ceiling"
         );
+    }
+}
+
+#[cfg(test)]
+mod dm_fresh_routine_tests {
+    //! #family-profile-probe: the discriminator that decides whether a headless
+    //! turn clears its resumed per-channel provider session at turn start. A DM
+    //! routine turn (default/"fresh" strategy) must reset so each probe run is a
+    //! fresh provider context; only an explicit "persistent" strategy or a
+    //! non-DM turn keeps the resumed session.
+    use super::dm_fresh_routine_turn;
+    use serde_json::json;
+
+    #[test]
+    fn dm_turn_without_strategy_is_fresh() {
+        // The probe routines omit execution_strategy (default fresh) → reset.
+        assert!(dm_fresh_routine_turn(Some(&json!({ "is_dm": true }))));
+    }
+
+    #[test]
+    fn dm_turn_with_fresh_strategy_is_fresh() {
+        assert!(dm_fresh_routine_turn(Some(&json!({
+            "is_dm": true,
+            "execution_strategy": "fresh"
+        }))));
+    }
+
+    #[test]
+    fn dm_turn_with_persistent_strategy_keeps_session() {
+        // Only an explicit "persistent" DM routine preserves its resumed session.
+        assert!(!dm_fresh_routine_turn(Some(&json!({
+            "is_dm": true,
+            "execution_strategy": "persistent"
+        }))));
+    }
+
+    #[test]
+    fn non_dm_turn_is_never_reset() {
+        // A non-DM (channel/thread) headless turn keeps its resumed session even
+        // with a fresh strategy — scoped strictly to DM turns.
+        assert!(!dm_fresh_routine_turn(Some(&json!({
+            "is_dm": false,
+            "execution_strategy": "fresh"
+        }))));
+        // is_dm absent ⇒ treated as non-DM.
+        assert!(!dm_fresh_routine_turn(Some(&json!({
+            "execution_strategy": "fresh"
+        }))));
+    }
+
+    #[test]
+    fn absent_metadata_is_not_reset() {
+        assert!(!dm_fresh_routine_turn(None));
     }
 }

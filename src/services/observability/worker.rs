@@ -4,6 +4,7 @@
 //! retention sweep lives in `retention`.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::sync::mpsc;
 
@@ -80,6 +81,9 @@ async fn worker_loop(
     snapshot_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     retention_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    // #3651: throttle for the deferrable-flush backpressure yield log.
+    let mut last_pressure_log = Instant::now() - crate::db::postgres::BACKPRESSURE_LOG_THROTTLE;
+
     loop {
         tokio::select! {
             maybe_message = rx.recv() => {
@@ -99,14 +103,24 @@ async fn worker_loop(
                     None => break,
                 }
             }
+            // #3651: event/quality flushes are NEVER gated — they back ingest
+            // visibility and have JSONL dead-letter resilience, so dropping a
+            // tick risks losing samples. Only the deferrable snapshot/retention
+            // ticks yield under pool pressure (they re-run on the next tick).
             _ = flush_tick.tick() => {
                 flush_event_batch(&runtime, &mut batch).await;
                 flush_quality_event_batch(&runtime, &mut quality_batch).await;
             }
             _ = snapshot_tick.tick() => {
+                if deferrable_flush_should_yield(&runtime, &mut last_pressure_log, "counter snapshot") {
+                    continue;
+                }
                 flush_counter_snapshots(&runtime).await;
             }
             _ = retention_tick.tick() => {
+                if deferrable_flush_should_yield(&runtime, &mut last_pressure_log, "retention sweep") {
+                    continue;
+                }
                 run_retention_sweep(&runtime).await;
             }
         }
@@ -115,6 +129,30 @@ async fn worker_loop(
     flush_event_batch(&runtime, &mut batch).await;
     flush_quality_event_batch(&runtime, &mut quality_batch).await;
     flush_counter_snapshots(&runtime).await;
+}
+
+/// #3651: returns `true` when a deferrable observability flush (counter
+/// snapshot / retention sweep) should yield its tick because the Postgres pool
+/// is under foreground pressure. When no PG pool is configured (standalone
+/// mode) it returns `false` so behaviour is unchanged. Throttled debug log is
+/// emitted at most once per `BACKPRESSURE_LOG_THROTTLE`.
+fn deferrable_flush_should_yield(
+    runtime: &Arc<ObservabilityRuntime>,
+    last_pressure_log: &mut Instant,
+    what: &str,
+) -> bool {
+    let handles = storage_handles(runtime);
+    let Some(pool) = handles.pg_pool.as_ref() else {
+        return false;
+    };
+    if !crate::db::postgres::background_should_yield(pool) {
+        return false;
+    }
+    if last_pressure_log.elapsed() >= crate::db::postgres::BACKPRESSURE_LOG_THROTTLE {
+        tracing::debug!("[observability] yielding {what} flush to foreground under pool pressure");
+        *last_pressure_log = Instant::now();
+    }
+    true
 }
 
 /// #2049 Finding 1: Flush observability events with multi-tier fallback.

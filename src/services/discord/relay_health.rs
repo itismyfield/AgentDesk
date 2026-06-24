@@ -123,6 +123,22 @@ impl RelayHealthSnapshot {
             || self.watcher_attached
             || self.bridge_inflight_present
     }
+
+    /// True for the restart/desync signature where a watcher handle still looks
+    /// live and may even own the tmux session, but the relay frontier never
+    /// advanced while the transcript/capture accumulated bytes.
+    pub(in crate::services::discord) fn relay_frontier_never_advanced_with_unread_tail(
+        &self,
+    ) -> bool {
+        self.desynced
+            && self.tmux_alive == Some(true)
+            && self.last_relay_ts_ms.is_none()
+            && self.last_relay_offset == 0
+            && self
+                .last_capture_offset
+                .is_some_and(|capture| capture > self.last_relay_offset)
+            && self.unread_bytes.is_some_and(|bytes| bytes > 0)
+    }
 }
 
 pub(in crate::services::discord) struct RelayStallClassifier;
@@ -134,7 +150,11 @@ impl RelayStallClassifier {
         let live_watcher_owns_relay = snapshot.watcher_attached
             && !snapshot.watcher_attached_stale
             && snapshot.watcher_owns_live_relay;
-        if snapshot.tmux_alive == Some(true) && snapshot.desynced && !live_watcher_owns_relay {
+        if snapshot.tmux_alive == Some(true)
+            && snapshot.desynced
+            && (!live_watcher_owns_relay
+                || snapshot.relay_frontier_never_advanced_with_unread_tail())
+        {
             return RelayStallState::TmuxAliveRelayDead;
         }
 
@@ -198,7 +218,7 @@ mod tests {
                 RelayStallState::ExplicitBackgroundWork,
             ),
             (
-                "live owned watcher plus foreground desync remains an active stream",
+                "live owned watcher with a dead relay frontier is classified relay-dead",
                 RelayHealthSnapshot {
                     active_turn: RelayActiveTurn::Foreground,
                     bridge_inflight_present: true,
@@ -208,6 +228,24 @@ mod tests {
                     watcher_owns_live_relay: true,
                     last_capture_offset: Some(128),
                     last_relay_offset: 0,
+                    unread_bytes: Some(128),
+                    desynced: true,
+                    ..RelayHealthSnapshot::test_snapshot()
+                },
+                RelayStallState::TmuxAliveRelayDead,
+            ),
+            (
+                "live owned watcher with relay progress remains an active stream",
+                RelayHealthSnapshot {
+                    active_turn: RelayActiveTurn::Foreground,
+                    bridge_inflight_present: true,
+                    mailbox_has_cancel_token: true,
+                    tmux_alive: Some(true),
+                    watcher_attached: true,
+                    watcher_owns_live_relay: true,
+                    last_relay_ts_ms: Some(1_777_001_234_000),
+                    last_capture_offset: Some(256),
+                    last_relay_offset: 128,
                     unread_bytes: Some(128),
                     desynced: true,
                     ..RelayHealthSnapshot::test_snapshot()

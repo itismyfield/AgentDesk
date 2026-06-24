@@ -207,6 +207,43 @@ fn collect_catch_up_channel_candidates(
 /// user messages.
 const CATCH_UP_FETCH_LIMIT: u8 = 50;
 
+/// #3668 F3: max backward-pagination pages for the no-checkpoint `Recent` scan.
+///
+/// `Recent` mode (channels with no disk/live/retry checkpoint, e.g. after
+/// `/clear` or stale-checkpoint pruning) previously fetched exactly one
+/// `limit=50` page. Discord applies `limit` BEFORE author filtering and returns
+/// newest-first, so a burst of newer bot/system noise can fill that single page
+/// and push an age-window-eligible user message off the end — it is never
+/// fetched, so catch-up silently fails to recover it. In `Recent` mode we now
+/// page backward with `.before(cursor)` up to this budget, stopping early as
+/// soon as a page's oldest message exceeds the age window (nothing older can
+/// qualify). 4 pages × 50 = 200 messages of reach; well inside the Discord
+/// per-channel rate limit (5 req / 5 s). The `After` (checkpoint) path is
+/// unchanged — it already has a precise lower bound.
+const CATCH_UP_RECENT_MAX_PAGES: u8 = 4;
+
+/// #3668 F3: decide whether to fetch another backward page in `Recent` mode.
+///
+/// Pure so the budget / age-window early-exit contract is unit-testable without
+/// a Discord runtime. Returns `true` only when (a) the page budget has room and
+/// (b) the just-fetched page's oldest message is still within the age window
+/// (i.e. an older page could still hold an eligible message). `oldest_age_secs`
+/// is the age of the oldest message in the page just fetched; `None` means the
+/// page was empty (no cursor to page before → stop).
+fn should_fetch_older_recent_page(
+    pages_fetched: u8,
+    oldest_age_secs: Option<i64>,
+    max_age_secs: i64,
+) -> bool {
+    if pages_fetched >= CATCH_UP_RECENT_MAX_PAGES {
+        return false;
+    }
+    match oldest_age_secs {
+        Some(age) => age <= max_age_secs,
+        None => false,
+    }
+}
+
 /// Inter-channel pacing for the catch-up REST sweep.
 ///
 /// Startup recovery and the periodic backstop scan every configured channel
@@ -500,6 +537,54 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
                 continue;
             }
         };
+
+        // #3668 F3: `Recent` mode (no checkpoint) has no lower bound, so a single
+        // newest-first page can be fully consumed by newer bot/system noise and
+        // bury an age-window-eligible user message past page 1. Page backward
+        // with `.before(oldest)` up to `CATCH_UP_RECENT_MAX_PAGES`, stopping as
+        // soon as a page's oldest message exceeds the age window. The `After`
+        // path keeps its precise single-page contract and is left untouched.
+        if matches!(fetch_mode, CatchUpFetchMode::Recent) {
+            let mut pages_fetched: u8 = 1;
+            loop {
+                // The oldest message currently held is the smallest id (Discord
+                // returns newest-first; ids are time-ordered snowflakes).
+                let Some(oldest) = messages.iter().min_by_key(|msg| msg.id.get()) else {
+                    break;
+                };
+                let oldest_id = oldest.id;
+                let oldest_age_secs = chrono::Utc::now()
+                    .signed_duration_since(*oldest_id.created_at())
+                    .num_seconds();
+                if !should_fetch_older_recent_page(
+                    pages_fetched,
+                    Some(oldest_age_secs),
+                    max_age.as_secs() as i64,
+                ) {
+                    break;
+                }
+                if should_pace_before_scan(true) {
+                    catch_up_scan_pace_gap().await;
+                }
+                let older_request = serenity::builder::GetMessages::new()
+                    .limit(CATCH_UP_FETCH_LIMIT)
+                    .before(oldest_id);
+                match channel_id.messages(http, older_request).await {
+                    Ok(older) if !older.is_empty() => {
+                        pages_fetched += 1;
+                        messages.extend(older);
+                    }
+                    Ok(_) => break, // no older messages → done
+                    Err(e) => {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::warn!(
+                            "  [{ts}] ⚠ catch-up: backward page fetch failed for channel {channel_id}: {e}"
+                        );
+                        break; // keep what we already have
+                    }
+                }
+            }
+        }
 
         if messages.is_empty() {
             continue;
@@ -838,10 +923,11 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
 #[cfg(test)]
 mod catch_up_recovery_tests {
     use super::{
-        CATCH_UP_SCAN_PACE_DEFAULT_MS, CatchUpChannelCandidate, CatchUpClassification,
-        CatchUpFetchMode, CatchUpMessageView, ChannelId, ProviderKind,
+        CATCH_UP_RECENT_MAX_PAGES, CATCH_UP_SCAN_PACE_DEFAULT_MS, CatchUpChannelCandidate,
+        CatchUpClassification, CatchUpFetchMode, CatchUpMessageView, ChannelId, ProviderKind,
         catch_up_fetch_mode_for_scan, classify_catch_up_message,
-        insert_configured_catch_up_candidate, parse_catch_up_scan_pace, should_pace_before_scan,
+        insert_configured_catch_up_candidate, parse_catch_up_scan_pace,
+        should_fetch_older_recent_page, should_pace_before_scan,
     };
     use std::collections::{BTreeMap, HashSet};
 
@@ -1017,5 +1103,68 @@ mod catch_up_recovery_tests {
             ),
             CatchUpClassification::Recover
         );
+    }
+
+    // #3668 F3: backward-pagination budget / age-window early-exit contract for
+    // the no-checkpoint `Recent` scan.
+    #[test]
+    fn recent_pagination_continues_while_within_age_window_and_under_budget() {
+        // First page (pages_fetched=1) whose oldest message is still inside the
+        // 300s window → a buried older user message may exist → fetch more.
+        assert!(
+            should_fetch_older_recent_page(1, Some(120), 300),
+            "in-window oldest under budget should page backward"
+        );
+    }
+
+    #[test]
+    fn recent_pagination_stops_when_oldest_exceeds_age_window() {
+        // The oldest message in the page is already older than the window —
+        // nothing older can qualify, so stop without another fetch.
+        assert!(
+            !should_fetch_older_recent_page(1, Some(301), 300),
+            "out-of-window oldest must early-exit"
+        );
+    }
+
+    #[test]
+    fn recent_pagination_stops_at_page_budget() {
+        // Even fully within the age window, the budget caps backward reach so a
+        // pathological channel cannot trigger unbounded fetches.
+        assert!(
+            !should_fetch_older_recent_page(CATCH_UP_RECENT_MAX_PAGES, Some(10), 300),
+            "page budget must cap backward pagination"
+        );
+        // One below the budget still pages.
+        assert!(
+            should_fetch_older_recent_page(CATCH_UP_RECENT_MAX_PAGES - 1, Some(10), 300),
+            "below-budget in-window page should continue"
+        );
+    }
+
+    #[test]
+    fn recent_pagination_stops_on_empty_page() {
+        // No oldest message (empty page) → no cursor to page before → stop.
+        assert!(
+            !should_fetch_older_recent_page(1, None, 300),
+            "empty page must stop pagination"
+        );
+    }
+
+    #[test]
+    fn after_mode_is_unchanged_by_recent_pagination() {
+        // Regression guard: the `After` (checkpoint) fetch mode keeps its single
+        // precise lower bound; the backward-pagination loop is gated on
+        // `matches!(fetch_mode, Recent)` only.
+        let candidate = CatchUpChannelCandidate {
+            channel_id: ChannelId::new(99),
+            fallback_name: None,
+            checkpoint_path: None,
+            disk_checkpoint: Some(1_500_000_000_000_000_000),
+        };
+        assert!(matches!(
+            catch_up_fetch_mode_for_scan(&candidate, None, None),
+            CatchUpFetchMode::After(_)
+        ));
     }
 }

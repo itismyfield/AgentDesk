@@ -40,7 +40,7 @@ mod queue_io;
 mod queued_placeholders_store;
 mod reaction_cleanup;
 mod relay_health;
-mod relay_recovery;
+pub(crate) mod relay_recovery;
 #[cfg(unix)] // #3089 A0: shared ReplaceLongMessageOutcome disposition policy.
 mod replace_outcome_policy;
 pub(crate) mod response_sanitizer;
@@ -62,6 +62,10 @@ mod runtime_bootstrap;
 // #1446 stall-deadlock recovery: shared post-clear bookkeeping for the THREAD-GUARD
 // + stall-watchdog cleanup paths so neither leaks `global_active` / cancel tokens.
 pub mod runtime_store;
+// #3646 OBSERVATION-ONLY: pure payload builders + owner-split derivation for the
+// relay flight recorder's two-signal owner separation and the three terminal
+// lifecycle events. No relay/cleanup behaviour lives here.
+mod relay_owner_observability;
 pub(crate) mod session_identity;
 mod session_runtime;
 pub(crate) mod settings;

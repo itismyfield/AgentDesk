@@ -32,7 +32,7 @@ use super::gateway::edit_outbound_message;
 use super::inflight::{
     InflightTurnState, delete_inflight_state_file, emit_reap_abandoned_rebind_origin,
     load_inflight_states_for_sweep, parse_started_at_unix, reap_abandoned_rebind_origin_locked,
-    should_reap_abandoned_rebind_origin,
+    should_reap_abandoned_rebind_origin, sweep_reap_dead_watcher_rebind_origin,
 };
 use crate::services::provider::ProviderKind;
 
@@ -345,24 +345,13 @@ async fn run_placeholder_sweep_pass(
     stalled_tracker.retain_live(provider, &states);
     for (state, age_secs) in states {
         if state.rebind_origin {
-            // #3581: a rebind-origin inflight has no placeholder message to
-            // edit, so it is normally skipped. But an abandoned, never-
-            // progressed orphan (STALL-WATCHDOG respawn) would otherwise live
-            // forever and wedge turn-start (`backstop_claim_is_safe` reads it as
-            // a "live foreign inflight"). Reap it once it is past its deadline.
-            // The strict conjunction in `should_reap_abandoned_rebind_origin`
-            // (owner-less + unadopted + never-progressed) guarantees a live /
-            // adopted rebind is never touched. `age_secs` here is the file-mtime
-            // age the sweeper already computed, which covers legacy rows that
-            // pre-date the persisted birth stamp.
-            //
-            // #3581 (codex TOCTOU fix): the `should_reap_*` check above runs on
-            // an UNLOCKED snapshot. Between this read and the delete, a normal
-            // intake / TUI claim can persist a brand-new live inflight at the
-            // same sidecar path. Route the delete through the locked
-            // re-validate helper so it reloads + re-checks identity + eligibility
-            // under the lock and only unlinks a row that is *still* the same
-            // abandoned orphan — never a live replacement.
+            // #3581: a rebind-origin inflight has no placeholder to edit (skipped)
+            // — but an abandoned, never-progressed orphan (STALL-WATCHDOG respawn)
+            // would live forever and wedge turn-start. Reap it once past its
+            // deadline; `should_reap_abandoned_rebind_origin`'s strict conjunction
+            // keeps any live/adopted rebind untouched, and the locked helper
+            // re-validates under the sidecar lock so a racing live intake/TUI claim
+            // is never clobbered (codex TOCTOU). `age_secs` = file-mtime age.
             let current_generation = super::runtime_store::load_generation();
             if should_reap_abandoned_rebind_origin(&state, age_secs, current_generation)
                 && reap_abandoned_rebind_origin_locked(provider, &state, current_generation)
@@ -373,6 +362,28 @@ async fn run_placeholder_sweep_pass(
                     age_secs,
                     current_generation,
                     "placeholder_sweep_deadline",
+                );
+                report.abandoned += 1;
+            } else if sweep_reap_dead_watcher_rebind_origin(
+                provider,
+                &state,
+                age_secs,
+                current_generation,
+            )
+            .await
+            {
+                // #3635: the None-owner predicate above can NEVER touch a
+                // Watcher-owned rebind orphan (the #897 birth shape), so it leaked
+                // forever after its watcher died. `sweep_reap_dead_watcher_*`
+                // reaps it ONLY when a runtime-liveness probe proves the watcher
+                // dead (live watcher preserved per #3154/#3540); this warm path
+                // is the sole carrier of the liveness gate — see the helper.
+                emit_reap_abandoned_rebind_origin(
+                    provider,
+                    &state,
+                    age_secs,
+                    current_generation,
+                    "placeholder_sweep_dead_watcher",
                 );
                 report.abandoned += 1;
             }

@@ -48,7 +48,7 @@ mod analytics_transcript;
 mod state_extractors;
 
 // Re-import moved items so existing call sites stay byte-identical.
-use self::jsonl_extract::{extract_response_from_output, success_result_end_offset_after_offset};
+use self::jsonl_extract::extract_response_from_output;
 #[cfg(unix)]
 use self::output_path_detect::{
     DetectedRebindOutputPath, StaleOutputCandidate, detect_rebind_output_path_from_candidates,
@@ -64,7 +64,9 @@ use self::phase_policy::{
 // `extract_response_from_output_pub` is re-exported (not just re-imported) so the
 // `recovery_engine::extract_response_from_output_pub` path stays valid for the
 // turn_bridge / tmux_restart_handoff external callers.
-pub(super) use self::jsonl_extract::extract_response_from_output_pub;
+pub(super) use self::jsonl_extract::{
+    extract_response_from_output_pub, success_result_end_offset_after_offset,
+};
 // #3479 item-2: re-import the externally-called terminal-watcher helpers so the
 // existing call sites stay byte-identical. The remaining cluster members
 // (`terminal_success_watcher_stop_allowed`, `jsonl_tail_contains_terminal_end_sentinel`,

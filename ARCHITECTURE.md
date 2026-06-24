@@ -404,6 +404,7 @@ src/
 │   │   │   ├── recovery.rs
 │   │   │   ├── redaction.rs
 │   │   │   ├── relay_auto_heal.rs
+│   │   │   ├── relay_dead_reattach.rs
 │   │   │   ├── runtime_resolve.rs
 │   │   │   ├── session_enrichment.rs
 │   │   │   ├── snapshot.rs
@@ -637,6 +638,7 @@ src/
 │   │   ├── reaction_cleanup.rs
 │   │   ├── recovery_engine.rs
 │   │   ├── relay_health.rs
+│   │   ├── relay_owner_observability.rs
 │   │   ├── relay_recovery.rs
 │   │   ├── replace_outcome_policy.rs
 │   │   ├── response_sanitizer.rs

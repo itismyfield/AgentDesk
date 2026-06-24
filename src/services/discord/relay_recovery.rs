@@ -89,6 +89,7 @@ pub(in crate::services::discord) struct RelayRecoveryEvidence {
     pub desynced: bool,
     pub last_capture_offset: Option<u64>,
     pub last_relay_offset: u64,
+    pub last_relay_ts_ms: Option<i64>,
     pub unread_bytes: Option<u64>,
     pub last_outbound_activity_ms: Option<i64>,
 }
@@ -270,6 +271,7 @@ fn evidence_from_snapshot(snapshot: &RelayHealthSnapshot) -> RelayRecoveryEviden
         desynced: snapshot.desynced,
         last_capture_offset: snapshot.last_capture_offset,
         last_relay_offset: snapshot.last_relay_offset,
+        last_relay_ts_ms: snapshot.last_relay_ts_ms,
         unread_bytes: snapshot.unread_bytes,
         last_outbound_activity_ms: snapshot.last_outbound_activity_ms,
     }
@@ -322,7 +324,8 @@ fn eligible_reattach_watcher(snapshot: &RelayHealthSnapshot) -> bool {
         && (snapshot.mailbox_has_cancel_token || snapshot.mailbox_active_user_msg_id.is_none())
         && (!snapshot.watcher_attached
             || snapshot.watcher_attached_stale
-            || !snapshot.watcher_owns_live_relay)
+            || !snapshot.watcher_owns_live_relay
+            || snapshot.relay_frontier_never_advanced_with_unread_tail())
         && snapshot.desynced
         && is_agentdesk_tmux_session(snapshot.tmux_session.as_deref())
 }
@@ -670,6 +673,29 @@ fn reattach_apply_status(watcher_spawned: bool) -> &'static str {
     }
 }
 
+fn relay_frontier_dead_reattach_owner(decision: &RelayRecoveryDecision) -> Option<ChannelId> {
+    let evidence = &decision.evidence;
+    if decision.relay_stall_state != RelayStallState::TmuxAliveRelayDead
+        || !evidence.desynced
+        || evidence.tmux_alive != Some(true)
+        || !evidence.watcher_attached
+        || !evidence.watcher_owns_live_relay
+        || evidence.last_relay_ts_ms.is_some()
+        || evidence.last_relay_offset != 0
+        || !evidence
+            .last_capture_offset
+            .is_some_and(|capture| capture > evidence.last_relay_offset)
+        || !evidence.unread_bytes.is_some_and(|bytes| bytes > 0)
+    {
+        return None;
+    }
+    Some(ChannelId::new(
+        evidence
+            .watcher_owner_channel_id
+            .unwrap_or(decision.channel_id),
+    ))
+}
+
 fn forget_completion_footer_for_relay_recovery(channel_id: ChannelId) {
     super::single_message_panel::completion_footer_forget_registered_target(channel_id);
 }
@@ -698,6 +724,56 @@ fn idle_tmux_repair_ready_for_input(
         .unwrap_or_else(|| {
             crate::services::provider::tmux_session_ready_for_input(tmux_session, provider)
         })
+}
+
+/// #3668 F2: detect tail answer text that the destructive idle-tmux clear would
+/// permanently lose.
+///
+/// `idle_tmux_repair_ready_for_input` returns Ready when the JSONL has a
+/// terminal envelope after `last_offset` (the offset-behind path in
+/// `tui_turn_state::jsonl_ready_for_input`), which means a final answer is
+/// already persisted past the inflight watermark. The companion inflight guard
+/// (`inflight_state_allows_idle_tmux_repair`) only inspects the streaming
+/// `full_response`, so an empty-stream + JSONL-terminal-answer row passes both
+/// guards and reaches `clear_inflight_state`, dropping text that
+/// `extract_response_from_output_pub(output_path, last_offset)` could still
+/// recover. The recovery_engine normal path (extract → relay → clear) never has
+/// this asymmetry. This guard reads the same offset slice read-only: if it
+/// yields non-empty relayable text, the caller skips the destructive clear and
+/// falls through to the non-destructive rebind path (which preserves the
+/// inflight/output so normal relay/recovery delivers the text). On extract
+/// failure / IO error the function returns false → existing behavior (only the
+/// genuinely-empty tail still clears), so this is behavior-preserving.
+pub(crate) fn idle_tmux_repair_has_unrelayed_tail_answer(
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> bool {
+    let Some(state) = super::inflight::load_inflight_state(provider, channel_id) else {
+        return false;
+    };
+    let Some(output_path) = state
+        .output_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
+        return false;
+    };
+    // #3668 codex r3: only treat this as an answer worth preserving when there
+    // is TERMINAL completion evidence — a *successful* `result` record after
+    // `last_offset`. A hung / desynced turn with only partial assistant text and
+    // no terminal result must NOT suppress the destructive idle-clear / force-
+    // clean: otherwise the watchdog would skip it every tick forever, since
+    // #3645 far-backstop / normal recovery only advance `last_offset` on a
+    // terminal success. Requiring the success-result record keeps the guard to
+    // genuinely-deliverable, complete-but-unrelayed answers.
+    if super::recovery::success_result_end_offset_after_offset(output_path, state.last_offset)
+        .is_none()
+    {
+        return false;
+    }
+    let tail = super::recovery::extract_response_from_output_pub(output_path, state.last_offset);
+    !tail.trim().is_empty()
 }
 
 async fn apply_relay_recovery_decision(
@@ -770,6 +846,10 @@ async fn apply_relay_recovery_decision(
                     decision.channel_id,
                 )
                 .unwrap_or(false)
+                // #3668 F2: never destructively clear when a final answer is
+                // still persisted in JSONL after `last_offset` — fall through to
+                // the non-destructive rebind path so normal relay delivers it.
+                && !idle_tmux_repair_has_unrelayed_tail_answer(provider, decision.channel_id)
             {
                 let finish = mailbox_finish_turn(shared, provider, channel).await;
                 if let Some(token) = finish.removed_token.as_ref() {
@@ -804,6 +884,21 @@ async fn apply_relay_recovery_decision(
                     reattach_initial_offset: None,
                     reattach_error: None,
                 };
+            }
+            if let Some(owner_channel_id) = relay_frontier_dead_reattach_owner(decision)
+                && let Some((_, watcher)) = shared.tmux_watchers.remove(&owner_channel_id)
+            {
+                watcher.cancel.store(true, Ordering::Relaxed);
+                tracing::warn!(
+                    target: "agentdesk::discord::relay_recovery",
+                    provider = provider.as_str(),
+                    channel_id = decision.channel_id,
+                    watcher_owner_channel_id = owner_channel_id.get(),
+                    last_relay_offset = decision.evidence.last_relay_offset,
+                    last_capture_offset = ?decision.evidence.last_capture_offset,
+                    unread_bytes = ?decision.evidence.unread_bytes,
+                    "relay recovery cancelled live-looking watcher with dead relay frontier before reattach"
+                );
             }
             match registry
                 .rebind_inflight(
@@ -1159,6 +1254,11 @@ mod tests {
         assert_ne!(decision.action, RelayRecoveryActionKind::ObserveOnly);
         assert_eq!(decision.action, RelayRecoveryActionKind::ReattachWatcher);
         assert!(
+            decision.auto_heal.eligible,
+            "zero-frontier unread relay-dead turns must be eligible for bounded reattach"
+        );
+        assert_eq!(decision.auto_heal.skipped_reason, None);
+        assert!(
             decision.auto_heal.bounded,
             "relay-dead foreground turns must surface bounded recovery metadata"
         );
@@ -1177,6 +1277,49 @@ mod tests {
         );
         assert!(decision.evidence.watcher_owns_live_relay);
         assert_eq!(decision.evidence.active_turn, RelayActiveTurn::Foreground);
+        assert_eq!(
+            relay_frontier_dead_reattach_owner(&decision),
+            Some(ChannelId::new(1509350393350459434))
+        );
+    }
+
+    #[test]
+    fn watcher_owned_live_relay_with_relay_progress_is_not_frontier_dead_takeover() {
+        let snapshot = RelayHealthSnapshot {
+            provider: "claude".to_string(),
+            channel_id: 1509350393350459434,
+            active_turn: RelayActiveTurn::Foreground,
+            tmux_session: Some("AgentDesk-claude-adk-claude-pipe-e2e".to_string()),
+            tmux_alive: Some(true),
+            watcher_attached: true,
+            watcher_owner_channel_id: Some(1509350393350459434),
+            watcher_owns_live_relay: true,
+            bridge_inflight_present: true,
+            mailbox_has_cancel_token: true,
+            mailbox_active_user_msg_id: Some(9001),
+            bridge_current_msg_id: Some(9002),
+            last_relay_ts_ms: Some(1_777_001_234_000),
+            last_capture_offset: Some(7968),
+            last_relay_offset: 4096,
+            unread_bytes: Some(3872),
+            desynced: true,
+            ..snapshot()
+        };
+        let relay_stall_state = RelayStallClassifier::classify(&snapshot);
+        let decision = plan_relay_recovery(&snapshot, relay_stall_state, 1_000);
+
+        assert_eq!(relay_stall_state, RelayStallState::ActiveForegroundStream);
+        assert_eq!(decision.action, RelayRecoveryActionKind::ObserveOnly);
+        assert_eq!(relay_frontier_dead_reattach_owner(&decision), None);
+
+        let forced_dead_decision =
+            plan_relay_recovery(&snapshot, RelayStallState::TmuxAliveRelayDead, 1_000);
+        assert_eq!(
+            relay_frontier_dead_reattach_owner(&forced_dead_decision),
+            None,
+            "a live-owned watcher that already advanced its relay frontier must never be \
+             cancelled by the dead-frontier reattach path"
+        );
     }
 
     /// #3277 (Defect D) + deploy-preserved ownerless restore eligibility table:
@@ -1561,6 +1704,144 @@ mod tests {
         assert!(
             shared.dispatch.thread_parents.contains_key(&parent),
             "auto orphan cleanup must not apply other recovery action kinds"
+        );
+    }
+
+    // #3668 F2: the destructive idle-tmux clear must not drop a final answer that
+    // is still persisted in JSONL after `last_offset`. The guard reads the same
+    // offset slice via `extract_response_from_output_pub`; when it yields
+    // non-empty text the caller skips the destructive clear (rebind fall-
+    // through). When the tail is genuinely empty the guard is silent and the
+    // existing clear behavior is preserved.
+    struct AgentdeskRootGuard(Option<std::ffi::OsString>);
+    impl Drop for AgentdeskRootGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
+
+    fn write_inflight_with_output(
+        provider: &ProviderKind,
+        channel_id: u64,
+        output_path: &std::path::Path,
+        last_offset: u64,
+        jsonl_body: &str,
+    ) {
+        std::fs::write(output_path, jsonl_body).expect("write output jsonl");
+        let state = super::super::inflight::InflightTurnState::new(
+            provider.clone(),
+            channel_id,
+            Some("adk-cdx".to_string()),
+            7,
+            777,
+            7777,
+            "hello".to_string(),
+            None,
+            Some(format!("AgentDesk-codex-adk-cdx-{channel_id}")),
+            Some(output_path.to_string_lossy().to_string()),
+            None,
+            last_offset,
+        );
+        // full_response stays empty (streaming guard would pass): F2 reproduces
+        // the empty-stream + JSONL-terminal-answer asymmetry exactly.
+        assert!(state.full_response.is_empty());
+        super::super::inflight::save_inflight_state(&state).expect("save inflight");
+    }
+
+    #[test]
+    fn idle_tmux_repair_guard_detects_tail_answer_after_offset() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempfile::TempDir::new().unwrap();
+        let _root_guard = AgentdeskRootGuard(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
+        let provider = ProviderKind::Codex;
+        let channel_id = 3_668_001;
+        let output_path = temp.path().join("out.jsonl");
+
+        // A leading pre-offset record (consumed) followed by a terminal answer
+        // record after `last_offset`. `last_offset` points past the first line so
+        // only the final answer remains in the extracted slice.
+        let pre = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"old\"}]}}\n";
+        let post = "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"FINAL ANSWER\"}\n";
+        let last_offset = pre.len() as u64;
+        write_inflight_with_output(
+            &provider,
+            channel_id,
+            &output_path,
+            last_offset,
+            &format!("{pre}{post}"),
+        );
+
+        assert!(
+            idle_tmux_repair_has_unrelayed_tail_answer(&provider, channel_id),
+            "JSONL terminal answer after last_offset must block destructive clear"
+        );
+    }
+
+    #[test]
+    fn idle_tmux_repair_guard_silent_when_tail_empty() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempfile::TempDir::new().unwrap();
+        let _root_guard = AgentdeskRootGuard(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
+        let provider = ProviderKind::Codex;
+        let channel_id = 3_668_002;
+        let output_path = temp.path().join("out.jsonl");
+
+        // Only a pre-offset record exists; nothing relayable remains after
+        // `last_offset`, so the guard stays silent and the existing destructive
+        // clear behavior is preserved (behavior-preserving regression guard).
+        let body = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"old\"}]}}\n";
+        let last_offset = body.len() as u64;
+        write_inflight_with_output(&provider, channel_id, &output_path, last_offset, body);
+
+        assert!(
+            !idle_tmux_repair_has_unrelayed_tail_answer(&provider, channel_id),
+            "empty JSONL tail must not block the existing destructive clear path"
+        );
+    }
+
+    #[test]
+    fn idle_tmux_repair_guard_silent_when_partial_text_has_no_terminal_result() {
+        // #3668 codex r3: a hung/desynced turn that emitted partial assistant
+        // text after `last_offset` but NO terminal `result` record must NOT
+        // suppress the destructive clear — otherwise the watchdog would skip it
+        // every tick forever (recovery only advances the offset on terminal
+        // success). The guard requires success-result completion evidence.
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempfile::TempDir::new().unwrap();
+        let _root_guard = AgentdeskRootGuard(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
+        let provider = ProviderKind::Codex;
+        let channel_id = 3_668_003;
+        let output_path = temp.path().join("out.jsonl");
+
+        let pre = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"old\"}]}}\n";
+        let post = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"partial, still streaming...\"}]}}\n";
+        let last_offset = pre.len() as u64;
+        write_inflight_with_output(
+            &provider,
+            channel_id,
+            &output_path,
+            last_offset,
+            &format!("{pre}{post}"),
+        );
+
+        assert!(
+            !idle_tmux_repair_has_unrelayed_tail_answer(&provider, channel_id),
+            "partial assistant text without a terminal success result must not block force-clean"
         );
     }
 }

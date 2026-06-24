@@ -896,3 +896,34 @@
   clobbering it backward) and the commit path `max`-serializes its watermark
   against the reload, eliminating the backward-write race with the owner-gated
   `refresh_inflight_last_offset_*` advance.
+- #3671 (stall-watchdog force-clean deferral backstop): `health/stall_liveness.rs`
+  replaces the tick-count cleanup gate with an age-based absolute backstop. While
+  positive liveness is observed (`evaluate_stall_watchdog_liveness`) the force-clean
+  is deferred indefinitely up to `STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS` (4h, aligned
+  to the Codex per-turn hard ceiling); only a turn whose anchor age
+  (`started_at.max(boot)`, unchanged from `from_snapshot`) crosses that bound is
+  force-cleaned (finite detection ceiling per #3582 R1), and a dead relay
+  (`reason_codes == none`) still cleans on the first tick. The age is the turn's own
+  `judgment_basis.inflight_age_secs` threaded in from `health/recovery.rs`. This is
+  **worker-local**: the watchdog runs against the node-local per-channel inflight
+  snapshot and its own `DEFERRAL_STATE`/`OFFSET_OBSERVATIONS` dashmaps. No lease,
+  durable queue, leader/standby ownership, gateway startup order, or singleton
+  assumption is touched.
+- #3646 (relay-owner observability — OBSERVATION-ONLY): splits the relay flight
+  recorder's collapsed `relay_owner_kind` into two distinct signals so the #3607
+  None-ledger vs Watcher-finalize ambiguity is PG-resolvable, and adds three
+  terminal lifecycle events (`terminal_body_commit` / `terminal_ui_transition` /
+  `inflight_clear` + a NON-FATAL invariant signal). The watcher side
+  (`tmux_watcher.rs`) emits `inflight_relay_owner` from the node-local pre-relay
+  inflight snapshot; the finalizer side (`turn_finalizer.rs`) emits
+  `finalizer_ledger_owner` reading the **worker-local** `turn_finalizer` actor
+  ledger entry's `relay_owner` — the same per-process in-memory map already
+  documented above (re-seeded by #3293's `reseed_watcher_owned_finalizer_ledger`).
+  The two signals JOIN on `discord:<channel>:<user_msg_id>`. All payload/derivation
+  logic lives in the non-hot `relay_owner_observability.rs`. NO relay/cleanup
+  behaviour, branch, ordering, or condition changes; the emits only gate the EMIT
+  (never the cleanup) and the invariant is an error-event + `debug_assert!` (no
+  operational panic). **Worker-local**: both owner reads are node-local (inflight
+  file + in-process ledger on the node that holds the live pane); the events flow
+  through the existing `emit_inflight_lifecycle_event` PG/jsonl sink. No lease,
+  durable queue, leader/standby ownership, or singleton assumption is introduced.
