@@ -9,7 +9,7 @@
 /// Check whether a **successful** result record exists after the given offset.
 /// Error results are not considered completion — they should not trigger the
 /// recovery completed-turn path (✅ reaction, idle dispatch, etc.).
-pub(super) fn success_result_end_offset_after_offset(
+pub(in crate::services::discord) fn success_result_end_offset_after_offset(
     output_path: &str,
     start_offset: u64,
 ) -> Option<u64> {

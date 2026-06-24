@@ -676,6 +676,19 @@ pub(crate) fn idle_tmux_repair_has_unrelayed_tail_answer(
     else {
         return false;
     };
+    // #3668 codex r3: only treat this as an answer worth preserving when there
+    // is TERMINAL completion evidence — a *successful* `result` record after
+    // `last_offset`. A hung / desynced turn with only partial assistant text and
+    // no terminal result must NOT suppress the destructive idle-clear / force-
+    // clean: otherwise the watchdog would skip it every tick forever, since
+    // #3645 far-backstop / normal recovery only advance `last_offset` on a
+    // terminal success. Requiring the success-result record keeps the guard to
+    // genuinely-deliverable, complete-but-unrelayed answers.
+    if super::recovery::success_result_end_offset_after_offset(output_path, state.last_offset)
+        .is_none()
+    {
+        return false;
+    }
     let tail = super::recovery::extract_response_from_output_pub(output_path, state.last_offset);
     !tail.trim().is_empty()
 }
@@ -1603,6 +1616,41 @@ mod tests {
         assert!(
             !idle_tmux_repair_has_unrelayed_tail_answer(&provider, channel_id),
             "empty JSONL tail must not block the existing destructive clear path"
+        );
+    }
+
+    #[test]
+    fn idle_tmux_repair_guard_silent_when_partial_text_has_no_terminal_result() {
+        // #3668 codex r3: a hung/desynced turn that emitted partial assistant
+        // text after `last_offset` but NO terminal `result` record must NOT
+        // suppress the destructive clear — otherwise the watchdog would skip it
+        // every tick forever (recovery only advances the offset on terminal
+        // success). The guard requires success-result completion evidence.
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempfile::TempDir::new().unwrap();
+        let _root_guard = AgentdeskRootGuard(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
+        let provider = ProviderKind::Codex;
+        let channel_id = 3_668_003;
+        let output_path = temp.path().join("out.jsonl");
+
+        let pre = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"old\"}]}}\n";
+        let post = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"partial, still streaming...\"}]}}\n";
+        let last_offset = pre.len() as u64;
+        write_inflight_with_output(
+            &provider,
+            channel_id,
+            &output_path,
+            last_offset,
+            &format!("{pre}{post}"),
+        );
+
+        assert!(
+            !idle_tmux_repair_has_unrelayed_tail_answer(&provider, channel_id),
+            "partial assistant text without a terminal success result must not block force-clean"
         );
     }
 }
