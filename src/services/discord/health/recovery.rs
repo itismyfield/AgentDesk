@@ -672,6 +672,18 @@ pub async fn clear_idle_tmux_stale_turn(
         return None;
     }
 
+    // #3668 F2: the stall-watchdog idle-clear path shares the same
+    // ready/inflight gates as the relay_recovery ReattachWatcher path, so it
+    // needs the same guard — never destructively clear when a final answer is
+    // still persisted in JSONL after `last_offset`. Skip the clear (return None)
+    // and let normal relay/recovery deliver the tail answer; otherwise this
+    // path would delete the very state F2 preserves on the other path.
+    if crate::services::discord::relay_recovery::idle_tmux_repair_has_unrelayed_tail_answer(
+        &provider, channel_id,
+    ) {
+        return None;
+    }
+
     let channel_id = ChannelId::new(channel_id);
     let shared = shared_for_provider(registry, &provider, channel_id).await?;
     let finish = discord::mailbox_finish_turn(&shared, &provider, channel_id).await;
