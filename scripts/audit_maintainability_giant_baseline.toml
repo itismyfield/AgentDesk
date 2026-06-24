@@ -545,7 +545,13 @@
 # cap + one-shot ceiling warn and the auto-extend `clamp_auto_extend_deadline_ms`
 # clamp (reusing the shared discord/mod.rs helpers). +54 prod LoC (the new test
 # module is excluded from the production count). 1462 -> 1516.
-"src/services/discord/router/message_handler/headless_turn.rs" = 1516
+# #family-profile-probe: raised 1516 -> 1529 (+13 prod LoC; the dm_fresh_routine
+# test module is excluded). `dm_fresh_routine_turn` discriminator + turn-start
+# clear_provider_session() + skipping the DB/live provider-session restore for
+# fresh DM routine turns (codex review P1) so each fresh DM routine run starts a
+# fresh provider context. Bugfix wiring at the existing session-load/restore
+# site; splitting headless_turn.rs is out of scope.
+"src/services/discord/router/message_handler/headless_turn.rs" = 1529
 # #3038 S2: lowered 1054 -> 954 (-100) as the session-override bookkeeping
 # helpers (fast-mode reset-entry codec + reset-pending probes/clears +
 # enablement probes + sync_session_reset_pending) moved verbatim to the
