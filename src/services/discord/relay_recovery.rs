@@ -661,7 +661,7 @@ fn idle_tmux_repair_ready_for_input(
 /// inflight/output so normal relay/recovery delivers the text). On extract
 /// failure / IO error the function returns false → existing behavior (only the
 /// genuinely-empty tail still clears), so this is behavior-preserving.
-pub(in crate::services::discord) fn idle_tmux_repair_has_unrelayed_tail_answer(
+pub(crate) fn idle_tmux_repair_has_unrelayed_tail_answer(
     provider: &ProviderKind,
     channel_id: u64,
 ) -> bool {

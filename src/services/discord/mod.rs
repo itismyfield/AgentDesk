@@ -40,7 +40,7 @@ mod queue_io;
 mod queued_placeholders_store;
 mod reaction_cleanup;
 mod relay_health;
-mod relay_recovery;
+pub(crate) mod relay_recovery;
 #[cfg(unix)] // #3089 A0: shared ReplaceLongMessageOutcome disposition policy.
 mod replace_outcome_policy;
 pub(crate) mod response_sanitizer;
