@@ -61,7 +61,11 @@
 # the sibling NON-hot `relay_owner_observability.rs`; this is the minimal frozen-file
 # cost (the emits are guarded only to gate the EMIT, never the cleanup, and the
 # invariant's bool return is discarded). See #3646.
-"src/services/discord/tmux_watcher.rs" = 10224
+# #3646 codex review #3678: 10224 -> 10230 (+6) — preserve the legacy
+# `relay_owner_kind` tracing field as a back-compat alias alongside the new
+# `inflight_relay_owner` (lifted the owner-string into a `let` so both fields can
+# emit it). Tracing fields only, no control-flow change.
+"src/services/discord/tmux_watcher.rs" = 10230
 "src/services/discord/tui_prompt_relay.rs" = 7789
 # #3560: 6612 -> 6621 (+9), reviewable admission — footer-mode separate-panel
 # migration reconcile call + comment at the resume entry. Helper body lives in

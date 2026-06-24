@@ -4552,6 +4552,19 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 watcher_provider.as_str(),
             );
         }
+        // #3646 OBSERVATION-ONLY owner split: this is the INFLIGHT-snapshot owner
+        // ONLY. The collapsed `="none"` could mean either a real None-ledger turn
+        // OR "bridge cleared inflight but the ledger is still Watcher/finalized" —
+        // the #3607 ambiguity. The finalizer-side `finalizer_ledger_owner` event
+        // (ledger entry's relay_owner, same turn_id) supplies the second signal and
+        // the two JOIN in PG. Computed once so we can emit it under BOTH the new
+        // `inflight_relay_owner` name AND the legacy `relay_owner_kind` alias
+        // (codex review #3678: keep the old field so existing dashboards/alerts/
+        // runbooks that grep `relay_owner_kind=` don't break).
+        let inflight_relay_owner_kind = inflight_before_relay
+            .as_ref()
+            .map(|state| state.effective_relay_owner_kind().as_str())
+            .unwrap_or("none");
         tracing::info!(
             target: "agentdesk::relay_flight_recorder",
             provider = watcher_provider.as_str(),
@@ -4565,18 +4578,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             any_tool_used = tool_state.any_tool_used,
             has_post_tool_text = tool_state.has_post_tool_text,
             inflight_present = inflight_before_relay.is_some(),
-            // #3646 OBSERVATION-ONLY owner split: this is the INFLIGHT-snapshot
-            // owner ONLY. The collapsed `relay_owner_kind="none"` could mean
-            // either a real None-ledger turn OR "bridge cleared inflight but the
-            // ledger is still Watcher/finalized" — the #3607 ambiguity. Renamed to
-            // `inflight_relay_owner` so the finalizer-side `finalizer_ledger_owner`
-            // event (ledger entry's relay_owner, same turn_id) supplies the second
-            // signal and the two JOIN in PG. Field rename only — control flow
-            // unchanged (this is a tracing field, not a branch).
-            inflight_relay_owner = inflight_before_relay
-                .as_ref()
-                .map(|state| state.effective_relay_owner_kind().as_str())
-                .unwrap_or("none"),
+            // #3646: new disambiguated name. Field rename/add only — control flow
+            // unchanged (these are tracing fields, not branches).
+            inflight_relay_owner = inflight_relay_owner_kind,
+            // #3646: legacy alias preserved for backward-compatible log greps.
+            relay_owner_kind = inflight_relay_owner_kind,
             session_bound_enabled = session_bound_discord_delivery_enabled,
             fully_mirrored = session_bound_relay_turn_fully_mirrored,
             frame_ack = session_bound_relay_frame_ack_reached(all_data_session_bound_relay_ack.as_ref()),

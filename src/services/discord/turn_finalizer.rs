@@ -941,10 +941,19 @@ async fn handle_terminal(
     // so the two owner signals JOIN in PG and the #3607 "None-ledger vs
     // Watcher-finalize" ambiguity resolves. Read-only: it neither inspects nor
     // changes the clear_inflight / defer / finalize decision that follows.
+    //
+    // codex review #3678: key on the RESOLVED entry identity (`entry.turn_key`),
+    // NOT the submitted `key`. A channel-only id-0 terminal collapses onto the
+    // channel's real registered turn via `resolve_ledger_key`; that entry's
+    // `turn_key` carries the real `user_msg_id`. Keying on the submitted `key`
+    // would emit `user_msg_id=0` for exactly those collapsed terminals, dropping
+    // the turn_id and breaking the JOIN against the watcher event — the #3607
+    // cases this signal exists to disambiguate. Genuine orphans (id-0 with no
+    // live entry) still carry id-0 here, which is correct (no real turn exists).
     super::relay_owner_observability::emit_finalizer_ledger_owner(
         entry.provider.as_str(),
-        key.channel_id.get(),
-        key.user_msg_id,
+        entry.turn_key.channel_id.get(),
+        entry.turn_key.user_msg_id,
         entry.relay_owner.as_str(),
         terminal_event_kind_str(&event),
         ctx.clear_inflight,
