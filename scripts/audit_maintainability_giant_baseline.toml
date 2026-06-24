@@ -363,7 +363,15 @@
 # destructive branch (idle-clear nor desynced force-clean) drops a final answer
 # still persisted in JSONL after last_offset. A correctness guard against
 # permanent answer loss; splitting recovery.rs is out of scope for this fix.
-"src/services/discord/health/recovery.rs" = 2733
+# #3671: raised 2733 -> 2736 (+3) — deliberate admission. The stall-watchdog
+# liveness gate now passes the turn's RAW restart-invariant age
+# (`judgment_basis.turn_age_secs`, NOT the boot-floored anchor age) into
+# `evaluate_stall_watchdog_liveness` so the force-clean defers indefinitely under
+# positive liveness up to an age-based absolute backstop that repeated restarts
+# cannot reset, instead of a brittle tick count (codex review #3672 finding). One
+# new argument line plus a 2-line explanatory comment at the existing call site;
+# splitting recovery.rs is out of scope.
+"src/services/discord/health/recovery.rs" = 2736
 # #3629: +81 (2641 -> 2722) for the NO_REPLY/empty orphan inflight cleanup in the
 # completed-stale leak-detection path: the `completed_stale_no_answer_orphan_should_clean`
 # pure seam (+ safety doc), the identity-guarded clear + lifecycle telemetry at the
