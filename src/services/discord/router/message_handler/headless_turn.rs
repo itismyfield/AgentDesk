@@ -1,5 +1,32 @@
 use super::*;
 
+/// #family-profile-probe: should this headless turn start from a FRESH provider
+/// session? A DM routine turn whose execution strategy is not explicitly
+/// "persistent" must NOT resume the per-channel provider session — the probe
+/// design treats each run as a fresh provider context with memento (caseId) as
+/// the only cross-run continuity. The per-channel session cache otherwise keeps
+/// resuming the same Claude session, accumulating context and leaking
+/// intermediate narrative across runs. Scoped to DM turns (`is_dm`); non-DM,
+/// persistent, and user-facing turns return false and keep their resumed session.
+fn dm_fresh_routine_turn(metadata: Option<&serde_json::Value>) -> bool {
+    let Some(metadata) = metadata else {
+        return false;
+    };
+    let is_dm = metadata
+        .get("is_dm")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if !is_dm {
+        return false;
+    }
+    // Only an explicit "persistent" strategy keeps the resumed session; an absent
+    // or "fresh" strategy resets (the routine default is "fresh").
+    metadata
+        .get("execution_strategy")
+        .and_then(|value| value.as_str())
+        != Some("persistent")
+}
+
 pub(in crate::services::discord) async fn start_headless_turn(
     ctx: &serenity::Context,
     channel_id: ChannelId,
@@ -259,6 +286,17 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     }
     let (mut session_id, mut memento_context_loaded, mut current_path) = {
         let mut data = shared.core.lock().await;
+        // #family-profile-probe: clear any resumed per-channel provider session
+        // for a fresh DM routine turn BEFORE loading runtime state, so the turn
+        // starts from a fresh provider context instead of resuming the
+        // accumulated DM session. This runs at the turn-start boundary (never
+        // mid-turn) and is scoped to DM headless turns; memento (caseId) remains
+        // the only cross-run continuity.
+        if dm_fresh_routine_turn(metadata.as_ref())
+            && let Some(session) = data.sessions.get_mut(&channel_id)
+        {
+            session.clear_provider_session();
+        }
         if let Some(info) = load_session_runtime_state(&mut data.sessions, channel_id) {
             if let Some(channel_name) = resolved_channel_name_for_session.as_ref()
                 && let Some(session) = data.sessions.get_mut(&channel_id)
@@ -1557,5 +1595,58 @@ mod headless_hard_ceiling_tests {
             new_dl < proposed_dl,
             "the clamp must lower the proposed extension to the ceiling"
         );
+    }
+}
+
+#[cfg(test)]
+mod dm_fresh_routine_tests {
+    //! #family-profile-probe: the discriminator that decides whether a headless
+    //! turn clears its resumed per-channel provider session at turn start. A DM
+    //! routine turn (default/"fresh" strategy) must reset so each probe run is a
+    //! fresh provider context; only an explicit "persistent" strategy or a
+    //! non-DM turn keeps the resumed session.
+    use super::dm_fresh_routine_turn;
+    use serde_json::json;
+
+    #[test]
+    fn dm_turn_without_strategy_is_fresh() {
+        // The probe routines omit execution_strategy (default fresh) → reset.
+        assert!(dm_fresh_routine_turn(Some(&json!({ "is_dm": true }))));
+    }
+
+    #[test]
+    fn dm_turn_with_fresh_strategy_is_fresh() {
+        assert!(dm_fresh_routine_turn(Some(&json!({
+            "is_dm": true,
+            "execution_strategy": "fresh"
+        }))));
+    }
+
+    #[test]
+    fn dm_turn_with_persistent_strategy_keeps_session() {
+        // Only an explicit "persistent" DM routine preserves its resumed session.
+        assert!(!dm_fresh_routine_turn(Some(&json!({
+            "is_dm": true,
+            "execution_strategy": "persistent"
+        }))));
+    }
+
+    #[test]
+    fn non_dm_turn_is_never_reset() {
+        // A non-DM (channel/thread) headless turn keeps its resumed session even
+        // with a fresh strategy — scoped strictly to DM turns.
+        assert!(!dm_fresh_routine_turn(Some(&json!({
+            "is_dm": false,
+            "execution_strategy": "fresh"
+        }))));
+        // is_dm absent ⇒ treated as non-DM.
+        assert!(!dm_fresh_routine_turn(Some(&json!({
+            "execution_strategy": "fresh"
+        }))));
+    }
+
+    #[test]
+    fn absent_metadata_is_not_reset() {
+        assert!(!dm_fresh_routine_turn(None));
     }
 }
