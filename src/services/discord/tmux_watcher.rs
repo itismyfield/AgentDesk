@@ -4565,7 +4565,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             any_tool_used = tool_state.any_tool_used,
             has_post_tool_text = tool_state.has_post_tool_text,
             inflight_present = inflight_before_relay.is_some(),
-            relay_owner_kind = inflight_before_relay
+            // #3646 OBSERVATION-ONLY owner split: this is the INFLIGHT-snapshot
+            // owner ONLY. The collapsed `relay_owner_kind="none"` could mean
+            // either a real None-ledger turn OR "bridge cleared inflight but the
+            // ledger is still Watcher/finalized" — the #3607 ambiguity. Renamed to
+            // `inflight_relay_owner` so the finalizer-side `finalizer_ledger_owner`
+            // event (ledger entry's relay_owner, same turn_id) supplies the second
+            // signal and the two JOIN in PG. Field rename only — control flow
+            // unchanged (this is a tracing field, not a branch).
+            inflight_relay_owner = inflight_before_relay
                 .as_ref()
                 .map(|state| state.effective_relay_owner_kind().as_str())
                 .unwrap_or("none"),
@@ -5470,6 +5478,43 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 runtime_binding_candidate_offset.unwrap_or(current_offset),
             );
 
+        // #3646 OBSERVATION-ONLY (event 1/3 — terminal_body_commit): emit once the
+        // body commit decision is in hand. The `if terminal_output_committed` guard
+        // only GATES the emit, never the cleanup; `inflight_relay_owner` (snapshot)
+        // and the finalizer-side `ledger_relay_owner` JOIN on turn_id to resolve the
+        // #3607 None-ledger vs Watcher-finalize confusion. Orchestration lives in
+        // relay_owner_observability (non-hot file); this is a thin pass-through.
+        if terminal_output_committed {
+            crate::services::discord::relay_owner_observability::emit_terminal_body_commit(
+                watcher_provider.as_str(),
+                channel_id.get(),
+                inflight_before_relay
+                    .as_ref()
+                    .and_then(|s| s.dispatch_id.as_deref()),
+                inflight_before_relay
+                    .as_ref()
+                    .and_then(|s| s.session_key.as_deref()),
+                pinned_finalizer_turn_id(
+                    inflight_before_relay.as_ref(),
+                    &tmux_session_name,
+                    current_offset,
+                ),
+                pinned_finalize_user_msg_id(
+                    inflight_before_relay.as_ref(),
+                    &tmux_session_name,
+                    current_offset,
+                ),
+                status_panel_msg_id.map(|id| id.get()).unwrap_or(0),
+                turn_data_start_offset,
+                terminal_event_consumed_offset(current_offset, &all_data),
+                inflight_before_relay
+                    .as_ref()
+                    .map(|state| state.effective_relay_owner_kind().as_str())
+                    .unwrap_or("none"),
+                terminal_delivery_committed,
+            );
+        }
+
         // #2161 TUI completion gate: ClaudeTui can land a `result` JSONL event before the
         // pane is quiescent; without it the user sees `응답 완료` while the pane still
         // streams. On gate timeout (Codex H2) do NOT emit `TurnCompleted` — the sweeper /
@@ -5680,6 +5725,42 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // frame ends and the next frame re-seeds `status_panel_msg_id`, so the
             // top-of-interval abandon reclaim never observes this finalized panel's
             // id again — no explicit reset needed here.
+        }
+
+        // #3646 OBSERVATION-ONLY (event 2/3 — terminal_ui_transition): label the
+        // visible-UI path the watcher took. Reads the same signals the EDIT/finalize
+        // block already branched on (`watcher_tui_gate_outcome` + the #3142
+        // stale-newer gate) — no new decision, only RECORDS committed /
+        // gate_suppressed / stale_identity. The guard gates the EMIT, not the
+        // cleanup. Orchestration lives in relay_owner_observability (non-hot file).
+        if terminal_output_committed {
+            let ui_transition_pane_quiescent = match watcher_tui_gate_outcome {
+                TuiCompletionGateOutcome::ConfirmedIdle => Some(true),
+                TuiCompletionGateOutcome::TimedOut => Some(false),
+                // NotGated / SkippedDead: quiescence was not probed.
+                TuiCompletionGateOutcome::NotGated | TuiCompletionGateOutcome::SkippedDead => None,
+            };
+            crate::services::discord::relay_owner_observability::emit_terminal_ui_transition(
+                watcher_provider.as_str(),
+                channel_id.get(),
+                inflight_before_relay
+                    .as_ref()
+                    .and_then(|s| s.dispatch_id.as_deref()),
+                inflight_before_relay
+                    .as_ref()
+                    .and_then(|s| s.session_key.as_deref()),
+                pinned_finalize_user_msg_id(
+                    inflight_before_relay.as_ref(),
+                    &tmux_session_name,
+                    current_offset,
+                ),
+                crate::services::discord::relay_owner_observability::TerminalUiOutcome::derive(
+                    inflight_before_relay_is_stale_newer_turn,
+                    watcher_tui_gate_outcome.should_emit_completion(),
+                ),
+                &format!("{watcher_tui_gate_outcome:?}"),
+                ui_transition_pane_quiescent,
+            );
         }
 
         // Advance the shared confirmed-delivery watermark on any committed
@@ -6353,6 +6434,28 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         "has_assistant_response": has_assistant_response,
                         "full_response_len": full_response.len(),
                     }),
+                );
+                // #3646 OBSERVATION-ONLY (event 3/3 — inflight_clear + invariant
+                // signal): the committed-output, non-stale watcher clear — the exact
+                // #3607 chokepoint. The clear ABOVE has already run; this only
+                // RECORDS the live lifecycle signals and fires a NON-FATAL
+                // ERROR-level invariant signal if a committed terminal was cleared
+                // with neither a visible UI completion nor a persisted obligation
+                // (#3607). Never gates cleanup. `terminal_ui_obligation_persisted` is
+                // `false` on the watcher path (obligations are the bridge
+                // gate-timeout path; the watcher's TimedOut gate routes through the
+                // finalizer GateTimeout submit, which suppresses THIS clear via
+                // `lifecycle_stage_paused`). Orchestration + the non-fatal invariant
+                // live in relay_owner_observability (non-hot file).
+                crate::services::discord::relay_owner_observability::emit_inflight_clear_with_invariant(
+                    provider_kind.as_str(),
+                    channel_id.get(),
+                    watcher_dispatch_id_owned.as_deref(),
+                    watcher_session_key_owned.as_deref(),
+                    watcher_turn_id.as_deref(),
+                    terminal_delivery_committed,
+                    terminal_output_committed && watcher_tui_gate_outcome.should_emit_completion(),
+                    false,
                 );
             }
             // codex P2 (#1670): cleanup (mailbox_finish_turn + cancel_token

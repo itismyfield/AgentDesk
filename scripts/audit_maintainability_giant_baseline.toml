@@ -84,7 +84,15 @@
 # real `wait_for_session_bound_relay_delivery_ack` target-none failure. NO new
 # direct send / behavior change — provenance/aggregation classification only.
 # #3610 PR-1d: watcher legacy long-chunk arm anchor instrumentation (+M4 reasoning comments)
-"src/services/discord/tmux_watcher.rs" = 6970
+# #3646 raised 6970 -> 7059 (+89 prod LoC): OBSERVATION-ONLY relay-owner split +
+# three terminal lifecycle event emits (terminal_body_commit / terminal_ui_transition /
+# inflight_clear + a NON-FATAL invariant signal). NO relay/cleanup behaviour change —
+# the flight-recorder owner field was split (one tracing field) and three thin
+# pass-through emit call sites were added; all orchestration/payload/invariant logic
+# lives in the sibling non-hot relay_owner_observability.rs. The emits only gate the
+# EMIT (never the cleanup); the invariant is error-event + debug_assert (no operational
+# panic). Resolves the #3607 None-ledger vs Watcher-finalize ambiguity.
+"src/services/discord/tmux_watcher.rs" = 7059
 # #3038 tmux_watcher S1 child modules, frozen at landed production LoC.
 "src/services/discord/tmux_watcher/commit_decisions.rs" = 140
 "src/services/discord/tmux_watcher/completion_gate.rs" = 275
@@ -537,7 +545,13 @@
 # tunables + terminal-or-defer verdict pair (turn_finalizer/watcher_backstop.rs)
 # into child modules. Pure move; each child is well under the 1000-prod-LoC
 # giant threshold so no new ratchet/registry entry is needed.
-"src/services/discord/turn_finalizer.rs" = 1337
+# #3646 raised 1337 -> 1364 (+27 prod LoC): OBSERVATION-ONLY finalizer_ledger_owner
+# companion emit + the `terminal_event_kind_str` wire-string helper. The actor-owned
+# ledger entry's `relay_owner` is the SECOND owner signal the watcher cannot read
+# synchronously; it is emitted (keyed on the same turn_id) right after the Phase gate
+# so it JOINs the watcher terminal_body_commit in PG. Read-only: it does NOT inspect or
+# change the clear_inflight / defer / finalize decision. Resolves #3607 owner ambiguity.
+"src/services/discord/turn_finalizer.rs" = 1364
 # #3557 (A) codex r2: the headless watchdog was missing the per-turn hard
 # ceiling cap that the foreground intake path already had — and it also
 # `mark_async_managed`s the token (sync watchdog stops enforcing), so this async

@@ -219,6 +219,18 @@ pub(in crate::services::discord) enum TerminalEvent {
     RelayMiss,
 }
 
+/// #3646 OBSERVATION-ONLY: stable wire string for the `finalizer_ledger_owner`
+/// event's `terminal_event` field (avoids leaking `GateTimeout`'s inner struct
+/// into the payload via `Debug`).
+fn terminal_event_kind_str(event: &TerminalEvent) -> &'static str {
+    match event {
+        TerminalEvent::Complete => "complete",
+        TerminalEvent::Cancel => "cancel",
+        TerminalEvent::GateTimeout { .. } => "gate_timeout",
+        TerminalEvent::RelayMiss => "relay_miss",
+    }
+}
+
 /// Per-submission knobs that keep each routed call-site behaviourally
 /// identical to its pre-#3016 inline sequence during the incremental window.
 /// Routed sites preserve their old side-effects; only ownership moves.
@@ -920,6 +932,23 @@ async fn handle_terminal(
         }
         Phase::Pending => {}
     }
+
+    // #3646 OBSERVATION-ONLY (finalizer_ledger_owner companion): emit the
+    // actor-owned ledger entry's `relay_owner` — the SECOND owner signal the
+    // watcher-side `terminal_body_commit` event cannot read (the ledger lives on
+    // this actor task; a synchronous cross-task query from the watcher would be
+    // new behaviour). Keyed on the same `discord:<channel>:<user_msg_id>` turn id
+    // so the two owner signals JOIN in PG and the #3607 "None-ledger vs
+    // Watcher-finalize" ambiguity resolves. Read-only: it neither inspects nor
+    // changes the clear_inflight / defer / finalize decision that follows.
+    super::relay_owner_observability::emit_finalizer_ledger_owner(
+        entry.provider.as_str(),
+        key.channel_id.get(),
+        key.user_msg_id,
+        entry.relay_owner.as_str(),
+        terminal_event_kind_str(&event),
+        ctx.clear_inflight,
+    );
 
     // Gate-timeout with a still-busy pane AND a live relay owner is the only
     // event that defers instead of finalizing now.
