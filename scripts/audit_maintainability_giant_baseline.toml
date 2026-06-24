@@ -545,14 +545,15 @@
 # cap + one-shot ceiling warn and the auto-extend `clamp_auto_extend_deadline_ms`
 # clamp (reusing the shared discord/mod.rs helpers). +54 prod LoC (the new test
 # module is excluded from the production count). 1462 -> 1516.
-# #family-profile-probe: raised 1516 -> 1533 (+17 prod LoC; the dm_fresh_routine
+# #family-profile-probe: raised 1516 -> 1543 (+27 prod LoC; the dm_fresh_routine
 # test module is excluded). `dm_fresh_routine_turn` discriminator routes a fresh
 # DM routine turn through the shared `/goal fresh` machinery (force_fresh =
-# goal_fresh || dm_fresh): thorough clear + DB/live restore skip + launch fresh
-# flag (codex review P1/R2 — in-memory clear alone is undone by the persisted id
-# and the live tmux pane is reused). Bugfix wiring at the existing session-load/
-# restore/launch site; splitting headless_turn.rs is out of scope.
-"src/services/discord/router/message_handler/headless_turn.rs" = 1533
+# goal_fresh || dm_fresh): thorough clear + Claude TUI runtime-binding clear +
+# DB/live restore skip + launch fresh flag — closing all four session-reuse
+# layers (in-memory, DB, Codex wrapper, Claude TUI runtime-binding recovery)
+# codex review P1/R2/R3. Bugfix wiring at the existing session-load/restore/
+# launch site; splitting headless_turn.rs is out of scope.
+"src/services/discord/router/message_handler/headless_turn.rs" = 1543
 # #3038 S2: lowered 1054 -> 954 (-100) as the session-override bookkeeping
 # helpers (fast-mode reset-entry codec + reset-pending probes/clears +
 # enablement probes + sync_session_reset_pending) moved verbatim to the

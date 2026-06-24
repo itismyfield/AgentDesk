@@ -640,6 +640,16 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
             &mut session_strategy_reason,
         )
         .await;
+        // #family-profile-probe (codex review R3): the in-memory/DB/stale clears
+        // above do NOT touch the Claude TUI runtime binding. With a live tmux
+        // pane, `recover_claude_tui_session_resolution_from_runtime_binding`
+        // (claude.rs) flips `resume` back on even when `session_id` is None, so
+        // the pane is warm-reused. Clear that binding too so a fresh DM/goal turn
+        // cold-starts instead of resuming the live pane. (The Codex wrapper path
+        // already honors `force_fresh_provider_session` at launch.)
+        if let Some(ref tmux_session) = tmux_session_name {
+            crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(tmux_session);
+        }
     }
     let effective_prompt: std::borrow::Cow<str> = if goal_fresh {
         std::borrow::Cow::Owned(rewrite_fresh_goal_prompt(prompt))
