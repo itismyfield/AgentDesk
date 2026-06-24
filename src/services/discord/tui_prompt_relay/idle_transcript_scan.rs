@@ -43,6 +43,7 @@ pub(super) enum CodexIdleRolloutScan {
     Prompt {
         prompt: String,
         line_end_offset: u64,
+        entry_id: Option<String>,
     },
 }
 
@@ -279,13 +280,142 @@ pub(super) fn scan_codex_idle_rollout_for_prompt(
             }
             continue;
         };
-        if let Some(prompt) =
-            crate::services::tui_prompt_dedupe::extract_codex_rollout_user_prompt(&json)
+        if let Some((prompt, entry_id)) =
+            crate::services::tui_prompt_dedupe::extract_codex_rollout_user_prompt_with_entry_id(
+                &json,
+            )
         {
             return Ok(CodexIdleRolloutScan::Prompt {
                 prompt,
                 line_end_offset: offset,
+                entry_id,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_idle_rollout_scan_finds_user_prompt_and_stops_at_prompt_end() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let rollout = dir.path().join("rollout.jsonl");
+        let before = "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s1\"}}\n";
+        let prompt = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"direct prompt\"}]}}\n";
+        let after = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}}\n";
+        std::fs::write(&rollout, format!("{before}{prompt}{after}")).expect("write rollout");
+
+        assert_eq!(
+            scan_codex_idle_rollout_for_prompt(&rollout, 0).expect("scan"),
+            CodexIdleRolloutScan::Prompt {
+                prompt: "direct prompt".to_string(),
+                line_end_offset: (before.len() + prompt.len()) as u64,
+                entry_id: None,
+            }
+        );
+        assert_eq!(
+            scan_codex_idle_rollout_for_prompt(&rollout, (before.len() + prompt.len()) as u64)
+                .expect("scan after prompt"),
+            CodexIdleRolloutScan::NoPrompt {
+                offset: (before.len() + prompt.len() + after.len()) as u64,
+            }
+        );
+    }
+
+    #[test]
+    fn codex_idle_rollout_scan_preserves_partial_trailing_jsonl() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let rollout = dir.path().join("rollout.jsonl");
+        let complete = "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s1\"}}\n";
+        let partial =
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\"";
+        std::fs::write(&rollout, format!("{complete}{partial}")).expect("write rollout");
+
+        assert_eq!(
+            scan_codex_idle_rollout_for_prompt(&rollout, 0).expect("scan partial"),
+            CodexIdleRolloutScan::NoPrompt {
+                offset: complete.len() as u64,
+            }
+        );
+    }
+
+    #[test]
+    fn codex_idle_rollout_scan_restarts_when_file_shrinks() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let rollout = dir.path().join("rollout.jsonl");
+        let prompt = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"after shrink\"}]}}\n";
+        std::fs::write(&rollout, prompt).expect("write rollout");
+
+        assert_eq!(
+            scan_codex_idle_rollout_for_prompt(&rollout, 99_999).expect("scan shrunken"),
+            CodexIdleRolloutScan::Prompt {
+                prompt: "after shrink".to_string(),
+                line_end_offset: prompt.len() as u64,
+                entry_id: None,
+            }
+        );
+    }
+
+    #[test]
+    fn codex_idle_rollout_scan_threads_entry_id_into_replay_dedupe() {
+        let _guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap();
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let rollout = dir.path().join("rollout.jsonl");
+        let entry_id = "codex-user-entry-3676";
+        let prompt = format!(
+            "{{\"type\":\"response_item\",\"payload\":{{\"id\":\"{entry_id}\",\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"direct codex prompt\"}}]}}}}\n"
+        );
+        std::fs::write(&rollout, &prompt).expect("write rollout");
+
+        let (text, line_end_offset, scanned_entry_id) =
+            match scan_codex_idle_rollout_for_prompt(&rollout, 0).expect("scan") {
+                CodexIdleRolloutScan::Prompt {
+                    prompt,
+                    line_end_offset,
+                    entry_id,
+                } => (prompt, line_end_offset, entry_id),
+                other => panic!("expected Codex prompt, got {other:?}"),
+            };
+        assert_eq!(text, "direct codex prompt");
+        assert_eq!(line_end_offset, prompt.len() as u64);
+        assert_eq!(scanned_entry_id.as_deref(), Some(entry_id));
+
+        let first = crate::services::tui_prompt_dedupe::observe_prompt_by_tmux_with_entry_id_at(
+            crate::services::provider::ProviderKind::Codex.as_str(),
+            "AgentDesk-codex-entry-id",
+            &text,
+            scanned_entry_id.as_deref(),
+            chrono::Utc::now(),
+        );
+        assert_eq!(
+            first,
+            crate::services::tui_prompt_dedupe::PromptObservation::PublishedSshDirect
+        );
+
+        let (re_prompt, re_entry_id) =
+            match scan_codex_idle_rollout_for_prompt(&rollout, 0).expect("rescan") {
+                CodexIdleRolloutScan::Prompt {
+                    prompt, entry_id, ..
+                } => (prompt, entry_id),
+                other => panic!("expected rescan prompt, got {other:?}"),
+            };
+        assert_eq!(re_prompt, text);
+        assert_eq!(re_entry_id.as_deref(), Some(entry_id));
+        let second = crate::services::tui_prompt_dedupe::observe_prompt_by_tmux_with_entry_id_at(
+            crate::services::provider::ProviderKind::Codex.as_str(),
+            "AgentDesk-codex-entry-id",
+            &re_prompt,
+            re_entry_id.as_deref(),
+            chrono::Utc::now(),
+        );
+        assert_eq!(
+            second,
+            crate::services::tui_prompt_dedupe::PromptObservation::SuppressedReplayedEntry
+        );
     }
 }

@@ -11,7 +11,7 @@ use crate::services::discord::{self as discord, SharedData};
 use crate::services::provider::{CancelToken, ProviderKind};
 
 use super::HealthRegistry;
-use super::{relay_auto_heal, stall_liveness, watcher_respawn};
+use super::{relay_auto_heal, relay_dead_reattach, stall_liveness, watcher_respawn};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeTurnStopResult {
@@ -1524,27 +1524,19 @@ pub(crate) const STALL_WATCHDOG_INTERVAL_SECS: u64 = 30;
 /// recovered turn as "desynced" mid-bootstrap.
 pub(crate) const STALL_WATCHDOG_INITIAL_DELAY_SECS: u64 = 90;
 
-/// Force-cleanup window: requires `inflight_updated_at` to be at least
-/// this old before the watchdog clears the desynced watcher. Strictly
-/// larger than `INFLIGHT_STALENESS_THRESHOLD_SECS` (the THREAD-GUARD's
-/// trigger) so the watchdog never races ahead of an in-flight intake call.
+/// Force-cleanup window; strictly larger than THREAD-GUARD staleness so the
+/// watchdog never races ahead of an in-flight intake call.
 pub(crate) const STALL_WATCHDOG_THRESHOLD_SECS: u64 =
     2 * discord::inflight::INFLIGHT_STALENESS_THRESHOLD_SECS;
 
-/// #3169: freshness window for the jsonl-mtime liveness probe that gates the
-/// desynced force-clean. Anchored at the force-clean threshold: any provider
-/// event written within the same window the watchdog uses to judge staleness
-/// proves the "desync" is a loop mid-write, so the force-clean is deferred.
-/// A genuinely hung turn writes nothing for the whole window and is still
-/// cleaned (at most one extra pass for a boundary-marginal real hang).
+/// #3169: freshness window for the jsonl-mtime liveness probe. Provider events
+/// inside this staleness window prove loop mid-write, not a hung desync.
 pub(crate) const STALL_WATCHDOG_LIVENESS_FRESHNESS_SECS: u64 = STALL_WATCHDOG_THRESHOLD_SECS;
 
 /// Run a single stall-watchdog pass against one provider+SharedData.
 ///
-/// Iterates every attached watcher (via `tmux_watchers.iter()`), pulls the
-/// `WatcherStateSnapshot` for the owning channel, and force-cleans any
-/// channel whose snapshot satisfies `stall_watchdog_should_force_clean`.
-/// Returns the number of channels cleaned this pass for telemetry/logging.
+/// Iterates every attached watcher and cleans channels whose snapshot satisfies
+/// the watchdog predicates. Returns the number of channels cleaned this pass.
 pub(crate) async fn run_stall_watchdog_pass(
     registry: &HealthRegistry,
     provider: &ProviderKind,
@@ -1553,13 +1545,8 @@ pub(crate) async fn run_stall_watchdog_pass(
     stall_liveness::gc_stall_watchdog_liveness_state(now_unix_secs);
     watcher_respawn::gc_watcher_absence_state(now_unix_secs);
 
-    // Multi-bot deployments register several runtimes under one provider
-    // name. Sweep *every* runtime's watcher channels (a name-only lookup
-    // would only ever visit the first-registered runtime, so the second
-    // bot's stalled turns would never be force-cleaned -- turn looks cut
-    // off, progress stops updating). Keep the runtime that exposed each
-    // watcher so the snapshot/cleanup below targets the same mailbox and
-    // relay coordinates.
+    // Sweep every same-provider runtime; name-only lookup would miss later
+    // bots, so keep the runtime that exposed each watcher.
     let runtimes = registry.all_shared_for_provider(provider).await;
     if runtimes.is_empty() {
         return 0;
@@ -1582,15 +1569,12 @@ pub(crate) async fn run_stall_watchdog_pass(
             }
         }
     }
-    // #3410 P1-a: no early return on empty candidates — the trailing retry +
-    // dead-man are keyed on WATCHER ABSENCE, not on live-watcher candidates, so
-    // they must run even when a force-clean killed the last channel's watcher
-    // (zero candidates next tick); gating them would strand it forever.
+    // #3410 P1-a: no early return on empty candidates; trailing retry/dead-man
+    // are keyed on watcher absence, not live-watcher candidates.
     let mut cleaned = 0usize;
     for (channel_id, shared) in candidate_channels {
-        // Use the already-selected runtime. A provider-name scan can be
-        // fooled by provider+channel inflight JSON and inspect the first
-        // same-provider runtime instead of the bot that owns this watcher.
+        // Use the selected runtime so same-provider multi-bot snapshots target
+        // the bot that owns this watcher.
         let snapshot = match registry
             .snapshot_watcher_state_for_shared(provider, shared.clone(), channel_id.get())
             .await
@@ -1598,11 +1582,21 @@ pub(crate) async fn run_stall_watchdog_pass(
             Some(snapshot) => snapshot,
             None => continue,
         };
-        // #3668 F2: if a final answer is still persisted in JSONL after
-        // `last_offset`, skip ALL destructive watchdog branches this tick (the
-        // idle-clear AND the desynced force-clean below) — let normal recovery /
-        // #3645 far-backstop deliver it first, then re-evaluate next tick once
-        // `last_offset` advances past the delivered answer.
+        if relay_dead_reattach::try_apply(
+            registry,
+            shared.clone(),
+            provider,
+            channel_id,
+            &snapshot,
+            now_unix_secs,
+        )
+        .await
+        {
+            cleaned += 1;
+            continue;
+        }
+        // #3668 F2: if JSONL still holds an unrelayed final answer after
+        // `last_offset`, skip destructive watchdog branches this tick.
         if crate::services::discord::relay_recovery::idle_tmux_repair_has_unrelayed_tail_answer(
             provider,
             channel_id.get(),
