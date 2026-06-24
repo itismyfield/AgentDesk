@@ -692,13 +692,25 @@ mod tests {
     /// which trips the #3293 runtime-store guard when `AGENTDESK_ROOT_DIR` points
     /// at a live release root (the normal dev-machine env). Point it at a throw-
     /// away temp root so these tests run anywhere, not just under CI's temp root.
-    /// Hold the returned tuple for the whole test — the `TempDir` keeps the dir
-    /// alive and the `EnvVarReset` restores the prior value on drop.
+    ///
+    /// `AGENTDESK_ROOT_DIR` is process-global, so we hold the shared test env lock
+    /// (same as the sibling `recovery.rs` tests) for the whole test — otherwise a
+    /// parallel test's `Drop` could restore the live root mid-run. Hold the
+    /// returned tuple for the whole test. Tuple drop order is first-to-last, so it
+    /// restores the env, deletes the temp dir, then releases the lock — all while
+    /// still holding the lock.
     #[must_use]
-    fn isolated_runtime_root() -> (tempfile::TempDir, EnvVarReset) {
+    fn isolated_runtime_root() -> (
+        EnvVarReset,
+        tempfile::TempDir,
+        std::sync::MutexGuard<'static, ()>,
+    ) {
+        let lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let dir = tempfile::tempdir().expect("temp runtime root");
-        let guard = EnvVarReset::set("AGENTDESK_ROOT_DIR", dir.path());
-        (dir, guard)
+        let env = EnvVarReset::set("AGENTDESK_ROOT_DIR", dir.path());
+        (env, dir, lock)
     }
 
     #[derive(Clone)]
