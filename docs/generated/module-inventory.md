@@ -357,7 +357,7 @@
 | `services::claude_tui::tui_relay` | `src/services/claude_tui/tui_relay.rs` | 1129 | 587 | 542 |  |
 | `services::cluster` | `src/services/cluster/mod.rs` | 30 | 30 | 0 |  |
 | `services::cluster::intake_router_hook` | `src/services/cluster/intake_router_hook.rs` | 804 | 368 | 436 |  |
-| `services::cluster::intake_routing` | `src/services/cluster/intake_routing.rs` | 356 | 154 | 202 |  |
+| `services::cluster::intake_routing` | `src/services/cluster/intake_routing.rs` | 351 | 149 | 202 |  |
 | `services::cluster::intake_worker` | `src/services/cluster/intake_worker.rs` | 417 | 336 | 81 |  |
 | `services::cluster::node_registry` | `src/services/cluster/node_registry.rs` | 1268 | 998 | 270 |  |
 | `services::cluster::registry_adapter_sink` | `src/services/cluster/registry_adapter_sink.rs` | 344 | 117 | 227 |  |
