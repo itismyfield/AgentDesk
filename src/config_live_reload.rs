@@ -25,7 +25,7 @@
 //! follows the existing global-runtime-setter precedent
 //! (`set_runtime_cluster_config`) so consumers opt in by reading [`current`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
@@ -134,7 +134,7 @@ fn discord_boot_config_changed(old: &DiscordConfig, new: &DiscordConfig) -> bool
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 struct AgentProviderRuntimeBindingKey {
     provider_id: String,
-    channel_id: u64,
+    target: String,
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -143,22 +143,42 @@ struct AgentProviderRuntimeBindingValue {
     runtime: Option<String>,
 }
 
-fn agent_provider_runtime_bindings(
-    config: &Config,
-) -> BTreeMap<AgentProviderRuntimeBindingKey, AgentProviderRuntimeBindingValue> {
+#[derive(Default, PartialEq, Eq)]
+struct AgentLaunchFingerprint {
+    provider_keys: BTreeSet<String>,
+    agent_ids: BTreeSet<String>,
+    channel_ids: BTreeSet<u64>,
+    runtime_bindings: BTreeMap<AgentProviderRuntimeBindingKey, AgentProviderRuntimeBindingValue>,
+}
+
+fn agent_launch_fingerprint(config: &Config) -> AgentLaunchFingerprint {
     let mut bindings: BTreeMap<AgentProviderRuntimeBindingKey, AgentProviderRuntimeBindingValue> =
         BTreeMap::new();
+    let mut provider_keys = BTreeSet::new();
+    let mut agent_ids = BTreeSet::new();
+    let mut channel_ids = BTreeSet::new();
     for agent in &config.agents {
+        let agent_id = agent.id.trim().to_ascii_lowercase();
+        if !agent_id.is_empty() {
+            agent_ids.insert(agent_id);
+        }
         for (channel_kind, channel) in agent.channels.iter() {
             let Some(channel) = channel else {
                 continue;
             };
-            let Some(channel_id) = channel
-                .channel_id()
-                .and_then(|value| value.parse::<u64>().ok())
-            else {
+            let Some(target) = channel.target() else {
                 continue;
             };
+            let normalized_provider_key = channel_kind.trim().to_ascii_lowercase();
+            if !normalized_provider_key.is_empty() {
+                provider_keys.insert(normalized_provider_key);
+            }
+            if let Some(channel_id) = channel
+                .channel_id()
+                .and_then(|value| value.parse::<u64>().ok())
+            {
+                channel_ids.insert(channel_id);
+            }
             let tui_hosting = channel.tui_hosting();
             let runtime = channel.runtime_mode_raw();
             let provider_id = channel
@@ -166,10 +186,11 @@ fn agent_provider_runtime_bindings(
                 .unwrap_or_else(|| channel_kind.to_string())
                 .trim()
                 .to_ascii_lowercase();
+            let target = target.trim().to_ascii_lowercase();
             let entry = bindings
                 .entry(AgentProviderRuntimeBindingKey {
                     provider_id,
-                    channel_id,
+                    target,
                 })
                 .or_default();
             if tui_hosting.is_some() {
@@ -180,7 +201,12 @@ fn agent_provider_runtime_bindings(
             }
         }
     }
-    bindings
+    AgentLaunchFingerprint {
+        provider_keys,
+        agent_ids,
+        channel_ids,
+        runtime_bindings: bindings,
+    }
 }
 
 /// The infra sections that are bound into long-lived objects at boot and cannot
@@ -205,6 +231,11 @@ pub fn restart_required_changes(old: &Config, new: &Config) -> Vec<&'static str>
     if section_changed(&old.data, &new.data) {
         changed.push("data");
     }
+    // The policy engine constructs its QuickJS runtime, directory watcher, and
+    // hook timeout/memory limits at boot.
+    if section_changed(&old.policies, &new.policies) {
+        changed.push("policies");
+    }
     // The Discord client + bot bindings/ids are constructed at boot.
     if discord_boot_config_changed(&old.discord, &new.discord) {
         changed.push("discord");
@@ -214,8 +245,10 @@ pub fn restart_required_changes(old: &Config, new: &Config) -> Vec<&'static str>
         changed.push("providers");
     }
     // Per-agent channel provider runtime/tui_hosting bindings are installed
-    // into process-global maps at boot by `services::provider_hosting`.
-    if agent_provider_runtime_bindings(old) != agent_provider_runtime_bindings(new) {
+    // into process-global maps at boot by `services::provider_hosting`; the
+    // Discord bot launcher also uses provider keys, agent ids, and channel ids
+    // to decide which configured bots actually run.
+    if agent_launch_fingerprint(old) != agent_launch_fingerprint(new) {
         changed.push("agents");
     }
     // MCP servers are spawned as child processes at boot.
@@ -229,6 +262,13 @@ pub fn restart_required_changes(old: &Config, new: &Config) -> Vec<&'static str>
     // The memory backend (file paths / MCP endpoint) is bound at boot.
     if section_changed(&old.memory, &new.memory) {
         changed.push("memory");
+    }
+    // Prompt-manifest retention is installed into a set-once boot snapshot.
+    if section_changed(
+        &old.prompt_manifest_retention,
+        &new.prompt_manifest_retention,
+    ) {
+        changed.push("prompt_manifest_retention");
     }
     changed
 }
@@ -458,6 +498,18 @@ mod tests {
         }
     }
 
+    fn test_agent_with_named_claude_channel(channel_name: &str) -> crate::config::AgentDef {
+        let mut agent = test_agent_with_claude_channel("123", None, None);
+        agent.channels.claude = Some(crate::config::AgentChannel::Detailed(
+            crate::config::AgentChannelConfig {
+                name: Some(channel_name.to_string()),
+                provider: Some("claude".to_string()),
+                ..crate::config::AgentChannelConfig::default()
+            },
+        ));
+        agent
+    }
+
     // A valid edit validates and swaps into the live snapshot.
     #[test]
     fn reload_applies_valid_config() {
@@ -508,6 +560,10 @@ mod tests {
         new = old.clone();
         new.data.dir = old.data.dir.join("moved");
         assert_eq!(restart_required_changes(&old, &new), vec!["data"]);
+
+        new = old.clone();
+        new.policies.hook_timeout_ms = old.policies.hook_timeout_ms.wrapping_add(1);
+        assert_eq!(restart_required_changes(&old, &new), vec!["policies"]);
     }
 
     // A hot-swappable-only change (routine tunable) reports no restart-required.
@@ -559,6 +615,16 @@ mod tests {
         let mut memory = base.clone();
         memory.memory = Some(crate::config::MemoryConfig::default());
         assert_eq!(restart_required_changes(&base, &memory), vec!["memory"]);
+
+        let mut prompt_retention = base.clone();
+        prompt_retention.prompt_manifest_retention.full_content_days = base
+            .prompt_manifest_retention
+            .full_content_days
+            .wrapping_add(1);
+        assert_eq!(
+            restart_required_changes(&base, &prompt_retention),
+            vec!["prompt_manifest_retention"]
+        );
     }
 
     #[test]
@@ -615,6 +681,19 @@ mod tests {
             .push(test_agent_with_claude_channel("123", None, None));
 
         assert_eq!(restart_required_changes(&old, &new), vec!["agents"]);
+
+        let mut name_target = old.clone();
+        name_target
+            .agents
+            .push(test_agent_with_named_claude_channel("voice-codex"));
+        assert_eq!(restart_required_changes(&old, &name_target), vec!["agents"]);
+
+        let mut renamed_agent = new.clone();
+        renamed_agent.agents[0].id = "renamed-dispatcher".to_string();
+        assert_eq!(
+            restart_required_changes(&new, &renamed_agent),
+            vec!["agents"]
+        );
     }
 
     #[test]
