@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { ChevronRight, Flame, Gauge, Sparkles, Target, Zap } from "lucide-react";
+import { ChevronRight, Flame, Gauge, Sparkles, Zap } from "lucide-react";
 
 import AgentAvatar from "../components/AgentAvatar";
 import { AgentQualityWidget } from "../components/dashboard/ExtraWidgets";
@@ -14,7 +14,6 @@ export function buildHomeWidgetSpecs(ctx: any) {
     activityStreak,
     agents,
     analytics,
-    blockedCards,
     costTrend,
     currentOfficeLabel,
     dailyMissions,
@@ -23,8 +22,6 @@ export function buildHomeWidgetSpecs(ctx: any) {
     formatCurrency,
     gamificationLeader,
     gamificationLevel,
-    inProgressCards,
-    inProgressTrend,
     isKo,
     kanbanCards,
     kanbanColumns,
@@ -41,7 +38,6 @@ export function buildHomeWidgetSpecs(ctx: any) {
     t,
     tokenTrend,
     topAgents,
-    totalActionableCards,
     tr,
   } = ctx;
 
@@ -106,24 +102,6 @@ export function buildHomeWidgetSpecs(ctx: any) {
           />
         ),
       },
-      m_progress: {
-        className: "lg:col-span-3",
-        render: () => (
-          <HomeMetricTile
-            icon={<Target size={14} />}
-            title={tr("칸반 진행 현황", "Kanban progress")}
-            value={`${inProgressCards}`}
-            sub={tr(
-              `요청 대기 ${requestedCards} · 리뷰 대기 ${reviewQueue} · 막힘 ${blockedCards}`,
-              `${requestedCards} requested · ${reviewQueue} in review · ${blockedCards} blocked`,
-            )}
-            delta={tr(`액션 필요 ${totalActionableCards}`, `${totalActionableCards} needs action`)}
-            deltaTone="flat"
-            accent="var(--th-accent-warn)"
-            trend={inProgressTrend}
-          />
-        ),
-      },
       m_streak: {
         className: "lg:col-span-3",
         render: () => (
@@ -154,7 +132,7 @@ export function buildHomeWidgetSpecs(ctx: any) {
         ),
       },
       m_rate_limit: {
-        className: "lg:col-span-3",
+        className: "lg:col-span-6",
         /* User reported "한도 UI 정보 밀도 낮음" — replace the previous
            single-percentage HomeMetricTile + sparkline with the same
            per-provider/per-bucket gauge rows used by the office "운영신호"
@@ -164,8 +142,8 @@ export function buildHomeWidgetSpecs(ctx: any) {
            tile no longer needs the manual fetch + summary state.
            The header mirrors HomeMetricTile (icon + uppercase title +
            trailing badge slot) and the gauge uses the comfortable density
-           so this card's vertical rhythm matches its row neighbours
-           (오늘 토큰 / API 비용 / 칸반 진행 현황). */
+           so this card can use a 2-unit desktop span without introducing
+           a separate home-specific rate-limit visualization. */
         render: () => (
           <div
             className="flex h-full flex-col overflow-hidden rounded-[1.15rem] border"
