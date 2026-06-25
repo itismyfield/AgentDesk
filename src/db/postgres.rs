@@ -350,8 +350,10 @@ pub async fn startup_reseed(pool: &PgPool, config: &Config) -> Result<(), String
 /// Whether this node should run the destructive config→DB agent roster sync.
 /// True for single-node deployments (cluster disabled) and for the node
 /// explicitly configured as `cluster.role: leader`. Worker/auto nodes return
-/// false so they never clobber the leader-owned shared roster (#3692).
-fn agent_roster_sync_enabled(config: &Config) -> bool {
+/// false so they never clobber the leader-owned shared roster (#3692). Shared
+/// with the config-audit path (`discord_config_audit`), which reaches the same
+/// destructive sync before `startup_reseed` runs.
+pub(crate) fn agent_roster_sync_enabled(config: &Config) -> bool {
     !config.cluster.enabled || config.cluster.role.trim().eq_ignore_ascii_case("leader")
 }
 
