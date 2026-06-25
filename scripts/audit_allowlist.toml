@@ -31,8 +31,6 @@ route_srp_violations = [
 # fail the hard gate because they produce different keys.
 direct_discord_sends = [
   "src/services/discord/commands/model_picker.rs#direct_discord_sends:9cf1f42bcb8abe4f",
-  "src/services/discord/commands/skill.rs#direct_discord_sends:1e8d329a7b6eeefe",
-  "src/services/discord/commands/skill.rs#direct_discord_sends:192ce5dcdad6764f",
   "src/services/discord/commands/text_commands.rs#direct_discord_sends:db5444d305a41f96",
   "src/services/discord/commands/text_commands.rs#direct_discord_sends:e1dff75fe79e7d70",
   "src/services/discord/discord_io.rs#direct_discord_sends:2f398342de1e7cd7",
@@ -56,7 +54,6 @@ direct_discord_sends = [
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:edafac97f164fd68",
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:b4849c24f5cb7d09",
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:1c6f6dcd93167903",
-  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:9b9526b38f0691a8",
   # #3560: footer-mode migration reconcile — edits a pre-default-ON *separate*
   # status panel to a migration notice before dropping its handle (behaviorally
   # the same direct resume-notice edit already allowlisted in mod.rs; extracted
