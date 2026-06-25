@@ -1086,6 +1086,62 @@ pub(crate) fn latest_runtime_activity_unix_nanos(tmux_session_name: &str) -> i64
     latest
 }
 
+fn selected_provider_resume_selector(
+    ids: &dispatched_sessions_db::ProviderSessionIds,
+) -> Option<&str> {
+    ids.claude_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            ids.raw_provider_session_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+}
+
+fn provider_is_claude(provider_name: Option<&str>) -> bool {
+    provider_name.is_some_and(|provider| provider.eq_ignore_ascii_case("claude"))
+}
+
+fn provider_resume_selector_is_effective(
+    provider_name: Option<&str>,
+    ids: &dispatched_sessions_db::ProviderSessionIds,
+) -> bool {
+    provider_resume_selector_is_effective_with_claude_home(provider_name, ids, None)
+}
+
+fn provider_resume_selector_is_effective_with_claude_home(
+    provider_name: Option<&str>,
+    ids: &dispatched_sessions_db::ProviderSessionIds,
+    claude_home: Option<&std::path::Path>,
+) -> bool {
+    let Some(selector) = selected_provider_resume_selector(ids) else {
+        return false;
+    };
+
+    if !provider_is_claude(provider_name) {
+        return true;
+    }
+
+    let Some(cwd) = ids
+        .cwd
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+
+    crate::services::claude_tui::transcript_tail::claude_transcript_path(
+        std::path::Path::new(cwd),
+        selector,
+        claude_home,
+    )
+    .is_ok_and(|path| path.exists())
+}
+
 async fn kill_tmux_session_impl(
     state: &AppState,
     headers: &HeaderMap,
@@ -1114,7 +1170,7 @@ async fn kill_tmux_session_impl(
             Json(json!({"error": "postgres pool unavailable"})),
         );
     };
-    let (active_dispatch_id, _agent_id, _runtime_channel_id, _session_provider, owner_instance_id) =
+    let (active_dispatch_id, _agent_id, _runtime_channel_id, session_provider, owner_instance_id) =
         match dispatched_sessions_db::load_force_kill_session_pg(pool, session_key, provider_name)
             .await
         {
@@ -1159,6 +1215,7 @@ async fn kill_tmux_session_impl(
             }
         }
     }
+    let effective_provider_name = provider_name.or(session_provider.as_deref());
 
     let tmux_was_alive = crate::services::platform::tmux::has_session(&tmux_name);
 
@@ -1213,31 +1270,19 @@ async fn kill_tmux_session_impl(
         false
     };
 
-    // #3052: a tmux-only idle cleanup must not silently claim "preserved for
-    // resume". Verify the provider resume selector is actually present in the
-    // DB row before logging that claim. Either selector column
-    // (claude_session_id namespaced selector or raw_provider_session_id native
-    // fallback) is sufficient for provider-native resume.
+    // #3052/#3693: a tmux-only idle cleanup must not silently claim
+    // "preserved for resume". For Claude TUI, selector presence alone is not
+    // enough: the next launch only resumes when the selected UUID has a
+    // transcript under the persisted cwd; otherwise it forces a fresh UUID.
+    // Non-Claude providers keep the existing selector-presence contract.
     let resumable = match dispatched_sessions_db::load_provider_session_ids_pg(
         pool,
         session_key,
-        provider_name,
+        effective_provider_name,
     )
     .await
     {
-        Ok(Some(ids)) => {
-            let has_claude_selector = ids
-                .claude_session_id
-                .as_deref()
-                .map(|value| !value.is_empty())
-                .unwrap_or(false);
-            let has_raw_selector = ids
-                .raw_provider_session_id
-                .as_deref()
-                .map(|value| !value.is_empty())
-                .unwrap_or(false);
-            has_claude_selector || has_raw_selector
-        }
+        Ok(Some(ids)) => provider_resume_selector_is_effective(effective_provider_name, &ids),
         Ok(None) => false,
         Err(error) => {
             tracing::warn!(
@@ -1260,7 +1305,7 @@ async fn kill_tmux_session_impl(
         );
     } else {
         tracing::info!(
-            "  [{ts}] ✂ kill-tmux: session={}, tmux_killed={}, tmux_was_alive={}, active_dispatch_id={:?} (DB row retained but no provider selector present, resumable=false)",
+            "  [{ts}] ✂ kill-tmux: session={}, tmux_killed={}, tmux_was_alive={}, active_dispatch_id={:?} (DB row retained but no effective provider resume selector present, resumable=false)",
             session_key,
             tmux_killed,
             tmux_was_alive,
@@ -1322,7 +1367,88 @@ async fn kill_tmux_session_impl(
             "tmux_session_name": tmux_name,
             "session_row_preserved": true,
             "session_row_disconnected": session_row_disconnected,
+            "resumable": resumable,
             "active_dispatch_id": active_dispatch_id,
         })),
     )
+}
+
+#[cfg(test)]
+mod kill_tmux_resume_tests {
+    use super::provider_resume_selector_is_effective_with_claude_home;
+    use crate::db::dispatched_sessions::ProviderSessionIds;
+
+    fn ids(
+        claude_session_id: Option<&str>,
+        raw_provider_session_id: Option<&str>,
+        cwd: Option<&std::path::Path>,
+    ) -> ProviderSessionIds {
+        ProviderSessionIds {
+            claude_session_id: claude_session_id.map(str::to_string),
+            raw_provider_session_id: raw_provider_session_id.map(str::to_string),
+            cwd: cwd.map(|path| path.display().to_string()),
+        }
+    }
+
+    #[test]
+    fn claude_resumable_requires_existing_transcript_for_selected_selector() {
+        let cwd = tempfile::tempdir().expect("cwd tempdir");
+        let claude_home = tempfile::tempdir().expect("claude home tempdir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let transcript_path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+            cwd.path(),
+            &session_id,
+            Some(claude_home.path()),
+        )
+        .expect("transcript path");
+
+        std::fs::create_dir_all(transcript_path.parent().expect("transcript parent"))
+            .expect("create transcript parent");
+        std::fs::write(&transcript_path, b"{}\n").expect("write transcript");
+
+        let ids = ids(Some(&session_id), None, Some(cwd.path()));
+        assert!(provider_resume_selector_is_effective_with_claude_home(
+            Some("claude"),
+            &ids,
+            Some(claude_home.path()),
+        ));
+    }
+
+    #[test]
+    fn claude_resumable_rejects_missing_transcript_or_cwd() {
+        let cwd = tempfile::tempdir().expect("cwd tempdir");
+        let claude_home = tempfile::tempdir().expect("claude home tempdir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+
+        let missing_transcript = ids(Some(&session_id), None, Some(cwd.path()));
+        assert!(!provider_resume_selector_is_effective_with_claude_home(
+            Some("claude"),
+            &missing_transcript,
+            Some(claude_home.path()),
+        ));
+
+        let missing_cwd = ids(Some(&session_id), None, None);
+        assert!(!provider_resume_selector_is_effective_with_claude_home(
+            Some("claude"),
+            &missing_cwd,
+            Some(claude_home.path()),
+        ));
+    }
+
+    #[test]
+    fn non_claude_resumable_uses_existing_selector_presence_contract() {
+        let codex_ids = ids(None, Some("codex-selector"), None);
+        assert!(provider_resume_selector_is_effective_with_claude_home(
+            Some("codex"),
+            &codex_ids,
+            None,
+        ));
+
+        let no_selector = ids(None, Some("   "), None);
+        assert!(!provider_resume_selector_is_effective_with_claude_home(
+            Some("codex"),
+            &no_selector,
+            None,
+        ));
+    }
 }

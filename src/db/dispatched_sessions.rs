@@ -1864,6 +1864,7 @@ pub(crate) struct DeleteSessionResult {
 pub(crate) struct ProviderSessionIds {
     pub(crate) claude_session_id: Option<String>,
     pub(crate) raw_provider_session_id: Option<String>,
+    pub(crate) cwd: Option<String>,
 }
 
 pub(crate) struct UpdateSessionParams<'a> {
@@ -2000,7 +2001,7 @@ pub(crate) async fn load_provider_session_ids_pg(
 ) -> Result<Option<ProviderSessionIds>, String> {
     let result = if let Some(provider) = provider {
         sqlx::query(
-            "SELECT claude_session_id, raw_provider_session_id
+            "SELECT claude_session_id, raw_provider_session_id, cwd
              FROM sessions
              WHERE session_key = $1 AND provider = $2",
         )
@@ -2010,7 +2011,7 @@ pub(crate) async fn load_provider_session_ids_pg(
         .await
     } else {
         sqlx::query(
-            "SELECT claude_session_id, raw_provider_session_id
+            "SELECT claude_session_id, raw_provider_session_id, cwd
              FROM sessions
              WHERE session_key = $1",
         )
@@ -2024,6 +2025,7 @@ pub(crate) async fn load_provider_session_ids_pg(
         Ok(ProviderSessionIds {
             claude_session_id: row.try_get("claude_session_id")?,
             raw_provider_session_id: row.try_get("raw_provider_session_id")?,
+            cwd: row.try_get("cwd")?,
         })
     })
     .transpose()
