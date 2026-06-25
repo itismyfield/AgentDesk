@@ -13,6 +13,11 @@ import {
   getProviderLevelColors,
   getProviderMeta,
 } from "../../app/providerTheme";
+import {
+  RATE_LIMIT_GAUGE_TRACK_STYLE,
+  rateLimitFillStyle,
+  rateLimitFillWidth,
+} from "../common/rateLimitGauge";
 
 interface RateLimitBucket {
   id: string;
@@ -505,26 +510,21 @@ function RateLimitWidgetImpl({ t, onOpenSettings }: RateLimitWidgetProps) {
                             <div
                               className="relative overflow-hidden rounded-full"
                               style={{
-                                height: 10,
-                                background: "var(--line-soft)",
-                                border: "1px solid color-mix(in oklch, var(--line) 60%, transparent)",
+                                height: 12,
+                                ...RATE_LIMIT_GAUGE_TRACK_STYLE,
                               }}
                             >
                               <div
                                 className="absolute inset-y-0 left-0 rounded-full transition-all duration-500"
                                 style={{
-                                  width:
-                                    bucket.utilization === null
-                                      ? "0%"
-                                      : `${Math.max(Math.min(bucket.utilization, 100), 2)}%`,
-                                  background:
-                                    bucket.utilization === null
-                                      ? "transparent"
-                                      : colors.bar,
-                                  boxShadow:
-                                    bucket.utilization === null
-                                      ? "none"
-                                      : `0 0 ${bucket.level !== "normal" ? "8" : "4"}px ${colors.glow}`,
+                                  width: rateLimitFillWidth(bucket.utilization),
+                                  ...(bucket.utilization === null
+                                    ? { background: "transparent", boxShadow: "none" }
+                                    : rateLimitFillStyle(
+                                        colors.bar,
+                                        colors.glow,
+                                        bucket.level !== "normal" ? 9 : 5,
+                                      )),
                                 }}
                               />
                             </div>

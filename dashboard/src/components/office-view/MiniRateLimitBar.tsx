@@ -4,6 +4,13 @@ import {
   getProviderMeta,
 } from "../../app/providerTheme";
 import {
+  RATE_LIMIT_GAUGE_TRACK_STYLE,
+  rateLimitFillStyle,
+  rateLimitFillWidth,
+  rateLimitProjectionStyle,
+  rateLimitProjectionWidth,
+} from "../common/rateLimitGauge";
+import {
   formatRateLimitResetLabel,
   transformRLProviders,
   type RLBucket,
@@ -69,12 +76,11 @@ function RateLimitBucketGauge({
 }) {
   const colors = getProviderLevelColors(provider, "normal");
   const showProjectedUtilization = shouldShowProjectedUtilization(bucket);
-  const utilizationWidth =
-    bucket.utilization === null ? "0%" : `${Math.min(bucket.utilization, 100)}%`;
+  const utilizationWidth = rateLimitFillWidth(bucket.utilization);
   const projectionWidth =
     !showProjectedUtilization || bucket.projectedUtilization === null
       ? "0%"
-      : `${Math.min(Math.max(bucket.projectedUtilization, bucket.utilization ?? 0), 100)}%`;
+      : rateLimitProjectionWidth(bucket.projectedUtilization, bucket.utilization);
   const nowMs = Date.now();
   const resetLabel = formatRateLimitResetLabel(bucket.resetAtMs, isKo, nowMs);
   const resetShortLabel = formatRateLimitResetLabel(bucket.resetAtMs, isKo, nowMs, "short");
@@ -82,37 +88,15 @@ function RateLimitBucketGauge({
   if (density === "comfortable") {
     return (
       <div key={bucket.id} className="min-w-0 space-y-1">
-        <div className="grid min-w-0 grid-cols-[22px_minmax(0,1fr)_32px_48px] items-center gap-1.5">
+        <div className="flex min-w-0 items-center gap-1.5">
           <span
-            className="text-xs font-bold"
+            className="shrink-0 text-xs font-bold"
             style={{ color: colors.bar }}
           >
             {bucket.label}
           </span>
-          <div className="flex-1 min-w-0">
-            <div
-              className="relative h-1.5 rounded-full overflow-hidden"
-              style={{ background: "var(--line-soft)" }}
-            >
-              <div
-                className="absolute inset-y-0 left-0 rounded-full"
-                style={{
-                  width: projectionWidth,
-                  opacity: 0.38,
-                  backgroundImage: `repeating-linear-gradient(90deg, ${colors.bar} 0 7px, transparent 7px 11px)`,
-                }}
-              />
-              <div
-                className="absolute inset-y-0 left-0 rounded-full"
-                style={{
-                  width: utilizationWidth,
-                  background: bucket.utilization === null ? "transparent" : colors.bar,
-                }}
-              />
-            </div>
-          </div>
           <span
-            className="text-xs font-mono font-bold text-right"
+            className="ml-auto shrink-0 text-xs font-mono font-bold text-right"
             style={{
               color: bucket.utilization === null ? "var(--th-text-muted)" : colors.bar,
             }}
@@ -127,6 +111,27 @@ function RateLimitBucketGauge({
               {formatProjectedPct(bucket)}
             </span>
           ) : null}
+        </div>
+        <div
+          className="relative h-2.5 w-full rounded-full overflow-hidden"
+          style={RATE_LIMIT_GAUGE_TRACK_STYLE}
+        >
+          <div
+            className="absolute inset-y-0 left-0 rounded-full"
+            style={{
+              width: projectionWidth,
+              ...rateLimitProjectionStyle(colors.bar, 7, 11),
+            }}
+          />
+          <div
+            className="absolute inset-y-0 left-0 rounded-full"
+            style={{
+              width: utilizationWidth,
+              ...(bucket.utilization === null
+                ? { background: "transparent", boxShadow: "none" }
+                : rateLimitFillStyle(colors.bar, colors.glow, 5)),
+            }}
+          />
         </div>
         <div
           className="truncate text-[10px] font-medium"
@@ -150,22 +155,23 @@ function RateLimitBucketGauge({
         </span>
         <div className="flex-1 min-w-0">
           <div
-            className="relative h-[3px] rounded-full overflow-hidden"
-            style={{ background: "var(--line-soft)" }}
+            className="relative h-1.5 rounded-full overflow-hidden"
+            style={RATE_LIMIT_GAUGE_TRACK_STYLE}
           >
             <div
               className="absolute inset-y-0 left-0 rounded-full"
               style={{
                 width: projectionWidth,
-                opacity: 0.38,
-                backgroundImage: `repeating-linear-gradient(90deg, ${colors.bar} 0 5px, transparent 5px 8px)`,
+                ...rateLimitProjectionStyle(colors.bar, 5, 8),
               }}
             />
             <div
               className="absolute inset-y-0 left-0 rounded-full"
               style={{
                 width: utilizationWidth,
-                background: bucket.utilization === null ? "transparent" : colors.bar,
+                ...(bucket.utilization === null
+                  ? { background: "transparent", boxShadow: "none" }
+                  : rateLimitFillStyle(colors.bar, colors.glow, 4)),
               }}
             />
           </div>
@@ -276,7 +282,7 @@ export function MiniRateLimitBar({
                   </span>
                 </div>
               ) : (
-                <div className="grid grid-cols-1 gap-y-1.5 min-[520px]:grid-cols-2 min-[520px]:gap-x-3 min-[520px]:gap-y-1">
+                <div className="grid grid-cols-1 gap-y-1.5">
                   {visible.map((b) => (
                     <RateLimitBucketGauge
                       key={b.id}
