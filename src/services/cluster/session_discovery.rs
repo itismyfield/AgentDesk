@@ -108,19 +108,21 @@ pub async fn build_channel_directory_from_pg(
     pool: &PgPool,
 ) -> Result<ChannelDirectory, sqlx::Error> {
     let live_session_names = HashSet::new();
-    build_channel_directory_from_pg_for_live_sessions(pool, &live_session_names).await
+    build_channel_directory_from_pg_for_live_sessions(pool, &live_session_names, None).await
 }
 
 async fn build_channel_directory_from_pg_for_live_sessions(
     pool: &PgPool,
     live_session_names: &HashSet<String>,
+    local_instance_id: Option<&str>,
 ) -> Result<ChannelDirectory, sqlx::Error> {
     // load_graceful() does sync filesystem IO + yaml parse — push to a blocking
     // thread so we don't stall the tokio runtime on every discovery tick.
     let name_map = tokio::task::spawn_blocking(build_yaml_channel_name_map)
         .await
         .unwrap_or_default();
-    let session_tmux_segments = load_session_tmux_segments_pg(pool, live_session_names).await?;
+    let session_tmux_segments =
+        load_session_tmux_segments_pg(pool, live_session_names, local_instance_id).await?;
     build_channel_directory_from_pg_with_config(pool, name_map, session_tmux_segments).await
 }
 
@@ -134,7 +136,7 @@ async fn build_channel_directory_from_pg_for_live_sessions(
 /// post-restart adoption path silently broken (issue #2465).
 pub type ChannelNameMap = HashMap<(String, ProviderKind, String), String>;
 type SessionTmuxSegmentMap = HashMap<(ProviderKind, String), String>;
-const SESSION_TMUX_SEGMENTS_QUERY: &str = "SELECT provider, channel_id, session_key
+const SESSION_TMUX_SEGMENTS_QUERY: &str = "SELECT provider, channel_id, session_key, instance_id
          FROM sessions
          WHERE NULLIF(TRIM(channel_id), '') IS NOT NULL
            AND NULLIF(TRIM(session_key), '') IS NOT NULL
@@ -231,6 +233,7 @@ async fn build_channel_directory_from_pg_with_config(
 async fn load_session_tmux_segments_pg(
     pool: &PgPool,
     live_session_names: &HashSet<String>,
+    local_instance_id: Option<&str>,
 ) -> Result<SessionTmuxSegmentMap, sqlx::Error> {
     let rows = sqlx::query(SESSION_TMUX_SEGMENTS_QUERY)
         .fetch_all(pool)
@@ -241,6 +244,7 @@ async fn load_session_tmux_segments_pg(
         let channel_id: Option<String> = row.try_get("channel_id")?;
         let session_key: Option<String> = row.try_get("session_key")?;
         let provider_hint: Option<String> = row.try_get("provider")?;
+        let row_instance_id: Option<String> = row.try_get("instance_id")?;
         let Some(channel_id) = normalize_nonempty(channel_id.as_deref()) else {
             continue;
         };
@@ -251,6 +255,15 @@ async fn load_session_tmux_segments_pg(
         else {
             continue;
         };
+        if !session_row_matches_local_instance(row_instance_id.as_deref(), local_instance_id) {
+            tracing::debug!(
+                session_key = %session_key,
+                row_instance_id = row_instance_id.as_deref().unwrap_or("<none>"),
+                local_instance_id = local_instance_id.unwrap_or("<none>"),
+                "session-discovery: ignoring non-local session row while deriving tmux segment",
+            );
+            continue;
+        }
         let Some((provider, tmux_segment)) =
             live_tmux_segment_from_session_key(session_key, live_session_names)
         else {
@@ -287,6 +300,20 @@ async fn load_session_tmux_segments_pg(
         }
     }
     Ok(map)
+}
+
+fn normalized_instance_id(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn session_row_matches_local_instance(
+    row_instance_id: Option<&str>,
+    local_instance_id: Option<&str>,
+) -> bool {
+    let Some(local) = normalized_instance_id(local_instance_id) else {
+        return true;
+    };
+    normalized_instance_id(row_instance_id).is_some_and(|row| row == local)
 }
 
 fn normalize_nonempty(value: Option<&str>) -> Option<String> {
@@ -621,6 +648,7 @@ async fn run_single_tick(
     let directory = match build_channel_directory_from_pg_for_live_sessions(
         pool,
         &live_session_names,
+        instance_id,
     )
     .await
     {
@@ -935,6 +963,10 @@ mod tests {
         let query = SESSION_TMUX_SEGMENTS_QUERY;
 
         assert!(
+            query.contains("instance_id"),
+            "fallback tmux segments must preserve session row ownership"
+        );
+        assert!(
             query.contains("LOWER(TRIM(COALESCE(status, ''))) IN"),
             "fallback query must filter status before deriving tmux segments"
         );
@@ -1007,6 +1039,26 @@ mod tests {
         assert_eq!(
             report.matched, 1,
             "skipping stale fallback must leave channel_id matching intact"
+        );
+    }
+
+    #[test]
+    fn session_tmux_segment_fallback_requires_local_instance_ownership() {
+        assert!(
+            session_row_matches_local_instance(Some(NODE_A), Some(NODE_A)),
+            "local session rows remain eligible"
+        );
+        assert!(
+            !session_row_matches_local_instance(Some(NODE_B), Some(NODE_A)),
+            "foreign session rows must not seed local tmux segment fallbacks"
+        );
+        assert!(
+            !session_row_matches_local_instance(None, Some(NODE_A)),
+            "missing row ownership is not enough when this node has an instance id"
+        );
+        assert!(
+            session_row_matches_local_instance(Some(NODE_B), None),
+            "single-node/legacy callers without a local instance keep compatibility"
         );
     }
 

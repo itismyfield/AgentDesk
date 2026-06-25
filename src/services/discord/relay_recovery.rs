@@ -413,8 +413,7 @@ pub(in crate::services::discord) fn plan_relay_recovery(
             )
         }
         RelayStallState::QueueBlocked => {
-            let eligible = snapshot.queue_depth > 0
-                && matches!(snapshot.active_turn, RelayActiveTurn::None)
+            let eligible = matches!(snapshot.active_turn, RelayActiveTurn::None)
                 && !snapshot.mailbox_has_cancel_token
                 && snapshot.mailbox_active_user_msg_id.is_none();
             (
@@ -1175,6 +1174,25 @@ mod tests {
             "queued work is stranded behind an idle mailbox; bounded queue drain can restore delivery"
         );
         assert!(decision.auto_heal.eligible);
+        assert_eq!(decision.auto_heal.skipped_reason, None);
+    }
+
+    #[test]
+    fn queue_blocked_allows_disk_backed_queue_to_reach_drain_helper() {
+        let decision = plan_relay_recovery(
+            &RelayHealthSnapshot {
+                queue_depth: 0,
+                ..snapshot()
+            },
+            RelayStallState::QueueBlocked,
+            1_000,
+        );
+
+        assert_eq!(decision.action, RelayRecoveryActionKind::DrainPendingQueue);
+        assert!(
+            decision.auto_heal.eligible,
+            "disk-backed pending queues are hydrated by the drain helper"
+        );
         assert_eq!(decision.auto_heal.skipped_reason, None);
     }
 

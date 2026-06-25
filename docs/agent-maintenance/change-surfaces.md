@@ -986,7 +986,7 @@
     one-arm gate at `relay_recovered_terminal_text_to_placeholder` is offset by
     non-#-tag prose-comment compaction in the same root, the cutover body lives in
     the sub-1000-prod-LoC sibling `recovery_paths/controller_cutover.rs`).
-  - `src/services/discord/relay_recovery.rs` (1008 lines; #3680 split relay
+  - `src/services/discord/relay_recovery.rs` (1007 lines; #3680 split relay
     recovery reattach/self-heal path; new behavior is bugfix-only until a
     follow-up extraction drops it below the giant-file threshold).
   - `src/services/discord/health.rs` (417 prod lines after the #3038 Phase A
