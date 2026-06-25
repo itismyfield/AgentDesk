@@ -2511,7 +2511,7 @@ fn idle_queue_snapshot_has_kickable_backlog(
         // finalize before claiming. Do NOT kick normal queued work in the
         // meantime — that would re-introduce the very turn-interleave this fix
         // serializes away.
-        && !tui_direct_pending_start::pending_synthetic_start_present(
+        && !tui_direct_pending_start::pending_synthetic_start_blocks_idle_kickoff(
             provider.as_str(),
             channel_id.get(),
         )
