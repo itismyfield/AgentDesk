@@ -792,6 +792,8 @@ src/
 │   │   └── terminal_usage.rs
 │   ├── slo/
 │   │   └── mod.rs
+│   ├── tui_prompt_dedupe/
+│   │   └── synthetic_prompt.rs
 │   ├── turn_orchestrator/
 │   │   └── registry_purge.rs
 │   ├── agent_protocol.rs
