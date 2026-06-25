@@ -111,13 +111,13 @@ export function buildHomeWidgetSpecs(ctx: any) {
         render: () => (
           <HomeMetricTile
             icon={<Target size={14} />}
-            title={tr("진행 중", "In progress")}
+            title={tr("칸반 진행 현황", "Kanban progress")}
             value={`${inProgressCards}`}
             sub={tr(
-              `${requestedCards} 요청 · ${reviewQueue} 리뷰 · ${blockedCards} 블록`,
-              `${requestedCards} requested · ${reviewQueue} review · ${blockedCards} blocked`,
+              `요청 대기 ${requestedCards} · 리뷰 대기 ${reviewQueue} · 막힘 ${blockedCards}`,
+              `${requestedCards} requested · ${reviewQueue} in review · ${blockedCards} blocked`,
             )}
-            delta={tr(`${totalActionableCards} 전체`, `${totalActionableCards} total`)}
+            delta={tr(`액션 필요 ${totalActionableCards}`, `${totalActionableCards} needs action`)}
             deltaTone="flat"
             accent="var(--th-accent-warn)"
             trend={inProgressTrend}
@@ -165,7 +165,7 @@ export function buildHomeWidgetSpecs(ctx: any) {
            The header mirrors HomeMetricTile (icon + uppercase title +
            trailing badge slot) and the gauge uses the comfortable density
            so this card's vertical rhythm matches its row neighbours
-           (오늘 토큰 / API 비용 / 진행 중). */
+           (오늘 토큰 / API 비용 / 칸반 진행 현황). */
         render: () => (
           <div
             className="flex h-full flex-col overflow-hidden rounded-[1.15rem] border"
