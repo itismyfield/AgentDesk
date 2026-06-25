@@ -1266,7 +1266,7 @@
     2026-08-31, #3036)).
   - `src/services/discord/{commands/text_commands.rs,
     discord_config_audit.rs, router/intake_gate.rs}` (all 1000+ production
-    lines) and `src/services/discord/inflight.rs` (7382 lines; #3680 relay
+    lines) and `src/services/discord/inflight.rs` (3137 lines; #3680 relay
     recovery review hardening; #3685 exposes the inflight sidecar lock
     crate-wide for locked legacy rebind backfill; #3635 added the
     dead-watcher rebind-origin reap — `WatcherLiveness` DI trait, three-state tmux
