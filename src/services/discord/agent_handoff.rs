@@ -257,7 +257,14 @@ pub(crate) async fn send_agent_handoff(
         .map_err(|error| AgentHandoffError::internal(format!("query agent channels: {error}")))?
         .ok_or_else(|| AgentHandoffError::agent_not_found(to_agent_id))?;
 
-    let Some(channel_id) = channel_for_kind(&bindings, channel_kind) else {
+    // Honor an explicit cc/cdx binding when present, but fall back to the
+    // agent's primary channel so single-provider mailboxes that are not a
+    // cc/cdx slot (opencode/gemini/qwen — e.g. monitoring) and cross-provider
+    // sends (claude↔codex) remain reachable instead of erroring "channel_kind
+    // unset". The receiving channel's intake resolves the agent's real provider.
+    let Some(channel_id) =
+        channel_for_kind(&bindings, channel_kind).or_else(|| bindings.primary_channel())
+    else {
         return Err(AgentHandoffError::channel_kind_unset(
             to_agent_id,
             channel_kind,
@@ -372,12 +379,25 @@ fn resolve_agent_handoff_turn_target(
         return Err(AgentHandoffError::bad_request("prompt is required"));
     }
 
-    let Some(channel_id) = channel_for_kind(bindings, channel_kind) else {
-        return Err(AgentHandoffError::channel_kind_unset(
-            to_agent_id,
-            channel_kind,
-            available_channel_kinds(bindings),
-        ));
+    // Prefer the explicit cc/cdx mailbox; otherwise fall back to the agent's
+    // primary channel and its real provider so opencode/gemini/qwen mailboxes
+    // (and cross-provider sends) dispatch the turn on the correct CLI rather
+    // than rejecting with "channel_kind unset".
+    let (channel_id, provider) = match channel_for_kind(bindings, channel_kind) {
+        Some(channel_id) => (channel_id, provider_for_channel_kind(channel_kind)),
+        None => {
+            let Some(channel_id) = bindings.primary_channel() else {
+                return Err(AgentHandoffError::channel_kind_unset(
+                    to_agent_id,
+                    channel_kind,
+                    available_channel_kinds(bindings),
+                ));
+            };
+            let provider = bindings
+                .resolved_primary_provider_kind()
+                .unwrap_or_else(|| provider_for_channel_kind(channel_kind));
+            (channel_id, provider)
+        }
     };
 
     let Some(channel_id_num) =
@@ -399,7 +419,7 @@ fn resolve_agent_handoff_turn_target(
         channel_id,
         channel_id_num,
         channel_kind,
-        provider: provider_for_channel_kind(channel_kind),
+        provider,
         content,
     })
 }
@@ -705,9 +725,103 @@ mod tests {
     }
 
     #[test]
-    fn handoff_turn_target_rejects_unset_channel_kind() {
-        let error = resolve_agent_handoff_turn_target(
+    fn handoff_turn_target_falls_back_to_primary_for_single_provider() {
+        // Codex agent (only cdx set): a cc request must fall back to the cdx
+        // mailbox and the codex provider instead of rejecting, so cross-provider
+        // handoffs (e.g. a now-claude sender → codex peer) still reach it.
+        let target = resolve_agent_handoff_turn_target(
             &bindings(None, Some("222")),
+            "from",
+            "to",
+            "prompt",
+            AgentHandoffChannelKind::Cc,
+            true,
+            None,
+        )
+        .expect("falls back to the agent's primary channel");
+        assert_eq!(target.channel_id, "222");
+        assert_eq!(target.provider, ProviderKind::Codex);
+    }
+
+    #[test]
+    fn handoff_turn_target_keeps_codex_for_primary_only_binding() {
+        // Regression (#3556 P1): a Codex agent bound ONLY via discord_channel_id
+        // (no cdx/alt mailbox) must still resolve to the Codex provider. The
+        // earlier fallback derived Claude — codex_channel() found nothing, so
+        // resolution slid to the Claude counterpart aliasing the same primary
+        // channel — reserving a Claude turn on a Codex mailbox.
+        let codex = AgentChannelBindings {
+            provider: Some("codex".to_string()),
+            discord_channel_id: Some("1495040912361914399".to_string()),
+            ..AgentChannelBindings::default()
+        };
+        let target = resolve_agent_handoff_turn_target(
+            &codex,
+            "from",
+            "to",
+            "prompt",
+            AgentHandoffChannelKind::Cc,
+            true,
+            None,
+        )
+        .expect("codex primary-only binding resolves");
+        assert_eq!(target.channel_id, "1495040912361914399");
+        assert_eq!(target.provider, ProviderKind::Codex);
+    }
+
+    #[test]
+    fn handoff_turn_target_keeps_codex_cc_only_binding_on_claude() {
+        // A Codex-configured row with only an explicit cc binding is Claude-owned;
+        // a missing cdx request must not reserve a Codex turn on that mailbox.
+        let codex_cc_only = AgentChannelBindings {
+            provider: Some("codex".to_string()),
+            discord_channel_id: Some("1495040912361914400".to_string()),
+            discord_channel_cc: Some("1495040912361914400".to_string()),
+            ..AgentChannelBindings::default()
+        };
+        let target = resolve_agent_handoff_turn_target(
+            &codex_cc_only,
+            "from",
+            "to",
+            "prompt",
+            AgentHandoffChannelKind::Cdx,
+            true,
+            None,
+        )
+        .expect("explicit cc-only fallback resolves via Claude");
+        assert_eq!(target.channel_id, "1495040912361914400");
+        assert_eq!(target.provider, ProviderKind::Claude);
+    }
+
+    #[test]
+    fn handoff_turn_target_reaches_opencode_mailbox() {
+        // opencode/gemini/qwen agents expose neither cc nor cdx; their mailbox
+        // is discord_channel_id. Any requested kind must resolve there with the
+        // agent's real provider so monitoring (opencode) stays reachable.
+        let opencode = AgentChannelBindings {
+            provider: Some("opencode".to_string()),
+            discord_channel_id: Some("1495040912361914398".to_string()),
+            ..AgentChannelBindings::default()
+        };
+        let target = resolve_agent_handoff_turn_target(
+            &opencode,
+            "from",
+            "monitoring",
+            "prompt",
+            AgentHandoffChannelKind::Cdx,
+            true,
+            None,
+        )
+        .expect("opencode mailbox resolves via primary channel");
+        assert_eq!(target.channel_id, "1495040912361914398");
+        assert_eq!(target.provider, ProviderKind::OpenCode);
+    }
+
+    #[test]
+    fn handoff_turn_target_rejects_when_no_channel_at_all() {
+        // A genuinely unbound agent (no cc/cdx/primary channel) still errors.
+        let error = resolve_agent_handoff_turn_target(
+            &AgentChannelBindings::default(),
             "from",
             "to",
             "prompt",
@@ -717,7 +831,6 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(error.body()["available_kinds"], json!(["cdx"]));
     }
 
     #[test]
