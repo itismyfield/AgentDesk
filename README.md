@@ -274,6 +274,7 @@ Agent turn lifecycle is managed by a dedicated orchestration layer (`src/service
 AgentDesk can run multiple release instances against one PostgreSQL control plane. Each node advertises identity, labels, provider capabilities, and node-local MCP health through `worker_nodes`, while PostgreSQL leases prevent duplicate cluster-wide side effects.
 
 - **Leader/worker split** — Each node boots with `cluster.instance_id`, acquires the cluster leader advisory lease when eligible, and records its effective role through `/api/cluster/nodes`.
+- **Agent roster ownership** — In cluster mode, exactly one node should be configured as `cluster.role: leader`; that configured leader owns the destructive config-to-DB agent roster sync. All-`auto` clusters can elect an effective runtime leader, but startup roster sync is intentionally disabled on `auto` nodes so agent edits can appear frozen.
 - **Capability-aware routing** — Dispatch claims compare required labels/providers/MCP health against registered worker capabilities and record routing diagnostics when a node is ineligible.
 - **Lease-backed work claims** — `task_dispatches` and dispatch outbox rows use PG claim owner, expiry, and idempotency fields so multiple nodes do not process the same work item concurrently.
 - **Exclusive resource locks** — `/api/cluster/resource-locks*` serializes node-local resources such as Unreal Editor, MCP endpoints, and project-level test execution.
@@ -367,7 +368,7 @@ database:
 cluster:
   enabled: true
   instance_id: example-main-node   # use a unique value per host, e.g. example-worker-node
-  role: auto                       # auto | leader | worker
+  role: leader                     # auto | leader | worker; set exactly one leader for roster sync
   heartbeat_interval_secs: 10
   lease_ttl_secs: 30
   labels: [example-main, release]

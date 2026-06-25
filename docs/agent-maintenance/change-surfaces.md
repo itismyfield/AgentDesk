@@ -1370,7 +1370,7 @@
   - `src/cli/migrate.rs` is the retired postgres-cutover facade (now below the
     giant-file threshold; bugfix only).
   - `src/cli/doctor/orchestrator.rs` (4381 lines).
-  - `src/cli/migrate/apply.rs` (3231 lines; +1 from #3690 AgentDef preferred_intake_node_labels literal).
+  - `src/cli/migrate/apply.rs` (3237 lines; +1 from #3690 AgentDef preferred_intake_node_labels literal; +6 from #3697 OpenClaw --write-db non-leader roster-sync gate).
   - `src/cli/migrate/{plan.rs (1513), source.rs (1612)}`.
   - `src/cli/{init.rs (1445), client.rs (2955), direct.rs (1781),
     dcserver.rs (1560)}`.

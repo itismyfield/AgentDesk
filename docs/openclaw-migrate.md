@@ -88,7 +88,7 @@ channel binding, bot 설정, 세션까지 함께 이관:
 - `--workspace-root-rewrite OLD=NEW`: 절대 workspace prefix 재작성
 - `--write-org`: `config/org.yaml` 반영
 - `--write-bot-settings`: `config/bot_settings.json` 반영
-- `--write-db`: SQLite upsert 반영
+- `--write-db`: PostgreSQL agent/session import 반영
 - `--with-channel-bindings`: Discord channel binding import 적용
 - `--with-sessions`: 세션 이관 활성화
 - `--snapshot-source`: source tree snapshot 남김
@@ -102,4 +102,5 @@ channel binding, bot 설정, 세션까지 함께 이관:
 - `--resume <import_id>`는 현재 runtime 상태로 role id를 다시 계산하지 않고, audit의 `agent-map.json`에 저장된 source→role 매핑을 그대로 재사용합니다.
 - Windows source에서 넘어온 `C:\...` 또는 `D:/...` workspace 경로는 절대경로로 유지한 뒤, 필요하면 `--workspace-root-rewrite`로 현 환경 경로에 맞춰 바꿔야 합니다.
 - workspace가 없거나 provider 매핑이 불가능한 agent는 audit에는 남지만 apply에서 건너뜁니다.
+- `--write-db`는 config-to-DB agent roster sync를 수행하므로 클러스터에서는 single-node 또는 명시적으로 `cluster.role: leader`인 노드에서만 실행합니다. worker/auto 노드에서는 안전하게 거부됩니다.
 - token/tool policy는 기본적으로 `report` 모드이며, 실제 쓰기 전 dry-run과 audit 결과를 먼저 확인하는 것이 안전합니다.
