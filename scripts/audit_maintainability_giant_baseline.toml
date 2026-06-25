@@ -305,7 +305,7 @@
 # ownerless-inflight recovery predicates (phase_policy/relay_recovery/relay_health).
 # Hotfix was deployed via direct push to main and bypassed CI, so this baseline
 # re-inflation surfaced only when PR #3655 (which bases on it) ran the gate.
-"src/services/discord/recovery_engine.rs" = 3421
+"src/services/discord/recovery_engine.rs" = 3438
 # #3034 batch-8: lowered 3771 -> 3770 (dead-code removal).
 # #3038 S1: +1 (3770 -> 3771) for the mechanical `shared.queued_placeholders` ->
 # `shared.queued.queued_placeholders` re-wire (one extra method-chain line) forced
@@ -478,7 +478,8 @@
 # changed; only the warm placeholder-sweeper carries the liveness gate (never the
 # boot path) so a freshly-restarted live watcher is never false-classified as dead.
 # Tests live in the excluded `rebind_origin_reap_tests` module.
-"src/services/discord/inflight.rs" = 3052 # #3635 dead-watcher rebind reap
+"src/services/discord/inflight.rs" = 3134 # #3680 existing-inflight rebind adoption guards
+"src/services/discord/relay_recovery.rs" = 1008 # #3680 ownerless relay recovery reattach
 # #3038 Phase A: health.rs decomposed into health/ directory modules (root 402
 # prod LoC + 6 sub-1000-LoC submodules) — dropped below the giant threshold, so
 # its ratchet entry is deleted (win; no baseline raises).
