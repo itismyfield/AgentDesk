@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { RoutineRecord } from "../../api";
 import {
+  describeRoutinePurpose,
   describeRoutineSchedule,
   sortRoutinesChronologically,
 } from "./RoutinesTimelineWidget";
+import type { TFunction } from "./model";
+
+const koT: TFunction = (translations) => translations.ko;
 
 function routineFixture(
   patch: Partial<RoutineRecord> & Pick<RoutineRecord, "id" | "name">,
@@ -81,5 +85,29 @@ describe("RoutinesTimelineWidget helpers", () => {
     );
     expect(describeRoutineSchedule("@every 15m", "ko")).toBe("15분마다");
     expect(describeRoutineSchedule(null, "en")).toBe("Manual run");
+  });
+
+  it("summarizes routine purpose from known routine families", () => {
+    expect(
+      describeRoutinePurpose(
+        routineFixture({
+          id: "morning",
+          name: "family-morning-briefing-obujang",
+          script_ref: "migrated-launchd/family-morning-briefing-obujang.js",
+        }),
+        koT,
+      ),
+    ).toContain("아침 브리핑");
+
+    expect(
+      describeRoutinePurpose(
+        routineFixture({
+          id: "janitor",
+          name: "harness-worktree-janitor",
+          script_ref: "local-worktree-gc.js",
+        }),
+        koT,
+      ),
+    ).toContain("worktree");
   });
 });
