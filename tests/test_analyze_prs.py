@@ -64,6 +64,30 @@ Update analyzer hygiene checks.
             )
         )
 
+    def test_bolded_field_label_counts_as_populated(self):
+        body = "- **Agent:** Codex"
+
+        self.assertTrue(has_non_empty_body_field(body, ["agent"]))
+
+    def test_skipped_checks_and_reasons_label_allows_none(self):
+        body = "- Skipped checks and reasons: none"
+
+        self.assertTrue(
+            has_non_empty_body_field(
+                body,
+                ["skipped checks and reasons", "skipped checks with reasons", "skipped checks"],
+                allow_none=True,
+            )
+        )
+
+    def test_combined_risk_and_rollback_notes_counts_for_both(self):
+        body = "- Risk and rollback notes: low risk; revert this PR."
+
+        self.assertTrue(has_non_empty_body_field(body, ["risk and rollback notes", "risk"]))
+        self.assertTrue(
+            has_non_empty_body_field(body, ["risk and rollback notes", "rollback notes"])
+        )
+
     def test_multiline_field_value_stops_at_next_field_label(self):
         body = """
 - Risk:
@@ -212,6 +236,10 @@ class PrAnalyzerOverlapReferenceTests(unittest.TestCase):
         body = "This no-change PR overlaps #1234 on branch inventory-refresh."
         self.assertTrue(has_overlap_reference(body))
 
+    def test_duplicate_plural_wording_with_branch_is_reference(self):
+        body = "This no-change PR duplicates #1234 on branch feature/foo."
+        self.assertTrue(has_overlap_reference(body))
+
     def test_pull_url_without_branch_is_not_overlap_reference(self):
         body = "Overlap with https://github.com/owner/repo/pull/5678."
         self.assertFalse(has_overlap_reference(body))
@@ -259,6 +287,16 @@ class PrAnalyzerOverlapReferenceTests(unittest.TestCase):
     def test_no_overlap_wording_is_not_overlap_evidence(self):
         body = """
 - Duplicate/overlap check: checked #123 on branch feature/foo; no overlap found
+"""
+
+        self.assertFalse(has_overlap_reference(body))
+
+    def test_negated_boundary_resets_incomplete_overlap_block(self):
+        body = """
+- Duplicate/overlap check:
+  - PR: #123
+- Why this is non-overlapping:
+  #123 on branch feature/foo
 """
 
         self.assertFalse(has_overlap_reference(body))

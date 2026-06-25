@@ -51,7 +51,7 @@ def _is_markdown_heading(line):
 def _is_top_level_field_label(line):
     if line[:1] in {" ", "\t"}:
         return False
-    return re.match(r"^(?:[-*]\s*)?[a-z0-9 /_-]+\s*:(?:\s.*)?$", line.strip(), re.I)
+    return re.match(r"^(?:[-*]\s*)?(?:\*\*)?[a-z0-9 /_-]+\s*:(?:\*\*)?(?:\s.*)?$", line.strip(), re.I)
 
 def _meaningful_branch_ref(value):
     normalized = value.strip().strip("`").strip(".,;:)]}")
@@ -60,7 +60,7 @@ def _meaningful_branch_ref(value):
 def has_non_empty_body_field(body, labels, *, allow_none=False, stop_at_field_labels=True):
     for label in labels:
         pattern = re.compile(
-            rf"(?im)^[ \t]*(?:[-*][ \t]*)?(?:#{{1,6}}[ \t]*)?{re.escape(label)}(?:[ \t]*:[ \t]*(.*)|[ \t]*)$"
+            rf"(?im)^[ \t]*(?:[-*][ \t]*)?(?:#{{1,6}}[ \t]*)?(?:\*\*)?{re.escape(label)}(?:[ \t]*:(?:\*\*)?[ \t]*(.*)|(?:\*\*)?[ \t]*)$"
         )
         for match in pattern.finditer(body):
             if _meaningful_field_value(match.group(1) or "", allow_none=allow_none):
@@ -136,7 +136,7 @@ def has_scratch_file_cleanup_ack(body):
 
 def has_overlap_reference(body):
     pr_ref = re.compile(r"(?i)(?:#[0-9]+|github\.com/[^/\s]+/[^/\s]+/pull/[0-9]+)")
-    overlap_context = re.compile(r"(?i)\b(?:overlaps?|overlapping|duplicate|supersed(?:e|ed|es|ing)?|replaces?|same scope)\b")
+    overlap_context = re.compile(r"(?i)\b(?:overlaps?|overlapping|duplicates?|supersed(?:e|ed|es|ing)?|replaces?|same scope)\b")
     negated_overlap_context = re.compile(r"(?i)\b(?:non[- ]?overlapp?ing|non[- ]?overlap|not overlapping|not overlap|does not overlap|no overlapping|no overlap)\b")
     branch_ref = re.compile(r"(?i)\b(?:branch(?:es)?|head(?:\s+ref)?|ref)\b\s*[:=-]?\s*`?([A-Za-z0-9][A-Za-z0-9._/-]*)`?")
     overlap_detail_field = re.compile(r"(?i)^(?:[-*]\s*)?(?:pr|pull request|branch(?:es)?|head(?: ref)?|ref)\s*:")
@@ -148,17 +148,18 @@ def has_overlap_reference(body):
         stripped = line.strip()
         if not stripped:
             continue
-        if negated_overlap_context.search(stripped):
-            continue
 
         is_boundary = _is_markdown_heading(line) or _is_top_level_field_label(line)
         is_overlap_detail = bool(overlap_detail_field.search(stripped))
+        is_negated_overlap = bool(negated_overlap_context.search(stripped))
         if is_boundary and not (in_overlap_block and is_overlap_detail):
             if in_overlap_block and block_has_pr and block_has_branch:
                 return True
-            in_overlap_block = bool(overlap_context.search(stripped))
+            in_overlap_block = bool(overlap_context.search(stripped)) and not is_negated_overlap
             block_has_pr = False
             block_has_branch = False
+        if is_negated_overlap:
+            continue
 
         line_has_context = in_overlap_block or bool(overlap_context.search(stripped))
         if not line_has_context:
@@ -254,11 +255,15 @@ def main():
             print("  [!] MISSING SCRATCH FILE CLEANUP CHECK: PR body lacks a completed scratch file cleanup acknowledgement.")
         if not has_non_empty_body_field(body, ["verification commands and results", "verification"]):
             print("  [!] MISSING VERIFICATION: PR body lacks the required 'verification' commands and results.")
-        if not has_non_empty_body_field(body, ["skipped checks with reasons", "skipped checks"], allow_none=True):
+        if not has_non_empty_body_field(
+            body,
+            ["skipped checks and reasons", "skipped checks with reasons", "skipped checks"],
+            allow_none=True,
+        ):
             print("  [!] MISSING SKIPPED CHECKS: PR body fails to mention 'skipped checks' with reasons.")
-        if not has_non_empty_body_field(body, ["risk", "risk assessment"]):
+        if not has_non_empty_body_field(body, ["risk and rollback notes", "risk", "risk assessment"]):
             print("  [!] MISSING RISK: PR body fails to mention 'risk' assessment.")
-        if not has_non_empty_body_field(body, ["rollback notes", "rollback"]):
+        if not has_non_empty_body_field(body, ["risk and rollback notes", "rollback notes", "rollback"]):
             print("  [!] MISSING ROLLBACK NOTES: PR body fails to mention 'rollback notes'.")
 
         # 2026-05-13 lesson: treat low-signal or stale broad branches as queue debt
