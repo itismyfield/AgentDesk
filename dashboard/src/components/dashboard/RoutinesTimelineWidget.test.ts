@@ -85,6 +85,12 @@ describe("RoutinesTimelineWidget helpers", () => {
       "Weekdays 09:30",
     );
     expect(describeRoutineSchedule("@every 15m", "ko")).toBe("15분마다");
+    expect(describeRoutineSchedule("0 */6 * * *", "ko")).toBe(
+      "6시간마다 정각",
+    );
+    expect(describeRoutineSchedule("30 */4 * * *", "en")).toBe(
+      "Every 4h at :30",
+    );
     expect(describeRoutineSchedule(null, "en")).toBe("Manual run");
   });
 

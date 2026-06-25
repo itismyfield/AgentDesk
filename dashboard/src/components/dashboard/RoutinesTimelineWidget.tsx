@@ -96,6 +96,37 @@ export function describeRoutineSchedule(
     const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
     const hourNum = Number(hour);
     const minuteNum = Number(minute);
+    const hourStep = hour.match(/^\*\/(\d+)$/);
+    if (
+      hourStep &&
+      Number.isInteger(minuteNum) &&
+      minuteNum >= 0 &&
+      minuteNum <= 59 &&
+      dayOfMonth === "*" &&
+      month === "*" &&
+      dayOfWeek === "*"
+    ) {
+      const value = Number(hourStep[1]);
+      if (Number.isInteger(value) && value > 0 && value <= 23) {
+        if (minuteNum === 0) {
+          return language === "ko"
+            ? `${value}시간마다 정각`
+            : language === "ja"
+              ? `${value}時間ごとの正時`
+              : language === "zh"
+                ? `每 ${value} 小时整点`
+                : `Every ${value}h on the hour`;
+        }
+        const minuteLabel = pad2(minuteNum);
+        return language === "ko"
+          ? `${value}시간마다 ${minuteLabel}분`
+          : language === "ja"
+            ? `${value}時間ごと ${minuteLabel}分`
+            : language === "zh"
+              ? `每 ${value} 小时 ${minuteLabel} 分`
+              : `Every ${value}h at :${minuteLabel}`;
+      }
+    }
     if (
       Number.isInteger(hourNum) &&
       Number.isInteger(minuteNum) &&
@@ -141,6 +172,39 @@ function statusLabel(routine: RoutineRecord, t: TFunction): string {
     return t({ ko: "분리됨", en: "Detached", ja: "切り離し", zh: "已分离" });
   }
   return routine.status;
+}
+
+function runStatusTone(status: string | null | undefined): "info" | "success" | "warn" | "neutral" | "danger" {
+  if (status === "succeeded") return "success";
+  if (status === "running") return "info";
+  if (status === "failed" || status === "interrupted") return "danger";
+  if (status === "paused") return "warn";
+  return "neutral";
+}
+
+function runStatusLabel(status: string | null | undefined, t: TFunction): string | null {
+  if (!status) return null;
+  switch (status) {
+    case "succeeded":
+      return t({ ko: "최근 성공", en: "Last succeeded", ja: "前回成功", zh: "最近成功" });
+    case "failed":
+      return t({ ko: "최근 실패", en: "Last failed", ja: "前回失敗", zh: "最近失败" });
+    case "skipped":
+      return t({ ko: "최근 스킵", en: "Last skipped", ja: "前回スキップ", zh: "最近跳过" });
+    case "running":
+      return t({ ko: "최근 진행 중", en: "Last running", ja: "前回実行中", zh: "最近运行中" });
+    case "paused":
+      return t({ ko: "최근 일시정지", en: "Last paused", ja: "前回一時停止", zh: "最近暂停" });
+    case "interrupted":
+      return t({ ko: "최근 중단", en: "Last interrupted", ja: "前回中断", zh: "最近中断" });
+    default:
+      return t({
+        ko: `최근 ${status}`,
+        en: `Last ${status}`,
+        ja: `前回${status}`,
+        zh: `最近 ${status}`,
+      });
+  }
 }
 
 function formatDateTime(value: string | null, localeTag: string): string {
@@ -823,6 +887,7 @@ export function RoutinesTimelineWidget({
   const [reloadKey, setReloadKey] = useState(0);
   const [selectedRoutineId, setSelectedRoutineId] = useState<string | null>(null);
   const [selectedRuns, setSelectedRuns] = useState<RoutineRunRecord[]>([]);
+  const [latestRunsByRoutine, setLatestRunsByRoutine] = useState<Record<string, RoutineRunRecord | null>>({});
   const [runsLoading, setRunsLoading] = useState(false);
   const [runsError, setRunsError] = useState(false);
 
@@ -837,6 +902,25 @@ export function RoutinesTimelineWidget({
         );
         if (!mounted) return;
         setRoutines(next);
+        setLatestRunsByRoutine((previous) =>
+          Object.fromEntries(
+            next.map((routine) => [routine.id, previous[routine.id] ?? null]),
+          ),
+        );
+        void Promise.all(
+          next.map(async (routine) => {
+            try {
+              const [latestRun] = await getRoutineRuns(routine.id, 1);
+              return [routine.id, latestRun ?? null] as const;
+            } catch {
+              return [routine.id, null] as const;
+            }
+          }),
+        ).then((latestRuns) => {
+          if (mounted) {
+            setLatestRunsByRoutine(Object.fromEntries(latestRuns));
+          }
+        });
       } catch {
         if (mounted) setError(true);
       } finally {
@@ -994,6 +1078,8 @@ export function RoutinesTimelineWidget({
           {sortedRoutines.map((routine) => {
             const relative = formatRelative(routine.next_due_at, localeTag);
             const lastRunLabel = formatDateTime(routine.last_run_at, localeTag);
+            const latestRun = latestRunsByRoutine[routine.id] ?? null;
+            const latestRunStatusLabel = runStatusLabel(latestRun?.status, t);
             const purpose = describeRoutinePurpose(routine, t);
             return (
               <button
@@ -1039,6 +1125,11 @@ export function RoutinesTimelineWidget({
                       <SurfaceMetaBadge tone={statusTone(routine)}>
                         {statusLabel(routine, t)}
                       </SurfaceMetaBadge>
+                      {latestRunStatusLabel ? (
+                        <SurfaceMetaBadge tone={runStatusTone(latestRun?.status)}>
+                          {latestRunStatusLabel}
+                        </SurfaceMetaBadge>
+                      ) : null}
                     </div>
                     <p className="mt-2 line-clamp-2 text-xs leading-5 sm:text-[13px]" style={{ color: "var(--th-text-primary)" }}>
                       {purpose}
