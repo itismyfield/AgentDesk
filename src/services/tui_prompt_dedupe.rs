@@ -8,6 +8,12 @@ use tokio::sync::broadcast;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use chrono::{DateTime, Utc};
 
+mod synthetic_prompt;
+use self::synthetic_prompt::{
+    is_synthetic_tui_user_prompt_for_provider, reject_synthetic_claude_user_prompt,
+    reject_synthetic_tui_user_prompt,
+};
+
 const PENDING_PROMPT_TTL: Duration = Duration::from_secs(10);
 const RECENT_OBSERVED_TTL: Duration = Duration::from_secs(30);
 const SESSION_MAPPING_TTL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -854,7 +860,7 @@ fn observe_prompt_candidates_by_tmux_inner(
         // never publishes a spurious SSH-direct turn. Treated like other synthetic
         // prompts → candidates stay empty → `PromptObservation::Ignored`.
         if prompt.is_empty()
-            || is_synthetic_tui_user_prompt(prompt)
+            || is_synthetic_tui_user_prompt_for_provider(&provider, prompt)
             || is_discord_relayed_user_prompt(prompt)
         {
             continue;
@@ -1257,7 +1263,7 @@ pub fn extract_claude_transcript_user_prompt_with_entry_id(
     {
         return None;
     }
-    let prompt = reject_synthetic_tui_user_prompt(extract_message_content_text(message)?)?;
+    let prompt = reject_synthetic_claude_user_prompt(extract_message_content_text(message)?)?;
     let entry_id = extract_claude_transcript_entry_id(json, message);
     Some((prompt, entry_id))
 }
@@ -1289,20 +1295,6 @@ pub fn extract_qwen_jsonl_user_prompt(json: &Value) -> Option<String> {
         return None;
     }
     reject_synthetic_tui_user_prompt(extract_message_content_text(message)?)
-}
-
-fn reject_synthetic_tui_user_prompt(prompt: String) -> Option<String> {
-    (!is_synthetic_tui_user_prompt(&prompt)).then_some(prompt)
-}
-
-fn is_synthetic_tui_user_prompt(prompt: &str) -> bool {
-    let prompt = prompt.trim();
-    if prompt.starts_with("<environment_context>") && prompt.ends_with("</environment_context>") {
-        return true;
-    }
-    prompt.starts_with("[Shared Agent Knowledge]\n")
-        || prompt.starts_with("[Proactive Memory Guidance]\n")
-        || prompt == "No response requested."
 }
 
 /// #3527: `[User: <author> (ID: <digits>)] …` is AgentDesk's OWN Discord→TUI
@@ -2833,6 +2825,50 @@ mod tests {
     }
 
     #[test]
+    fn ignores_claude_interrupt_marker_without_relay_lease() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        assert_eq!(
+            observe_prompt_by_tmux("claude", "tmux-stop", "[Request interrupted by user]"),
+            PromptObservation::Ignored
+        );
+        assert!(
+            !external_input_relay_lease_present("claude", "tmux-stop", 42),
+            "a stop-control transcript marker must not create an SSH-direct relay lease"
+        );
+    }
+
+    #[test]
+    fn interrupt_marker_filter_is_claude_scoped_for_direct_observation() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+        let marker = "[Request interrupted by user]";
+
+        assert_eq!(
+            observe_prompt_by_tmux("codex", "tmux-codex-stop-text", marker),
+            PromptObservation::PublishedSshDirect,
+            "Codex direct input with the same text remains a user prompt"
+        );
+        assert!(clear_external_input_relay_lease(
+            "codex",
+            "tmux-codex-stop-text",
+            42
+        ));
+
+        assert_eq!(
+            observe_prompt_by_tmux("qwen", "tmux-qwen-stop-text", marker),
+            PromptObservation::PublishedSshDirect,
+            "Qwen direct input with the same text remains a user prompt"
+        );
+        assert!(clear_external_input_relay_lease(
+            "qwen",
+            "tmux-qwen-stop-text",
+            42
+        ));
+    }
+
+    #[test]
     fn external_input_relay_lease_can_be_bound_to_channel_after_observation() {
         let _guard = TEST_LOCK.lock().unwrap();
         reset_state();
@@ -3049,6 +3085,42 @@ mod tests {
     }
 
     #[test]
+    fn codex_and_qwen_keep_claude_interrupt_text_as_user_prompt() {
+        let marker = "[Request interrupted by user]";
+        let codex_json = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": marker
+                    }
+                ]
+            }
+        });
+        let qwen_json = serde_json::json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": marker }
+                ]
+            }
+        });
+
+        assert_eq!(
+            extract_codex_rollout_user_prompt(&codex_json).as_deref(),
+            Some(marker)
+        );
+        assert_eq!(
+            extract_qwen_jsonl_user_prompt(&qwen_json).as_deref(),
+            Some(marker)
+        );
+    }
+
+    #[test]
     fn extracts_claude_transcript_user_message_text() {
         let json = serde_json::json!({
             "type": "user",
@@ -3153,6 +3225,49 @@ mod tests {
         });
 
         assert_eq!(extract_claude_transcript_user_prompt(&json), None);
+    }
+
+    #[test]
+    fn ignores_claude_transcript_interrupt_marker_user_message_text() {
+        for marker in [
+            "[Request interrupted by user]",
+            "[Request interrupted by user for tool use]",
+        ] {
+            let json = serde_json::json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": marker }
+                    ]
+                },
+                "sessionId": "sess-tui",
+            });
+
+            assert_eq!(
+                extract_claude_transcript_user_prompt(&json),
+                None,
+                "interrupt marker {marker:?} is control output, not external input"
+            );
+        }
+
+        let user_prompt = "[Request interrupted by user story idea]";
+        let json = serde_json::json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": user_prompt }
+                ]
+            },
+            "sessionId": "sess-tui",
+        });
+
+        assert_eq!(
+            extract_claude_transcript_user_prompt(&json).as_deref(),
+            Some(user_prompt),
+            "nearby human text must not be filtered by prefix"
+        );
     }
 
     #[test]

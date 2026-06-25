@@ -886,7 +886,7 @@
     normal long SILENT tool run (e.g. a big build) is never mistaken for an idle
     hang, with the 4h hard ceiling as the real backstop, and noted the limitation
     in the idle-kill error message + a delayed-event test).
-  - `src/services/tui_prompt_dedupe.rs` (1633 lines; shared TUI prompt
+  - `src/services/tui_prompt_dedupe.rs` (1625 lines; shared TUI prompt
     fingerprinting/dedupe state for hook and rollout relay paths, bugfix only
     outside an extraction plan; +20 from #3676: Codex rollout user prompts now
     prefer the stable message entry id when present so Codex TUI direct prompt
@@ -922,7 +922,10 @@
     atomic read, closing the present/generation TOCTOU) plus its dedicated accessor unit
     test; the watcher-snapshot no-clobber regression test is retained, rewritten to take
     its G1/G2 snapshots from `external_input_relay_lease(...).map(|l| l.generation)`;
-    +62 from #3304: slash-command canonical prompt keys for `<command-*>` XML vs
+    -8 from #3695: moved the synthetic TUI user prompt filter into
+    `tui_prompt_dedupe/synthetic_prompt.rs` while adding exact Claude interrupt
+    marker suppression for stop-control transcript envelopes; +62 from #3304:
+    slash-command canonical prompt keys for `<command-*>` XML vs
     `/command args` dedupe, plus focused loop skill-expansion regressions).
   - `src/services/discord/recovery_engine.rs` (3412 lines; +2 from #3668 re-exporting `success_result_end_offset_after_offset` (pub(in discord)) so the relay_recovery F2 tail-answer guard can require terminal success evidence; +24 from f12b09366 backstop missed turn intake (drain-restart ownerless-inflight recovery: phase_policy/relay_recovery/relay_health predicates); +15 from #3610 PR-2 codex r2 Issue-2 storm-guard comment at the committed-branch anchor-repost dispose (passes `tmux_alive = false` so a transient send-new is budget-bounded, not pane-preserved forever; the now-unused liveness probe is dropped); +33 from #3610 PR-2 anchor-repost fallback (flag-gated, default OFF); +9 from #3582 stamping
     `set_relay_owner_kind(Watcher)` at the rebind-origin birth site so the
