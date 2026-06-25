@@ -1,5 +1,7 @@
 use super::super::*;
 
+mod busy_duplicate_notice;
+
 pub(in crate::services::discord) fn should_process_turn_message(
     kind: serenity::model::channel::MessageType,
 ) -> bool {
@@ -2477,6 +2479,13 @@ pub(in crate::services::discord) async fn handle_event(
                     .load(std::sync::atomic::Ordering::Relaxed);
 
                 if !outcome.enqueued {
+                    if busy_duplicate_notice::silence_if_already_queued(
+                        outcome.refusal_reason,
+                        new_message.id,
+                        channel_id,
+                    ) {
+                        return Ok(());
+                    }
                     rate_limit_wait(&data.shared, channel_id).await;
                     let _ = channel_id
                         .say(&ctx.http, "↪ 같은 메시지가 방금 이미 큐잉되어서 무시했어.")
