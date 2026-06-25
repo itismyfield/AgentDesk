@@ -322,7 +322,7 @@ mod presleep_tests {
     // this sync scope and never span an await, so no await_holding_lock allow is
     // needed (#3034 ratchet stays frozen at its baseline).
     #[test]
-    fn abandoned_presence_clear_releases_idle_queue_gate_but_keeps_durable_record() {
+    fn abandoned_presence_auto_reconcile_releases_idle_queue_gate_but_keeps_durable_record() {
         let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
         let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
         let tmp = tempfile::tempdir().expect("temp runtime root");
@@ -348,27 +348,24 @@ mod presleep_tests {
 
             let record = pending_record(&provider, channel_id);
             super::super::tui_direct_pending_start::persist(&record).unwrap();
-            let snapshot = mailbox_snapshot(&shared, channel_id).await;
             assert!(
-                !idle_queue_snapshot_has_kickable_backlog(
-                    &shared,
-                    &provider,
-                    channel_id,
-                    &snapshot
-                ),
-                "pending synthetic-start presence must block the idle queue before the #3333 clear"
-            );
-
-            assert!(
-                super::super::tui_direct_pending_start::clear_abandoned_synthetic_start_presence(
+                super::super::tui_direct_pending_start::pending_synthetic_start_present(
                     provider.as_str(),
                     channel_id.get(),
                 ),
-                "the abandoned durable record should allow presence-only clearing"
+                "the retained pending-start presence starts out blocking the idle queue"
             );
+            let snapshot = mailbox_snapshot(&shared, channel_id).await;
             assert!(
                 idle_queue_snapshot_has_kickable_backlog(&shared, &provider, channel_id, &snapshot),
-                "after presence-only clear, the queued item is kickable by the final one-shot drain"
+                "#3691: abandoned retry-exhausted presence must self-clear so the queued item is kickable"
+            );
+            assert!(
+                !super::super::tui_direct_pending_start::pending_synthetic_start_present(
+                    provider.as_str(),
+                    channel_id.get(),
+                ),
+                "#3691: only the in-memory presence is cleared"
             );
             assert!(
                 super::super::tui_direct_pending_start::pending_synthetic_start_abandoned(

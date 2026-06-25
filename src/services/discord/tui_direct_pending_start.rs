@@ -273,6 +273,24 @@ pub(super) fn pending_synthetic_start_present(provider: &str, channel_id: u64) -
         > 0
 }
 
+pub(super) fn pending_synthetic_start_blocks_idle_kickoff(provider: &str, channel_id: u64) -> bool {
+    if !pending_synthetic_start_present(provider, channel_id) {
+        return false;
+    }
+
+    if clear_abandoned_synthetic_start_presence(provider, channel_id) {
+        tracing::warn!(
+            provider,
+            channel_id,
+            issue = "#3691",
+            "idle queue gate cleared abandoned TUI-direct pending-start presence; durable record retained for restart retry"
+        );
+        return false;
+    }
+
+    true
+}
+
 /// Re-mark a record present during restart restore. [`load_all`] reads the
 /// durable store but does not touch the in-memory index; this restores the gate
 /// state before the respawned worker's first poll. The worker's terminal
