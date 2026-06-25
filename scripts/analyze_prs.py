@@ -74,10 +74,13 @@ def has_non_empty_body_field(body, labels, *, allow_none=False, stop_at_field_la
                 # Next field label is a boundary whether or not it carries a
                 # value: an empty `- Risk:` must not borrow the value of a
                 # following populated field (e.g. `- Rollback notes: revert`).
-                if stop_at_field_labels and _is_top_level_field_label(next_line):
+                is_field_label = _is_top_level_field_label(next_line)
+                if stop_at_field_labels and is_field_label:
                     break
                 if _meaningful_field_value(commentless, allow_none=allow_none):
                     return True
+                if is_field_label:
+                    continue
                 break
     return False
 
@@ -131,7 +134,7 @@ def has_overlap_reference(body):
     pr_ref = re.compile(r"(?i)(?:#[0-9]+|github\.com/[^/\s]+/[^/\s]+/pull/[0-9]+)")
     overlap_context = re.compile(r"(?i)\b(?:overlaps?|overlapping|duplicate|supersed(?:e|ed|es|ing)?|replaces?|same scope)\b")
     negated_overlap_context = re.compile(r"(?i)\b(?:non[- ]?overlapp?ing|non[- ]?overlap|not overlapping|not overlap|does not overlap)\b")
-    branch_ref = re.compile(r"(?i)\b(?:branch(?:es)?|head(?: ref)?|ref)\s*[:=-]?\s*`?([A-Za-z0-9][A-Za-z0-9._/-]*)`?")
+    branch_ref = re.compile(r"(?i)\b(?:branch(?:es)?|head(?:\s+ref)?|ref)\b\s*[:=-]?\s*`?([A-Za-z0-9][A-Za-z0-9._/-]*)`?")
     overlap_detail_field = re.compile(r"(?i)^(?:[-*]\s*)?(?:pr|pull request|branch(?:es)?|head(?: ref)?|ref)\s*:")
     in_overlap_block = False
     block_has_pr = False
@@ -144,7 +147,7 @@ def has_overlap_reference(body):
         if negated_overlap_context.search(stripped):
             continue
 
-        is_boundary = stripped.startswith("#") or _is_top_level_field_label(line)
+        is_boundary = _is_markdown_heading(line) or _is_top_level_field_label(line)
         is_overlap_detail = bool(overlap_detail_field.search(stripped))
         if is_boundary and not (in_overlap_block and is_overlap_detail):
             if in_overlap_block and block_has_pr and block_has_branch:

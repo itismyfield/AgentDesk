@@ -203,6 +203,11 @@ class PrAnalyzerOverlapReferenceTests(unittest.TestCase):
         body = "This is a no-change PR overlapping with #1234."
         self.assertFalse(has_overlap_reference(body))
 
+    def test_ref_prefix_inside_word_is_not_branch_reference(self):
+        body = "Overlap with #1234; refreshed docs only."
+
+        self.assertFalse(has_overlap_reference(body))
+
     def test_plural_overlap_wording_with_branch_is_reference(self):
         body = "This no-change PR overlaps #1234 on branch inventory-refresh."
         self.assertTrue(has_overlap_reference(body))
@@ -223,6 +228,14 @@ class PrAnalyzerOverlapReferenceTests(unittest.TestCase):
         body = """
 - Duplicate/overlap check:
   - #1234 on branch codex/same-scope covers this no-change PR.
+"""
+
+        self.assertTrue(has_overlap_reference(body))
+
+    def test_overlap_reference_accepts_bare_issue_ref_line_inside_overlap_block(self):
+        body = """
+- Duplicate/overlap check:
+  #1234 on branch codex/same-scope
 """
 
         self.assertTrue(has_overlap_reference(body))
@@ -277,6 +290,16 @@ Update analyzer hygiene checks to match the current template.
 ## Summary
 
 - Tests: add analyzer coverage.
+"""
+
+        self.assertTrue(has_template_summary(body))
+
+    def test_multiline_labelled_summary_bullet_counts_as_change_context(self):
+        body = """
+## Summary
+
+- Tests:
+  Add analyzer coverage.
 """
 
         self.assertTrue(has_template_summary(body))
