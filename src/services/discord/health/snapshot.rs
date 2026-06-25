@@ -375,8 +375,24 @@ impl HealthRegistry {
         channel_id: u64,
     ) -> Option<WatcherStateSnapshot> {
         let channel = ChannelId::new(channel_id);
-        if let Some(shared) = self.shared_for_provider_on_channel(provider, channel).await {
-            return watcher_state_snapshot_for_shared(provider.as_str(), shared, channel).await;
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            self.shared_for_provider_on_channel(provider, channel),
+        )
+        .await
+        {
+            Ok(Some(shared)) => {
+                return watcher_state_snapshot_for_shared(provider.as_str(), shared, channel).await;
+            }
+            Ok(None) => {}
+            Err(_) => {
+                tracing::warn!(
+                    provider = provider.as_str(),
+                    channel_id,
+                    "watcher-state provider/channel runtime resolve timed out; skipping provider scan to preserve channel ownership",
+                );
+                return None;
+            }
         }
 
         self.snapshot_watcher_state_filtered(channel_id, Some(provider))
@@ -842,7 +858,12 @@ pub(super) fn observe_global_active_invariant(
 
 #[cfg(test)]
 mod tests {
-    use super::rebind_origin_inflight_is_idle;
+    use std::sync::Arc;
+
+    use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+
+    use super::{HealthRegistry, rebind_origin_inflight_is_idle};
+    use crate::services::provider::{CancelToken, ProviderKind};
 
     /// #3631: a rebind-origin row with NO cancel token is idle (so the channel
     /// is not falsely reported as an active foreground stream and queued
@@ -857,5 +878,38 @@ mod tests {
         // not a rebind-origin row → never idle via this seam.
         assert!(!rebind_origin_inflight_is_idle(false, false));
         assert!(!rebind_origin_inflight_is_idle(true, false));
+    }
+
+    #[tokio::test]
+    async fn provider_scoped_snapshot_timeout_does_not_fallback_to_provider_scan() {
+        let registry = HealthRegistry::new();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        registry
+            .register(ProviderKind::Codex.as_str().to_string(), shared.clone())
+            .await;
+
+        let channel = ChannelId::new(42);
+        let token = Arc::new(CancelToken::new());
+        assert!(
+            crate::services::discord::mailbox_try_start_turn(
+                shared.as_ref(),
+                channel,
+                token,
+                UserId::new(1),
+                MessageId::new(2),
+            )
+            .await,
+            "test mailbox turn should make fallback provider scan look engaged"
+        );
+
+        let _settings_guard = shared.settings.write().await;
+        let snapshot = registry
+            .snapshot_watcher_state_for_provider(&ProviderKind::Codex, channel.get())
+            .await;
+
+        assert!(
+            snapshot.is_none(),
+            "provider/channel resolve timeout must not scan a possibly wrong same-provider runtime"
+        );
     }
 }

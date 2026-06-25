@@ -42,12 +42,13 @@
 //! [`request_discovery_tick`] for that purpose so future PRs can nudge the
 //! loop without changing this module.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use sqlx::PgPool;
+use sqlx::{PgPool, Row as SqlxRow};
 use tokio::sync::Notify;
 
 use super::session_matcher::{
@@ -56,7 +57,7 @@ use super::session_matcher::{
 };
 use super::session_registry::{RegistryChange, SessionRegistry, global_session_registry};
 use crate::services::platform::tmux::{EnumeratedSession, list_sessions_with_pane_command};
-use crate::services::provider::ProviderKind;
+use crate::services::provider::{ProviderKind, parse_provider_and_channel_from_tmux_name};
 
 /// Knobs for the discovery loop. Production callers use [`Self::default`].
 /// Kept as a struct (rather than a bare `Duration`) so future tuning (jitter,
@@ -102,15 +103,27 @@ pub fn request_discovery_tick() {
 ///
 /// Logs at WARN if the directory builder rejects a per-binding collision so
 /// operators can fix the config without aborting the whole tick.
+#[allow(dead_code)] // compatibility helper; the discovery tick uses the live-session-filtered path
 pub async fn build_channel_directory_from_pg(
     pool: &PgPool,
+) -> Result<ChannelDirectory, sqlx::Error> {
+    let live_session_names = HashSet::new();
+    build_channel_directory_from_pg_for_live_sessions(pool, &live_session_names, None).await
+}
+
+async fn build_channel_directory_from_pg_for_live_sessions(
+    pool: &PgPool,
+    live_session_names: &HashSet<String>,
+    local_instance_id: Option<&str>,
 ) -> Result<ChannelDirectory, sqlx::Error> {
     // load_graceful() does sync filesystem IO + yaml parse — push to a blocking
     // thread so we don't stall the tokio runtime on every discovery tick.
     let name_map = tokio::task::spawn_blocking(build_yaml_channel_name_map)
         .await
         .unwrap_or_default();
-    build_channel_directory_from_pg_with_config(pool, name_map).await
+    let session_tmux_segments =
+        load_session_tmux_segments_pg(pool, live_session_names, local_instance_id).await?;
+    build_channel_directory_from_pg_with_config(pool, name_map, session_tmux_segments).await
 }
 
 /// Lookup table: `(agent_id, provider, channel_id) → channel_name`. Built once
@@ -121,7 +134,25 @@ pub async fn build_channel_directory_from_pg(
 /// Without this, the directory keys collapse to `(provider, channel_id)` and
 /// fail to match `AgentDesk-{provider}-{channel_name}` sessions, leaving the
 /// post-restart adoption path silently broken (issue #2465).
-pub type ChannelNameMap = std::collections::HashMap<(String, ProviderKind, String), String>;
+pub type ChannelNameMap = HashMap<(String, ProviderKind, String), String>;
+type SessionTmuxSegmentMap = HashMap<(ProviderKind, String), String>;
+const SESSION_TMUX_SEGMENTS_QUERY: &str = "SELECT provider, channel_id, session_key, instance_id
+         FROM sessions
+         WHERE NULLIF(TRIM(channel_id), '') IS NOT NULL
+           AND NULLIF(TRIM(session_key), '') IS NOT NULL
+           AND LOWER(TRIM(COALESCE(status, ''))) IN (
+             'connected',
+             'turn_active',
+             'awaiting_bg',
+             'awaiting_user',
+             'idle',
+             'working'
+           )
+           AND last_heartbeat IS NOT NULL
+           AND last_heartbeat > NOW() - INTERVAL '10 minutes'
+         ORDER BY last_heartbeat DESC NULLS LAST,
+                  created_at DESC NULLS LAST,
+                  id DESC";
 
 /// Build the channel-name map from the live yaml config. Returns an empty map
 /// on any failure so discovery degrades gracefully (legacy snowflake-keyed
@@ -149,6 +180,7 @@ pub fn build_yaml_channel_name_map() -> ChannelNameMap {
 async fn build_channel_directory_from_pg_with_config(
     pool: &PgPool,
     name_map: ChannelNameMap,
+    session_tmux_segments: SessionTmuxSegmentMap,
 ) -> Result<ChannelDirectory, sqlx::Error> {
     let all = crate::db::agents::load_all_agent_channel_bindings_pg(pool).await?;
 
@@ -166,7 +198,12 @@ async fn build_channel_directory_from_pg_with_config(
             // `channel_id` preserves legacy bindings without a yaml entry.
             let tmux_segment = name_map
                 .get(&(agent_id.clone(), provider.clone(), channel_id.clone()))
-                .cloned();
+                .cloned()
+                .or_else(|| {
+                    session_tmux_segments
+                        .get(&(provider.clone(), channel_id.clone()))
+                        .cloned()
+                });
             let binding = ChannelBinding {
                 channel_id,
                 agent_id: agent_id.clone(),
@@ -183,6 +220,157 @@ async fn build_channel_directory_from_pg_with_config(
         }
     }
     Ok(directory)
+}
+
+/// Best-effort post-restart adoption aid:
+///
+/// `agentdesk.yaml` is the preferred source for a Discord channel's tmux
+/// segment, but some operator/by-id channels only exist in the database. Live
+/// provider sessions still persist their exact `session_key` as
+/// `...:AgentDesk-{provider}-{tmux_segment}`. Use that runtime fact as a
+/// fallback so discovery can re-bind an already-running tmux session after
+/// dcserver restarts instead of logging it as an unowned operator session.
+async fn load_session_tmux_segments_pg(
+    pool: &PgPool,
+    live_session_names: &HashSet<String>,
+    local_instance_id: Option<&str>,
+) -> Result<SessionTmuxSegmentMap, sqlx::Error> {
+    let rows = sqlx::query(SESSION_TMUX_SEGMENTS_QUERY)
+        .fetch_all(pool)
+        .await?;
+
+    let mut map = SessionTmuxSegmentMap::new();
+    for row in rows {
+        let channel_id: Option<String> = row.try_get("channel_id")?;
+        let session_key: Option<String> = row.try_get("session_key")?;
+        let provider_hint: Option<String> = row.try_get("provider")?;
+        let row_instance_id: Option<String> = row.try_get("instance_id")?;
+        let Some(channel_id) = normalize_nonempty(channel_id.as_deref()) else {
+            continue;
+        };
+        let Some(session_key) = session_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        else {
+            continue;
+        };
+        if !session_row_matches_local_instance(row_instance_id.as_deref(), local_instance_id) {
+            tracing::debug!(
+                session_key = %session_key,
+                row_instance_id = row_instance_id.as_deref().unwrap_or("<none>"),
+                local_instance_id = local_instance_id.unwrap_or("<none>"),
+                "session-discovery: ignoring non-local session row while deriving tmux segment",
+            );
+            continue;
+        }
+        let Some((provider, tmux_segment)) =
+            live_tmux_segment_from_session_key(session_key, live_session_names)
+        else {
+            continue;
+        };
+        if !provider_hint_matches_session_provider(provider_hint.as_deref(), &provider) {
+            tracing::debug!(
+                session_key = %session_key,
+                provider_hint = provider_hint.as_deref().unwrap_or("<none>"),
+                parsed_provider = ?provider,
+                "session-discovery: ignoring mismatched sessions.provider while deriving tmux segment",
+            );
+            continue;
+        }
+        match map.entry((provider, channel_id)) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(tmux_segment);
+            }
+            std::collections::hash_map::Entry::Occupied(existing)
+                if existing.get() != &tmux_segment =>
+            {
+                tracing::debug!(
+                    channel_id = %existing.key().1,
+                    provider = ?existing.key().0,
+                    existing_tmux_segment = %existing.get(),
+                    candidate_tmux_segment = %tmux_segment,
+                    "session-discovery: keeping first runtime tmux segment for channel",
+                );
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {}
+        }
+    }
+    Ok(map)
+}
+
+fn normalized_instance_id(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn default_instance_hostname(value: &str) -> Option<&str> {
+    let (hostname, pid) = value.rsplit_once('-')?;
+    if hostname.is_empty() || pid.is_empty() || !pid.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    Some(hostname)
+}
+
+fn provider_hint_matches_session_provider(
+    provider_hint: Option<&str>,
+    parsed_provider: &ProviderKind,
+) -> bool {
+    match provider_hint
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(ProviderKind::from_str)
+    {
+        Some(hint) => hint == *parsed_provider,
+        None => true,
+    }
+}
+
+fn session_row_matches_local_instance(
+    row_instance_id: Option<&str>,
+    local_instance_id: Option<&str>,
+) -> bool {
+    let Some(local) = normalized_instance_id(local_instance_id) else {
+        return true;
+    };
+    let Some(row) = normalized_instance_id(row_instance_id) else {
+        return false;
+    };
+    row == local
+        || matches!(
+            (default_instance_hostname(row), default_instance_hostname(local)),
+            (Some(row_host), Some(local_host)) if row_host == local_host
+        )
+}
+
+fn normalize_nonempty(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn tmux_name_and_segment_from_session_key(
+    session_key: &str,
+) -> Option<(&str, ProviderKind, String)> {
+    let (_, tmux_name) = session_key.rsplit_once(':')?;
+    let (provider, tmux_segment) = parse_provider_and_channel_from_tmux_name(tmux_name)?;
+    Some((tmux_name, provider, tmux_segment))
+}
+
+fn live_tmux_segment_from_session_key(
+    session_key: &str,
+    live_session_names: &HashSet<String>,
+) -> Option<(ProviderKind, String)> {
+    let (tmux_name, provider, tmux_segment) = tmux_name_and_segment_from_session_key(session_key)?;
+    if !live_session_names.contains(tmux_name) {
+        tracing::debug!(
+            session_key = %session_key,
+            tmux_name = %tmux_name,
+            "session-discovery: ignoring non-live session row while deriving tmux segment",
+        );
+        return None;
+    }
+    Some((provider, tmux_segment))
 }
 
 /// Extract the `(provider, channel_id)` pairs an agent declares. Today this
@@ -203,6 +391,7 @@ fn channel_pairs_for_agent(
     // Claude → discord_channel_cc; Codex → discord_channel_cdx.
     push(ProviderKind::Claude, bindings.discord_channel_cc.clone());
     push(ProviderKind::Codex, bindings.discord_channel_cdx.clone());
+    push(ProviderKind::Codex, bindings.discord_channel_alt.clone());
 
     // Legacy primary channel: routed under the configured provider when set.
     if let Some(provider_str) = bindings.provider.as_deref() {
@@ -464,18 +653,6 @@ async fn run_single_tick(
         tracing::debug!("session-discovery: yielding tick to foreground under pool pressure",);
         return TickReport::default();
     }
-    // PG load failure → ABORT THE TICK. Returning a default report leaves the
-    // registry untouched, so a transient PG hiccup never wipes live entries.
-    let directory = match build_channel_directory_from_pg(pool).await {
-        Ok(dir) => dir,
-        Err(error) => {
-            tracing::warn!(
-                ?error,
-                "session-discovery: agent-binding load failed; skipping tick to preserve registry",
-            );
-            return TickReport::default();
-        }
-    };
     let enumeration_result = tokio::task::spawn_blocking(list_sessions_with_pane_command).await;
     let enumeration = match enumeration_result {
         Ok(Ok(sessions)) => sessions,
@@ -485,6 +662,28 @@ async fn run_single_tick(
         }
         Err(error) => {
             tracing::warn!(?error, "session-discovery: tmux enumeration join failed");
+            return TickReport::default();
+        }
+    };
+    let live_session_names: HashSet<String> = enumeration
+        .iter()
+        .map(|session| session.session_name.clone())
+        .collect();
+    // PG load failure → ABORT THE TICK. Returning a default report leaves the
+    // registry untouched, so a transient PG hiccup never wipes live entries.
+    let directory = match build_channel_directory_from_pg_for_live_sessions(
+        pool,
+        &live_session_names,
+        instance_id,
+    )
+    .await
+    {
+        Ok(dir) => dir,
+        Err(error) => {
+            tracing::warn!(
+                ?error,
+                "session-discovery: agent-binding load failed; skipping tick to preserve registry",
+            );
             return TickReport::default();
         }
     };
@@ -783,6 +982,138 @@ mod tests {
         );
 
         assert_eq!(report.matched, 1, "snowflake fallback must still match");
+    }
+
+    #[test]
+    fn session_tmux_segment_fallback_uses_live_recent_session_rows() {
+        let query = SESSION_TMUX_SEGMENTS_QUERY;
+
+        assert!(
+            query.contains("instance_id"),
+            "fallback tmux segments must preserve session row ownership"
+        );
+        assert!(
+            query.contains("LOWER(TRIM(COALESCE(status, ''))) IN"),
+            "fallback query must filter status before deriving tmux segments"
+        );
+        assert!(
+            query.contains("'turn_active'") && query.contains("'idle'"),
+            "live runtime statuses must remain eligible"
+        );
+        assert!(
+            !query.contains("'disconnected'") && !query.contains("'aborted'"),
+            "stale terminal statuses must not be eligible"
+        );
+        assert!(
+            query.contains("last_heartbeat IS NOT NULL")
+                && query.contains("last_heartbeat > NOW() - INTERVAL '10 minutes'"),
+            "fallback tmux segments must come from current-runtime heartbeat rows"
+        );
+        assert!(
+            query.contains("ORDER BY last_heartbeat DESC NULLS LAST")
+                && query.contains("created_at DESC NULLS LAST")
+                && query.contains("id DESC"),
+            "newest live session rows must be considered before older rows"
+        );
+    }
+
+    #[test]
+    fn session_tmux_segment_fallback_requires_live_tmux_session() {
+        let snowflake = "1234567890";
+        let stale_named_session =
+            expected_session_name_for(None, &ProviderKind::Claude, "old-channel-name");
+        let live_snowflake_session =
+            expected_session_name_for(None, &ProviderKind::Claude, snowflake);
+        let live_named_session =
+            expected_session_name_for(None, &ProviderKind::Claude, "current-channel-name");
+        let live_session_names = std::collections::HashSet::from([
+            live_snowflake_session.clone(),
+            live_named_session.clone(),
+        ]);
+
+        assert!(
+            live_tmux_segment_from_session_key(
+                &format!("provider-cli:{stale_named_session}"),
+                &live_session_names,
+            )
+            .is_none(),
+            "stale DB session rows must not install a tmux_segment fallback"
+        );
+        assert_eq!(
+            live_tmux_segment_from_session_key(
+                &format!("provider-cli:{live_named_session}"),
+                &live_session_names,
+            ),
+            Some((ProviderKind::Claude, "current-channel-name".to_string())),
+            "live tmux-verified session rows remain eligible"
+        );
+
+        let directory = ChannelDirectory::from_bindings(vec![binding(
+            snowflake,
+            "legacy-agent",
+            ProviderKind::Claude,
+        )]);
+        let registry = SessionRegistry::new();
+
+        let report = reconcile_from_enumeration(
+            Some(NODE_A),
+            vec![enumerated(&live_snowflake_session, "claude")],
+            &directory,
+            &registry,
+        );
+
+        assert_eq!(
+            report.matched, 1,
+            "skipping stale fallback must leave channel_id matching intact"
+        );
+    }
+
+    #[test]
+    fn session_tmux_segment_fallback_requires_local_instance_ownership() {
+        assert!(
+            session_row_matches_local_instance(Some(NODE_A), Some(NODE_A)),
+            "local session rows remain eligible"
+        );
+        assert!(
+            session_row_matches_local_instance(Some("mac-mini-123"), Some("mac-mini-456")),
+            "default hostname-PID instance ids on the same host remain eligible across restart"
+        );
+        assert!(
+            !session_row_matches_local_instance(Some(NODE_B), Some(NODE_A)),
+            "foreign session rows must not seed local tmux segment fallbacks"
+        );
+        assert!(
+            !session_row_matches_local_instance(Some("mac-book-123"), Some("mac-mini-456")),
+            "default hostname-PID instance ids on different hosts must not match"
+        );
+        assert!(
+            !session_row_matches_local_instance(Some("mac-mini-release"), Some("mac-mini-prod")),
+            "operator-provided stable instance ids must still match exactly"
+        );
+        assert!(
+            !session_row_matches_local_instance(None, Some(NODE_A)),
+            "missing row ownership is not enough when this node has an instance id"
+        );
+        assert!(
+            session_row_matches_local_instance(Some(NODE_B), None),
+            "single-node/legacy callers without a local instance keep compatibility"
+        );
+    }
+
+    #[test]
+    fn session_tmux_segment_fallback_rejects_provider_hint_mismatch() {
+        assert!(provider_hint_matches_session_provider(
+            Some("claude"),
+            &ProviderKind::Claude
+        ));
+        assert!(
+            !provider_hint_matches_session_provider(Some("claude"), &ProviderKind::Codex),
+            "sessions.provider mismatch must discard the runtime tmux segment fallback"
+        );
+        assert!(
+            provider_hint_matches_session_provider(Some("unknown-provider"), &ProviderKind::Codex),
+            "unparseable legacy provider hints remain non-authoritative"
+        );
     }
 
     /// Regression for #2470: claude code 2.1.143 rewrites its process title to
