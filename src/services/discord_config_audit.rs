@@ -661,6 +661,21 @@ fn audit_db_agents(
         return Ok(());
     }
 
+    // #3692: this config-audit sync runs before `startup_reseed`, so it needs the
+    // same leader-ownership gate. Only a single-node deployment or the configured
+    // cluster leader runs the destructive config→DB agent sync. A cluster
+    // worker/auto node reports drift (without warnings — divergence from the
+    // leader-owned roster is expected on a worker) and must not mutate the shared
+    // agents table, otherwise it clobbers the leader's roster.
+    if !crate::db::postgres::agent_roster_sync_enabled(config) {
+        report.actions.push(
+            "skipped DB agent sync on non-leader cluster node; the leader owns the shared agents roster (#3692)"
+                .to_string(),
+        );
+        apply_db_agent_drift(report, pre_sync_drift.without_warnings());
+        return Ok(());
+    }
+
     match sync_db_agents_pg(config, &config.agents) {
         Ok(Some(count)) => {
             report.storage.synced_agents = Some(count);
