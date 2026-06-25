@@ -91,6 +91,18 @@ describe("RoutinesTimelineWidget helpers", () => {
     expect(describeRoutineSchedule("30 */4 * * *", "en")).toBe(
       "Every 4h at :30",
     );
+    expect(describeRoutineSchedule("0,30 12-20 * * *", "ko")).toBe(
+      "매일 12:00~20:30, 30분마다",
+    );
+    expect(describeRoutineSchedule("15,45 12-20 * * *", "ko")).toBe(
+      "매일 12:15~20:45, 30분마다",
+    );
+    expect(describeRoutineSchedule("0 9 * * 0", "ko")).toBe(
+      "매주 일요일 09:00",
+    );
+    expect(describeRoutineSchedule("0 10 * * 1", "ko")).toBe(
+      "매주 월요일 10:00",
+    );
     expect(describeRoutineSchedule(null, "en")).toBe("Manual run");
   });
 

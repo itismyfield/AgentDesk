@@ -61,6 +61,49 @@ function pad2(value: number): string {
   return value.toString().padStart(2, "0");
 }
 
+function parseNumberList(value: string, min: number, max: number): number[] | null {
+  const numbers = value.split(",").map((part) => Number(part));
+  if (
+    numbers.length === 0 ||
+    numbers.some((number) => !Number.isInteger(number) || number < min || number > max)
+  ) {
+    return null;
+  }
+  return numbers;
+}
+
+function parseNumberRange(value: string, min: number, max: number): [number, number] | null {
+  const match = value.match(/^(\d+)-(\d+)$/);
+  if (!match) return null;
+  const start = Number(match[1]);
+  const end = Number(match[2]);
+  if (
+    !Number.isInteger(start) ||
+    !Number.isInteger(end) ||
+    start < min ||
+    end > max ||
+    start > end
+  ) {
+    return null;
+  }
+  return [start, end];
+}
+
+function weekdayLabel(
+  dayOfWeek: string,
+  language: "ko" | "en" | "ja" | "zh",
+): string | null {
+  const weekday = dayOfWeek === "7" ? 0 : Number(dayOfWeek);
+  if (!Number.isInteger(weekday) || weekday < 0 || weekday > 6) return null;
+  const labels = {
+    ko: ["일요일", "월요일", "화요일", "수요일", "목요일", "금요일", "토요일"],
+    en: ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"],
+    ja: ["日曜日", "月曜日", "火曜日", "水曜日", "木曜日", "金曜日", "土曜日"],
+    zh: ["周日", "周一", "周二", "周三", "周四", "周五", "周六"],
+  };
+  return labels[language][weekday];
+}
+
 export function describeRoutineSchedule(
   schedule: string | null,
   language: "ko" | "en" | "ja" | "zh",
@@ -97,6 +140,8 @@ export function describeRoutineSchedule(
     const hourNum = Number(hour);
     const minuteNum = Number(minute);
     const hourStep = hour.match(/^\*\/(\d+)$/);
+    const minuteList = parseNumberList(minute, 0, 59);
+    const hourRange = parseNumberRange(hour, 0, 23);
     if (
       hourStep &&
       Number.isInteger(minuteNum) &&
@@ -128,6 +173,41 @@ export function describeRoutineSchedule(
       }
     }
     if (
+      minuteList &&
+      minuteList.length > 1 &&
+      hourRange &&
+      dayOfMonth === "*" &&
+      month === "*" &&
+      dayOfWeek === "*"
+    ) {
+      const [startHour, endHour] = hourRange;
+      const sortedMinutes = [...minuteList].sort((left, right) => left - right);
+      const interval =
+        sortedMinutes.length === 2
+          ? sortedMinutes[1] - sortedMinutes[0]
+          : null;
+      const startClock = `${pad2(startHour)}:${pad2(sortedMinutes[0])}`;
+      const endClock = `${pad2(endHour)}:${pad2(sortedMinutes[sortedMinutes.length - 1])}`;
+      const rangeLabel =
+        language === "ko"
+          ? `매일 ${startClock}~${endClock}`
+          : language === "ja"
+            ? `毎日 ${startClock}〜${endClock}`
+            : language === "zh"
+              ? `每天 ${startClock}~${endClock}`
+              : `Daily ${startClock}-${endClock}`;
+      if (interval && interval > 0) {
+        return language === "ko"
+          ? `${rangeLabel}, ${interval}분마다`
+          : language === "ja"
+            ? `${rangeLabel}、${interval}分ごと`
+            : language === "zh"
+              ? `${rangeLabel}，每 ${interval} 分钟`
+              : `${rangeLabel}, every ${interval}m`;
+      }
+      return rangeLabel;
+    }
+    if (
       Number.isInteger(hourNum) &&
       Number.isInteger(minuteNum) &&
       hourNum >= 0 &&
@@ -143,6 +223,16 @@ export function describeRoutineSchedule(
       }
       if (dayOfWeek === "1-5") {
         return language === "ko" ? `평일 ${clock}` : `Weekdays ${clock}`;
+      }
+      const weekday = weekdayLabel(dayOfWeek, language);
+      if (weekday) {
+        return language === "ko"
+          ? `매주 ${weekday} ${clock}`
+          : language === "ja"
+            ? `毎週${weekday} ${clock}`
+            : language === "zh"
+              ? `每${weekday} ${clock}`
+              : `Every ${weekday} ${clock}`;
       }
     }
   }
