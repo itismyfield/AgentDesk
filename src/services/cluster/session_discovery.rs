@@ -125,6 +125,21 @@ pub async fn build_channel_directory_from_pg(
 /// post-restart adoption path silently broken (issue #2465).
 pub type ChannelNameMap = HashMap<(String, ProviderKind, String), String>;
 type SessionTmuxSegmentMap = HashMap<(ProviderKind, String), String>;
+const SESSION_TMUX_SEGMENTS_QUERY: &str = "SELECT provider, channel_id, session_key
+         FROM sessions
+         WHERE NULLIF(TRIM(channel_id), '') IS NOT NULL
+           AND NULLIF(TRIM(session_key), '') IS NOT NULL
+           AND LOWER(TRIM(COALESCE(status, ''))) IN (
+             'connected',
+             'turn_active',
+             'awaiting_bg',
+             'awaiting_user',
+             'idle',
+             'working'
+           )
+         ORDER BY last_heartbeat DESC NULLS LAST,
+                  created_at DESC NULLS LAST,
+                  id DESC";
 
 /// Build the channel-name map from the live yaml config. Returns an empty map
 /// on any failure so discovery degrades gracefully (legacy snowflake-keyed
@@ -205,14 +220,9 @@ async fn build_channel_directory_from_pg_with_config(
 async fn load_session_tmux_segments_pg(
     pool: &PgPool,
 ) -> Result<SessionTmuxSegmentMap, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT provider, channel_id, session_key
-         FROM sessions
-         WHERE NULLIF(TRIM(channel_id), '') IS NOT NULL
-           AND NULLIF(TRIM(session_key), '') IS NOT NULL",
-    )
-    .fetch_all(pool)
-    .await?;
+    let rows = sqlx::query(SESSION_TMUX_SEGMENTS_QUERY)
+        .fetch_all(pool)
+        .await?;
 
     let mut map = SessionTmuxSegmentMap::new();
     for row in rows {
@@ -876,6 +886,30 @@ mod tests {
         );
 
         assert_eq!(report.matched, 1, "snowflake fallback must still match");
+    }
+
+    #[test]
+    fn session_tmux_segment_fallback_uses_live_recent_session_rows() {
+        let query = SESSION_TMUX_SEGMENTS_QUERY;
+
+        assert!(
+            query.contains("LOWER(TRIM(COALESCE(status, ''))) IN"),
+            "fallback query must filter status before deriving tmux segments"
+        );
+        assert!(
+            query.contains("'turn_active'") && query.contains("'idle'"),
+            "live runtime statuses must remain eligible"
+        );
+        assert!(
+            !query.contains("'disconnected'") && !query.contains("'aborted'"),
+            "stale terminal statuses must not be eligible"
+        );
+        assert!(
+            query.contains("ORDER BY last_heartbeat DESC NULLS LAST")
+                && query.contains("created_at DESC NULLS LAST")
+                && query.contains("id DESC"),
+            "newest live session rows must be considered before older rows"
+        );
     }
 
     /// Regression for #2470: claude code 2.1.143 rewrites its process title to

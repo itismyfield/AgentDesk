@@ -3635,20 +3635,22 @@ pub(crate) async fn rebind_inflight_for_channel(
         existing.output_path = Some(output_path.clone());
         existing.input_fifo_path = Some(input_fifo.clone());
         existing.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
-        let save_outcome = super::inflight::set_relay_owner_kind_if_matches_identity(
-            provider,
-            existing.channel_id,
-            &expected,
-            expected_turn_start_offset,
-            super::inflight::RelayOwnerKind::Watcher,
-        );
+        let save_outcome =
+            super::inflight::save_existing_inflight_rebind_adoption_if_matches_identity(
+                &existing,
+                &expected,
+                expected_turn_start_offset,
+            );
         if !matches!(save_outcome, super::inflight::GuardedSaveOutcome::Saved) {
             tracing::warn!(
                 channel_id,
                 tmux_session = %tmux_session_name,
                 ?save_outcome,
-                "rebind could not stamp existing inflight as watcher-owned",
+                "rebind could not persist existing inflight watcher adoption",
             );
+            return Err(RebindError::Internal(format!(
+                "persist existing inflight watcher adoption for channel {channel_id}: {save_outcome:?}"
+            )));
         }
         existing
     } else {

@@ -508,20 +508,6 @@ async fn resolve_recovery_shared(
     provider: &ProviderKind,
     decision: &RelayRecoveryDecision,
 ) -> Option<Arc<SharedData>> {
-    let expected_tmux = decision.affected.tmux_session.as_deref();
-    for shared in registry.all_shared_for_provider(provider).await {
-        let Some(snapshot) = registry
-            .snapshot_watcher_state_for_shared(provider, shared.clone(), decision.channel_id)
-            .await
-        else {
-            continue;
-        };
-        if expected_tmux.is_none() || snapshot.relay_health.tmux_session.as_deref() == expected_tmux
-        {
-            return Some(shared);
-        }
-    }
-
     let channel = ChannelId::new(decision.channel_id);
     match tokio::time::timeout(
         std::time::Duration::from_secs(2),
@@ -530,14 +516,14 @@ async fn resolve_recovery_shared(
     .await
     {
         Ok(Some(shared)) => Some(shared),
-        Ok(None) => registry.shared_for_provider(provider).await,
+        Ok(None) => None,
         Err(_) => {
             tracing::warn!(
                 provider = provider.as_str(),
                 channel_id = decision.channel_id,
-                "relay recovery provider/channel runtime resolve timed out; falling back to provider runtime",
+                "relay recovery provider/channel runtime resolve timed out; skipping channel-scoped recovery",
             );
-            registry.shared_for_provider(provider).await
+            None
         }
     }
 }

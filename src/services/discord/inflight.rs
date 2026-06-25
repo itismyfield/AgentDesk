@@ -1274,17 +1274,32 @@ pub(in crate::services::discord) fn save_inflight_state_if_matches_identity(
     )
 }
 
-pub(in crate::services::discord) fn set_relay_owner_kind_if_matches_identity(
-    provider: &ProviderKind,
-    channel_id: u64,
+pub(in crate::services::discord) fn save_existing_inflight_rebind_adoption_if_matches_identity(
+    state: &InflightTurnState,
     expected: &InflightTurnIdentity,
     expected_turn_start_offset: Option<u64>,
-    relay_owner_kind: RelayOwnerKind,
 ) -> GuardedSaveOutcome {
     let Some(root) = inflight_runtime_root() else {
         return GuardedSaveOutcome::IoError;
     };
-    let path = inflight_state_path(&root, provider, channel_id);
+    save_existing_inflight_rebind_adoption_if_matches_identity_in_root(
+        &root,
+        state,
+        expected,
+        expected_turn_start_offset,
+    )
+}
+
+fn save_existing_inflight_rebind_adoption_if_matches_identity_in_root(
+    root: &Path,
+    state: &InflightTurnState,
+    expected: &InflightTurnIdentity,
+    expected_turn_start_offset: Option<u64>,
+) -> GuardedSaveOutcome {
+    let Some(provider) = state.provider_kind() else {
+        return GuardedSaveOutcome::IoError;
+    };
+    let path = inflight_state_path(root, &provider, state.channel_id);
     if let Some(parent) = path.parent() {
         if fs::create_dir_all(parent).is_err() {
             return GuardedSaveOutcome::IoError;
@@ -1296,10 +1311,13 @@ pub(in crate::services::discord) fn set_relay_owner_kind_if_matches_identity(
     let Ok(data) = fs::read_to_string(&path) else {
         return GuardedSaveOutcome::Missing;
     };
-    let Ok(mut on_disk) = serde_json::from_str::<InflightTurnState>(&data) else {
+    let Ok(on_disk) = serde_json::from_str::<InflightTurnState>(&data) else {
         return GuardedSaveOutcome::IdentityMismatch;
     };
-    if on_disk.restart_mode.is_some() || on_disk.rebind_origin {
+    if on_disk.rebind_origin {
+        return GuardedSaveOutcome::IdentityMismatch;
+    }
+    if on_disk.restart_mode != state.restart_mode {
         return GuardedSaveOutcome::IdentityMismatch;
     }
     if expected.user_msg_id == 0 || !expected.matches_state(&on_disk) {
@@ -1310,9 +1328,17 @@ pub(in crate::services::discord) fn set_relay_owner_kind_if_matches_identity(
             return GuardedSaveOutcome::IdentityMismatch;
         }
     }
-    on_disk.set_relay_owner_kind(relay_owner_kind);
-    on_disk.updated_at = now_string();
-    let Ok(json) = serde_json::to_string_pretty(&on_disk) else {
+
+    let mut updated = state.clone();
+    updated.ensure_finalizer_turn_id();
+    let _ = validate_inflight_state_for_save(
+        root,
+        &path,
+        &updated,
+        "src/services/discord/inflight.rs:save_existing_inflight_rebind_adoption_if_matches_identity_in_root",
+    );
+    updated.updated_at = now_string();
+    let Ok(json) = serde_json::to_string_pretty(&updated) else {
         return GuardedSaveOutcome::IoError;
     };
     match atomic_write(&path, &json) {
@@ -1320,10 +1346,10 @@ pub(in crate::services::discord) fn set_relay_owner_kind_if_matches_identity(
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel = channel_id,
+                channel = state.channel_id,
                 expected_user_msg_id = expected.user_msg_id,
                 error = %error,
-                "inflight relay-owner update failed; leaving on-disk row untouched"
+                "existing inflight rebind adoption save failed; leaving on-disk row untouched"
             );
             GuardedSaveOutcome::IoError
         }
@@ -3121,6 +3147,7 @@ mod stall_recovery_tests {
         offset_monotonic_invariant_severity, persist_watcher_relay_watermark_locked_in_root,
         persist_watcher_stream_progress_locked_in_root,
         refresh_inflight_last_offset_if_matches_identity_in_root,
+        save_existing_inflight_rebind_adoption_if_matches_identity_in_root,
         save_inflight_state_if_matches_identity_in_root, save_inflight_state_in_root,
         validate_inflight_state_for_save,
     };
@@ -4536,6 +4563,22 @@ mod stall_recovery_tests {
         )
     }
 
+    struct EnvReset(Option<std::ffi::OsString>);
+    impl Drop for EnvReset {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
+
+    fn set_agentdesk_root_for_test(path: &Path) -> EnvReset {
+        let reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", path) };
+        reset
+    }
+
     /// #2427 D/A wire — happy path. When the on-disk inflight has a
     /// matching `user_msg_id` and is neither a planned-restart marker
     /// nor a rebind origin, the explicit signal removes it.
@@ -5748,6 +5791,93 @@ mod stall_recovery_tests {
             rows[0].restart_mode.is_some(),
             "the planned-restart marker must be preserved for recovery"
         );
+    }
+
+    #[test]
+    fn existing_rebind_adoption_persists_paths_for_planned_restart() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _env_reset = set_agentdesk_root_for_test(temp.path());
+        let mut on_disk = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 777);
+        on_disk.user_msg_id = 777;
+        on_disk.current_msg_id = 778;
+        on_disk.set_restart_mode(InflightRestartMode::DrainRestart);
+        save_inflight_state_in_root(temp.path(), &on_disk).unwrap();
+
+        let expected = InflightTurnIdentity::from_state(&on_disk);
+        let mut adopted = on_disk.clone();
+        adopted.tmux_session_name = Some("AgentDesk-claude-adk-restored".to_string());
+        adopted.output_path = Some("/tmp/restored-output.jsonl".to_string());
+        adopted.input_fifo_path = Some("/tmp/restored-input.fifo".to_string());
+        adopted.set_relay_owner_kind(RelayOwnerKind::Watcher);
+
+        let outcome = save_existing_inflight_rebind_adoption_if_matches_identity_in_root(
+            temp.path(),
+            &adopted,
+            &expected,
+            on_disk.turn_start_offset,
+        );
+
+        assert_eq!(outcome, GuardedSaveOutcome::Saved);
+        let rows = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].tmux_session_name.as_deref(),
+            Some("AgentDesk-claude-adk-restored")
+        );
+        assert_eq!(
+            rows[0].output_path.as_deref(),
+            Some("/tmp/restored-output.jsonl")
+        );
+        assert_eq!(
+            rows[0].input_fifo_path.as_deref(),
+            Some("/tmp/restored-input.fifo")
+        );
+        assert_eq!(
+            rows[0].effective_relay_owner_kind(),
+            RelayOwnerKind::Watcher
+        );
+        assert_eq!(
+            rows[0].restart_mode,
+            Some(InflightRestartMode::DrainRestart)
+        );
+    }
+
+    #[test]
+    fn existing_rebind_adoption_does_not_clobber_rebind_origin() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _env_reset = set_agentdesk_root_for_test(temp.path());
+        let mut on_disk = build_inflight_for_guard_tests(ProviderKind::Claude, 322, 777);
+        on_disk.user_msg_id = 777;
+        on_disk.current_msg_id = 778;
+        on_disk.rebind_origin = true;
+        save_inflight_state_in_root(temp.path(), &on_disk).unwrap();
+
+        let expected = InflightTurnIdentity::from_state(&on_disk);
+        let mut adopted = on_disk.clone();
+        adopted.tmux_session_name = Some("AgentDesk-claude-adk-restored".to_string());
+        adopted.output_path = Some("/tmp/restored-output.jsonl".to_string());
+        adopted.input_fifo_path = Some("/tmp/restored-input.fifo".to_string());
+        adopted.set_relay_owner_kind(RelayOwnerKind::Watcher);
+
+        let outcome = save_existing_inflight_rebind_adoption_if_matches_identity_in_root(
+            temp.path(),
+            &adopted,
+            &expected,
+            on_disk.turn_start_offset,
+        );
+
+        assert_eq!(outcome, GuardedSaveOutcome::IdentityMismatch);
+        let rows = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].rebind_origin);
+        assert_eq!(rows[0].output_path.as_deref(), Some("/tmp/out.jsonl"));
+        assert_eq!(rows[0].effective_relay_owner_kind(), RelayOwnerKind::None);
     }
 
     #[cfg(unix)]
