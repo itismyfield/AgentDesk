@@ -256,6 +256,22 @@ class PrAnalyzerOverlapReferenceTests(unittest.TestCase):
 
         self.assertFalse(has_overlap_reference(body))
 
+    def test_no_overlap_wording_is_not_overlap_evidence(self):
+        body = """
+- Duplicate/overlap check: checked #123 on branch feature/foo; no overlap found
+"""
+
+        self.assertFalse(has_overlap_reference(body))
+
+    def test_placeholder_branch_value_is_not_overlap_reference(self):
+        body = """
+- Duplicate/overlap check:
+  - PR: #1234
+  - Branch: none
+"""
+
+        self.assertFalse(has_overlap_reference(body))
+
 
 class PrAnalyzerTemplateSummaryTests(unittest.TestCase):
     def test_populated_template_summary_counts_as_change_context(self):
