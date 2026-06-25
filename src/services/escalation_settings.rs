@@ -29,32 +29,44 @@ pub(crate) fn normalize_optional_string(value: Option<String>) -> Option<String>
 /// Compute the escalation settings implied by static config (no override).
 ///
 /// Prefers the hot-reloaded live config snapshot ([`crate::config_live_reload::current`])
-/// over the passed-in (boot-captured) `config`, so an `agentdesk.yaml` edit to the
-/// escalation owner / PM channel / schedule applies without a restart when no
-/// persisted Postgres override is set. Falls back to the passed `config` when the
-/// live snapshot is not installed (unit tests, pre-boot). Mirrors the
-/// `services::dispatch_gate` live-read precedent.
+/// for the escalation/kanban fields, so an `agentdesk.yaml` edit to the escalation
+/// owner / PM channel / schedule applies without a restart when no persisted
+/// Postgres override is set. Falls back to the passed `config` when the live
+/// snapshot is not installed (unit tests, pre-boot). The legacy fallback to
+/// `discord.owner_id` intentionally stays boot-bound because the Discord section
+/// is restart-required and bot authorization was captured during bootstrap.
+/// Mirrors the `services::dispatch_gate` live-read precedent.
 pub(crate) fn escalation_defaults(config: &Config) -> EscalationSettings {
     let live = crate::config_live_reload::current();
-    let config = live.as_deref().unwrap_or(config);
+    let live_config = live.as_deref().unwrap_or(config);
+    escalation_defaults_from_configs(config, live_config)
+}
+
+fn escalation_defaults_from_configs(
+    boot_config: &Config,
+    live_config: &Config,
+) -> EscalationSettings {
     EscalationSettings {
-        mode: config.escalation.mode.clone(),
-        owner_user_id: config.escalation.owner_user_id.or(config.discord.owner_id),
+        mode: live_config.escalation.mode,
+        owner_user_id: live_config
+            .escalation
+            .owner_user_id
+            .or(boot_config.discord.owner_id),
         pm_channel_id: normalize_optional_string(
-            config
+            live_config
                 .escalation
                 .pm_channel_id
                 .clone()
-                .or_else(|| config.kanban.human_alert_channel_id.clone()),
+                .or_else(|| live_config.kanban.human_alert_channel_id.clone()),
         ),
         schedule: EscalationScheduleSettings {
-            pm_hours: config
+            pm_hours: live_config
                 .escalation
                 .schedule
                 .pm_hours
                 .clone()
                 .unwrap_or_else(|| DEFAULT_ESCALATION_PM_HOURS.to_string()),
-            timezone: config
+            timezone: live_config
                 .escalation
                 .schedule
                 .timezone
@@ -119,4 +131,36 @@ pub(crate) fn effective_owner_user_id_with_backends(
     }
 
     escalation_defaults(config).owner_user_id
+}
+
+#[cfg(test)]
+mod tests {
+    use super::escalation_defaults_from_configs;
+    use crate::config::Config;
+
+    #[test]
+    fn escalation_defaults_keep_discord_owner_fallback_boot_bound() {
+        let mut boot = Config::default();
+        boot.discord.owner_id = Some(111);
+        let mut live = boot.clone();
+        live.discord.owner_id = Some(222);
+        live.escalation.owner_user_id = None;
+
+        let defaults = escalation_defaults_from_configs(&boot, &live);
+
+        assert_eq!(defaults.owner_user_id, Some(111));
+    }
+
+    #[test]
+    fn escalation_defaults_still_use_live_escalation_owner_override() {
+        let mut boot = Config::default();
+        boot.discord.owner_id = Some(111);
+        let mut live = boot.clone();
+        live.discord.owner_id = Some(222);
+        live.escalation.owner_user_id = Some(333);
+
+        let defaults = escalation_defaults_from_configs(&boot, &live);
+
+        assert_eq!(defaults.owner_user_id, Some(333));
+    }
 }
