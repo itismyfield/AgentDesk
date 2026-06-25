@@ -315,6 +315,7 @@ fn ensure_config_agent(
         keywords: Vec::new(),
         department: None,
         avatar_emoji: None,
+        preferred_intake_node_labels: None,
     });
     (config.agents.len() - 1, true)
 }
