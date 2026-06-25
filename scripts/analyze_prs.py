@@ -176,7 +176,10 @@ def is_scratch_file_path(path):
     }
     if path in root_scratch_files:
         return True
-    return bool(re.match(r"^(?:scratch|scratchpad|test_scratch)[._-].+\.(?:md|txt|sh|sql|rs)$", path))
+    return bool(
+        re.match(r"^(?:scratch|scratchpad|test_scratch)[._-].+\.(?:md|txt|sh|sql|rs)$", path)
+        or re.match(r"^test_[A-Za-z0-9._-]+\.rs$", path)
+    )
 
 def main():
     repo = _detect_repo()
