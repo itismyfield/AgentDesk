@@ -1696,13 +1696,22 @@ pub(crate) fn sweep_stale_inflight_files_at(root: &std::path::Path, max_age: Dur
             }
             let is_managed_lifecycle = fs::read_to_string(&fpath)
                 .ok()
-                .and_then(|body| serde_json::from_str::<LifecycleExt>(&body).ok())
-                .is_some_and(|v| {
+                .and_then(|body| {
+                    let v = serde_json::from_str::<LifecycleExt>(&body).ok()?;
                     let planned_restart = v.restart_mode.is_some_and(|rm| !rm.is_null());
-                    let external_rebind_origin = v.rebind_origin
-                        && matches!(v.turn_source.as_deref(), None | Some("external_adopted"));
-                    planned_restart || external_rebind_origin
-                });
+                    if planned_restart {
+                        return Some(true);
+                    }
+                    if !v.rebind_origin {
+                        return Some(false);
+                    }
+                    match v.turn_source.as_deref() {
+                        Some("external_adopted") => Some(true),
+                        None => Some(backfill_legacy_rebind_origin_turn_source(&fpath, &body)),
+                        _ => Some(false),
+                    }
+                })
+                .unwrap_or(false);
             if is_managed_lifecycle {
                 continue;
             }
@@ -1717,6 +1726,23 @@ pub(crate) fn sweep_stale_inflight_files_at(root: &std::path::Path, max_age: Dur
         }
     }
     removed
+}
+
+fn backfill_legacy_rebind_origin_turn_source(path: &std::path::Path, body: &str) -> bool {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    let Some(object) = value.as_object_mut() else {
+        return false;
+    };
+    object.insert(
+        "turn_source".to_string(),
+        serde_json::Value::String("external_adopted".to_string()),
+    );
+    let Ok(updated) = serde_json::to_string_pretty(&value) else {
+        return false;
+    };
+    std::fs::write(path, format!("{updated}\n")).is_ok()
 }
 
 #[cfg(test)]
@@ -1778,6 +1804,10 @@ mod stale_inflight_sweep_tests {
             legacy.exists(),
             "legacy rebind-origin rows predate turn_source and remain placeholder-managed"
         );
+        let updated: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&legacy).expect("legacy body"))
+                .expect("updated legacy json");
+        assert_eq!(updated["turn_source"], "external_adopted");
     }
 
     #[test]
