@@ -1324,6 +1324,7 @@ mod db_agent_drift_tests {
             keywords: Vec::new(),
             department: None,
             avatar_emoji: None,
+            preferred_intake_node_labels: None,
         }
     }
 
@@ -1485,6 +1486,7 @@ mod voice_alias_precheck_tests {
             keywords: Vec::new(),
             department: None,
             avatar_emoji: None,
+            preferred_intake_node_labels: None,
         }
     }
 
