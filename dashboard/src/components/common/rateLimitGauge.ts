@@ -27,7 +27,7 @@ export function rateLimitFillStyle(
   glowPx: number,
 ): CSSProperties {
   return {
-    background: `linear-gradient(90deg, ${barColor}, color-mix(in oklch, ${barColor} 76%, var(--fg) 24%))`,
+    background: barColor,
     boxShadow: `0 0 0 1px color-mix(in oklch, ${barColor} 62%, var(--fg) 38%), 0 0 ${glowPx}px ${glowColor}`,
   };
 }
