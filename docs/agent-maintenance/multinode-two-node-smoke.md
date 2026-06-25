@@ -36,12 +36,12 @@ node --test policies/__tests__/merge-automation.test.js
 Run this only against a release runtime against the shared PostgreSQL instance.
 Do not stop `AgentDesk-*` tmux work sessions unless the operator explicitly asks.
 
-1. Start Mac mini as leader-capable:
+1. Start Mac mini as the configured leader:
 
 ```bash
 AGENTDESK_CLUSTER_ENABLED=true \
 AGENTDESK_CLUSTER_INSTANCE_ID=mac-mini-release \
-AGENTDESK_CLUSTER_ROLE=auto \
+AGENTDESK_CLUSTER_ROLE=leader \
 scripts/deploy-release.sh
 ```
 
@@ -64,6 +64,9 @@ Expected:
 
 - two distinct `worker_nodes` rows
 - exactly one `effective_role=leader`
+- exactly one configured `cluster.role=leader`; all-`auto` clusters can elect a
+  runtime leader but skip destructive config-to-DB agent roster sync, so
+  `agentdesk.yaml` roster edits can remain frozen
 - MacBook/Mac mini capability surfaces differ where expected
 
 4. Verify claim and routing diagnostics:
