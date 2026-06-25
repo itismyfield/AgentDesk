@@ -349,6 +349,14 @@ pub struct AgentDef {
     pub department: Option<String>,
     #[serde(default)]
     pub avatar_emoji: Option<String>,
+    /// Cluster intake node-affinity labels (#3667). When set and non-empty,
+    /// intake for this agent's channels is routed to an online worker node whose
+    /// labels satisfy this list; `Some([])` means no preference (intake stays on
+    /// the leader). `None` (key absent from yaml) leaves any existing DB value
+    /// untouched on sync, so an out-of-band label is never wiped. Maps to the
+    /// `agents.preferred_intake_node_labels` JSONB column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_intake_node_labels: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]

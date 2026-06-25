@@ -1816,6 +1816,7 @@ fn write_agentdesk_channel_bindings(
                 keywords: Vec::new(),
                 department: None,
                 avatar_emoji: None,
+                preferred_intake_node_labels: None,
             });
             config.agents.len() - 1
         };

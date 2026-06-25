@@ -2718,6 +2718,7 @@ fn merge_imported_agents(
             keywords: Vec::new(),
             department: None,
             avatar_emoji: agent.avatar_emoji.clone(),
+            preferred_intake_node_labels: None,
         };
 
         if let Some(existing) = config

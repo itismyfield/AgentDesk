@@ -1040,6 +1040,7 @@ mod tests {
             keywords: Vec::new(),
             department: None,
             avatar_emoji: None,
+            preferred_intake_node_labels: None,
         }
     }
 
@@ -1066,6 +1067,7 @@ mod tests {
             keywords: Vec::new(),
             department: None,
             avatar_emoji: None,
+            preferred_intake_node_labels: None,
         }
     }
 }
