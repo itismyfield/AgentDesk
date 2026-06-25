@@ -137,7 +137,7 @@ struct AgentProviderRuntimeBindingKey {
     channel_id: u64,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Default, PartialEq, Eq)]
 struct AgentProviderRuntimeBindingValue {
     tui_hosting: Option<bool>,
     runtime: Option<String>,
@@ -146,7 +146,8 @@ struct AgentProviderRuntimeBindingValue {
 fn agent_provider_runtime_bindings(
     config: &Config,
 ) -> BTreeMap<AgentProviderRuntimeBindingKey, AgentProviderRuntimeBindingValue> {
-    let mut bindings = BTreeMap::new();
+    let mut bindings: BTreeMap<AgentProviderRuntimeBindingKey, AgentProviderRuntimeBindingValue> =
+        BTreeMap::new();
     for agent in &config.agents {
         for (channel_kind, channel) in agent.channels.iter() {
             let Some(channel) = channel else {
@@ -160,24 +161,23 @@ fn agent_provider_runtime_bindings(
             };
             let tui_hosting = channel.tui_hosting();
             let runtime = channel.runtime_mode_raw();
-            if tui_hosting.is_none() && runtime.is_none() {
-                continue;
-            }
             let provider_id = channel
                 .provider()
                 .unwrap_or_else(|| channel_kind.to_string())
                 .trim()
                 .to_ascii_lowercase();
-            bindings.insert(
-                AgentProviderRuntimeBindingKey {
+            let entry = bindings
+                .entry(AgentProviderRuntimeBindingKey {
                     provider_id,
                     channel_id,
-                },
-                AgentProviderRuntimeBindingValue {
-                    tui_hosting,
-                    runtime,
-                },
-            );
+                })
+                .or_default();
+            if tui_hosting.is_some() {
+                entry.tui_hosting = tui_hosting;
+            }
+            if runtime.is_some() {
+                entry.runtime = runtime;
+            }
         }
     }
     bindings
@@ -605,6 +605,33 @@ mod tests {
         let mut tui_changed = old.clone();
         tui_changed.agents[0] = test_agent_with_claude_channel("123", Some(true), Some("pipe"));
         assert_eq!(restart_required_changes(&old, &tui_changed), vec!["agents"]);
+    }
+
+    #[test]
+    fn restart_required_changes_flags_agent_channel_launch_bindings() {
+        let old = Config::default();
+        let mut new = old.clone();
+        new.agents
+            .push(test_agent_with_claude_channel("123", None, None));
+
+        assert_eq!(restart_required_changes(&old, &new), vec!["agents"]);
+    }
+
+    #[test]
+    fn restart_required_changes_preserves_split_duplicate_agent_channel_overrides() {
+        let mut old = Config::default();
+        old.agents
+            .push(test_agent_with_claude_channel("123", None, Some("pipe")));
+        old.agents
+            .push(test_agent_with_claude_channel("123", Some(false), None));
+
+        let mut new = Config::default();
+        new.agents
+            .push(test_agent_with_claude_channel("123", None, Some("tui")));
+        new.agents
+            .push(test_agent_with_claude_channel("123", Some(false), None));
+
+        assert_eq!(restart_required_changes(&old, &new), vec!["agents"]);
     }
 
     #[test]
