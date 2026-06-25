@@ -770,6 +770,30 @@ mod tests {
     }
 
     #[test]
+    fn handoff_turn_target_keeps_codex_cc_only_binding_on_claude() {
+        // A Codex-configured row with only an explicit cc binding is Claude-owned;
+        // a missing cdx request must not reserve a Codex turn on that mailbox.
+        let codex_cc_only = AgentChannelBindings {
+            provider: Some("codex".to_string()),
+            discord_channel_id: Some("1495040912361914400".to_string()),
+            discord_channel_cc: Some("1495040912361914400".to_string()),
+            ..AgentChannelBindings::default()
+        };
+        let target = resolve_agent_handoff_turn_target(
+            &codex_cc_only,
+            "from",
+            "to",
+            "prompt",
+            AgentHandoffChannelKind::Cdx,
+            true,
+            None,
+        )
+        .expect("explicit cc-only fallback resolves via Claude");
+        assert_eq!(target.channel_id, "1495040912361914400");
+        assert_eq!(target.provider, ProviderKind::Claude);
+    }
+
+    #[test]
     fn handoff_turn_target_reaches_opencode_mailbox() {
         // opencode/gemini/qwen agents expose neither cc nor cdx; their mailbox
         // is discord_channel_id. Any requested kind must resolve there with the
