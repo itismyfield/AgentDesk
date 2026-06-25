@@ -990,7 +990,7 @@ test("timeouts idle-kill module calls kill-tmux API for expired idle sessions", 
             provider: "codex",
             active_dispatch_id: null,
             thread_channel_id: null,
-            last_seen_at: "2000-01-01 00:00:00"
+            last_seen_at: timestampMinutesAgo(370)
           }
         ]
       },
@@ -1013,6 +1013,10 @@ test("timeouts idle-kill module calls kill-tmux API for expired idle sessions", 
   assert.equal(state.httpPosts.length, 1);
   assert.match(state.httpPosts[0].url, /\/api\/sessions\/provider%3AAgentDesk-codex-project-agentdesk\/kill-tmux$/);
   assert.equal(state.httpPosts[0].body.retry, undefined);
+  assert.match(state.httpPosts[0].body.reason, /idle 6시간 초과/);
+  const idleSql = state.queries.map((q) => q.sql).join("\n");
+  assert.match(idleSql, /turn_lifecycle_events/);
+  assert.match(idleSql, /GREATEST\(COALESCE\(s\.last_heartbeat, s\.created_at\)/);
   assert.match(state.logs.info.join("\n"), /idle kill: agent-idle-1/);
 });
 
@@ -1082,6 +1086,47 @@ test("timeouts idle-kill module does not let zombie (already-gone tmux) rows sta
   // The live row was reached and actually killed.
   assert.ok(state.httpPosts.some((p) => p.url.includes("live-4")));
   assert.match(state.logs.info.join("\n"), /Killed idle tmux .*live-4/);
+});
+
+test("timeouts idle-kill module does not count live-activity guard skips toward budget", () => {
+  const guardKeys = [
+    "provider:AgentDesk-claude-guard-1",
+    "provider:AgentDesk-claude-guard-2",
+    "provider:AgentDesk-claude-guard-3"
+  ];
+  const liveKey = "provider:AgentDesk-claude-live-after-guard";
+  function row(session_key) {
+    return {
+      session_key,
+      agent_id: null,
+      provider: "claude",
+      active_dispatch_id: null,
+      thread_channel_id: null,
+      last_seen_at: "2000-01-01 00:00:00"
+    };
+  }
+
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { server_port: 8791 },
+    dbQuery: createSqlRouter([
+      { match: "SELECT id, name, name_ko, discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx FROM agents", result: [] },
+      { match: "FROM sessions WHERE provider IN ('claude', 'codex', 'qwen') AND (agent_id IS NULL OR TRIM(agent_id) = '')", result: [] },
+      { match: (sql) => sql.includes("WHERE status = 'idle'") && sql.includes("active_dispatch_id IS NULL") && sql.includes("INTERVAL '6 hours'"), result: [...guardKeys.map(row), row(liveKey)] },
+      { match: (sql) => sql.includes("WHERE status = 'idle'") && sql.includes("active_dispatch_id IS NOT NULL") && sql.includes("INTERVAL '24 hours'"), result: [] }
+    ]),
+    httpPost(url) {
+      return url.includes("live-after-guard")
+        ? { ok: true, tmux_was_alive: true, tmux_killed: true }
+        : { ok: true, tmux_was_alive: true, tmux_killed: false, skipped_live_activity_guard: true };
+    }
+  });
+
+  policy._section_O();
+
+  assert.equal(state.httpPosts.length, 4);
+  assert.ok(state.httpPosts.some((p) => p.url.includes("live-after-guard")));
+  assert.match(state.logs.info.join("\n"), /skipped live activity guard/);
+  assert.doesNotMatch(state.logs.error.join("\n"), /tmux was alive but kill failed/);
 });
 
 test("timeouts idle-kill module counts genuine kill failures (tmux alive but kill failed) toward budget", () => {
