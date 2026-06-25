@@ -327,8 +327,34 @@ pub async fn startup_reseed(pool: &PgPool, config: &Config) -> Result<(), String
         register_repo(pool, &repo_id).await?;
     }
 
-    sync_agents_from_config_pg(pool, &config.agents).await?;
+    // #3692: in a cluster, the shared `agents` table is owned by the leader.
+    // `sync_agents_from_config_pg` is destructive (it DELETEs agents absent from
+    // the local config), so if a worker/auto node ran it at boot it would
+    // clobber the leader's roster — each node's startup would fight over the
+    // shared table and the roster would flip-flop per deploy order. Reseed runs
+    // before cluster leadership election, so gate on the configured role: only a
+    // single-node deployment (cluster disabled) or the explicitly-configured
+    // leader owns the roster sync. Workers/auto nodes trust the shared roster.
+    if agent_roster_sync_enabled(config) {
+        sync_agents_from_config_pg(pool, &config.agents).await?;
+    } else {
+        tracing::info!(
+            "[agent-sync] skipping config→DB agent roster sync on non-leader node \
+             (cluster.role={}); the cluster leader owns the shared agents table (#3692)",
+            config.cluster.role
+        );
+    }
     Ok(())
+}
+
+/// Whether this node should run the destructive config→DB agent roster sync.
+/// True for single-node deployments (cluster disabled) and for the node
+/// explicitly configured as `cluster.role: leader`. Worker/auto nodes return
+/// false so they never clobber the leader-owned shared roster (#3692). Shared
+/// with the config-audit path (`discord_config_audit`), which reaches the same
+/// destructive sync before `startup_reseed` runs.
+pub(crate) fn agent_roster_sync_enabled(config: &Config) -> bool {
+    !config.cluster.enabled || config.cluster.role.trim().eq_ignore_ascii_case("leader")
 }
 
 pub async fn health_check(pool: &PgPool) -> Result<(), String> {
@@ -1142,12 +1168,12 @@ pub(crate) async fn close_test_pool(pool: PgPool, label: &str) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::{
-        AdvisoryLockLease, POSTGRES_MIGRATOR, STARTUP_PG_ACQUIRE_TIMEOUT_SECS, checksum_hex,
-        clamp_foreground_reserve, close_test_pool, config_database_summary, connect_options,
-        connect_test_pool_and_migrate_config, create_test_database, database_enabled,
-        database_summary, health_check, run_test_postgres_sqlx_op_with_timeout,
-        runtime_pool_settings, should_yield_for_counters, startup_pool_settings, startup_reseed,
-        sync_agents_from_config_pg,
+        AdvisoryLockLease, POSTGRES_MIGRATOR, STARTUP_PG_ACQUIRE_TIMEOUT_SECS,
+        agent_roster_sync_enabled, checksum_hex, clamp_foreground_reserve, close_test_pool,
+        config_database_summary, connect_options, connect_test_pool_and_migrate_config,
+        create_test_database, database_enabled, database_summary, health_check,
+        run_test_postgres_sqlx_op_with_timeout, runtime_pool_settings, should_yield_for_counters,
+        startup_pool_settings, startup_reseed, sync_agents_from_config_pg,
     };
     use sqlx::Row;
     use std::collections::BTreeMap;
@@ -1584,6 +1610,89 @@ mod tests {
             .await
             .expect("close postgres pool");
         assert!(test_db.database_url.contains("agentdesk_pg_"));
+        test_db.drop().await;
+    }
+
+    #[test]
+    fn agent_roster_sync_gated_to_leader_or_single_node() {
+        // #3692: only a single-node deployment or the configured leader owns the
+        // destructive config→DB agent roster sync.
+        let mut config = crate::config::Config::default();
+
+        config.cluster.enabled = false; // single-node: always owns the roster
+        config.cluster.role = "auto".to_string();
+        assert!(agent_roster_sync_enabled(&config));
+
+        config.cluster.enabled = true;
+        for (role, expected) in [
+            ("leader", true),
+            ("Leader", true),
+            ("  leader  ", true),
+            ("worker", false),
+            ("auto", false),
+            ("", false),
+        ] {
+            config.cluster.role = role.to_string();
+            assert_eq!(
+                agent_roster_sync_enabled(&config),
+                expected,
+                "cluster.role={role:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_node_reseed_does_not_clobber_shared_agent_roster() {
+        // #3692: a cluster worker/auto node must NOT run the destructive agent
+        // sync at boot — doing so would delete leader-owned agents from the
+        // shared table and re-add its own, causing roster flip-flop per deploy.
+        let test_db = TestDatabase::create().await;
+        let mut config = postgres_test_config(&test_db);
+
+        let pool = connect_test_pool_and_migrate_config(
+            &config,
+            "db::postgres worker-reseed gating test pool",
+        )
+        .await
+        .expect("connect and migrate postgres")
+        .expect("postgres pool");
+
+        // Simulate a leader-owned agent already present in the shared table.
+        sqlx::query("INSERT INTO agents (id, name, provider) VALUES ($1, $2, $3)")
+            .bind("leader-owned")
+            .bind("Leader Owned")
+            .bind("claude")
+            .execute(&pool)
+            .await
+            .expect("seed leader-owned agent");
+
+        // This node is a cluster worker: reseed must skip the agent sync.
+        config.cluster.enabled = true;
+        config.cluster.role = "worker".to_string();
+        startup_reseed(&pool, &config).await.expect("worker reseed");
+
+        let leader_owned: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM agents WHERE id = 'leader-owned'")
+                .fetch_one(&pool)
+                .await
+                .expect("count leader-owned");
+        assert_eq!(
+            leader_owned, 1,
+            "worker reseed must not delete leader-owned agents"
+        );
+        let own_agent: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM agents WHERE id = 'pg-agent'")
+                .fetch_one(&pool)
+                .await
+                .expect("count pg-agent");
+        assert_eq!(
+            own_agent, 0,
+            "worker reseed must not sync its own config agents into the shared roster"
+        );
+
+        close_test_pool(pool, "db::postgres worker-reseed gating test pool")
+            .await
+            .expect("close postgres pool");
         test_db.drop().await;
     }
 
