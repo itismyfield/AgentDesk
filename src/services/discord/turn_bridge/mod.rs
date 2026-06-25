@@ -4058,6 +4058,7 @@ pub(super) fn spawn_turn_bridge(
             adk_session_key.as_deref(),
             turn_id.as_str(),
             current_msg_id.get(),
+            can_chain_locally,
             tmux_last_offset,
             response_unsent,
             &mut inflight_state,
