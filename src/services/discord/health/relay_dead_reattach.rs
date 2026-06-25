@@ -8,22 +8,6 @@ use crate::services::discord::relay_health::RelayStallState;
 use crate::services::discord::{self, SharedData};
 use crate::services::provider::ProviderKind;
 
-fn outbound_activity_is_recent(
-    last_outbound_activity_ms: Option<i64>,
-    now_unix_secs: i64,
-    threshold_secs: u64,
-) -> bool {
-    let Some(last_outbound_activity_ms) = last_outbound_activity_ms else {
-        return false;
-    };
-    let now_ms = now_unix_secs.saturating_mul(1000);
-    if last_outbound_activity_ms >= now_ms {
-        return true;
-    }
-    let age_ms = now_ms.saturating_sub(last_outbound_activity_ms) as u64;
-    age_ms < threshold_secs.saturating_mul(1000)
-}
-
 fn should_reattach_relay_dead_watcher(
     snapshot: &WatcherStateSnapshot,
     channel_id: ChannelId,
@@ -35,11 +19,6 @@ fn should_reattach_relay_dead_watcher(
         || !snapshot.attached
         || snapshot.watcher_owner_channel_id != Some(channel_id.get())
         || snapshot.tmux_session_alive != Some(true)
-        || outbound_activity_is_recent(
-            snapshot.relay_health.last_outbound_activity_ms,
-            now_unix_secs,
-            recovery::STALL_WATCHDOG_THRESHOLD_SECS,
-        )
     {
         return false;
     }
@@ -215,7 +194,6 @@ mod tests {
                 fresh_activity,
                 boot,
             ),
-            ("fresh outbound", fresh_outbound, stale_activity, boot),
             (
                 "post-restart grace",
                 snapshot(&stale),
@@ -234,5 +212,15 @@ mod tests {
                 "{name}"
             );
         }
+        assert!(
+            should_reattach_relay_dead_watcher(
+                &fresh_outbound,
+                ChannelId::new(42),
+                stale_activity,
+                now,
+                boot,
+            ),
+            "recent outbound activity must not block non-destructive watcher reattach"
+        );
     }
 }

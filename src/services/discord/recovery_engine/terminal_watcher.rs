@@ -124,14 +124,72 @@ fn jsonl_tail_contains_terminal_end_sentinel(output_path: &str) -> bool {
 pub(super) fn recovery_watcher_start_offset(
     output_path: &str,
     saved_last_offset: u64,
+    turn_start_offset: Option<u64>,
 ) -> (u64, u64, bool) {
     let current_len = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
-    if current_len >= saved_last_offset {
-        (saved_last_offset, current_len, false)
+    let resume_floor = turn_start_offset.unwrap_or(0);
+    let desired_offset = saved_last_offset.max(resume_floor);
+    if current_len >= desired_offset {
+        (desired_offset, current_len, false)
     } else {
         // The output file was recreated or truncated while dcserver was down.
         // Resume from the beginning of the new file so we do not skip the
         // entire restarted session output.
         (0, current_len, true)
+    }
+}
+
+pub(super) fn recovery_watcher_start_offset_for_state(
+    output_path: &str,
+    state: &crate::services::discord::inflight::InflightTurnState,
+) -> (u64, u64, bool) {
+    recovery_watcher_start_offset(output_path, state.last_offset, state.turn_start_offset)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::recovery_watcher_start_offset;
+    use std::io::Write;
+
+    fn temp_file_with_len(len: usize) -> tempfile::NamedTempFile {
+        let mut file = tempfile::NamedTempFile::new().expect("temp file");
+        file.write_all(&vec![b'x'; len]).expect("write temp file");
+        file
+    }
+
+    #[test]
+    fn recovery_start_offset_uses_turn_start_floor_when_last_offset_is_zero() {
+        let file = temp_file_with_len(2_000);
+
+        let (offset, current_len, truncated) =
+            recovery_watcher_start_offset(file.path().to_str().unwrap(), 0, Some(1_250));
+
+        assert_eq!(offset, 1_250);
+        assert_eq!(current_len, 2_000);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn recovery_start_offset_prefers_newer_saved_last_offset() {
+        let file = temp_file_with_len(2_000);
+
+        let (offset, current_len, truncated) =
+            recovery_watcher_start_offset(file.path().to_str().unwrap(), 1_600, Some(1_250));
+
+        assert_eq!(offset, 1_600);
+        assert_eq!(current_len, 2_000);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn recovery_start_offset_rewinds_only_when_output_truncated_below_floor() {
+        let file = temp_file_with_len(900);
+
+        let (offset, current_len, truncated) =
+            recovery_watcher_start_offset(file.path().to_str().unwrap(), 0, Some(1_250));
+
+        assert_eq!(offset, 0);
+        assert_eq!(current_len, 900);
+        assert!(truncated);
     }
 }

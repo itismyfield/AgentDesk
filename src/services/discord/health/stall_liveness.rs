@@ -132,6 +132,7 @@ pub(super) struct StallWatchdogLivenessEvidence {
     pub(super) pane_offset_advanced_age_secs: Option<u64>,
     pub(super) transcript_mtime_age_secs: Option<u64>,
     pub(super) runtime_activity_age_secs: Option<u64>,
+    pub(super) outbound_activity_age_secs: Option<u64>,
     pub(super) background_synthetic_activity_age_secs: Option<u64>,
     pub(super) background_synthetic_kind: Option<String>,
 }
@@ -147,6 +148,9 @@ impl StallWatchdogLivenessEvidence {
         }
         if is_recent_age(self.runtime_activity_age_secs, freshness_secs) {
             reasons.push("runtime_activity_mtime_recent");
+        }
+        if is_recent_age(self.outbound_activity_age_secs, freshness_secs) {
+            reasons.push("outbound_activity_recent");
         }
         if is_recent_age(self.background_synthetic_activity_age_secs, freshness_secs) {
             reasons.push("background_synthetic_activity_recent");
@@ -375,6 +379,7 @@ pub(super) fn log_stall_watchdog_liveness_deferred(
         pane_offset_advanced_age_secs = ?decision.evidence.pane_offset_advanced_age_secs,
         transcript_mtime_age_secs = ?decision.evidence.transcript_mtime_age_secs,
         runtime_activity_age_secs = ?decision.evidence.runtime_activity_age_secs,
+        outbound_activity_age_secs = ?decision.evidence.outbound_activity_age_secs,
         background_synthetic_activity_age_secs = ?decision.evidence.background_synthetic_activity_age_secs,
         background_synthetic_kind = ?decision.evidence.background_synthetic_kind,
         deferral_count = ?decision.deferral_count(),
@@ -438,6 +443,7 @@ pub(super) fn log_stall_watchdog_force_cleanup_judgment(
         liveness_reasons = liveness_reasons,
         liveness_no_evidence = no_evidence,
         liveness_absolute_backstop_reached = absolute_backstop_reached,
+        outbound_activity_age_secs = ?decision.map(|decision| decision.evidence.outbound_activity_age_secs),
         deferral_count = ?decision.and_then(StallWatchdogLivenessDecision::deferral_count),
         max_deferrals = decision.map(|decision| decision.max_deferrals).unwrap_or(0),
         "  [{ts}] ⚡ STALL-WATCHDOG: forced cleanup for desynced channel {}",
@@ -500,6 +506,10 @@ impl StallWatchdogLivenessEvidence {
             pane_offset_advanced_age_secs,
             transcript_mtime_age_secs: transcript_mtime_age_secs(inflight, now_unix_secs),
             runtime_activity_age_secs: runtime_activity_age_secs(snapshot, now_unix_secs),
+            outbound_activity_age_secs: unix_millis_age_secs(
+                snapshot.relay_health.last_outbound_activity_ms,
+                now_unix_secs,
+            ),
             background_synthetic_activity_age_secs: background_synthetic
                 .as_ref()
                 .map(|(_, age)| *age),
@@ -938,6 +948,42 @@ mod tests {
             StallWatchdogLivenessAction::ProceedNoEvidence
         );
         assert!(!decision.should_defer());
+    }
+
+    #[test]
+    fn recent_outbound_activity_defers_cleanup() {
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(3373);
+        let tmux_session = "AgentDesk-codex-outbound-liveness";
+        let _root = isolated_runtime_root();
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+        let now = chrono::Utc::now().timestamp();
+        let mut snap = snapshot(channel.get(), tmux_session, None);
+        snap.relay_health.last_outbound_activity_ms = Some((now - 60) * 1000);
+        let mut inflight = inflight_with_output(channel.get(), tmux_session, None);
+        inflight.updated_at = "2026-06-12 00:00:00".to_string();
+
+        let decision = evaluate_stall_watchdog_liveness(
+            &provider,
+            channel,
+            &snap,
+            Some(&inflight),
+            now,
+            STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+            STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+            Some(0),
+        );
+
+        assert_eq!(
+            decision.action,
+            StallWatchdogLivenessAction::Defer { deferral_count: 1 }
+        );
+        assert_eq!(
+            decision
+                .evidence
+                .reason_codes_csv(STALL_WATCHDOG_POSITIVE_LIVENESS_SECS),
+            "outbound_activity_recent"
+        );
     }
 
     #[test]

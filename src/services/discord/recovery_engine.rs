@@ -73,7 +73,7 @@ pub(super) use self::jsonl_extract::{
 // `TERMINAL_SUCCESS_DRAIN_QUIET_PERIOD`) are only used inside the submodule and
 // stay private to it.
 use self::terminal_watcher::{
-    output_has_bytes_after_offset, recovery_watcher_start_offset,
+    output_has_bytes_after_offset, recovery_watcher_start_offset_for_state,
     terminal_success_output_drained_for_recovery,
 };
 // #3479 item-2: re-import the inflight-state derivation helpers used by the root
@@ -1751,7 +1751,7 @@ pub(super) async fn restore_inflight_turns(
                         crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl");
                     if std::fs::metadata(&output_path).is_ok() {
                         let (initial_offset, current_len, truncated) =
-                            recovery_watcher_start_offset(&output_path, state.last_offset);
+                            recovery_watcher_start_offset_for_state(&output_path, &state);
                         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                         let paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                         let resume_offset = std::sync::Arc::new(std::sync::Mutex::new(None::<u64>));
@@ -2948,7 +2948,7 @@ pub(super) async fn restore_inflight_turns(
             // Immediately spawn watcher to avoid race condition.
             if std::fs::metadata(&output_path).is_ok() {
                 let (initial_offset, current_len, truncated) =
-                    recovery_watcher_start_offset(&output_path, state.last_offset);
+                    recovery_watcher_start_offset_for_state(&output_path, &state);
                 let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let resume_offset = std::sync::Arc::new(std::sync::Mutex::new(None::<u64>));
@@ -3604,7 +3604,7 @@ pub(crate) async fn rebind_inflight_for_channel(
 
     let initial_offset = if let Some(existing) = existing_inflight.as_ref() {
         let (resume_offset, current_len, truncated) =
-            recovery_watcher_start_offset(&output_path, existing.last_offset);
+            recovery_watcher_start_offset_for_state(&output_path, existing);
         if truncated {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
