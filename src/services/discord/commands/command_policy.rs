@@ -170,9 +170,9 @@ pub(in crate::services::discord) fn slash_command_risk(slash_cmd: &str) -> Comma
         }
 
         // Per-channel session shaping (mirrors text-command tiers).
-        "/start" | "/down" | "/cc" | "/skill" | "/meeting" | "/model" | "/fast" | "/goals"
-        | "/effort" | "/compact" | "/clear" | "/deletesession" | "/stop" | "/restart"
-        | "/steer" | "/debug" => CommandRisk::Mutating,
+        "/start" | "/down" | "/cc" | "/skill" | "/meeting" | "/model" | "/node" | "/fast"
+        | "/goals" | "/effort" | "/compact" | "/clear" | "/deletesession" | "/stop"
+        | "/restart" | "/steer" | "/debug" => CommandRisk::Mutating,
 
         // RCE-equivalent surface.
         // `/deadlock-recover`, `/machine-flip`, and `/stuck-pr-rebase` (issue
@@ -200,7 +200,7 @@ pub(in crate::services::discord) fn risk_tier_summary_for_help(high_risk_enabled
     format!(
         "**Command Risk Tiers** (issue #1005)\n\
          `read-only` — help/status/usage/receipt/metrics/allowedtools: any authorized user\n\
-         `mutating` — start/down/skill(/cc)/meeting/model/fast/goals/effort/compact/clear/deletesession/stop/restart/debug: any authorized user\n\
+         `mutating` — start/down/skill(/cc)/meeting/model/node/fast/goals/effort/compact/clear/deletesession/stop/restart/debug: any authorized user\n\
          `read-only (Claude native)` — cost/context: any authorized user\n\
          `shell/tool-grant` — shell/allowed: {shell_state}\n\
          `credential/system` — allowall/adduser/removeuser/escalation: owner-only"

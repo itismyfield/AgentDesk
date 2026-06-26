@@ -185,7 +185,7 @@ use terminal_delivery::{
     send_ordered_long_terminal_response, should_complete_work_dispatch_after_terminal_delivery,
     should_fail_dispatch_after_terminal_delivery, silent_turn_skip_marks_committed,
     terminal_delivery_should_send_new_chunks, tui_quiescence_timeout_requires_inflight_retry,
-    turn_bridge_replace_outcome_committed,
+    turn_bridge_replace_outcome_committed, warn_preserved_uncommitted as td_warn,
 };
 use tmux_runtime::is_dcserver_restart_command;
 pub(super) use turn_analytics::persist_turn_analytics_row_with_handles;
@@ -5773,16 +5773,19 @@ pub(super) fn spawn_turn_bridge(
                 gateway.add_reaction(channel_id, user_msg_id, '✅').await;
             }
 
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!("  [{ts}] ▶ Response sent");
-            if let Ok(mut last) = shared_owned.last_turn_at.lock() {
-                *last = Some(chrono::Local::now().to_rfc3339());
-            }
+            td_warn(terminal_delivery_committed, preserve_inflight_for_cleanup_retry, channel_id);
             status_panel_terminal_committed = status_panel_completion_ready_after_terminal_body(
                 terminal_delivery_committed,
                 terminal_body_visible,
                 preserve_inflight_for_cleanup_retry,
             );
+            if status_panel_terminal_committed {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!("  [{ts}] ▶ Response sent");
+                if let Ok(mut last) = shared_owned.last_turn_at.lock() {
+                    *last = Some(chrono::Local::now().to_rfc3339());
+                }
+            }
         }
 
         let mut status_panel_completion_committed = true;

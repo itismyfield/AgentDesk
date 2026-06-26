@@ -264,6 +264,21 @@ pub(super) fn tui_quiescence_timeout_requires_inflight_retry(
     !terminal_delivery_committed
 }
 
+pub(super) fn warn_preserved_uncommitted(
+    terminal_delivery_committed: bool,
+    preserve_inflight_for_cleanup_retry: bool,
+    channel_id: ChannelId,
+) {
+    if terminal_delivery_committed || !preserve_inflight_for_cleanup_retry {
+        return;
+    }
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::warn!(
+        "  [{ts}] ⚠ turn bridge preserved inflight after terminal delivery failed for channel {} — response was not marked sent",
+        channel_id
+    );
+}
+
 // #3089 A5: `pub(super)` so the `terminal_controller_cutover` sibling's advance
 // callback runs the SAME monotonic-CAS confirmed-end advance as the legacy site-5.
 pub(super) fn advance_tmux_relay_confirmed_end(

@@ -9,7 +9,6 @@ use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId};
 
 use super::SharedData;
-use super::gateway::{GatewayFuture, TurnGateway};
 use super::inflight::{InflightTurnState, RelayOwnerKind, TurnSource};
 use super::outbound::delivery_record as dr; // #3089 B2c
 use super::turn_bridge::{TurnBridgeContext, spawn_turn_bridge};
@@ -82,6 +81,8 @@ use self::rehydration::{
 // re-imported privately so this parent's call sites (and the test module) stay
 // byte-identical.
 mod anchor_completion;
+mod bridge_completion;
+mod bridge_gateway;
 use self::anchor_completion::{
     DeferredAnchorCompletionDrain, decide_deferred_anchor_completion_drain,
 };
@@ -90,6 +91,8 @@ pub(in crate::services::discord) use self::anchor_completion::{
     complete_tui_direct_prompt_anchor_lifecycle_if_present,
     should_complete_tui_direct_anchor_lifecycle,
 };
+use self::bridge_completion::ensure_tui_direct_bridge_delivery_committed;
+use self::bridge_gateway::TuiDirectBridgeGateway;
 
 // #3479: the Claude TUI launch-*script* parsing cluster (`ClaudeTuiLaunchInfo`,
 // the file/content parsers, and the single-quote shell-word splitter) moved
@@ -323,184 +326,6 @@ fn clear_external_input_bridge_lease_if_current(
         channel_id.get(),
         lease,
     )
-}
-
-struct TuiDirectBridgeGateway {
-    http: Arc<serenity::Http>,
-    shared: Arc<SharedData>,
-    provider: ProviderKind,
-}
-
-impl TurnGateway for TuiDirectBridgeGateway {
-    fn send_message<'a>(
-        &'a self,
-        channel_id: ChannelId,
-        content: &'a str,
-    ) -> GatewayFuture<'a, Result<MessageId, String>> {
-        Box::pin(async move {
-            super::gateway::send_outbound_message(
-                self.http.clone(),
-                self.shared.clone(),
-                channel_id,
-                content,
-            )
-            .await
-        })
-    }
-
-    fn edit_message<'a>(
-        &'a self,
-        channel_id: ChannelId,
-        message_id: MessageId,
-        content: &'a str,
-    ) -> GatewayFuture<'a, Result<(), String>> {
-        Box::pin(async move {
-            super::gateway::edit_outbound_message(
-                self.http.clone(),
-                self.shared.clone(),
-                channel_id,
-                message_id,
-                content,
-            )
-            .await
-        })
-    }
-
-    fn delete_message<'a>(
-        &'a self,
-        channel_id: ChannelId,
-        message_id: MessageId,
-    ) -> GatewayFuture<'a, Result<(), String>> {
-        Box::pin(async move {
-            super::rate_limit_wait(&self.shared, channel_id).await;
-            channel_id
-                .delete_message(&self.http, message_id)
-                .await
-                .map_err(|error| error.to_string())
-        })
-    }
-
-    fn replace_message_with_outcome<'a>(
-        &'a self,
-        channel_id: ChannelId,
-        message_id: MessageId,
-        content: &'a str,
-    ) -> GatewayFuture<'a, Result<super::formatting::ReplaceLongMessageOutcome, String>> {
-        Box::pin(async move {
-            super::formatting::replace_long_message_raw_with_outcome(
-                &self.http,
-                channel_id,
-                message_id,
-                content,
-                &self.shared,
-            )
-            .await
-            .map_err(|error| error.to_string())
-        })
-    }
-
-    fn add_reaction<'a>(
-        &'a self,
-        channel_id: ChannelId,
-        message_id: MessageId,
-        emoji: char,
-    ) -> GatewayFuture<'a, ()> {
-        Box::pin(async move {
-            super::formatting::add_reaction_raw(&self.http, channel_id, message_id, emoji).await;
-        })
-    }
-
-    fn remove_reaction<'a>(
-        &'a self,
-        channel_id: ChannelId,
-        message_id: MessageId,
-        emoji: char,
-    ) -> GatewayFuture<'a, ()> {
-        Box::pin(async move {
-            super::formatting::remove_reaction_raw(&self.http, channel_id, message_id, emoji).await;
-        })
-    }
-
-    fn schedule_retry_with_history<'a>(
-        &'a self,
-        channel_id: ChannelId,
-        user_message_id: MessageId,
-        _user_text: &'a str,
-    ) -> GatewayFuture<'a, ()> {
-        Box::pin(async move {
-            tracing::warn!(
-                provider = %self.provider.as_str(),
-                channel_id = channel_id.get(),
-                user_message_id = user_message_id.get(),
-                "TUI-direct bridge adapter suppressed retry resubmission through Discord intake"
-            );
-        })
-    }
-
-    fn schedule_retry_with_history_with_completion<'a>(
-        &'a self,
-        channel_id: ChannelId,
-        user_message_id: MessageId,
-        user_text: &'a str,
-        completion_tx: tokio::sync::oneshot::Sender<()>,
-    ) -> GatewayFuture<'a, ()> {
-        Box::pin(async move {
-            self.schedule_retry_with_history(channel_id, user_message_id, user_text)
-                .await;
-            let _ = completion_tx.send(());
-        })
-    }
-
-    fn dispatch_queued_turn<'a>(
-        &'a self,
-        channel_id: ChannelId,
-        intervention: &'a super::Intervention,
-        _request_owner_name: &'a str,
-        has_more_queued_turns: bool,
-    ) -> GatewayFuture<'a, Result<(), String>> {
-        Box::pin(async move {
-            super::mailbox_requeue_intervention_front(
-                &self.shared,
-                &self.provider,
-                channel_id,
-                intervention.clone(),
-            )
-            .await;
-            super::schedule_deferred_idle_queue_kickoff(
-                self.shared.clone(),
-                self.provider.clone(),
-                channel_id,
-                "tui_direct_bridge_queued_turn",
-            );
-            tracing::info!(
-                provider = %self.provider.as_str(),
-                channel_id = channel_id.get(),
-                queued_message_id = intervention.message_id.get(),
-                has_more_queued_turns,
-                "TUI-direct bridge adapter deferred queued turn to normal Discord intake without prompt resubmission"
-            );
-            Ok(())
-        })
-    }
-
-    fn validate_live_routing<'a>(
-        &'a self,
-        _channel_id: ChannelId,
-    ) -> GatewayFuture<'a, Result<(), String>> {
-        Box::pin(async move { Ok(()) })
-    }
-
-    fn requester_mention(&self) -> Option<String> {
-        None
-    }
-
-    fn can_chain_locally(&self) -> bool {
-        true
-    }
-
-    fn bot_owner_provider(&self) -> Option<ProviderKind> {
-        None
-    }
 }
 
 impl Drop for CodexIdleTailDoneGuard {
@@ -3761,6 +3586,16 @@ async fn relay_tui_idle_response_through_bridge(
 
     match tokio::time::timeout(Duration::from_secs(180), completion_rx).await {
         Ok(_) => {
+            ensure_tui_direct_bridge_delivery_committed(
+                &provider,
+                channel_id,
+                user_msg_id,
+                current_msg_id,
+                tmux_session_name,
+                lease,
+                anchor.map(|anchor| anchor.message_id),
+                false,
+            )?;
             if let Some(anchor) = anchor {
                 crate::services::tui_prompt_dedupe::clear_prompt_anchor_for_response(
                     provider.as_str(),
@@ -3946,6 +3781,16 @@ async fn stream_tui_idle_response_through_bridge(
 
     match completion {
         Ok(_) => {
+            ensure_tui_direct_bridge_delivery_committed(
+                &provider,
+                channel_id,
+                user_msg_id,
+                current_msg_id,
+                tmux_session_name,
+                lease,
+                anchor.map(|anchor| anchor.message_id),
+                true,
+            )?;
             if let Some(anchor) = anchor {
                 crate::services::tui_prompt_dedupe::clear_prompt_anchor_for_response(
                     provider.as_str(),
@@ -4290,6 +4135,7 @@ fn local_only_kind_note_suppressed_by_recent_continuation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::discord::gateway::TurnGateway;
 
     fn compact_command_name_first_stub() -> &'static str {
         "<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args></command-args>"

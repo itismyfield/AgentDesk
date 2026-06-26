@@ -404,6 +404,14 @@
 
 ### Audited touches
 
+- #3698/#3710 `/node` channel picker: Discord command registration now exposes a
+  select-menu based node override for intake routing. The override is stored in
+  shared bot settings and read only by the existing intake gate/hook path when
+  `ADK_INTAKE_ROUTING_MODE=enforce`; available choices are filtered from
+  `worker_nodes` nodes that advertise the active provider's intake-worker
+  capability. This adds no gateway ownership, leader-election, or lease
+  assumption; it only constrains the already-clustered intake target decision.
+
 - #3630 frontier mirror for cancel/stop + prompt_too_long terminal arms:
   turn_bridge now mirrors only Delivered+committed terminal-replace lease ranges
   into the durable delivery-record frontier keyed by `watcher_owner_channel_id`.

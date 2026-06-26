@@ -227,6 +227,7 @@ pub(super) fn run_bot_build_slash_commands() -> Vec<poise::Command<Data, Error>>
         commands::cmd_cc(),
         commands::cmd_metrics(),
         commands::cmd_model(),
+        commands::cmd_node(),
         commands::cmd_sidecar(),
         commands::cmd_fast(),
         commands::cmd_goals(),
@@ -330,6 +331,16 @@ mod steer_registration_tests {
                 .iter()
                 .any(|command| command.name == "steer"),
             "/steer must be present in the slash command registration vec"
+        );
+    }
+
+    #[test]
+    fn node_command_is_registered() {
+        assert!(
+            run_bot_build_slash_commands()
+                .iter()
+                .any(|command| command.name == "node"),
+            "/node must be present in the slash command registration vec"
         );
     }
 }
