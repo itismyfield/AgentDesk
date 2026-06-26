@@ -2096,10 +2096,9 @@ fn tui_direct_watcher_synthetic_inflight_matches(
 }
 
 #[cfg(unix)]
-fn codex_ownerless_external_input_inflight_needs_rollout_repair(
+fn codex_ownerless_external_input_inflight_needs_rollout_recovery(
     state: &InflightTurnState,
     tmux_session_name: &str,
-    rollout_path: &Path,
 ) -> bool {
     if state.turn_source != TurnSource::ExternalInput
         || state.runtime_kind != Some(RuntimeHandoffKind::CodexTui)
@@ -2114,17 +2113,11 @@ fn codex_ownerless_external_input_inflight_needs_rollout_repair(
     {
         return false;
     }
-    let Some(output_path) = state.output_path.as_deref() else {
-        return true;
-    };
-    let output_path = Path::new(output_path);
-    if !output_path.exists() {
-        return true;
-    }
-    let current = std::fs::canonicalize(output_path).unwrap_or_else(|_| output_path.to_path_buf());
-    let rollout =
-        std::fs::canonicalize(rollout_path).unwrap_or_else(|_| rollout_path.to_path_buf());
-    current != rollout
+    // At this point the inflight is ownerless and no Discord delivery has ever
+    // started. Recovery must run whether `output_path` is stale/missing or
+    // already points at the live rollout: an earlier deploy can interrupt after
+    // repairing the path but before the bridge posts a response.
+    true
 }
 
 #[cfg(unix)]
@@ -3154,10 +3147,9 @@ fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                 if let Some(inflight) =
                     super::inflight::load_inflight_state(&ProviderKind::Codex, channel_id.get())
                 {
-                    if codex_ownerless_external_input_inflight_needs_rollout_repair(
+                    if codex_ownerless_external_input_inflight_needs_rollout_recovery(
                         &inflight,
                         &tmux_session_name,
-                        &rollout_path,
                     ) {
                         match scan_codex_idle_rollout_for_latest_prompt_matching(
                             &rollout_path,
@@ -7114,7 +7106,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn codex_ownerless_external_input_missing_output_needs_rollout_repair() {
+    fn codex_ownerless_external_input_undelivered_turn_needs_rollout_repair() {
         let dir = tempfile::tempdir().expect("temp dir");
         let _env = EnvRootGuard::set(dir.path());
         let rollout_path = dir.path().join("rollout.jsonl");
@@ -7141,29 +7133,26 @@ mod tests {
         state.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
 
         assert!(
-            codex_ownerless_external_input_inflight_needs_rollout_repair(
+            codex_ownerless_external_input_inflight_needs_rollout_recovery(
                 &state,
                 tmux_session_name,
-                &rollout_path,
             )
         );
 
         state.output_path = Some(rollout_path.display().to_string());
         assert!(
-            !codex_ownerless_external_input_inflight_needs_rollout_repair(
+            codex_ownerless_external_input_inflight_needs_rollout_recovery(
                 &state,
                 tmux_session_name,
-                &rollout_path,
             )
         );
 
         state.output_path = Some(missing_output_path.display().to_string());
         state.current_msg_id = 123;
         assert!(
-            !codex_ownerless_external_input_inflight_needs_rollout_repair(
+            !codex_ownerless_external_input_inflight_needs_rollout_recovery(
                 &state,
                 tmux_session_name,
-                &rollout_path,
             )
         );
     }
