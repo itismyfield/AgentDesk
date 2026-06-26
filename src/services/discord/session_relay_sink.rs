@@ -1243,10 +1243,23 @@ async fn run_idle_jsonl_relay_loop(
                 *offset = 0;
             }
 
-            if super::inflight::load_inflight_state(&matched.provider, channel_id).is_some() {
-                last_inflight_seen_at.insert(session_name.clone(), Instant::now());
-                *offset = len;
-                continue;
+            if let Some(inflight) =
+                super::inflight::load_inflight_state(&matched.provider, channel_id)
+            {
+                if !super::inflight::ownerless_external_input_inflight_is_stale(&inflight) {
+                    last_inflight_seen_at.insert(session_name.clone(), Instant::now());
+                    *offset = len;
+                    continue;
+                }
+                last_inflight_seen_at.remove(&session_name);
+                tracing::debug!(
+                    provider = matched.provider.as_str(),
+                    channel = channel_id,
+                    tmux_session = %session_name,
+                    user_msg_id = inflight.user_msg_id,
+                    updated_at = %inflight.updated_at,
+                    "idle JSONL relay ignored stale ownerless TUI-direct inflight blocker"
+                );
             }
             if last_inflight_seen_at
                 .get(&session_name)

@@ -1500,7 +1500,8 @@ async fn synthetic_start_prior_turn_view(
     tmux_session_name: &str,
     own_anchor_id: u64,
 ) -> super::tui_direct_pending_start::PriorTurnObservation {
-    let inflight = super::inflight::load_inflight_state(provider, channel_id.get());
+    let inflight = super::inflight::load_inflight_state(provider, channel_id.get())
+        .filter(|state| !super::inflight::ownerless_external_input_inflight_is_stale(state));
     let inflight_present = inflight.is_some();
     let inflight_is_own_anchor = inflight
         .as_ref()
@@ -2929,10 +2930,19 @@ fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                     // #3018/#3306/#3656: registry miss ⇒ drop; Codex repair-ineligible.
                     continue;
                 };
-                if super::inflight::load_inflight_state(&ProviderKind::Codex, channel_id.get())
-                    .is_some()
+                if let Some(inflight) =
+                    super::inflight::load_inflight_state(&ProviderKind::Codex, channel_id.get())
                 {
-                    continue;
+                    if !super::inflight::ownerless_external_input_inflight_is_stale(&inflight) {
+                        continue;
+                    }
+                    tracing::debug!(
+                        channel_id = channel_id.get(),
+                        tmux_session_name = %tmux_session_name,
+                        user_msg_id = inflight.user_msg_id,
+                        updated_at = %inflight.updated_at,
+                        "codex idle rollout relay ignored stale ownerless TUI-direct inflight blocker"
+                    );
                 }
 
                 let rollout_path = PathBuf::from(&binding.output_path);

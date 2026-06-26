@@ -172,6 +172,14 @@ fn rebind_origin_inflight_is_idle(mailbox_has_cancel_token: bool, rebind_origin:
     rebind_origin && !mailbox_has_cancel_token
 }
 
+fn ownerless_external_input_inflight_is_idle(
+    mailbox_has_cancel_token: bool,
+    inflight: Option<&discord::inflight::InflightTurnState>,
+) -> bool {
+    !mailbox_has_cancel_token
+        && inflight.is_some_and(discord::inflight::ownerless_external_input_inflight_is_stale)
+}
+
 fn relay_active_turn_from_inflight(
     mailbox_has_cancel_token: bool,
     inflight: Option<&discord::inflight::InflightTurnState>,
@@ -186,6 +194,13 @@ fn relay_active_turn_from_inflight(
     if inflight.is_some_and(|state| {
         rebind_origin_inflight_is_idle(mailbox_has_cancel_token, state.rebind_origin)
     }) {
+        return RelayActiveTurn::None;
+    }
+
+    // A stale bridge-owned TUI-direct synthetic row has no cancel token and no
+    // live relay owner left after a restart. It cannot finish itself, so it must
+    // not make health/recovery report `active_foreground_stream` forever.
+    if ownerless_external_input_inflight_is_idle(mailbox_has_cancel_token, inflight) {
         return RelayActiveTurn::None;
     }
 
@@ -862,8 +877,11 @@ mod tests {
 
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
-    use super::{HealthRegistry, rebind_origin_inflight_is_idle};
+    use super::{HealthRegistry, rebind_origin_inflight_is_idle, relay_active_turn_from_inflight};
+    use crate::services::discord::inflight::InflightTurnState;
+    use crate::services::discord::relay_health::RelayActiveTurn;
     use crate::services::provider::{CancelToken, ProviderKind};
+    use chrono::TimeZone;
 
     /// #3631: a rebind-origin row with NO cancel token is idle (so the channel
     /// is not falsely reported as an active foreground stream and queued
@@ -878,6 +896,57 @@ mod tests {
         // not a rebind-origin row → never idle via this seam.
         assert!(!rebind_origin_inflight_is_idle(false, false));
         assert!(!rebind_origin_inflight_is_idle(true, false));
+    }
+
+    #[test]
+    fn stale_ownerless_external_input_inflight_is_not_foreground_without_cancel_token() {
+        let now_unix = chrono::Utc::now().timestamp();
+        let stale_unix = now_unix
+            - (crate::services::discord::inflight::INFLIGHT_STALENESS_THRESHOLD_SECS as i64)
+            - 1;
+        let stale_updated_at = chrono::Local
+            .timestamp_opt(stale_unix, 0)
+            .single()
+            .expect("valid local time")
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        let state: InflightTurnState = serde_json::from_value(serde_json::json!({
+            "version": 9,
+            "provider": "codex",
+            "channel_id": 42,
+            "channel_name": "adk-cdx",
+            "request_owner_user_id": 7,
+            "user_msg_id": 8,
+            "current_msg_id": 0,
+            "current_msg_len": 3,
+            "user_text": "typed in TUI",
+            "source": "text",
+            "session_id": null,
+            "tmux_session_name": "AgentDesk-codex-adk-cdx",
+            "output_path": "/tmp/rollout.jsonl",
+            "input_fifo_path": null,
+            "last_offset": 0,
+            "full_response": "",
+            "response_sent_offset": 0,
+            "started_at": stale_updated_at,
+            "updated_at": stale_updated_at,
+            "terminal_delivery_committed": false,
+            "relay_owner_kind": "none",
+            "turn_source": "external_input",
+            "injected_prompt_message_id": 8
+        }))
+        .expect("deserialize external-input inflight row");
+
+        assert_eq!(
+            relay_active_turn_from_inflight(false, Some(&state)),
+            RelayActiveTurn::None,
+            "stale ownerless TUI-direct synthetic rows must not strand recovery in active_foreground_stream"
+        );
+        assert_eq!(
+            relay_active_turn_from_inflight(true, Some(&state)),
+            RelayActiveTurn::Foreground,
+            "a cancel token is live-turn evidence even for the same row shape"
+        );
     }
 
     #[tokio::test]
