@@ -44,7 +44,7 @@ use self::idle_transcript_scan::{
     claude_idle_prompt_observation_should_tail_response,
     codex_idle_prompt_observation_should_tail_response,
     scan_claude_idle_transcript_for_last_prompt, scan_claude_idle_transcript_for_prompt,
-    scan_codex_idle_rollout_for_prompt,
+    scan_codex_idle_rollout_for_latest_prompt_matching, scan_codex_idle_rollout_for_prompt,
 };
 
 // #3479 rank-10: the Discord-IO/SharedData-coupled Claude TUI binding
@@ -56,8 +56,8 @@ use self::idle_transcript_scan::{
 mod rehydration;
 #[cfg(unix)]
 use self::rehydration::{
-    rehydrate_existing_claude_tui_bindings, rehydrate_existing_codex_tui_bindings,
-    rehydrated_claude_tui_binding_for_tmux_session,
+    codex_tui_rehydrated_binding_from_rollout_path, rehydrate_existing_claude_tui_bindings,
+    rehydrate_existing_codex_tui_bindings, rehydrated_claude_tui_binding_for_tmux_session,
 };
 // The dead/orphaned-session predicates and the eviction pass are driven in
 // production only transitively (via `rehydrate_existing_claude_tui_bindings`);
@@ -1016,6 +1016,70 @@ fn clear_observed_external_turn_lease_if_current(
     )
 }
 
+fn external_input_relay_binding(
+    provider: &str,
+    tmux_session_name: &str,
+    channel_id: ChannelId,
+    binding: Option<crate::services::tui_prompt_dedupe::TuiRuntimeBinding>,
+) -> Option<crate::services::tui_prompt_dedupe::TuiRuntimeBinding> {
+    let binding = binding?;
+    #[cfg(unix)]
+    {
+        if provider
+            .trim()
+            .eq_ignore_ascii_case(ProviderKind::Codex.as_str())
+            && binding.runtime_kind == RuntimeHandoffKind::CodexTui
+            && let Some(fresh) =
+                resolved_codex_idle_relay_binding(tmux_session_name, channel_id, &binding)
+        {
+            return Some(fresh);
+        }
+    }
+    Some(binding)
+}
+
+#[cfg(unix)]
+fn resolved_codex_idle_relay_binding(
+    tmux_session_name: &str,
+    channel_id: ChannelId,
+    binding: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+) -> Option<crate::services::tui_prompt_dedupe::TuiRuntimeBinding> {
+    let marker =
+        crate::services::codex_tui::session::read_codex_tui_rollout_marker(tmux_session_name);
+    if let Some(marker) = marker
+        && marker.rollout_path.exists()
+    {
+        let marker_path = std::fs::canonicalize(&marker.rollout_path)
+            .unwrap_or_else(|_| marker.rollout_path.clone());
+        let binding_path = std::fs::canonicalize(&binding.output_path)
+            .unwrap_or_else(|_| PathBuf::from(&binding.output_path));
+        if marker_path != binding_path {
+            let fresh = codex_tui_rehydrated_binding_from_rollout_path(
+                tmux_session_name,
+                &marker.rollout_path,
+                marker.session_id,
+            )?;
+            crate::services::tui_prompt_dedupe::register_rehydrated_tmux_runtime_binding(
+                ProviderKind::Codex.as_str(),
+                tmux_session_name,
+                channel_id.get(),
+                fresh.clone(),
+            );
+            tracing::warn!(
+                tmux_session_name = %tmux_session_name,
+                channel_id = channel_id.get(),
+                stale_output_path = %binding.output_path,
+                rollout_path = %fresh.output_path,
+                "refreshed Codex TUI direct relay binding from live rollout marker"
+            );
+            return Some(fresh);
+        }
+    }
+    Path::new(&binding.output_path)
+        .exists()
+        .then(|| binding.clone())
+}
+
 fn external_input_relay_output_path(
     shared: &Arc<SharedData>,
     provider: &str,
@@ -1039,8 +1103,28 @@ fn external_input_relay_output_path(
         {
             return Some(transcript_path);
         }
+        if provider
+            .trim()
+            .eq_ignore_ascii_case(ProviderKind::Codex.as_str())
+            && binding.runtime_kind == RuntimeHandoffKind::CodexTui
+        {
+            return Some(PathBuf::from(&binding.output_path));
+        }
     }
     Some(PathBuf::from(binding.relay_output_path()))
+}
+
+fn external_input_relay_start_offset(
+    provider: &ProviderKind,
+    binding: Option<&crate::services::tui_prompt_dedupe::TuiRuntimeBinding>,
+) -> u64 {
+    let Some(binding) = binding else {
+        return 0;
+    };
+    if provider == &ProviderKind::Codex && binding.runtime_kind == RuntimeHandoffKind::CodexTui {
+        return binding.last_offset;
+    }
+    binding.relay_last_offset()
 }
 
 fn record_external_turn_lease_for_output(
@@ -1250,6 +1334,8 @@ async fn claim_tui_direct_synthetic_turn(
 ) -> TuiDirectSyntheticTurnClaim {
     let binding =
         crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name);
+    let binding =
+        external_input_relay_binding(provider.as_str(), tmux_session_name, channel_id, binding);
     let output_path = external_input_relay_output_path(
         shared,
         provider.as_str(),
@@ -1257,10 +1343,7 @@ async fn claim_tui_direct_synthetic_turn(
         channel_id,
         binding.as_ref(),
     );
-    let relay_last_offset = binding
-        .as_ref()
-        .map(crate::services::tui_prompt_dedupe::TuiRuntimeBinding::relay_last_offset)
-        .unwrap_or(0);
+    let relay_last_offset = external_input_relay_start_offset(provider, binding.as_ref());
     // #3358 round 2: carry the committed frontier forward, but ONLY for the
     // CURRENT wrapper generation (stale → `None` → no content skip).
     // The `tmux` module is `#[cfg(unix)]`; on non-unix targets (windows CI
@@ -1434,6 +1517,11 @@ async fn claim_tui_direct_synthetic_turn(
         existing.set_relay_owner_kind(relay_owner_kind);
         existing.session_key = lease.session_key.clone();
         existing.runtime_kind = lease.runtime_kind;
+        existing.output_path = output_path
+            .as_deref()
+            .and_then(|path| path.to_str().map(str::to_string));
+        existing.last_offset = start_offset;
+        existing.turn_start_offset = Some(start_offset);
         // #3099 codex re-review (P2): keep this turn's own injected `⏳` message id
         // pinned so completion cleanup never reads a later injection's overwrite of
         // the shared prompt-anchor slot.
@@ -2005,6 +2093,38 @@ fn tui_direct_watcher_synthetic_inflight_matches(
             && state.tmux_session_name.as_deref() == Some(tmux_session_name)
             && state.effective_relay_owner_kind() == RelayOwnerKind::Watcher
     })
+}
+
+#[cfg(unix)]
+fn codex_ownerless_external_input_inflight_needs_rollout_repair(
+    state: &InflightTurnState,
+    tmux_session_name: &str,
+    rollout_path: &Path,
+) -> bool {
+    if state.turn_source != TurnSource::ExternalInput
+        || state.runtime_kind != Some(RuntimeHandoffKind::CodexTui)
+        || state.effective_relay_owner_kind() != RelayOwnerKind::None
+        || state.tmux_session_name.as_deref() != Some(tmux_session_name)
+        || state.injected_prompt_message_id.is_none()
+        || state.current_msg_id != 0
+        || state.response_sent_offset != 0
+        || !state.full_response.trim().is_empty()
+        || state.last_watcher_relayed_offset.is_some()
+        || state.terminal_delivery_committed
+    {
+        return false;
+    }
+    let Some(output_path) = state.output_path.as_deref() else {
+        return true;
+    };
+    let output_path = Path::new(output_path);
+    if !output_path.exists() {
+        return true;
+    }
+    let current = std::fs::canonicalize(output_path).unwrap_or_else(|_| output_path.to_path_buf());
+    let rollout =
+        std::fs::canonicalize(rollout_path).unwrap_or_else(|_| rollout_path.to_path_buf());
+    current != rollout
 }
 
 #[cfg(unix)]
@@ -3016,9 +3136,145 @@ fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                     // #3018/#3306/#3656: registry miss ⇒ drop; Codex repair-ineligible.
                     continue;
                 };
+                let binding = resolved_codex_idle_relay_binding(
+                    &tmux_session_name,
+                    channel_id,
+                    &binding,
+                )
+                .unwrap_or(binding);
+                let rollout_path = PathBuf::from(&binding.output_path);
+                if !rollout_path.exists() {
+                    tracing::debug!(
+                        tmux_session_name = %tmux_session_name,
+                        rollout_path = %rollout_path.display(),
+                        "codex idle rollout relay skipped missing rollout path"
+                    );
+                    continue;
+                }
                 if let Some(inflight) =
                     super::inflight::load_inflight_state(&ProviderKind::Codex, channel_id.get())
                 {
+                    if codex_ownerless_external_input_inflight_needs_rollout_repair(
+                        &inflight,
+                        &tmux_session_name,
+                        &rollout_path,
+                    ) {
+                        match scan_codex_idle_rollout_for_latest_prompt_matching(
+                            &rollout_path,
+                            &inflight.user_text,
+                        ) {
+                            Ok(Some(CodexIdleRolloutScan::Prompt {
+                                prompt,
+                                line_end_offset,
+                                ..
+                            })) => {
+                                if let Some(anchor_id) = inflight.injected_prompt_message_id {
+                                    crate::services::tui_prompt_dedupe::record_prompt_anchor(
+                                        ProviderKind::Codex.as_str(),
+                                        &tmux_session_name,
+                                        channel_id.get(),
+                                        anchor_id,
+                                    );
+                                }
+                                let observed_at = chrono::Utc::now();
+                                let lease = record_external_turn_lease_for_output(
+                                    &shared,
+                                    &ProviderKind::Codex,
+                                    channel_id,
+                                    &tmux_session_name,
+                                    binding.runtime_kind,
+                                    &rollout_path,
+                                    observed_at,
+                                );
+                                let mut repaired = inflight;
+                                repaired.output_path =
+                                    rollout_path.to_str().map(ToString::to_string);
+                                repaired.last_offset = line_end_offset;
+                                repaired.turn_start_offset = Some(line_end_offset);
+                                repaired.session_key = lease.session_key.clone();
+                                repaired.runtime_kind = lease.runtime_kind;
+                                repaired.set_relay_owner_kind(RelayOwnerKind::None);
+                                if let Err(error) = super::inflight::save_inflight_state(&repaired)
+                                {
+                                    tracing::warn!(
+                                        tmux_session_name = %tmux_session_name,
+                                        channel_id = channel_id.get(),
+                                        rollout_path = %rollout_path.display(),
+                                        error = %error,
+                                        "failed to repair Codex ownerless external-input inflight with live rollout path"
+                                    );
+                                    continue;
+                                }
+                                crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset(
+                                    &tmux_session_name,
+                                    &binding.output_path,
+                                    line_end_offset,
+                                );
+                                active_tails.insert(tmux_session_name.clone());
+                                let shared_for_tail = shared.clone();
+                                let done_tx_for_tail = done_tx.clone();
+                                let tail_tmux_session_name = tmux_session_name.clone();
+                                let tail_rollout_path = rollout_path.clone();
+                                let tail_lease = lease.clone();
+                                let tail_span = tracing::info_span!(
+                                    "codex_idle_response_tail_repair",
+                                    provider = ProviderKind::Codex.as_str(),
+                                    channel_id = channel_id.get(),
+                                    tmux_session_name = %tmux_session_name,
+                                    turn_id = lease.turn_id.as_deref().unwrap_or(""),
+                                    session_key = lease.session_key.as_deref().unwrap_or(""),
+                                    relay_owner = lease.relay_owner.as_str(),
+                                    runtime_kind = lease.runtime_kind.map(RuntimeHandoffKind::as_str).unwrap_or("unknown"),
+                                );
+                                tracing::warn!(
+                                    tmux_session_name = %tmux_session_name,
+                                    channel_id = channel_id.get(),
+                                    rollout_path = %rollout_path.display(),
+                                    line_end_offset,
+                                    "repaired Codex ownerless external-input inflight and resumed response tail from live rollout"
+                                );
+                                super::task_supervisor::spawn_observed(
+                                    "codex_idle_response_tail_repair",
+                                    async move {
+                                        let _done_guard = CodexIdleTailDoneGuard {
+                                            tmux_session_name: Some(tail_tmux_session_name.clone()),
+                                            done_tx: done_tx_for_tail,
+                                        };
+                                        run_codex_idle_response_tail(
+                                            shared_for_tail,
+                                            tail_tmux_session_name,
+                                            channel_id,
+                                            tail_rollout_path,
+                                            line_end_offset,
+                                            prompt,
+                                            tail_lease,
+                                        )
+                                        .await;
+                                    }
+                                    .instrument(tail_span),
+                                );
+                                continue;
+                            }
+                            Ok(Some(CodexIdleRolloutScan::NoPrompt { .. })) => {}
+                            Ok(None) => {
+                                tracing::debug!(
+                                    tmux_session_name = %tmux_session_name,
+                                    channel_id = channel_id.get(),
+                                    rollout_path = %rollout_path.display(),
+                                    "Codex ownerless external-input inflight repair skipped; prompt not found in rollout"
+                                );
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    tmux_session_name = %tmux_session_name,
+                                    channel_id = channel_id.get(),
+                                    rollout_path = %rollout_path.display(),
+                                    error = %error,
+                                    "Codex ownerless external-input inflight repair scan failed"
+                                );
+                            }
+                        }
+                    }
                     if !super::inflight::ownerless_external_input_inflight_is_stale(&inflight) {
                         continue;
                     }
@@ -3031,7 +3287,6 @@ fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                     );
                 }
 
-                let rollout_path = PathBuf::from(&binding.output_path);
                 let scan =
                     match scan_codex_idle_rollout_for_prompt(&rollout_path, binding.last_offset) {
                         Ok(scan) => scan,
@@ -6725,6 +6980,140 @@ mod tests {
         assert_eq!(state.user_text, "typed in TUI");
         assert_eq!(state.output_path.as_deref(), output_path.to_str());
         assert_eq!(state.input_fifo_path, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_external_input_relay_output_path_uses_rollout_not_wrapper() {
+        let shared = super::super::make_shared_data_for_tests();
+        let binding = crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::CodexTui,
+            output_path: "/tmp/live-codex-rollout.jsonl".to_string(),
+            relay_output_path: Some("/tmp/stale-wrapper-output.jsonl".to_string()),
+            input_fifo_path: None,
+            session_id: Some("codex-session".to_string()),
+            last_offset: 123,
+            relay_last_offset: Some(0),
+        };
+
+        assert_eq!(
+            external_input_relay_output_path(
+                &shared,
+                ProviderKind::Codex.as_str(),
+                "AgentDesk-codex-rollout-path",
+                ChannelId::new(42),
+                Some(&binding),
+            ),
+            Some(PathBuf::from("/tmp/live-codex-rollout.jsonl")),
+            "Codex TUI response relay must tail the rollout file, not the wrapper jsonl"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_external_input_binding_refreshes_from_live_rollout_marker() {
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap();
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+        let temp = tempfile::tempdir().expect("temp runtime root");
+        let _env = EnvRootGuard::set(temp.path());
+        let tmux_session_name = "AgentDesk-codex-marker-refresh";
+        let rollout_path = temp.path().join("rollout.jsonl");
+        std::fs::write(
+            &rollout_path,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"codex-marker-session\"}}\n",
+        )
+        .expect("write rollout");
+        crate::services::codex_tui::session::write_codex_tui_rollout_marker(
+            tmux_session_name,
+            &rollout_path,
+            Some("codex-marker-session"),
+        )
+        .expect("write marker");
+        let stale_binding = crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::CodexTui,
+            output_path: temp
+                .path()
+                .join("missing-wrapper.jsonl")
+                .display()
+                .to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: None,
+            last_offset: 0,
+            relay_last_offset: None,
+        };
+
+        let refreshed = external_input_relay_binding(
+            ProviderKind::Codex.as_str(),
+            tmux_session_name,
+            ChannelId::new(43),
+            Some(stale_binding),
+        )
+        .expect("binding refresh");
+
+        assert_eq!(refreshed.output_path, rollout_path.display().to_string());
+        assert_eq!(
+            refreshed.session_id.as_deref(),
+            Some("codex-marker-session")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_ownerless_external_input_missing_output_needs_rollout_repair() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let _env = EnvRootGuard::set(dir.path());
+        let rollout_path = dir.path().join("rollout.jsonl");
+        std::fs::write(
+            &rollout_path,
+            "{\"type\":\"session_meta\",\"payload\":{}}\n",
+        )
+        .expect("write rollout");
+        let missing_output_path = dir.path().join("missing-wrapper.jsonl");
+        let lease = ExternalInputRelayLease::unassigned(Some(44));
+        let tmux_session_name = "AgentDesk-codex-repair-predicate";
+        let mut state = build_tui_direct_synthetic_inflight_state(
+            ProviderKind::Codex,
+            ChannelId::new(44),
+            MessageId::new(444),
+            None,
+            "typed in TUI",
+            tmux_session_name,
+            Some(&missing_output_path),
+            0,
+            &lease,
+            RelayOwnerKind::None,
+        );
+        state.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
+
+        assert!(
+            codex_ownerless_external_input_inflight_needs_rollout_repair(
+                &state,
+                tmux_session_name,
+                &rollout_path,
+            )
+        );
+
+        state.output_path = Some(rollout_path.display().to_string());
+        assert!(
+            !codex_ownerless_external_input_inflight_needs_rollout_repair(
+                &state,
+                tmux_session_name,
+                &rollout_path,
+            )
+        );
+
+        state.output_path = Some(missing_output_path.display().to_string());
+        state.current_msg_id = 123;
+        assert!(
+            !codex_ownerless_external_input_inflight_needs_rollout_repair(
+                &state,
+                tmux_session_name,
+                &rollout_path,
+            )
+        );
     }
 
     #[cfg(unix)]

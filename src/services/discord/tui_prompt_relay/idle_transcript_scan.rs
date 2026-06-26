@@ -294,6 +294,57 @@ pub(super) fn scan_codex_idle_rollout_for_prompt(
     }
 }
 
+pub(super) fn scan_codex_idle_rollout_for_latest_prompt_matching(
+    rollout_path: &Path,
+    prompt_text: &str,
+) -> Result<Option<CodexIdleRolloutScan>, String> {
+    let target = prompt_text.trim();
+    if target.is_empty() {
+        return Ok(None);
+    }
+    let file = std::fs::File::open(rollout_path)
+        .map_err(|error| format!("open Codex rollout {}: {error}", rollout_path.display()))?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut offset = 0_u64;
+    let mut line = String::new();
+    let mut latest = None;
+
+    loop {
+        line.clear();
+        let line_start_offset = offset;
+        let bytes_read = reader
+            .read_line(&mut line)
+            .map_err(|error| format!("read Codex rollout {}: {error}", rollout_path.display()))?;
+        if bytes_read == 0 {
+            return Ok(latest);
+        }
+        offset = offset.saturating_add(bytes_read as u64);
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            if !line.ends_with('\n') {
+                return Ok(latest);
+            }
+            continue;
+        };
+        if let Some((prompt, entry_id)) =
+            crate::services::tui_prompt_dedupe::extract_codex_rollout_user_prompt_with_entry_id(
+                &json,
+            )
+            && prompt.trim() == target
+        {
+            latest = Some(CodexIdleRolloutScan::Prompt {
+                prompt,
+                line_end_offset: offset,
+                entry_id,
+            });
+        } else if !line.ends_with('\n') {
+            return Ok(latest);
+        }
+        if bytes_read == 0 || line_start_offset == offset {
+            return Ok(latest);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,6 +467,29 @@ mod tests {
         assert_eq!(
             second,
             crate::services::tui_prompt_dedupe::PromptObservation::SuppressedReplayedEntry
+        );
+    }
+
+    #[test]
+    fn codex_idle_rollout_latest_matching_prompt_uses_last_complete_match() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let rollout = dir.path().join("rollout.jsonl");
+        let first = "{\"type\":\"response_item\",\"payload\":{\"id\":\"first\",\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"same prompt\"}]}}\n";
+        let middle = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"old answer\"}]}}\n";
+        let second = "{\"type\":\"response_item\",\"payload\":{\"id\":\"second\",\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"same prompt\"}]}}\n";
+        let partial =
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\"";
+        std::fs::write(&rollout, format!("{first}{middle}{second}{partial}"))
+            .expect("write rollout");
+
+        assert_eq!(
+            scan_codex_idle_rollout_for_latest_prompt_matching(&rollout, "same prompt")
+                .expect("scan latest"),
+            Some(CodexIdleRolloutScan::Prompt {
+                prompt: "same prompt".to_string(),
+                line_end_offset: (first.len() + middle.len() + second.len()) as u64,
+                entry_id: Some("second".to_string()),
+            })
         );
     }
 }

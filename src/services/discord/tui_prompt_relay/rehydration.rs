@@ -667,7 +667,7 @@ fn markerless_codex_tui_fallback_allowed_from_cwds(
 }
 
 #[cfg(unix)]
-fn codex_tui_rehydrated_binding_from_rollout_path(
+pub(in crate::services::discord) fn codex_tui_rehydrated_binding_from_rollout_path(
     tmux_session_name: &str,
     rollout_path: &Path,
     session_id: Option<String>,
