@@ -515,6 +515,8 @@ src/
 │   │   │   ├── spawns.rs
 │   │   │   ├── startup_doctor.rs
 │   │   │   └── voice.rs
+│   │   ├── session_relay_sink/
+│   │   │   └── idle_jsonl.rs
 │   │   ├── settings/
 │   │   │   ├── content.rs
 │   │   │   ├── memory.rs
