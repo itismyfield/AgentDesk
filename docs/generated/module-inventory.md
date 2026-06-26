@@ -106,7 +106,7 @@
 | `db::dispatches::outbox::diagnostics` | `src/db/dispatches/outbox/diagnostics.rs` | 127 | 127 | 0 |  |
 | `db::dispatches::outbox::followup` | `src/db/dispatches/outbox/followup.rs` | 91 | 91 | 0 |  |
 | `db::dispatches::outbox::model` | `src/db/dispatches/outbox/model.rs` | 74 | 74 | 0 |  |
-| `db::dispatches::outbox::notify` | `src/db/dispatches/outbox/notify.rs` | 73 | 73 | 0 |  |
+| `db::dispatches::outbox::notify` | `src/db/dispatches/outbox/notify.rs` | 75 | 75 | 0 |  |
 | `db::dispatches::outbox::retry` | `src/db/dispatches/outbox/retry.rs` | 60 | 60 | 0 |  |
 | `db::idempotency` | `src/db/idempotency.rs` | 659 | 302 | 357 |  |
 | `db::intake_outbox` | `src/db/intake_outbox.rs` | 1779 | 630 | 1149 |  |

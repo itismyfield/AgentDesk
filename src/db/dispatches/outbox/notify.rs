@@ -59,7 +59,9 @@ pub(crate) async fn requeue_dispatch_notify_pg(
             delivery_status = NULL,
             delivery_result = NULL,
             claimed_at = NULL,
-            claim_owner = NULL",
+            claim_owner = NULL,
+            wait_reason = NULL,
+            wait_started_at = NULL",
     )
     .bind(dispatch_id)
     .bind(&agent_id)
