@@ -327,6 +327,13 @@ fn tail_latest_rollout_for_cwd_with_handoff_options(
         &mut is_alive,
         options.wait_for_rollout,
     )?;
+    let rollout_session_id =
+        super::rollout_index::read_rollout_session_meta(&rollout_path).and_then(|meta| meta.id);
+    persist_codex_tui_rollout_marker(
+        options.tmux_session_name.as_deref(),
+        &rollout_path,
+        rollout_session_id.as_deref(),
+    );
     tail_rollout_file_until_assistant_response(
         &rollout_path,
         0,
@@ -498,6 +505,11 @@ fn tail_resumed_rollout_for_session_with_handoff_options(
     } else {
         0
     };
+    persist_codex_tui_rollout_marker(
+        options.tmux_session_name.as_deref(),
+        &rollout_path,
+        Some(session_id),
+    );
     let known_session_id = (start_offset > 0).then(|| session_id.to_string());
     tail_rollout_file_until_assistant_response(
         &rollout_path,
@@ -521,6 +533,28 @@ fn tail_resumed_rollout_for_session_with_handoff_options(
         final_offset: outcome.final_offset,
         session_id: outcome.session_id,
     })
+}
+
+fn persist_codex_tui_rollout_marker(
+    tmux_session_name: Option<&str>,
+    rollout_path: &Path,
+    session_id: Option<&str>,
+) {
+    let Some(tmux_session_name) = tmux_session_name else {
+        return;
+    };
+    if let Err(error) = crate::services::codex_tui::session::write_codex_tui_rollout_marker(
+        tmux_session_name,
+        rollout_path,
+        session_id,
+    ) {
+        tracing::warn!(
+            tmux_session_name,
+            rollout_path = %rollout_path.display(),
+            error,
+            "failed to persist Codex TUI rollout marker after transcript discovery"
+        );
+    }
 }
 
 fn wait_for_latest_rollout_for_cwd(
@@ -609,8 +643,29 @@ pub fn latest_rollout_for_cwd_since(
     modified_since: SystemTime,
     sessions_dir: &Path,
 ) -> Option<PathBuf> {
+    rollout_candidates_for_cwd_since(cwd, modified_since, sessions_dir)
+        .into_iter()
+        .next()
+}
+
+pub fn latest_unclaimed_rollout_for_cwd_since(
+    cwd: &Path,
+    modified_since: SystemTime,
+    sessions_dir: &Path,
+    claimed_rollout_paths: &HashSet<PathBuf>,
+) -> Option<PathBuf> {
+    rollout_candidates_for_cwd_since(cwd, modified_since, sessions_dir)
+        .into_iter()
+        .find(|path| !rollout_path_is_claimed(path, claimed_rollout_paths))
+}
+
+pub fn rollout_candidates_for_cwd_since(
+    cwd: &Path,
+    modified_since: SystemTime,
+    sessions_dir: &Path,
+) -> Vec<PathBuf> {
     let canonical_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-    let mut best: Option<(SystemTime, PathBuf)> = None;
+    let mut candidates: Vec<(SystemTime, PathBuf)> = Vec::new();
     for item in super::rollout_index::cached_indexed_rollouts(sessions_dir) {
         if item.modified < modified_since {
             continue;
@@ -623,14 +678,18 @@ pub fn latest_rollout_for_cwd_since(
         if session_cwd != canonical_cwd {
             continue;
         }
-        if best
-            .as_ref()
-            .is_none_or(|(best_modified, _)| item.modified > *best_modified)
-        {
-            best = Some((item.modified, item.path));
-        }
+        candidates.push((item.modified, item.path));
     }
-    best.map(|(_, path)| path)
+    candidates.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    candidates.into_iter().map(|(_, path)| path).collect()
+}
+
+fn rollout_path_is_claimed(path: &Path, claimed_rollout_paths: &HashSet<PathBuf>) -> bool {
+    if claimed_rollout_paths.contains(path) {
+        return true;
+    }
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    claimed_rollout_paths.contains(&canonical)
 }
 
 /// Find a codex rollout transcript by its session UUID alone, scanning the
@@ -1914,6 +1973,54 @@ mod tests {
         )
         .unwrap();
         path
+    }
+
+    #[test]
+    fn latest_unclaimed_rollout_skips_rollout_claimed_by_another_tui() {
+        let _guard = super::super::rollout_index::lock_cache_for_tests();
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let older = write_rollout(
+            dir.path(),
+            "old/rollout-old.jsonl",
+            "session-old",
+            cwd.path(),
+            "",
+        );
+        let newer = write_rollout(
+            dir.path(),
+            "new/rollout-new.jsonl",
+            "session-new",
+            cwd.path(),
+            "",
+        );
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        filetime::set_file_mtime(
+            &older,
+            filetime::FileTime::from_system_time(base + Duration::from_secs(10)),
+        )
+        .unwrap();
+        filetime::set_file_mtime(
+            &newer,
+            filetime::FileTime::from_system_time(base + Duration::from_secs(20)),
+        )
+        .unwrap();
+
+        assert_eq!(
+            latest_rollout_for_cwd_since(cwd.path(), base, dir.path()).as_deref(),
+            Some(newer.as_path()),
+            "precondition: unclaimed lookup chooses the newest rollout"
+        );
+
+        let claimed = [std::fs::canonicalize(&newer).unwrap()]
+            .into_iter()
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            latest_unclaimed_rollout_for_cwd_since(cwd.path(), base, dir.path(), &claimed)
+                .as_deref(),
+            Some(older.as_path()),
+            "rehydrate must not bind two live Codex TUI sessions to the same rollout"
+        );
     }
 
     #[test]

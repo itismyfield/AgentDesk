@@ -1071,12 +1071,34 @@ pub(super) fn rebind_error_status_and_message(
     let status = match err {
         discord::recovery_engine::RebindError::TmuxNotAlive { .. } => "404 Not Found",
         discord::recovery_engine::RebindError::InflightAlreadyExists
-        | discord::recovery_engine::RebindError::StaleOutputPath { .. } => "409 Conflict",
+        | discord::recovery_engine::RebindError::StaleOutputPath { .. }
+        | discord::recovery_engine::RebindError::RuntimeBindingUnavailable { .. } => "409 Conflict",
         discord::recovery_engine::RebindError::ChannelNotBound
         | discord::recovery_engine::RebindError::ChannelNameMissing => "400 Bad Request",
         discord::recovery_engine::RebindError::Internal(_) => "500 Internal Server Error",
     };
     (status, err.to_string())
+}
+
+#[cfg(test)]
+mod rebind_error_status_tests {
+    use super::rebind_error_status_and_message;
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+    use crate::services::discord::recovery_engine::RebindError;
+
+    #[test]
+    fn runtime_binding_unavailable_maps_to_conflict() {
+        let err = RebindError::RuntimeBindingUnavailable {
+            tmux_session: "AgentDesk-codex-adk-cdx".to_string(),
+            runtime_kind: RuntimeHandoffKind::CodexTui,
+        };
+
+        let (status, message) = rebind_error_status_and_message(&err);
+
+        assert_eq!(status, "409 Conflict");
+        assert!(message.contains("codex_tui"));
+        assert!(message.contains("AgentDesk-codex-adk-cdx"));
+    }
 }
 
 /// Self-watchdog: runs on a dedicated OS thread (not tokio) to detect

@@ -801,12 +801,14 @@
     extracted verbatim from `tui_prompt_relay.rs` — no `shared.`/`http.`/async-IO
     coupling, all items `pub(super)` and re-imported by the parent; below the
     giant-file threshold).
-  - `src/services/discord/tui_prompt_relay/rehydration.rs` (295 prod lines; #3479
+  - `src/services/discord/tui_prompt_relay/rehydration.rs` (648 prod lines; #3479
     rank-10: the Discord-IO/`SharedData`-coupled Claude TUI binding rehydration +
-    dead/orphaned-session eviction pass extracted from `tui_prompt_relay.rs`. Free
-    functions taking `&Arc<SharedData>` explicitly (no captured module state), so
-    the move via `use super::*;` is behavior-identical; the five fns are
-    `pub(super)` and re-imported by the parent; below the giant-file threshold).
+    dead/orphaned-session eviction pass extracted from `tui_prompt_relay.rs`. #3711
+    extends the same rehydrate surface to Codex TUI restart recovery: persist/use
+    rollout markers, reject already-claimed marker paths, and allow markerless
+    cwd-based fallback only when exactly one live markerless Codex TUI session
+    owns that cwd. This file is still below the giant-file threshold, but split
+    before adding another provider/recovery policy cluster).
   - `src/services/discord/tui_prompt_relay/anchor_completion.rs` (213 prod lines;
     #3479 item-2: the live-relay TUI-direct prompt anchor COMPLETION lifecycle
     (`⏳ → ✅`) — the visibility gate, the deferred `⏳`-completion drain decision,
@@ -927,7 +929,10 @@
     marker suppression for stop-control transcript envelopes; +62 from #3304:
     slash-command canonical prompt keys for `<command-*>` XML vs
     `/command args` dedupe, plus focused loop skill-expansion regressions).
-  - `src/services/discord/recovery_engine.rs` (3438 lines; +2 from #3668 re-exporting `success_result_end_offset_after_offset` (pub(in discord)) so the relay_recovery F2 tail-answer guard can require terminal success evidence; +24 from f12b09366 backstop missed turn intake (drain-restart ownerless-inflight recovery: phase_policy/relay_recovery/relay_health predicates); +15 from #3610 PR-2 codex r2 Issue-2 storm-guard comment at the committed-branch anchor-repost dispose (passes `tmux_alive = false` so a transient send-new is budget-bounded, not pane-preserved forever; the now-unused liveness probe is dropped); +33 from #3610 PR-2 anchor-repost fallback (flag-gated, default OFF); +26 from #3680 relay recovery review hardening; +9 from #3582 stamping
+  - `src/services/discord/recovery_engine.rs` (3433 lines; -5 net from #3711/#3712 extracting rebind runtime/output-path resolution to
+    `recovery_engine/rebind_runtime.rs` while adding direct Codex TUI detection
+    so rebind can rebuild rollout bindings when possible and return 409 instead
+    of synthesizing inert legacy-wrapper inflight rows; +2 from #3668 re-exporting `success_result_end_offset_after_offset` (pub(in discord)) so the relay_recovery F2 tail-answer guard can require terminal success evidence; +24 from f12b09366 backstop missed turn intake (drain-restart ownerless-inflight recovery: phase_policy/relay_recovery/relay_health predicates); +15 from #3610 PR-2 codex r2 Issue-2 storm-guard comment at the committed-branch anchor-repost dispose (passes `tmux_alive = false` so a transient send-new is budget-bounded, not pane-preserved forever; the now-unused liveness probe is dropped); +33 from #3610 PR-2 anchor-repost fallback (flag-gated, default OFF); +26 from #3680 relay recovery review hardening; +9 from #3582 stamping
     `set_relay_owner_kind(Watcher)` at the rebind-origin birth site so the
     STALL-WATCHDOG force-clean -> respawn synthetic row (which lands here with
     `existing_inflight = None`) is watcher-owned instead of degrading to
@@ -1003,7 +1008,7 @@
     children (`send_target`, `send_gate`, `send_api`, `manual_delivery`) to
     `outbound/` while preserving the `health::` re-export API; #1879
     snapshot/mailbox extraction, and #3082 answer-flush-barrier field).
-  - `src/services/discord/health/recovery.rs` (2730 lines; #3676 moved
+  - `src/services/discord/health/recovery.rs` (2732 lines; +2 from #3711/#3712 mapping direct TUI runtime-binding-unavailable rebind failures to 409 Conflict; #3676 moved
     `tmux_alive_relay_dead` watchdog reattach logic into sibling
     `health/relay_dead_reattach.rs`, leaving recovery.rs with only the
     pre-cleanup hook so final transcript output can be delivered without
@@ -1480,7 +1485,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   support extracted from the route layer; split before adding non-bugfix
   behavior.
 - `src/services/claude.rs` (2963), `src/services/gemini.rs` (1358),
-  `src/services/qwen.rs` (2196), `src/services/codex.rs` (3011),
+  `src/services/qwen.rs` (2196), `src/services/codex.rs` (3023),
   `src/services/opencode.rs` (2760), `src/services/provider.rs` (1818) —
   provider adapters. (#3034 removed dead non-cancel `execute_command_simple*`
   twins from the claude/codex/gemini adapters and a superseded
@@ -1499,15 +1504,20 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   move). #3038 S3 relocates the TUI warm/follow-up hosting cluster into
   `src/services/claude_tui/hosting/` child modules, ratchets claude.rs at 2950
   production LoC, and leaves the #3262 turn-lock machinery in the claude.rs
-  root.)
-- `src/services/codex_tui/rollout_tail.rs` (1772) — Codex TUI rollout tail
+  root. #3711 adds +12 in codex.rs to persist Codex TUI rollout markers when
+  idle relay bindings are registered, so dcserver restart rehydrate has a
+  stable rollout identity.)
+- `src/services/codex_tui/rollout_tail.rs` (1831) — Codex TUI rollout tail
   parsing and resume identity surface; split before adding non-bugfix behavior
   beyond the #2169 session identity fix and the #3343 message-boundary
   separator unified across the streamed `StreamMessage::Text` surface and the
   `final_text` assembly (one shared `push_message_text` boundary writer; the
   newline witness is the single source of truth so the two surfaces mirror);
   +4 from #3676 threading Codex rollout user-message entry ids into TUI prompt
-  dedupe so restart/offset rewind cannot mint duplicate direct-input anchors.
+  dedupe so restart/offset rewind cannot mint duplicate direct-input anchors;
+  +59 from #3711 persisting rollout markers as soon as the live rollout is
+  discovered and adding claimed-rollout candidate selection for restart
+  rehydrate.
 - `src/services/codex_tui/input.rs` (1366) — Codex TUI input readiness
   detector and prompt delivery surface (#2399 hardened the post-turn
   handoff deadline). Treat as giant-file territory; split before adding

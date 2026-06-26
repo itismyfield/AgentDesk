@@ -56,7 +56,8 @@ use self::idle_transcript_scan::{
 mod rehydration;
 #[cfg(unix)]
 use self::rehydration::{
-    rehydrate_existing_claude_tui_bindings, rehydrated_claude_tui_binding_for_tmux_session,
+    rehydrate_existing_claude_tui_bindings, rehydrate_existing_codex_tui_bindings,
+    rehydrated_claude_tui_binding_for_tmux_session,
 };
 // The dead/orphaned-session predicates and the eviction pass are driven in
 // production only transitively (via `rehydrate_existing_claude_tui_bindings`);
@@ -2771,9 +2772,17 @@ fn resolve_idle_relay_transcript(
 
 #[cfg(unix)]
 pub(super) fn resolve_rehydrated_claude_tmux_channel_id(tmux_session_name: &str) -> Option<u64> {
+    resolve_rehydrated_tmux_channel_id(&ProviderKind::Claude, tmux_session_name)
+}
+
+#[cfg(unix)]
+pub(super) fn resolve_rehydrated_tmux_channel_id(
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+) -> Option<u64> {
     let mut matched: Option<u64> = None;
     for binding in super::settings::list_registered_channel_bindings() {
-        if binding.owner_provider != ProviderKind::Claude {
+        if &binding.owner_provider != provider {
             continue;
         }
         let channel_id_text = binding.channel_id.to_string();
@@ -2787,7 +2796,8 @@ pub(super) fn resolve_rehydrated_claude_tmux_channel_id(tmux_session_name: &str)
             segments.push(fallback_name);
         }
         for segment in segments {
-            let Some(candidate_channel_id) = rehydrated_claude_channel_id_for_segment(
+            let Some(candidate_channel_id) = rehydrated_channel_id_for_segment(
+                provider,
                 tmux_session_name,
                 segment,
                 binding.channel_id,
@@ -2797,9 +2807,10 @@ pub(super) fn resolve_rehydrated_claude_tmux_channel_id(tmux_session_name: &str)
             if matched.is_some_and(|existing| existing != candidate_channel_id) {
                 tracing::warn!(
                     tmux_session_name,
+                    provider = provider.as_str(),
                     channel_id = candidate_channel_id,
                     existing_channel_id = matched.unwrap_or_default(),
-                    "Claude TUI rehydrate skipped ambiguous exact session-name match"
+                    "TUI rehydrate skipped ambiguous exact session-name match"
                 );
                 return None;
             }
@@ -2809,20 +2820,35 @@ pub(super) fn resolve_rehydrated_claude_tmux_channel_id(tmux_session_name: &str)
     matched
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn rehydrated_claude_channel_id_for_segment(
     tmux_session_name: &str,
     segment: &str,
     parent_channel_id: u64,
 ) -> Option<u64> {
-    let base_session_name = ProviderKind::Claude.build_tmux_session_name(segment);
+    rehydrated_channel_id_for_segment(
+        &ProviderKind::Claude,
+        tmux_session_name,
+        segment,
+        parent_channel_id,
+    )
+}
+
+#[cfg(unix)]
+fn rehydrated_channel_id_for_segment(
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+    segment: &str,
+    parent_channel_id: u64,
+) -> Option<u64> {
+    let base_session_name = provider.build_tmux_session_name(segment);
     if base_session_name == tmux_session_name {
         return Some(parent_channel_id);
     }
 
-    let (provider, session_segment) =
+    let (session_provider, session_segment) =
         crate::services::provider::parse_provider_and_channel_from_tmux_name(tmux_session_name)?;
-    if provider != ProviderKind::Claude {
+    if &session_provider != provider {
         return None;
     }
     let (_base_provider, base_segment) =
@@ -2864,8 +2890,27 @@ fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
     super::task_supervisor::spawn_observed("codex_idle_rollout_relay", async move {
         let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let mut active_tails: HashSet<String> = HashSet::new();
+        let mut next_rehydrate = tokio::time::Instant::now();
 
         loop {
+            // #3711: direct Codex TUI tmux sessions survive dcserver restarts,
+            // but their in-memory rollout binding does not.
+            let now = tokio::time::Instant::now();
+            if now >= next_rehydrate {
+                let shared_for_rehydrate = shared.clone();
+                let rehydrate_result = tokio::task::spawn_blocking(move || {
+                    rehydrate_existing_codex_tui_bindings(&shared_for_rehydrate);
+                })
+                .await;
+                if let Err(error) = rehydrate_result {
+                    tracing::warn!(
+                        error = %error,
+                        "Codex TUI binding rehydrate task panicked or was cancelled"
+                    );
+                }
+                next_rehydrate = now + CLAUDE_IDLE_REHYDRATE_POLL_INTERVAL;
+            }
+
             while let Ok(tmux_session_name) = done_rx.try_recv() {
                 active_tails.remove(&tmux_session_name);
             }
@@ -6644,6 +6689,25 @@ mod tests {
             rehydrated_claude_channel_id_for_segment(
                 &tmux_session_name,
                 "adk-cc",
+                parent_channel_id
+            ),
+            Some(thread_id)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_rehydrate_thread_session_resolves_thread_channel_id() {
+        let parent_channel_id = 1479671301387059200;
+        let thread_id = 1504455726595051591_u64;
+        let tmux_session_name =
+            ProviderKind::Codex.build_tmux_session_name(&format!("adk-cdx-t{thread_id}"));
+
+        assert_eq!(
+            rehydrated_channel_id_for_segment(
+                &ProviderKind::Codex,
+                &tmux_session_name,
+                "adk-cdx",
                 parent_channel_id
             ),
             Some(thread_id)

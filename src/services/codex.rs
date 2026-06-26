@@ -533,6 +533,18 @@ fn register_codex_tui_idle_relay_binding(
     tmux_session_name: &str,
     tail_result: &crate::services::codex_tui::rollout_tail::CodexTuiTailResult,
 ) {
+    if let Err(error) = crate::services::codex_tui::session::write_codex_tui_rollout_marker(
+        tmux_session_name,
+        &tail_result.rollout_path,
+        tail_result.session_id.as_deref(),
+    ) {
+        tracing::warn!(
+            tmux_session_name,
+            rollout_path = %tail_result.rollout_path.display(),
+            error,
+            "failed to persist Codex TUI rollout marker; restart rehydrate will fall back to rollout discovery"
+        );
+    }
     crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
         tmux_session_name,
         codex_tui_idle_relay_binding(tmux_session_name, tail_result),

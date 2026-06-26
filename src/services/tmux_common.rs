@@ -535,6 +535,7 @@ const SESSIONS_SUBDIR: &str = "runtime/sessions";
 pub(crate) const CLAUDE_TUI_HOOK_SETTINGS_TEMP_EXT: &str = "claude-tui-settings.json";
 pub(crate) const CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT: &str = "claude-tui.sh";
 pub(crate) const CODEX_TUI_HOME_TEMP_EXT: &str = "codex-tui-home";
+pub(crate) const CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT: &str = "codex-tui-rollout.json";
 pub(crate) const TMUX_DEAD_MARKER_TEMP_EXT: &str = "pane_dead";
 pub(crate) const TMUX_RUNTIME_KIND_TEMP_EXT: &str = "runtime-kind";
 
@@ -695,6 +696,7 @@ pub fn cleanup_session_temp_files(session_name: &str) {
         TMUX_DEAD_MARKER_TEMP_EXT,
         CLAUDE_TUI_HOOK_SETTINGS_TEMP_EXT,
         CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT,
+        CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT,
     ];
     for ext in EXTS {
         let _ = std::fs::remove_file(session_temp_path(session_name, ext));

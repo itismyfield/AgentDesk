@@ -44,6 +44,8 @@ mod terminal_watcher;
 // spawn-cwd derivation) into a leaf module.
 #[path = "recovery_engine/analytics_transcript.rs"]
 mod analytics_transcript;
+#[path = "recovery_engine/rebind_runtime.rs"]
+mod rebind_runtime;
 #[path = "recovery_engine/state_extractors.rs"]
 mod state_extractors;
 
@@ -81,6 +83,7 @@ use self::terminal_watcher::{
 // members (the worktree path/branch/info/git helpers, `recovery_dispatch_id`,
 // `recovery_requires_worktree_context` and `inflight_ready_for_input_without_tui_pane`)
 // stay private to the submodule.
+use self::rebind_runtime::resolve_rebind_runtime_state;
 use self::state_extractors::{
     inflight_or_legacy_tmux_ready_for_input, interrupted_recovery_message, recovery_spawn_adk_cwd,
     recovery_tmux_session_name, restore_recovered_session_worktree,
@@ -3386,6 +3389,13 @@ pub enum RebindError {
     },
     /// Channel is not bound to the requested provider in the role-map. 400.
     ChannelNotBound,
+    /// A direct TUI tmux session was detected, but `/api/inflight/rebind` can
+    /// only respawn wrapper-output watchers. Direct TUI recovery must go
+    /// through the runtime-specific rehydrate/idle relay path instead.
+    RuntimeBindingUnavailable {
+        tmux_session: String,
+        runtime_kind: RuntimeHandoffKind,
+    },
     /// `tmux_session` not provided and no in-memory session supplies a
     /// channel_name — cannot derive the canonical tmux session name. 400.
     ChannelNameMissing,
@@ -3422,6 +3432,14 @@ impl std::fmt::Display for RebindError {
                 )
             }
             Self::ChannelNotBound => write!(f, "channel is not bound for this provider"),
+            Self::RuntimeBindingUnavailable {
+                tmux_session,
+                runtime_kind,
+            } => write!(
+                f,
+                "watcher rebind unavailable for {} tmux session {tmux_session}",
+                runtime_kind.as_str()
+            ),
             Self::ChannelNameMissing => write!(
                 f,
                 "channel name missing — pass tmux_session or pre-register the channel"
@@ -3557,50 +3575,17 @@ pub(crate) async fn rebind_inflight_for_channel(
         return Err(RebindError::ChannelNotBound);
     }
 
-    let (default_output_path, input_fifo) = tmux_runtime_paths(&tmux_session_name);
-    let fallback_output_path = existing_saved_output_path
-        .clone()
-        .unwrap_or_else(|| default_output_path.clone());
-    let (output_path, synthetic_initial_offset) = {
-        #[cfg(unix)]
-        {
-            match detect_live_tmux_output_path(&tmux_session_name, &fallback_output_path) {
-                Ok(Some(detected)) => {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::info!(
-                        "  [{ts}] ♻ rebind adopted live tmux output path for {}: {} -> {} (offset {})",
-                        tmux_session_name,
-                        default_output_path,
-                        detected.path,
-                        detected.initial_offset
-                    );
-                    (detected.path, detected.initial_offset)
-                }
-                Ok(None) => {
-                    let synthetic_initial_offset = std::fs::metadata(&fallback_output_path)
-                        .map(|m| m.len())
-                        .unwrap_or(0);
-                    (fallback_output_path.clone(), synthetic_initial_offset)
-                }
-                Err(stale) => {
-                    return Err(RebindError::StaleOutputPath {
-                        tmux_session: tmux_session_name.clone(),
-                        output_path: fallback_output_path.clone(),
-                        live_fd: stale.fd,
-                        live_inode: stale.inode,
-                        live_path: stale.raw_path,
-                    });
-                }
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            let synthetic_initial_offset = std::fs::metadata(&fallback_output_path)
-                .map(|m| m.len())
-                .unwrap_or(0);
-            (fallback_output_path.clone(), synthetic_initial_offset)
-        }
-    };
+    let runtime_state = resolve_rebind_runtime_state(
+        provider,
+        &tmux_session_name,
+        existing_saved_output_path.as_deref(),
+        existing_session_id.clone(),
+    )?;
+    let output_path = runtime_state.output_path;
+    let synthetic_initial_offset = runtime_state.synthetic_initial_offset;
+    let input_fifo_for_state = runtime_state.input_fifo_path;
+    let runtime_kind_for_state = runtime_state.runtime_kind;
+    let session_id_for_state = runtime_state.session_id;
 
     let initial_offset = if let Some(existing) = existing_inflight.as_ref() {
         let (resume_offset, current_len, truncated) =
@@ -3633,7 +3618,13 @@ pub(crate) async fn rebind_inflight_for_channel(
         let expected_turn_start_offset = existing.turn_start_offset;
         existing.tmux_session_name = Some(tmux_session_name.clone());
         existing.output_path = Some(output_path.clone());
-        existing.input_fifo_path = Some(input_fifo.clone());
+        existing.input_fifo_path = input_fifo_for_state.clone();
+        if let Some(runtime_kind) = runtime_kind_for_state {
+            existing.runtime_kind = Some(runtime_kind);
+        }
+        if session_id_for_state.is_some() {
+            existing.session_id = session_id_for_state.clone();
+        }
         existing.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
         let save_outcome =
             super::inflight::save_existing_inflight_rebind_adoption_if_matches_identity(
@@ -3673,9 +3664,13 @@ pub(crate) async fn rebind_inflight_for_channel(
             None, // session_id
             Some(tmux_session_name.clone()),
             Some(output_path.clone()),
-            Some(input_fifo.clone()),
+            input_fifo_for_state.clone(),
             initial_offset,
         );
+        state.runtime_kind = runtime_kind_for_state;
+        if session_id_for_state.is_some() {
+            state.session_id = session_id_for_state.clone();
+        }
         state.rebind_origin = true;
         // #2161 Part 2 / #2285 adoption: this synthetic inflight is born when
         // `POST /api/inflight/rebind` adopts a tmux session the operator
