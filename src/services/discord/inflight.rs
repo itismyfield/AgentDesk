@@ -852,6 +852,49 @@ pub(super) fn inflight_state_is_stale(
     age_secs >= 0 && (age_secs as u64) >= threshold_secs
 }
 
+fn inflight_state_started_at_is_stale(
+    state: &InflightTurnState,
+    now_unix_secs: i64,
+    threshold_secs: u64,
+) -> bool {
+    let Some(started_at_unix) = parse_started_at_unix(&state.started_at) else {
+        return false;
+    };
+    let age_secs = now_unix_secs.saturating_sub(started_at_unix);
+    age_secs >= 0 && (age_secs as u64) >= threshold_secs
+}
+
+/// A TUI-direct `ExternalInput` row can be born as a bridge-owned synthetic
+/// claim before the bridge tail has created the real response placeholder. If
+/// dcserver restarts in that narrow window, the tail is gone and the row has no
+/// live relay owner left. Treat that shape as stale after the normal inflight
+/// threshold so prompt scanners / idle relays / health recovery do not block
+/// forever on a row that cannot make progress.
+pub(super) fn ownerless_external_input_inflight_is_stale_at(
+    state: &InflightTurnState,
+    now_unix_secs: i64,
+) -> bool {
+    state.turn_source == TurnSource::ExternalInput
+        && state.effective_relay_owner_kind() == RelayOwnerKind::None
+        && state.injected_prompt_message_id.is_some()
+        && state.current_msg_id == 0
+        && state.response_sent_offset == 0
+        && state.full_response.trim().is_empty()
+        && state.last_watcher_relayed_offset.is_none()
+        && !state.terminal_delivery_committed
+        && (inflight_state_is_stale(state, now_unix_secs, INFLIGHT_STALENESS_THRESHOLD_SECS)
+            || (state.restart_mode.is_some()
+                && inflight_state_started_at_is_stale(
+                    state,
+                    now_unix_secs,
+                    INFLIGHT_STALENESS_THRESHOLD_SECS,
+                )))
+}
+
+pub(super) fn ownerless_external_input_inflight_is_stale(state: &InflightTurnState) -> bool {
+    ownerless_external_input_inflight_is_stale_at(state, now_unix())
+}
+
 fn turn_id_for_state(state: &InflightTurnState) -> Option<String> {
     (state.user_msg_id != 0).then(|| format!("discord:{}:{}", state.channel_id, state.user_msg_id))
 }
@@ -3147,7 +3190,8 @@ mod stall_recovery_tests {
         commit_watcher_terminal_delivery_locked_in_root,
         inflight_state_allows_idle_tmux_repair_state, inflight_state_is_stale, inflight_state_path,
         load_inflight_states_from_root, lock_inflight_state_path, normalize_response_sent_offset,
-        offset_monotonic_invariant_severity, persist_watcher_relay_watermark_locked_in_root,
+        offset_monotonic_invariant_severity, ownerless_external_input_inflight_is_stale_at,
+        persist_watcher_relay_watermark_locked_in_root,
         persist_watcher_stream_progress_locked_in_root,
         refresh_inflight_last_offset_if_matches_identity_in_root,
         save_existing_inflight_rebind_adoption_if_matches_identity_in_root,
@@ -3212,6 +3256,79 @@ mod stall_recovery_tests {
         assert!(
             !inflight_state_is_stale(&state, now_unix, INFLIGHT_STALENESS_THRESHOLD_SECS),
             "unparseable updated_at must NOT be treated as stale"
+        );
+    }
+
+    #[test]
+    fn ownerless_external_input_stale_only_for_unowned_pre_placeholder_synthetic_rows() {
+        let now_unix = chrono::Utc::now().timestamp();
+        let stale_unix = now_unix - (INFLIGHT_STALENESS_THRESHOLD_SECS as i64) - 1;
+        let fresh_unix = now_unix - 5;
+        let to_local = |unix: i64| {
+            chrono::Local
+                .timestamp_opt(unix, 0)
+                .single()
+                .expect("valid local time")
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        };
+        let mut state: InflightTurnState = serde_json::from_value(serde_json::json!({
+            "version": 9,
+            "provider": "codex",
+            "channel_id": 42,
+            "channel_name": "adk-cdx",
+            "request_owner_user_id": 7,
+            "user_msg_id": 8,
+            "current_msg_id": 0,
+            "current_msg_len": 3,
+            "user_text": "typed in TUI",
+            "source": "text",
+            "session_id": null,
+            "tmux_session_name": "AgentDesk-codex-adk-cdx",
+            "output_path": "/tmp/rollout.jsonl",
+            "input_fifo_path": null,
+            "last_offset": 0,
+            "full_response": "",
+            "response_sent_offset": 0,
+            "started_at": to_local(stale_unix),
+            "updated_at": to_local(stale_unix),
+            "terminal_delivery_committed": false,
+            "relay_owner_kind": "none",
+            "turn_source": "external_input",
+            "injected_prompt_message_id": 8
+        }))
+        .expect("deserialize external-input inflight row");
+
+        assert!(
+            ownerless_external_input_inflight_is_stale_at(&state, now_unix),
+            "stale bridge-owned synthetic claim without a response placeholder is not live evidence"
+        );
+
+        state.updated_at = to_local(fresh_unix);
+        assert!(
+            !ownerless_external_input_inflight_is_stale_at(&state, now_unix),
+            "fresh synthetic rows still block to protect live turns"
+        );
+
+        state.restart_mode = Some(InflightRestartMode::DrainRestart);
+        assert!(
+            ownerless_external_input_inflight_is_stale_at(&state, now_unix),
+            "planned-restart rows use started_at because updated_at is rewritten during boot"
+        );
+
+        state.restart_mode = None;
+        state.updated_at = to_local(stale_unix);
+        state.set_relay_owner_kind(RelayOwnerKind::Watcher);
+        assert!(
+            !ownerless_external_input_inflight_is_stale_at(&state, now_unix),
+            "watcher-owned TUI-direct rows have a live relay owner"
+        );
+
+        state.set_relay_owner_kind(RelayOwnerKind::None);
+        state.current_msg_id = 9002;
+        assert!(
+            !ownerless_external_input_inflight_is_stale_at(&state, now_unix),
+            "rows that already created a Discord response placeholder use terminal recovery paths"
         );
     }
 

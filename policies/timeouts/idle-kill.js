@@ -138,7 +138,10 @@ module.exports = function attachIdleKill(timeouts, helpers) {
           try {
             var killUrl = "http://127.0.0.1:" + apiPort +
               "/api/sessions/" + encodeURIComponent(s.session_key) + "/kill-tmux";
-            killResp = agentdesk.http.post(killUrl, { reason: "idle " + formatIdleDuration(idleMin) + " 초과 — 자동 정리" });
+            killResp = agentdesk.http.post(killUrl, {
+              reason: "idle " + formatIdleDuration(idleMin) + " 초과 — 자동 정리",
+              minimum_idle_minutes: minimumIdleMinutes
+            });
           } catch (e) {
             agentdesk.log.error("[idle-kill] kill-tmux API exception for " + s.session_key + ": " + e);
             continue;

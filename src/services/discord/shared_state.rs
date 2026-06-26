@@ -396,6 +396,8 @@ pub(in crate::services) struct SessionOverrideState {
     pub(in crate::services) codex_goals_channels: dashmap::DashSet<ChannelId>,
     /// Channels that must restart Codex before the next turn because goals changed.
     pub(in crate::services) codex_goals_session_reset_pending: dashmap::DashSet<ChannelId>,
+    /// Per-channel selected cluster node instance for Discord intake routing.
+    pub(in crate::services) node_overrides: dashmap::DashMap<ChannelId, String>,
     /// Channels that must start a fresh provider session on the next turn
     /// because the effective model override changed.
     pub(in crate::services) model_session_reset_pending: dashmap::DashSet<ChannelId>,

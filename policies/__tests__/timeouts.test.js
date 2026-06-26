@@ -1011,6 +1011,7 @@ test("timeouts idle-kill module calls kill-tmux API for expired idle sessions", 
   assert.match(state.httpPosts[0].url, /\/api\/sessions\/provider%3AAgentDesk-codex-project-agentdesk\/kill-tmux$/);
   assert.equal(state.httpPosts[0].body.retry, undefined);
   assert.match(state.httpPosts[0].body.reason, /idle 6시간 초과/);
+  assert.equal(state.httpPosts[0].body.minimum_idle_minutes, 360);
   const idleSql = state.queries.map((q) => q.sql).join("\n");
   assert.match(idleSql, /turn_lifecycle_events/);
   assert.match(idleSql, /GREATEST\(COALESCE\(s\.last_heartbeat, s\.created_at\)/);
@@ -1226,5 +1227,6 @@ test("timeouts idle-kill module excludes thread idle rows from the main batch", 
   // Reason text uses the human-readable formatter (hours, not minutes).
   state.httpPosts.forEach((p) => {
     assert.match(p.body.reason, /idle \d+(시간|일) 초과/);
+    assert.equal(p.body.minimum_idle_minutes, 360);
   });
 });

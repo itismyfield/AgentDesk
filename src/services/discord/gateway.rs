@@ -39,9 +39,47 @@ pub(super) trait TurnGateway: Send + Sync {
         content: &'a str,
     ) -> GatewayFuture<'a, Result<Vec<MessageId>, String>> {
         Box::pin(async move {
-            let message_id = TurnGateway::send_message(self, channel_id, content).await?;
-            let _ = rollback_anchor_msg_id;
-            Ok(vec![message_id])
+            let chunks = formatting::split_message(content);
+            if chunks.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            let mut sent_message_ids = Vec::new();
+            for (index, chunk) in chunks.iter().enumerate() {
+                match TurnGateway::send_message(self, channel_id, chunk).await {
+                    Ok(message_id) => sent_message_ids.push(message_id),
+                    Err(error) => {
+                        let mut rollback_errors = Vec::new();
+                        for message_id in sent_message_ids.iter().rev() {
+                            if let Err(rollback_error) =
+                                self.delete_message(channel_id, *message_id).await
+                            {
+                                rollback_errors.push(format!(
+                                    "{}: {}",
+                                    message_id.get(),
+                                    rollback_error
+                                ));
+                            }
+                        }
+                        let attempted = index + 1;
+                        let total = chunks.len();
+                        let anchor = rollback_anchor_msg_id.get();
+                        if rollback_errors.is_empty() {
+                            return Err(format!(
+                                "send chunk {attempted}/{total} failed for anchor {anchor} in channel {}; sent chunks cleaned before retry: {error}",
+                                channel_id.get()
+                            ));
+                        }
+                        return Err(format!(
+                            "send chunk {attempted}/{total} failed for anchor {anchor} in channel {}; cleanup incomplete after error {error}: {}",
+                            channel_id.get(),
+                            rollback_errors.join("; ")
+                        ));
+                    }
+                }
+            }
+
+            Ok(sent_message_ids)
         })
     }
 
@@ -944,6 +982,169 @@ impl TurnGateway for HeadlessGateway {
 
     fn bot_owner_provider(&self) -> Option<ProviderKind> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::discord::DISCORD_MSG_LIMIT;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct DefaultLongGateway {
+        sent: Mutex<Vec<(MessageId, String)>>,
+        deleted: Mutex<Vec<MessageId>>,
+        fail_on_chunk: Option<usize>,
+    }
+
+    impl TurnGateway for DefaultLongGateway {
+        fn send_message<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            content: &'a str,
+        ) -> GatewayFuture<'a, Result<MessageId, String>> {
+            Box::pin(async move {
+                let mut sent = self.sent.lock().expect("sent lock");
+                let chunk_index = sent.len() + 1;
+                if self.fail_on_chunk == Some(chunk_index) {
+                    return Err("simulated send failure".to_string());
+                }
+                let message_id = MessageId::new(8_000 + chunk_index as u64);
+                sent.push((message_id, content.to_string()));
+                Ok(message_id)
+            })
+        }
+
+        fn edit_message<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _content: &'a str,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn delete_message<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            message_id: MessageId,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            Box::pin(async move {
+                self.deleted.lock().expect("deleted lock").push(message_id);
+                Ok(())
+            })
+        }
+
+        fn replace_message_with_outcome<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _content: &'a str,
+        ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
+            Box::pin(async { Ok(ReplaceLongMessageOutcome::EditedOriginal) })
+        }
+
+        fn add_reaction<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _emoji: char,
+        ) -> GatewayFuture<'a, ()> {
+            Box::pin(async {})
+        }
+
+        fn remove_reaction<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _emoji: char,
+        ) -> GatewayFuture<'a, ()> {
+            Box::pin(async {})
+        }
+
+        fn schedule_retry_with_history<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _user_message_id: MessageId,
+            _user_text: &'a str,
+        ) -> GatewayFuture<'a, ()> {
+            Box::pin(async {})
+        }
+
+        fn dispatch_queued_turn<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _intervention: &'a Intervention,
+            _request_owner_name: &'a str,
+            _has_more_queued_turns: bool,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn validate_live_routing<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn requester_mention(&self) -> Option<String> {
+            None
+        }
+
+        fn can_chain_locally(&self) -> bool {
+            true
+        }
+
+        fn bot_owner_provider(&self) -> Option<ProviderKind> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn default_long_message_delivery_chunks_over_limit_body() {
+        let gateway = DefaultLongGateway::default();
+        let body = format!("{}{}", "A".repeat(2500), "B".repeat(2500));
+
+        let ids = gateway
+            .send_long_message_with_rollback(ChannelId::new(7), MessageId::new(42), &body)
+            .await
+            .expect("long message delivery");
+
+        assert!(ids.len() > 1);
+        let sent = gateway.sent.lock().expect("sent lock");
+        assert_eq!(
+            sent.iter()
+                .map(|(_, chunk)| chunk.as_str())
+                .collect::<String>(),
+            body
+        );
+        assert!(
+            sent.iter()
+                .all(|(_, chunk)| chunk.len() <= DISCORD_MSG_LIMIT)
+        );
+        assert!(gateway.deleted.lock().expect("deleted lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn default_long_message_delivery_rolls_back_sent_chunks_on_failure() {
+        let gateway = DefaultLongGateway {
+            fail_on_chunk: Some(2),
+            ..DefaultLongGateway::default()
+        };
+        let body = format!("{}{}", "A".repeat(2500), "B".repeat(2500));
+
+        let error = gateway
+            .send_long_message_with_rollback(ChannelId::new(7), MessageId::new(42), &body)
+            .await
+            .expect_err("second chunk should fail");
+
+        assert!(error.contains("sent chunks cleaned before retry"));
+        assert_eq!(
+            gateway.deleted.lock().expect("deleted lock").as_slice(),
+            &[MessageId::new(8001)]
+        );
     }
 }
 

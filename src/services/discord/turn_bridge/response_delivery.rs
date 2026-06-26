@@ -72,3 +72,37 @@ pub(super) fn done_result_requires_full_terminal_replay(
         && !result.trim().is_empty()
         && full_response.trim() == result.trim()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        done_result_requires_full_terminal_replay, terminal_delivery_response_after_offset,
+    };
+    use crate::services::discord::DISCORD_MSG_LIMIT;
+
+    #[test]
+    fn terminal_delivery_after_rollover_includes_authoritative_tail() {
+        let frozen_prefix = "probe 품질 검토 결과, 현재 관측된 ";
+        let terminal_body = format!("{frozen_prefix}기준으로는 실패입니다");
+
+        let delivered_tail =
+            terminal_delivery_response_after_offset(&terminal_body, frozen_prefix.len(), None);
+
+        assert_eq!(delivered_tail, "기준으로는 실패입니다");
+    }
+
+    #[test]
+    fn long_authoritative_done_after_rollover_replays_full_body() {
+        let frozen_prefix = "probe 품질 ".repeat(220);
+        let terminal_tail = "기준으로는 실패입니다";
+        let terminal_body = format!("{frozen_prefix}{terminal_tail}");
+        assert!(terminal_body.len() > DISCORD_MSG_LIMIT);
+
+        assert!(done_result_requires_full_terminal_replay(
+            &terminal_body,
+            &terminal_body,
+            frozen_prefix.len(),
+            true,
+        ));
+    }
+}

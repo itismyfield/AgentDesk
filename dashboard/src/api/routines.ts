@@ -12,6 +12,8 @@ export type RoutineRunStatus =
 export interface RoutineRecord {
   id: string;
   agent_id: string | null;
+  fallback_agent_id?: string | null;
+  max_retries?: number;
   script_ref: string;
   name: string;
   status: RoutineStatus | string;
@@ -24,6 +26,7 @@ export interface RoutineRecord {
   discord_thread_id: string | null;
   timeout_secs: number | null;
   in_flight_run_id: string | null;
+  pause_reason?: string | null;
   created_at: string;
   updated_at: string;
 }

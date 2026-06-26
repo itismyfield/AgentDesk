@@ -1901,11 +1901,11 @@ mod tests {
     /// PARTIAL transport and must NEVER commit/advance.
     ///
     /// The fake's `send_long_message_with_rollback` falls back to the trait
-    /// default (one `send_message`, so exactly ONE message id). A
-    /// `SendNewChunks { chunk_count: 3 }` plan therefore receives 1 id for a
-    /// 3-chunk send — the exact partial the old `chunk_count.min(1)` bug
-    /// committed as Delivered. With the fix (`ids.len() >= chunk_count`) it must
-    /// classify Unknown, leave the lease uncommitted, and release to Unleased.
+    /// default. This fixture body fits in one split chunk, so a
+    /// `SendNewChunks { chunk_count: 3 }` plan receives 1 id for a 3-chunk send —
+    /// the exact partial the old `chunk_count.min(1)` bug committed as
+    /// Delivered. With the fix (`ids.len() >= chunk_count`) it must classify
+    /// Unknown, leave the lease uncommitted, and release to Unleased.
     #[tokio::test]
     async fn split_partial_send_does_not_commit_or_advance() {
         let channel = ChannelId::new(103);

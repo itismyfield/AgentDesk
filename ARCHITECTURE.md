@@ -342,9 +342,11 @@ src/
 │   │   ├── transcript_tail.rs
 │   │   └── tui_relay.rs
 │   ├── cluster/
+│   │   ├── capability_routing.rs
 │   │   ├── intake_router_hook.rs
 │   │   ├── intake_routing.rs
 │   │   ├── intake_worker.rs
+│   │   ├── intake_worker_capabilities.rs
 │   │   ├── mod.rs
 │   │   ├── node_registry.rs
 │   │   ├── registry_adapter_sink.rs
@@ -387,6 +389,7 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── model_picker.rs
 │   │   │   ├── model_ui.rs
+│   │   │   ├── node.rs
 │   │   │   ├── receipt.rs
 │   │   │   ├── recovery_ops.rs
 │   │   │   ├── restart.rs
@@ -463,6 +466,7 @@ src/
 │   │   │   ├── jsonl_extract.rs
 │   │   │   ├── output_path_detect.rs
 │   │   │   ├── phase_policy.rs
+│   │   │   ├── rebind_runtime.rs
 │   │   │   ├── state_extractors.rs
 │   │   │   ├── status_panel.rs
 │   │   │   └── terminal_watcher.rs
@@ -473,7 +477,8 @@ src/
 │   │   │   └── shared.rs
 │   │   ├── router/
 │   │   │   ├── intake_gate/
-│   │   │   │   └── busy_duplicate_notice.rs
+│   │   │   │   ├── busy_duplicate_notice.rs
+│   │   │   │   └── node_override_routing.rs
 │   │   │   ├── message_handler/
 │   │   │   │   ├── attachments.rs
 │   │   │   │   ├── control.rs
@@ -510,6 +515,8 @@ src/
 │   │   │   ├── spawns.rs
 │   │   │   ├── startup_doctor.rs
 │   │   │   └── voice.rs
+│   │   ├── session_relay_sink/
+│   │   │   └── idle_jsonl.rs
 │   │   ├── settings/
 │   │   │   ├── content.rs
 │   │   │   ├── memory.rs
@@ -544,6 +551,8 @@ src/
 │   │   │   └── store.rs
 │   │   ├── tui_prompt_relay/
 │   │   │   ├── anchor_completion.rs
+│   │   │   ├── bridge_completion.rs
+│   │   │   ├── bridge_gateway.rs
 │   │   │   ├── idle_offset_resolution.rs
 │   │   │   ├── idle_transcript_scan.rs
 │   │   │   ├── injected_prompt_policy.rs

@@ -1,7 +1,6 @@
 export const HOME_PRIMARY_WIDGET_IDS = [
   "m_tokens",
   "m_cost",
-  "m_progress",
   "m_rate_limit",
   "kanban",
   "routines",

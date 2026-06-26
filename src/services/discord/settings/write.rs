@@ -155,6 +155,7 @@ fn save_runtime_bot_settings_checked(
             || !sorted_fast_mode_reset_pending.is_empty()
             || !settings.channel_codex_goals.is_empty()
             || !sorted_codex_goals_reset_pending.is_empty()
+            || !settings.channel_node_overrides.is_empty()
         {
             let mut runtime_entry = serde_json::Map::new();
             if !settings.channel_model_overrides.is_empty() {
@@ -185,6 +186,12 @@ fn save_runtime_bot_settings_checked(
                 runtime_entry.insert(
                     "channel_codex_goals_reset_pending".to_string(),
                     serde_json::json!(sorted_codex_goals_reset_pending),
+                );
+            }
+            if !settings.channel_node_overrides.is_empty() {
+                runtime_entry.insert(
+                    "channel_node_overrides".to_string(),
+                    serde_json::json!(settings.channel_node_overrides),
                 );
             }
             obj.insert(key, serde_json::Value::Object(runtime_entry));
@@ -303,6 +310,14 @@ fn save_runtime_bot_settings_checked(
             entry.insert(
                 "channel_codex_goals_reset_pending".to_string(),
                 serde_json::json!(sorted_codex_goals_reset_pending),
+            );
+        }
+        if settings.channel_node_overrides.is_empty() {
+            entry.remove("channel_node_overrides");
+        } else {
+            entry.insert(
+                "channel_node_overrides".to_string(),
+                serde_json::json!(settings.channel_node_overrides),
             );
         }
         obj.insert(key, serde_json::Value::Object(entry));

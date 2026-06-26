@@ -1,3 +1,4 @@
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -30,6 +31,64 @@ impl CodexTuiSessionFiles {
         let _ = std::fs::remove_dir_all(&self.codex_home_path);
         let _ = std::fs::remove_dir_all(&self.legacy_codex_home_path);
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexTuiRolloutMarker {
+    pub rollout_path: PathBuf,
+    pub session_id: Option<String>,
+}
+
+pub fn write_codex_tui_rollout_marker(
+    tmux_session_name: &str,
+    rollout_path: &Path,
+    session_id: Option<&str>,
+) -> Result<(), String> {
+    let tmux_session_name = tmux_session_name.trim();
+    if tmux_session_name.is_empty() {
+        return Ok(());
+    }
+    let path = crate::services::tmux_common::session_temp_path(
+        tmux_session_name,
+        crate::services::tmux_common::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT,
+    );
+    let value = serde_json::json!({
+        "rollout_path": rollout_path.display().to_string(),
+        "session_id": session_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+    });
+    std::fs::write(&path, format!("{value}\n"))
+        .map_err(|error| format!("failed to write Codex TUI rollout marker: {error}"))
+}
+
+pub fn read_codex_tui_rollout_marker(tmux_session_name: &str) -> Option<CodexTuiRolloutMarker> {
+    let tmux_session_name = tmux_session_name.trim();
+    if tmux_session_name.is_empty() {
+        return None;
+    }
+    let path = crate::services::tmux_common::resolve_session_temp_path(
+        tmux_session_name,
+        crate::services::tmux_common::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT,
+    )?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(raw.trim()).ok()?;
+    let rollout_path = value
+        .get("rollout_path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)?;
+    let session_id = value
+        .get("session_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    Some(CodexTuiRolloutMarker {
+        rollout_path,
+        session_id,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -314,6 +373,26 @@ mod tests {
         assert!(
             !files.legacy_codex_home_path.exists(),
             "cleanup_best_effort must remove the legacy Codex TUI temp home recursively"
+        );
+    }
+
+    #[test]
+    fn codex_tui_rollout_marker_round_trips() {
+        let _lock = lock_test_env();
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvRestore::set_agentdesk_root_and_host(dir.path(), "codex-tui-marker-host");
+        let rollout_path = dir.path().join("rollout-session.jsonl");
+        std::fs::write(&rollout_path, "{}\n").unwrap();
+
+        write_codex_tui_rollout_marker("AgentDesk-codex-marker", &rollout_path, Some("sess-1"))
+            .unwrap();
+
+        assert_eq!(
+            read_codex_tui_rollout_marker("AgentDesk-codex-marker"),
+            Some(CodexTuiRolloutMarker {
+                rollout_path,
+                session_id: Some("sess-1".to_string()),
+            })
         );
     }
 

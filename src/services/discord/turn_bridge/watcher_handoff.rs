@@ -76,6 +76,22 @@ pub(super) fn bridge_should_hand_off_busy_turn_to_watcher(
         && live_watcher_registered
 }
 
+/// A synthetic-headless bridge turn has no real Discord placeholder for the
+/// watcher to edit. If the bridge already holds terminal text, keep ownership on
+/// the bridge so it can run the headless outbox delivery path instead of
+/// promoting the turn to watcher-only ownership with zero relay progress.
+pub(super) fn headless_terminal_delivery_should_stay_on_bridge(
+    can_chain_locally: bool,
+    current_msg_id: u64,
+    response_pending_bytes: usize,
+    response_pending_trimmed_empty: bool,
+) -> bool {
+    !can_chain_locally
+        && super::super::is_synthetic_headless_message_id_raw(current_msg_id)
+        && response_pending_bytes > 0
+        && !response_pending_trimmed_empty
+}
+
 /// #3268 FIX 1 (codex blocker): true ONLY for a GENUINELY-LIVE watcher = a
 /// handle is present AND it is neither cancelled NOR heartbeat-stale.
 ///
@@ -310,6 +326,7 @@ pub(super) fn maybe_hand_off_busy_turn_to_watcher(
     session_key: Option<&str>,
     turn_id: &str,
     current_msg_id: u64,
+    can_chain_locally: bool,
     tmux_last_offset: Option<u64>,
     response_unsent: &str,
     inflight_state: &mut InflightTurnState,
@@ -326,6 +343,23 @@ pub(super) fn maybe_hand_off_busy_turn_to_watcher(
         genuinely_live_watcher_for_relay(&shared_owned.tmux_watchers, watcher_owner_channel_id),
     ) && let Some(watcher) = shared_owned.tmux_watchers.get(&watcher_owner_channel_id)
     {
+        if headless_terminal_delivery_should_stay_on_bridge(
+            can_chain_locally,
+            current_msg_id,
+            response_unsent.len(),
+            response_unsent.trim().is_empty(),
+        ) {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = channel_id.get(),
+                watcher_owner_channel = watcher_owner_channel_id.get(),
+                current_msg_id,
+                response_pending_bytes = response_unsent.len(),
+                "  [{ts}] 👁 #3704: quiescence timeout with headless terminal text pending — bridge keeps delivery ownership instead of handing off to watcher"
+            );
+            return;
+        }
         // #3277 (Defect A): a turn whose JSONL terminator is ALREADY on disk
         // (and whose transcript grew past the turn start) has nothing left for
         // the watcher to relay — handing it off parks the watcher at EOF and
@@ -663,6 +697,33 @@ mod tests {
         assert_eq!(
             post_gate_handoff_pending_response_visibility_kind(12, true),
             None
+        );
+    }
+
+    #[test]
+    fn headless_terminal_delivery_stays_on_bridge_truth_table() {
+        let synthetic_id = super::super::SYNTHETIC_HEADLESS_MESSAGE_ID_FLOOR + 42;
+        assert!(headless_terminal_delivery_should_stay_on_bridge(
+            false,
+            synthetic_id,
+            128,
+            false,
+        ));
+        assert!(
+            !headless_terminal_delivery_should_stay_on_bridge(false, synthetic_id, 0, false),
+            "no pending response means no bridge-owned terminal delivery to protect"
+        );
+        assert!(
+            !headless_terminal_delivery_should_stay_on_bridge(false, synthetic_id, 128, true),
+            "whitespace-only pending response should not block watcher handoff"
+        );
+        assert!(
+            !headless_terminal_delivery_should_stay_on_bridge(true, synthetic_id, 128, false),
+            "live Discord turns can still use the existing watcher handoff path"
+        );
+        assert!(
+            !headless_terminal_delivery_should_stay_on_bridge(false, 42, 128, false),
+            "real Discord placeholders are not the headless outbox path"
         );
     }
 }

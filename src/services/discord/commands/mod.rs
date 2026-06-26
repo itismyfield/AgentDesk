@@ -9,6 +9,7 @@ mod inspect;
 mod meeting_cmd;
 mod model_picker;
 mod model_ui;
+mod node;
 mod receipt;
 mod recovery_ops;
 mod restart;
@@ -56,6 +57,10 @@ pub(super) use help::cmd_help;
 pub(super) use inspect::cmd_adk;
 pub(super) use meeting_cmd::cmd_meeting;
 pub(super) use model_picker::cmd_model;
+pub(super) use node::cmd_node;
+pub(in crate::services::discord) use node::{
+    channel_node_override, handle_node_picker_interaction, is_node_picker_custom_id,
+};
 pub(super) use receipt::{cmd_receipt, cmd_usage};
 pub(super) use recovery_ops::{cmd_deadlock_recover, cmd_machine_flip, cmd_stuck_pr_rebase};
 pub(super) use restart::cmd_restart;

@@ -58,7 +58,6 @@ export default function HomeOverviewPage({
   const [analytics, setAnalytics] = useState<TokenAnalyticsResponse | null>(
     () => api.getCachedTokenAnalytics("7d")?.data ?? null,
   );
-  const [homeKpiTrends, setHomeKpiTrends] = useState<api.HomeKpiTrendsResponse | null>(null);
   const [gamification, setGamification] = useState<api.AchievementsResponse | null>(null);
   const [streaks, setStreaks] = useState<api.AgentStreak[]>([]);
   const defaultWidgets = useMemo(
@@ -78,9 +77,6 @@ export default function HomeOverviewPage({
     (notification) => Date.now() - notification.ts < 60_000,
   ).length;
   const requestedCards = kanbanCards.filter((card) => card.status === "requested").length;
-  const inProgressCards = kanbanCards.filter(
-    (card) => card.status === "in_progress" || card.status === "review",
-  ).length;
   const topAgents = useMemo(
     () =>
       (stats?.top_agents?.length
@@ -113,7 +109,6 @@ export default function HomeOverviewPage({
   }, [kanbanCards]);
   const recentDoneCount = recentDoneCards.length;
   const blockedCards = kanbanCards.filter((card) => card.status === "blocked").length;
-  const totalActionableCards = requestedCards + inProgressCards + blockedCards;
   const totalMeetings = meetings.length;
   const reviewQueue = stats?.kanban.review_queue ?? kanbanCards.filter((card) => card.status === "review").length;
   const agentTotal = stats?.agents.total ?? topAgents.length;
@@ -206,25 +201,6 @@ export default function HomeOverviewPage({
   }, []);
 
   useEffect(() => {
-    const controller = new AbortController();
-    let active = true;
-    api
-      .getHomeKpiTrends(14, { signal: controller.signal })
-      .then((next) => {
-        if (!active) return;
-        setHomeKpiTrends(next);
-      })
-      .catch((error) => {
-        if (!active || controller.signal.aborted) return;
-        console.error("Failed to load home KPI trends", error);
-      });
-    return () => {
-      active = false;
-      controller.abort();
-    };
-  }, []);
-
-  useEffect(() => {
     if (typeof window === "undefined") return;
     if (window.localStorage.getItem(STORAGE_KEYS.homeOrder) !== null) return;
     try {
@@ -283,7 +259,6 @@ export default function HomeOverviewPage({
   const latestAnalyticsDay = analytics?.daily.at(-1) ?? null;
   const tokenTrend = analytics?.daily.slice(-7).map((day) => day.total_tokens) ?? [];
   const costTrend = analytics?.daily.slice(-7).map((day) => day.cost) ?? [];
-  const inProgressTrend = homeKpiTrends?.in_progress.values ?? [];
   const activityStreak = useMemo(() => {
     const daily = [...(analytics?.daily ?? [])].sort((left, right) =>
       left.date.localeCompare(right.date),
@@ -371,7 +346,6 @@ export default function HomeOverviewPage({
     activityStreak,
     agents,
     analytics,
-    blockedCards,
     costTrend,
     currentOfficeLabel,
     dailyMissions,
@@ -380,8 +354,6 @@ export default function HomeOverviewPage({
     formatCurrency,
     gamificationLeader,
     gamificationLevel,
-    inProgressCards,
-    inProgressTrend,
     isKo,
     kanbanCards,
     kanbanColumns,
@@ -398,7 +370,6 @@ export default function HomeOverviewPage({
     t,
     tokenTrend,
     topAgents,
-    totalActionableCards,
     tr,
   });
   const primaryWidgets = widgets.filter((widgetId) => HOME_PRIMARY_WIDGET_SET.has(widgetId));

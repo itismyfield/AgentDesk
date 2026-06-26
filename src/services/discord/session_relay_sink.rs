@@ -7,8 +7,6 @@
 //! treats terminal delivery as delegated instead of sending directly.
 
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -33,6 +31,13 @@ use crate::services::cluster::watcher_supervisor::{SupervisorConfig, run_watcher
 use crate::services::provider::ProviderKind;
 use crate::services::session_backend::StreamLineState;
 use tracing::Instrument;
+
+mod idle_jsonl;
+use self::idle_jsonl::{
+    IdleRelayRangeAction, idle_jsonl_payload_contains_init_event,
+    idle_jsonl_payload_contains_schedule_wakeup_setup, idle_jsonl_payload_contains_user_event,
+    idle_jsonl_relay_source_for_matched, idle_relay_range_action, read_jsonl_range,
+};
 
 static SESSION_BOUND_DISCORD_DELIVERY_ENABLED: AtomicBool = AtomicBool::new(false);
 const IDLE_JSONL_RELAY_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -1221,6 +1226,7 @@ async fn run_idle_jsonl_relay_loop(
         for entry in registry.list_matched() {
             let matched = entry.matched;
             let session_name = matched.expected_session_name.clone();
+            let relay_source = idle_jsonl_relay_source_for_matched(&matched);
             seen_sessions.insert(session_name.clone());
             let first_seen = *first_seen_at
                 .entry(session_name.clone())
@@ -1228,7 +1234,7 @@ async fn run_idle_jsonl_relay_loop(
             let Ok(channel_id) = matched.channel_id.parse::<u64>() else {
                 continue;
             };
-            let Ok(metadata) = std::fs::metadata(&matched.expected_rollout_path) else {
+            let Ok(metadata) = std::fs::metadata(&relay_source.path) else {
                 continue;
             };
             let len = metadata.len();
@@ -1237,10 +1243,23 @@ async fn run_idle_jsonl_relay_loop(
                 *offset = 0;
             }
 
-            if super::inflight::load_inflight_state(&matched.provider, channel_id).is_some() {
-                last_inflight_seen_at.insert(session_name.clone(), Instant::now());
-                *offset = len;
-                continue;
+            if let Some(inflight) =
+                super::inflight::load_inflight_state(&matched.provider, channel_id)
+            {
+                if !super::inflight::ownerless_external_input_inflight_is_stale(&inflight) {
+                    last_inflight_seen_at.insert(session_name.clone(), Instant::now());
+                    *offset = len;
+                    continue;
+                }
+                last_inflight_seen_at.remove(&session_name);
+                tracing::debug!(
+                    provider = matched.provider.as_str(),
+                    channel = channel_id,
+                    tmux_session = %session_name,
+                    user_msg_id = inflight.user_msg_id,
+                    updated_at = %inflight.updated_at,
+                    "idle JSONL relay ignored stale ownerless TUI-direct inflight blocker"
+                );
             }
             if last_inflight_seen_at
                 .get(&session_name)
@@ -1255,7 +1274,7 @@ async fn run_idle_jsonl_relay_loop(
 
             let start = *offset;
             let end = len.min(start.saturating_add(IDLE_JSONL_RELAY_MAX_BYTES_PER_TICK));
-            let Ok(payload) = read_jsonl_range(&matched.expected_rollout_path, start, end) else {
+            let Ok(payload) = read_jsonl_range(&relay_source.path, start, end) else {
                 continue;
             };
             if payload.is_empty() {
@@ -1300,7 +1319,9 @@ async fn run_idle_jsonl_relay_loop(
                 );
                 continue;
             }
-            if !idle_jsonl_payload_contains_init_event(&payload) {
+            if !relay_source.allow_continued_session_without_init
+                && !idle_jsonl_payload_contains_init_event(&payload)
+            {
                 *offset = end;
                 tracing::debug!(
                     provider = matched.provider.as_str(),
@@ -1354,7 +1375,14 @@ async fn run_idle_jsonl_relay_loop(
                     &session_name,
                 );
                 // Classification passed above → consults ONLY the offset-authority dedup branch.
-                match idle_relay_range_action(&payload, start, end, committed, false) {
+                match idle_relay_range_action(
+                    &payload,
+                    start,
+                    end,
+                    committed,
+                    false,
+                    relay_source.allow_continued_session_without_init,
+                ) {
                     IdleRelayRangeAction::SkipAlreadyRelayed => {
                         // Whole range already delivered by the watcher → skip.
                         *offset = end;
@@ -1373,11 +1401,10 @@ async fn run_idle_jsonl_relay_loop(
                         // delivered the `[start, committed)` prefix; deliver ONLY the uncommitted
                         // suffix THIS pass (a next-tick bounce would re-read a suffix that lost the
                         // `system/init` event → re-classified and DROPPED). See `SendSuffixFrom`.
-                        let suffix =
-                            match read_jsonl_range(&matched.expected_rollout_path, from, end) {
-                                Ok(suffix) => suffix,
-                                Err(_) => continue,
-                            };
+                        let suffix = match read_jsonl_range(&relay_source.path, from, end) {
+                            Ok(suffix) => suffix,
+                            Err(_) => continue,
+                        };
                         if suffix.is_empty() {
                             *offset = end;
                             continue;
@@ -1421,140 +1448,6 @@ async fn run_idle_jsonl_relay_loop(
         last_inflight_seen_at.retain(|session, _| seen_sessions.contains(session));
         tokio::time::sleep(IDLE_JSONL_RELAY_POLL_INTERVAL).await;
     }
-}
-
-/// The action the idle relay loop takes for one fresh JSONL range `[start, end)`
-/// after classifying the payload and consulting the offset authority. Encodes the
-/// REAL loop ordering: classification gates run on the WHOLE payload FIRST (an
-/// `init` event anywhere keeps the range relayable), the offset-authority dedup
-/// SECOND. Extracting it makes the "init in committed prefix, suffix uncommitted"
-/// black-hole regression testable without spinning the live poll loop.
-#[derive(Debug, PartialEq, Eq)]
-enum IdleRelayRangeAction {
-    /// Classification dropped the range (grace window, user/tool-result event,
-    /// ScheduleWakeup setup, or non-init active-session payload). Advance the
-    /// offset past `end` without relaying.
-    SkipClassified,
-    /// The offset authority already covers `[start, end)` (`committed >= end`).
-    /// Advance past `end` without relaying (dedup, whole range).
-    SkipAlreadyRelayed,
-    /// PARTIAL overlap (`start < committed < end`): the prefix was already relayed;
-    /// relay ONLY the uncommitted `[committed, end)` suffix of THIS classified turn (not
-    /// re-gated as a fresh non-init payload → no black-hole, codex r6 P1).
-    SendSuffixFrom(u64),
-    /// Nothing covered (`committed <= start`): relay the whole `[start, end)`.
-    SendFull,
-}
-
-/// Pure decision for the idle relay's classification + offset-authority dedup,
-/// in the loop's real order. `payload` is the full `[start, end)` bytes.
-/// `in_new_session_grace` mirrors the runtime `first_seen.elapsed() < grace`
-/// gate. `committed` is the offset authority's `committed_relay_offset`.
-fn idle_relay_range_action(
-    payload: &[u8],
-    start: u64,
-    end: u64,
-    committed: u64,
-    in_new_session_grace: bool,
-) -> IdleRelayRangeAction {
-    // Classification first, on the WHOLE payload (matches the loop's gate
-    // ordering at the top of `run_idle_jsonl_relay_loop`).
-    if in_new_session_grace
-        || idle_jsonl_payload_contains_user_event(payload)
-        || idle_jsonl_payload_contains_schedule_wakeup_setup(payload)
-        || !idle_jsonl_payload_contains_init_event(payload)
-    {
-        return IdleRelayRangeAction::SkipClassified;
-    }
-    // Offset-authority dedup second, on the already-classified range.
-    if committed >= end {
-        IdleRelayRangeAction::SkipAlreadyRelayed
-    } else if committed > start {
-        IdleRelayRangeAction::SendSuffixFrom(committed)
-    } else {
-        IdleRelayRangeAction::SendFull
-    }
-}
-
-fn read_jsonl_range(path: &str, start: u64, end: u64) -> std::io::Result<Vec<u8>> {
-    let mut file = File::open(path)?;
-    file.seek(SeekFrom::Start(start))?;
-    let mut payload = Vec::new();
-    file.take(end.saturating_sub(start))
-        .read_to_end(&mut payload)?;
-    Ok(payload)
-}
-
-fn idle_jsonl_payload_contains_user_event(payload: &[u8]) -> bool {
-    for line in String::from_utf8_lossy(payload).lines() {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
-            continue;
-        };
-        if value.get("type").and_then(serde_json::Value::as_str) == Some("user") {
-            return true;
-        }
-    }
-    false
-}
-
-fn idle_jsonl_payload_contains_schedule_wakeup_setup(payload: &[u8]) -> bool {
-    for line in String::from_utf8_lossy(payload).lines() {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
-            continue;
-        };
-        if jsonl_event_contains_schedule_wakeup_setup_reference(&value) {
-            return true;
-        }
-    }
-    false
-}
-
-fn jsonl_event_contains_schedule_wakeup_setup_reference(value: &serde_json::Value) -> bool {
-    match value.get("type").and_then(serde_json::Value::as_str) {
-        Some("assistant") => assistant_event_contains_schedule_wakeup_reference(value),
-        Some("result") => value
-            .get("result")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|text| text.contains("ScheduleWakeup")),
-        _ => false,
-    }
-}
-
-fn assistant_event_contains_schedule_wakeup_reference(value: &serde_json::Value) -> bool {
-    let Some(content) = value
-        .get("message")
-        .and_then(|message| message.get("content"))
-        .and_then(serde_json::Value::as_array)
-    else {
-        return false;
-    };
-    content.iter().any(|item| {
-        let item_type = item.get("type").and_then(serde_json::Value::as_str);
-        match item_type {
-            Some("tool_use") => {
-                item.get("name").and_then(serde_json::Value::as_str) == Some("ScheduleWakeup")
-            }
-            Some("text") => item
-                .get("text")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|text| text.contains("ScheduleWakeup")),
-            _ => false,
-        }
-    })
-}
-
-fn idle_jsonl_payload_contains_init_event(payload: &[u8]) -> bool {
-    for line in String::from_utf8_lossy(payload).lines() {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
-            continue;
-        };
-        if value.get("type").and_then(serde_json::Value::as_str) == Some("system")
-            && value.get("subtype").and_then(serde_json::Value::as_str) == Some("init")
-        {
-            return true;
-        }
-    }
-    false
 }
 
 struct SessionRelayParser {
@@ -1754,6 +1647,17 @@ mod tests {
         }
     }
 
+    fn matched_codex(channel_id: &str) -> MatchedChannel {
+        let session = ProviderKind::Codex.build_tmux_session_name(channel_id);
+        MatchedChannel {
+            channel_id: channel_id.to_string(),
+            agent_id: format!("agent-{channel_id}"),
+            provider: ProviderKind::Codex,
+            expected_session_name: session.clone(),
+            expected_rollout_path: expected_rollout_path_for(&session),
+        }
+    }
+
     fn frame(binding: &MatchedChannel, payload: &str, sequence: u64) -> StreamFrame {
         StreamFrame {
             session_name: binding.expected_session_name.clone(),
@@ -1877,6 +1781,43 @@ mod tests {
             "{\"type\":\"result\",\"result\":\"[E2E:E1:OK]\"}\n"
         );
         assert!(!idle_jsonl_payload_contains_init_event(payload.as_bytes()));
+    }
+
+    #[test]
+    fn idle_jsonl_source_uses_codex_tui_runtime_output_path() {
+        let _guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let rollout_path = temp.path().join("rollout.jsonl");
+        std::fs::write(
+            &rollout_path,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s1\"}}\n",
+        )
+        .expect("write rollout");
+        let matched = matched_codex("1479671301387059200");
+        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+            &matched.expected_session_name,
+            crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+                runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+                output_path: rollout_path.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some("s1".to_string()),
+                last_offset: 0,
+                relay_last_offset: None,
+            },
+        );
+
+        let source = idle_jsonl_relay_source_for_matched(&matched);
+
+        assert_eq!(source.path, rollout_path.display().to_string());
+        assert!(
+            source.allow_continued_session_without_init,
+            "known Codex TUI runtime bindings may relay continued assistant-only suffixes"
+        );
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
     }
 
     fn inflight_for(
@@ -2335,7 +2276,7 @@ mod tests {
 
         // REAL loop decision on the WHOLE classified payload: relay only the
         // uncommitted suffix `[committed, end)` — NOT a re-classify-and-drop.
-        let action = idle_relay_range_action(full_bytes, start, end, committed, false);
+        let action = idle_relay_range_action(full_bytes, start, end, committed, false, false);
         assert_eq!(
             action,
             super::IdleRelayRangeAction::SendSuffixFrom(committed),
@@ -2357,26 +2298,32 @@ mod tests {
         // classification on the init-less suffix proves that path BLACK-HOLES
         // it: classified as non-init → dropped. The fix avoids the bounce so the
         // suffix is never re-gated this way.
-        let suffix_only_action = idle_relay_range_action(suffix, 0, suffix.len() as u64, 0, false);
+        let suffix_only_action =
+            idle_relay_range_action(suffix, 0, suffix.len() as u64, 0, false, false);
         assert_eq!(
             suffix_only_action,
             super::IdleRelayRangeAction::SkipClassified,
             "re-gating the init-less suffix as a fresh payload WOULD black-hole it (the old bug)"
         );
+        assert_eq!(
+            idle_relay_range_action(suffix, 0, suffix.len() as u64, 0, false, true),
+            super::IdleRelayRangeAction::SendFull,
+            "a known continued Codex TUI runtime binding may relay assistant-only suffixes without init"
+        );
 
         // Whole range uncommitted → relay the full payload (control case).
         assert_eq!(
-            idle_relay_range_action(full_bytes, start, end, 0, false),
+            idle_relay_range_action(full_bytes, start, end, 0, false, false),
             super::IdleRelayRangeAction::SendFull
         );
         // Whole range already committed → skip (control case).
         assert_eq!(
-            idle_relay_range_action(full_bytes, start, end, end, false),
+            idle_relay_range_action(full_bytes, start, end, end, false, false),
             super::IdleRelayRangeAction::SkipAlreadyRelayed
         );
         // New-session grace still wins over everything (ordering preserved).
         assert_eq!(
-            idle_relay_range_action(full_bytes, start, end, committed, true),
+            idle_relay_range_action(full_bytes, start, end, committed, true, true),
             super::IdleRelayRangeAction::SkipClassified
         );
     }

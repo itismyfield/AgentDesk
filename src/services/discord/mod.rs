@@ -715,6 +715,8 @@ pub(super) struct DiscordBotSettings {
     pub(super) channel_codex_goals: std::collections::HashMap<String, bool>,
     /// channel_id (string) → pending Codex goals session reset on the next turn
     pub(super) channel_codex_goals_reset_pending: std::collections::HashSet<String>,
+    /// channel_id (string) → selected cluster node instance for intake routing
+    pub(super) channel_node_overrides: std::collections::HashMap<String, String>,
     /// Discord user ID of the registered owner (must be configured explicitly)
     pub(super) owner_user_id: Option<u64>,
     /// Additional authorized user IDs (added by owner via /adduser)
@@ -741,6 +743,7 @@ impl Default for DiscordBotSettings {
             channel_fast_mode_reset_pending: std::collections::HashSet::new(),
             channel_codex_goals: std::collections::HashMap::new(),
             channel_codex_goals_reset_pending: std::collections::HashSet::new(),
+            channel_node_overrides: std::collections::HashMap::new(),
             owner_user_id: None,
             allowed_user_ids: Vec::new(),
             allow_all_users: false,
@@ -2261,6 +2264,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
             fast_mode_session_reset_pending: dashmap::DashSet::new(),
             codex_goals_channels: dashmap::DashSet::new(),
             codex_goals_session_reset_pending: dashmap::DashSet::new(),
+            node_overrides: dashmap::DashMap::new(),
             model_session_reset_pending: dashmap::DashSet::new(),
             session_reset_pending: dashmap::DashSet::new(),
             model_picker_pending: dashmap::DashMap::new(),

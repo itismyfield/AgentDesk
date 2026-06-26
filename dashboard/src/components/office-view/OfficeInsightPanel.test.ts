@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  formatRateLimitResetLabel,
   normalizeMiniRateLimitProviderLabel,
+  projectRateLimitBucketAtReset,
   transformRLProviders,
-} from "./OfficeInsightPanel";
+} from "./MiniRateLimitBarModel";
 
 describe("OfficeInsightPanel mini rate-limit helpers", () => {
   it("normalizes provider labels for compact cards", () => {
@@ -67,5 +69,70 @@ describe("OfficeInsightPanel mini rate-limit helpers", () => {
       utilization: null,
       level: "normal",
     });
+  });
+
+  it("keeps 5h/7d bucket labels and projects reset utilization from window pace", () => {
+    const nowMs = Date.UTC(2026, 5, 25, 0, 0, 0);
+    const rows = transformRLProviders(
+      [
+        {
+          provider: "claude",
+          buckets: [
+            {
+              name: "5h",
+              limit: 100,
+              used: 50,
+              remaining: 50,
+              reset: Math.floor((nowMs + 3_600_000) / 1000),
+            },
+            {
+              name: "7d",
+              limit: 100,
+              used: 25,
+              remaining: 75,
+              reset: Math.floor((nowMs + 86_400_000) / 1000),
+            },
+          ],
+          stale: false,
+        },
+      ],
+      { nowMs },
+    );
+
+    expect(rows[0]?.buckets[0]).toMatchObject({
+      label: "5h",
+      utilization: 50,
+      projectedUtilization: 63,
+      projectedLevel: "normal",
+    });
+    expect(rows[0]?.buckets[1]).toMatchObject({
+      label: "7d",
+      utilization: 25,
+      projectedUtilization: 29,
+      projectedLevel: "normal",
+    });
+  });
+
+  it("formats reset text with absolute time and relative distance", () => {
+    const nowMs = Date.UTC(2026, 5, 25, 0, 0, 0);
+    const label = formatRateLimitResetLabel(nowMs + 90 * 60_000, true, nowMs);
+
+    expect(label).toContain("초기화");
+    expect(label).toContain("1h 30m 후");
+  });
+
+  it("does not project unsupported bucket windows", () => {
+    const nowMs = Date.UTC(2026, 5, 25, 0, 0, 0);
+
+    expect(
+      projectRateLimitBucketAtReset(
+        {
+          label: "requests",
+          utilization: 50,
+          resetAtMs: nowMs + 3_600_000,
+        },
+        nowMs,
+      ),
+    ).toBeNull();
   });
 });

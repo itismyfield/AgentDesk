@@ -18,11 +18,7 @@ import {
   SurfaceSubsection,
 } from "../common/SurfacePrimitives";
 
-export {
-  MiniRateLimitBar,
-  normalizeMiniRateLimitProviderLabel,
-  transformRLProviders,
-} from "./MiniRateLimitBar";
+export { MiniRateLimitBar };
 
 interface OfficeInsightPanelProps {
   agents: Agent[];

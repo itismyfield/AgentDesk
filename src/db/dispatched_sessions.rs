@@ -1622,20 +1622,29 @@ pub(crate) async fn session_last_seen_unix_nanos_pg(
     last_seen.map(|value| value.timestamp_nanos_opt().unwrap_or(0))
 }
 
-/// Refresh `sessions.last_heartbeat = NOW()` by exact `session_key`. Used by the
-/// kill-time live-activity guard (#3053) when runtime activity is newer than the
-/// stored heartbeat, so a subsequent idle-kill tick no longer selects the row.
-/// Returns true when a row was touched.
-pub(crate) async fn refresh_session_heartbeat_by_key_pg(pool: &PgPool, session_key: &str) -> bool {
-    match sqlx::query("UPDATE sessions SET last_heartbeat = NOW() WHERE session_key = $1")
+/// Refresh `sessions.last_heartbeat` to the exact runtime activity timestamp.
+/// This keeps idle cleanup anchored to "last output" rather than the later
+/// cleanup tick that noticed the missed heartbeat.
+pub(crate) async fn refresh_session_heartbeat_by_key_to_unix_nanos_pg(
+    pool: &PgPool,
+    session_key: &str,
+    unix_nanos: i64,
+) -> bool {
+    let secs = unix_nanos.div_euclid(1_000_000_000);
+    let nanos = unix_nanos.rem_euclid(1_000_000_000) as u32;
+    let Some(activity_at) = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nanos) else {
+        return false;
+    };
+    match sqlx::query("UPDATE sessions SET last_heartbeat = $2 WHERE session_key = $1")
         .bind(session_key)
+        .bind(activity_at)
         .execute(pool)
         .await
     {
         Ok(result) => result.rows_affected() > 0,
         Err(error) => {
             tracing::warn!(
-                "[dispatched-sessions] refresh_session_heartbeat_by_key_pg: failed for {}: {}",
+                "[dispatched-sessions] refresh_session_heartbeat_by_key_to_unix_nanos_pg: failed for {}: {}",
                 session_key,
                 error
             );

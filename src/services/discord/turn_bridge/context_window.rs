@@ -20,16 +20,18 @@ pub(super) fn resolve_done_response(
     if any_tool_used && !has_post_tool_text {
         return Some(result.to_string());
     }
-    if done_result_supersedes_streamed_tail(full_response, result) {
+    if done_result_supersedes_streamed_partial(full_response, result) {
         return Some(result.to_string());
     }
     None
 }
 
-fn done_result_supersedes_streamed_tail(full_response: &str, result: &str) -> bool {
+fn done_result_supersedes_streamed_partial(full_response: &str, result: &str) -> bool {
     let streamed = full_response.trim();
     let terminal = result.trim();
-    !streamed.is_empty() && terminal.len() > streamed.len() && terminal.ends_with(streamed)
+    !streamed.is_empty()
+        && terminal.len() > streamed.len()
+        && (terminal.ends_with(streamed) || terminal.starts_with(streamed))
 }
 
 pub(super) fn total_context_tokens(
@@ -106,6 +108,16 @@ mod tests {
         let terminal_body = "[E2E:E15:BEGIN]\nE15-LINE-001\nE15-LINE-002\nE15-LINE-150\nE15-LINE-151\n[E2E:E15:END]";
 
         let resolved = resolve_done_response(streamed_tail, terminal_body, false, false);
+
+        assert_eq!(resolved, Some(terminal_body.to_string()));
+    }
+
+    #[test]
+    fn done_uses_terminal_result_when_streamed_response_is_prefix_missing_tail() {
+        let streamed_prefix = "probe 품질 검토 결과, 현재 관측된 기준으로는";
+        let terminal_body = "probe 품질 검토 결과, 현재 관측된 기준으로는 실패입니다";
+
+        let resolved = resolve_done_response(streamed_prefix, terminal_body, false, false);
 
         assert_eq!(resolved, Some(terminal_body.to_string()));
     }

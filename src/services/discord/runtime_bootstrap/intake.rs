@@ -15,6 +15,9 @@ pub(super) fn run_bot_maybe_spawn_intake_worker(
         crate::services::cluster::intake_router_hook::IntakeRoutingMode::Enforce
     ) {
         if let Some(pool_for_intake_worker) = shared.pg_pool.clone() {
+            crate::services::cluster::node_registry::register_intake_worker_provider(
+                provider.as_str(),
+            );
             let intake_worker_http = std::sync::Arc::new(serenity::http::Http::new(token));
             let intake_worker_shared = shared.clone();
             let intake_worker_token = token.to_string();
@@ -36,6 +39,15 @@ pub(super) fn run_bot_maybe_spawn_intake_worker(
                         std::time::Duration::from_secs(30),
                     )
                     .await;
+                if let Err(error) =
+                    crate::services::cluster::node_registry::refresh_worker_node_runtime_capabilities(
+                        &pool_for_intake_worker,
+                        &resolved_target_id,
+                    )
+                    .await
+                {
+                    tracing::warn!("[intake_worker] runtime capability refresh failed: {error}");
+                }
                 // claim_owner appends provider so multi-bot deployments
                 // surface which token's worker holds a row in
                 // observability dashboards.
