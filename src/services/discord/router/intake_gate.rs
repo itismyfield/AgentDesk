@@ -1658,6 +1658,29 @@ pub(in crate::services::discord) async fn handle_event(
                     )
                     .await;
                 }
+                if super::super::commands::is_node_picker_custom_id(&component.data.custom_id) {
+                    let settings_snapshot = { data.shared.settings.read().await.clone() };
+                    if !super::super::provider_handles_channel(
+                        ctx,
+                        &data.provider,
+                        &settings_snapshot,
+                        component.channel_id,
+                    )
+                    .await
+                    {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::info!(
+                            "  [{ts}] ⏭ COMPONENT-GUARD: skipping node picker in channel {} for provider {}",
+                            component.channel_id,
+                            data.provider.as_str()
+                        );
+                        return Ok(());
+                    }
+                    return super::super::commands::handle_node_picker_interaction(
+                        ctx, component, data,
+                    )
+                    .await;
+                }
                 if super::super::sidecar_interaction::is_sidecar_custom_id(
                     &component.data.custom_id,
                 ) {
@@ -2841,6 +2864,8 @@ pub(in crate::services::discord) async fn handle_event(
                     super::message_handler::TurnKind::Foreground => "foreground",
                     super::message_handler::TurnKind::BackgroundTrigger => "background_trigger",
                 };
+                let node_override =
+                    super::super::commands::channel_node_override(&data.shared, channel_id);
                 let hook_ctx = crate::services::cluster::intake_router_hook::IntakeRouterContext {
                     mode,
                     leader_instance_id: &leader_instance_id,
@@ -2857,6 +2882,7 @@ pub(in crate::services::discord) async fn handle_event(
                     reply_to_user_message: false,
                     defer_watcher_resume: false,
                     wait_for_completion: false,
+                    node_override_instance_id: node_override.as_deref(),
                 };
                 Some(
                     crate::services::cluster::intake_router_hook::try_route_intake(pool, &hook_ctx)

@@ -1,5 +1,6 @@
-use std::sync::Arc;
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, RwLock};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,82 @@ use crate::services::cluster::session_routing::{
 };
 
 pub(crate) const CLUSTER_LEADER_ADVISORY_LOCK_ID: i64 = 7_801_100;
+
+static ACTIVE_INTAKE_WORKER_PROVIDERS: LazyLock<RwLock<BTreeSet<String>>> =
+    LazyLock::new(|| RwLock::new(BTreeSet::new()));
+
+pub(crate) fn register_intake_worker_provider(provider: &str) {
+    let provider = provider.trim().to_ascii_lowercase();
+    if provider.is_empty() {
+        return;
+    }
+    if let Ok(mut providers) = ACTIVE_INTAKE_WORKER_PROVIDERS.write() {
+        providers.insert(provider);
+    }
+}
+
+fn active_intake_worker_providers() -> Vec<String> {
+    ACTIVE_INTAKE_WORKER_PROVIDERS
+        .read()
+        .map(|providers| providers.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn capabilities_with_runtime_state(base: &Value) -> Value {
+    let mut capabilities = base.as_object().cloned().unwrap_or_default();
+    let providers = active_intake_worker_providers();
+    capabilities.insert(
+        "intake_worker".to_string(),
+        serde_json::json!({
+            "enabled": !providers.is_empty(),
+            "providers": providers,
+        }),
+    );
+    Value::Object(capabilities)
+}
+
+pub(crate) fn node_supports_intake_provider(node: &Value, provider: &str) -> bool {
+    let provider = provider.trim().to_ascii_lowercase();
+    if provider.is_empty() {
+        return false;
+    }
+    let Some(intake_worker) = node
+        .get("capabilities")
+        .and_then(|capabilities| capabilities.get("intake_worker"))
+    else {
+        return false;
+    };
+    if intake_worker.get("enabled").and_then(Value::as_bool) != Some(true) {
+        return false;
+    }
+    intake_worker
+        .get("providers")
+        .and_then(Value::as_array)
+        .map(|providers| {
+            providers
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|candidate| candidate.trim().eq_ignore_ascii_case(&provider))
+        })
+        .unwrap_or(false)
+}
+
+pub(crate) async fn refresh_worker_node_runtime_capabilities(
+    pool: &PgPool,
+    instance_id: &str,
+) -> Result<(), String> {
+    let base = cluster_capabilities_with_worker_api(&crate::config::load_graceful().cluster);
+    let capabilities = capabilities_with_runtime_state(&base);
+    sqlx::query(
+        "UPDATE worker_nodes SET capabilities = $2, updated_at = NOW() WHERE instance_id = $1",
+    )
+    .bind(instance_id)
+    .bind(capabilities)
+    .execute(pool)
+    .await
+    .map(|_| ())
+    .map_err(|error| format!("refresh worker_node runtime capabilities: {error}"))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -210,7 +287,8 @@ pub(crate) async fn bootstrap(config: &Config, pg_pool: Option<PgPool>) -> Clust
             .map(|label| serde_json::Value::String(label.clone()))
             .collect(),
     );
-    let capabilities = cluster_capabilities_with_worker_api(&config.cluster);
+    let base_capabilities = cluster_capabilities_with_worker_api(&config.cluster);
+    let capabilities = capabilities_with_runtime_state(&base_capabilities);
     let pid = std::process::id() as i32;
 
     if let Err(error) = upsert_worker_node(
@@ -255,7 +333,7 @@ pub(crate) async fn bootstrap(config: &Config, pg_pool: Option<PgPool>) -> Clust
         pid,
         configured_role,
         labels,
-        capabilities,
+        base_capabilities,
         config.cluster.heartbeat_interval_secs,
         config.cluster.lease_ttl_secs,
         leader_active.clone(),
@@ -285,7 +363,7 @@ fn spawn_heartbeat_loop(
     pid: i32,
     configured_role: ClusterRole,
     labels: serde_json::Value,
-    capabilities: serde_json::Value,
+    base_capabilities: serde_json::Value,
     heartbeat_interval_secs: u64,
     lease_ttl_secs: u64,
     leader_active: Arc<AtomicBool>,
@@ -341,6 +419,7 @@ fn spawn_heartbeat_loop(
             } else {
                 ClusterRole::Worker
             };
+            let capabilities = capabilities_with_runtime_state(&base_capabilities);
             if let Err(error) = upsert_worker_node(
                 &pool,
                 &instance_id,

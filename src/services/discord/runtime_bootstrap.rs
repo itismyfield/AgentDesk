@@ -156,6 +156,16 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 .map(|id| (ChannelId::new(id), model.clone()))
         })
         .collect();
+    let restored_node_overrides: Vec<(ChannelId, String)> = bot_settings
+        .channel_node_overrides
+        .iter()
+        .filter_map(|(channel_id, instance_id)| {
+            channel_id
+                .parse::<u64>()
+                .ok()
+                .map(|id| (ChannelId::new(id), instance_id.clone()))
+        })
+        .collect();
     let restored_fast_mode_channels =
         restored_fast_mode_enabled_channels_for_provider(&bot_settings, &provider);
     let restored_fast_mode_reset_entries = restored_fast_mode_reset_entries(&bot_settings);
@@ -186,6 +196,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         },
         RestoredSessionState {
             model_overrides: &restored_model_overrides,
+            node_overrides: &restored_node_overrides,
             fast_mode_channels: &restored_fast_mode_channels,
             fast_mode_reset_entries: &restored_fast_mode_reset_entries,
             fast_mode_reset_channels: &restored_fast_mode_reset_channels,
@@ -760,6 +771,7 @@ mod restart_lifecycle_characterization_tests {
             },
             RestoredSessionState {
                 model_overrides: &[],
+                node_overrides: &[],
                 fast_mode_channels: &[],
                 fast_mode_reset_entries: &[],
                 fast_mode_reset_channels: &[],

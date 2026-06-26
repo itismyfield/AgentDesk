@@ -26,6 +26,7 @@ Each channel gets an independent session.
 `/start <path>` — Start session at directory
 `/start` — Start with auto-generated workspace
 `/pwd` — Show current working directory
+`/node` — Pick the cluster node for this channel
 `/health` — Show runtime health summary
 `/status` — Show this channel session status
 `/inflight` — Show saved inflight turn state

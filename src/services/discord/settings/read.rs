@@ -12,6 +12,7 @@ struct LegacyBotSettingsEntry {
     channel_fast_mode_reset_pending: std::collections::HashSet<String>,
     channel_codex_goals: std::collections::HashMap<String, bool>,
     channel_codex_goals_reset_pending: std::collections::HashSet<String>,
+    channel_node_overrides: std::collections::HashMap<String, String>,
     owner_user_id: Option<u64>,
     allowed_user_ids: Vec<u64>,
     allow_all_users: Option<bool>,
@@ -112,6 +113,21 @@ fn load_legacy_bot_settings_entry(token: &str) -> LegacyBotSettingsEntry {
                 .collect()
         })
         .unwrap_or_default();
+    let channel_node_overrides = entry
+        .get("channel_node_overrides")
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(channel_id, instance_id)| {
+                    instance_id
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(|value| (channel_id.clone(), value.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let owner_user_id = entry.get("owner_user_id").and_then(json_u64);
     let allowed_user_ids = entry
         .get("allowed_user_ids")
@@ -143,6 +159,7 @@ fn load_legacy_bot_settings_entry(token: &str) -> LegacyBotSettingsEntry {
         channel_fast_mode_reset_pending,
         channel_codex_goals,
         channel_codex_goals_reset_pending,
+        channel_node_overrides,
         owner_user_id,
         allowed_user_ids,
         allow_all_users,
@@ -352,6 +369,7 @@ pub(crate) fn load_bot_settings(token: &str) -> DiscordBotSettings {
         channel_fast_mode_reset_pending: legacy.channel_fast_mode_reset_pending,
         channel_codex_goals: legacy.channel_codex_goals,
         channel_codex_goals_reset_pending: legacy.channel_codex_goals_reset_pending,
+        channel_node_overrides: legacy.channel_node_overrides,
         owner_user_id: fallback_legacy_option(
             configured.as_ref().and_then(|bot| bot.owner_id),
             legacy.owner_user_id,

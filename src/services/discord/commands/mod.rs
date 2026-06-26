@@ -9,6 +9,7 @@ mod inspect;
 mod meeting_cmd;
 mod model_picker;
 mod model_ui;
+mod node;
 mod receipt;
 mod recovery_ops;
 mod restart;
@@ -33,9 +34,9 @@ pub(in crate::services::discord) use super::model_catalog::{
 pub(in crate::services::discord) use config::{
     ModelPickerAction, build_allowall_policy_note, build_model_picker_components_from_snapshot,
     build_model_picker_embed_from_snapshot, channel_codex_goals_setting, channel_fast_mode_setting,
-    clear_model_picker_pending, current_working_dir, effective_model_snapshot,
-    model_picker_pending_to_override, parse_model_picker_custom_id, resolve_model_for_turn,
-    update_channel_model_override, would_channel_model_override_change,
+    channel_node_override, clear_model_picker_pending, current_working_dir,
+    effective_model_snapshot, model_picker_pending_to_override, parse_model_picker_custom_id,
+    resolve_model_for_turn, update_channel_model_override, would_channel_model_override_change,
 };
 pub(super) use config::{cmd_adduser, cmd_allowall, cmd_allowed, cmd_allowedtools, cmd_removeuser};
 pub(in crate::services::discord) use control::{
@@ -56,6 +57,10 @@ pub(super) use help::cmd_help;
 pub(super) use inspect::cmd_adk;
 pub(super) use meeting_cmd::cmd_meeting;
 pub(super) use model_picker::cmd_model;
+pub(super) use node::cmd_node;
+pub(in crate::services::discord) use node::{
+    handle_node_picker_interaction, is_node_picker_custom_id,
+};
 pub(super) use receipt::{cmd_receipt, cmd_usage};
 pub(super) use recovery_ops::{cmd_deadlock_recover, cmd_machine_flip, cmd_stuck_pr_rebase};
 pub(super) use restart::cmd_restart;

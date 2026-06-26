@@ -5773,16 +5773,30 @@ pub(super) fn spawn_turn_bridge(
                 gateway.add_reaction(channel_id, user_msg_id, '✅').await;
             }
 
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!("  [{ts}] ▶ Response sent");
-            if let Ok(mut last) = shared_owned.last_turn_at.lock() {
-                *last = Some(chrono::Local::now().to_rfc3339());
-            }
             status_panel_terminal_committed = status_panel_completion_ready_after_terminal_body(
                 terminal_delivery_committed,
                 terminal_body_visible,
                 preserve_inflight_for_cleanup_retry,
             );
+            if status_panel_terminal_committed {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!("  [{ts}] ▶ Response sent");
+                if let Ok(mut last) = shared_owned.last_turn_at.lock() {
+                    *last = Some(chrono::Local::now().to_rfc3339());
+                }
+            } else if preserve_inflight_for_cleanup_retry
+                && !delivery_response.trim().is_empty()
+                && !terminal_delivery_committed
+            {
+                tracing::warn!(
+                    provider = %provider.as_str(),
+                    channel = channel_id.get(),
+                    turn_id = %turn_id.as_str(),
+                    response_len = delivery_response.len(),
+                    current_msg_id = current_msg_id.get(),
+                    "turn bridge preserved inflight after terminal delivery failed; response was not marked sent"
+                );
+            }
         }
 
         let mut status_panel_completion_committed = true;

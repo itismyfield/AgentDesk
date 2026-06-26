@@ -32,6 +32,7 @@ pub(super) struct UiFeatureFlags {
 /// after the builder returns.
 pub(super) struct RestoredSessionState<'a> {
     pub(super) model_overrides: &'a [(ChannelId, String)],
+    pub(super) node_overrides: &'a [(ChannelId, String)],
     pub(super) fast_mode_channels: &'a [ChannelId],
     pub(super) fast_mode_reset_entries: &'a [String],
     pub(super) fast_mode_reset_channels: &'a [ChannelId],
@@ -77,6 +78,7 @@ pub(super) fn run_bot_build_shared_data(
     } = flags;
     let RestoredSessionState {
         model_overrides: restored_model_overrides,
+        node_overrides: restored_node_overrides,
         fast_mode_channels: restored_fast_mode_channels,
         fast_mode_reset_entries: restored_fast_mode_reset_entries,
         fast_mode_reset_channels: restored_fast_mode_reset_channels,
@@ -202,6 +204,13 @@ pub(super) fn run_bot_build_shared_data(
                     set.insert(*channel_id);
                 }
                 set
+            },
+            node_overrides: {
+                let map = dashmap::DashMap::new();
+                for (channel_id, instance_id) in restored_node_overrides {
+                    map.insert(*channel_id, instance_id.clone());
+                }
+                map
             },
             model_session_reset_pending: dashmap::DashSet::new(),
             session_reset_pending: bootstrap_session_reset_pending_channels(

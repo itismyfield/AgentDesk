@@ -203,6 +203,17 @@ pub(in crate::services::discord) async fn channel_codex_goals_setting(
         .copied()
 }
 
+pub(in crate::services::discord) fn channel_node_override(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+) -> Option<String> {
+    shared
+        .overrides
+        .node_overrides
+        .get(&channel_id)
+        .map(|value| value.clone())
+}
+
 // #3038 S2: the session-override bookkeeping helpers (the fast-mode
 // reset-entry codec, the reset-pending probes/clears, the fast-mode /
 // Codex-goals enablement probes, and `sync_session_reset_pending`) moved
@@ -434,6 +445,41 @@ pub(in crate::services::discord) async fn update_channel_codex_goals(
         .codex_goals_session_reset_pending
         .insert(channel_id);
     sync_session_reset_pending(shared, channel_id);
+    true
+}
+
+pub(in crate::services::discord) async fn update_channel_node_override(
+    shared: &Arc<SharedData>,
+    token: &str,
+    channel_id: serenity::ChannelId,
+    next_instance_id: Option<String>,
+) -> bool {
+    let current = channel_node_override(shared, channel_id);
+    let next_instance_id = next_instance_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if current.as_deref() == next_instance_id.as_deref() {
+        return false;
+    }
+
+    let channel_key = channel_id.get().to_string();
+    let mut settings = shared.settings.write().await;
+    match next_instance_id {
+        Some(instance_id) => {
+            shared
+                .overrides
+                .node_overrides
+                .insert(channel_id, instance_id.clone());
+            settings
+                .channel_node_overrides
+                .insert(channel_key, instance_id);
+        }
+        None => {
+            shared.overrides.node_overrides.remove(&channel_id);
+            settings.channel_node_overrides.remove(&channel_key);
+        }
+    }
+    save_bot_settings(token, &settings);
     true
 }
 

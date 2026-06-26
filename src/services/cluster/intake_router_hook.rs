@@ -123,6 +123,15 @@ pub(crate) enum RanLocalReason {
     /// Agent for this channel could not be looked up (channel not
     /// mapped to an agent). Treated as no-preference.
     NoAgentForChannel,
+    /// Channel has an explicit `/node` override to this leader, so the
+    /// leader should keep the turn local.
+    NodeOverrideIsLeader,
+    /// Channel has an explicit `/node` override, but that worker is not
+    /// currently online or does not advertise a matching intake consumer.
+    NodeOverrideUnavailable,
+    /// Channel has an explicit `/node` override, but the intake worker is only
+    /// spawned in `Enforce` mode. Running locally avoids pending-row loss.
+    NodeOverrideRoutingDisabled,
 }
 
 /// Inputs to the hook. Bundled into a struct so the intake gate can
@@ -144,12 +153,12 @@ pub(crate) struct IntakeRouterContext<'a> {
     pub reply_to_user_message: bool,
     pub defer_watcher_resume: bool,
     pub wait_for_completion: bool,
+    pub node_override_instance_id: Option<&'a str>,
 }
 
-/// Heartbeat lease window for treating a worker_node row as fresh.
-/// Mirrors the dispatch routing engine's default; Phase 5 will allow
-/// per-cluster override via config.
-const WORKER_HEARTBEAT_LEASE_SECS: u64 = 30;
+fn worker_heartbeat_lease_secs() -> u64 {
+    crate::config::load_graceful().cluster.lease_ttl_secs.max(1)
+}
 
 /// Run the hook. Never fails — every error path turns into
 /// `RanLocal { reason: DbErrorFellBackToLocal }` because losing an
@@ -159,6 +168,26 @@ pub(crate) async fn try_route_intake(
     pool: &PgPool,
     ctx: &IntakeRouterContext<'_>,
 ) -> IntakeRouterDecision {
+    if let Some(target) = ctx
+        .node_override_instance_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if !matches!(ctx.mode, IntakeRoutingMode::Enforce) {
+            tracing::info!(
+                target_instance_id = %target,
+                channel_id = ctx.channel_id,
+                user_msg_id = ctx.user_msg_id,
+                mode = ?ctx.mode,
+                "[intake_router] /node override ignored because intake routing is not enforce"
+            );
+            return IntakeRouterDecision::RanLocal {
+                reason: RanLocalReason::NodeOverrideRoutingDisabled,
+            };
+        }
+        return try_route_node_override(pool, ctx, target).await;
+    }
+
     if matches!(ctx.mode, IntakeRoutingMode::Disabled) {
         // Disabled-but-preference-set is reported separately so Phase 5
         // operators can spot agents whose label preferences are set
@@ -178,9 +207,9 @@ pub(crate) async fn try_route_intake(
 
     // Resolve agent + preference. NoAgentForChannel is NOT an error —
     // many channels (DMs, ad-hoc cross-bot) have no agent row.
-    let (agent_id, preferred_labels) =
+    let (agent_id, agent_provider, preferred_labels) =
         match agent_id_and_preferred_labels(pool, ctx.channel_id).await {
-            Ok(Some((agent_id, labels))) => (agent_id, labels),
+            Ok(Some((agent_id, provider, labels))) => (agent_id, provider, labels),
             Ok(None) => {
                 return IntakeRouterDecision::RanLocal {
                     reason: RanLocalReason::NoAgentForChannel,
@@ -203,11 +232,22 @@ pub(crate) async fn try_route_intake(
 
     let candidates = match crate::services::cluster::node_registry::list_worker_nodes(
         pool,
-        WORKER_HEARTBEAT_LEASE_SECS,
+        worker_heartbeat_lease_secs(),
     )
     .await
     {
-        Ok(nodes) => candidates_from_worker_nodes_json(&nodes),
+        Ok(nodes) => {
+            let eligible_nodes: Vec<_> = nodes
+                .into_iter()
+                .filter(|node| {
+                    crate::services::cluster::node_registry::node_supports_intake_provider(
+                        node,
+                        &agent_provider,
+                    )
+                })
+                .collect();
+            candidates_from_worker_nodes_json(&eligible_nodes)
+        }
         Err(error) => {
             return IntakeRouterDecision::RanLocal {
                 reason: RanLocalReason::DbErrorFellBackToLocal {
@@ -285,6 +325,89 @@ pub(crate) async fn try_route_intake(
     }
 }
 
+async fn try_route_node_override(
+    pool: &PgPool,
+    ctx: &IntakeRouterContext<'_>,
+    target: &str,
+) -> IntakeRouterDecision {
+    let (agent_id, agent_provider, _) =
+        match agent_id_and_preferred_labels(pool, ctx.channel_id).await {
+            Ok(Some((agent_id, provider, labels))) => (agent_id, provider, labels),
+            Ok(None) => {
+                return IntakeRouterDecision::RanLocal {
+                    reason: RanLocalReason::NoAgentForChannel,
+                };
+            }
+            Err(error) => {
+                return IntakeRouterDecision::RanLocal {
+                    reason: RanLocalReason::DbErrorFellBackToLocal {
+                        detail: format!("agent lookup: {error}"),
+                    },
+                };
+            }
+        };
+
+    if target == ctx.leader_instance_id {
+        return IntakeRouterDecision::RanLocal {
+            reason: RanLocalReason::NodeOverrideIsLeader,
+        };
+    }
+
+    let nodes = match crate::services::cluster::node_registry::list_worker_nodes(
+        pool,
+        worker_heartbeat_lease_secs(),
+    )
+    .await
+    {
+        Ok(nodes) => nodes,
+        Err(error) => {
+            return IntakeRouterDecision::RanLocal {
+                reason: RanLocalReason::DbErrorFellBackToLocal {
+                    detail: format!("list worker_nodes: {error}"),
+                },
+            };
+        }
+    };
+    let target_online = nodes.iter().any(|node| {
+        node.get("instance_id").and_then(|value| value.as_str()) == Some(target)
+            && node
+                .get("status")
+                .and_then(|value| value.as_str())
+                .is_some_and(|status| status.eq_ignore_ascii_case("online"))
+            && crate::services::cluster::node_registry::node_supports_intake_provider(
+                node,
+                &agent_provider,
+            )
+    });
+    if !target_online {
+        return IntakeRouterDecision::RanLocal {
+            reason: RanLocalReason::NodeOverrideUnavailable,
+        };
+    }
+
+    let required_labels: Vec<String> = Vec::new();
+    let payload = build_payload_for_insert(ctx, target, &required_labels, &agent_id);
+    match insert_pending(pool, &payload, 1, None).await {
+        Ok(outbox_id) => IntakeRouterDecision::Forwarded {
+            target_instance_id: target.to_string(),
+            outbox_id,
+        },
+        Err(error) => match classify_insert_pending_error(&error) {
+            Some(IntakeInsertConflict::OpenRoutePerChannel) => IntakeRouterDecision::RanLocal {
+                reason: RanLocalReason::OpenRouteAlreadyExists,
+            },
+            Some(IntakeInsertConflict::DuplicateMessageAttempt) => {
+                IntakeRouterDecision::SkippedDuplicate
+            }
+            None => IntakeRouterDecision::RanLocal {
+                reason: RanLocalReason::DbErrorFellBackToLocal {
+                    detail: format!("insert_pending: {error}"),
+                },
+            },
+        },
+    }
+}
+
 fn build_payload_for_insert(
     ctx: &IntakeRouterContext<'_>,
     target: &str,
@@ -321,14 +444,14 @@ fn build_payload_for_insert(
     }
 }
 
-/// Look up the agent_id + `preferred_intake_node_labels` for a channel.
+/// Look up the agent_id + provider + `preferred_intake_node_labels` for a channel.
 /// Returns `Ok(None)` when the channel isn't mapped to any agent.
 async fn agent_id_and_preferred_labels(
     pool: &PgPool,
     channel_id: &str,
-) -> Result<Option<(String, Vec<String>)>, sqlx::Error> {
-    let row: Option<(String, serde_json::Value)> = sqlx::query_as(
-        "SELECT id, preferred_intake_node_labels FROM agents
+) -> Result<Option<(String, String, Vec<String>)>, sqlx::Error> {
+    let row: Option<(String, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT id, provider, preferred_intake_node_labels FROM agents
          WHERE discord_channel_id = $1
             OR discord_channel_alt = $1
             OR discord_channel_cc = $1
@@ -339,7 +462,7 @@ async fn agent_id_and_preferred_labels(
     .fetch_optional(pool)
     .await?;
 
-    let Some((agent_id, labels_value)) = row else {
+    let Some((agent_id, provider, labels_value)) = row else {
         return Ok(None);
     };
 
@@ -352,7 +475,7 @@ async fn agent_id_and_preferred_labels(
         })
         .unwrap_or_default();
 
-    Ok(Some((agent_id, labels)))
+    Ok(Some((agent_id, provider, labels)))
 }
 
 /// Variant used by the `Disabled` branch — only the labels matter.
@@ -362,7 +485,7 @@ async fn agent_preferred_labels_for_channel(
 ) -> Result<Option<Vec<String>>, sqlx::Error> {
     Ok(agent_id_and_preferred_labels(pool, channel_id)
         .await?
-        .map(|(_, labels)| labels))
+        .map(|(_, _, labels)| labels))
 }
 
 #[cfg(test)]
@@ -436,6 +559,7 @@ mod pg_tests {
             reply_to_user_message: false,
             defer_watcher_resume: false,
             wait_for_completion: false,
+            node_override_instance_id: None,
         }
     }
 
@@ -464,14 +588,37 @@ mod pg_tests {
         labels: serde_json::Value,
         status: &str,
     ) {
+        seed_worker_node_with_capabilities(
+            pool,
+            instance_id,
+            labels,
+            status,
+            serde_json::json!({
+                "intake_worker": {
+                    "enabled": true,
+                    "providers": ["claude"],
+                },
+            }),
+        )
+        .await;
+    }
+
+    async fn seed_worker_node_with_capabilities(
+        pool: &PgPool,
+        instance_id: &str,
+        labels: serde_json::Value,
+        status: &str,
+        capabilities: serde_json::Value,
+    ) {
         sqlx::query(
             "INSERT INTO worker_nodes (instance_id, status, role, effective_role,
-             labels, last_heartbeat_at, started_at, updated_at)
-             VALUES ($1, $2, 'worker', 'worker', $3, NOW(), NOW(), NOW())",
+             labels, capabilities, last_heartbeat_at, started_at, updated_at)
+             VALUES ($1, $2, 'worker', 'worker', $3, $4, NOW(), NOW(), NOW())",
         )
         .bind(instance_id)
         .bind(status)
         .bind(labels)
+        .bind(capabilities)
         .execute(pool)
         .await
         .expect("seed worker_nodes");
@@ -624,6 +771,183 @@ mod pg_tests {
         assert_eq!(row.3, "agent-enforce");
         assert_eq!(row.4, "pending");
         assert_eq!(row.5, 1);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn node_override_disabled_mode_runs_local_without_inserting() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        seed_agent_with_preference(
+            &pool,
+            "agent-node-override",
+            "ch-node-override",
+            serde_json::json!([]),
+        )
+        .await;
+        seed_worker_node(
+            &pool,
+            "worker-selected",
+            serde_json::json!(["mac-mini"]),
+            "online",
+        )
+        .await;
+
+        let mut ctx = ctx_for_channel(IntakeRoutingMode::Disabled, "ch-node-override");
+        ctx.node_override_instance_id = Some("worker-selected");
+        let decision = try_route_intake(&pool, &ctx).await;
+        assert_eq!(
+            decision,
+            IntakeRouterDecision::RanLocal {
+                reason: RanLocalReason::NodeOverrideRoutingDisabled
+            }
+        );
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM intake_outbox WHERE channel_id = $1")
+                .bind("ch-node-override")
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        assert_eq!(count, 0, "disabled /node override must not insert");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn node_override_forwards_in_enforce_mode() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        seed_agent_with_preference(
+            &pool,
+            "agent-node-override",
+            "ch-node-override",
+            serde_json::json!([]),
+        )
+        .await;
+        seed_worker_node(
+            &pool,
+            "worker-selected",
+            serde_json::json!(["mac-mini"]),
+            "online",
+        )
+        .await;
+
+        let mut ctx = ctx_for_channel(IntakeRoutingMode::Enforce, "ch-node-override");
+        ctx.node_override_instance_id = Some("worker-selected");
+        let decision = try_route_intake(&pool, &ctx).await;
+        let outbox_id = match decision {
+            IntakeRouterDecision::Forwarded {
+                target_instance_id,
+                outbox_id,
+            } => {
+                assert_eq!(target_instance_id, "worker-selected");
+                outbox_id
+            }
+            other => panic!("expected explicit node override to forward, got {other:?}"),
+        };
+
+        let row: (String, serde_json::Value, String) = sqlx::query_as(
+            "SELECT target_instance_id, required_labels, agent_id
+               FROM intake_outbox WHERE id = $1",
+        )
+        .bind(outbox_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read node override row");
+        assert_eq!(row.0, "worker-selected");
+        assert_eq!(row.1, serde_json::json!([]));
+        assert_eq!(row.2, "agent-node-override");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn node_override_unavailable_runs_local_without_inserting() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        seed_agent_with_preference(
+            &pool,
+            "agent-node-offline",
+            "ch-node-offline",
+            serde_json::json!([]),
+        )
+        .await;
+        seed_worker_node(
+            &pool,
+            "worker-offline",
+            serde_json::json!(["mac-mini"]),
+            "offline",
+        )
+        .await;
+
+        let mut ctx = ctx_for_channel(IntakeRoutingMode::Enforce, "ch-node-offline");
+        ctx.node_override_instance_id = Some("worker-offline");
+        let decision = try_route_intake(&pool, &ctx).await;
+        assert_eq!(
+            decision,
+            IntakeRouterDecision::RanLocal {
+                reason: RanLocalReason::NodeOverrideUnavailable
+            }
+        );
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM intake_outbox WHERE channel_id = $1")
+                .bind("ch-node-offline")
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        assert_eq!(count, 0, "offline /node override must not insert");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn node_override_without_intake_capability_runs_local_without_inserting() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        seed_agent_with_preference(
+            &pool,
+            "agent-node-no-consumer",
+            "ch-node-no-consumer",
+            serde_json::json!([]),
+        )
+        .await;
+        seed_worker_node_with_capabilities(
+            &pool,
+            "worker-online-no-consumer",
+            serde_json::json!(["mac-mini"]),
+            "online",
+            serde_json::json!({}),
+        )
+        .await;
+
+        let mut ctx = ctx_for_channel(IntakeRoutingMode::Enforce, "ch-node-no-consumer");
+        ctx.node_override_instance_id = Some("worker-online-no-consumer");
+        let decision = try_route_intake(&pool, &ctx).await;
+        assert_eq!(
+            decision,
+            IntakeRouterDecision::RanLocal {
+                reason: RanLocalReason::NodeOverrideUnavailable
+            }
+        );
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM intake_outbox WHERE channel_id = $1")
+                .bind("ch-node-no-consumer")
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        assert_eq!(count, 0, "non-consuming /node target must not insert");
 
         pool.close().await;
         pg_db.drop().await;

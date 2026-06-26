@@ -3003,6 +3003,7 @@ mod tests {
                 fast_mode_session_reset_pending: dashmap::DashSet::new(),
                 codex_goals_channels: dashmap::DashSet::new(),
                 codex_goals_session_reset_pending: dashmap::DashSet::new(),
+                node_overrides: dashmap::DashMap::new(),
                 model_session_reset_pending: dashmap::DashSet::new(),
                 session_reset_pending: dashmap::DashSet::new(),
                 model_picker_pending: dashmap::DashMap::new(),
