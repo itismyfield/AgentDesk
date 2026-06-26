@@ -3468,15 +3468,129 @@ async fn run_codex_idle_response_tail(
         channel_id,
         &lease,
     );
-    let tmux_for_tail = tmux_session_name.clone();
-    let rollout_for_tail = rollout_path.clone();
-    let tail_result = tokio::task::spawn_blocking(move || {
-        collect_codex_idle_response(rollout_for_tail, start_offset, tmux_for_tail)
+    let (reader_tx, reader_rx) = mpsc::channel::<StreamMessage>();
+    let (offset_tx, offset_rx) = tokio::sync::oneshot::channel::<Result<u64, String>>();
+    let rollout_for_reader = rollout_path.clone();
+    let tmux_for_reader = tmux_session_name.clone();
+    std::thread::Builder::new()
+        .name("codex_idle_response_tail_reader".to_string())
+        .spawn(move || {
+            let read_result =
+                crate::services::codex_tui::rollout_tail::tail_rollout_file_from_offset(
+                    &rollout_for_reader,
+                    start_offset,
+                    None,
+                    reader_tx,
+                    None,
+                    || {
+                        crate::services::tmux_diagnostics::tmux_session_has_live_pane(
+                            &tmux_for_reader,
+                        )
+                    },
+                )
+                .map(|result| match result {
+                    ReadOutputResult::Completed { offset }
+                    | ReadOutputResult::Cancelled { offset }
+                    | ReadOutputResult::SessionDied { offset } => offset,
+                });
+            let _ = offset_tx.send(read_result);
+        })
+        .expect("spawn codex idle response tail reader thread");
+
+    let buffered = tokio::task::spawn_blocking(move || {
+        let mut prefix: Vec<StreamMessage> = Vec::new();
+        let mut has_content = false;
+        while let Ok(message) = reader_rx.recv() {
+            let is_content = idle_stream_message_is_content(&message);
+            let is_terminal = matches!(message, StreamMessage::Done { .. });
+            prefix.push(message);
+            if is_content {
+                has_content = true;
+                break;
+            }
+            if is_terminal {
+                break;
+            }
+        }
+        (prefix, has_content, reader_rx)
     })
     .await;
 
-    let (response, final_offset) = match tail_result {
-        Ok(Ok(result)) => result,
+    let (prefix, has_content, reader_rx) = match buffered {
+        Ok(buffered) => buffered,
+        Err(error) => {
+            tracing::warn!(
+                tmux_session_name = %tmux_session_name,
+                rollout_path = %rollout_path.display(),
+                error = %error,
+                "codex idle rollout response tail buffering panicked"
+            );
+            finish_tui_direct_synthetic_turn_if_current(
+                &shared,
+                &ProviderKind::Codex,
+                channel_id,
+                &tmux_session_name,
+                "codex_tui_direct_tail_panicked",
+            )
+            .await;
+            return;
+        }
+    };
+
+    if !has_content {
+        let _ = tokio::task::spawn_blocking(move || while reader_rx.recv().is_ok() {}).await;
+        if let Ok(Ok(final_offset)) = offset_rx.await {
+            crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset(
+                &tmux_session_name,
+                rollout_path.to_str().unwrap_or_default(),
+                final_offset,
+            );
+        }
+        finish_tui_direct_synthetic_turn_if_current(
+            &shared,
+            &ProviderKind::Codex,
+            channel_id,
+            &tmux_session_name,
+            "codex_tui_direct_empty_response",
+        )
+        .await;
+        return;
+    }
+    let delivery_result = stream_tui_idle_response_through_bridge(
+        &shared,
+        ProviderKind::Codex,
+        channel_id,
+        &tmux_session_name,
+        &rollout_path,
+        start_offset,
+        &prompt_text,
+        prefix,
+        reader_rx,
+        &lease,
+    )
+    .await;
+    if delivery_result.is_err() {
+        finish_tui_direct_synthetic_turn_if_current(
+            &shared,
+            &ProviderKind::Codex,
+            channel_id,
+            &tmux_session_name,
+            "codex_tui_direct_delivery_failed",
+        )
+        .await;
+    }
+    match offset_rx.await {
+        Ok(Ok(final_offset))
+            if tui_idle_tail_stream_should_commit_runtime_binding_offset(
+                delivery_result.is_ok(),
+            ) =>
+        {
+            crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset(
+                &tmux_session_name,
+                rollout_path.to_str().unwrap_or_default(),
+                final_offset,
+            );
+        }
         Ok(Err(error)) => {
             tracing::warn!(
                 tmux_session_name = %tmux_session_name,
@@ -3492,77 +3606,13 @@ async fn run_codex_idle_response_tail(
                 "codex_tui_direct_tail_failed",
             )
             .await;
-            return;
         }
-        Err(error) => {
-            tracing::warn!(
-                tmux_session_name = %tmux_session_name,
-                rollout_path = %rollout_path.display(),
-                error = %error,
-                "codex idle rollout response tail panicked"
-            );
-            finish_tui_direct_synthetic_turn_if_current(
-                &shared,
-                &ProviderKind::Codex,
-                channel_id,
-                &tmux_session_name,
-                "codex_tui_direct_tail_panicked",
-            )
-            .await;
-            return;
-        }
-    };
-
-    let response = response.trim();
-    if response.is_empty() {
-        crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset(
-            &tmux_session_name,
-            rollout_path.to_str().unwrap_or_default(),
-            final_offset,
-        );
-        finish_tui_direct_synthetic_turn_if_current(
-            &shared,
-            &ProviderKind::Codex,
-            channel_id,
-            &tmux_session_name,
-            "codex_tui_direct_empty_response",
-        )
-        .await;
-        return;
-    }
-    let delivery_result = relay_tui_idle_response_through_bridge(
-        &shared,
-        ProviderKind::Codex,
-        channel_id,
-        &tmux_session_name,
-        &rollout_path,
-        start_offset,
-        final_offset,
-        &prompt_text,
-        response,
-        &lease,
-    )
-    .await;
-    if delivery_result.is_err() {
-        finish_tui_direct_synthetic_turn_if_current(
-            &shared,
-            &ProviderKind::Codex,
-            channel_id,
-            &tmux_session_name,
-            "codex_tui_direct_delivery_failed",
-        )
-        .await;
-    }
-    if tui_idle_tail_should_commit_runtime_binding_offset(response, delivery_result.is_ok()) {
-        crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset(
-            &tmux_session_name,
-            rollout_path.to_str().unwrap_or_default(),
-            final_offset,
-        );
+        _ => {}
     }
 }
 
 #[cfg(unix)]
+#[allow(dead_code)]
 fn collect_codex_idle_response(
     rollout_path: PathBuf,
     start_offset: u64,
@@ -3852,6 +3902,7 @@ fn compose_tui_idle_response(
 }
 
 #[cfg(unix)]
+#[allow(dead_code)]
 async fn relay_tui_idle_response_through_bridge(
     shared: &Arc<SharedData>,
     provider: ProviderKind,
@@ -4371,6 +4422,7 @@ fn build_tui_direct_synthetic_inflight_state(
 }
 
 #[cfg(unix)]
+#[allow(dead_code)]
 fn tui_idle_tail_should_commit_runtime_binding_offset(
     response: &str,
     discord_delivery_succeeded: bool,
