@@ -1021,6 +1021,12 @@ pub struct KillTmuxOptions {
     /// Human-readable reason for the kill (e.g. "idle 15시간 초과").
     #[serde(default)]
     pub reason: Option<String>,
+    /// Policy threshold that selected this idle-cleanup candidate. When present,
+    /// the kill-time live-activity guard treats runtime output newer than the
+    /// DB heartbeat as the true idle anchor and skips the kill only while that
+    /// output is still younger than this threshold.
+    #[serde(default)]
+    pub minimum_idle_minutes: Option<u64>,
 }
 
 /// POST /api/sessions/{session_key}/kill-tmux
@@ -1042,7 +1048,14 @@ pub async fn kill_tmux_session(
     Json(body): Json<KillTmuxOptions>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let reason = body.reason.as_deref().unwrap_or("kill-tmux API invoked");
-    kill_tmux_session_impl(&state, &headers, &session_key, reason).await
+    kill_tmux_session_impl(
+        &state,
+        &headers,
+        &session_key,
+        reason,
+        body.minimum_idle_minutes,
+    )
+    .await
 }
 
 /// #3053: most-recent runtime activity instant for a tmux session, as a
@@ -1082,8 +1095,31 @@ pub(crate) fn latest_runtime_activity_unix_nanos(tmux_session_name: &str) -> i64
     {
         latest = latest.max(mtime_nanos(&generation_path));
     }
+    // Codex TUI direct mode writes provider-native rollout JSONL under
+    // ~/.codex/sessions/... and only stores that path in a small AgentDesk
+    // marker. Use the marker and the rollout file as liveness anchors; the
+    // AgentDesk relay jsonl may remain quiet while Codex keeps appending output.
+    if let Some(marker_path) = crate::services::tmux_common::resolve_session_temp_path(
+        tmux_session_name,
+        crate::services::tmux_common::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT,
+    ) {
+        latest = latest.max(mtime_nanos(&marker_path));
+    }
+    if let Some(marker) =
+        crate::services::codex_tui::session::read_codex_tui_rollout_marker(tmux_session_name)
+    {
+        latest = latest.max(marker.rollout_path.to_str().map(mtime_nanos).unwrap_or(0));
+    }
 
     latest
+}
+
+fn now_unix_nanos() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
+        .unwrap_or(0)
 }
 
 fn selected_provider_resume_selector(
@@ -1147,6 +1183,7 @@ async fn kill_tmux_session_impl(
     headers: &HeaderMap,
     session_key: &str,
     reason: &str,
+    minimum_idle_minutes: Option<u64>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let tmux_name = match session_key.split_once(':') {
         Some((_, name)) => name.to_string(),
@@ -1235,18 +1272,35 @@ async fn kill_tmux_session_impl(
                 .await
                 .unwrap_or(0);
         let runtime_activity_nanos = latest_runtime_activity_unix_nanos(&tmux_name);
-        if runtime_activity_nanos > 0 && runtime_activity_nanos > last_seen_nanos {
+        let runtime_activity_age_minutes =
+            runtime_activity_age_minutes(runtime_activity_nanos, now_unix_nanos());
+        let runtime_activity_still_within_idle_threshold =
+            match (runtime_activity_age_minutes, minimum_idle_minutes) {
+                (Some(age), Some(threshold)) => age < threshold,
+                (Some(_), None) => true,
+                _ => false,
+            };
+        if runtime_activity_nanos > 0
+            && runtime_activity_nanos > last_seen_nanos
+            && runtime_activity_still_within_idle_threshold
+        {
             let refreshed =
-                dispatched_sessions_db::refresh_session_heartbeat_by_key_pg(pool, session_key)
-                    .await;
+                dispatched_sessions_db::refresh_session_heartbeat_by_key_to_unix_nanos_pg(
+                    pool,
+                    session_key,
+                    runtime_activity_nanos,
+                )
+                .await;
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
                 session_key,
                 tmux_session = %tmux_name,
                 last_seen_unix_nanos = last_seen_nanos,
                 runtime_activity_unix_nanos = runtime_activity_nanos,
+                runtime_activity_age_minutes,
+                minimum_idle_minutes,
                 heartbeat_refreshed = refreshed,
-                "  [{ts}] 🛡 kill-tmux: SKIPPED idle kill — runtime activity newer than last_heartbeat, session is live (#3053). Heartbeat refreshed.",
+                "  [{ts}] 🛡 kill-tmux: SKIPPED idle kill — runtime activity newer than last_heartbeat and still within idle threshold, session is live (#3053). Heartbeat refreshed to runtime activity.",
             );
             return (
                 StatusCode::OK,
@@ -1258,6 +1312,8 @@ async fn kill_tmux_session_impl(
                     "session_row_preserved": true,
                     "skipped_live_activity_guard": true,
                     "heartbeat_refreshed": refreshed,
+                    "runtime_activity_age_minutes": runtime_activity_age_minutes,
+                    "minimum_idle_minutes": minimum_idle_minutes,
                     "active_dispatch_id": active_dispatch_id,
                 })),
             );
@@ -1373,9 +1429,22 @@ async fn kill_tmux_session_impl(
     )
 }
 
+fn runtime_activity_age_minutes(runtime_activity_nanos: i64, now_nanos: i64) -> Option<u64> {
+    if runtime_activity_nanos <= 0 {
+        return None;
+    }
+    if now_nanos <= runtime_activity_nanos {
+        return Some(0);
+    }
+    Some(((now_nanos - runtime_activity_nanos) / 60_000_000_000) as u64)
+}
+
 #[cfg(test)]
 mod kill_tmux_resume_tests {
-    use super::provider_resume_selector_is_effective_with_claude_home;
+    use super::{
+        latest_runtime_activity_unix_nanos, provider_resume_selector_is_effective_with_claude_home,
+        runtime_activity_age_minutes,
+    };
     use crate::db::dispatched_sessions::ProviderSessionIds;
 
     fn ids(
@@ -1388,6 +1457,57 @@ mod kill_tmux_resume_tests {
             raw_provider_session_id: raw_provider_session_id.map(str::to_string),
             cwd: cwd.map(|path| path.display().to_string()),
         }
+    }
+
+    fn mtime_nanos(path: &std::path::Path) -> i64 {
+        std::fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+            .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn latest_runtime_activity_uses_codex_tui_rollout_marker_target() {
+        let tmux = format!("AgentDesk-codex-runtime-{}", uuid::Uuid::new_v4());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rollout = dir.path().join("rollout.jsonl");
+        std::fs::write(&rollout, "{\"type\":\"session_meta\"}\n").expect("write rollout");
+        crate::services::codex_tui::session::write_codex_tui_rollout_marker(
+            &tmux,
+            &rollout,
+            Some("session-runtime-activity"),
+        )
+        .expect("write marker");
+        let marker = std::path::PathBuf::from(crate::services::tmux_common::session_temp_path(
+            &tmux,
+            crate::services::tmux_common::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT,
+        ));
+        let old = filetime::FileTime::from_unix_time(1_700_000_000, 0);
+        let new = filetime::FileTime::from_unix_time(1_700_000_600, 0);
+        filetime::set_file_mtime(&marker, old).expect("set marker mtime");
+        filetime::set_file_mtime(&rollout, new).expect("set rollout mtime");
+
+        let latest = latest_runtime_activity_unix_nanos(&tmux);
+
+        assert_eq!(latest, mtime_nanos(&rollout));
+        assert!(latest > mtime_nanos(&marker));
+        let _ = std::fs::remove_file(marker);
+    }
+
+    #[test]
+    fn runtime_activity_age_minutes_uses_last_output_age() {
+        let minute = 60_000_000_000i64;
+        assert_eq!(
+            runtime_activity_age_minutes(100 * minute, 465 * minute),
+            Some(365)
+        );
+        assert_eq!(runtime_activity_age_minutes(0, 465 * minute), None);
+        assert_eq!(
+            runtime_activity_age_minutes(465 * minute, 465 * minute),
+            Some(0)
+        );
     }
 
     #[test]
