@@ -9,8 +9,8 @@ use crate::services::cluster::intake_router_hook::IntakeRoutingMode;
 use crate::services::cluster::node_registry::node_supports_intake_provider;
 use crate::services::provider::ProviderKind;
 
+use super::super::settings::save_bot_settings;
 use super::super::{Context, Data, Error, SharedData, check_auth};
-use super::config::{channel_node_override, update_channel_node_override};
 
 const NODE_PICKER_CUSTOM_ID: &str = "agentdesk:node-picker";
 const NODE_PICKER_RESET_VALUE: &str = "__agentdesk_node_default__";
@@ -50,6 +50,52 @@ fn prune_node_picker_pending() {
 
 fn intake_routing_enforced() -> bool {
     matches!(IntakeRoutingMode::from_env(), IntakeRoutingMode::Enforce)
+}
+
+pub(in crate::services::discord) fn channel_node_override(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+) -> Option<String> {
+    shared
+        .overrides
+        .node_overrides
+        .get(&channel_id)
+        .map(|value| value.clone())
+}
+
+async fn update_channel_node_override(
+    shared: &Arc<SharedData>,
+    token: &str,
+    channel_id: serenity::ChannelId,
+    next_instance_id: Option<String>,
+) -> bool {
+    let current = channel_node_override(shared, channel_id);
+    let next_instance_id = next_instance_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if current.as_deref() == next_instance_id.as_deref() {
+        return false;
+    }
+
+    let channel_key = channel_id.get().to_string();
+    let mut settings = shared.settings.write().await;
+    match next_instance_id {
+        Some(instance_id) => {
+            shared
+                .overrides
+                .node_overrides
+                .insert(channel_id, instance_id.clone());
+            settings
+                .channel_node_overrides
+                .insert(channel_key, instance_id);
+        }
+        None => {
+            shared.overrides.node_overrides.remove(&channel_id);
+            settings.channel_node_overrides.remove(&channel_key);
+        }
+    }
+    save_bot_settings(token, &settings);
+    true
 }
 
 pub(in crate::services::discord) fn is_node_picker_custom_id(custom_id: &str) -> bool {

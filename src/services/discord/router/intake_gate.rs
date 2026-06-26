@@ -1,6 +1,7 @@
 use super::super::*;
 
 mod busy_duplicate_notice;
+mod node_override_routing;
 
 pub(in crate::services::discord) fn should_process_turn_message(
     kind: serenity::model::channel::MessageType,
@@ -2841,56 +2842,21 @@ pub(in crate::services::discord) async fn handle_event(
                 notify_bot_id,
             );
 
-            // Phase 4 of intake-node-routing: try to forward to a worker
-            // node first. Only acts when a PG pool exists AND the global
-            // mode env var is `observe` or `enforce`; otherwise this is
-            // a no-op and the leader runs the intake locally as before.
-            let route_decision = if !new_message.attachments.is_empty() {
-                tracing::debug!(
-                    channel_id = %channel_id,
-                    user_msg_id = %new_message.id,
-                    "[intake_router] Discord attachments are node-local — running locally"
-                );
-                None
-            } else if let Some(pool) = data.shared.pg_pool.as_ref().as_ref() {
-                let mode =
-                    crate::services::cluster::intake_router_hook::IntakeRoutingMode::from_env();
-                let leader_instance_id =
-                    crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
-                let channel_id_str = channel_id.get().to_string();
-                let user_msg_id_str = new_message.id.get().to_string();
-                let request_owner_id_str = user_id.get().to_string();
-                let turn_kind_str = match turn_kind {
-                    super::message_handler::TurnKind::Foreground => "foreground",
-                    super::message_handler::TurnKind::BackgroundTrigger => "background_trigger",
-                };
-                let node_override =
-                    super::super::commands::channel_node_override(&data.shared, channel_id);
-                let hook_ctx = crate::services::cluster::intake_router_hook::IntakeRouterContext {
-                    mode,
-                    leader_instance_id: &leader_instance_id,
-                    channel_id: &channel_id_str,
-                    user_msg_id: &user_msg_id_str,
-                    request_owner_id: &request_owner_id_str,
-                    request_owner_name: Some(user_name),
-                    user_text: text,
-                    reply_context: reply_context.as_deref(),
-                    has_reply_boundary,
-                    dm_hint: Some(is_dm),
-                    turn_kind: turn_kind_str,
-                    merge_consecutive,
-                    reply_to_user_message: false,
-                    defer_watcher_resume: false,
-                    wait_for_completion: false,
-                    node_override_instance_id: node_override.as_deref(),
-                };
-                Some(
-                    crate::services::cluster::intake_router_hook::try_route_intake(pool, &hook_ctx)
-                        .await,
-                )
-            } else {
-                None
-            };
+            let route_decision = node_override_routing::try_route_intake_for_message(
+                data,
+                channel_id,
+                new_message.id,
+                !new_message.attachments.is_empty(),
+                user_id,
+                user_name,
+                text,
+                reply_context.as_deref(),
+                has_reply_boundary,
+                is_dm,
+                merge_consecutive,
+                turn_kind,
+            )
+            .await;
 
             // Branch on the decision:
             // - `Forwarded` → worker has it, skip local.
