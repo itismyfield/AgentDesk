@@ -317,7 +317,7 @@ test("auto-queue finalization sweep filters blocked runs before LIMIT", () => {
     query.sql.includes("auto_queue_phase_gates")
   );
   assert.match(finishedRunQuery.sql, /NOT EXISTS \(  SELECT 1 FROM auto_queue_phase_gates pg/);
-  assert.match(finishedRunQuery.sql, /r\.phase_gate_grace_until <= datetime\('now'\)/);
+  assert.match(finishedRunQuery.sql, /datetime\(r\.phase_gate_grace_until\) <= datetime\('now'\)/);
   assert.deepEqual(state.autoQueueCompletes, [
     { runId: "run-eligible", reason: "finalize_without_phase_gate", options: { releaseSlots: true } }
   ]);

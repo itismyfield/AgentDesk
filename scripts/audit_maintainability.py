@@ -153,17 +153,44 @@ def _strip_toml_comment(line: str) -> str:
 
 
 def run_all(
-    specs: list[CheckSpec], allowlist: dict[str, set[str]]
-) -> dict[str, list[Finding]]:
+    specs: list[CheckSpec], allowlist: dict[str, set[str]], check_stale: bool = False
+) -> tuple[dict[str, list[Finding]], dict[str, list[str]]]:
     out: dict[str, list[Finding]] = {}
+    stale_entries: dict[str, list[str]] = {}
     for spec in specs:
-        out[spec.key] = list(spec.runner(allowlist.get(spec.key, set())))
-    return out
+        al = allowlist.get(spec.key, set())
+        if not check_stale:
+            out[spec.key] = list(spec.runner(al))
+            continue
 
+        all_findings = list(spec.runner(set()))
+        used_al = set()
+        filtered_findings = []
 
-# ---------------------------------------------------------------------------
-# Output formatters
-# ---------------------------------------------------------------------------
+        for finding in all_findings:
+            stable_key = finding.extra.get("allowlist_key")
+
+            covered = False
+            if finding.file in al:
+                used_al.add(finding.file)
+                covered = True
+            elif stable_key is not None and stable_key in al:
+                used_al.add(stable_key)
+                covered = True
+            elif finding.line is not None and f"{finding.file}:{finding.line}" in al:
+                used_al.add(f"{finding.file}:{finding.line}")
+                covered = True
+
+            if not covered:
+                filtered_findings.append(finding)
+
+        stale = al - used_al
+        if stale:
+            stale_entries[spec.key] = sorted(list(stale))
+
+        out[spec.key] = filtered_findings
+
+    return out, stale_entries
 
 
 def _yaml_escape(value: str) -> str:
@@ -359,7 +386,7 @@ def main(argv: list[str] | None = None) -> int:
 
     specs = load_check_specs()
     allowlist = load_allowlist(args.allowlist)
-    findings = run_all(specs, allowlist)
+    findings, stale_entries = run_all(specs, allowlist, check_stale=args.check)
 
     if args.format == "yaml":
         rendered = render_yaml(specs, findings)
@@ -379,13 +406,26 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.check:
         failed: list[tuple[str, CheckSpec, list[Finding]]] = []
+        has_stale = False
+
         for spec in specs:
+            if spec.key in stale_entries:
+                has_stale = True
+                print(
+                    f"audit_maintainability: stale-allowlist `{spec.key}` failed with "
+                    f"{len(stale_entries[spec.key])} stale entry/entries",
+                    file=sys.stderr,
+                )
+                for entry in stale_entries[spec.key]:
+                    print(f"  - {entry}", file=sys.stderr)
+
             if spec.hard_gate and findings.get(spec.key):
                 failed.append(("hard-gate", spec, findings[spec.key]))
             if spec.baseline_gate:
                 baseline_failures = list(spec.baseline_gate(findings.get(spec.key, [])))
                 if baseline_failures:
                     failed.append(("baseline-gate", spec, baseline_failures))
+
         if failed:
             for gate_kind, spec, hits in failed:
                 print(
@@ -396,6 +436,8 @@ def main(argv: list[str] | None = None) -> int:
                 for hit in hits:
                     loc = hit.file if hit.line is None else f"{hit.file}:{hit.line}"
                     print(f"  - {loc}: {hit.message}", file=sys.stderr)
+
+        if failed or has_stale:
             return 1
 
     return 0
