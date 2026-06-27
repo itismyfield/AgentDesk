@@ -131,7 +131,11 @@ echo "=== Portable deployable path lint ==="
   tests.test_script_python_policy \
   tests.test_analyze_prs
 
-echo "=== Generate inventory docs (also gates giant-file registry, #3036) ==="
+echo "=== Generate inventory docs (refresh workspace; gate source-of-truth invariants, #3036) ==="
+# Generic committed markdown freshness drift is warning-only for ordinary PRs
+# and is refreshed by the weekly regen-docs workflow. This CI invocation writes
+# the current generated view into the workspace so the checks below compare
+# against current source facts.
 # The generator hard-fails (exit 2) on giant-file registry drift: unregistered
 # new giants, ghost registrations left after decomposition, or deadline-less
 # [[entry]] tables in scripts/giant_file_registry.toml.

@@ -63,8 +63,24 @@ high_risk_recovery:
 
 ### Generated docs / architecture drift
 
-- `scripts/generate_inventory_docs.py --check` 은 `Script checks` job 마지막 단계에서 하드 블록 (ci-main `scripts` step, ci-pr `scripts` step).
-- 이 drift 검증이 red 면 Full/PG/High-risk 와 동일하게 release gate 위반으로 간주한다.
+- Ordinary generated markdown freshness drift is **warning-only** for PR work.
+  Stale `ARCHITECTURE.md` or `docs/generated/**` output is not equivalent to
+  Full/PG/High-risk release-gate failure unless the PR is itself changing the
+  generator, generated report wording, or the maintainability invariant that the
+  report represents.
+- `ci-pr.yml` and `ci-main.yml` run `scripts/ci-script-checks.sh`, which invokes
+  `scripts/generate_inventory_docs.py` in the CI workspace. That command may
+  update generated markdown locally for downstream checks, but generic markdown
+  freshness drift is not the hard gate. The hard failures are the generator's
+  source-of-truth invariants, such as giant-file registry drift, missing
+  metadata, parse errors, or other explicitly coded maintainability errors.
+- `ci-nightly.yml` runs `scripts/generate_inventory_docs.py --check` as
+  `Generated docs drift (warn)` and emits a GitHub warning when inventory docs
+  are stale.
+- `.github/workflows/regen-docs.yml` owns the scheduled refresh path. It runs
+  weekly, commits regenerated `ARCHITECTURE.md` / `docs/generated/**` output to a
+  maintenance branch, and opens a reviewable PR. This keeps generated docs useful
+  without forcing unrelated feature/fix PRs to carry mechanical report churn.
 
 ### Script checks Python runtime
 

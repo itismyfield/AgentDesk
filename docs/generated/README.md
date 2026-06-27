@@ -7,14 +7,25 @@ about the generated report or its generator.
 
 ## Current Policy
 
-- PR CI in `.github/workflows/ci-pr.yml` treats inventory-doc drift from
-  `python3 scripts/generate_inventory_docs.py --check` as warning-only. The
-  warning points contributors to the weekly refresh workflow or to a local
-  regeneration command.
+- PR CI in `.github/workflows/ci-pr.yml` does not hard-block solely on
+  inventory-doc markdown freshness drift.
+- `ci-pr.yml` and `ci-main.yml` run `scripts/ci-script-checks.sh`, which calls
+  `python3 scripts/generate_inventory_docs.py` in the CI workspace. That keeps
+  downstream maintainability checks on the current generated view, but generic
+  committed markdown freshness drift is not the hard failure and does not need
+  to be committed in unrelated PRs.
+- `ci-nightly.yml` runs `Generated docs drift (warn)` with
+  `python3 scripts/generate_inventory_docs.py --check` so accumulated drift is
+  visible without blocking ordinary PRs. That warning points contributors to
+  the weekly refresh workflow or to a local regeneration command.
 - `python3 scripts/audit_maintainability.py --check` is still allowed to fail
   for configured hard or baseline maintainability gates. The warning-only drift
   policy applies to the committed markdown report freshness, not to new
   maintainability violations.
+- `scripts/generate_inventory_docs.py` is still allowed to hard-fail on
+  source-of-truth invariants such as giant-file registry drift, missing required
+  registry metadata, or top-level architecture map parse errors. Those are not
+  generic generated-doc markdown freshness failures.
 - Do not re-introduce a hard PR gate solely because generated docs drifted.
 
 ## Rationale
