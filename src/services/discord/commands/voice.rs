@@ -31,6 +31,10 @@ impl VoiceSensitivityChoice {
     }
 }
 
+fn voice_disabled_guidance() -> &'static str {
+    "Voice capture is disabled because `voice.enabled` is false. Set `voice.enabled: true` in `agentdesk.yaml`, then restart/reload AgentDesk. If it disables again, check config-audit logs for voice alias collisions."
+}
+
 /// /voice — Voice capture and spoken-command namespace.
 #[poise::command(
     slash_command,
@@ -67,8 +71,7 @@ async fn voice_join_impl(ctx: Context<'_>) -> Result<(), Error> {
     }
 
     if !ctx.data().voice_config.enabled {
-        ctx.say("Voice capture is disabled in `agentdesk.yaml` (`voice.enabled: true`).")
-            .await?;
+        ctx.say(voice_disabled_guidance()).await?;
         return Ok(());
     }
 
@@ -258,12 +261,7 @@ pub(in crate::services::discord) async fn handle_vc_text_command(
     match subcommand {
         "join" => {
             if !data.voice_config.enabled {
-                let _ = msg
-                    .reply(
-                        &ctx.http,
-                        "Voice capture is disabled in `agentdesk.yaml` (`voice.enabled: true`).",
-                    )
-                    .await;
+                let _ = msg.reply(&ctx.http, voice_disabled_guidance()).await;
                 return Ok(());
             }
             let (guild_id, channel_id) =
@@ -960,6 +958,20 @@ async fn notify_voice_alert(channel_id: ChannelId, content: String, kind: &'stat
 #[cfg(test)]
 mod auto_join_tests {
     use super::*;
+
+    #[test]
+    fn disabled_voice_guidance_is_stable() {
+        let guidance = voice_disabled_guidance();
+        assert_eq!(
+            guidance,
+            "Voice capture is disabled because `voice.enabled` is false. Set `voice.enabled: true` in `agentdesk.yaml`, then restart/reload AgentDesk. If it disables again, check config-audit logs for voice alias collisions."
+        );
+        assert!(guidance.contains("`voice.enabled` is false"));
+        assert!(guidance.contains("`voice.enabled: true`"));
+        assert!(guidance.contains("restart/reload AgentDesk"));
+        assert!(guidance.contains("config-audit logs"));
+        assert!(guidance.contains("voice alias collisions"));
+    }
 
     #[test]
     fn occupancy_registry_isolates_providers_per_guild() {
