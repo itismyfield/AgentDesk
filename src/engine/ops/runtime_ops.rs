@@ -149,6 +149,15 @@ pub(super) fn register_runtime_ops<'js>(
             },
         )?,
     )?;
+    runtime_obj.set(
+        "__validateSignalRaw",
+        Function::new(
+            ctx.clone(),
+            move |signal_name: String, evidence_json: String| -> String {
+                crate::supervisor::validate_signal_json(&signal_name, &evidence_json)
+            },
+        )?,
+    )?;
     let bridge_should_defer_signal = bridge.clone();
     runtime_obj.set(
         "__shouldDeferSignalRaw",
@@ -189,6 +198,14 @@ pub(super) fn register_runtime_ops<'js>(
             agentdesk.runtime.emitSignal = function(signalName, evidence) {
                 var normalizedSignal = signalName || "";
                 var normalizedEvidence = evidence || {};
+                var evidenceJson = JSON.stringify(normalizedEvidence);
+                var validation = JSON.parse(
+                    agentdesk.runtime.__validateSignalRaw(
+                        normalizedSignal,
+                        evidenceJson
+                    )
+                );
+                if (validation.error) throw new Error(validation.error);
                 if (agentdesk.runtime.__shouldDeferSignalRaw()) {
                     agentdesk.__pendingIntents = agentdesk.__pendingIntents || [];
                     agentdesk.__pendingIntents.push({
@@ -200,6 +217,7 @@ pub(super) fn register_runtime_ops<'js>(
                         ok: true,
                         deferred: true,
                         signal: normalizedSignal,
+                        support_state: validation.support_state,
                         executed: false,
                         note: "deferred until hook completion"
                     };
@@ -207,7 +225,7 @@ pub(super) fn register_runtime_ops<'js>(
                 var result = JSON.parse(
                     agentdesk.runtime.__emitSignalRaw(
                         normalizedSignal,
-                        JSON.stringify(normalizedEvidence)
+                        evidenceJson
                     )
                 );
                 if (result.error) throw new Error(result.error);
