@@ -2625,11 +2625,6 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                 &shared.token_hash,
                 channel_id.get(),
             );
-            let remote_profile = load_last_remote_profile(
-                shared.pg_pool.as_ref(),
-                &shared.token_hash,
-                channel_id.get(),
-            );
             let persisted_session_id = load_restored_provider_session_id(
                 None::<&crate::db::Db>,
                 shared.pg_pool.as_ref(),
@@ -2670,7 +2665,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                         cleared: false,
                         channel_name: Some(channel_name.clone()),
                         category_name: None,
-                        remote_profile_name: remote_profile.clone(),
+                        remote_profile_name: None,
                         channel_id: Some(channel_id.get()),
 
                         last_active: tokio::time::Instant::now(),
@@ -2708,7 +2703,6 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                     configured_path,
                     db_cwd,
                     persisted_path,
-                    remote_profile.as_deref(),
                     reusable_worktree,
                 );
                 if let Some(path) = effective_path {

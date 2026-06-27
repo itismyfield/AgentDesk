@@ -2823,9 +2823,13 @@ pub(crate) fn shared_test_env_lock() -> &'static std::sync::Mutex<()> {
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
-/// Compatibility shim: RCC's `config::Settings` is referenced by discord code
-/// for remote_profiles. AgentDesk doesn't have TUI settings, so this returns
-/// an empty struct.
+/// Compatibility shim for legacy provider signatures that still mention
+/// `remote_profiles`.
+///
+/// AgentDesk does not load remote profiles from operator config. `Settings`
+/// intentionally returns an empty list so those signatures cannot be mistaken
+/// for supported remote SSH behavior. Future remote SSH work must use the
+/// #2193 `providers.codex.remote_hosts` contract instead.
 pub struct Settings {
     pub remote_profiles: Vec<crate::services::remote::RemoteProfile>,
 }
@@ -2840,5 +2844,19 @@ impl Settings {
     #[allow(dead_code)]
     pub fn config_dir() -> Option<std::path::PathBuf> {
         runtime_root().map(|root| crate::runtime_layout::config_dir(&root))
+    }
+}
+
+#[cfg(test)]
+mod remote_settings_tests {
+    use super::Settings;
+
+    #[test]
+    fn settings_load_exposes_no_remote_profiles() {
+        let settings = Settings::load();
+        assert!(
+            settings.remote_profiles.is_empty(),
+            "remote profiles are not loaded from AgentDesk config; use the #2193 remote_hosts ADR"
+        );
     }
 }

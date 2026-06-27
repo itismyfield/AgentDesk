@@ -40,9 +40,7 @@ pub(super) use content::{
     load_review_tuning_guidance, load_role_prompt, render_peer_agent_guidance,
 };
 pub(crate) use memory::{memory_settings_for_binding, resolve_memory_settings};
-pub(super) use read::{
-    load_bot_settings, load_last_remote_profile, load_last_session_path, save_last_session_runtime,
-};
+pub(super) use read::{load_bot_settings, load_last_session_path, save_last_session_runtime};
 pub use read::{
     load_discord_bot_launch_configs, resolve_discord_bot_provider, resolve_discord_token_by_hash,
 };

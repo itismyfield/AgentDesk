@@ -34,8 +34,8 @@ use super::placeholder_live_events::{
     RecentPlaceholderEvent, events_from_json, status_events_from_json,
 };
 use super::settings::{
-    channel_supports_provider, load_last_remote_profile, load_last_session_path,
-    resolve_role_binding, validate_bot_channel_routing_with_provider_channel,
+    channel_supports_provider, load_last_session_path, resolve_role_binding,
+    validate_bot_channel_routing_with_provider_channel,
 };
 use super::tmux_error_detect::{
     detect_provider_overload_message, is_auth_error_message, is_prompt_too_long_message,

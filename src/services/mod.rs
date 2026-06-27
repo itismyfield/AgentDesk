@@ -125,5 +125,8 @@ pub mod turn_cancel_finalizer;
 pub mod turn_lifecycle;
 pub mod turn_orchestrator;
 
-// Compatibility alias: code referencing services::remote::* uses the stub
+// Compatibility alias only: code referencing `services::remote::*` still
+// compiles, but the target module is disabled per #1606/#2175/#2193. A real
+// `services::remote` must replace `remote_stub` only when the ADR prerequisites
+// in `docs/codex-remote-ssh-policy.md` are satisfied.
 pub use remote_stub as remote;

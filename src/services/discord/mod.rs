@@ -192,7 +192,7 @@ use restart_report::flush_restart_reports;
 use router::handle_event;
 use settings::{
     RoleBinding, channel_upload_dir, cleanup_old_uploads, load_bot_settings,
-    load_last_remote_profile, load_last_session_path, resolve_role_binding, save_bot_settings,
+    load_last_session_path, resolve_role_binding, save_bot_settings,
     validate_bot_channel_routing_with_provider_channel,
 };
 #[cfg(unix)]
