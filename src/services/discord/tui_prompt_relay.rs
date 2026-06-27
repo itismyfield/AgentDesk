@@ -23,16 +23,13 @@ use crate::services::tui_prompt_dedupe::{
 };
 use tracing::Instrument;
 
-// #3479 rank-5: the pure injected-prompt classification + formatting policy
-// lives in a capped sibling module. Names are re-imported below so the stateful
-// dedupe/bridge call sites in this parent stay byte-identical.
 mod injected_prompt_policy;
 use self::injected_prompt_policy::{
     InjectedPromptClass, classify_injected_prompt, format_slash_command_control_note,
-    format_ssh_direct_prompt_notification, format_system_continuation_note,
-    is_slash_command_control_prompt, is_start_anchored_task_notification,
-    should_suppress_local_only_kind_note_after_continuation, slash_command_control_kind,
-    slash_command_control_prompt_is_caveat_only,
+    format_ssh_direct_prompt_notification, format_subagent_notification_card,
+    format_system_continuation_note, is_slash_command_control_prompt,
+    is_start_anchored_task_notification, should_suppress_local_only_kind_note_after_continuation,
+    slash_command_control_kind, slash_command_control_prompt_is_caveat_only,
 };
 
 // #3479 rank-10: the pure transcript/rollout prompt scanners live in a capped
@@ -523,17 +520,7 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
              (adding with a different bot would leave an un-removable hourglass)"
         );
     }
-    // #3099 / #3100: a compact/system continuation prologue is NOT a human request —
-    // it renders as a neutral note (no ⏳/anchor/synthetic turn) but must NOT short-
-    // circuit the whole relay (P1): the bridge tail below still relays its assistant
-    // output. #3178: a SlashCommandControl is NO LONGER suppressed — it takes the
-    // active-turn `else` block (anchor + ⏳ + synthetic inflight) so mid-/loop input
-    // queues cleanly. Only SystemContinuation suppresses the lifecycle here.
-    let is_system_continuation = injected_class.suppresses_user_turn_lifecycle();
-    debug_assert!(
-        injected_class.still_delivers_assistant_output(),
-        "every injected class must still deliver assistant output via the bridge tail",
-    );
+    let suppresses_user_turn_lifecycle = injected_class.suppresses_user_turn_lifecycle();
     // #3176: anchor id of THIS turn's synthetic inflight (set only on the anchor-
     // posting branch); the idle-tail drain-wait uses it to identity-pin our own row
     // (no self-deadlock) while still waiting on a genuinely distinct previous turn.
@@ -590,7 +577,20 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         }
         return;
     }
-    if is_system_continuation {
+    if injected_class.is_subagent_notification_event() {
+        let note = format_subagent_notification_card(&prompt.tmux_session_name, &prompt.prompt);
+        if let Err(error) = channel_id.say(&*notify_http, note).await {
+            tracing::warn!(
+                provider = %prompt.provider,
+                channel_id = channel_id.get(),
+                tmux_session_name = %prompt.tmux_session_name,
+                error = %error,
+                "failed to send subagent_notification machine-event card"
+            );
+        }
+        return;
+    }
+    if suppresses_user_turn_lifecycle {
         // #3178 (codex fix): only SystemContinuation reaches here now —
         // SlashCommandControl was removed from `suppresses_user_turn_lifecycle`
         // and takes the active-turn `else` block below.

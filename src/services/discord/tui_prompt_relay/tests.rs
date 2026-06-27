@@ -826,6 +826,107 @@ fn classify_injected_prompt_task_notification_event() {
     );
 }
 
+// #3716: Codex subagent completions arrive as start-anchored
+// `<subagent_notification>{json}</subagent_notification>` envelopes. They are
+// neutral machine events, not human direct prompts.
+#[test]
+fn classify_injected_prompt_subagent_notification_event() {
+    let unwrapped = r#"<subagent_notification>
+{"agent_path":"/tmp/agent","status":{"completed":"Read-only review complete."}}
+</subagent_notification>"#;
+    assert_eq!(
+        classify_injected_prompt(unwrapped),
+        InjectedPromptClass::SubagentNotificationEvent,
+    );
+    assert!(
+        super::injected_prompt_policy::is_start_anchored_subagent_notification(unwrapped),
+        "bare subagent_notification must pass the start-anchored detector"
+    );
+
+    let wrapped = "터미널에 직접 주입된 입력 (tmux : `AgentDesk-codex-adk-cdx`):\n```text\n\
+<subagent_notification>\n{\"status\":{\"completed\":\"done\"}}\n</subagent_notification>\n```";
+    assert_eq!(
+        classify_injected_prompt(wrapped),
+        InjectedPromptClass::SubagentNotificationEvent,
+    );
+    assert!(
+        super::injected_prompt_policy::is_start_anchored_subagent_notification(wrapped),
+        "wrapped subagent_notification must pass after peeling the direct-injection wrapper"
+    );
+
+    let quoted = "please inspect this log line:\n<subagent_notification>{\"status\":{\"completed\":\"x\"}}</subagent_notification>";
+    assert_eq!(
+        classify_injected_prompt(quoted),
+        InjectedPromptClass::HumanTuiDirect,
+        "a human quote of the envelope mid-body must stay a normal direct prompt",
+    );
+    assert!(
+        !super::injected_prompt_policy::is_start_anchored_subagent_notification(quoted),
+        "mid-body quote must not pass the start-anchored detector"
+    );
+}
+
+#[test]
+fn subagent_notification_card_completed_hides_raw_envelope() {
+    let prompt = r#"<subagent_notification>
+{"agent_path":"/tmp/private-agent","status":{"completed":"Read-only review complete.\n\n1. Make /api/docs route-derived.\n2. Resolve generated-doc drift policy."}}
+</subagent_notification>"#;
+
+    let output = format_subagent_notification_card("AgentDesk-codex-adk-cdx", prompt);
+
+    assert!(output.contains("Subagent completed"));
+    assert!(output.contains("Read-only review complete."));
+    assert!(output.contains("1. Make /api/docs route-derived."));
+    assert!(output.contains("(tmux : `AgentDesk-codex-adk-cdx`)"));
+    assert!(!output.contains("터미널에 직접 주입된 입력"));
+    assert!(!output.contains("<subagent_notification>"));
+    assert!(!output.contains("agent_path"));
+    assert!(!output.contains("/tmp/private-agent"));
+    assert!(!output.contains("{\""));
+}
+
+#[test]
+fn subagent_notification_card_failed_hides_raw_envelope() {
+    let prompt = r#"<subagent_notification>{"status":{"failed":"Review failed: missing test coverage."}}</subagent_notification>"#;
+
+    let output = format_subagent_notification_card("tmux`name", prompt);
+
+    assert!(output.contains("Subagent failed"));
+    assert!(output.contains("Review failed: missing test coverage."));
+    assert!(output.contains("(tmux : `tmux'name`)"));
+    assert!(!output.contains("<subagent_notification>"));
+    assert!(!output.contains("{\"status\""));
+}
+
+#[test]
+fn subagent_notification_card_truncates_long_report() {
+    let long_report = "x".repeat(1_200);
+    let prompt = format!(
+        "<subagent_notification>{{\"status\":{{\"completed\":\"{long_report}\"}}}}</subagent_notification>"
+    );
+
+    let output = format_subagent_notification_card("sess", &prompt);
+
+    assert!(output.contains("Subagent completed"));
+    assert!(output.contains("..."));
+    assert!(output.len() < prompt.len());
+}
+
+#[test]
+fn subagent_notification_card_malformed_payload_omits_raw_payload() {
+    let prompt =
+        "<subagent_notification>{not-json agent_path=/tmp/private}</subagent_notification>";
+
+    let output = format_subagent_notification_card("sess", prompt);
+
+    assert!(output.contains("Subagent notification"));
+    assert!(output.contains("malformed payload omitted"));
+    assert!(!output.contains("not-json"));
+    assert!(!output.contains("agent_path"));
+    assert!(!output.contains("/tmp/private"));
+    assert!(!output.contains("<subagent_notification>"));
+}
+
 // #3393 finding 2: the live-panel terminal BRIDGE is gated on a START-ANCHORED
 // check, distinct from the contains-based CARD classifier. A human direct
 // prompt that QUOTES a notification (embedding a LIVE tool-use-id) still earns
@@ -1385,6 +1486,14 @@ fn system_continuation_suppresses_user_turn_but_still_delivers_output() {
         "SystemContinuation must still relay Claude's assistant output (no orphaning)"
     );
     assert!(!cont.is_human_active_turn());
+
+    // A subagent_notification is a terminal machine-event card, not a model
+    // prologue: it suppresses the user-turn lifecycle and does not keep the
+    // provider-output bridge tail.
+    let subagent = InjectedPromptClass::SubagentNotificationEvent;
+    assert!(subagent.suppresses_user_turn_lifecycle());
+    assert!(!subagent.still_delivers_assistant_output());
+    assert!(!subagent.is_human_active_turn());
 
     // Human + task-notification turns keep their user-turn lifecycle AND
     // deliver output.
