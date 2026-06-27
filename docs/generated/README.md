@@ -50,6 +50,13 @@ rules, baselines, or report text change. CI also uploads the structured audit
 artifact from the current run, so stale committed markdown should not be treated
 as a reason to hard-fail unrelated PRs.
 
+`scripts/audit_legacy_sqlite_sunset.py` remains available as an on-demand
+historical cleanup audit. Its markdown output is intentionally not committed
+under `docs/generated/` because the SQLite sunset surface is retired and a
+checked-in snapshot quickly becomes stale. For issue work that touches the
+SQLite sunset contract, run the script locally and include the current summary
+in the PR instead of reintroducing a generated report.
+
 ## When to Regenerate Locally
 
 Regenerate locally when the PR itself changes route or module structure and the
@@ -60,6 +67,7 @@ Commands:
 
 - `python3 scripts/generate_inventory_docs.py`
 - `python3 scripts/audit_maintainability.py --write-report`
+- `python3 scripts/audit_legacy_sqlite_sunset.py --root . --format markdown --top 20`
 
 Search terms: generated docs drift, generated-docs drift, inventory docs drift,
 maintainability audit drift.

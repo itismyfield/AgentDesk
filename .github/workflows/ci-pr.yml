@@ -365,10 +365,9 @@ jobs:
             ${{ runner.os }}-cargo-
 
       # Stage 1 keeps Windows inline and default-feature-only instead of
-      # `just check`: `--all-features` enables legacy SQLite test surfaces
-      # that still reference Unix-only tmux modules. This lane's job is
-      # cross-OS compile and targeted test signal; fmt/staged clippy and
-      # all-feature checks are authoritative in the Ubuntu jobs above.
+      # `just check`: this lane's job is cross-OS compile and targeted test
+      # signal, while fmt/staged clippy and full workspace checks are
+      # authoritative in the Ubuntu jobs above.
       - name: cargo check
         run: cargo check --workspace --all-targets
 

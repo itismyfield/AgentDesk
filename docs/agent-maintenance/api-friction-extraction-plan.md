@@ -7,8 +7,8 @@ Epic: #1788
 
 `src/services/api_friction.rs` is currently 1,709 lines: about 1,090 lines of
 production marker capture, PG persistence, memory sync, pattern aggregation,
-GitHub issue creation, and issue-body rendering followed by about 615 lines of
-inline tests behind `#[cfg(all(test, feature = "legacy-sqlite-tests"))]`.
+GitHub issue creation, and issue-body rendering followed by a historical block
+of SQLite-only inline tests that has since been retired.
 
 ## Scope Notes
 

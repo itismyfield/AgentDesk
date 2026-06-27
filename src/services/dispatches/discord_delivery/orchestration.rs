@@ -595,7 +595,7 @@ async fn latest_work_dispatch_thread_pg(
     crate::db::dispatches::latest_work_dispatch_thread_pg(pool, card_id).await
 }
 
-// #1693: `latest_completed_review_provider_on_conn` (legacy-sqlite-tests only)
+// #1693: `latest_completed_review_provider_on_conn` (removed SQLite-only path)
 // moved to `crate::db::dispatches::latest_completed_review_provider_on_conn`
 // so the route layer no longer holds raw SQL strings.
 

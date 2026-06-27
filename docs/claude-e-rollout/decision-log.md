@@ -185,6 +185,11 @@ visible to the operator running the rollout rather than to other users.
 
 ## 2026-05-27 — Counter-review Phase 0 MAJOR-1: missing field in legacy-sqlite-tests literal
 
+> Historical note: the `legacy-sqlite-tests` Cargo feature referenced in this
+> rollout log was later retired by the SQLite sunset cleanup. The commands below
+> document what passed during the 2026-05-27 rollout and are not current
+> verification instructions.
+
 **Decision:** `src/services/onboarding/mod.rs:4660` gets the
 `runtime: None,` field. `cargo check --tests --features
 legacy-sqlite-tests` is now part of the Phase 0 gate.

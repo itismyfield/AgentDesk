@@ -107,7 +107,7 @@
 - canonical_modules: `src/dispatch/{mod,dispatch_context,dispatch_create,dispatch_status}.rs`.
 - legacy_modules: none.
 - do_not_edit_without_migration_plan (giant-file, awaiting split issue):
-  - `src/dispatch/dispatch_context.rs` (2805 lines).
+  - `src/dispatch/dispatch_context.rs` (2803 lines).
   - `src/dispatch/dispatch_create.rs` (1385 lines).
   - `src/dispatch/dispatch_status.rs` (1508 lines).
   - `src/services/dispatches/outbox_route.rs` (1120 lines; route extraction
@@ -1237,7 +1237,7 @@
     `audit_maintainability_config.toml`; the root is no longer a prod giant and
     was removed from `giant_file_registry.toml`; #3038 S5 locked the final
     root ratchet at 274 production lines).
-  - `src/services/discord/session_runtime.rs` (1712 lines; -41 from #3591 dead `assistant_turn_count`/`recent_history_context` 메서드 제거 — 100턴/idle 세션 리셋 폐기 연쇄).
+  - `src/services/discord/session_runtime.rs` (1679 lines; -41 from #3591 dead `assistant_turn_count`/`recent_history_context` 메서드 제거 — 100턴/idle 세션 리셋 폐기 연쇄).
   - `src/services/discord/voice_barge_in.rs` (2823 lines after #3038
     VoiceBargeInRuntime S1 moved the STT method cluster to
     `src/services/discord/voice_barge_in/stt.rs` (314 production lines) and
@@ -1276,7 +1276,7 @@
     2026-08-31, #3036)).
   - `src/services/discord/{commands/text_commands.rs,
     discord_config_audit.rs, router/intake_gate.rs}` (all 1000+ production
-    lines) and `src/services/discord/inflight.rs` (3004 lines; #3680 relay
+    lines) and `src/services/discord/inflight.rs` (3003 lines; #3680 relay
     recovery review hardening; #3685 exposes the inflight sidecar lock
     crate-wide for locked legacy rebind backfill; #3715 moved the #3635
     dead-watcher rebind-origin reap helpers into
@@ -1335,10 +1335,10 @@
   `src/services/auto_queue/cancel_run.rs` (1032 lines) is the canonical
   auto-queue cancellation and run-stop command surface; split before adding
   non-bugfix behavior.
-- legacy_modules: none, but several routes still call `legacy_db()` against
-  the SQLite compat handle (see `known-legacy.md`).
+- legacy_modules: none; retired route fallback history is documented in
+  `known-legacy.md`.
 - do_not_edit_without_migration_plan (giant-file routes):
-  - `src/server/routes/kanban.rs` (2676 lines after #3037 backflow batch
+  - `src/server/routes/kanban.rs` (2677 lines after #3037 backflow batch
     relocated the `require_explicit_bearer_token` /
     `resolve_requesting_agent_id_with_pg` auth/identity helpers to
     `crate::services::kanban`).
@@ -1362,8 +1362,8 @@
     1000+ production lines). (`dispatches/thread_reuse.rs` dropped below the
     giant threshold in #3037 after its Postgres/Discord-API thread-map helpers
     were relocated to `services/dispatches/discord_delivery/thread_reuse.rs`.)
-- active_callsite_coverage: legacy_db helper coverage tracked separately —
-  see `known-legacy.md` row `legacy_db_helper`.
+- active_callsite_coverage: retired DB compatibility history is tracked in
+  `known-legacy.md`.
 - invariants:
   - `/api/inflight/rebind` is the only synthetic inflight writer
     (`src/server/routes/health_api.rs:684`).
@@ -1432,7 +1432,8 @@
 ### `db_layer`
 
 - canonical_modules: `src/db/{mod,postgres,schema}.rs` and per-domain modules.
-- legacy_modules: SQLite path through `libsql_rusqlite` (see `known-legacy.md`).
+- legacy_modules: retired SQLite migration history only (see
+  `known-legacy.md`).
 - do_not_edit_without_migration_plan (giant-file):
   - `src/db/auto_queue/tests.rs` is the migrated auto-queue test harness; it is a
     dedicated `*_tests.rs` file (excluded from the production giant-file count),
@@ -1464,8 +1465,8 @@
     `#[cfg(test)] mod` PG coverage is excluded (bugfix only).
 - active_callsite_coverage: PG-only cleanup tracked per #1237/#1238/#1239 —
   see `known-legacy.md`.
-- invariants: production reads/writes go through `pg_pool_ref()`; `legacy_db()`
-  remains for unmigrated callsites only.
+- invariants: production reads/writes go through `pg_pool_ref()`; retired DB
+  compatibility handles must not be reintroduced as live route fallbacks.
 - allowed_changes: `bugfix` on existing path; `new_feature` MUST use PG.
 - tests: `src/integration_tests/postgres_only/*`.
 - related_issues: #843 epic, #1237, #1238, #1239.

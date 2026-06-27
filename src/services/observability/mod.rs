@@ -35,8 +35,8 @@ mod worker;
 
 // Public surface re-exports — keep `crate::services::observability::*`
 // import paths working unchanged. `#[allow(unused_imports)]` because some
-// of these are only consumed by the gated test module (legacy-sqlite-tests)
-// or by downstream crates that ship outside the default build profile.
+// of these are only consumed by narrow test modules or by downstream crates
+// that ship outside the default build profile.
 #[allow(unused_imports)]
 pub use emit::{
     InvariantSeverity, emit_agent_quality_event, emit_dispatch_result, emit_guard_fired,

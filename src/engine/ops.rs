@@ -72,7 +72,7 @@ fn register_globals_pg_only(
     dispatch_ops::register_dispatch_ops(ctx, pg_pool.clone())?;
     kanban_ops::register_kanban_ops(ctx, None, pg_pool.clone())?;
     ci_recovery_ops::register_ci_recovery_ops(ctx, pg_pool.clone())?;
-    kv_ops::register_kv_ops(ctx, None, pg_pool.clone())?;
+    kv_ops::register_kv_ops(ctx, pg_pool.clone())?;
     review_ops::register_review_ops(ctx, None, pg_pool.clone())?;
     review_automation_ops::register_review_automation_ops(ctx, pg_pool.clone())?;
     queue_ops::register_queue_ops(ctx, pg_pool.clone())?;

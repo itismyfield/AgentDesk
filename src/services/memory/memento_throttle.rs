@@ -740,8 +740,8 @@ pub(crate) fn note_recall_context_size(bucket: RecallSizeBucket, bytes: usize) {
 }
 
 /// #2655: test-only state reset for the forget-ratio monitor. Avoids the
-/// `legacy-sqlite-tests` feature gate so the new test module below can drain
-/// the shared sliding-window state between cases.
+/// removed SQLite-only feature gate so the new test module below can drain the
+/// shared sliding-window state between cases.
 #[cfg(test)]
 pub(crate) fn reset_forget_ratio_state_for_tests() {
     with_state(|state| {

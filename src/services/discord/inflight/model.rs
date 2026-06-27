@@ -422,7 +422,7 @@ mod turn_source_tests {
 
     #[test]
     fn missing_field_defaults_to_managed_when_deserialised() {
-        // The full state struct is gated behind `legacy-sqlite-tests`, so we
+        // The full state struct lived behind the removed SQLite-only gate, so we
         // exercise the `#[serde(default)]` contract with a small wrapper
         // that captures the exact attribute combination used on the field.
         #[derive(serde::Deserialize, Debug)]

@@ -23,116 +23,46 @@ pub mod turns;
 use std::sync::Arc;
 
 #[derive(Debug)]
-pub enum LegacySqliteDisabled {}
+pub enum DisabledDbBackend {}
 
 #[derive(Debug, Clone, Copy)]
-pub struct LegacySqliteError;
+pub struct DisabledDbError;
 
-impl std::fmt::Display for LegacySqliteError {
+impl std::fmt::Display for DisabledDbError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "legacy sqlite backend is unavailable in production")
+        write!(f, "disabled compatibility database is unavailable")
     }
 }
 
-impl std::error::Error for LegacySqliteError {}
+impl std::error::Error for DisabledDbError {}
 
-pub struct LegacySqliteConnection;
+pub struct DisabledDbConnection;
 
-// reason: production-side shim mirroring the legacy-sqlite-tests API surface;
-// constructed only under the legacy-sqlite-tests feature. See #3034 / #3035.
-#[allow(dead_code)]
-pub struct LegacySqliteStatement;
+pub struct DisabledDbRow;
 
-// reason: production-side shim mirroring the legacy-sqlite-tests API surface;
-// constructed only under the legacy-sqlite-tests feature. See #3034 / #3035.
-#[allow(dead_code)]
-pub struct LegacySqliteRows;
-
-pub struct LegacySqliteRow;
-
-impl LegacySqliteDisabled {
-    pub fn lock(&self) -> Result<LegacySqliteConnection, LegacySqliteError> {
-        Err(LegacySqliteError)
-    }
-
-    // reason: legacy-sqlite API parity shim; exercised only under
-    // legacy-sqlite-tests. See #3034 / #3035.
-    #[allow(dead_code)]
-    pub fn read_conn(&self) -> Result<LegacySqliteConnection, LegacySqliteError> {
-        Err(LegacySqliteError)
-    }
-
-    // reason: legacy-sqlite API parity shim; exercised only under
-    // legacy-sqlite-tests. See #3034 / #3035.
-    #[allow(dead_code)]
-    pub fn separate_conn(&self) -> Result<LegacySqliteConnection, LegacySqliteError> {
-        Err(LegacySqliteError)
+impl DisabledDbBackend {
+    pub fn lock(&self) -> Result<DisabledDbConnection, DisabledDbError> {
+        Err(DisabledDbError)
     }
 }
 
-impl LegacySqliteConnection {
-    pub fn execute<P>(&self, _sql: &str, _params: P) -> Result<usize, LegacySqliteError> {
-        Err(LegacySqliteError)
+impl DisabledDbConnection {
+    pub fn execute<P>(&self, _sql: &str, _params: P) -> Result<usize, DisabledDbError> {
+        Err(DisabledDbError)
     }
 
-    // reason: legacy-sqlite API parity shim; exercised only under
-    // legacy-sqlite-tests. See #3034 / #3035.
-    #[allow(dead_code)]
-    pub fn execute_batch(&self, _sql: &str) -> Result<(), LegacySqliteError> {
-        Err(LegacySqliteError)
-    }
-
-    // reason: legacy-sqlite API parity shim; exercised only under
-    // legacy-sqlite-tests. See #3034 / #3035.
-    #[allow(dead_code)]
-    pub fn prepare(&self, _sql: &str) -> Result<LegacySqliteStatement, LegacySqliteError> {
-        Err(LegacySqliteError)
-    }
-
-    pub fn query_row<P, F, T>(&self, _sql: &str, _params: P, _f: F) -> Result<T, LegacySqliteError>
+    pub fn query_row<P, F, T>(&self, _sql: &str, _params: P, _f: F) -> Result<T, DisabledDbError>
     where
-        F: FnOnce(&LegacySqliteRow) -> Result<T, LegacySqliteError>,
+        F: FnOnce(&DisabledDbRow) -> Result<T, DisabledDbError>,
     {
-        Err(LegacySqliteError)
+        Err(DisabledDbError)
     }
 }
 
-impl LegacySqliteStatement {
-    // reason: legacy-sqlite API parity shim; exercised only under
-    // legacy-sqlite-tests. See #3034 / #3035.
-    #[allow(dead_code)]
-    pub fn query<P>(&mut self, _params: P) -> Result<LegacySqliteRows, LegacySqliteError> {
-        Err(LegacySqliteError)
-    }
-
-    // reason: legacy-sqlite API parity shim; exercised only under
-    // legacy-sqlite-tests. See #3034 / #3035.
-    #[allow(dead_code)]
-    pub fn query_map<P, F, T>(
-        &mut self,
-        _params: P,
-        _f: F,
-    ) -> Result<std::vec::IntoIter<Result<T, LegacySqliteError>>, LegacySqliteError>
-    where
-        F: FnMut(&LegacySqliteRow) -> Result<T, LegacySqliteError>,
-    {
-        Err(LegacySqliteError)
+impl DisabledDbRow {
+    pub fn get<I, T: Default>(&self, _idx: I) -> Result<T, DisabledDbError> {
+        Err(DisabledDbError)
     }
 }
 
-impl LegacySqliteRows {
-    // reason: legacy-sqlite API parity shim; exercised only under
-    // legacy-sqlite-tests. See #3034 / #3035.
-    #[allow(dead_code)]
-    pub fn next(&mut self) -> Result<Option<LegacySqliteRow>, LegacySqliteError> {
-        Err(LegacySqliteError)
-    }
-}
-
-impl LegacySqliteRow {
-    pub fn get<I, T: Default>(&self, _idx: I) -> Result<T, LegacySqliteError> {
-        Err(LegacySqliteError)
-    }
-}
-
-pub type Db = Arc<LegacySqliteDisabled>;
+pub type Db = Arc<DisabledDbBackend>;

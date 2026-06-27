@@ -31,8 +31,9 @@ GIANT_FILE_REGISTRY_DOC = GENERATED_DOCS_DIR / "giant-file-registry.md"
 #
 # A module's `#[cfg(...)]` attribute gates it to test-only builds when the
 # predicate *requires* the `test` flag. `cfg_requires_test` evaluates this
-# structurally (with balanced-paren awareness) so it handles nested forms such
-# as `all(test, not(feature = "legacy-sqlite-tests"))`. Predicates that do not
+# structurally (with balanced-paren awareness) so it handles nested forms that
+# combine `test`, `all(...)`, `any(...)`, `not(...)`, and feature checks.
+# Predicates that do not
 # remove the module from production builds — `not(test)` (production-only) and
 # `any(test, …)` (compiles when the other option is set) — are rejected.
 
@@ -107,7 +108,7 @@ TOP_LEVEL_MODULE_PURPOSES = {
     "config.rs": "`agentdesk.yaml` parsing, configuration defaults, and shared test env helpers.",
     "config_live_reload.rs": "Hot-reloads `agentdesk.yaml` without a restart: a debounced `notify` watcher pre-validates edits and atomically swaps a process-global config snapshot, keeping the running config on failure and reporting restart-required infra changes.",
     "credential.rs": "Reads runtime credential files such as Discord bot tokens from the AgentDesk root.",
-    "db/": "SQLite access layer and schema authority (`src/db/schema.rs`).",
+    "db/": "PostgreSQL access layer, migration helpers, and schema authority.",
     "dispatch/": "Dispatch context construction, review metadata, and worktree targeting.",
     "engine/": "QuickJS policy runtime, hook wiring, transition logic, and Rust-JS bridge ops.",
     "error.rs": "Shared HTTP and policy error type with typed codes and JSON response helpers.",

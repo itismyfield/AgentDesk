@@ -17,8 +17,8 @@ legacy catch-all test suite.
   follow-up issues are the deliverable.
 - Keep the public `crate::dispatch::*` API stable until a later cleanup issue
   deliberately narrows call sites.
-- Preserve the existing split between runtime PG paths and SQLite test/backfill
-  helpers. Do not add a SQLite runtime fallback.
+- Preserve runtime PG ownership and retired migration-era boundaries. Do not
+  add a SQLite runtime fallback.
 - Keep caller-owned PG transaction semantics intact for cancellation helpers.
 - `src/dispatch/mod.rs` should end as a small facade/re-export module, not as a
   new home for behavior.

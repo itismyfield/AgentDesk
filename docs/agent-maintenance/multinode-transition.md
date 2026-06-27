@@ -191,9 +191,8 @@
   processes a batch, `src/server/routes/dispatches/outbox.rs:654` relies on the
   Discord delivery reservation guard, and `src/server/routes/dispatches/outbox.rs:719`
   applies retry/permanent-failure state.
-- legacy_modules: SQLite test-only fallback paths in
-  `src/server/routes/dispatches/outbox.rs` remain behind
-  `legacy-sqlite-tests`.
+- legacy_modules: removed SQLite-only fallback paths are historical context;
+  current `src/server/routes/dispatches/outbox.rs` behavior is PostgreSQL-first.
 - do_not_edit_without_migration_plan:
   `src/server/routes/dispatches/outbox.rs` claim, notify, followup, status
   reaction, retry, and failure paths.

@@ -947,7 +947,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | --- | --- |
 | `src/cli/` | Operator-facing CLI commands, direct API shims, migrations, and Discord send helpers. |
 | `src/compat/` | Centralised home for compatibility/legacy/fallback shims (#1076). Each public item carries a `REMOVE_WHEN` comment so retirement is grep-driven. |
-| `src/db/` | SQLite access layer and schema authority (`src/db/schema.rs`). |
+| `src/db/` | PostgreSQL access layer, migration helpers, and schema authority. |
 | `src/dispatch/` | Dispatch context construction, review metadata, and worktree targeting. |
 | `src/engine/` | QuickJS policy runtime, hook wiring, transition logic, and Rust-JS bridge ops. |
 | `src/github/` | GitHub sync, issue triage, and Definition-of-Done mirroring. |

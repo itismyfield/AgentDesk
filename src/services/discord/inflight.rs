@@ -2994,10 +2994,9 @@ pub(in crate::services::discord) enum InflightSignal {
 
 /// #1446 Layer 1 — `inflight_state_is_stale` is a pure helper with no
 /// filesystem or runtime dependencies, so we keep its test always-on
-/// (`#[cfg(test)]`) rather than gating it on the `legacy-sqlite-tests`
-/// feature like the rest of this file. The legacy-gated tests below
-/// require a live SQLite test harness and cannot run in plain `cargo
-/// test --bin agentdesk` invocations.
+/// (`#[cfg(test)]`) rather than tying it to the removed SQLite-only harness.
+/// The heavier tests below require fixtures that still are not available in
+/// plain `cargo test --bin agentdesk` invocations.
 #[cfg(test)]
 mod stall_recovery_tests {
     use super::{

@@ -354,7 +354,7 @@ github:
     - "owner/repo-name"
   sync_interval_minutes: 10
 
-# PostgreSQL is the live datastore (SQLite is legacy / test-only since the #868 / #1239 cutover).
+# PostgreSQL is the live datastore; old SQLite files are retired migration history.
 database:
   enabled: true
   host: 127.0.0.1
@@ -740,7 +740,7 @@ Full API documentation is available at `/api/docs` when the server is running, w
 ### Design Principles
 1. **Single Binary** — One Rust binary; PostgreSQL is the only required external runtime dependency
 2. **Single Process Per Node** — Each node is one `agentdesk dcserver` process; multinode coordination is persisted in PostgreSQL rather than a sidecar coordinator
-3. **Single Database Control Plane** — PostgreSQL holds all live state (agents, cards, dispatches, sessions, kv_meta, worker nodes, resource locks, phase evidence). The legacy SQLite path is gated behind a `legacy-sqlite-tests` cargo feature and only used by tests after the #868 / #1239 cutover
+3. **Single Database Control Plane** — PostgreSQL holds all live state (agents, cards, dispatches, sessions, kv_meta, worker nodes, resource locks, phase evidence). The old SQLite-only test feature was retired after the #868 / #1239 / #3035 cutovers; SQLite compatibility files are migration inputs, not a live runtime backend.
 4. **Hot-Reloadable Policies** — Business logic in JS, editable without rebuild
 5. **Self-Contained** — No Node.js, Python, or other runtimes needed at deploy time
 6. **Pipeline-Driven** — State machines defined in YAML, not hardcoded in Rust or JS
@@ -765,7 +765,7 @@ AgentDesk/
 │   ├── kanban.rs               # Kanban state machine + transition hooks
 │   ├── pipeline.rs             # Pipeline config resolution
 │   ├── cli/                    # CLI commands (dcserver, init, client)
-│   ├── db/                     # SQLite schema, migrations, typed queries
+│   ├── db/                     # PostgreSQL schema helpers, migrations, typed queries
 │   ├── dispatch/               # Dispatch creation, outbox, delivery
 │   ├── engine/                 # QuickJS policy engine + bridge ops
 │   │   └── ops/                # ~21 bridge namespaces (cards, kanban, dispatch, kv, http, runtime, quality, ...)

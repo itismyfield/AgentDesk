@@ -59,9 +59,9 @@ Initial pass did not surface a clear production PG site still decoding raw `TIME
 | Location | Status | Note |
 | --- | --- | --- |
 | `src/services/api_friction.rs:189-273,715-849` | `hardened` | PG-only authority is now explicit: capture and pattern processing require a Postgres pool, ignore the legacy SQLite handle when one is passed, and fail fast instead of falling back to SQLite. |
-| `src/services/message_outbox.rs:141-190,236-277` | `hardened` | PG-only authority is now explicit in code comments: once `pg_pool` exists, lifecycle/outbox rows must land in PG because the release worker drains PG exclusively. SQLite is retained only for legacy no-PG runtime/tests. |
-| `src/services/retrospectives.rs:88-101,1137-1219` | `hardened` | PG-only authority is now explicit for `card_retrospectives` in mixed mode, and the PG test now asserts SQLite stays empty so the no-mirror choice is executable rather than implied. |
-| `src/services/discord_dm_reply_store.rs:85-123,156-173,261-276` | `hardened` | Pending DM reply ownership is now explicitly PG-first in mixed mode for register/read/consume paths; SQLite remains a legacy compatibility path only when PG is absent. |
+| `src/services/message_outbox.rs:141-190,236-277` | `hardened` | PG-only authority is now explicit in code comments: lifecycle/outbox rows must land in PG because the release worker drains PG exclusively; retired SQLite-era fallbacks are not live runtime paths. |
+| `src/services/retrospectives.rs:88-101,1137-1219` | `hardened` | PG-only authority is now explicit for `card_retrospectives`; historical SQLite mirror behavior is intentionally absent from the live control plane. |
+| `src/services/discord_dm_reply_store.rs:85-123,156-173,261-276` | `hardened` | Pending DM reply ownership is explicitly PostgreSQL-owned for register/read/consume paths; retired SQLite compatibility is not a live fallback. |
 | `src/db/auto_queue/claim.rs:118-160,316-390`; `src/db/auto_queue/slots.rs:98-122` | `hardened` | Slot rebind/release ownership is PG-only in the active implementation: the audit guard now requires the `*_pg` helpers and rejects old `TODO(#839)` ambiguity if legacy helper ranges return. |
 
 ## Later sub-PR guidance
