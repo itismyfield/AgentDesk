@@ -19,7 +19,7 @@
 use axum::{Json, extract::State, http::StatusCode};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sqlx::{PgPool, QueryBuilder, Row};
+use sqlx::{QueryBuilder, Row};
 
 use super::AppState;
 use crate::services::memory::MementoRememberRequest;
@@ -293,30 +293,10 @@ pub async fn memory_forget(
 
 // ── Local backend (PostgreSQL) ───────────────────────────────────
 
-async fn ensure_local_memory_table(pool: &PgPool) -> Result<(), String> {
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS local_memory (
-            id TEXT PRIMARY KEY,
-            content TEXT NOT NULL,
-            topic TEXT NOT NULL,
-            kind TEXT NOT NULL,
-            importance DOUBLE PRECISION,
-            workspace TEXT,
-            keywords JSONB,
-            created_at TIMESTAMPTZ DEFAULT NOW()
-        )",
-    )
-    .execute(pool)
-    .await
-    .map(|_| ())
-    .map_err(|error| format!("ensure local_memory: {error}"))
-}
-
 async fn local_recall_pg(state: &AppState, body: &RecallBody) -> Result<Vec<Value>, String> {
     let Some(pool) = state.pg_pool_ref() else {
         return Err("postgres pool unavailable".to_string());
     };
-    ensure_local_memory_table(pool).await?;
     let limit = body.limit.map(|value| value.clamp(1, 200)).unwrap_or(20) as i64;
     let mut query = QueryBuilder::new(
         "SELECT id, content, topic, kind, importance, workspace, keywords::TEXT AS keywords, created_at::TEXT AS created_at
@@ -399,7 +379,6 @@ async fn local_remember_pg(state: &AppState, body: &RememberBody) -> Result<Stri
     let Some(pool) = state.pg_pool_ref() else {
         return Err("postgres pool unavailable".to_string());
     };
-    ensure_local_memory_table(pool).await?;
     let id = format!("mem-{}", uuid_like());
 
     let keywords_json = body
@@ -437,7 +416,6 @@ async fn local_forget_pg(state: &AppState, id: &str) -> Result<bool, String> {
     let Some(pool) = state.pg_pool_ref() else {
         return Err("postgres pool unavailable".to_string());
     };
-    ensure_local_memory_table(pool).await?;
     sqlx::query("DELETE FROM local_memory WHERE id = $1")
         .bind(id)
         .execute(pool)
@@ -512,6 +490,86 @@ async fn memento_remember(body: &RememberBody) -> Result<(), String> {
 mod request_body_tests {
     use super::*;
 
+    const PG_TEST_LABEL: &str = "memory API local fallback migration test";
+
+    struct MemoryApiPostgresDb {
+        _lock: crate::db::postgres::PostgresTestLifecycleGuard,
+        admin_url: String,
+        database_name: String,
+        database_url: String,
+    }
+
+    impl MemoryApiPostgresDb {
+        async fn try_create() -> Option<Self> {
+            let lock = crate::db::postgres::lock_test_lifecycle();
+            let admin_url = crate::dispatch::test_support::postgres_admin_database_url();
+            let database_name = format!("agentdesk_memory_api_{}", uuid::Uuid::new_v4().simple());
+            let database_url = format!(
+                "{}/{}",
+                crate::dispatch::test_support::postgres_base_database_url(),
+                database_name
+            );
+            if let Err(error) =
+                crate::db::postgres::create_test_database(&admin_url, &database_name, PG_TEST_LABEL)
+                    .await
+            {
+                eprintln!("skipping {PG_TEST_LABEL}: {error}");
+                drop(lock);
+                return None;
+            }
+
+            Some(Self {
+                _lock: lock,
+                admin_url,
+                database_name,
+                database_url,
+            })
+        }
+
+        async fn connect(&self) -> sqlx::PgPool {
+            crate::db::postgres::connect_test_pool(&self.database_url, PG_TEST_LABEL)
+                .await
+                .expect("connect memory API postgres test db")
+        }
+
+        async fn connect_and_migrate(&self) -> sqlx::PgPool {
+            crate::db::postgres::connect_test_pool_and_migrate(&self.database_url, PG_TEST_LABEL)
+                .await
+                .expect("connect + migrate memory API postgres test db")
+        }
+
+        async fn drop(self) {
+            crate::db::postgres::drop_test_database(
+                &self.admin_url,
+                &self.database_name,
+                PG_TEST_LABEL,
+            )
+            .await
+            .expect("drop memory API postgres test db");
+        }
+    }
+
+    fn test_engine_with_pg(pg_pool: sqlx::PgPool) -> crate::engine::PolicyEngine {
+        let mut config = crate::config::Config::default();
+        config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+        config.policies.hot_reload = false;
+        crate::engine::PolicyEngine::new_with_pg(&config, Some(pg_pool)).unwrap()
+    }
+
+    fn test_state_with_pg(pg_pool: sqlx::PgPool) -> AppState {
+        let tx = crate::server::ws::new_broadcast();
+        let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
+        AppState {
+            pg_pool: Some(pg_pool.clone()),
+            engine: test_engine_with_pg(pg_pool),
+            config: std::sync::Arc::new(crate::config::Config::default()),
+            broadcast_tx: tx,
+            batch_buffer: buf,
+            health_registry: None,
+            cluster_instance_id: None,
+        }
+    }
+
     #[test]
     fn remember_body_deserializes_channel_scope_fields() {
         let body: RememberBody = serde_json::from_str(
@@ -551,5 +609,119 @@ mod request_body_tests {
             ..RememberBody::default()
         };
         assert!(validate_memento_remember_scope(&zero_channel).is_some());
+    }
+
+    #[tokio::test]
+    async fn local_memory_api_uses_migrated_table() {
+        let Some(pg_db) = MemoryApiPostgresDb::try_create().await else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+        let state = test_state_with_pg(pool.clone());
+
+        let table: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('public.local_memory')::TEXT")
+                .fetch_one(&pool)
+                .await
+                .expect("read migrated local_memory table");
+        assert_eq!(table.as_deref(), Some("local_memory"));
+
+        let remember = RememberBody {
+            content: "The relay fallback writes through the local memory API".to_string(),
+            topic: "memory-migration".to_string(),
+            kind: "fact".to_string(),
+            importance: Some(0.7),
+            workspace: Some("issue-3723".to_string()),
+            keywords: Some(vec!["relay".to_string(), "fallback".to_string()]),
+            ..RememberBody::default()
+        };
+        let id = local_remember_pg(&state, &remember)
+            .await
+            .expect("remember local memory row");
+
+        let recall = RecallBody {
+            keywords: Some(vec!["fallback".to_string()]),
+            workspace: Some("issue-3723".to_string()),
+            limit: Some(5),
+            ..RecallBody::default()
+        };
+        let fragments = local_recall_pg(&state, &recall)
+            .await
+            .expect("recall local memory row");
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(fragments[0]["id"], id);
+        assert_eq!(fragments[0]["topic"], "memory-migration");
+        assert_eq!(fragments[0]["keywords"], json!(["relay", "fallback"]));
+
+        assert!(
+            local_forget_pg(&state, &id)
+                .await
+                .expect("forget local memory row")
+        );
+        assert!(
+            !local_forget_pg(&state, &id)
+                .await
+                .expect("forget missing local memory row")
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn local_memory_migration_preserves_preexisting_route_table_rows() {
+        let Some(pg_db) = MemoryApiPostgresDb::try_create().await else {
+            return;
+        };
+        let pool = pg_db.connect().await;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS local_memory (
+                id TEXT PRIMARY KEY,
+                content TEXT NOT NULL,
+                topic TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                importance DOUBLE PRECISION,
+                workspace TEXT,
+                keywords JSONB,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create pre-migration local_memory table");
+        sqlx::query(
+            "INSERT INTO local_memory
+                (id, content, topic, kind, importance, workspace, keywords)
+             VALUES
+                ('legacy-row', 'kept across migration', 'legacy', 'fact', 0.5, 'issue-3723', '[\"legacy\"]'::JSONB)",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert pre-migration local_memory row");
+
+        crate::db::postgres::migrate(&pool)
+            .await
+            .expect("migrate database with preexisting local_memory table");
+
+        let content: String =
+            sqlx::query_scalar("SELECT content FROM local_memory WHERE id = 'legacy-row'")
+                .fetch_one(&pool)
+                .await
+                .expect("read preserved local_memory row");
+        assert_eq!(content, "kept across migration");
+
+        let keywords_index: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('public.idx_local_memory_keywords_gin')::TEXT")
+                .fetch_one(&pool)
+                .await
+                .expect("read migrated local_memory keywords index");
+        assert_eq!(
+            keywords_index.as_deref(),
+            Some("idx_local_memory_keywords_gin")
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 }
