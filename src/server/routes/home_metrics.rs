@@ -92,29 +92,30 @@ pub async fn home_kpi_trends(
     )
     .await;
 
-    let (tokens_values, cost_values) = match analytics_data.as_deref() {
-        Some(data) => {
-            let mut by_day: BTreeMap<String, (u64, f64)> = BTreeMap::new();
-            for day in &data.daily {
-                by_day.insert(day.date.clone(), (day.total_tokens, day.cost));
+    let (tokens_values, cost_values) =
+        match analytics_data.as_ref().map(|result| result.data.as_ref()) {
+            Some(data) => {
+                let mut by_day: BTreeMap<String, (u64, f64)> = BTreeMap::new();
+                for day in &data.daily {
+                    by_day.insert(day.date.clone(), (day.total_tokens, day.cost));
+                }
+                let tokens = date_keys
+                    .iter()
+                    .map(|d| by_day.get(d).map(|(t, _)| *t).unwrap_or(0))
+                    .map(|v| json!(v))
+                    .collect::<Vec<_>>();
+                let costs = date_keys
+                    .iter()
+                    .map(|d| by_day.get(d).map(|(_, c)| *c).unwrap_or(0.0))
+                    .map(|v| json!(v))
+                    .collect::<Vec<_>>();
+                (tokens, costs)
             }
-            let tokens = date_keys
-                .iter()
-                .map(|d| by_day.get(d).map(|(t, _)| *t).unwrap_or(0))
-                .map(|v| json!(v))
-                .collect::<Vec<_>>();
-            let costs = date_keys
-                .iter()
-                .map(|d| by_day.get(d).map(|(_, c)| *c).unwrap_or(0.0))
-                .map(|v| json!(v))
-                .collect::<Vec<_>>();
-            (tokens, costs)
-        }
-        None => (
-            vec![json!(0); date_keys.len()],
-            vec![json!(0.0); date_keys.len()],
-        ),
-    };
+            None => (
+                vec![json!(0); date_keys.len()],
+                vec![json!(0.0); date_keys.len()],
+            ),
+        };
 
     // ── In-progress (daily dispatch count from PG) ────────────────────────
     let in_progress_values = collect_in_progress_trend_pg(pool, &date_keys).await;

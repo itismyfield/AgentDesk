@@ -388,6 +388,7 @@ pub(crate) async fn run(
     );
     worker_registry.run_boot_only_steps().await?;
     worker_registry.start_after_boot_reconcile()?;
+    routes::receipt::spawn_token_analytics_cache_prewarm();
 
     // Resolve dashboard dist path relative to runtime root or binary location
     let dashboard_dir = crate::cli::agentdesk_runtime_root()
