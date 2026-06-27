@@ -1208,7 +1208,7 @@
     `turn_finalizer/watcher_backstop.rs` (watcher far-backstop tunables +
     terminal-or-defer verdict pair). Bugfix only outside a
     finalizer-decomposition plan).
-  - `src/services/discord/formatting.rs` (2802 lines; net +0 from #3034 scoped
+  - `src/services/discord/formatting.rs` (2798 lines; net +0 from #3034 scoped
     dead-code allows on the `MonitorHandoffReason::InlineTimeout` /
     `MonitorHandoffStatus::Failed` reserved variants — the two added `#[allow]`
     lines were offset by collapsing the adjacent reason comments back to inline

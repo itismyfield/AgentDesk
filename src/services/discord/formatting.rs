@@ -814,9 +814,7 @@ pub(super) fn format_for_discord_with_provider(
     s: &str,
     provider: &crate::services::provider::ProviderKind,
 ) -> String {
-    let sanitized = super::response_sanitizer::strip_leading_tui_response_chrome(
-        &super::response_sanitizer::sanitize_hidden_context(s),
-    );
+    let sanitized = super::response_sanitizer::sanitize_hidden_context_and_strip_chrome(s);
     let filtered;
     let input = if matches!(provider, crate::services::provider::ProviderKind::Codex) {
         filtered = filter_codex_tool_logs(&sanitized);
@@ -833,9 +831,7 @@ pub(super) fn format_for_discord_with_status_panel(
     s: &str,
     provider: &crate::services::provider::ProviderKind,
 ) -> String {
-    let sanitized = super::response_sanitizer::strip_leading_tui_response_chrome(
-        &super::response_sanitizer::sanitize_hidden_context(s),
-    );
+    let sanitized = super::response_sanitizer::sanitize_hidden_context_and_strip_chrome(s);
     let filtered;
     let input = if matches!(provider, crate::services::provider::ProviderKind::Codex) {
         filtered = strip_codex_tool_log_lines(&sanitized);
@@ -1018,6 +1014,41 @@ mod status_panel_v2_formatter_tests {
         );
         // No 3+ newline run survives in the relayed body.
         assert!(!format_for_discord(input).contains("\n\n\n"));
+    }
+
+    #[test]
+    fn format_for_discord_with_provider_hides_raw_subagent_notification() {
+        let input = r#"<subagent_notification>
+{"agent_path":"/tmp/private-agent","status":{"completed":"Read-only review complete.\n\n1. Check relay path."}}
+</subagent_notification>"#;
+
+        let output = format_for_discord_with_provider(input, &ProviderKind::Codex);
+
+        assert!(output.contains("Subagent completed"));
+        assert!(output.contains("Read-only review complete."));
+        assert!(output.contains("1. Check relay path."));
+        assert!(!output.contains("<subagent_notification>"));
+        assert!(!output.contains("agent_path"));
+        assert!(!output.contains("/tmp/private-agent"));
+        assert!(!output.contains("{\""));
+    }
+
+    #[test]
+    fn format_for_discord_sanitizes_subagent_after_tui_chrome_strip() {
+        let input = "No response requested.\n<subagent_notification>{\"agent_path\":\"/tmp/private-agent\",\"status\":{\"completed\":\"Read-only review complete.\"}}</subagent_notification>";
+
+        let output = format_for_discord_with_provider(input, &ProviderKind::Codex);
+        assert!(output.contains("Subagent completed"));
+        assert!(output.contains("Read-only review complete."));
+        assert!(!output.contains("No response requested."));
+        assert!(!output.contains("<subagent_notification>"));
+        assert!(!output.contains("agent_path"));
+        assert!(!output.contains("/tmp/private-agent"));
+
+        let status_panel_output = format_for_discord_with_status_panel(input, &ProviderKind::Codex);
+        assert!(status_panel_output.contains("Subagent completed"));
+        assert!(!status_panel_output.contains("<subagent_notification>"));
+        assert!(!status_panel_output.contains("agent_path"));
     }
 
     #[test]
