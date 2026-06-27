@@ -1684,6 +1684,70 @@ pub async fn send_handler(
     (status, Json(json)).into_response()
 }
 
+/// POST /api/discord/bot-tokens/reload — reload announce/notify REST clients.
+///
+/// This only rotates the utility bots backed by `HealthRegistry`
+/// (`credential/announce_bot_token`, `credential/notify_bot_token`). Provider
+/// runtime gateway token caches are `OnceCell`s and still require a dcserver
+/// restart; the response reports that scope explicitly.
+///
+/// See `send_handler` for the rationale on the mandatory
+/// `ConnectInfo<SocketAddr>` extractor and non-loopback Bearer requirement.
+pub async fn reload_discord_bot_tokens_handler(
+    State(state): State<AppState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    if !discord_control_endpoints_allowed(&state.config, Some(peer_addr), &headers) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"ok": false, "error": "auth_token required for non-loopback host"})),
+        )
+            .into_response();
+    }
+
+    let Some(ref registry) = state.health_registry else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"ok": false, "error": "Discord not available (standalone mode)"})),
+        )
+            .into_response();
+    };
+
+    let report = registry.reload_bot_tokens().await;
+    let status = if !report.runtime_root_available {
+        "runtime_root_unavailable"
+    } else if report.any_reloaded {
+        "reloaded"
+    } else if report.announce.previous_client_kept || report.notify.previous_client_kept {
+        "kept_previous_no_valid_credentials"
+    } else {
+        "no_valid_credentials_loaded"
+    };
+    tracing::info!(
+        status,
+        announce = ?report.announce.status,
+        notify = ?report.notify.status,
+        utility_bot_user_ids_invalidated = report.utility_bot_user_ids_invalidated,
+        "operator-triggered Discord utility bot token reload completed"
+    );
+
+    let http_status = if report.runtime_root_available {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        http_status,
+        Json(serde_json::json!({
+            "ok": report.any_reloaded,
+            "status": status,
+            "report": report,
+        })),
+    )
+        .into_response()
+}
+
 /// POST /api/inflight/rebind — #896 orphan recovery endpoint.
 ///
 /// Rebinds a live tmux session to a freshly-created inflight state and
@@ -1806,10 +1870,11 @@ mod tests {
         public_health_json, registry_purge_decision, stale_mailbox_repair_applied,
     };
     use axum::{
-        body::Body,
+        body::{Body, to_bytes},
         http::{HeaderMap, Request, StatusCode, header::AUTHORIZATION},
     };
     use serde_json::json;
+    use std::{path::Path, sync::Arc, sync::MutexGuard};
     use tower::ServiceExt;
 
     fn empty_headers() -> HeaderMap {
@@ -1887,24 +1952,76 @@ mod tests {
     }
 
     fn test_api_router_with_config(config: crate::config::Config) -> axum::Router {
+        test_api_router_with_config_and_registry(config, None)
+    }
+
+    fn test_api_router_with_config_and_registry(
+        config: crate::config::Config,
+        health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+    ) -> axum::Router {
         let mut engine_config = crate::config::Config::default();
         engine_config.policies.hot_reload = false;
         let engine = crate::engine::PolicyEngine::new(&engine_config).unwrap();
         let tx = crate::server::ws::new_broadcast();
         let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
-        crate::server::routes::api_router_with_pg(engine, config, tx, buf, None, None)
+        crate::server::routes::api_router_with_pg(engine, config, tx, buf, health_registry, None)
     }
 
     fn control_request(peer: &str) -> Request<Body> {
+        control_request_for("/discord/send", peer, r#"{"content":"hello"}"#)
+    }
+
+    fn reload_bot_tokens_request(peer: &str) -> Request<Body> {
+        control_request_for("/discord/bot-tokens/reload", peer, "")
+    }
+
+    fn control_request_for(uri: &str, peer: &str, body: &str) -> Request<Body> {
         let mut request = Request::builder()
             .method("POST")
-            .uri("/discord/send")
-            .body(Body::from(r#"{"content":"hello"}"#))
+            .uri(uri)
+            .body(Body::from(body.to_string()))
             .unwrap();
         request.extensions_mut().insert(axum::extract::ConnectInfo(
             peer.parse::<std::net::SocketAddr>().unwrap(),
         ));
         request
+    }
+
+    struct EnvVarGuard {
+        key: String,
+        previous_value: Option<std::ffi::OsString>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &str, path: &Path) -> Self {
+            let lock = crate::config::shared_test_env_lock()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let previous_value = std::env::var_os(key);
+            unsafe { std::env::set_var(key, path) };
+            Self {
+                key: key.to_string(),
+                previous_value,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous_value {
+                Some(value) => unsafe { std::env::set_var(&self.key, value) },
+                None => unsafe { std::env::remove_var(&self.key) },
+            }
+        }
+    }
+
+    fn write_test_bot_token(root: &Path, bot_name: &str, token: &str) {
+        crate::runtime_layout::ensure_credential_layout(root).unwrap();
+        let path = crate::runtime_layout::credential_token_path(root, bot_name);
+        crate::utils::secret_file::write_secret_file(&path, format!("{token}\n"))
+            .expect("write test bot token");
     }
 
     #[tokio::test]
@@ -1980,6 +2097,73 @@ mod tests {
         let response = app.oneshot(control_request("10.0.0.5:8791")).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn discord_bot_token_reload_router_rejects_non_loopback_auth_token_without_bearer() {
+        let mut config = crate::config::Config::default();
+        config.server.host = "0.0.0.0".to_string();
+        config.server.auth_token = Some("secret".to_string());
+        let app = test_api_router_with_config(config);
+
+        let response = app
+            .oneshot(reload_bot_tokens_request("10.0.0.5:8791"))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn discord_bot_token_reload_router_rejects_non_loopback_without_auth_token() {
+        let mut config = crate::config::Config::default();
+        config.server.host = "0.0.0.0".to_string();
+        let app = test_api_router_with_config(config);
+
+        let response = app
+            .oneshot(reload_bot_tokens_request("10.0.0.5:8791"))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn discord_bot_token_reload_router_reports_success_without_exposing_tokens() {
+        let runtime_root = tempfile::tempdir().expect("temp runtime root");
+        let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+        write_test_bot_token(runtime_root.path(), "announce", "announce-token");
+        write_test_bot_token(runtime_root.path(), "notify", "notify-token");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let mut config = crate::config::Config::default();
+            config.server.host = "0.0.0.0".to_string();
+            let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
+            let app = test_api_router_with_config_and_registry(config, Some(registry));
+
+            let response = app
+                .oneshot(reload_bot_tokens_request("127.0.0.1:8791"))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+            assert_eq!(body["ok"], true);
+            assert_eq!(body["status"], "reloaded");
+            assert_eq!(body["report"]["announce"]["status"], "reloaded");
+            assert_eq!(body["report"]["notify"]["status"], "reloaded");
+            assert_eq!(
+                body["report"]["provider_cached_bot_token_scope"],
+                "announce/notify HealthRegistry clients are reloaded; provider runtime SharedData.cached_bot_token is restart-only"
+            );
+            assert!(!String::from_utf8_lossy(&bytes).contains("announce-token"));
+            assert!(!String::from_utf8_lossy(&bytes).contains("notify-token"));
+        });
     }
 
     #[test]
