@@ -1337,10 +1337,11 @@
     relocated the `require_explicit_bearer_token` /
     `resolve_requesting_agent_id_with_pg` auth/identity helpers to
     `crate::services::kanban`).
-  - `src/server/routes/docs.rs` (5956 lines; +40 from #3556 documenting
+  - `src/server/routes/docs.rs` (5997 production lines; +40 from #3556 documenting
     the agent-to-agent turn-trigger handoff endpoint `/api/agents/{id}/handoff`
     paired example + 409 conflict error example + curl; +16 documenting the
-    `expect_reply` reply-expectation param on /message and /handoff).
+    `expect_reply` reply-expectation param on /message and /handoff; +41 from
+    #3750 documenting `/api/discord/bot-tokens/reload`).
   - `src/server/routes/escalation.rs` (1376 lines).
   - `src/server/routes/meetings.rs` (1266 lines; SQL extracted to `src/db/meetings.rs` in #3570 slice 1).
   - `src/server/routes/review_verdict/decision_route.rs` was decomposed in

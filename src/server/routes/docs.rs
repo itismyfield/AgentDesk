@@ -1271,6 +1271,47 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         .with_curl("curl -X POST http://localhost:8787/api/discord/send -H 'Content-Type: application/json' -d '{\"target\":\"channel:1473922824350601297\",\"content\":\"hello\",\"source\":\"system\",\"bot\":\"notify\"}'"),
         ep(
             "POST",
+            "/api/discord/bot-tokens/reload",
+            "discord",
+            "Reload announce/notify Discord utility bot tokens",
+        )
+        .with_example(
+            json!({}),
+            json!({
+                "ok": true,
+                "status": "reloaded",
+                "report": {
+                    "announce": {
+                        "bot": "announce",
+                        "credential": "credential/announce_bot_token",
+                        "status": "reloaded",
+                        "reloaded": true,
+                        "previous_client_kept": false,
+                        "user_id_cache_invalidated": true
+                    },
+                    "notify": {
+                        "bot": "notify",
+                        "credential": "credential/notify_bot_token",
+                        "status": "reloaded",
+                        "reloaded": true,
+                        "previous_client_kept": false,
+                        "user_id_cache_invalidated": true
+                    },
+                    "runtime_root_available": true,
+                    "any_reloaded": true,
+                    "utility_bot_user_ids_invalidated": true,
+                    "provider_cached_bot_token_scope": "announce/notify HealthRegistry clients are reloaded; provider runtime SharedData.cached_bot_token is restart-only"
+                }
+            }),
+        )
+        .with_error_example(
+            403,
+            json!({}),
+            json!({"ok": false, "error": "auth_token required for non-loopback host"}),
+        )
+        .with_curl("curl -X POST http://127.0.0.1:8787/api/discord/bot-tokens/reload"),
+        ep(
+            "POST",
             "/api/discord/send-to-agent",
             "discord",
             "Send a Discord message by agent role_id",

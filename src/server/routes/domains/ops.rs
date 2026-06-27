@@ -30,6 +30,10 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             )
             .route("/discord/send", post(health_api::send_handler))
             .route(
+                "/discord/bot-tokens/reload",
+                post(health_api::reload_discord_bot_tokens_handler),
+            )
+            .route(
                 "/discord/send-to-agent",
                 post(health_api::send_to_agent_handler),
             )

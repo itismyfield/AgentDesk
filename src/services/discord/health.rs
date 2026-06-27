@@ -1,7 +1,11 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::Instant;
 
 use poise::serenity_prelude as serenity;
+use serde::Serialize;
 use serenity::ChannelId;
 
 use super::SharedData;
@@ -77,6 +81,34 @@ pub(super) struct ProviderEntry {
     pub(super) shared: Arc<SharedData>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BotTokenReloadStatus {
+    Reloaded,
+    MissingOrInvalid,
+    RuntimeRootUnavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BotTokenReloadEntry {
+    pub bot: &'static str,
+    pub credential: &'static str,
+    pub status: BotTokenReloadStatus,
+    pub reloaded: bool,
+    pub previous_client_kept: bool,
+    pub user_id_cache_invalidated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BotTokenReloadReport {
+    pub announce: BotTokenReloadEntry,
+    pub notify: BotTokenReloadEntry,
+    pub runtime_root_available: bool,
+    pub any_reloaded: bool,
+    pub utility_bot_user_ids_invalidated: bool,
+    pub provider_cached_bot_token_scope: &'static str,
+}
+
 /// Registry that providers register with so the unified axum API can query all of them.
 /// Also holds Discord HTTP clients for agent-to-agent message routing.
 pub struct HealthRegistry {
@@ -95,13 +127,15 @@ pub struct HealthRegistry {
     /// Dedicated HTTP client for the announce bot (agent-to-agent routing).
     /// This bot's messages are accepted by all agents' allowed_bot_ids.
     announce_http: tokio::sync::Mutex<Option<Arc<serenity::Http>>>,
-    /// Cached Discord user id for the announce bot.
-    announce_user_id: tokio::sync::Mutex<Option<u64>>,
+    /// Cached Discord user id for the announce bot, paired with the token generation.
+    announce_user_id: tokio::sync::Mutex<Option<(u64, u64)>>,
+    announce_token_generation: AtomicU64,
     /// Dedicated HTTP client for the notify bot (info-only notifications).
     /// Agents do NOT process notify bot messages — use for non-actionable alerts.
     notify_http: tokio::sync::Mutex<Option<Arc<serenity::Http>>>,
-    /// Cached Discord user id for the notify bot.
-    notify_user_id: tokio::sync::Mutex<Option<u64>>,
+    /// Cached Discord user id for the notify bot, paired with the token generation.
+    notify_user_id: tokio::sync::Mutex<Option<(u64, u64)>>,
+    notify_token_generation: AtomicU64,
 }
 
 impl HealthRegistry {
@@ -113,8 +147,10 @@ impl HealthRegistry {
             discord_http: tokio::sync::Mutex::new(Vec::new()),
             announce_http: tokio::sync::Mutex::new(None),
             announce_user_id: tokio::sync::Mutex::new(None),
+            announce_token_generation: AtomicU64::new(0),
             notify_http: tokio::sync::Mutex::new(None),
             notify_user_id: tokio::sync::Mutex::new(None),
+            notify_token_generation: AtomicU64::new(0),
         }
     }
 
@@ -328,89 +364,392 @@ impl HealthRegistry {
     /// and the cached user ids are cleared so the next call to
     /// `utility_bot_user_id` re-derives them against the new token.
     ///
-    /// Returns a tuple `(announce_loaded, notify_loaded)` so callers can
-    /// surface a clean status. Tokens that fail [`crate::credential::is_valid_bot_name`]
-    /// or whose credential file is absent leave the corresponding HTTP slot
-    /// untouched (caller can decide whether to treat that as an error).
-    // #3034: operator-triggered token-rotation entry point (#2047 Finding 11);
-    // not yet wired to an HTTP/CLI route. Keep the rotation API live.
-    #[allow(dead_code)]
-    pub async fn reload_bot_tokens(&self) -> (bool, bool) {
+    /// Returns a structured report so operator surfaces can distinguish
+    /// "reloaded", "credential missing/invalid, kept prior client", and
+    /// "runtime root unavailable" without ever exposing token material.
+    pub async fn reload_bot_tokens(&self) -> BotTokenReloadReport {
         self.reload_bot_tokens_inner(true).await
     }
 
-    async fn reload_bot_tokens_inner(&self, rotation: bool) -> (bool, bool) {
-        let mut announce_loaded = false;
-        let mut notify_loaded = false;
-        if super::runtime_store::agentdesk_root().is_some() {
-            for (bot_name, http_field, user_id_field, loaded_flag) in [
-                (
+    async fn reload_bot_tokens_inner(&self, rotation: bool) -> BotTokenReloadReport {
+        let runtime_root_available = super::runtime_store::agentdesk_root().is_some();
+        let (announce, notify) = if runtime_root_available {
+            (
+                self.reload_utility_bot_token(
                     "announce",
+                    "credential/announce_bot_token",
                     &self.announce_http,
                     &self.announce_user_id,
-                    &mut announce_loaded,
-                ),
-                (
+                    &self.announce_token_generation,
+                    rotation,
+                )
+                .await,
+                self.reload_utility_bot_token(
                     "notify",
+                    "credential/notify_bot_token",
                     &self.notify_http,
                     &self.notify_user_id,
-                    &mut notify_loaded,
-                ),
-            ] {
-                if let Some(token) = crate::credential::read_bot_token(bot_name) {
-                    let http = Arc::new(serenity::Http::new(&format!("Bot {token}")));
-                    *http_field.lock().await = Some(http);
-                    // Invalidate the cached user-id so the next utility call
-                    // re-resolves it via the rotated token; otherwise a stale
-                    // id from a revoked bot account could leak into routing.
-                    *user_id_field.lock().await = None;
-                    *loaded_flag = true;
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    let emoji = if bot_name == "announce" {
-                        "📢"
-                    } else {
-                        "🔔"
-                    };
-                    let action = if rotation { "reloaded" } else { "loaded" };
-                    tracing::info!(
-                        "  [{ts}] {emoji} {bot_name} bot {action} for /api/discord/send routing"
-                    );
-                } else if rotation {
-                    tracing::warn!(
-                        bot = bot_name,
-                        "reload_bot_tokens: credential file missing or invalid; keeping previous client"
-                    );
-                }
+                    &self.notify_token_generation,
+                    rotation,
+                )
+                .await,
+            )
+        } else {
+            let announce = self
+                .runtime_root_unavailable_reload_entry(
+                    "announce",
+                    "credential/announce_bot_token",
+                    &self.announce_http,
+                )
+                .await;
+            let notify = self
+                .runtime_root_unavailable_reload_entry(
+                    "notify",
+                    "credential/notify_bot_token",
+                    &self.notify_http,
+                )
+                .await;
+            if rotation {
+                tracing::warn!(
+                    "reload_bot_tokens called before agentdesk runtime root is initialised"
+                );
             }
-        } else if rotation {
-            tracing::warn!("reload_bot_tokens called before agentdesk runtime root is initialised");
+            (announce, notify)
+        };
+
+        BotTokenReloadReport {
+            runtime_root_available,
+            any_reloaded: announce.reloaded || notify.reloaded,
+            utility_bot_user_ids_invalidated: announce.user_id_cache_invalidated
+                || notify.user_id_cache_invalidated,
+            provider_cached_bot_token_scope: "announce/notify HealthRegistry clients are reloaded; provider runtime SharedData.cached_bot_token is restart-only",
+            announce,
+            notify,
         }
-        (announce_loaded, notify_loaded)
+    }
+
+    async fn reload_utility_bot_token(
+        &self,
+        bot_name: &'static str,
+        credential: &'static str,
+        http_field: &tokio::sync::Mutex<Option<Arc<serenity::Http>>>,
+        user_id_field: &tokio::sync::Mutex<Option<(u64, u64)>>,
+        token_generation: &AtomicU64,
+        rotation: bool,
+    ) -> BotTokenReloadEntry {
+        if let Some(token) = crate::credential::read_bot_token(bot_name) {
+            let http = Arc::new(serenity::Http::new(&format!("Bot {token}")));
+            *http_field.lock().await = Some(http);
+            // Invalidate the cached user-id so the next utility call re-resolves
+            // it via the rotated token; otherwise a stale id from a revoked bot
+            // account could leak into routing.
+            let mut user_id = user_id_field.lock().await;
+            *user_id = None;
+            token_generation.fetch_add(1, Ordering::SeqCst);
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            let emoji = if bot_name == "announce" {
+                "📢"
+            } else {
+                "🔔"
+            };
+            let action = if rotation { "reloaded" } else { "loaded" };
+            tracing::info!(
+                "  [{ts}] {emoji} {bot_name} bot {action} for /api/discord/send routing"
+            );
+            return BotTokenReloadEntry {
+                bot: bot_name,
+                credential,
+                status: BotTokenReloadStatus::Reloaded,
+                reloaded: true,
+                previous_client_kept: false,
+                user_id_cache_invalidated: true,
+            };
+        }
+
+        let previous_client_kept = http_field.lock().await.is_some();
+        if rotation {
+            tracing::warn!(
+                bot = bot_name,
+                "reload_bot_tokens: credential file missing or invalid; keeping previous client"
+            );
+        }
+        BotTokenReloadEntry {
+            bot: bot_name,
+            credential,
+            status: BotTokenReloadStatus::MissingOrInvalid,
+            reloaded: false,
+            previous_client_kept,
+            user_id_cache_invalidated: false,
+        }
+    }
+
+    async fn runtime_root_unavailable_reload_entry(
+        &self,
+        bot_name: &'static str,
+        credential: &'static str,
+        http_field: &tokio::sync::Mutex<Option<Arc<serenity::Http>>>,
+    ) -> BotTokenReloadEntry {
+        BotTokenReloadEntry {
+            bot: bot_name,
+            credential,
+            status: BotTokenReloadStatus::RuntimeRootUnavailable,
+            reloaded: false,
+            previous_client_kept: http_field.lock().await.is_some(),
+            user_id_cache_invalidated: false,
+        }
     }
 
     pub async fn utility_bot_user_id(&self, bot_name: &str) -> Option<u64> {
         match bot_name {
             "announce" => {
-                if let Some(id) = *self.announce_user_id.lock().await {
-                    return Some(id);
-                }
-                let http = { self.announce_http.lock().await.clone()? };
-                let user = http.get_current_user().await.ok()?;
-                let id = user.id.get();
-                *self.announce_user_id.lock().await = Some(id);
-                Some(id)
+                Self::utility_bot_user_id_from(
+                    &self.announce_http,
+                    &self.announce_user_id,
+                    &self.announce_token_generation,
+                )
+                .await
             }
             "notify" => {
-                if let Some(id) = *self.notify_user_id.lock().await {
-                    return Some(id);
-                }
-                let http = { self.notify_http.lock().await.clone()? };
-                let user = http.get_current_user().await.ok()?;
-                let id = user.id.get();
-                *self.notify_user_id.lock().await = Some(id);
-                Some(id)
+                Self::utility_bot_user_id_from(
+                    &self.notify_http,
+                    &self.notify_user_id,
+                    &self.notify_token_generation,
+                )
+                .await
             }
             _ => None,
         }
+    }
+
+    async fn utility_bot_user_id_from(
+        http_field: &tokio::sync::Mutex<Option<Arc<serenity::Http>>>,
+        user_id_field: &tokio::sync::Mutex<Option<(u64, u64)>>,
+        token_generation: &AtomicU64,
+    ) -> Option<u64> {
+        for _ in 0..3 {
+            let current_generation = token_generation.load(Ordering::SeqCst);
+            if let Some((id, cached_generation)) = *user_id_field.lock().await
+                && cached_generation == current_generation
+            {
+                return Some(id);
+            }
+            let http = http_field.lock().await.clone()?;
+            let observed_generation = token_generation.load(Ordering::SeqCst);
+            let user = match http.get_current_user().await {
+                Ok(user) => user,
+                Err(_) => {
+                    if Self::utility_bot_http_matches_current(http_field, &http).await {
+                        return None;
+                    }
+                    continue;
+                }
+            };
+            let id = user.id.get();
+            if Self::cache_utility_bot_user_id_if_current(
+                http_field,
+                user_id_field,
+                token_generation,
+                observed_generation,
+                &http,
+                id,
+            )
+            .await
+            {
+                return Some(id);
+            }
+        }
+        None
+    }
+
+    async fn utility_bot_http_matches_current(
+        http_field: &tokio::sync::Mutex<Option<Arc<serenity::Http>>>,
+        expected_http: &Arc<serenity::Http>,
+    ) -> bool {
+        http_field
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, expected_http))
+    }
+
+    async fn cache_utility_bot_user_id_if_current(
+        http_field: &tokio::sync::Mutex<Option<Arc<serenity::Http>>>,
+        user_id_field: &tokio::sync::Mutex<Option<(u64, u64)>>,
+        token_generation: &AtomicU64,
+        expected_generation: u64,
+        expected_http: &Arc<serenity::Http>,
+        id: u64,
+    ) -> bool {
+        if token_generation.load(Ordering::SeqCst) != expected_generation {
+            return false;
+        }
+        if !Self::utility_bot_http_matches_current(http_field, expected_http).await {
+            return false;
+        }
+        let mut cached_user_id = user_id_field.lock().await;
+        if token_generation.load(Ordering::SeqCst) != expected_generation {
+            return false;
+        }
+        if cached_user_id
+            .as_ref()
+            .is_none_or(|(_, cached_generation)| *cached_generation != expected_generation)
+        {
+            *cached_user_id = Some((id, expected_generation));
+        }
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{path::Path, sync::MutexGuard};
+    use tempfile::TempDir;
+
+    struct EnvVarGuard {
+        key: String,
+        previous_value: Option<std::ffi::OsString>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &str, path: &Path) -> Self {
+            let lock = crate::config::shared_test_env_lock()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let previous_value = std::env::var_os(key);
+            unsafe { std::env::set_var(key, path) };
+            Self {
+                key: key.to_string(),
+                previous_value,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous_value {
+                Some(value) => unsafe { std::env::set_var(&self.key, value) },
+                None => unsafe { std::env::remove_var(&self.key) },
+            }
+        }
+    }
+
+    fn write_test_bot_token(root: &Path, bot_name: &str, token: &str) {
+        crate::runtime_layout::ensure_credential_layout(root).unwrap();
+        let path = crate::runtime_layout::credential_token_path(root, bot_name);
+        crate::utils::secret_file::write_secret_file(&path, format!("{token}\n"))
+            .expect("write test bot token");
+    }
+
+    #[test]
+    fn reload_bot_tokens_reports_success_and_invalidates_user_id_cache() {
+        let temp = TempDir::new().expect("temp runtime root");
+        let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        write_test_bot_token(temp.path(), "announce", "announce-token");
+        write_test_bot_token(temp.path(), "notify", "notify-token");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let registry = HealthRegistry::new();
+            *registry.announce_user_id.lock().await = Some((11, 0));
+            *registry.notify_user_id.lock().await = Some((22, 0));
+
+            let report = registry.reload_bot_tokens().await;
+
+            assert!(report.runtime_root_available);
+            assert!(report.any_reloaded);
+            assert!(report.utility_bot_user_ids_invalidated);
+            assert_eq!(report.announce.status, BotTokenReloadStatus::Reloaded);
+            assert!(report.announce.reloaded);
+            assert!(report.announce.user_id_cache_invalidated);
+            assert_eq!(*registry.announce_user_id.lock().await, None);
+            assert_eq!(report.notify.status, BotTokenReloadStatus::Reloaded);
+            assert!(report.notify.reloaded);
+            assert!(report.notify.user_id_cache_invalidated);
+            assert_eq!(*registry.notify_user_id.lock().await, None);
+            assert!(resolve_bot_http(&registry, "announce").await.is_ok());
+            assert!(resolve_bot_http(&registry, "notify").await.is_ok());
+        });
+    }
+
+    #[test]
+    fn reload_bot_tokens_keeps_previous_client_when_credential_is_missing() {
+        let temp = TempDir::new().expect("temp runtime root");
+        let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        write_test_bot_token(temp.path(), "announce", "announce-token");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let registry = HealthRegistry::new();
+            let first = registry.reload_bot_tokens().await;
+            assert_eq!(first.announce.status, BotTokenReloadStatus::Reloaded);
+            assert!(resolve_bot_http(&registry, "announce").await.is_ok());
+
+            std::fs::remove_file(crate::runtime_layout::credential_token_path(
+                temp.path(),
+                "announce",
+            ))
+            .expect("remove announce token");
+            let second = registry.reload_bot_tokens().await;
+
+            assert_eq!(
+                second.announce.status,
+                BotTokenReloadStatus::MissingOrInvalid
+            );
+            assert!(!second.announce.reloaded);
+            assert!(second.announce.previous_client_kept);
+            assert!(resolve_bot_http(&registry, "announce").await.is_ok());
+        });
+    }
+
+    #[tokio::test]
+    async fn utility_bot_user_id_cache_rejects_stale_http_after_reload() {
+        let registry = HealthRegistry::new();
+        let old_http = Arc::new(serenity::Http::new("Bot old-token"));
+        let new_http = Arc::new(serenity::Http::new("Bot new-token"));
+
+        *registry.announce_http.lock().await = Some(old_http.clone());
+        let old_generation = registry.announce_token_generation.load(Ordering::SeqCst);
+        assert!(
+            HealthRegistry::cache_utility_bot_user_id_if_current(
+                &registry.announce_http,
+                &registry.announce_user_id,
+                &registry.announce_token_generation,
+                old_generation,
+                &old_http,
+                11,
+            )
+            .await
+        );
+        assert_eq!(
+            *registry.announce_user_id.lock().await,
+            Some((11, old_generation))
+        );
+
+        registry
+            .announce_token_generation
+            .fetch_add(1, Ordering::SeqCst);
+        *registry.announce_http.lock().await = Some(new_http);
+        *registry.announce_user_id.lock().await = None;
+        assert!(
+            !HealthRegistry::cache_utility_bot_user_id_if_current(
+                &registry.announce_http,
+                &registry.announce_user_id,
+                &registry.announce_token_generation,
+                old_generation,
+                &old_http,
+                22,
+            )
+            .await
+        );
+        assert_eq!(*registry.announce_user_id.lock().await, None);
     }
 }
