@@ -404,6 +404,14 @@
 
 ### Audited touches
 
+- #3739 worker-local loop-owned terminal supervision: `worker_registry` now records
+  unexpected worker-local `LoopOwned` Tokio task return/panic as local runtime
+  status and tracing with `auto_restart=false`. Shutdown remains worker-local:
+  the registry first lets the inner worker observe runtime shutdown and run its
+  own cleanup, only aborting after a bounded grace timeout. This does not move
+  the worker to leader-only ownership, add cross-node routing, or change PG lease
+  assumptions.
+
 - #3698/#3710 `/node` channel picker: Discord command registration now exposes a
   select-menu based node override for intake routing. The override is stored in
   shared bot settings and read only by the existing intake gate/hook path when

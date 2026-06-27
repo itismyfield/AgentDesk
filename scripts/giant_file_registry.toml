@@ -335,6 +335,17 @@ deadline = "2026-08-31"
 decompose_issue = "#3405"
 
 [[entry]]
+# Crossed the 1000-prod-LoC threshold in #3739: worker-local LoopOwned Tokio
+# tasks now have registry-owned terminal supervision for unexpected future
+# return/panic. The file already held the bootstrap worker inventory plus
+# leader-only supervision state; split worker-status/supervision helpers out
+# once the worker registry API stabilizes.
+file = "src/server/worker_registry.rs"
+owner = "server-runtime"
+deadline = "2026-08-31"
+decompose_issue = "#3739"
+
+[[entry]]
 # Crossed the 1000-prod-LoC threshold when #3041 P1-0 landed the dormant
 # `DeliveryLeaseCell` finalizer messages/handlers on top of #3143's
 # `FinalizeContext::monitor()` + monitor turn-key/ledger-generation logic. The
