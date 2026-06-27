@@ -1635,11 +1635,18 @@ pub(crate) async fn refresh_session_heartbeat_by_key_to_unix_nanos_pg(
     let Some(activity_at) = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nanos) else {
         return false;
     };
-    match sqlx::query("UPDATE sessions SET last_heartbeat = $2 WHERE session_key = $1")
-        .bind(session_key)
-        .bind(activity_at)
-        .execute(pool)
-        .await
+    match sqlx::query(
+        "UPDATE sessions
+         SET last_heartbeat = GREATEST(
+             COALESCE(last_heartbeat, TIMESTAMPTZ 'epoch'),
+             $2
+         )
+         WHERE session_key = $1",
+    )
+    .bind(session_key)
+    .bind(activity_at)
+    .execute(pool)
+    .await
     {
         Ok(result) => result.rows_affected() > 0,
         Err(error) => {

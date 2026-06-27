@@ -1013,9 +1013,39 @@ test("timeouts idle-kill module calls kill-tmux API for expired idle sessions", 
   assert.match(state.httpPosts[0].body.reason, /idle 6시간 초과/);
   assert.equal(state.httpPosts[0].body.minimum_idle_minutes, 360);
   const idleSql = state.queries.map((q) => q.sql).join("\n");
-  assert.match(idleSql, /turn_lifecycle_events/);
-  assert.match(idleSql, /GREATEST\(COALESCE\(s\.last_heartbeat, s\.created_at\)/);
+  assert.match(idleSql, /COALESCE\(s\.last_heartbeat, s\.created_at\) AS last_seen_at/);
+  assert.doesNotMatch(idleSql, /turn_lifecycle_events/);
+  assert.doesNotMatch(idleSql, /active_dispatch_id IS NOT NULL/);
   assert.match(state.logs.info.join("\n"), /idle kill: agent-idle-1/);
+});
+
+test("timeouts idle-kill module leaves active-dispatch sessions to dispatch cleanup", () => {
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { server_port: 8791 },
+    dbQuery: createSqlRouter([
+      { match: "SELECT id, name, name_ko, discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx FROM agents", result: [] },
+      { match: "FROM sessions WHERE provider IN ('claude', 'codex', 'qwen') AND (agent_id IS NULL OR TRIM(agent_id) = '')", result: [] },
+      {
+        match(sql) {
+          return sql.includes("WHERE status = 'idle'") &&
+            sql.includes("active_dispatch_id IS NULL") &&
+            sql.includes("INTERVAL '6 hours'");
+        },
+        result: []
+      }
+    ]),
+    httpPost() {
+      throw new Error("active-dispatch idle rows must not call kill-tmux");
+    }
+  });
+
+  policy._section_O();
+
+  assert.equal(state.httpPosts.length, 0);
+  assert.doesNotMatch(
+    state.queries.map((q) => q.sql).join("\n"),
+    /active_dispatch_id IS NOT NULL/
+  );
 });
 
 test("timeouts idle-kill module does not let zombie (already-gone tmux) rows starve live idle sessions (#2861)", () => {

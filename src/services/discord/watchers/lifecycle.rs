@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::discord::watcher_lifecycle_decision::runtime_activity_heartbeat_at;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum LivenessProbeOutcome {
@@ -1432,16 +1433,14 @@ pub(in crate::services::discord) fn refresh_session_heartbeat_from_tmux_output_d
     if let Some(pg_pool) = pg_pool {
         let provider_name = provider.as_str().to_string();
         let thread_channel_id = thread_channel_id.map(|value| value.to_string());
+        let activity_at = runtime_activity_heartbeat_at(tmux_session_name, chrono::Utc::now());
         return crate::utils::async_bridge::block_on_pg_result(
             pg_pool,
             move |pool| async move {
-                let updated = sqlx::query(
-                    "UPDATE sessions
-                     SET last_heartbeat = NOW()
-                     WHERE session_key = $1 OR session_key = $2",
-                )
+                let updated = sqlx::query("UPDATE sessions SET last_heartbeat = GREATEST(COALESCE(last_heartbeat, TIMESTAMPTZ 'epoch'), $3) WHERE session_key = $1 OR session_key = $2")
                 .bind(&session_keys[0])
                 .bind(&session_keys[1])
+                .bind(activity_at)
                 .execute(&pool)
                 .await
                 .map_err(|error| format!("refresh pg watcher heartbeat by session key: {error}"))?
@@ -1459,15 +1458,10 @@ pub(in crate::services::discord) fn refresh_session_heartbeat_from_tmux_output_d
                         rows_affected: 0,
                     });
                 };
-                let updated = sqlx::query(
-                    "UPDATE sessions
-                     SET last_heartbeat = NOW()
-                     WHERE provider = $1
-                       AND thread_channel_id = $2
-                       AND status IN ('idle', 'working')",
-                )
+                let updated = sqlx::query("UPDATE sessions SET last_heartbeat = GREATEST(COALESCE(last_heartbeat, TIMESTAMPTZ 'epoch'), $3) WHERE provider = $1 AND thread_channel_id = $2 AND status IN ('idle', 'working')")
                 .bind(&provider_name)
                 .bind(&thread_channel_id)
+                .bind(activity_at)
                 .execute(&pool)
                 .await
                 .map_err(|error| {

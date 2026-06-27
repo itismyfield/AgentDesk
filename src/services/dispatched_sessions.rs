@@ -1241,6 +1241,7 @@ async fn kill_tmux_session_impl(
                     &target,
                     session_key,
                     reason,
+                    minimum_idle_minutes,
                 )
                 .await;
             }
@@ -1255,6 +1256,47 @@ async fn kill_tmux_session_impl(
     let effective_provider_name = provider_name.or(session_provider.as_deref());
 
     let tmux_was_alive = crate::services::platform::tmux::has_session(&tmux_name);
+    let reason_is_idle_cleanup = reason_is_idle_cleanup_reason(reason);
+    let mut idle_decision_last_seen_nanos = None;
+    let mut idle_decision_runtime_activity_nanos = None;
+    let mut idle_decision_runtime_activity_age_minutes = None;
+
+    if should_skip_idle_cleanup_for_active_dispatch(active_dispatch_id.as_deref(), reason) {
+        let last_seen_nanos =
+            dispatched_sessions_db::session_last_seen_unix_nanos_pg(pool, session_key)
+                .await
+                .unwrap_or(0);
+        let runtime_activity_nanos = latest_runtime_activity_unix_nanos(&tmux_name);
+        let runtime_activity_age_minutes =
+            runtime_activity_age_minutes(runtime_activity_nanos, now_unix_nanos());
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            session_key,
+            tmux_session = %tmux_name,
+            active_dispatch_id = ?active_dispatch_id,
+            last_seen_unix_nanos = last_seen_nanos,
+            runtime_activity_unix_nanos = runtime_activity_nanos,
+            runtime_activity_age_minutes,
+            minimum_idle_minutes,
+            reason,
+            decision = "skip_active_dispatch",
+            "  [{ts}] 🛡 kill-tmux: SKIPPED idle cleanup — active dispatch is still attached, dispatch cleanup owns this session (#3718).",
+        );
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "tmux_killed": false,
+                "tmux_was_alive": tmux_was_alive,
+                "tmux_session_name": tmux_name,
+                "session_row_preserved": true,
+                "skipped_active_dispatch_guard": true,
+                "runtime_activity_age_minutes": runtime_activity_age_minutes,
+                "minimum_idle_minutes": minimum_idle_minutes,
+                "active_dispatch_id": active_dispatch_id,
+            })),
+        );
+    }
 
     // #3053: live-activity guard. idle-kill selects on COALESCE(last_heartbeat,
     // created_at); if the matching heartbeat path silently missed this row,
@@ -1265,25 +1307,24 @@ async fn kill_tmux_session_impl(
     // refresh the heartbeat and SKIP the kill so the next idle-kill tick no
     // longer selects it. Forced/explicit reasons are not affected — this guard
     // only fires for the idle-cleanup reason shape and a live tmux.
-    let reason_is_idle_cleanup = reason.contains("idle") || reason.contains("자동 정리");
     if tmux_was_alive && reason_is_idle_cleanup && active_dispatch_id.is_none() {
         let last_seen_nanos =
             dispatched_sessions_db::session_last_seen_unix_nanos_pg(pool, session_key)
                 .await
                 .unwrap_or(0);
         let runtime_activity_nanos = latest_runtime_activity_unix_nanos(&tmux_name);
+        let now_nanos = now_unix_nanos();
         let runtime_activity_age_minutes =
-            runtime_activity_age_minutes(runtime_activity_nanos, now_unix_nanos());
-        let runtime_activity_still_within_idle_threshold =
-            match (runtime_activity_age_minutes, minimum_idle_minutes) {
-                (Some(age), Some(threshold)) => age < threshold,
-                (Some(_), None) => true,
-                _ => false,
-            };
-        if runtime_activity_nanos > 0
-            && runtime_activity_nanos > last_seen_nanos
-            && runtime_activity_still_within_idle_threshold
-        {
+            runtime_activity_age_minutes(runtime_activity_nanos, now_nanos);
+        idle_decision_last_seen_nanos = Some(last_seen_nanos);
+        idle_decision_runtime_activity_nanos = Some(runtime_activity_nanos);
+        idle_decision_runtime_activity_age_minutes = runtime_activity_age_minutes;
+        if should_skip_idle_kill_for_live_runtime_activity(
+            last_seen_nanos,
+            runtime_activity_nanos,
+            now_nanos,
+            minimum_idle_minutes,
+        ) {
             let refreshed =
                 dispatched_sessions_db::refresh_session_heartbeat_by_key_to_unix_nanos_pg(
                     pool,
@@ -1300,6 +1341,8 @@ async fn kill_tmux_session_impl(
                 runtime_activity_age_minutes,
                 minimum_idle_minutes,
                 heartbeat_refreshed = refreshed,
+                reason,
+                decision = "skip_live_output",
                 "  [{ts}] 🛡 kill-tmux: SKIPPED idle kill — runtime activity newer than last_heartbeat and still within idle threshold, session is live (#3053). Heartbeat refreshed to runtime activity.",
             );
             return (
@@ -1414,6 +1457,38 @@ async fn kill_tmux_session_impl(
         );
     }
 
+    if reason_is_idle_cleanup {
+        if idle_decision_last_seen_nanos.is_none() {
+            idle_decision_last_seen_nanos = Some(
+                dispatched_sessions_db::session_last_seen_unix_nanos_pg(pool, session_key)
+                    .await
+                    .unwrap_or(0),
+            );
+        }
+        if idle_decision_runtime_activity_nanos.is_none() {
+            let runtime_activity_nanos = latest_runtime_activity_unix_nanos(&tmux_name);
+            idle_decision_runtime_activity_nanos = Some(runtime_activity_nanos);
+            idle_decision_runtime_activity_age_minutes =
+                runtime_activity_age_minutes(runtime_activity_nanos, now_unix_nanos());
+        }
+        tracing::info!(
+            session_key,
+            tmux_session = %tmux_name,
+            tmux_killed,
+            tmux_was_alive,
+            session_row_disconnected,
+            resumable,
+            active_dispatch_id = ?active_dispatch_id,
+            last_seen_unix_nanos = idle_decision_last_seen_nanos,
+            runtime_activity_unix_nanos = idle_decision_runtime_activity_nanos,
+            runtime_activity_age_minutes = idle_decision_runtime_activity_age_minutes,
+            minimum_idle_minutes,
+            reason,
+            decision = "kill_idle",
+            "kill-tmux: idle cleanup decision (#3718)"
+        );
+    }
+
     (
         StatusCode::OK,
         Json(json!({
@@ -1429,6 +1504,10 @@ async fn kill_tmux_session_impl(
     )
 }
 
+fn reason_is_idle_cleanup_reason(reason: &str) -> bool {
+    reason.contains("idle") || reason.contains("자동 정리")
+}
+
 fn runtime_activity_age_minutes(runtime_activity_nanos: i64, now_nanos: i64) -> Option<u64> {
     if runtime_activity_nanos <= 0 {
         return None;
@@ -1439,11 +1518,38 @@ fn runtime_activity_age_minutes(runtime_activity_nanos: i64, now_nanos: i64) -> 
     Some(((now_nanos - runtime_activity_nanos) / 60_000_000_000) as u64)
 }
 
+fn should_skip_idle_kill_for_live_runtime_activity(
+    last_seen_nanos: i64,
+    runtime_activity_nanos: i64,
+    now_nanos: i64,
+    minimum_idle_minutes: Option<u64>,
+) -> bool {
+    if runtime_activity_nanos <= 0 || runtime_activity_nanos <= last_seen_nanos {
+        return false;
+    }
+    match (
+        runtime_activity_age_minutes(runtime_activity_nanos, now_nanos),
+        minimum_idle_minutes,
+    ) {
+        (Some(age), Some(threshold)) => age < threshold,
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
+fn should_skip_idle_cleanup_for_active_dispatch(
+    active_dispatch_id: Option<&str>,
+    reason: &str,
+) -> bool {
+    active_dispatch_id.is_some() && reason_is_idle_cleanup_reason(reason)
+}
+
 #[cfg(test)]
 mod kill_tmux_resume_tests {
     use super::{
         latest_runtime_activity_unix_nanos, provider_resume_selector_is_effective_with_claude_home,
-        runtime_activity_age_minutes,
+        runtime_activity_age_minutes, should_skip_idle_cleanup_for_active_dispatch,
+        should_skip_idle_kill_for_live_runtime_activity,
     };
     use crate::db::dispatched_sessions::ProviderSessionIds;
 
@@ -1508,6 +1614,56 @@ mod kill_tmux_resume_tests {
             runtime_activity_age_minutes(465 * minute, 465 * minute),
             Some(0)
         );
+    }
+
+    #[test]
+    fn idle_kill_guard_uses_runtime_output_age_not_turn_age() {
+        let minute = 60_000_000_000i64;
+        let now = 1_000 * minute;
+        let old_db_last_seen = 10 * minute;
+        let recent_runtime_output = now - 5 * minute;
+        let stale_runtime_output = now - 400 * minute;
+
+        assert!(should_skip_idle_kill_for_live_runtime_activity(
+            old_db_last_seen,
+            recent_runtime_output,
+            now,
+            Some(360),
+        ));
+        assert!(!should_skip_idle_kill_for_live_runtime_activity(
+            old_db_last_seen,
+            stale_runtime_output,
+            now,
+            Some(360),
+        ));
+        assert!(!should_skip_idle_kill_for_live_runtime_activity(
+            recent_runtime_output,
+            recent_runtime_output,
+            now,
+            Some(360),
+        ));
+        assert!(!should_skip_idle_kill_for_live_runtime_activity(
+            old_db_last_seen,
+            0,
+            now,
+            Some(360),
+        ));
+    }
+
+    #[test]
+    fn idle_cleanup_reason_does_not_kill_active_dispatch_tmux() {
+        assert!(should_skip_idle_cleanup_for_active_dispatch(
+            Some("dispatch-123"),
+            "idle 24시간 초과 — 자동 정리",
+        ));
+        assert!(!should_skip_idle_cleanup_for_active_dispatch(
+            Some("dispatch-123"),
+            "operator requested tmux reset",
+        ));
+        assert!(!should_skip_idle_cleanup_for_active_dispatch(
+            None,
+            "idle 24시간 초과 — 자동 정리",
+        ));
     }
 
     #[test]

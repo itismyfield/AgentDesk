@@ -56,22 +56,8 @@ module.exports = function attachIdleKill(timeouts, helpers) {
       var mainChannelSqlGuard =
         "AND thread_channel_id IS NULL " +
         "AND session_key !~ '-t[0-9]{15,}(-dev)?$' ";
-      var recentLifecycleWindowExpr = "NOW() - INTERVAL '24 hours'";
-      var latestChannelLifecycleAtExpr =
-        "(SELECT tle_channel.created_at FROM turn_lifecycle_events tle_channel " +
-        "WHERE NULLIF(BTRIM(COALESCE(s.channel_id, '')), '') IS NOT NULL " +
-        "AND tle_channel.channel_id = s.channel_id " +
-        "AND tle_channel.created_at >= " + recentLifecycleWindowExpr + " " +
-        "ORDER BY tle_channel.created_at DESC LIMIT 1)";
-      var latestSessionLifecycleAtExpr =
-        "(SELECT tle_session.created_at FROM turn_lifecycle_events tle_session " +
-        "WHERE tle_session.session_key = s.session_key " +
-        "AND tle_session.created_at >= " + recentLifecycleWindowExpr + " " +
-        "ORDER BY tle_session.created_at DESC LIMIT 1)";
       var effectiveLastSeenJoin =
-        "CROSS JOIN LATERAL (SELECT GREATEST(COALESCE(s.last_heartbeat, s.created_at), " +
-        "COALESCE(" + latestChannelLifecycleAtExpr + ", TIMESTAMPTZ 'epoch'), " +
-        "COALESCE(" + latestSessionLifecycleAtExpr + ", TIMESTAMPTZ 'epoch')) AS last_seen_at) latest ";
+        "CROSS JOIN LATERAL (SELECT COALESCE(s.last_heartbeat, s.created_at) AS last_seen_at) latest ";
       var idleSessions = agentdesk.db.query(
         "SELECT s.session_key, s.agent_id, s.provider, s.active_dispatch_id, s.thread_channel_id, latest.last_seen_at " +
         "FROM sessions s " +
@@ -83,17 +69,6 @@ module.exports = function attachIdleKill(timeouts, helpers) {
         "AND latest.last_seen_at < NOW() - INTERVAL '6 hours' " +
         "ORDER BY latest.last_seen_at ASC LIMIT 50"
       );
-      var safetySessions = agentdesk.db.query(
-        "SELECT s.session_key, s.agent_id, s.provider, s.active_dispatch_id, s.thread_channel_id, latest.last_seen_at " +
-        "FROM sessions s " +
-        effectiveLastSeenJoin +
-        "WHERE status = 'idle' " +
-        "AND provider IN ('claude', 'codex', 'qwen') " +
-        "AND active_dispatch_id IS NOT NULL " +
-        mainChannelSqlGuard +
-        "AND latest.last_seen_at < NOW() - INTERVAL '24 hours' " +
-        "ORDER BY latest.last_seen_at ASC LIMIT 50"
-      );
 
       // Defense-in-depth: client-side filter catches anything the SQL guard
       // missed (e.g. helper logic evolves with new session_key shapes).
@@ -102,7 +77,6 @@ module.exports = function attachIdleKill(timeouts, helpers) {
           && !parseSessionThreadId(s.session_key, s.provider);
       }
       idleSessions = idleSessions.filter(isMainChannelSession);
-      safetySessions = safetySessions.filter(isMainChannelSession);
 
       function formatIdleDuration(idleMin) {
         if (idleMin >= 60 * 24) {
@@ -175,6 +149,14 @@ module.exports = function attachIdleKill(timeouts, helpers) {
             continue;
           }
 
+          if (killResp.skipped_active_dispatch_guard) {
+            agentdesk.log.warn(
+              "[idle-kill] kill-tmux refused active-dispatch session for " + s.session_key +
+              " (not counted toward budget; dispatch cleanup owns this case)"
+            );
+            continue;
+          }
+
           if (!killResp.tmux_killed) {
             // tmux WAS alive but `tmux kill-session` failed — a genuine failure,
             // not a zombie. Count it toward the budget so a stuck-but-live
@@ -199,7 +181,6 @@ module.exports = function attachIdleKill(timeouts, helpers) {
         }
       }
 
-      killTmuxIdleSessions(safetySessions, 1440, "idle 24시간 경과 (safety TTL)", 2);
       killTmuxIdleSessions(idleSessions, 360, "idle 6시간 경과 (active_dispatch_id 없음)", 3);
     };
 };
