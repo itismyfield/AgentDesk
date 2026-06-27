@@ -6,6 +6,7 @@ use super::settings::{
     load_last_remote_profile, load_last_session_path, resolve_role_binding,
     validate_bot_channel_routing_with_provider_channel,
 };
+use super::single_message_panel as smp;
 use super::turn_bridge::stale_inflight_message;
 use super::*;
 use crate::db::turns::TurnTokenUsage;
@@ -321,10 +322,6 @@ fn should_advance_recovery_dispatch_after_relay(relay_ok: bool) -> bool {
     relay_ok
 }
 
-fn forget_completion_footer_for_recovery_takeover(channel_id: ChannelId) {
-    super::single_message_panel::completion_footer_forget_registered_target(channel_id);
-}
-
 async fn relay_recovery_terminal_notice(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -357,7 +354,9 @@ pub(in crate::services::discord) async fn relay_recovered_terminal_text_to_place
     placeholder: Option<MessageId>,
     text: &str,
 ) -> RecoveryRelayOutcome {
-    forget_completion_footer_for_recovery_takeover(channel_id);
+    if let Some(placeholder) = placeholder {
+        smp::completion_footer_forget_registered_target_if_message(channel_id, placeholder);
+    }
     let delivery = match placeholder {
         Some(placeholder) => {
             use super::recovery_paths::controller_cutover as cc;
@@ -703,7 +702,11 @@ mod recovery_completion_outcome_tests {
             true,
         );
 
-        super::forget_completion_footer_for_recovery_takeover(channel_id);
+        assert!(
+            super::super::single_message_panel::completion_footer_forget_registered_target_if_message(
+            channel_id,
+            MessageId::new(3_089_301),
+        ));
 
         assert_eq!(
             super::super::single_message_panel::completion_footer_edit_for_registered_target_at(
@@ -714,6 +717,39 @@ mod recovery_completion_outcome_tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn recovery_takeover_keeps_different_completion_footer_target() {
+        let channel_id = ChannelId::new(3_089_211);
+        let shared = super::super::make_shared_data_for_tests();
+        super::super::single_message_panel::completion_footer_forget_registered_target(channel_id);
+        let _ = super::super::single_message_panel::register_completion_footer_target(
+            channel_id,
+            MessageId::new(3_089_311),
+            &ProviderKind::Claude,
+            1_800_000_000,
+            "Final answer",
+            None,
+            true,
+        );
+
+        assert!(
+            !super::super::single_message_panel::completion_footer_forget_registered_target_if_message(
+            channel_id,
+            MessageId::new(3_089_312),
+        ));
+
+        assert!(
+            super::super::single_message_panel::completion_footer_edit_for_registered_target_at(
+                shared.as_ref(),
+                channel_id,
+                "⠸",
+                1_800_000_005,
+            )
+            .is_some()
+        );
+        super::super::single_message_panel::completion_footer_forget_registered_target(channel_id);
     }
 }
 
@@ -3719,7 +3755,12 @@ pub(crate) async fn rebind_inflight_for_channel(
         }
         state
     };
-    forget_completion_footer_for_recovery_takeover(discord_channel_id);
+    if let Some(current_msg_id) = optional_message_id(recovered_state_for_session.current_msg_id) {
+        smp::completion_footer_forget_registered_target_if_message(
+            discord_channel_id,
+            current_msg_id,
+        );
+    }
 
     // Register / refresh the in-memory session so downstream handlers can
     // locate this channel after the rebind.

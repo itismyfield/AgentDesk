@@ -191,9 +191,8 @@
   processes a batch, `src/server/routes/dispatches/outbox.rs:654` relies on the
   Discord delivery reservation guard, and `src/server/routes/dispatches/outbox.rs:719`
   applies retry/permanent-failure state.
-- legacy_modules: SQLite test-only fallback paths in
-  `src/server/routes/dispatches/outbox.rs` remain behind
-  `legacy-sqlite-tests`.
+- legacy_modules: removed SQLite-only fallback paths are historical context;
+  current `src/server/routes/dispatches/outbox.rs` behavior is PostgreSQL-first.
 - do_not_edit_without_migration_plan:
   `src/server/routes/dispatches/outbox.rs` claim, notify, followup, status
   reaction, retry, and failure paths.
@@ -403,6 +402,14 @@
   before merging.
 
 ### Audited touches
+
+- #3739 worker-local loop-owned terminal supervision: `worker_registry` now records
+  unexpected worker-local `LoopOwned` Tokio task return/panic as local runtime
+  status and tracing with `auto_restart=false`. Shutdown remains worker-local:
+  the registry first lets the inner worker observe runtime shutdown and run its
+  own cleanup, only aborting after a bounded grace timeout. This does not move
+  the worker to leader-only ownership, add cross-node routing, or change PG lease
+  assumptions.
 
 - #3698/#3710 `/node` channel picker: Discord command registration now exposes a
   select-menu based node override for intake routing. The override is stored in

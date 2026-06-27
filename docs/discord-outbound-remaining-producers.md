@@ -21,7 +21,7 @@ Discord summaries to direct v3 envelopes.
   `OutboundOperation::Edit` where applicable.
 - `routines::discord_log`: routine summary send/edit uses direct v3 envelopes
   with idempotency disabled for repeated summary writes.
-- `message_outbox`: PG and sqlite drains pass row metadata into `/api/discord/send` as
+- `message_outbox`: PG drains pass row metadata into `/api/discord/send` as
   a `ManualOutboundDeliveryId`, so the shared send contract sees the source,
   reason/session correlation, and row semantic event instead of anonymous
   manual delivery.

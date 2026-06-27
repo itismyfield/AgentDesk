@@ -100,9 +100,8 @@ pub(in crate::services::discord) fn task_notification_closes_background_child(
 ///
 /// The existing exhaustive-status coverage lives in
 /// `tests::task_notification_kind_resets_after_terminal_status` but that
-/// module is feature-gated on `legacy-sqlite-tests`; this lighter copy is
-/// added in the non-gated mod so the regression is observable in normal
-/// `cargo test` runs.
+/// module depends on heavier fixtures; this lighter copy is added in the
+/// non-gated mod so the regression is observable in normal `cargo test` runs.
 #[cfg(test)]
 mod task_notification_kind_lifecycle_tests {
     use super::{

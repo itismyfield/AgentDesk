@@ -970,8 +970,8 @@ fn kv_key(job_name: &str, field: &str) -> String {
 }
 
 /// Registry-membership assertion (#2362 / #2164 Voice A). Lives outside
-/// the `legacy-sqlite-tests` gate so the production scheduler is checked
-/// in the normal test path.
+/// the removed SQLite-only gate so the production scheduler is checked in the
+/// normal test path.
 #[cfg(test)]
 mod registry_membership_tests {
     use super::*;

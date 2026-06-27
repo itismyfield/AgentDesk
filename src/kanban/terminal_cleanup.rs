@@ -27,7 +27,8 @@ pub(super) fn sync_terminal_transition_followups(db: &Db, card_id: &str) {
     sync_terminal_card_state_with_scope(db, card_id, false);
 }
 
-// reason: scoped impl of the terminal-cleanup sync (sqlite/non-sqlite cfg arms); callers are cfg/test-gated. See #3034.
+// reason: disabled DB compatibility entrypoint for retired terminal-cleanup sync
+// callers. See #3034 / #3035.
 #[allow(dead_code)]
 fn sync_terminal_card_state_with_scope(db: &Db, card_id: &str, cancel_implementation: bool) {
     {

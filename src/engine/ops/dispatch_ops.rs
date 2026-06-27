@@ -1,4 +1,3 @@
-use crate::db::Db;
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use serde_json::json;
 use sqlx::PgPool;
@@ -10,14 +9,11 @@ use sqlx::PgPool;
 // Discord notification is handled by posting to the local /api/discord/send endpoint.
 
 pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> JsResult<()> {
-    let db: Option<Db> = None;
-
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let dispatch_obj = Object::new(ctx.clone())?;
 
     // #248: __dispatch_create_raw(card_id, agent_id, dispatch_type, title, context_json)
     // -> json_string. Synchronous PG INSERT — no deferred intent.
-    let db_create = db.clone();
     let pg_create = pg_pool.clone();
     dispatch_obj.set(
         "__create_raw",
@@ -30,8 +26,7 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>
                       title: String,
                       context_json: String|
                       -> String {
-                    dispatch_create_raw(
-                        db_create.as_ref(),
+                    dispatch_create_raw_pg_optional(
                         pg_create.as_ref(),
                         &card_id,
                         &agent_id,
@@ -46,7 +41,6 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>
 
     // __mark_failed_raw(dispatch_id, reason) → json_string
     // Marks a dispatch as failed. Used by timeout handlers.
-    let db_mf = db.clone();
     let pg_mf = pg_pool.clone();
     dispatch_obj.set(
         "__mark_failed_raw",
@@ -64,17 +58,6 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>
                         false,
                     );
                 }
-                if let Some(db) = db_mf.as_ref() {
-                    let reason_json = json!({ "reason": reason });
-                    return dispatch_set_status_raw_sqlite_test(
-                        db,
-                        &dispatch_id,
-                        "failed",
-                        Some(reason_json),
-                        "js_dispatch_mark_failed_raw",
-                        false,
-                    );
-                }
                 r#"{"error":"backend unavailable for dispatch.markFailed"}"#.to_string()
             },
         )?,
@@ -82,7 +65,6 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>
 
     // __mark_completed_raw(dispatch_id, result_json) → json_string
     // Marks a dispatch as completed. Used by orphan recovery.
-    let db_mc = db.clone();
     let pg_mc = pg_pool.clone();
     dispatch_obj.set(
         "__mark_completed_raw",
@@ -101,18 +83,6 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>
                         true,
                     );
                 }
-                if let Some(db) = db_mc.as_ref() {
-                    let parsed_result = serde_json::from_str::<serde_json::Value>(&result_json)
-                        .unwrap_or_else(|_| serde_json::json!({ "raw_result": result_json }));
-                    return dispatch_set_status_raw_sqlite_test(
-                        db,
-                        &dispatch_id,
-                        "completed",
-                        Some(parsed_result),
-                        "js_dispatch_mark_completed_raw",
-                        true,
-                    );
-                }
                 r#"{"error":"backend unavailable for dispatch.markCompleted"}"#.to_string()
             },
         )?,
@@ -120,7 +90,6 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>
 
     // __has_active_work_raw(card_id) → json_string {"count":N}
     // Checks if a card has active implementation/rework dispatches.
-    let db_aw = db.clone();
     let pg_aw = pg_pool.clone();
     dispatch_obj.set(
         "__has_active_work_raw",
@@ -128,16 +97,12 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>
             if let Some(pool) = pg_aw.as_ref() {
                 return dispatch_has_active_work_raw_pg(pool, &card_id);
             }
-            if let Some(db) = db_aw.as_ref() {
-                return dispatch_has_active_work_raw_sqlite_test(db, &card_id);
-            }
             r#"{"error":"backend unavailable for dispatch.hasActiveWork"}"#.to_string()
         })?,
     )?;
 
     // __set_retry_count_raw(dispatch_id, count) → json_string
     // Updates retry_count for auto-retry tracking.
-    let db_rc = db;
     let pg_rc = pg_pool;
     dispatch_obj.set(
         "__set_retry_count_raw",
@@ -146,9 +111,6 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>
             move |dispatch_id: String, count: i32| -> String {
                 if let Some(pool) = pg_rc.as_ref() {
                     return dispatch_set_retry_count_raw_pg(pool, &dispatch_id, count);
-                }
-                if let Some(db) = db_rc.as_ref() {
-                    return dispatch_set_retry_count_raw_sqlite_test(db, &dispatch_id, count);
                 }
                 r#"{"error":"backend unavailable for dispatch.setRetryCount"}"#.to_string()
             },
@@ -311,8 +273,7 @@ fn dispatch_create_raw_pg(
     }
 }
 
-fn dispatch_create_raw(
-    db: Option<&Db>,
+fn dispatch_create_raw_pg_optional(
     pg_pool: Option<&PgPool>,
     card_id: &str,
     agent_id: &str,
@@ -323,28 +284,7 @@ fn dispatch_create_raw(
     if let Some(pool) = pg_pool {
         return dispatch_create_raw_pg(pool, card_id, agent_id, dispatch_type, title, context_json);
     }
-    if let Some(db) = db {
-        return dispatch_create_raw_sqlite_test(
-            db,
-            card_id,
-            agent_id,
-            dispatch_type,
-            title,
-            context_json,
-        );
-    }
     r#"{"error":"backend unavailable for dispatch.create in JS hook"}"#.to_string()
-}
-
-fn dispatch_create_raw_sqlite_test(
-    _db: &Db,
-    _card_id: &str,
-    _agent_id: &str,
-    _dispatch_type: &str,
-    _title: &str,
-    _context_json: &str,
-) -> String {
-    r#"{"error":"sqlite backend is unavailable for dispatch.create in production"}"#.to_string()
 }
 
 fn dispatch_has_active_work_raw_pg(pool: &PgPool, card_id: &str) -> String {
@@ -371,11 +311,6 @@ fn dispatch_has_active_work_raw_pg(pool: &PgPool, card_id: &str) -> String {
     }
 }
 
-fn dispatch_has_active_work_raw_sqlite_test(_db: &Db, _card_id: &str) -> String {
-    r#"{"error":"sqlite backend is unavailable for dispatch.hasActiveWork in production"}"#
-        .to_string()
-}
-
 fn dispatch_set_retry_count_raw_pg(pool: &PgPool, dispatch_id: &str, count: i32) -> String {
     let dispatch_id = dispatch_id.to_string();
     match crate::utils::async_bridge::block_on_pg_result(
@@ -396,11 +331,6 @@ fn dispatch_set_retry_count_raw_pg(pool: &PgPool, dispatch_id: &str, count: i32)
         Ok(rows_affected) => format!(r#"{{"ok":true,"rows_affected":{rows_affected}}}"#),
         Err(raw) => crate::engine::ops::ensure_js_error_json(raw),
     }
-}
-
-fn dispatch_set_retry_count_raw_sqlite_test(_db: &Db, _dispatch_id: &str, _count: i32) -> String {
-    r#"{"error":"sqlite backend is unavailable for dispatch.setRetryCount in production"}"#
-        .to_string()
 }
 
 // #2045 Finding 3 (P0): JS-bridge mark_failed/mark_completed used to run an ad-hoc
@@ -432,16 +362,4 @@ fn dispatch_set_status_raw_pg(
         Ok(rows_affected) => format!(r#"{{"ok":true,"rows_affected":{rows_affected}}}"#),
         Err(error) => crate::engine::ops::ensure_js_error_json(error.to_string()),
     }
-}
-
-fn dispatch_set_status_raw_sqlite_test(
-    _db: &Db,
-    _dispatch_id: &str,
-    _to_status: &str,
-    _result: Option<serde_json::Value>,
-    _transition_source: &str,
-    _touch_completed_at: bool,
-) -> String {
-    r#"{"error":"sqlite backend is unavailable for dispatch status updates in production"}"#
-        .to_string()
 }

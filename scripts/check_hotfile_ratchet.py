@@ -30,8 +30,30 @@ on any missing required entry.
 from __future__ import annotations
 
 import sys
-import tomllib
 from pathlib import Path
+
+MIN_PYTHON = (3, 11)
+
+# Keep this before importing tomllib so unsupported interpreters fail with the
+# repository policy message instead of a raw ModuleNotFoundError.
+if sys.version_info < MIN_PYTHON:
+    version = (
+        f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    )
+    print(
+        "ERROR: scripts/check_hotfile_ratchet.py requires Python 3.11+ "
+        "for stdlib tomllib; "
+        f"{sys.executable} is Python {version}.",
+        file=sys.stderr,
+    )
+    print(
+        "Run with python3.11+ or set PYTHON=/path/to/python3.11+ when using "
+        "scripts/ci-script-checks.sh.",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+import tomllib
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = REPO_ROOT / "scripts" / "hotfile_ratchet.toml"

@@ -100,7 +100,7 @@ incident review identifies corrupt rows and provides exact dispatch ids.
 Run local verification before deploy:
 
 ```bash
-cargo test -p agentdesk --features legacy-sqlite-tests \
+cargo test -p agentdesk \
   services::dispatches::discord_delivery::guard::tests::duplicate_delivery_replay_returns_prior_message_metadata_without_resend \
   services::dispatches::discord_delivery::guard::tests::expired_reserved_delivery_recovers_with_new_attempt_and_single_transport_send
 

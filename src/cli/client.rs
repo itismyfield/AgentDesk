@@ -2471,7 +2471,7 @@ pub fn cmd_terminations(
 mod health_compare_tests {
     //! Unit tests for `cmd_health` / `cmd_machine_compare` helpers (issue
     //! #2656). These intentionally avoid touching the live HTTP API or
-    //! `legacy-sqlite-tests` feature so they run in the default test profile.
+    //! the removed SQLite-only feature so they run in the default test profile.
 
     use super::*;
     use serde_json::json;

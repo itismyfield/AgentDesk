@@ -66,10 +66,15 @@
 # `inflight_relay_owner` (lifted the owner-string into a `let` so both fields can
 # emit it). Tracing fields only, no control-flow change.
 "src/services/discord/tmux_watcher.rs" = 10230
-"src/services/discord/tui_prompt_relay.rs" = 7789
+# #3715: 7789 -> 4007 by moving the inline `#[cfg(test)] mod tests` body into
+# `tui_prompt_relay/tests.rs` and the Codex idle rollout tail/rebind loop into
+# `tui_prompt_relay/codex_idle_rollout.rs`; no production behavior change.
+"src/services/discord/tui_prompt_relay.rs" = 4007
 # #3560: 6612 -> 6621 (+9), reviewable admission — footer-mode separate-panel
 # migration reconcile call + comment at the resume entry. Helper body lives in
 # turn_bridge/status_panel.rs; this is the minimal call-site cost.
 # #3607: 6644 -> 6664 (+20), TimedOut+committed terminal-UI obligation hook;
 # durable sidecar + sweeper body lives in terminal_ui_obligation.rs.
-"src/services/discord/turn_bridge/mod.rs" = 6664 # #3607 terminal-UI obligation hook
+# #3715: 6664 -> 6661, lock in the existing shrink reported by the raw-LOC
+# ratchet while restoring main CI script checks.
+"src/services/discord/turn_bridge/mod.rs" = 6661 # #3607 terminal-UI obligation hook

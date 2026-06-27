@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sqlx::Connection;
 use sqlx::migrate::Migrator;
@@ -17,6 +18,10 @@ const DEFAULT_PG_ACQUIRE_TIMEOUT_SECS: u64 = 3;
 const STARTUP_PG_ACQUIRE_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_PG_IDLE_TIMEOUT_SECS: u64 = 5 * 60;
 const DEFAULT_PG_MAX_LIFETIME_SECS: u64 = 30 * 60;
+const STARTUP_INITIALIZATION_ADVISORY_LOCK_ID: i64 = 3_722_000_001;
+const STARTUP_INITIALIZATION_LOCK_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
+const STARTUP_INITIALIZATION_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+const STARTUP_INITIALIZATION_LOCK_LOG_INTERVAL: Duration = Duration::from_secs(5);
 
 /// #3651: process-global count of runtime-pool connections reserved for
 /// foreground turn ingestion. Set once when the runtime pool is built
@@ -296,7 +301,7 @@ pub async fn connect_and_migrate(config: &Config) -> Result<Option<PgPool>, Stri
     let Some(pool) = connect(config).await? else {
         return Ok(None);
     };
-    migrate(&pool).await?;
+    with_startup_advisory_lock(&pool, || async { migrate(&pool).await }).await?;
     Ok(Some(pool))
 }
 
@@ -306,6 +311,95 @@ pub async fn migrate(pool: &PgPool) -> Result<(), String> {
         .await
         .map_err(|error| format!("run postgres migrations: {error}"))?;
     Ok(())
+}
+
+async fn acquire_startup_advisory_lock(pool: &PgPool) -> Result<AdvisoryLockLease, String> {
+    let started = Instant::now();
+    let mut last_wait_log = started
+        .checked_sub(STARTUP_INITIALIZATION_LOCK_LOG_INTERVAL)
+        .unwrap_or(started);
+
+    loop {
+        match AdvisoryLockLease::try_acquire(
+            pool,
+            STARTUP_INITIALIZATION_ADVISORY_LOCK_ID,
+            "postgres startup initialization",
+        )
+        .await?
+        {
+            Some(lease) => {
+                tracing::info!(
+                    lock_id = STARTUP_INITIALIZATION_ADVISORY_LOCK_ID,
+                    wait_ms = started.elapsed().as_millis() as u64,
+                    "[startup] acquired postgres startup advisory lock"
+                );
+                return Ok(lease);
+            }
+            None => {
+                let elapsed = started.elapsed();
+                if elapsed >= STARTUP_INITIALIZATION_LOCK_WAIT_TIMEOUT {
+                    return Err(format!(
+                        "postgres startup initialization advisory lock {} unavailable after {}s",
+                        STARTUP_INITIALIZATION_ADVISORY_LOCK_ID,
+                        elapsed.as_secs()
+                    ));
+                }
+
+                if last_wait_log.elapsed() >= STARTUP_INITIALIZATION_LOCK_LOG_INTERVAL {
+                    tracing::warn!(
+                        lock_id = STARTUP_INITIALIZATION_ADVISORY_LOCK_ID,
+                        waited_ms = elapsed.as_millis() as u64,
+                        timeout_ms = STARTUP_INITIALIZATION_LOCK_WAIT_TIMEOUT.as_millis() as u64,
+                        "[startup] waiting for postgres startup advisory lock"
+                    );
+                    last_wait_log = Instant::now();
+                }
+
+                tokio::time::sleep(STARTUP_INITIALIZATION_LOCK_RETRY_INTERVAL).await;
+            }
+        }
+    }
+}
+
+pub async fn with_startup_advisory_lock<T, F, Fut>(pool: &PgPool, operation: F) -> Result<T, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<T, String>>,
+{
+    let started = Instant::now();
+    let lease = acquire_startup_advisory_lock(pool).await?;
+    let result = operation().await;
+    let release_result = lease.unlock().await;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+
+    match (result, release_result) {
+        (Ok(value), Ok(())) => {
+            tracing::info!(
+                lock_id = STARTUP_INITIALIZATION_ADVISORY_LOCK_ID,
+                elapsed_ms,
+                "[startup] released postgres startup advisory lock"
+            );
+            Ok(value)
+        }
+        (Ok(_), Err(error)) => Err(error),
+        (Err(error), Ok(())) => {
+            tracing::info!(
+                lock_id = STARTUP_INITIALIZATION_ADVISORY_LOCK_ID,
+                elapsed_ms,
+                "[startup] released postgres startup advisory lock after failed startup mutation"
+            );
+            Err(error)
+        }
+        (Err(error), Err(unlock_error)) => {
+            tracing::warn!(
+                lock_id = STARTUP_INITIALIZATION_ADVISORY_LOCK_ID,
+                elapsed_ms,
+                unlock_error,
+                "[startup] failed to explicitly release postgres startup advisory lock after startup mutation error"
+            );
+            Err(error)
+        }
+    }
 }
 
 pub async fn startup_reseed(pool: &PgPool, config: &Config) -> Result<(), String> {
@@ -344,6 +438,25 @@ pub async fn startup_reseed(pool: &PgPool, config: &Config) -> Result<(), String
             config.cluster.role
         );
     }
+    Ok(())
+}
+
+pub async fn startup_reseed_with_warmup_pool(
+    runtime_pool: &PgPool,
+    config: &Config,
+) -> Result<(), String> {
+    let startup_pg_pool = match connect_for_startup(config).await {
+        Ok(pool) => pool,
+        Err(error) => {
+            tracing::warn!(
+                "[startup] postgres warmup pool unavailable; falling back to runtime pool: {error}"
+            );
+            None
+        }
+    };
+    let startup_pool = startup_pg_pool.as_ref().unwrap_or(runtime_pool);
+    startup_reseed(startup_pool, config).await?;
+    drop(startup_pg_pool);
     Ok(())
 }
 
@@ -1174,10 +1287,16 @@ mod tests {
         create_test_database, database_enabled, database_summary, health_check,
         run_test_postgres_sqlx_op_with_timeout, runtime_pool_settings, should_yield_for_counters,
         startup_pool_settings, startup_reseed, sync_agents_from_config_pg,
+        with_startup_advisory_lock,
     };
     use sqlx::Row;
     use std::collections::BTreeMap;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     use std::time::Duration;
+    use tokio::sync::{Mutex, Notify};
 
     struct TestDatabase {
         admin_url: String,
@@ -2455,6 +2574,105 @@ mod tests {
             .await
             .expect("close pool B");
         close_test_pool(pool_a, "db::postgres advisory lock pool A")
+            .await
+            .expect("close pool A");
+        test_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn postgres_startup_advisory_lock_serializes_concurrent_startup_sections() {
+        let test_db = TestDatabase::create().await;
+        let config = postgres_test_config(&test_db);
+
+        let pool_a =
+            connect_test_pool_and_migrate_config(&config, "db::postgres startup lock test pool A")
+                .await
+                .expect("connect and migrate postgres pool A")
+                .expect("postgres pool A");
+        let pool_b =
+            connect_test_pool_and_migrate_config(&config, "db::postgres startup lock test pool B")
+                .await
+                .expect("connect and migrate postgres pool B")
+                .expect("postgres pool B");
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let events = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let first_entered = Arc::new(Notify::new());
+        let release_first = Arc::new(Notify::new());
+
+        let pool_a_task = pool_a.clone();
+        let active_a = Arc::clone(&active);
+        let max_active_a = Arc::clone(&max_active);
+        let events_a = Arc::clone(&events);
+        let first_entered_a = Arc::clone(&first_entered);
+        let release_first_a = Arc::clone(&release_first);
+        let config_a = config.clone();
+        let first = tokio::spawn(async move {
+            with_startup_advisory_lock(&pool_a_task, || async {
+                let now = active_a.fetch_add(1, Ordering::SeqCst) + 1;
+                max_active_a.fetch_max(now, Ordering::SeqCst);
+                events_a.lock().await.push("first-enter");
+                first_entered_a.notify_one();
+                release_first_a.notified().await;
+                startup_reseed(&pool_a_task, &config_a).await?;
+                events_a.lock().await.push("first-exit");
+                active_a.fetch_sub(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .await
+        });
+
+        first_entered.notified().await;
+
+        let pool_b_task = pool_b.clone();
+        let active_b = Arc::clone(&active);
+        let max_active_b = Arc::clone(&max_active);
+        let events_b = Arc::clone(&events);
+        let config_b = config.clone();
+        let second = tokio::spawn(async move {
+            with_startup_advisory_lock(&pool_b_task, || async {
+                let now = active_b.fetch_add(1, Ordering::SeqCst) + 1;
+                max_active_b.fetch_max(now, Ordering::SeqCst);
+                events_b.lock().await.push("second-enter");
+                startup_reseed(&pool_b_task, &config_b).await?;
+                active_b.fetch_sub(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            active.load(Ordering::SeqCst),
+            1,
+            "the second startup section must wait while the first lock holder is active"
+        );
+
+        release_first.notify_one();
+        first
+            .await
+            .expect("first startup task joins")
+            .expect("first startup lock section");
+        second
+            .await
+            .expect("second startup task joins")
+            .expect("second startup lock section");
+
+        assert_eq!(
+            max_active.load(Ordering::SeqCst),
+            1,
+            "startup lock must prevent overlapping startup mutation sections"
+        );
+        assert_eq!(
+            events.lock().await.as_slice(),
+            ["first-enter", "first-exit", "second-enter"]
+        );
+
+        close_test_pool(pool_b, "db::postgres startup lock pool B")
+            .await
+            .expect("close pool B");
+        close_test_pool(pool_a, "db::postgres startup lock pool A")
             .await
             .expect("close pool A");
         test_db.drop().await;

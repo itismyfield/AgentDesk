@@ -1372,50 +1372,42 @@ pub fn handle_dcserver(token: Option<String>) {
             }
         }
 
-        let discord_pg_pool = match crate::db::postgres::connect_and_migrate(&ad_config).await {
+        let discord_pg_pool = match crate::db::postgres::connect(&ad_config).await {
             Ok(Some(pool)) => {
-                if let Some(root) = runtime_root.as_ref() {
-                    match crate::services::discord_config_audit::load_runtime_config(root)
-                        .and_then(|loaded| {
-                            crate::services::discord_config_audit::audit_and_reconcile_config_only(
-                                root,
-                                loaded.config,
-                                loaded.path,
-                                loaded.existed,
-                                &legacy_scan,
-                                false,
-                            )
-                        })
-                    {
-                        Ok(outcome) => {
-                            ad_config = outcome.config;
-                        }
-                        Err(error) => {
-                            eprintln!(
-                                "  ✖ Config audit after PostgreSQL migration failed: {error}"
-                            );
-                            std::process::exit(1);
-                        }
-                    }
-                }
-                let startup_pg_pool =
-                    match crate::db::postgres::connect_for_startup(&ad_config).await {
-                        Ok(pool) => pool,
-                        Err(error) => {
-                            eprintln!(
-                                "  ⚠ PostgreSQL warmup pool unavailable: {error} — falling back to runtime pool"
-                            );
-                            None
-                        }
-                    };
-                let startup_pool = startup_pg_pool.as_ref().unwrap_or(&pool);
                 if let Err(error) =
-                    crate::db::postgres::startup_reseed(startup_pool, &ad_config).await
+                    crate::db::postgres::with_startup_advisory_lock(&pool, || async {
+                        crate::db::postgres::migrate(&pool).await?;
+                        if let Some(root) = runtime_root.as_ref() {
+                            match crate::services::discord_config_audit::load_runtime_config(root)
+                                .and_then(|loaded| {
+                                    crate::services::discord_config_audit::audit_and_reconcile_config_only(
+                                        root,
+                                        loaded.config,
+                                        loaded.path,
+                                        loaded.existed,
+                                        &legacy_scan,
+                                        false,
+                                    )
+                                })
+                            {
+                                Ok(outcome) => {
+                                    ad_config = outcome.config;
+                                }
+                                Err(error) => {
+                                    return Err(format!(
+                                        "Config audit after PostgreSQL migration failed: {error}"
+                                    ));
+                                }
+                            }
+                        }
+                        crate::db::postgres::startup_reseed_with_warmup_pool(&pool, &ad_config)
+                            .await
+                    })
+                    .await
                 {
-                    eprintln!("  ✖ PostgreSQL startup reseed failed: {error}");
+                    eprintln!("  ✖ PostgreSQL startup initialization failed: {error}");
                     std::process::exit(1);
                 }
-                drop(startup_pg_pool);
                 pool
             }
             Ok(None) => {
@@ -1423,7 +1415,7 @@ pub fn handle_dcserver(token: Option<String>) {
                 std::process::exit(1);
             }
             Err(error) => {
-                eprintln!("  ✖ PostgreSQL connect/migrate failed: {error}");
+                eprintln!("  ✖ PostgreSQL connect failed: {error}");
                 std::process::exit(1);
             }
         };

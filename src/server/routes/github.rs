@@ -6,6 +6,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::{PgPool, Row};
+use std::collections::BTreeSet;
 
 use super::AppState;
 use crate::db::kanban::{IssueCardUpsert, upsert_card_from_issue_pg};
@@ -47,6 +48,7 @@ pub struct CreateIssueBody {
 }
 
 const ISSUE_FORMAT_VERSION: u32 = 1;
+const ISSUE_CREATE_UNSUPPORTED_FEATURES: &[&str] = &["auto_dispatch"];
 
 fn trim_non_empty(value: &str) -> Option<String> {
     let trimmed = value.trim();
@@ -60,16 +62,38 @@ fn normalize_string_list(values: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn labels_metadata_json(labels: &[String]) -> Option<String> {
+fn normalize_block_on_issue_numbers(body: &CreateIssueBody) -> Result<Vec<i64>, String> {
+    let Some(items) = body.block_on.as_ref() else {
+        return Ok(Vec::new());
+    };
+
+    let mut numbers = BTreeSet::new();
+    for issue_number in items {
+        if *issue_number <= 0 {
+            return Err("block_on issue numbers must be positive".to_string());
+        }
+        numbers.insert(*issue_number);
+    }
+    Ok(numbers.into_iter().collect())
+}
+
+fn issue_metadata_json(labels: &[String], block_on_issue_numbers: &[i64]) -> Option<String> {
     let labels = labels
         .iter()
         .filter_map(|label| trim_non_empty(label))
         .collect::<Vec<_>>();
 
-    if labels.is_empty() {
+    if labels.is_empty() && block_on_issue_numbers.is_empty() {
         None
     } else {
-        Some(json!({ "labels": labels.join(",") }).to_string())
+        let mut metadata = serde_json::Map::new();
+        if !labels.is_empty() {
+            metadata.insert("labels".to_string(), json!(labels.join(",")));
+        }
+        if !block_on_issue_numbers.is_empty() {
+            metadata.insert("depends_on".to_string(), json!(block_on_issue_numbers));
+        }
+        Some(serde_json::Value::Object(metadata).to_string())
     }
 }
 
@@ -148,7 +172,7 @@ fn build_pmd_issue_body(body: &CreateIssueBody) -> Result<String, String> {
         return Err("dod items must be 10 or fewer".to_string());
     }
 
-    let dependencies = body
+    let mut dependencies = body
         .dependencies
         .as_deref()
         .map(|items| {
@@ -158,6 +182,12 @@ fn build_pmd_issue_body(body: &CreateIssueBody) -> Result<String, String> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let block_on_issue_numbers = normalize_block_on_issue_numbers(body)?;
+    dependencies.extend(
+        block_on_issue_numbers
+            .into_iter()
+            .map(|issue_number| format!("- #{issue_number}")),
+    );
     let risks = body
         .risks
         .as_deref()
@@ -221,7 +251,42 @@ fn collect_issue_body_validation_errors(body: &CreateIssueBody) -> Vec<String> {
     } else if dod.len() > 10 {
         errors.push("dod items must be 10 or fewer".to_string());
     }
+    if let Err(error) = normalize_block_on_issue_numbers(body) {
+        errors.push(error);
+    }
     errors
+}
+
+fn issue_create_capabilities() -> serde_json::Value {
+    json!({
+        "auto_dispatch": false,
+        "block_on": true,
+        "unsupported_features": ISSUE_CREATE_UNSUPPORTED_FEATURES,
+    })
+}
+
+fn requested_unsupported_issue_create_features(body: &CreateIssueBody) -> Vec<&'static str> {
+    let mut features = Vec::new();
+    if body.auto_dispatch.unwrap_or(false) {
+        features.push("auto_dispatch");
+    }
+    features
+}
+
+fn unsupported_issue_create_warnings(features: &[&str]) -> Vec<String> {
+    features
+        .iter()
+        .map(|feature| {
+            format!("{feature} is reserved and unsupported; non-dry-run issue creation rejects it")
+        })
+        .collect()
+}
+
+fn unsupported_issue_create_error(features: &[&str]) -> String {
+    format!(
+        "unsupported reserved issue-create field(s): {}; send dry_run=true to inspect capabilities before creating an issue",
+        features.join(", ")
+    )
 }
 
 fn issue_validation_error(error: String, dry_run: bool) -> (StatusCode, Json<serde_json::Value>) {
@@ -233,6 +298,8 @@ fn issue_validation_error(error: String, dry_run: bool) -> (StatusCode, Json<ser
                 "dry_run": true,
                 "error": error,
                 "validation_warnings": [warning],
+                "capabilities": issue_create_capabilities(),
+                "unsupported_features": [],
             })),
         )
     } else {
@@ -251,42 +318,20 @@ pub async fn create_issue(
     Json(body): Json<CreateIssueBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let dry_run = body.dry_run.unwrap_or(false);
-    if body.auto_dispatch.unwrap_or(false) {
-        if dry_run {
-            return (
-                StatusCode::NOT_IMPLEMENTED,
-                Json(json!({
-                    "dry_run": true,
-                    "error": "auto_dispatch is not implemented yet",
-                })),
-            );
-        }
+    let unsupported_features = requested_unsupported_issue_create_features(&body);
+    if !dry_run && !unsupported_features.is_empty() {
         return (
-            StatusCode::NOT_IMPLEMENTED,
-            Json(json!({"error": "auto_dispatch is not implemented yet"})),
-        );
-    }
-    if body
-        .block_on
-        .as_ref()
-        .is_some_and(|items| !items.is_empty())
-    {
-        if dry_run {
-            return (
-                StatusCode::NOT_IMPLEMENTED,
-                Json(json!({
-                    "dry_run": true,
-                    "error": "block_on is not implemented yet",
-                })),
-            );
-        }
-        return (
-            StatusCode::NOT_IMPLEMENTED,
-            Json(json!({"error": "block_on is not implemented yet"})),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": unsupported_issue_create_error(&unsupported_features),
+                "capabilities": issue_create_capabilities(),
+                "unsupported_features": unsupported_features,
+            })),
         );
     }
 
     if dry_run {
+        let unsupported_feature_warnings = unsupported_issue_create_warnings(&unsupported_features);
         let mut validation_warnings = Vec::new();
         let repo = match resolve_issue_repo(&body.repo) {
             Ok(repo) => Some(repo),
@@ -299,18 +344,23 @@ pub async fn create_issue(
             validation_warnings.push("title is required".to_string());
         }
         validation_warnings.extend(collect_issue_body_validation_errors(&body));
+        let block_on_issue_numbers = normalize_block_on_issue_numbers(&body).unwrap_or_default();
 
         if !validation_warnings.is_empty() {
             let error = validation_warnings
                 .first()
                 .cloned()
                 .unwrap_or_else(|| "validation failed".to_string());
+            validation_warnings.extend(unsupported_feature_warnings);
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(json!({
                     "dry_run": true,
                     "error": error,
                     "validation_warnings": validation_warnings,
+                    "capabilities": issue_create_capabilities(),
+                    "unsupported_features": unsupported_features,
+                    "block_on": block_on_issue_numbers,
                 })),
             );
         }
@@ -337,6 +387,7 @@ pub async fn create_issue(
                 }
             }
         }
+        validation_warnings.extend(unsupported_feature_warnings);
         let announcement_channel_id = body
             .announcement_channel_id
             .as_deref()
@@ -359,6 +410,9 @@ pub async fn create_issue(
                 "applied_labels": applied_labels,
                 "rendered_body": issue_body,
                 "validation_warnings": validation_warnings,
+                "capabilities": issue_create_capabilities(),
+                "unsupported_features": unsupported_features,
+                "block_on": block_on_issue_numbers,
                 "issue_format_version": ISSUE_FORMAT_VERSION,
                 // deprecated alias kept for transition; remove after clients migrate
                 "pmd_format_version": ISSUE_FORMAT_VERSION,
@@ -378,6 +432,10 @@ pub async fn create_issue(
         Ok(issue_body) => issue_body,
         Err(error) => return issue_validation_error(error, dry_run),
     };
+    let block_on_issue_numbers = match normalize_block_on_issue_numbers(&body) {
+        Ok(block_on_issue_numbers) => block_on_issue_numbers,
+        Err(error) => return issue_validation_error(error, dry_run),
+    };
 
     let applied_labels = body
         .agent_id
@@ -395,7 +453,7 @@ pub async fn create_issue(
 
     match github::create_issue_with_labels(&repo, &title, &issue_body, &applied_labels).await {
         Ok(created) => {
-            let metadata_json = labels_metadata_json(&applied_labels);
+            let metadata_json = issue_metadata_json(&applied_labels, &block_on_issue_numbers);
             let (kanban_card_id, kanban_card_sync_error) = if let Some(pool) = state.pg_pool_ref() {
                 let assigned_agent_id = match resolve_known_agent_id_pg(
                     pool,
@@ -422,6 +480,7 @@ pub async fn create_issue(
                                 "kanban_card_id": serde_json::Value::Null,
                                 "kanban_card_sync_error": error,
                                 "applied_labels": applied_labels,
+                                "block_on": block_on_issue_numbers,
                                 "issue_format_version": ISSUE_FORMAT_VERSION,
                                 // deprecated alias kept for transition; remove after clients migrate
                                 "pmd_format_version": ISSUE_FORMAT_VERSION,
@@ -545,6 +604,7 @@ pub async fn create_issue(
                     "announcement_message_id": announcement_message_id,
                     "announcement_sync_error": announcement_sync_error,
                     "applied_labels": applied_labels,
+                    "block_on": block_on_issue_numbers,
                     "issue_format_version": ISSUE_FORMAT_VERSION,
                     // deprecated alias kept for transition; remove after clients migrate
                     "pmd_format_version": ISSUE_FORMAT_VERSION,
@@ -555,6 +615,132 @@ pub async fn create_issue(
             StatusCode::BAD_GATEWAY,
             Json(json!({"error": format!("gh issue create failed: {error}")})),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn test_state() -> AppState {
+        let config = crate::config::Config::default();
+        let tx = crate::server::ws::new_broadcast();
+        let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
+        AppState {
+            pg_pool: None,
+            engine: crate::engine::PolicyEngine::new(&config).expect("test policy engine"),
+            config: Arc::new(config),
+            broadcast_tx: tx,
+            batch_buffer: buf,
+            health_registry: None,
+            cluster_instance_id: None,
+        }
+    }
+
+    fn base_issue_body() -> CreateIssueBody {
+        CreateIssueBody {
+            repo: "ADK".to_string(),
+            title: "Test issue".to_string(),
+            background: "Background".to_string(),
+            content: vec!["Do the thing".to_string()],
+            dod: vec!["It works".to_string()],
+            agent_id: None,
+            dependencies: None,
+            risks: None,
+            hints: None,
+            auto_dispatch: None,
+            block_on: None,
+            announcement_channel_id: None,
+            dry_run: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_issue_dry_run_reports_reserved_feature_capabilities_without_failing() {
+        let mut body = base_issue_body();
+        body.auto_dispatch = Some(true);
+        body.block_on = Some(vec![3718]);
+        body.dry_run = Some(true);
+
+        let (status, Json(response)) = create_issue(State(test_state()), Json(body)).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["dry_run"], true);
+        assert_eq!(response["unsupported_features"], json!(["auto_dispatch"]));
+        assert_eq!(response["block_on"], json!([3718]));
+        assert_eq!(response["capabilities"]["auto_dispatch"], false);
+        assert_eq!(response["capabilities"]["block_on"], true);
+        assert_eq!(
+            response["capabilities"]["unsupported_features"],
+            json!(["auto_dispatch"])
+        );
+        assert!(
+            response["validation_warnings"]
+                .as_array()
+                .expect("warnings must be an array")
+                .iter()
+                .any(|warning| warning
+                    .as_str()
+                    .is_some_and(|message| message.contains("auto_dispatch is reserved"))),
+            "dry_run must expose unsupported reserved-field warnings: {response}"
+        );
+        assert!(response["rendered_body"].is_string());
+    }
+
+    #[test]
+    fn block_on_renders_dependency_section_and_kanban_metadata() {
+        let mut body = base_issue_body();
+        body.agent_id = Some("project-agentdesk".to_string());
+        body.block_on = Some(vec![42, 7, 42]);
+
+        let rendered = build_pmd_issue_body(&body).expect("issue body should render");
+        assert!(rendered.contains("## 의존성"));
+        assert!(rendered.contains("- #7"));
+        assert!(rendered.contains("- #42"));
+
+        let dependencies =
+            normalize_block_on_issue_numbers(&body).expect("block_on should normalize");
+        assert_eq!(dependencies, vec![7, 42]);
+        let metadata = issue_metadata_json(&["agent:project-agentdesk".to_string()], &dependencies)
+            .expect("metadata should exist");
+        let metadata: serde_json::Value =
+            serde_json::from_str(&metadata).expect("metadata should be JSON");
+        assert_eq!(metadata["labels"], "agent:project-agentdesk");
+        assert_eq!(metadata["depends_on"], json!([7, 42]));
+    }
+
+    #[test]
+    fn block_on_rejects_non_positive_issue_numbers() {
+        let mut body = base_issue_body();
+        body.block_on = Some(vec![0]);
+
+        assert_eq!(
+            normalize_block_on_issue_numbers(&body),
+            Err("block_on issue numbers must be positive".to_string())
+        );
+        assert_eq!(
+            build_pmd_issue_body(&body),
+            Err("block_on issue numbers must be positive".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn create_issue_rejects_reserved_fields_without_gh_side_effects() {
+        let mut body = base_issue_body();
+        body.auto_dispatch = Some(true);
+
+        let (status, Json(response)) = create_issue(State(test_state()), Json(body)).await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(response["unsupported_features"], json!(["auto_dispatch"]));
+        assert_eq!(response["capabilities"]["auto_dispatch"], false);
+        assert!(
+            response["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("unsupported reserved issue-create")),
+            "non-dry-run unsupported fields must fail as a contract error: {response}"
+        );
     }
 }
 

@@ -2965,7 +2965,7 @@ use super::super::model_picker_interaction::handle_model_picker_interaction;
 /// only exercises the read+staleness classification (no `SharedData`
 /// construction). The `thread_guard_force_clean_stale_thread` integration
 /// test that drives mailbox cancel / dispatch_thread_parents removal is
-/// gated on `legacy-sqlite-tests` because it depends on `TestHealthHarness`.
+/// still not in the default suite because it depends on `TestHealthHarness`.
 #[cfg(test)]
 mod thread_guard_stale_pure_tests {
     use super::*;

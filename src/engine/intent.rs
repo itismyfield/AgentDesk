@@ -464,10 +464,13 @@ fn execute_emit_supervisor_signal(
     signal_name: &str,
     evidence: serde_json::Value,
 ) -> anyhow::Result<()> {
-    let engine =
-        engine.ok_or_else(|| anyhow::anyhow!("supervisor signal intent requires engine"))?;
     let signal =
         crate::supervisor::SupervisorSignal::try_from(signal_name).map_err(anyhow::Error::msg)?;
+    signal
+        .validate_emit_evidence(&evidence)
+        .map_err(anyhow::Error::msg)?;
+    let engine =
+        engine.ok_or_else(|| anyhow::anyhow!("supervisor signal intent requires engine"))?;
     let supervisor = crate::supervisor::RuntimeSupervisor::new(pg_pool.cloned(), engine.clone());
     supervisor
         .emit_signal(signal, evidence)
@@ -549,4 +552,27 @@ fn execute_delete_kv(
         |error| error,
     )
     .map_err(anyhow::Error::msg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn emit_supervisor_signal_intent_rejects_audit_only_without_engine_lookup() {
+        let err = execute_emit_supervisor_signal(
+            None,
+            None,
+            None,
+            "StaleInflight",
+            json!({ "session_key": "session-1" }),
+        )
+        .expect_err("audit-only signal without acknowledgement should fail");
+        let msg = err.to_string();
+
+        assert!(msg.contains("audit-only"));
+        assert!(msg.contains("supervisor_audit_only"));
+        assert!(!msg.contains("requires engine"));
+    }
 }

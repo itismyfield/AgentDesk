@@ -191,6 +191,25 @@ pub(super) fn should_resume_watcher_after_turn(
     !defer_watcher_resume && !(has_local_queued_turns && can_chain_locally)
 }
 
+fn datetime_from_unix_nanos(unix_nanos: i64) -> Option<chrono::DateTime<chrono::Utc>> {
+    if unix_nanos <= 0 {
+        return None;
+    }
+    let secs = unix_nanos.div_euclid(1_000_000_000);
+    let nanos = unix_nanos.rem_euclid(1_000_000_000) as u32;
+    chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nanos)
+}
+
+pub(in crate::services::discord) fn runtime_activity_heartbeat_at(
+    tmux_session_name: &str,
+    fallback_now: chrono::DateTime<chrono::Utc>,
+) -> chrono::DateTime<chrono::Utc> {
+    datetime_from_unix_nanos(
+        crate::services::dispatched_sessions::latest_runtime_activity_unix_nanos(tmux_session_name),
+    )
+    .unwrap_or(fallback_now)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,5 +325,39 @@ mod tests {
         assert!(!should_flush_post_terminal_success_continuation(
             true, false, true, "   "
         ));
+    }
+
+    #[test]
+    fn watcher_activity_heartbeat_uses_runtime_output_mtime() {
+        let tmux_name = format!("AgentDesk-claude-heartbeat-{}", uuid::Uuid::new_v4());
+        let output_path = std::path::PathBuf::from(
+            crate::services::tmux_common::session_temp_path(&tmux_name, "jsonl"),
+        );
+        std::fs::write(&output_path, b"{\"event\":\"output\"}\n").expect("write runtime output");
+        let output_time = filetime::FileTime::from_unix_time(1_700_000_123, 456_000_000);
+        filetime::set_file_mtime(&output_path, output_time).expect("set runtime output mtime");
+        let fallback_now =
+            chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_010_000, 0).unwrap();
+
+        let activity_at = runtime_activity_heartbeat_at(&tmux_name, fallback_now);
+
+        assert_eq!(activity_at.timestamp(), 1_700_000_123);
+        assert_eq!(activity_at.timestamp_subsec_nanos(), 456_000_000);
+        let _ = std::fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn watcher_activity_heartbeat_falls_back_to_now_without_runtime_output() {
+        let tmux_name = format!(
+            "AgentDesk-claude-heartbeat-missing-{}",
+            uuid::Uuid::new_v4()
+        );
+        let fallback_now =
+            chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_020_000, 0).unwrap();
+
+        assert_eq!(
+            runtime_activity_heartbeat_at(&tmux_name, fallback_now),
+            fallback_now
+        );
     }
 }

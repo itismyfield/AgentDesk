@@ -2746,8 +2746,8 @@ async fn maybe_recover_completed_stale_leak(
 
 /// #1446 — pure-helper tests for the stall-watchdog decision logic.
 /// Always-on (`#[cfg(test)]`) because the helper has no filesystem/runtime
-/// dependencies; the legacy-sqlite-tests gate would prevent these from
-/// running in normal `cargo test --bin agentdesk` invocations.
+/// dependencies; keeping them in a removed SQLite-only gate would prevent them
+/// from running in normal `cargo test --bin agentdesk` invocations.
 
 #[cfg(test)]
 mod stall_watchdog_pure_tests {

@@ -229,7 +229,7 @@ pub(super) fn agent_performance_prompt_section(
 }
 
 /// Test-only helper that resets the cache state and the hit/miss counters.
-/// Not gated on `legacy-sqlite-tests` because the bucket-cadence regression
+/// Not gated on the removed SQLite-only harness because the bucket-cadence regression
 /// tests (#2666) need it under the default test build too.
 #[cfg(test)]
 pub(super) fn reset_agent_performance_cache_for_layer_rendering_tests() {

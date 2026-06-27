@@ -213,8 +213,8 @@ pub(super) fn claude_teardown_sigint_suppressed(provider: &ProviderKind, reason:
 }
 
 // #3029(A): the "missed SIGINT target" decision is a pure boolean and runs
-// under the default `cargo test` invocation (the main suite is gated behind
-// the `legacy-sqlite-tests` feature, which CI does not enable by default).
+// under the default `cargo test` invocation (the main suite depends on heavier
+// fixtures that are outside the supported feature set).
 #[cfg(test)]
 mod sigint_target_missing_tests {
     use super::interrupt_sigint_target_missing;
@@ -270,7 +270,7 @@ mod sigint_target_missing_tests {
 
 // #3207 (part 1): the claude session-preserving interrupt selection + envelope
 // builder are pure and run under the default `cargo test` invocation (the main
-// suite is gated behind `legacy-sqlite-tests`, which CI does not enable).
+// suite depends on heavier fixtures outside the supported feature set).
 #[cfg(test)]
 mod claude_session_preserving_interrupt_tests {
     use super::{
@@ -313,8 +313,8 @@ mod claude_session_preserving_interrupt_tests {
 }
 
 // #3169 (death #3): the teardown-SIGINT suppression decision is a pure boolean
-// and runs under the default `cargo test` invocation (the main suite is gated
-// behind the `legacy-sqlite-tests` feature, which CI does not enable).
+// and runs under the default `cargo test` invocation (the main suite depends on
+// heavier fixtures outside the supported feature set).
 #[cfg(test)]
 mod claude_teardown_sigint_tests {
     use super::{ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON, claude_teardown_sigint_suppressed};

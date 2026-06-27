@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Audit remaining legacy SQLite test surface before the sunset sweep.
+"""Audit historical legacy SQLite test surface after the sunset sweep.
 
-This is intentionally lexical rather than Rust-AST based: the legacy surface is
-mostly cfg gates, sqlite_test symbols, and Db read/separate connection calls.
-The report is a Phase 0 map for #2563, not a compiler.
+This is intentionally lexical rather than Rust-AST based: the remaining surface
+is mostly historical docs plus any unexpected cfg gates, sqlite_test symbols,
+and Db read/separate connection calls. The report is an on-demand cleanup audit
+for #2563/#3035 history, not a compiler.
 """
 
 from __future__ import annotations
@@ -414,10 +415,9 @@ def render_markdown(report: AuditReport, *, top_limit: int) -> str:
             "",
             "## Phase 0 Blockers",
             "",
-            "These production files still call legacy `Db::read_conn()` or "
-            "`Db::separate_conn()` paths. They must move to PostgreSQL-backed "
-            "queries or be deleted before the final feature sweep can remove "
-            "`src/db/mod.rs` stubs.",
+            "These production files still call retired `Db::read_conn()` or "
+            "`Db::separate_conn()` paths. Any hit here should move to "
+            "PostgreSQL-backed queries or be deleted.",
             "",
             "| File | refs | prod db_conn_calls | all db_conn_calls | sqlite refs |",
             "| --- | ---: | ---: | ---: | ---: |",
@@ -438,9 +438,9 @@ def render_markdown(report: AuditReport, *, top_limit: int) -> str:
             "## Remove/Migrate Decision Inventory",
             "",
             "Ignored tests already annotated as obsolete SQLite and PostgreSQL-only "
-            "are remove candidates, not CI expansion candidates. Production "
-            "stub dependencies remain migrate/keep decisions until PG-backed "
-            "coverage replaces each callsite.",
+            "are remove candidates, not CI expansion candidates. Any production "
+            "stub dependency here is a regression against the retired SQLite "
+            "surface.",
             "",
             "| File | obsolete SQLite ignored tests | category | refs |",
             "| --- | ---: | --- | ---: |",
@@ -477,11 +477,10 @@ def render_markdown(report: AuditReport, *, top_limit: int) -> str:
             "",
             "## Phase Recommendation",
             "",
-            "- Phase 1 should first eliminate `prod_stub_dependency` files, because "
-            "those callsites keep the non-feature `LegacySqlite*` stubs alive.",
-            "- After production stub dependencies reach zero, the final sweep can "
-            "remove the Cargo feature, `sqlite_test` dependency, gated SQLite "
-            "test modules, and `src/db/mod.rs` legacy backend types in one PR.",
+            "- `prod_db_conn_calls` must stay at 0; any nonzero value is a "
+            "regression against the PostgreSQL-only control plane.",
+            "- Keep this report on-demand. Do not commit a generated snapshot "
+            "unless a cleanup PR specifically changes this audit contract.",
         ]
     )
     return "\n".join(lines) + "\n"

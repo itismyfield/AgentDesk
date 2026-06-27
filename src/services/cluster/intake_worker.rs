@@ -406,8 +406,8 @@ mod tests {
 // `handle_text_message`, which requires a fully-populated
 // `Arc<SharedData>` + Discord runtime. Constructing that from outside
 // `services::discord` is not supported today (the prod-shape test
-// harness `TestHealthHarness` is gated behind the `legacy-sqlite-tests`
-// feature). The pre-execute branches we DO want to pin are already
+// harness `TestHealthHarness` lived in the removed SQLite-only feature). The
+// pre-execute branches we DO want to pin are already
 // covered at the helper level:
 //   - lost-claim race (sweep wins between claim and accept):
 //     `db::intake_outbox::helper_tests::mark_accepted_returns_false_when_sweep_already_reset_the_claim`

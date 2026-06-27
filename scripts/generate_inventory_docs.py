@@ -31,8 +31,9 @@ GIANT_FILE_REGISTRY_DOC = GENERATED_DOCS_DIR / "giant-file-registry.md"
 #
 # A module's `#[cfg(...)]` attribute gates it to test-only builds when the
 # predicate *requires* the `test` flag. `cfg_requires_test` evaluates this
-# structurally (with balanced-paren awareness) so it handles nested forms such
-# as `all(test, not(feature = "legacy-sqlite-tests"))`. Predicates that do not
+# structurally (with balanced-paren awareness) so it handles nested forms that
+# combine `test`, `all(...)`, `any(...)`, `not(...)`, and feature checks.
+# Predicates that do not
 # remove the module from production builds — `not(test)` (production-only) and
 # `any(test, …)` (compiles when the other option is set) — are rejected.
 
@@ -107,7 +108,7 @@ TOP_LEVEL_MODULE_PURPOSES = {
     "config.rs": "`agentdesk.yaml` parsing, configuration defaults, and shared test env helpers.",
     "config_live_reload.rs": "Hot-reloads `agentdesk.yaml` without a restart: a debounced `notify` watcher pre-validates edits and atomically swaps a process-global config snapshot, keeping the running config on failure and reporting restart-required infra changes.",
     "credential.rs": "Reads runtime credential files such as Discord bot tokens from the AgentDesk root.",
-    "db/": "SQLite access layer and schema authority (`src/db/schema.rs`).",
+    "db/": "PostgreSQL access layer, migration helpers, and schema authority.",
     "dispatch/": "Dispatch context construction, review metadata, and worktree targeting.",
     "engine/": "QuickJS policy runtime, hook wiring, transition logic, and Rust-JS bridge ops.",
     "error.rs": "Shared HTTP and policy error type with typed codes and JSON response helpers.",
@@ -1049,6 +1050,8 @@ def parse_route_file(
         decl_line = offset_to_line(text, match.start())
         for method, handler in parse_method_chain(methods_expr):
             resolved = resolve_function_source(handler, by_file, by_name)
+            if resolved is None and "::" not in handler and handler in by_file.get(path, {}):
+                resolved = (path, by_file[path][handler])
             if resolved is None:
                 raise ParseError(f"could not resolve handler source for {handler!r}")
             handler_path, handler_line = resolved
@@ -1065,7 +1068,10 @@ def parse_route_file(
 
 
 def find_function_body(text: str, fn_name: str) -> tuple[str, int]:
-    match = re.search(rf"pub\s+async\s+fn\s+{re.escape(fn_name)}\s*\(", text)
+    match = re.search(
+        rf"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+{re.escape(fn_name)}\s*\(",
+        text,
+    )
     if match is None:
         raise ParseError(f"could not find function {fn_name}")
     open_brace = text.find("{", match.end())
@@ -1073,6 +1079,96 @@ def find_function_body(text: str, fn_name: str) -> tuple[str, int]:
         raise ParseError(f"could not find body for function {fn_name}")
     body, _ = scan_balanced(text, open_brace, open_char="{", close_char="}")
     return body, open_brace + 1
+
+
+def _router_source_path_from_merge_expr(expr: str, routes_root: Path) -> Path:
+    stripped = expr.strip()
+    domain_match = re.match(
+        r"^(?:(?:crate::server::routes|self)::)?domains::"
+        r"(?P<module>[A-Za-z_][A-Za-z0-9_]*)::router\s*\(",
+        stripped,
+    )
+    if domain_match:
+        source_path = routes_root / "domains" / f"{domain_match.group('module')}.rs"
+    else:
+        top_level_match = re.match(
+            r"^(?:(?:crate::server::routes|self)::)?"
+            r"(?P<module>[A-Za-z_][A-Za-z0-9_]*)::router\s*\(",
+            stripped,
+        )
+        if top_level_match is None:
+            raise ParseError(
+                "unsupported compose_api_router merge expression: "
+                f"{strip_wrapping_whitespace(stripped)!r}"
+            )
+        source_path = routes_root / f"{top_level_match.group('module')}.rs"
+
+    if not source_path.exists():
+        raise ParseError(
+            "compose_api_router merge references missing router source: "
+            f"{rel_posix(source_path) if source_path.is_relative_to(REPO_ROOT) else source_path}"
+        )
+    return source_path
+
+
+def mounted_api_route_source_paths(
+    routes_mod_path: Path | None = None,
+    routes_root: Path | None = None,
+) -> list[Path]:
+    """Return route declaration files merged by ``compose_api_router``.
+
+    ``src/server/mod.rs`` nests the composed API router under ``/api``. The
+    composed router itself is centralized in ``src/server/routes/mod.rs``; parse
+    that merge chain so coverage follows the actual mounted router graph instead
+    of scanning files by convention.
+    """
+
+    if routes_mod_path is None:
+        routes_mod_path = REPO_ROOT / "src" / "server" / "routes" / "mod.rs"
+    if routes_root is None:
+        routes_root = routes_mod_path.parent
+
+    text = read_text(routes_mod_path)
+    body, _offset = find_function_body(text, "compose_api_router")
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    for match in re.finditer(r"\.merge\s*\(", body):
+        args, _end = extract_call_args(body, match)
+        pieces = split_top_level(args, maxsplit=1)
+        if len(pieces) != 1:
+            raise ParseError(
+                "expected one router expression in compose_api_router merge: "
+                f"{strip_wrapping_whitespace(args)!r}"
+            )
+        source_path = _router_source_path_from_merge_expr(pieces[0], routes_root)
+        if source_path not in seen:
+            paths.append(source_path)
+            seen.add(source_path)
+
+    if not paths:
+        raise ParseError(f"could not find merged API routers in {rel_posix(routes_mod_path)}")
+    return paths
+
+
+def collect_mounted_api_route_entries(
+    function_paths: list[Path] | None = None,
+    by_file: dict[Path, dict[str, int]] | None = None,
+    by_name: dict[str, list[tuple[Path, int]]] | None = None,
+) -> list[RouteEntry]:
+    if by_file is None or by_name is None:
+        if function_paths is None:
+            function_paths = sorted(
+                path
+                for path in (REPO_ROOT / "src" / "server").rglob("*.rs")
+                if path.is_file() and not is_test_file(path)
+            )
+        by_file, by_name = build_function_index(function_paths)
+
+    route_entries: list[RouteEntry] = []
+    for route_path in mounted_api_route_source_paths():
+        route_entries.extend(parse_route_file(route_path, "/api", by_file, by_name))
+    route_entries.sort(key=lambda entry: (entry.path, entry.method, entry.handler))
+    return route_entries
 
 
 def preceding_comment_block(text: str, offset: int) -> str:
@@ -1370,18 +1466,11 @@ def generated_documents() -> dict[Path, str]:
         for path in (REPO_ROOT / "src" / "server").rglob("*.rs")
         if path.is_file() and not is_test_file(path)
     )
-    route_paths = sorted(
-        path
-        for path in (REPO_ROOT / "src" / "server" / "routes" / "domains").rglob("*.rs")
-        if path.is_file() and not is_test_file(path)
-    )
     by_file, by_name = build_function_index(function_paths)
 
     module_entries = collect_modules()
     giant_registrations = build_giant_registrations(module_entries)
-    route_entries: list[RouteEntry] = []
-    for route_path in route_paths:
-        route_entries.extend(parse_route_file(route_path, "/api", by_file, by_name))
+    route_entries = collect_mounted_api_route_entries(function_paths, by_file, by_name)
     route_entries.extend(
         parse_route_file(REPO_ROOT / "src" / "server" / "mod.rs", "", by_file, by_name)
     )

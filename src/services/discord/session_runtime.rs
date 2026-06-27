@@ -456,7 +456,7 @@ fn worktree_is_squash_merged(
 }
 
 fn disconnect_sessions_for_worktree_path(
-    db: Option<&crate::db::Db>,
+    _db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     worktree_path: &str,
 ) {
@@ -497,39 +497,6 @@ fn disconnect_sessions_for_worktree_path(
                 err
             ),
         }
-    }
-
-    let Some(db) = db else {
-        return;
-    };
-
-    let Ok(conn) = db.lock() else {
-        tracing::warn!(
-            "Failed to lock DB while disconnecting sessions for removed worktree {}",
-            worktree_path
-        );
-        return;
-    };
-
-    match conn.execute(
-        "UPDATE sessions
-         SET cwd = NULL,
-             status = 'disconnected',
-             active_dispatch_id = NULL,
-             claude_session_id = NULL
-         WHERE cwd = ?1",
-        [worktree_path],
-    ) {
-        Ok(updated) if updated > 0 => tracing::info!(
-            "Disconnected {updated} SQLite session(s) referencing removed worktree {}",
-            worktree_path
-        ),
-        Ok(_) => {}
-        Err(err) => tracing::warn!(
-            "Failed to disconnect SQLite sessions for removed worktree {}: {}",
-            worktree_path,
-            err
-        ),
     }
 }
 

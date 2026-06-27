@@ -2130,8 +2130,8 @@ impl Default for PoliciesConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct RoutinesConfig {
-    /// Master on/off switch. Defaults to false; requires PostgreSQL.
-    /// SQLite-only deployments are unaffected when this is false.
+    /// Master on/off switch. Defaults to false; requires PostgreSQL and is
+    /// unavailable without the PG control plane.
     #[serde(default)]
     pub enabled: bool,
     /// Release-managed directory containing bundled *.js routine scripts.

@@ -1057,10 +1057,8 @@ pub(super) fn inject_review_merge_base_context(
 /// #2254 item 1 — SQLite codepath mirror decision.
 ///
 /// `resolve_pr_tracking_review_target_pg` (PG) is the sole production
-/// rereview-target resolver. The SQLite-shaped helpers below
-/// (`resolve_card_issue_commit_target`, `resolve_repo_head_fallback_target`,
-/// `refresh_review_target_worktree`, `build_review_context_sqlite_test`) are
-/// all gated by `#[cfg(all(test, feature = "legacy-sqlite-tests"))]` and only
+/// rereview-target resolver. Historical SQLite-shaped helper names from the
+/// removed test harness are not a supported runtime fallback.
 
 /// Review-target fields that steer the agent's execution state (which commit
 /// to check out, which worktree to inspect, which branch to compare against).

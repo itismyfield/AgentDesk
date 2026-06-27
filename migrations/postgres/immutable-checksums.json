@@ -380,6 +380,11 @@
       "path": "migrations/postgres/0073_routine_pause_reason.sql",
       "sha256": "9231bd8a8fbeee9bfbcd28518f328dda4629d7eee73facfe9e49a5dfc0db2999",
       "version": 73
+    },
+    {
+      "path": "migrations/postgres/0074_local_memory.sql",
+      "sha256": "1e246fa4115fc7be5150e0f9b695501fe23061cf9be660aa986becf1ef98ee19",
+      "version": 74
     }
   ],
   "version": 1

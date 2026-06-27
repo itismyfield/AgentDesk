@@ -2,6 +2,23 @@
 
 use super::*;
 
+pub(super) fn make_owner(
+    user_msg_id: Option<MessageId>,
+    started_at_unix: i64,
+) -> super::single_message_panel::CompletionFooterOwner {
+    super::single_message_panel::CompletionFooterOwner::new(
+        user_msg_id.map(|id| id.get()).unwrap_or(0),
+        started_at_unix,
+    )
+}
+
+pub(super) fn make_owner_now(
+    user_msg_id: Option<MessageId>,
+) -> (i64, super::single_message_panel::CompletionFooterOwner) {
+    let started_at_unix = chrono::Utc::now().timestamp();
+    (started_at_unix, make_owner(user_msg_id, started_at_unix))
+}
+
 pub(super) fn bridge_single_message_panel_footer_enabled(status_panel_v2_enabled: bool) -> bool {
     super::single_message_panel::footer_mode_enabled(
         crate::services::discord::single_message_panel_enabled(),
@@ -175,6 +192,7 @@ pub(super) async fn complete_bridge_single_message_completion_footer(
     shared: &SharedData,
     channel_id: ChannelId,
     terminal_msg_id: MessageId,
+    owner: super::single_message_panel::CompletionFooterOwner,
     provider: &ProviderKind,
     _started_at_unix: i64,
     terminal_text: &str,
@@ -189,9 +207,10 @@ pub(super) async fn complete_bridge_single_message_completion_footer(
         .ui
         .placeholder_live_events
         .render_completion_footer(channel_id, provider, indicator);
-    if let Some(edit) = super::single_message_panel::register_completion_footer_target(
+    if let Some(edit) = super::single_message_panel::register_completion_footer_target_for_owner(
         channel_id,
         terminal_msg_id,
+        owner,
         provider,
         chrono::Utc::now().timestamp(),
         terminal_text,
@@ -235,15 +254,20 @@ pub(super) async fn complete_bridge_single_message_completion_footer(
             false
         }
     };
-    super::single_message_panel::completion_footer_record_edit_result(
-        channel_id,
-        !rendered.has_unfinished_entries,
-        edited,
-    );
+    let recorded =
+        super::single_message_panel::completion_footer_record_committed_text_result_for_owner(
+            channel_id,
+            terminal_msg_id,
+            owner,
+            !rendered.has_unfinished_entries,
+            edited,
+            &finalized,
+            rendered.block.as_deref(),
+        );
     // #3391: the finalize edit delivered this render's terminal marks once;
     // evict those slot identities so subsequent footer renders (incl. #3386
     // migration) drop the completed task AND subagent entries.
-    if edited {
+    if edited && recorded {
         shared
             .ui
             .placeholder_live_events
@@ -252,12 +276,16 @@ pub(super) async fn complete_bridge_single_message_completion_footer(
     edited
 }
 
-pub(super) async fn supersede_bridge_registered_completion_footer(
+pub(super) async fn supersede_bridge_footer(
     shared: &SharedData,
     channel_id: ChannelId,
+    owner: super::single_message_panel::CompletionFooterOwner,
 ) -> bool {
     let Some(edit) =
-        super::single_message_panel::completion_footer_supersede_registered_target(channel_id)
+        super::single_message_panel::completion_footer_supersede_registered_target_for_owner(
+            channel_id,
+            Some(owner),
+        )
     else {
         return false;
     };
@@ -275,16 +303,22 @@ pub(super) async fn supersede_bridge_registered_completion_footer(
     }
 }
 
-pub(super) async fn refresh_bridge_registered_completion_footer(
+pub(super) async fn refresh_bridge_footer(
     shared: &SharedData,
     channel_id: ChannelId,
+    owner: super::single_message_panel::CompletionFooterOwner,
     indicator: &str,
 ) -> bool {
-    let Some(edit) = super::single_message_panel::completion_footer_edit_for_registered_target(
-        shared, channel_id, indicator,
-    ) else {
+    let Some(edit) =
+        super::single_message_panel::completion_footer_edit_for_registered_target_for_owner(
+            shared, channel_id, owner, indicator,
+        )
+    else {
         return false;
     };
+    if !super::single_message_panel::completion_footer_edit_still_registered(channel_id, &edit) {
+        return false;
+    }
     let edited = match edit_bridge_completion_footer(
         shared,
         channel_id,
@@ -346,12 +380,17 @@ pub(super) async fn complete_bridge_terminal_footer_or_status_panel<G: TurnGatew
         return true;
     }
     if single_message_panel_footer_mode {
+        let owner = super::single_message_panel::CompletionFooterOwner::new(
+            this_turn_user_msg_id,
+            started_at_unix,
+        );
         return match terminal_text {
             Some(text) => {
                 complete_bridge_single_message_completion_footer(
                     shared,
                     channel_id,
                     current_msg_id,
+                    owner,
                     provider,
                     started_at_unix,
                     text,

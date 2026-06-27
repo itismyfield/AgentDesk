@@ -386,8 +386,8 @@ fn pending_dispatch_row_to_json_pg(
 
 // #3029(C): `resolve_cancel_force` is a pure parser with no DB/runtime
 // dependency, so its coverage lives in a plain `#[cfg(test)]` module that runs
-// under the default `cargo test` invocation (the suite above is gated behind
-// the `legacy-sqlite-tests` feature, which CI does not enable by default).
+// under the default `cargo test` invocation; the older SQLite-only suite was
+// removed from the supported Cargo feature set.
 #[cfg(test)]
 mod cancel_force_tests {
     use super::*;

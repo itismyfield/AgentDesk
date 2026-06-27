@@ -420,6 +420,7 @@ src/
 │   │   │   ├── budget.rs
 │   │   │   ├── finalizer_identity.rs
 │   │   │   ├── model.rs
+│   │   │   ├── rebind_reap.rs
 │   │   │   └── store.rs
 │   │   ├── outbound/
 │   │   │   ├── confirmation.rs
@@ -523,6 +524,8 @@ src/
 │   │   │   ├── read.rs
 │   │   │   ├── validation.rs
 │   │   │   └── write.rs
+│   │   ├── single_message_panel/
+│   │   │   └── completion_footer_registry.rs
 │   │   ├── tmux_watcher/
 │   │   │   ├── commit_decisions.rs
 │   │   │   ├── completion_gate.rs
@@ -553,11 +556,13 @@ src/
 │   │   │   ├── anchor_completion.rs
 │   │   │   ├── bridge_completion.rs
 │   │   │   ├── bridge_gateway.rs
+│   │   │   ├── codex_idle_rollout.rs
 │   │   │   ├── idle_offset_resolution.rs
 │   │   │   ├── idle_transcript_scan.rs
 │   │   │   ├── injected_prompt_policy.rs
 │   │   │   ├── launch_script.rs
-│   │   │   └── rehydration.rs
+│   │   │   ├── rehydration.rs
+│   │   │   └── tests.rs
 │   │   ├── turn_bridge/
 │   │   │   ├── completion_guard/
 │   │   │   │   ├── completion_context.rs
@@ -651,6 +656,7 @@ src/
 │   │   ├── relay_health.rs
 │   │   ├── relay_owner_observability.rs
 │   │   ├── relay_recovery.rs
+│   │   ├── relay_recovery_completion_footer.rs
 │   │   ├── replace_outcome_policy.rs
 │   │   ├── response_sanitizer.rs
 │   │   ├── restart_ctrl.rs
@@ -941,7 +947,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | --- | --- |
 | `src/cli/` | Operator-facing CLI commands, direct API shims, migrations, and Discord send helpers. |
 | `src/compat/` | Centralised home for compatibility/legacy/fallback shims (#1076). Each public item carries a `REMOVE_WHEN` comment so retirement is grep-driven. |
-| `src/db/` | SQLite access layer and schema authority (`src/db/schema.rs`). |
+| `src/db/` | PostgreSQL access layer, migration helpers, and schema authority. |
 | `src/dispatch/` | Dispatch context construction, review metadata, and worktree targeting. |
 | `src/engine/` | QuickJS policy runtime, hook wiring, transition logic, and Rust-JS bridge ops. |
 | `src/github/` | GitHub sync, issue triage, and Definition-of-Done mirroring. |

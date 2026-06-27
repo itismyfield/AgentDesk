@@ -319,7 +319,7 @@ fn canonical_category(category: &str) -> &'static str {
         "dispatches" | "dispatched-sessions" | "internal" | "messages" | "sessions" => "dispatches",
         "auto-queue" | "cron" | "queue" => "queue",
         "routines" => "routines",
-        "analytics" | "auth" | "cluster" | "docs" | "health" | "monitoring" | "stats"
+        "analytics" | "auth" | "cluster" | "docs" | "health" | "monitoring" | "stats" | "v1"
         | "provider-cli" => "ops",
         "discord" | "github" | "github-dashboard" | "meetings" => "integrations",
         "departments" | "memory" | "offices" | "onboarding" | "policies" | "settings"
@@ -486,6 +486,7 @@ fn category_description(category: &str) -> &'static str {
         "settings" => "Settings surfaces, live overrides, precedence, and onboarding contracts.",
         "skills" => "Skill catalog and usage ranking.",
         "stats" => "Aggregate system counters.",
+        "v1" => "Versioned dashboard read models and compatibility settings endpoints.",
         _ => "Miscellaneous API endpoints.",
     }
 }
@@ -1269,6 +1270,47 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             json!({"error": "content is required", "ok": false}),
         )
         .with_curl("curl -X POST http://localhost:8787/api/discord/send -H 'Content-Type: application/json' -d '{\"target\":\"channel:1473922824350601297\",\"content\":\"hello\",\"source\":\"system\",\"bot\":\"notify\"}'"),
+        ep(
+            "POST",
+            "/api/discord/bot-tokens/reload",
+            "discord",
+            "Reload announce/notify Discord utility bot tokens",
+        )
+        .with_example(
+            json!({}),
+            json!({
+                "ok": true,
+                "status": "reloaded",
+                "report": {
+                    "announce": {
+                        "bot": "announce",
+                        "credential": "credential/announce_bot_token",
+                        "status": "reloaded",
+                        "reloaded": true,
+                        "previous_client_kept": false,
+                        "user_id_cache_invalidated": true
+                    },
+                    "notify": {
+                        "bot": "notify",
+                        "credential": "credential/notify_bot_token",
+                        "status": "reloaded",
+                        "reloaded": true,
+                        "previous_client_kept": false,
+                        "user_id_cache_invalidated": true
+                    },
+                    "runtime_root_available": true,
+                    "any_reloaded": true,
+                    "utility_bot_user_ids_invalidated": true,
+                    "provider_cached_bot_token_scope": "announce/notify HealthRegistry clients are reloaded; provider runtime SharedData.cached_bot_token is restart-only"
+                }
+            }),
+        )
+        .with_error_example(
+            403,
+            json!({}),
+            json!({"ok": false, "error": "auth_token required for non-loopback host"}),
+        )
+        .with_curl("curl -X POST http://127.0.0.1:8787/api/discord/bot-tokens/reload"),
         ep(
             "POST",
             "/api/discord/send-to-agent",
@@ -2963,7 +3005,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/github/issues/create",
             "github",
-            "Create a GitHub issue with server-enforced issue markdown format. Successful creation returns HTTP 201 Created (not 200) with the issue payload. dry_run returns 200 OK with rendered_body and no side effects.",
+            "Create a GitHub issue with server-enforced issue markdown format. Successful creation returns HTTP 201 Created (not 200) with the issue payload. block_on records positive GitHub issue-number dependencies for auto-queue via the rendered `## 의존성` section and kanban metadata. dry_run returns 200 OK with rendered_body, no side effects, and capabilities that show auto_dispatch is not supported by this public contract.",
         )
         .with_params([
             (
@@ -3024,19 +3066,11 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 ),
             ),
             (
-                "auto_dispatch",
-                body_param(
-                    "boolean",
-                    false,
-                    "Reserved for future dispatch automation; currently returns 501 when true",
-                ),
-            ),
-            (
                 "block_on",
                 body_param(
                     "array[number]",
                     false,
-                    "Reserved for dependency blocking; currently returns 501 when non-empty",
+                    "Optional positive GitHub issue numbers rendered into `## 의존성` and stored as kanban metadata `depends_on` for auto-queue dependency gating",
                 ),
             ),
             (
@@ -3083,6 +3117,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "content": ["render issue body"],
                 "dod": ["response includes rendered_body"],
                 "agent_id": "project-agentdesk",
+                "block_on": [3718],
                 "dry_run": true
             }),
             json!({
@@ -3098,8 +3133,15 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "announcement_message_id": null,
                 "announcement_sync_error": null,
                 "applied_labels": ["agent:project-agentdesk"],
-                "rendered_body": "## 배경\nCheck the generated markdown before creating anything.\n\n## 내용\n- render issue body\n\n## DoD\n- [ ] response includes rendered_body",
+                "rendered_body": "## 배경\nCheck the generated markdown before creating anything.\n\n## 내용\n- render issue body\n\n## 의존성\n- #3718\n\n## DoD\n- [ ] response includes rendered_body",
                 "validation_warnings": [],
+                "capabilities": {
+                    "auto_dispatch": false,
+                    "block_on": true,
+                    "unsupported_features": ["auto_dispatch"]
+                },
+                "block_on": [3718],
+                "unsupported_features": [],
                 "issue_format_version": 1,
                 "pmd_format_version": 1
             }),
@@ -5304,7 +5346,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/memory/recall",
             "memory",
-            "Recall memory fragments by keyword/text. Auto-selects memento or local backend (ADK_FORCE_LOCAL_MEMORY=1 forces local).",
+            "Recall memory fragments by keyword/text from PostgreSQL local_memory. Auto-detects runtime-active memento, but memento recall is not implemented on this HTTP route; when runtime-active memento is selected the endpoint returns 501 instead of falling back to local rows. If memento is unavailable, or ADK_FORCE_LOCAL_MEMORY=1 is set, the route uses local fallback access.",
         )
         .with_params([
             (
@@ -5330,6 +5372,19 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "fragments": [{"id": "mem-abc", "content": "PostgreSQL cutover done", "topic": "pg-cutover"}],
                 "source": "local",
                 "detected_backend": "local"
+            }),
+        )
+        .with_example(
+            json!({"body": {"keywords": ["postgres"], "workspace": "ops"}}),
+            json!({
+                "ok": false,
+                "error": "memento recall bridge is not implemented on /api/memory/recall",
+                "code": "memento_recall_unsupported",
+                "operation": "recall",
+                "source": "memento",
+                "detected_backend": "memento",
+                "local_fallback_available": true,
+                "local_fallback_hint": "set ADK_FORCE_LOCAL_MEMORY=1 to query/delete only PostgreSQL local_memory fallback rows"
             }),
         ),
         ep(
@@ -5370,13 +5425,198 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/memory/forget",
             "memory",
-            "Remove a memory fragment by id. Returns 404 when the id is not found.",
+            "Remove a PostgreSQL local_memory fragment by id. Auto-detects runtime-active memento, but memento forget is not implemented on this HTTP route; when runtime-active memento is selected the endpoint returns 501 instead of deleting local fallback rows. If memento is unavailable, or ADK_FORCE_LOCAL_MEMORY=1 is set, the route uses local fallback access.",
         )
         .with_params([("id", body_param("string", true, "Fragment id returned by remember"))])
         .with_example(
             json!({"body": {"id": "mem-abc"}}),
             json!({"ok": true, "source": "local"}),
+        )
+        .with_example(
+            json!({"body": {"id": "memento:release"}}),
+            json!({
+                "ok": false,
+                "error": "memento forget bridge is not implemented on /api/memory/forget",
+                "code": "memento_forget_unsupported",
+                "operation": "forget",
+                "source": "memento",
+                "detected_backend": "memento",
+                "local_fallback_available": true,
+                "local_fallback_hint": "set ADK_FORCE_LOCAL_MEMORY=1 to query/delete only PostgreSQL local_memory fallback rows"
+            }),
         ),
+        // #3719 mounted-route coverage: compact docs for routes that were
+        // mounted but absent from the curated /api/docs endpoint list.
+        ep(
+            "GET",
+            "/api/agents/diag/{identifier}",
+            "agents",
+            "Agent diagnostic snapshot by id or role identifier.",
+        )
+        .with_params([(
+            "identifier",
+            path_param("Agent id, role id, or configured agent identifier"),
+        )]),
+        ep(
+            "GET",
+            "/api/analytics/policy-hooks",
+            "analytics",
+            "Policy hook timeout and execution counters.",
+        ),
+        ep(
+            "GET",
+            "/api/github/pr-summary",
+            "github",
+            "Fetch a GitHub PR summary from the AgentDesk cache, with gh CLI fallback on cache miss.",
+        )
+        .with_params([
+            ("repo", query_param("string", true, "Repository in owner/name form")),
+            ("pr", query_param("integer", true, "Pull request number")),
+            (
+                "force_refresh",
+                query_param("boolean", false, "Bypass cached value and refetch"),
+            ),
+            (
+                "expected_head_sha",
+                query_param("string", false, "Use cache only when the head SHA matches"),
+            ),
+        ]),
+        ep(
+            "POST",
+            "/api/github/pr-summary/invalidate",
+            "github",
+            "Invalidate one cached GitHub PR summary entry.",
+        )
+        .with_params([
+            ("repo", body_param("string", true, "Repository in owner/name form")),
+            ("pr", body_param("integer", true, "Pull request number")),
+        ]),
+        ep(
+            "GET",
+            "/api/maintenance/jobs",
+            "ops",
+            "List maintenance job status records from PostgreSQL.",
+        ),
+        ep(
+            "GET",
+            "/api/queue/phase-gates/violations",
+            "auto-queue",
+            "Report pending or active auto-queue entries whose batch phase is ahead of the run phase pointer.",
+        ),
+        ep(
+            "POST",
+            "/api/queue/runs/{id}/entries",
+            "auto-queue",
+            "Append a GitHub issue entry to an existing auto-queue run.",
+        )
+        .with_params([
+            ("id", path_param("Auto-queue run id")),
+            ("issue_number", body_param("integer", true, "GitHub issue number")),
+            ("thread_group", body_param("integer", false, "Optional thread-group override")),
+            ("batch_phase", body_param("integer", false, "Optional batch phase override")),
+        ]),
+        ep(
+            "GET",
+            "/api/round-table-meetings/channels",
+            "meetings",
+            "List Discord channels available to round-table meeting workflows.",
+        ),
+        ep(
+            "POST",
+            "/api/inflight/rebind",
+            "dispatches",
+            "Recover an orphaned live tmux session by rebinding inflight state and respawning its watcher.",
+        ),
+        ep(
+            "POST",
+            "/api/sessions/{session_key}/idle-recap",
+            "sessions",
+            "Trigger an idle-recap card for a resumable dispatched session.",
+        )
+        .with_params([(
+            "session_key",
+            path_param("Dispatched session key to recap"),
+        )]),
+        ep(
+            "GET",
+            "/api/v1/overview",
+            "v1",
+            "Versioned dashboard overview combining health, agents, kanban, dispatch, token, and sparkline summaries.",
+        ),
+        ep(
+            "GET",
+            "/api/v1/agents",
+            "v1",
+            "Versioned dashboard agent list, optionally filtered by officeId.",
+        )
+        .with_params([(
+            "officeId",
+            query_param("string", false, "Optional office id filter"),
+        )]),
+        ep(
+            "GET",
+            "/api/v1/tokens",
+            "v1",
+            "Versioned token usage summary for range or period query windows.",
+        )
+        .with_params([
+            ("range", query_param("string", false, "Usage window such as 7d or 30d")),
+            ("period", query_param("string", false, "Legacy alias for range")),
+        ]),
+        ep(
+            "GET",
+            "/api/v1/kanban",
+            "v1",
+            "Versioned dashboard kanban summary.",
+        ),
+        ep(
+            "GET",
+            "/api/v1/ops/health",
+            "v1",
+            "Versioned operational health payload with bottleneck annotations.",
+        ),
+        ep(
+            "GET",
+            "/api/v1/stream",
+            "v1",
+            "Versioned Server-Sent Events stream with optional last-event-id replay.",
+        ),
+        ep(
+            "GET",
+            "/api/v1/activity",
+            "v1",
+            "Versioned activity feed with limit and cursor pagination.",
+        )
+        .with_params([
+            ("limit", query_param("integer", false, "Maximum activity items")),
+            ("before", query_param("string", false, "Cursor returned by a prior page")),
+        ]),
+        ep(
+            "GET",
+            "/api/v1/achievements",
+            "v1",
+            "Versioned achievement bundle, optionally scoped to an agent.",
+        )
+        .with_params([(
+            "agentId",
+            query_param("string", false, "Optional agent id filter"),
+        )]),
+        ep(
+            "GET",
+            "/api/v1/settings",
+            "v1",
+            "Versioned settings list compatible with the dashboard settings surface.",
+        ),
+        ep(
+            "PATCH",
+            "/api/v1/settings/{key}",
+            "v1",
+            "Patch one versioned settings value using the dashboard-compatible settings contract.",
+        )
+        .with_params([
+            ("key", path_param("Settings key")),
+            ("value", body_param("any", true, "New settings value")),
+        ]),
         // provider-cli safe migration
         ep(
             "GET",
@@ -6153,6 +6393,47 @@ mod tests {
         let (status, _headers, routed) = resolve_docs_segment("api-friction-markers", false);
         assert_eq!(status, StatusCode::OK);
         assert_eq!(routed["path"], "/api/docs/api-friction-markers");
+    }
+
+    #[test]
+    fn github_issue_create_docs_surface_block_on_and_auto_dispatch_capabilities() {
+        let endpoints = all_endpoints();
+        let endpoint = endpoints
+            .iter()
+            .find(|endpoint| {
+                endpoint.method == "POST" && endpoint.path == "/api/github/issues/create"
+            })
+            .expect("POST /api/github/issues/create must be documented");
+
+        assert!(
+            !endpoint.params.contains_key("auto_dispatch"),
+            "unsupported auto_dispatch must not be advertised as a public request param"
+        );
+        assert!(
+            endpoint.params.contains_key("block_on"),
+            "supported block_on dependency contract must be documented"
+        );
+        assert!(
+            endpoint.description.contains("capabilities")
+                && endpoint.description.contains("auto_dispatch")
+                && endpoint.description.contains("block_on records positive"),
+            "docs must explain block_on support and dry_run capability discovery: {}",
+            endpoint.description
+        );
+
+        let dry_run = endpoint
+            .dry_run_example
+            .as_ref()
+            .expect("issue create docs must include dry_run discovery example");
+        assert_eq!(dry_run.status, Some(200));
+        assert_eq!(dry_run.response["capabilities"]["auto_dispatch"], false);
+        assert_eq!(dry_run.response["capabilities"]["block_on"], true);
+        assert_eq!(
+            dry_run.response["capabilities"]["unsupported_features"],
+            json!(["auto_dispatch"])
+        );
+        assert_eq!(dry_run.response["block_on"], json!([3718]));
+        assert_eq!(dry_run.response["unsupported_features"], json!([]));
     }
 
     #[test]

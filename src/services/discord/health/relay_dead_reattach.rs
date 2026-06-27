@@ -33,6 +33,15 @@ fn should_reattach_relay_dead_watcher(
     ) {
         return false;
     }
+    // Fresh runtime activity is a blocker for destructive cleanup, but for a
+    // relay frontier that never moved it is evidence that a non-destructive
+    // watcher reattach can recover live output.
+    if snapshot
+        .relay_health
+        .relay_frontier_never_advanced_with_unread_tail()
+    {
+        return true;
+    }
     !stall_liveness::stall_watchdog_jsonl_liveness_defers_force_clean(
         latest_runtime_activity_unix_nanos,
         now_unix_secs,
@@ -157,7 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_dead_watcher_reattach_requires_stale_turn_and_stale_jsonl() {
+    fn relay_dead_watcher_reattach_handles_dead_frontier_liveness() {
         let now = chrono::Utc::now().timestamp();
         let stale = local_string(now - (recovery::STALL_WATCHDOG_THRESHOLD_SECS as i64) - 1);
         let fresh = local_string(now - 5);
@@ -181,6 +190,15 @@ mod tests {
         committed.inflight_terminal_delivery_committed = true;
         let mut fresh_outbound = snapshot(&stale);
         fresh_outbound.relay_health.last_outbound_activity_ms = Some((now - 5) * 1000);
+        let mut advanced_frontier = snapshot(&stale);
+        advanced_frontier.last_relay_ts_ms = (now - 30) * 1000;
+        advanced_frontier.last_relay_offset = 64;
+        advanced_frontier.last_capture_offset = Some(128);
+        advanced_frontier.unread_bytes = Some(64);
+        advanced_frontier.relay_health.last_relay_ts_ms = Some((now - 30) * 1000);
+        advanced_frontier.relay_health.last_relay_offset = 64;
+        advanced_frontier.relay_health.last_capture_offset = Some(128);
+        advanced_frontier.relay_health.unread_bytes = Some(64);
         let recent_boot = now - 5;
 
         for (name, candidate, activity, boot_unix_secs) in [
@@ -189,8 +207,8 @@ mod tests {
             ("terminal committed", committed, stale_activity, boot),
             ("fresh inflight", snapshot(&fresh), stale_activity, boot),
             (
-                "fresh runtime activity",
-                snapshot(&stale),
+                "fresh advanced relay frontier",
+                advanced_frontier.clone(),
                 fresh_activity,
                 boot,
             ),
@@ -212,6 +230,26 @@ mod tests {
                 "{name}"
             );
         }
+        assert!(
+            should_reattach_relay_dead_watcher(
+                &snapshot(&stale),
+                ChannelId::new(42),
+                fresh_activity,
+                now,
+                boot,
+            ),
+            "fresh runtime activity is positive liveness for the dead-frontier reattach signature"
+        );
+        assert!(
+            should_reattach_relay_dead_watcher(
+                &advanced_frontier,
+                ChannelId::new(42),
+                stale_activity,
+                now,
+                boot,
+            ),
+            "advanced relay frontiers still require stale runtime activity before reattach"
+        );
         assert!(
             should_reattach_relay_dead_watcher(
                 &fresh_outbound,

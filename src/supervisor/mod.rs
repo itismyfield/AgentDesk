@@ -10,13 +10,32 @@ use crate::error::{AppError, ErrorCode};
 const SUPERVISOR_ACTOR: &str = "runtime_supervisor";
 const ORPHAN_CONFIRM_KEY_PREFIX: &str = "runtime_supervisor:orphan_confirm:";
 const ACTIVE_DISPATCH_STATUSES: &[&str] = &["pending", "dispatched"];
+const AUDIT_ONLY_ACK_FIELD: &str = "supervisor_audit_only";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SupervisorSignal {
+    /// Audit-only signal. Rust records an escalation decision only when callers
+    /// explicitly set `supervisor_audit_only: true`; no recovery action exists.
     DeadlockCandidate,
+    /// Implemented recovery signal. Rust probes/recovers orphan dispatches.
     OrphanCandidate,
+    /// Audit-only signal. Rust records an escalation decision only when callers
+    /// explicitly set `supervisor_audit_only: true`; no recovery action exists.
     ResumeCandidate,
+    /// Audit-only signal. Rust records an escalation decision only when callers
+    /// explicitly set `supervisor_audit_only: true`; no recovery action exists.
     StaleInflight,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupervisorSignalSupport {
+    /// Rust owns and may execute corrective action semantics for this signal.
+    ImplementedAction,
+    /// Rust only records an escalation/probe audit row; callers must opt in.
+    AuditOnly,
+    /// Reserved names are not accepted at public emit boundaries.
+    Reserved,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,6 +51,7 @@ pub enum SupervisorAction {
 #[derive(Debug, Clone, Serialize)]
 pub struct SupervisorDecision {
     pub signal: SupervisorSignal,
+    pub support_state: SupervisorSignalSupport,
     pub chosen_action: SupervisorAction,
     pub actor: &'static str,
     pub session_key: Option<String>,
@@ -77,7 +97,6 @@ impl BridgeHandle {
 #[derive(Clone)]
 pub struct RuntimeSupervisor {
     pg_pool: Option<PgPool>,
-    engine: PolicyEngine,
 }
 
 #[derive(Clone)]
@@ -89,6 +108,20 @@ struct OrphanCandidate {
     repo_id: Option<String>,
 }
 
+struct ReadyTarget {
+    status: String,
+    clock: Option<crate::pipeline::ClockConfig>,
+}
+
+enum OrphanReadyTransition {
+    Transitioned,
+    CardMoved {
+        status: String,
+        latest_dispatch_id: Option<String>,
+    },
+    CardMissing,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct OrphanConfirmMarker {
     card_id: String,
@@ -97,8 +130,8 @@ struct OrphanConfirmMarker {
 }
 
 impl RuntimeSupervisor {
-    pub fn new(pg_pool: Option<PgPool>, engine: PolicyEngine) -> Self {
-        Self { pg_pool, engine }
+    pub fn new(pg_pool: Option<PgPool>, _engine: PolicyEngine) -> Self {
+        Self { pg_pool }
     }
 
     fn kv_get(&self, key: &str) -> Result<Option<String>, String> {
@@ -171,32 +204,22 @@ impl RuntimeSupervisor {
         signal: SupervisorSignal,
         evidence: Value,
     ) -> Result<SupervisorDecision, String> {
+        signal.validate_emit_evidence(&evidence)?;
         match signal {
             SupervisorSignal::OrphanCandidate => self.handle_orphan_candidate(evidence),
             other => {
-                let audit = wrap_audit_evidence(
-                    evidence,
-                    Some("signal not implemented yet".to_string()),
-                    None,
-                );
-                let session_key = extract_str(&audit, "session_key");
-                let dispatch_id = extract_str(&audit, "dispatch_id");
+                let (decision, audit) = build_audit_only_decision(other, evidence)?;
+                let session_key = decision.session_key.clone();
+                let dispatch_id = decision.dispatch_id.clone();
                 self.record_decision(
                     other,
                     &audit,
                     SupervisorAction::Escalate,
                     session_key.as_deref(),
                     dispatch_id.as_deref(),
+                    false,
                 )?;
-                Ok(SupervisorDecision {
-                    signal: other,
-                    chosen_action: SupervisorAction::Escalate,
-                    actor: SUPERVISOR_ACTOR,
-                    session_key,
-                    dispatch_id,
-                    executed: false,
-                    note: extract_str(&audit, "supervisor_note"),
-                })
+                Ok(decision)
             }
         }
     }
@@ -215,6 +238,34 @@ impl RuntimeSupervisor {
             } else {
                 chosen_action = SupervisorAction::Resume;
 
+                let Some(pool) = self.pg_pool.as_ref() else {
+                    return Err("runtime supervisor postgres backend is unavailable".to_string());
+                };
+                let repo_id = candidate.repo_id.clone();
+                let agent_id = candidate.assigned_agent_id.clone();
+                let ready_target = crate::utils::async_bridge::block_on_pg_result(
+                    pool,
+                    move |bridge_pool| async move {
+                        crate::pipeline::ensure_loaded();
+                        let effective = crate::pipeline::resolve_for_card_pg(
+                            &bridge_pool,
+                            repo_id.as_deref(),
+                            agent_id.as_deref(),
+                        )
+                        .await;
+                        let status = effective
+                            .dispatchable_states()
+                            .first()
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| "ready".to_string());
+                        Ok::<ReadyTarget, String>(ReadyTarget {
+                            clock: effective.clock_for_state(&status).cloned(),
+                            status,
+                        })
+                    },
+                    |error| error,
+                )?;
+
                 // Orphan recovery: fail the dispatch and return card to ready.
                 // The dispatch had no active session, so no work was done.
                 // Completing it would falsely advance the card through review → done.
@@ -223,84 +274,37 @@ impl RuntimeSupervisor {
                     note = Some("dispatch already terminal or missing".to_string());
                     chosen_action = SupervisorAction::Probe;
                 } else {
+                    executed = true;
                     // Return card to ready for re-dispatch instead of advancing to review
-                    let Some(pool) = self.pg_pool.as_ref() else {
-                        return Err(
-                            "runtime supervisor postgres backend is unavailable".to_string()
-                        );
-                    };
-                    let repo_id = candidate.repo_id.clone();
-                    let agent_id = candidate.assigned_agent_id.clone();
-                    let ready_target = crate::utils::async_bridge::block_on_pg_result(
-                        pool,
-                        move |bridge_pool| async move {
-                            crate::pipeline::ensure_loaded();
-                            let effective = crate::pipeline::resolve_for_card_pg(
-                                &bridge_pool,
-                                repo_id.as_deref(),
-                                agent_id.as_deref(),
-                            )
-                            .await;
-                            Ok::<String, String>(
-                                effective
-                                    .dispatchable_states()
-                                    .first()
-                                    .map(|s| s.to_string())
-                                    .unwrap_or_else(|| "ready".to_string()),
-                            )
-                        },
-                        |error| error,
-                    )?;
-
-                    let current = self.current_card_head(&candidate.card_id)?;
-                    if current
-                        .as_ref()
-                        .is_some_and(|(status, latest_dispatch_id)| {
-                            status == &candidate.card_status
-                                && latest_dispatch_id.as_deref() == Some(dispatch_id.as_str())
-                        })
-                    {
-                        let engine = self.engine.clone();
-                        let card_id = candidate.card_id.clone();
-                        let transition_target = ready_target.clone();
-                        let transition_result = crate::utils::async_bridge::block_on_pg_result(
-                            pool,
-                            move |bridge_pool| async move {
-                                crate::kanban::transition_status_with_opts_pg(
-                                    None,
-                                    &bridge_pool,
-                                    &engine,
-                                    &card_id,
-                                    &transition_target,
-                                    SUPERVISOR_ACTOR,
-                                    crate::engine::transition::ForceIntent::SystemRecovery,
-                                )
-                                .await
-                                .map(|_| ())
-                                .map_err(|error| error.to_string())
-                            },
-                            |error| error,
-                        );
-                        match transition_result {
-                            Ok(_) => {
-                                executed = true;
-                                self.notify_orphan_recovery(&candidate, &ready_target);
-                            }
-                            Err(e) => {
-                                note = Some(format!("resume transition skipped: {e}"));
-                            }
+                    match self.return_card_to_ready_if_orphan_head(
+                        &candidate,
+                        &dispatch_id,
+                        &ready_target.status,
+                        ready_target.clock.as_ref(),
+                    ) {
+                        Ok(OrphanReadyTransition::Transitioned) => {
+                            self.notify_orphan_recovery(&candidate, &ready_target.status);
                         }
-                    } else {
-                        let moved = current
-                            .map(|(status, latest_dispatch_id)| {
-                                format!(
-                                    "card moved to status={} latest_dispatch_id={}",
-                                    status,
-                                    latest_dispatch_id.unwrap_or_else(|| "null".to_string())
-                                )
-                            })
-                            .unwrap_or_else(|| "card disappeared before transition".to_string());
-                        note = Some(moved);
+                        Ok(OrphanReadyTransition::CardMoved {
+                            status,
+                            latest_dispatch_id,
+                        }) => {
+                            note = Some(format!(
+                                "dispatch failed; card moved to status={} latest_dispatch_id={}",
+                                status,
+                                latest_dispatch_id.unwrap_or_else(|| "null".to_string())
+                            ));
+                        }
+                        Ok(OrphanReadyTransition::CardMissing) => {
+                            note = Some(
+                                "dispatch failed; card disappeared before transition".to_string(),
+                            );
+                        }
+                        Err(e) => {
+                            note = Some(format!(
+                                "dispatch failed; resume transition status unknown: {e}"
+                            ));
+                        }
                     }
                 }
             }
@@ -319,10 +323,12 @@ impl RuntimeSupervisor {
             chosen_action,
             session_key.as_deref(),
             Some(dispatch_id.as_str()),
+            executed,
         )?;
 
         Ok(SupervisorDecision {
             signal: SupervisorSignal::OrphanCandidate,
+            support_state: SupervisorSignal::OrphanCandidate.support_state(),
             chosen_action,
             actor: SUPERVISOR_ACTOR,
             session_key,
@@ -473,32 +479,96 @@ impl RuntimeSupervisor {
         )
     }
 
-    fn current_card_head(&self, card_id: &str) -> Result<Option<(String, Option<String>)>, String> {
-        if let Some(pool) = self.pg_pool.as_ref() {
-            let card_id = card_id.to_string();
-            return crate::utils::async_bridge::block_on_pg_result(
-                pool,
-                move |bridge_pool| async move {
-                    let row = sqlx::query(
-                        "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = $1",
+    fn return_card_to_ready_if_orphan_head(
+        &self,
+        candidate: &OrphanCandidate,
+        dispatch_id: &str,
+        ready_target: &str,
+        ready_clock: Option<&crate::pipeline::ClockConfig>,
+    ) -> Result<OrphanReadyTransition, String> {
+        let Some(pool) = self.pg_pool.as_ref() else {
+            return Err("runtime supervisor postgres backend is unavailable".to_string());
+        };
+        let card_id = candidate.card_id.clone();
+        let expected_status = candidate.card_status.clone();
+        let dispatch_id = dispatch_id.to_string();
+        let ready_target = ready_target.to_string();
+        let clock_assignment = ready_clock
+            .map(orphan_ready_clock_assignment_sql)
+            .unwrap_or_default();
+        crate::utils::async_bridge::block_on_pg_result(
+            pool,
+            move |bridge_pool| async move {
+                let mut tx = bridge_pool
+                    .begin()
+                    .await
+                    .map_err(|error| format!("begin orphan ready transition tx: {error}"))?;
+                let update_sql = format!(
+                    "UPDATE kanban_cards
+                     SET status = $1, updated_at = NOW(){clock_assignment}
+                     WHERE id = $2
+                       AND status = $3
+                       AND latest_dispatch_id = $4"
+                );
+                let update = sqlx::query(&update_sql)
+                    .bind(&ready_target)
+                    .bind(&card_id)
+                    .bind(&expected_status)
+                    .bind(&dispatch_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|error| {
+                        format!("conditionally return orphan card {card_id}: {error}")
+                    })?;
+
+                if update.rows_affected() == 1 {
+                    sqlx::query(
+                        "INSERT INTO kanban_audit_logs (
+                            card_id, from_status, to_status, source, result
+                         )
+                         VALUES ($1, $2, $3, $4, $5)",
                     )
                     .bind(&card_id)
-                    .fetch_optional(&bridge_pool)
+                    .bind(&expected_status)
+                    .bind(&ready_target)
+                    .bind(SUPERVISOR_ACTOR)
+                    .bind(format!(
+                        "orphan recovery failed dispatch {dispatch_id}; returned card to {ready_target}"
+                    ))
+                    .execute(&mut *tx)
                     .await
-                    .map_err(|error| format!("current card head {card_id}: {error}"))?;
-                    Ok(row.map(|row| {
-                        (
-                            row.try_get::<String, _>("status").unwrap_or_default(),
-                            row.try_get::<Option<String>, _>("latest_dispatch_id")
-                                .ok()
-                                .flatten(),
-                        )
-                    }))
-                },
-                |error| error,
-            );
-        }
-        Err("runtime supervisor postgres backend is unavailable".to_string())
+                    .map_err(|error| format!("audit orphan ready transition {card_id}: {error}"))?;
+                    tx.commit()
+                        .await
+                        .map_err(|error| format!("commit orphan ready transition tx: {error}"))?;
+                    return Ok(OrphanReadyTransition::Transitioned);
+                }
+
+                let row = sqlx::query(
+                    "SELECT status, latest_dispatch_id
+                     FROM kanban_cards
+                     WHERE id = $1",
+                )
+                .bind(&card_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|error| format!("reload orphan card head {card_id}: {error}"))?;
+                tx.commit()
+                    .await
+                    .map_err(|error| format!("commit orphan ready skip tx: {error}"))?;
+
+                Ok(row
+                    .map(|row| OrphanReadyTransition::CardMoved {
+                        status: row.try_get("status").unwrap_or_default(),
+                        latest_dispatch_id: row
+                            .try_get::<Option<String>, _>("latest_dispatch_id")
+                            .ok()
+                            .flatten(),
+                    })
+                    .unwrap_or(OrphanReadyTransition::CardMissing))
+            },
+            |error| error,
+        )
     }
 
     fn record_decision(
@@ -508,9 +578,11 @@ impl RuntimeSupervisor {
         chosen_action: SupervisorAction,
         session_key: Option<&str>,
         dispatch_id: Option<&str>,
+        executed: bool,
     ) -> Result<(), String> {
         if let Some(pool) = self.pg_pool.as_ref() {
-            let evidence_json = evidence.to_string();
+            let evidence_json =
+                decision_log_evidence(signal, evidence, chosen_action, executed).to_string();
             let signal = signal.to_string();
             let chosen_action = chosen_action.to_string();
             let session_key = session_key.map(str::to_string);
@@ -606,6 +678,13 @@ pub fn emit_signal_json(bridge: &BridgeHandle, signal_name: &str, evidence_json:
                 .into_policy_json_string();
         }
     };
+    if let Err(err) = signal.validate_emit_evidence(&evidence) {
+        return AppError::bad_request(err)
+            .with_code(ErrorCode::Policy)
+            .with_operation("emit_signal_json.signal_support")
+            .with_context("signal_name", signal_name)
+            .into_policy_json_string();
+    }
     let supervisor = match bridge.runtime_supervisor() {
         Ok(supervisor) => supervisor,
         Err(err) => {
@@ -632,6 +711,43 @@ pub fn emit_signal_json(bridge: &BridgeHandle, signal_name: &str, evidence_json:
     }
 }
 
+pub fn validate_signal_json(signal_name: &str, evidence_json: &str) -> String {
+    let signal = match SupervisorSignal::try_from(signal_name) {
+        Ok(signal) => signal,
+        Err(err) => {
+            return AppError::bad_request(err)
+                .with_code(ErrorCode::Policy)
+                .with_operation("validate_signal_json.parse_signal")
+                .with_context("signal_name", signal_name)
+                .into_policy_json_string();
+        }
+    };
+    let evidence: Value = match serde_json::from_str(evidence_json) {
+        Ok(value) => value,
+        Err(err) => {
+            return AppError::bad_request(format!("invalid evidence_json: {err}"))
+                .with_code(ErrorCode::Policy)
+                .with_operation("validate_signal_json.parse_evidence")
+                .with_context("signal_name", signal_name)
+                .into_policy_json_string();
+        }
+    };
+    if let Err(err) = signal.validate_emit_evidence(&evidence) {
+        return AppError::bad_request(err)
+            .with_code(ErrorCode::Policy)
+            .with_operation("validate_signal_json.signal_support")
+            .with_context("signal_name", signal_name)
+            .into_policy_json_string();
+    }
+
+    json!({
+        "ok": true,
+        "signal": signal.to_string(),
+        "support_state": signal.support_state(),
+    })
+    .to_string()
+}
+
 fn wrap_audit_evidence(
     evidence: Value,
     note: Option<String>,
@@ -651,6 +767,65 @@ fn wrap_audit_evidence(
         }
     }
     payload
+}
+
+fn decision_log_evidence(
+    signal: SupervisorSignal,
+    evidence: &Value,
+    chosen_action: SupervisorAction,
+    executed: bool,
+) -> Value {
+    let mut payload = if evidence.is_object() {
+        evidence.clone()
+    } else {
+        json!({ "input": evidence })
+    };
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert(
+            "supervisor_signal_support".to_string(),
+            json!(signal.support_state()),
+        );
+        obj.insert("supervisor_action_executed".to_string(), json!(executed));
+        obj.insert(
+            "supervisor_chosen_action".to_string(),
+            json!(chosen_action.to_string()),
+        );
+    }
+    payload
+}
+
+fn build_audit_only_decision(
+    signal: SupervisorSignal,
+    evidence: Value,
+) -> Result<(SupervisorDecision, Value), String> {
+    signal.validate_emit_evidence(&evidence)?;
+    let note = Some(format!(
+        "{signal} is audit-only; no runtime recovery action executed"
+    ));
+    let audit = wrap_audit_evidence(evidence, note.clone(), None);
+    let session_key = extract_str(&audit, "session_key");
+    let dispatch_id = extract_str(&audit, "dispatch_id");
+    Ok((
+        SupervisorDecision {
+            signal,
+            support_state: signal.support_state(),
+            chosen_action: SupervisorAction::Escalate,
+            actor: SUPERVISOR_ACTOR,
+            session_key,
+            dispatch_id,
+            executed: false,
+            note,
+        },
+        audit,
+    ))
+}
+
+fn orphan_ready_clock_assignment_sql(clock: &crate::pipeline::ClockConfig) -> String {
+    if clock.mode.as_deref() == Some("coalesce") {
+        format!(", {field} = COALESCE({field}, NOW())", field = clock.set)
+    } else {
+        format!(", {} = NOW()", clock.set)
+    }
 }
 
 fn extract_required_str(evidence: &Value, key: &str) -> Result<String, String> {
@@ -682,6 +857,39 @@ impl TryFrom<&str> for SupervisorSignal {
     }
 }
 
+impl SupervisorSignal {
+    pub const fn support_state(self) -> SupervisorSignalSupport {
+        match self {
+            Self::OrphanCandidate => SupervisorSignalSupport::ImplementedAction,
+            Self::DeadlockCandidate | Self::ResumeCandidate | Self::StaleInflight => {
+                SupervisorSignalSupport::AuditOnly
+            }
+        }
+    }
+
+    pub fn validate_emit_evidence(self, evidence: &Value) -> Result<(), String> {
+        match self.support_state() {
+            SupervisorSignalSupport::ImplementedAction => Ok(()),
+            SupervisorSignalSupport::AuditOnly => {
+                if evidence
+                    .get(AUDIT_ONLY_ACK_FIELD)
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "supervisor signal {self} is audit-only; set {AUDIT_ONLY_ACK_FIELD}=true to record Escalate without runtime recovery"
+                    ))
+                }
+            }
+            SupervisorSignalSupport::Reserved => Err(format!(
+                "supervisor signal {self} is reserved and cannot be emitted"
+            )),
+        }
+    }
+}
+
 impl std::fmt::Display for SupervisorSignal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -703,5 +911,135 @@ impl std::fmt::Display for SupervisorAction {
             Self::Resume => write!(f, "Resume"),
             Self::Escalate => write!(f, "Escalate"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn supervisor_signal_support_states_are_explicit() {
+        assert_eq!(
+            SupervisorSignal::OrphanCandidate.support_state(),
+            SupervisorSignalSupport::ImplementedAction
+        );
+        for signal in [
+            SupervisorSignal::DeadlockCandidate,
+            SupervisorSignal::ResumeCandidate,
+            SupervisorSignal::StaleInflight,
+        ] {
+            assert_eq!(signal.support_state(), SupervisorSignalSupport::AuditOnly);
+        }
+    }
+
+    #[test]
+    fn audit_only_signals_require_explicit_acknowledgement() {
+        for signal in [
+            SupervisorSignal::DeadlockCandidate,
+            SupervisorSignal::ResumeCandidate,
+            SupervisorSignal::StaleInflight,
+        ] {
+            let err = signal
+                .validate_emit_evidence(&json!({ "session_key": "s1" }))
+                .expect_err("audit-only signal should require an explicit acknowledgement");
+            assert!(err.contains("audit-only"));
+            assert!(err.contains(AUDIT_ONLY_ACK_FIELD));
+
+            signal
+                .validate_emit_evidence(&json!({
+                    "session_key": "s1",
+                    "supervisor_audit_only": true,
+                }))
+                .expect("acknowledged audit-only signal should validate");
+        }
+
+        SupervisorSignal::OrphanCandidate
+            .validate_emit_evidence(&json!({ "dispatch_id": "dispatch-1" }))
+            .expect("implemented signal should not require audit-only acknowledgement");
+    }
+
+    #[test]
+    fn audit_only_decisions_escalate_without_execution() {
+        for signal in [
+            SupervisorSignal::DeadlockCandidate,
+            SupervisorSignal::ResumeCandidate,
+            SupervisorSignal::StaleInflight,
+        ] {
+            let (decision, audit) = build_audit_only_decision(
+                signal,
+                json!({
+                    "session_key": "session-1",
+                    "dispatch_id": "dispatch-1",
+                    "supervisor_audit_only": true,
+                }),
+            )
+            .expect("audit-only decision should build");
+
+            assert_eq!(decision.signal, signal);
+            assert_eq!(decision.support_state, SupervisorSignalSupport::AuditOnly);
+            assert_eq!(decision.chosen_action, SupervisorAction::Escalate);
+            assert!(!decision.executed);
+            assert_eq!(decision.session_key.as_deref(), Some("session-1"));
+            assert_eq!(decision.dispatch_id.as_deref(), Some("dispatch-1"));
+            assert!(
+                decision
+                    .note
+                    .as_deref()
+                    .is_some_and(|note| note.contains("no runtime recovery action executed"))
+            );
+
+            let persisted =
+                decision_log_evidence(signal, &audit, decision.chosen_action, decision.executed);
+            assert_eq!(persisted["supervisor_signal_support"], json!("audit_only"));
+            assert_eq!(persisted["supervisor_action_executed"], json!(false));
+            assert_eq!(persisted["supervisor_chosen_action"], json!("Escalate"));
+            assert!(
+                persisted["supervisor_note"]
+                    .as_str()
+                    .is_some_and(|note| note.contains("audit-only"))
+            );
+        }
+    }
+
+    #[test]
+    fn emit_signal_json_rejects_audit_only_signal_before_bridge_lookup() {
+        let bridge = BridgeHandle::new();
+        let response = emit_signal_json(&bridge, "DeadlockCandidate", r#"{"session_key":"s1"}"#);
+
+        assert!(response.contains("audit-only"));
+        assert!(response.contains("emit_signal_json.signal_support"));
+        assert!(!response.contains("runtime supervisor is not attached"));
+    }
+
+    #[test]
+    fn orphan_recovery_clock_assignment_matches_transition_semantics() {
+        let requested = crate::pipeline::ClockConfig {
+            set: "requested_at".to_string(),
+            mode: None,
+        };
+        assert_eq!(
+            orphan_ready_clock_assignment_sql(&requested),
+            ", requested_at = NOW()"
+        );
+
+        let started = crate::pipeline::ClockConfig {
+            set: "started_at".to_string(),
+            mode: Some("coalesce".to_string()),
+        };
+        assert_eq!(
+            orphan_ready_clock_assignment_sql(&started),
+            ", started_at = COALESCE(started_at, NOW())"
+        );
+
+        let review_gate = crate::pipeline::ClockConfig {
+            set: "awaiting_dod_at".to_string(),
+            mode: None,
+        };
+        assert_eq!(
+            orphan_ready_clock_assignment_sql(&review_gate),
+            ", awaiting_dod_at = NOW()"
+        );
     }
 }

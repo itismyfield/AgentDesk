@@ -1151,7 +1151,7 @@ mod tests {
 /// #3082 part B (codex P2-3): gate-behavior tests for the answer-flush wait.
 /// These do not need a live Discord HTTP client (they exercise only the
 /// `await_answer_flush_if_queued_notice` seam against a real barrier), so they
-/// are compiled unconditionally rather than behind `legacy-sqlite-tests`.
+/// are compiled unconditionally rather than behind removed integration fixtures.
 #[cfg(test)]
 mod answer_flush_gate_tests {
     use super::await_answer_flush_if_queued_notice;

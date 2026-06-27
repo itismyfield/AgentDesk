@@ -254,7 +254,7 @@ struct PolicyEngineRuntimeDeps {
 pub struct PolicyEngine {
     inner: Arc<Mutex<PolicyEngineInner>>,
     actor: Arc<PolicyEngineActor>,
-    /// Transitional runtime deps kept only while SQLite compatibility remains.
+    /// Runtime deps for bridge ops that need PostgreSQL access.
     runtime_deps: Arc<PolicyEngineRuntimeDeps>,
     tick_hook_in_flight: Arc<AtomicBool>,
 }
@@ -278,9 +278,9 @@ pub struct PolicyInfo {
 
 impl PolicyEngine {
     /// Create a new policy engine, initializing QuickJS and loading policies.
-    // reason: SQLite-path constructor consumed only by cross-module test setups
+    // reason: non-PG constructor consumed only by cross-module test setups
     // (server route tests build engines via new_with_pg); kept as the public
-    // non-PG entry point.
+    // no-runtime-deps entry point.
     #[allow(dead_code)]
     pub fn new(config: &Config) -> Result<Self> {
         Self::new_with_pg_and_label(config, None, "main")

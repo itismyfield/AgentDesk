@@ -1025,6 +1025,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             .as_ref()
             .filter(|state| state.tmux_session_name.as_deref() == Some(tmux_session_name.as_str()))
             .map(crate::services::discord::inflight::InflightTurnIdentity::from_state);
+        let (status_panel_started_at, footer_owner) =
+            make_owner_now(turn_identity_for_panel.as_ref());
         // #3003 P2: rehydrate a watcher-owned persisted panel id while the row
         // still exists; footer mode intentionally has no separate panel handle.
         if !single_message_panel_footer_mode
@@ -1047,7 +1049,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             && (shared.ui.placeholder_live_events_enabled || shared.ui.status_panel_v2_enabled)
         {
             if single_message_panel_footer_mode {
-                supersede_watcher_registered_completion_footer(&http, &shared, channel_id).await;
+                supersede_watcher_footer(&http, &shared, channel_id, footer_owner).await;
                 shared
                     .ui
                     .placeholder_live_events
@@ -1057,7 +1059,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             }
         }
         let mut last_status_panel_text = String::new();
-        let status_panel_started_at = chrono::Utc::now().timestamp();
         let mut last_edit_text = stream_seed.last_edit_text;
         let mut response_sent_offset = stream_seed.response_sent_offset;
         let finish_mailbox_on_completion = stream_seed.finish_mailbox_on_completion;
@@ -1075,7 +1076,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // #1009: 1-shot tracker for the monitor-auto-turn preamble hint so the
         // hint text is emitted exactly once per watcher turn frame.
         let mut monitor_auto_turn_preamble_injected = false;
-
         // Process any complete lines we already have
         let initial_buffer_len = all_data.len();
         observe_qwen_user_prompts_in_buffer(&all_data, &watcher_provider, &tmux_session_name);

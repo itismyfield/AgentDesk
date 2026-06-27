@@ -14,9 +14,14 @@ use super::*;
 // so the classifier, formatters, and card parser stay in sync. The parent's
 // glob (`use super::*`) does not re-export these `use`-imported names, so the
 // child module imports them directly to keep the moved bodies byte-identical.
+use serde::Deserialize;
+
 use super::super::tui_task_card::{
     strip_terminal_controls, truncate_chars_ascii as truncate_chars,
 };
+
+const SUBAGENT_NOTIFICATION_PREVIEW_CHARS: usize = 900;
+const SUBAGENT_NOTIFICATION_PREVIEW_LINES: usize = 8;
 
 /// Classification of TUI-injected prompt text. Each class drives different
 /// lifecycle handling: human/task turns get active-turn ownership, continuation
@@ -25,6 +30,7 @@ use super::super::tui_task_card::{
 pub(super) enum InjectedPromptClass {
     HumanTuiDirect,
     TaskNotificationEvent,
+    SubagentNotificationEvent,
     SystemContinuation,
     SlashCommandControl,
 }
@@ -36,23 +42,34 @@ impl InjectedPromptClass {
         matches!(self, InjectedPromptClass::HumanTuiDirect)
     }
 
-    /// Only continuation banners suppress the active-turn lifecycle. Slash
-    /// control echoes are not human turns, but keep the full synthetic lifecycle.
+    /// Neutral machine events suppress the active-turn lifecycle. Slash control
+    /// echoes are not human turns, but keep the full synthetic lifecycle.
     pub(super) fn suppresses_user_turn_lifecycle(self) -> bool {
-        matches!(self, InjectedPromptClass::SystemContinuation)
+        matches!(
+            self,
+            InjectedPromptClass::SystemContinuation
+                | InjectedPromptClass::SubagentNotificationEvent
+        )
     }
 
-    /// Every injected class still delivers provider output via the bridge tail.
+    /// Whether this injected class should keep the provider-output bridge tail.
+    #[cfg(test)]
     pub(super) fn still_delivers_assistant_output(self) -> bool {
-        true
+        !matches!(self, InjectedPromptClass::SubagentNotificationEvent)
+    }
+
+    pub(super) fn is_subagent_notification_event(self) -> bool {
+        matches!(self, InjectedPromptClass::SubagentNotificationEvent)
     }
 }
 
 /// Pure classifier for injected TUI prompt text. Order is load-bearing:
-/// continuation banners win before task notifications and slash-control echoes.
+/// continuation banners win before machine notifications and slash-control echoes.
 pub(super) fn classify_injected_prompt(prompt: &str) -> InjectedPromptClass {
     if is_system_continuation_prompt(prompt) {
         InjectedPromptClass::SystemContinuation
+    } else if is_start_anchored_subagent_notification(prompt) {
+        InjectedPromptClass::SubagentNotificationEvent
     } else if is_task_notification_prompt(prompt) {
         InjectedPromptClass::TaskNotificationEvent
     } else if is_slash_command_control_prompt(prompt) {
@@ -107,33 +124,49 @@ pub(super) fn strip_leading_local_command_caveat(text: &str) -> (&str, bool) {
 }
 
 /// Detects the `<task-notification>` auto-turn tag injected by Claude Code /
-/// Codex when a background task reaches a terminal state. Deliberately
-/// CONTAINS-based: the CARD render must fire even for a human prompt that quotes
-/// a notification (it is still classified + rendered, never lost). The terminal
-/// BRIDGE uses the stricter `is_start_anchored_task_notification` instead.
+/// Codex when a background task reaches a terminal state. Start-anchored after
+/// the same normalization used by the terminal bridge, so a human prompt that
+/// quotes the tag mid-body remains a normal direct prompt (#3730).
 pub(super) fn is_task_notification_prompt(prompt: &str) -> bool {
-    let trimmed = prompt.trim_start();
-    // Skip a leading terminal-control prefix some injectors prepend before the
-    // tag (strip_terminal_controls is applied for display, not classification).
-    let normalized = strip_terminal_controls(trimmed);
-    let normalized = normalized.trim_start();
-    normalized.contains("<task-notification>") || normalized.contains("<task-notification ")
+    is_start_anchored_task_notification(prompt)
 }
 
 /// #3393 finding 2: START-ANCHORED gate for the live-panel terminal BRIDGE only.
 /// A REAL machine `<task-notification>` user-record begins with the tag after the
 /// shared normalization pipeline (strip_terminal_controls → trim →
 /// strip_leading_injection_wrapper → trim, mirroring #3100/#3388). A human direct
-/// prompt that merely QUOTES a notification mid-message keeps its CARD render (the
-/// contains-based classifier) but must NOT push terminal StatusEvents — combined
-/// with finding 1's id requirement this closes the false-close attack where a
-/// quoted live tool-use-id would otherwise finalize a real running slot.
+/// prompt that merely QUOTES a notification mid-message must NOT push terminal
+/// StatusEvents — combined with finding 1's id requirement this closes the
+/// false-close attack where a quoted live tool-use-id would otherwise finalize a
+/// real running slot.
 pub(super) fn is_start_anchored_task_notification(prompt: &str) -> bool {
+    let normalized = normalized_start_anchored_injection(prompt);
+    starts_with_xmlish_tag(&normalized, "task-notification")
+}
+
+/// Detects Codex `<subagent_notification>` envelopes as neutral machine events.
+/// This is deliberately START-ANCHORED: a human prompt that quotes the XML-ish
+/// tag mid-body remains a normal TUI-direct prompt.
+pub(super) fn is_start_anchored_subagent_notification(prompt: &str) -> bool {
+    let normalized = normalized_start_anchored_injection(prompt);
+    starts_with_xmlish_tag(&normalized, "subagent_notification")
+}
+
+fn starts_with_xmlish_tag(text: &str, tag: &str) -> bool {
+    let Some(rest) = text.strip_prefix('<') else {
+        return false;
+    };
+    let Some(rest) = rest.strip_prefix(tag) else {
+        return false;
+    };
+    rest.starts_with('>') || rest.chars().next().is_some_and(char::is_whitespace)
+}
+
+fn normalized_start_anchored_injection(prompt: &str) -> String {
     let normalized = strip_terminal_controls(prompt);
     let normalized = normalized.trim_start();
     let normalized = strip_leading_injection_wrapper(normalized);
-    let normalized = normalized.trim_start();
-    normalized.starts_with("<task-notification>") || normalized.starts_with("<task-notification ")
+    normalized.trim_start().to_string()
 }
 
 /// Detects start-anchored compact/session-continuation banners.
@@ -149,6 +182,30 @@ pub(super) fn is_system_continuation_prompt(prompt: &str) -> bool {
     SYSTEM_CONTINUATION_OPENINGS
         .iter()
         .any(|opening| normalized.starts_with(opening))
+        || is_provider_session_reuse_marker(normalized)
+}
+
+fn is_provider_session_reuse_marker(normalized: &str) -> bool {
+    const RESUMED_THREAD_PROLOGUE: &str = "The prior authoritative Discord, role, and tool \
+         instructions already present in this Codex thread still apply. Treat only this turn's \
+         user request, reply context, uploaded files, and memory recall below as new actionable \
+         input.";
+    const FRESH_FORK_PROLOGUE: &str = "The prior authoritative Discord, role, and tool \
+         instructions already issued to this role in the current dcserver lifetime still apply. \
+         Treat only this turn's user request, reply context, uploaded files, and memory recall \
+         below as new actionable input.";
+
+    let Some(rest) = normalized.strip_prefix("[Provider Session Reuse]") else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    provider_reuse_prologue_has_prompt_tail(rest, RESUMED_THREAD_PROLOGUE)
+        || provider_reuse_prologue_has_prompt_tail(rest, FRESH_FORK_PROLOGUE)
+}
+
+fn provider_reuse_prologue_has_prompt_tail(rest: &str, prologue: &str) -> bool {
+    rest.strip_prefix(prologue)
+        .is_some_and(|tail| tail.starts_with("\n\n"))
 }
 
 /// Removes a leading SSH-direct wrapper line/fence; mid-body quotes are untouched.
@@ -183,6 +240,117 @@ pub(super) fn format_ssh_direct_prompt_notification(
         sanitize_inline_code(tmux_session_name),
         preview,
     )
+}
+
+#[derive(Debug, Deserialize)]
+struct SubagentNotificationEnvelope {
+    status: Option<SubagentNotificationStatus>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubagentNotificationStatus {
+    completed: Option<String>,
+    failed: Option<String>,
+}
+
+pub(super) fn format_subagent_notification_card(tmux_session_name: &str, prompt: &str) -> String {
+    match parse_subagent_notification(prompt) {
+        Ok(SubagentNotificationRender::Completed(report)) => {
+            format_subagent_notification_report(tmux_session_name, "✅", "completed", &report)
+        }
+        Ok(SubagentNotificationRender::Failed(report)) => {
+            format_subagent_notification_report(tmux_session_name, "❌", "failed", &report)
+        }
+        Ok(SubagentNotificationRender::Unknown) => format!(
+            "📋 Subagent notification (tmux : `{}`) — no completed/failed status",
+            sanitize_inline_code(tmux_session_name),
+        ),
+        Err(_) => format!(
+            "⚠️ Subagent notification (tmux : `{}`) — malformed payload omitted",
+            sanitize_inline_code(tmux_session_name),
+        ),
+    }
+}
+
+enum SubagentNotificationRender {
+    Completed(String),
+    Failed(String),
+    Unknown,
+}
+
+fn parse_subagent_notification(prompt: &str) -> Result<SubagentNotificationRender, ()> {
+    let payload = extract_subagent_notification_payload(prompt)?;
+    let envelope: SubagentNotificationEnvelope = serde_json::from_str(&payload).map_err(|_| ())?;
+    let status = envelope.status.ok_or(())?;
+    if let Some(report) = status.completed.filter(|report| !report.trim().is_empty()) {
+        return Ok(SubagentNotificationRender::Completed(report));
+    }
+    if let Some(report) = status.failed.filter(|report| !report.trim().is_empty()) {
+        return Ok(SubagentNotificationRender::Failed(report));
+    }
+    Ok(SubagentNotificationRender::Unknown)
+}
+
+fn extract_subagent_notification_payload(prompt: &str) -> Result<String, ()> {
+    const OPEN: &str = "<subagent_notification";
+    const CLOSE: &str = "</subagent_notification>";
+
+    let normalized = normalized_start_anchored_injection(prompt);
+    if !normalized.starts_with(OPEN) {
+        return Err(());
+    }
+    let after_open_name = &normalized[OPEN.len()..];
+    let Some(first) = after_open_name.chars().next() else {
+        return Err(());
+    };
+    if first != '>' && !first.is_whitespace() {
+        return Err(());
+    }
+    let open_end = normalized.find('>').ok_or(())? + 1;
+    let after_open = &normalized[open_end..];
+    let close_start = after_open.find(CLOSE).ok_or(())?;
+    Ok(after_open[..close_start].trim().to_string())
+}
+
+fn format_subagent_notification_report(
+    tmux_session_name: &str,
+    icon: &str,
+    status: &str,
+    report: &str,
+) -> String {
+    let preview = subagent_report_preview(report);
+    let mut lines = vec![format!(
+        "{icon} Subagent {status} (tmux : `{}`)",
+        sanitize_inline_code(tmux_session_name),
+    )];
+    if !preview.is_empty() {
+        lines.push(String::new());
+        lines.push(preview);
+    }
+    lines.join("\n")
+}
+
+fn subagent_report_preview(report: &str) -> String {
+    let report = strip_terminal_controls(report);
+    let mut collected: Vec<String> = Vec::new();
+    for line in report.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        collected.push(sanitize_subagent_report_line(line));
+        if collected.len() >= SUBAGENT_NOTIFICATION_PREVIEW_LINES {
+            break;
+        }
+    }
+    truncate_chars(&collected.join("\n"), SUBAGENT_NOTIFICATION_PREVIEW_CHARS)
+}
+
+fn sanitize_subagent_report_line(value: &str) -> String {
+    value
+        .replace('\r', " ")
+        .replace('\n', " ")
+        .replace("```", "` ` `")
 }
 
 /// Canonical command kind for slash-control dedupe and kind-only notes.

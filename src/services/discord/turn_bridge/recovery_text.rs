@@ -29,22 +29,6 @@ fn direct_runtime_context_unavailable(error: &str) -> bool {
         || error.contains("direct runtime pg context is unavailable")
 }
 
-fn store_session_retry_context_sqlite(
-    sqlite: &crate::db::Db,
-    key: &str,
-    history: &str,
-) -> Result<(), String> {
-    let conn = sqlite
-        .lock()
-        .map_err(|err| format!("db lock failed: {err}"))?;
-    conn.execute(
-        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-        [key, history],
-    )
-    .map_err(|err| err.to_string())?;
-    Ok(())
-}
-
 fn store_session_retry_context_pg(
     pg_pool: &sqlx::PgPool,
     key: &str,
@@ -94,22 +78,6 @@ fn insert_recovery_audit_pg(
         },
         |message| message,
     )
-}
-
-fn take_session_retry_context_sqlite(sqlite: &crate::db::Db, key: &str) -> Option<String> {
-    let conn = sqlite.lock().ok()?;
-    let history = conn
-        .query_row("SELECT value FROM kv_meta WHERE key = ?1", [key], |row| {
-            row.get::<_, String>(0)
-        })
-        .ok()?;
-    let _ = conn.execute("DELETE FROM kv_meta WHERE key = ?1", [key]);
-    let history = history.trim().to_string();
-    if history.is_empty() {
-        None
-    } else {
-        Some(history)
-    }
 }
 
 fn take_session_retry_context_pg(pg_pool: &sqlx::PgPool, key: &str) -> Option<String> {
@@ -176,7 +144,7 @@ fn take_session_retry_context_runtime_pg(key: &str) -> Option<String> {
 }
 
 fn store_session_retry_context_impl(
-    db: Option<&crate::db::Db>,
+    _db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     channel_id: u64,
     history: &str,
@@ -193,8 +161,6 @@ fn store_session_retry_context_impl(
         Err(err) if direct_runtime_context_unavailable(&err) => {
             if let Some(pg_pool) = pg_pool {
                 store_session_retry_context_pg(pg_pool, &key, history)
-            } else if let Some(db) = db {
-                store_session_retry_context_sqlite(db, &key, history)
             } else {
                 Err(err)
             }
@@ -249,7 +215,7 @@ fn mark_recovery_audit_consumed_pg(
 }
 
 pub(in crate::services::discord) fn take_session_retry_context_for_turn_with_audit(
-    db: Option<&crate::db::Db>,
+    _db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     channel_id: u64,
     consumed_by_turn_id: Option<&str>,
@@ -267,8 +233,7 @@ pub(in crate::services::discord) fn take_session_retry_context_for_turn_with_aud
         Ok(None) => None,
         Err(err) if direct_runtime_context_unavailable(&err) => pg_pool
             .and_then(|pg_pool| take_session_retry_context_pg(pg_pool, &key))
-            .or_else(|| take_session_retry_context_runtime_pg(&key))
-            .or_else(|| db.and_then(|db| take_session_retry_context_sqlite(db, &key))),
+            .or_else(|| take_session_retry_context_runtime_pg(&key)),
         Err(_) => None,
     };
 
@@ -391,9 +356,9 @@ mod tests {
     /// built below) was pure duplication of the status panel's inline
     /// recovery suffix, which is rendered from `recovery_message_count`
     /// (SessionStrategyDetails) and is entirely independent of any
-    /// notification. Backends are PG-only in practice
-    /// (`Db = Arc<LegacySqliteDisabled>`, an uninhabited enum), so this
-    /// guards the wiring at the source level rather than via a DB fixture.
+    /// notification. Backends are PG-only in practice; the `Db` compatibility
+    /// handle is disabled, so this guards the wiring at the source level rather
+    /// than via a DB fixture.
     ///
     /// The forbidden literals are assembled at runtime from fragments so the
     /// test source itself never contains them verbatim (otherwise the
@@ -593,8 +558,8 @@ mod retry_pending_tests {
     /// #2452 H6 acceptance — first probe is the spec line "Test: simulate
     /// retry that resolves completion_rx -> lockout released immediately".
     /// We exercise the release path directly because the surrounding
-    /// scheduling future requires a live Discord HTTP / SharedData
-    /// fixture that the legacy-sqlite-tests gate already covers.
+    /// scheduling future requires a live Discord HTTP / SharedData fixture that
+    /// is outside the default test suite.
     #[test]
     fn release_retry_pending_removes_dedup_entry() {
         // Use an arbitrary channel id unlikely to collide with other tests

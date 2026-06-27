@@ -7,14 +7,25 @@ about the generated report or its generator.
 
 ## Current Policy
 
-- PR CI in `.github/workflows/ci-pr.yml` treats inventory-doc drift from
-  `python3 scripts/generate_inventory_docs.py --check` as warning-only. The
-  warning points contributors to the weekly refresh workflow or to a local
-  regeneration command.
+- PR CI in `.github/workflows/ci-pr.yml` does not hard-block solely on
+  inventory-doc markdown freshness drift.
+- `ci-pr.yml` and `ci-main.yml` run `scripts/ci-script-checks.sh`, which calls
+  `python3 scripts/generate_inventory_docs.py` in the CI workspace. That keeps
+  downstream maintainability checks on the current generated view, but generic
+  committed markdown freshness drift is not the hard failure and does not need
+  to be committed in unrelated PRs.
+- `ci-nightly.yml` runs `Generated docs drift (warn)` with
+  `python3 scripts/generate_inventory_docs.py --check` so accumulated drift is
+  visible without blocking ordinary PRs. That warning points contributors to
+  the weekly refresh workflow or to a local regeneration command.
 - `python3 scripts/audit_maintainability.py --check` is still allowed to fail
   for configured hard or baseline maintainability gates. The warning-only drift
   policy applies to the committed markdown report freshness, not to new
   maintainability violations.
+- `scripts/generate_inventory_docs.py` is still allowed to hard-fail on
+  source-of-truth invariants such as giant-file registry drift, missing required
+  registry metadata, or top-level architecture map parse errors. Those are not
+  generic generated-doc markdown freshness failures.
 - Do not re-introduce a hard PR gate solely because generated docs drifted.
 
 ## Rationale
@@ -39,6 +50,13 @@ rules, baselines, or report text change. CI also uploads the structured audit
 artifact from the current run, so stale committed markdown should not be treated
 as a reason to hard-fail unrelated PRs.
 
+`scripts/audit_legacy_sqlite_sunset.py` remains available as an on-demand
+historical cleanup audit. Its markdown output is intentionally not committed
+under `docs/generated/` because the SQLite sunset surface is retired and a
+checked-in snapshot quickly becomes stale. For issue work that touches the
+SQLite sunset contract, run the script locally and include the current summary
+in the PR instead of reintroducing a generated report.
+
 ## When to Regenerate Locally
 
 Regenerate locally when the PR itself changes route or module structure and the
@@ -49,6 +67,7 @@ Commands:
 
 - `python3 scripts/generate_inventory_docs.py`
 - `python3 scripts/audit_maintainability.py --write-report`
+- `python3 scripts/audit_legacy_sqlite_sunset.py --root . --format markdown --top 20`
 
 Search terms: generated docs drift, generated-docs drift, inventory docs drift,
 maintainability audit drift.

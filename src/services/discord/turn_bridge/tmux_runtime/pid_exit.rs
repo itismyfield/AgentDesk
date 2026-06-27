@@ -172,8 +172,8 @@ fn wait_for_pid_exit_kill_fallback(_pid: u32, deadline: Duration) -> bool {
 }
 
 // #2426: tests for the PID-exit observation helper. These do not require the
-// `legacy-sqlite-tests` feature because they exercise only the
-// `wait_for_pid_exit` path and do not touch the SQLite test scaffolding.
+// removed SQLite-only feature because they exercise only the `wait_for_pid_exit`
+// path and do not touch that retired scaffolding.
 #[cfg(all(test, unix))]
 mod pid_exit_tests {
     use super::wait_for_pid_exit;

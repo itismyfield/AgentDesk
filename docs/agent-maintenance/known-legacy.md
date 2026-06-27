@@ -15,13 +15,13 @@ Every entry uses the common §8 schema: `feature`, `canonical_modules`,
 `active_callsite_coverage`, `invariants`, `allowed_changes`, `tests`,
 `related_issues`.
 
-## `legacy_db()` helper
+## Retired `legacy_db()` Helper
 
-- feature: `db_layer / legacy_compat_handle`
+- feature: retired `db_layer` compatibility handle history.
 - canonical_modules: PG pool via `state.pg_pool_ref()` and per-domain PG
   query modules.
-- legacy_modules: per-route shim functions, all named `fn legacy_db(state:
-  &AppState) -> &crate::db::Db`:
+- legacy_modules: removed per-route shim functions historically named
+  `legacy_db`:
   - `src/server/routes/onboarding.rs:17`
   - `src/server/routes/kanban.rs:16`
   - `src/server/routes/review_verdict/verdict_route.rs:8`
@@ -32,32 +32,29 @@ Every entry uses the common §8 schema: `feature`, `canonical_modules`,
   - Plus the engine-side definition `src/engine/mod.rs:436`:
     `pub(crate) fn legacy_db(&self) -> Option<&Db>`.
   - Server-side reads at `src/server/mod.rs:158`, `:365`, `:376`.
-- do_not_edit_without_migration_plan: do not add a new `legacy_db(&AppState)`
-  shim to a new route. New routes use `state.pg_pool_ref()`.
-- active_callsite_coverage: tracked by #1238. Each removed shim is a
-  step-down toward `legacy_db()` returning `None` everywhere, after which
-  the engine-side helper itself is deleted in #1239.
-- invariants: kanban handlers per the comment at
-  `src/server/routes/kanban.rs:18` already tolerate `legacy_db().is_none()`;
-  this is the target shape for every other route.
-- allowed_changes: `bugfix` only; `extraction` to PG-only is the cleanup
-  itself.
+- do_not_edit_without_migration_plan: do not add a new retired DB shim. New
+  routes use `state.pg_pool_ref()`.
+- active_callsite_coverage: tracked historically by #1238/#1239 and completed
+  by the SQLite sunset cleanup.
+- invariants: route handlers preserve the response shape captured during the
+  migration window while using PostgreSQL as the only live backend.
+- allowed_changes: historical note updates only.
 - tests: PG-only test suite under `src/integration_tests/postgres_only/*`.
 - related_issues: #843, #1237, #1238, #1239.
 
-## SQLite Fallback Branches in Routes
+## Retired SQLite Fallback Branches in Routes
 
-- feature: `db_layer / runtime_sqlite_fallback`
+- feature: retired `db_layer` SQLite fallback history.
 - canonical_modules: PG-only handlers under `src/server/routes/*.rs`.
-- legacy_modules: any `match state.legacy_db() { Some(db) => …, None => …
-  }` branch in a route. Concentrated in `onboarding.rs`, `kanban.rs`, the
-  review-verdict routes, and the auto_queue route family.
-- do_not_edit_without_migration_plan: do not add a new SQLite arm. Existing
-  arms are removed in #1238 in batches.
+- legacy_modules: removed `state.legacy_db()` route arms from the onboarding,
+  kanban, review-verdict, and auto_queue migration era.
+- do_not_edit_without_migration_plan: do not add a new SQLite arm; route work
+  must stay PostgreSQL-owned.
 - active_callsite_coverage: baseline grep was owned by #1239 static analysis;
-  #1438 removes the default SQLite dependency surface.
-- invariants: a route handler must produce the same response shape on the PG
-  path as it did on the SQLite path during the migration window.
+  #1438 removed the default SQLite dependency surface and #3035 completed the
+  sunset.
+- invariants: a route handler must preserve the response shape captured during
+  migration while using the PG path as the only live control-plane backend.
 - allowed_changes: `bugfix` only; `extraction` is the cleanup itself.
 - tests: PG-only suite plus per-route tests under `src/server/routes/*`.
 - related_issues: #1238 (primary), #1237 (prereq), #1239 (final dependency

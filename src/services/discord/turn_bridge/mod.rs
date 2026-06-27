@@ -1357,12 +1357,12 @@ pub(super) fn spawn_turn_bridge(
             bool, // ack_consumed
         )> = None;
         let mut active_background_child_session_ids: Vec<i64> = Vec::new();
+        let (status_panel_started_at, footer_owner) = make_owner_now(user_msg_id);
         let single_message_panel_footer_mode =
             bridge_single_message_panel_footer_enabled(shared_owned.ui.status_panel_v2_enabled);
         if shared_owned.ui.placeholder_live_events_enabled || shared_owned.ui.status_panel_v2_enabled {
             if single_message_panel_footer_mode {
-                supersede_bridge_registered_completion_footer(shared_owned.as_ref(), channel_id)
-                    .await;
+                supersede_bridge_footer(shared_owned.as_ref(), channel_id, footer_owner).await;
                 shared_owned
                     .ui
                     .placeholder_live_events
@@ -1585,7 +1585,6 @@ pub(super) fn spawn_turn_bridge(
         let mut last_status_panel_text = String::new();
         let mut status_panel_dirty = shared_owned.ui.status_panel_v2_enabled;
         let mut last_status_panel_edit = tokio::time::Instant::now() - status_interval;
-        let status_panel_started_at = chrono::Utc::now().timestamp();
         let turn_start = std::time::Instant::now();
 
         maybe_create_bridge_separate_status_panel_response(
@@ -2444,9 +2443,10 @@ pub(super) fn spawn_turn_bridge(
                                         spin_idx,
                                     );
                                 spin_idx = spin_idx.wrapping_add(1);
-                                refresh_bridge_registered_completion_footer(
+                                refresh_bridge_footer(
                                     shared_owned.as_ref(),
                                     channel_id,
+                                    footer_owner,
                                     indicator,
                                 )
                                 .await;
@@ -3388,16 +3388,16 @@ pub(super) fn spawn_turn_bridge(
                 && status_panel_dirty
                 && last_status_panel_edit.elapsed() >= status_interval
             {
-                refresh_bridge_registered_completion_footer(
+                refresh_bridge_footer(
                     shared_owned.as_ref(),
                     channel_id,
+                    footer_owner,
                     indicator,
                 )
                 .await;
                 last_status_panel_edit = tokio::time::Instant::now();
                 status_panel_dirty = false;
             }
-
             if !watcher_owns_assistant_relay && !standby_relay_owns_output {
                 loop {
                     let current_portion =

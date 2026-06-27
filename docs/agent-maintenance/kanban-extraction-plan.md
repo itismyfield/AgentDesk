@@ -16,10 +16,9 @@ home for card CRUD persistence.
   follow-up issues are the deliverable.
 - Keep the public `crate::kanban::*` API stable until a later cleanup issue
   deliberately narrows call sites.
-- Keep runtime transition behavior PG-only. The SQLite helpers in this file are
-  test/legacy compatibility paths behind `#[cfg(all(test,
-  feature = "legacy-sqlite-tests"))]` and should move with their owner modules
-  without becoming runtime fallbacks.
+- Keep runtime transition behavior PG-only. Any remaining SQLite-shaped helper
+  names are historical compatibility residue and should move with their owner
+  modules without becoming runtime fallbacks.
 - Card CRUD, listing, card metadata, and low-level card transition persistence
   are already owned outside this file by `src/db/kanban_cards/*`,
   `src/services/kanban_cards.rs`, `src/server/dto/kanban.rs`, and

@@ -22,6 +22,9 @@ use crate::services::provider::ProviderKind;
 const AUTO_HEAL_WINDOW_SECS: i64 = 600;
 const AUTO_HEAL_MAX_ATTEMPTS_PER_WINDOW: u32 = 1;
 
+#[path = "relay_recovery_completion_footer.rs"]
+mod completion_footer;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(in crate::services::discord) enum RelayRecoveryActionKind {
@@ -681,10 +684,6 @@ fn relay_frontier_dead_reattach_owner(decision: &RelayRecoveryDecision) -> Optio
     ))
 }
 
-fn forget_completion_footer_for_relay_recovery(channel_id: ChannelId) {
-    super::single_message_panel::completion_footer_forget_registered_target(channel_id);
-}
-
 fn idle_tmux_repair_ready_for_input(
     provider: &ProviderKind,
     channel_id: u64,
@@ -822,7 +821,7 @@ async fn apply_relay_recovery_decision(
         }
         RelayRecoveryActionKind::ReattachWatcher => {
             let channel = ChannelId::new(decision.channel_id);
-            forget_completion_footer_for_relay_recovery(channel);
+            completion_footer::forget_if_message(channel, decision.affected.bridge_current_msg_id);
             if let Some(tmux_session) = decision.affected.tmux_session.as_deref()
                 && decision.evidence.unread_bytes.unwrap_or(0) == 0
                 && idle_tmux_repair_ready_for_input(provider, decision.channel_id, tmux_session)
@@ -1098,7 +1097,10 @@ mod tests {
             true,
         );
 
-        forget_completion_footer_for_relay_recovery(channel_id);
+        assert!(completion_footer::forget_if_message(
+            channel_id,
+            Some(3_089_303),
+        ));
 
         assert_eq!(
             super::super::single_message_panel::completion_footer_edit_for_registered_target_at(
@@ -1109,6 +1111,38 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn relay_recovery_takeover_keeps_different_completion_footer_target() {
+        let channel_id = ChannelId::new(3_089_213);
+        let shared = super::super::make_shared_data_for_tests();
+        super::super::single_message_panel::completion_footer_forget_registered_target(channel_id);
+        let _ = super::super::single_message_panel::register_completion_footer_target(
+            channel_id,
+            MessageId::new(3_089_313),
+            &ProviderKind::Codex,
+            1_800_000_000,
+            "Final answer",
+            None,
+            true,
+        );
+
+        assert!(!completion_footer::forget_if_message(
+            channel_id,
+            Some(3_089_314),
+        ));
+
+        assert!(
+            super::super::single_message_panel::completion_footer_edit_for_registered_target_at(
+                shared.as_ref(),
+                channel_id,
+                "⠸",
+                1_800_000_005,
+            )
+            .is_some()
+        );
+        super::super::single_message_panel::completion_footer_forget_registered_target(channel_id);
     }
 
     #[test]

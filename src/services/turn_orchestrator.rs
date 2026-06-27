@@ -4755,9 +4755,9 @@ mod persistence_tests {
 }
 
 // #2706: PurgeQueue regression guards. Kept in a plain `#[cfg(test)]` module so
-// they run under the default `cargo test` invocation — the legacy-sqlite-tests
-// feature is *not* enabled in CI by default, so the regression coverage for
-// queue-only purge cannot live next to the rest of the mailbox tests.
+// they run under the default `cargo test` invocation. The older SQLite-only
+// mailbox harness was removed, so queue-only purge coverage must live in the
+// normal test build.
 #[cfg(test)]
 mod purge_queue_tests {
     use std::sync::Arc;

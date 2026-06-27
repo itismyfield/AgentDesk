@@ -25,6 +25,7 @@ env:
   RUSTC_WRAPPER: sccache
   SCCACHE_CACHE_SIZE: 10G
   SCCACHE_GHA_ENABLED: "true"
+  POSTGRES_SERVICE_IMAGE: ${{ vars.AGENTDESK_POSTGRES_SERVICE_IMAGE }}
 
 jobs:
   changes:
@@ -87,6 +88,7 @@ jobs:
               - '.github/workflows/**'
               - 'justfile'
               - 'migrations/**'
+              - 'scripts/ci/postgres-service.sh'
               - 'src/db/**'
               - 'src/dispatch/**'
               - 'src/engine/**'
@@ -363,10 +365,9 @@ jobs:
             ${{ runner.os }}-cargo-
 
       # Stage 1 keeps Windows inline and default-feature-only instead of
-      # `just check`: `--all-features` enables legacy SQLite test surfaces
-      # that still reference Unix-only tmux modules. This lane's job is
-      # cross-OS compile and targeted test signal; fmt/staged clippy and
-      # all-feature checks are authoritative in the Ubuntu jobs above.
+      # `just check`: this lane's job is cross-OS compile and targeted test
+      # signal, while fmt/staged clippy and full workspace checks are
+      # authoritative in the Ubuntu jobs above.
       - name: cargo check
         run: cargo check --workspace --all-targets
 
@@ -458,20 +459,6 @@ jobs:
     needs: changes
     if: needs.changes.outputs.pg_db == 'true' && needs.changes.outputs.ci_relax_safe != 'true'
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d postgres"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     env:
       RUST_BACKTRACE: 1
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
@@ -483,6 +470,9 @@ jobs:
       PGPASSWORD: postgres
     steps:
       - uses: actions/checkout@v4
+
+      - name: Start PostgreSQL service
+        run: ./scripts/ci/postgres-service.sh start
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -513,6 +503,10 @@ jobs:
         timeout-minutes: 15
         run: just test-postgres
 
+      - name: Stop PostgreSQL service
+        if: always()
+        run: ./scripts/ci/postgres-service.sh stop
+
       - name: sccache stats
         if: always()
         run: sccache --show-stats || true
@@ -522,20 +516,6 @@ jobs:
     needs: changes
     if: needs.changes.outputs.high_risk_recovery == 'true' && needs.changes.outputs.ci_relax_safe != 'true'
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d postgres"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     env:
       RUST_BACKTRACE: 1
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
@@ -547,6 +527,9 @@ jobs:
       PGPASSWORD: postgres
     steps:
       - uses: actions/checkout@v4
+
+      - name: Start PostgreSQL service
+        run: ./scripts/ci/postgres-service.sh start
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -569,6 +552,10 @@ jobs:
 
       - name: High-risk recovery lane
         run: "cargo test --bin agentdesk high_risk_recovery:: -- --test-threads=1"
+
+      - name: Stop PostgreSQL service
+        if: always()
+        run: ./scripts/ci/postgres-service.sh stop
 
       - name: sccache stats
         if: always()
@@ -691,6 +678,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Setup Python for script checks
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
       - name: Large file guard
         shell: bash

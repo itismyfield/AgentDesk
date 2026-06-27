@@ -214,6 +214,7 @@ pub(crate) async fn forward_kill_tmux(
     target: &ForwardTarget,
     session_key: &str,
     reason: &str,
+    minimum_idle_minutes: Option<u64>,
 ) -> (StatusCode, Json<Value>) {
     let url = format!(
         "{}/api/sessions/{}/kill-tmux",
@@ -223,7 +224,9 @@ pub(crate) async fn forward_kill_tmux(
     let request = apply_node_headers(
         state,
         target,
-        client().post(url).json(&json!({ "reason": reason })),
+        client()
+            .post(url)
+            .json(&json!({ "reason": reason, "minimum_idle_minutes": minimum_idle_minutes })),
     );
     forward_json_response(request, "kill-tmux", target).await
 }
