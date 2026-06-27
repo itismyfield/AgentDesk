@@ -10,11 +10,11 @@
 //!
 //! Auto-selection is performed per request by [`detect_memory_backend`].
 //!
-//! NOTE (#1066 follow-up): memento `recall` and `forget` bridge invocations
-//! are TBD — the existing `MementoBackend` only exposes `remember()`. For now
-//! those two ops always take the local branch even when the backend reports
-//! `memento`. The `source` field in the response surfaces which branch ran so
-//! callers can distinguish.
+//! NOTE (#1066/#3743): memento `recall` and `forget` bridge invocations are
+//! not implemented on this HTTP route. When memento is the detected backend,
+//! those operations return an explicit capability error instead of falling back
+//! to local `local_memory`, so callers cannot mistake fallback rows for MCP
+//! backed memory.
 
 use axum::{Json, extract::State, http::StatusCode};
 use serde::Deserialize;
@@ -46,19 +46,16 @@ impl MemoryBackend {
 ///
 /// Priority:
 /// 1. `ADK_FORCE_LOCAL_MEMORY=1` → always Local (testing / escape hatch).
-/// 2. Memento MCP is configured for any supported provider → Memento.
+/// 2. Memento runtime config is active → Memento.
 /// 3. Otherwise → Local.
 pub(crate) fn detect_memory_backend() -> MemoryBackend {
     if env_flag_true("ADK_FORCE_LOCAL_MEMORY") {
         return MemoryBackend::Local;
     }
 
-    let memento_mcp_configured = crate::services::provider::provider_registry()
-        .iter()
-        .filter_map(|entry| crate::services::provider::ProviderKind::from_str(entry.id))
-        .any(|provider| crate::services::mcp_config::provider_has_memento_mcp(&provider));
-
-    if memento_mcp_configured {
+    if crate::services::memory::backend_is_active(
+        crate::services::discord::settings::MemoryBackendKind::Memento,
+    ) {
         MemoryBackend::Memento
     } else {
         MemoryBackend::Local
@@ -113,18 +110,12 @@ pub async fn memory_recall(
 ) -> (StatusCode, Json<Value>) {
     let backend = detect_memory_backend();
 
-    // Memento recall bridge is TBD (see module docs). Fall back to local for
-    // the moment; the response still reports the detected backend and a
-    // deferred-bridge note so callers can tell.
-    let (fragments, effective_source, note) = match local_recall_pg(&state, &body).await {
-        Ok(fragments) => {
-            let note = if backend == MemoryBackend::Memento {
-                Some("memento recall bridge TBD; served from local_memory")
-            } else {
-                None
-            };
-            (fragments, MemoryBackend::Local, note)
-        }
+    if backend == MemoryBackend::Memento {
+        return memento_memory_operation_unsupported("recall");
+    }
+
+    let fragments = match local_recall_pg(&state, &body).await {
+        Ok(fragments) => fragments,
         Err(error) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -133,16 +124,11 @@ pub async fn memory_recall(
         }
     };
 
-    let mut response = json!({
+    let response = json!({
         "fragments": fragments,
-        "source": effective_source.as_str(),
+        "source": MemoryBackend::Local.as_str(),
         "detected_backend": backend.as_str(),
     });
-    if let Some(note) = note {
-        if let Some(obj) = response.as_object_mut() {
-            obj.insert("note".to_string(), json!(note));
-        }
-    }
     (StatusCode::OK, Json(response))
 }
 
@@ -256,10 +242,10 @@ pub async fn memory_forget(
 
     let backend = detect_memory_backend();
 
-    // Memento forget bridge is TBD (see module docs). Still attempt local
-    // deletion so id prefixes the caller may have received ("memento:...")
-    // do not silently succeed against a local row. Return 404 if nothing
-    // matched locally.
+    if backend == MemoryBackend::Memento {
+        return memento_memory_operation_unsupported("forget");
+    }
+
     match local_forget_pg(&state, &id).await {
         Ok(true) => (
             StatusCode::OK,
@@ -269,26 +255,35 @@ pub async fn memory_forget(
                 "detected_backend": backend.as_str(),
             })),
         ),
-        Ok(false) => {
-            let note = if backend == MemoryBackend::Memento {
-                "memento forget bridge TBD; id not found in local_memory"
-            } else {
-                "id not found"
-            };
-            (
-                StatusCode::NOT_FOUND,
-                Json(json!({
-                    "ok": false,
-                    "error": note,
-                    "detected_backend": backend.as_str(),
-                })),
-            )
-        }
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "ok": false,
+                "error": "id not found",
+                "detected_backend": backend.as_str(),
+            })),
+        ),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("local forget failed: {error}")})),
         ),
     }
+}
+
+fn memento_memory_operation_unsupported(operation: &'static str) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({
+            "ok": false,
+            "error": format!("memento {operation} bridge is not implemented on /api/memory/{operation}"),
+            "code": format!("memento_{operation}_unsupported"),
+            "operation": operation,
+            "source": MemoryBackend::Memento.as_str(),
+            "detected_backend": MemoryBackend::Memento.as_str(),
+            "local_fallback_available": true,
+            "local_fallback_hint": "set ADK_FORCE_LOCAL_MEMORY=1 to query/delete only PostgreSQL local_memory fallback rows",
+        })),
+    )
 }
 
 // ── Local backend (PostgreSQL) ───────────────────────────────────
@@ -491,6 +486,73 @@ mod request_body_tests {
     use super::*;
 
     const PG_TEST_LABEL: &str = "memory API local fallback migration test";
+    const TEST_MEMENTO_ACCESS_KEY_ENV: &str = "ADK_TEST_MEMENTO_ACCESS_KEY_3743";
+
+    struct TestEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl TestEnvGuard {
+        fn new(names: &[&'static str]) -> Self {
+            let lock = crate::config::shared_test_env_lock()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let saved = names
+                .iter()
+                .map(|name| (*name, std::env::var_os(name)))
+                .collect();
+            Self { _lock: lock, saved }
+        }
+
+        fn set<V>(&self, name: &'static str, value: V)
+        where
+            V: AsRef<std::ffi::OsStr>,
+        {
+            unsafe { std::env::set_var(name, value) };
+        }
+
+        fn remove(&self, name: &'static str) {
+            unsafe { std::env::remove_var(name) };
+        }
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            for (name, value) in &self.saved {
+                match value {
+                    Some(value) => unsafe { std::env::set_var(name, value) },
+                    None => unsafe { std::env::remove_var(name) },
+                }
+            }
+        }
+    }
+
+    fn memory_env_guard() -> TestEnvGuard {
+        TestEnvGuard::new(&[
+            "AGENTDESK_ROOT_DIR",
+            "ADK_FORCE_LOCAL_MEMORY",
+            TEST_MEMENTO_ACCESS_KEY_ENV,
+        ])
+    }
+
+    fn write_memento_runtime_config(root: &std::path::Path) {
+        let config_dir = crate::runtime_layout::config_dir(root);
+        std::fs::create_dir_all(&config_dir).expect("create runtime config dir");
+        let config = json!({
+            "version": 2,
+            "backend": "memento",
+            "mcp": {
+                "endpoint": "http://127.0.0.1:57332/mcp",
+                "access_key_env": TEST_MEMENTO_ACCESS_KEY_ENV,
+            },
+        });
+        std::fs::write(
+            crate::runtime_layout::memory_backend_path(root),
+            serde_json::to_vec_pretty(&config).expect("serialize memory backend config"),
+        )
+        .expect("write memory backend config");
+    }
 
     struct MemoryApiPostgresDb {
         _lock: crate::db::postgres::PostgresTestLifecycleGuard,
@@ -609,6 +671,136 @@ mod request_body_tests {
             ..RememberBody::default()
         };
         assert!(validate_memento_remember_scope(&zero_channel).is_some());
+    }
+
+    #[test]
+    fn detect_memory_backend_uses_local_when_memento_runtime_unavailable() {
+        let env = memory_env_guard();
+        let root = tempfile::tempdir().expect("runtime root");
+        write_memento_runtime_config(root.path());
+
+        env.set("AGENTDESK_ROOT_DIR", root.path().as_os_str());
+        env.remove("ADK_FORCE_LOCAL_MEMORY");
+        env.remove(TEST_MEMENTO_ACCESS_KEY_ENV);
+
+        assert_eq!(detect_memory_backend(), MemoryBackend::Local);
+    }
+
+    #[test]
+    fn detect_memory_backend_uses_memento_when_runtime_config_is_active() {
+        let env = memory_env_guard();
+        let root = tempfile::tempdir().expect("runtime root");
+        write_memento_runtime_config(root.path());
+
+        env.set("AGENTDESK_ROOT_DIR", root.path().as_os_str());
+        env.remove("ADK_FORCE_LOCAL_MEMORY");
+        env.set(TEST_MEMENTO_ACCESS_KEY_ENV, "test-token");
+
+        assert_eq!(detect_memory_backend(), MemoryBackend::Memento);
+    }
+
+    #[test]
+    fn detect_memory_backend_force_local_overrides_active_memento() {
+        let env = memory_env_guard();
+        let root = tempfile::tempdir().expect("runtime root");
+        write_memento_runtime_config(root.path());
+
+        env.set("AGENTDESK_ROOT_DIR", root.path().as_os_str());
+        env.set("ADK_FORCE_LOCAL_MEMORY", "1");
+        env.set(TEST_MEMENTO_ACCESS_KEY_ENV, "test-token");
+
+        assert_eq!(detect_memory_backend(), MemoryBackend::Local);
+    }
+
+    #[test]
+    fn memento_recall_forget_unsupported_response_is_explicit() {
+        let (recall_status, Json(recall)) = memento_memory_operation_unsupported("recall");
+        assert_eq!(recall_status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(recall["ok"], false);
+        assert_eq!(recall["source"], "memento");
+        assert_eq!(recall["detected_backend"], "memento");
+        assert_eq!(recall["code"], "memento_recall_unsupported");
+        assert!(
+            recall["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("memento recall bridge is not implemented")
+        );
+        assert!(
+            recall["local_fallback_hint"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("ADK_FORCE_LOCAL_MEMORY=1")
+        );
+
+        let (forget_status, Json(forget)) = memento_memory_operation_unsupported("forget");
+        assert_eq!(forget_status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(forget["ok"], false);
+        assert_eq!(forget["source"], "memento");
+        assert_eq!(forget["detected_backend"], "memento");
+        assert_eq!(forget["code"], "memento_forget_unsupported");
+        assert!(
+            forget["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("memento forget bridge is not implemented")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn memory_recall_forget_handlers_use_local_when_memento_runtime_unavailable() {
+        let env = memory_env_guard();
+        let root = tempfile::tempdir().expect("runtime root");
+        write_memento_runtime_config(root.path());
+
+        env.set("AGENTDESK_ROOT_DIR", root.path().as_os_str());
+        env.remove("ADK_FORCE_LOCAL_MEMORY");
+        env.remove(TEST_MEMENTO_ACCESS_KEY_ENV);
+
+        let Some(pg_db) = MemoryApiPostgresDb::try_create().await else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+        let state = test_state_with_pg(pool.clone());
+
+        let remember = RememberBody {
+            content: "Memento is configured but unavailable, so recall uses local fallback"
+                .to_string(),
+            topic: "memory-contract".to_string(),
+            kind: "fact".to_string(),
+            importance: Some(0.8),
+            workspace: Some("issue-3743".to_string()),
+            keywords: Some(vec!["fallback".to_string(), "inactive-memento".to_string()]),
+            ..RememberBody::default()
+        };
+        let id = local_remember_pg(&state, &remember)
+            .await
+            .expect("seed local memory row");
+
+        let (recall_status, Json(recall)) = memory_recall(
+            State(state.clone()),
+            Json(RecallBody {
+                keywords: Some(vec!["inactive-memento".to_string()]),
+                workspace: Some("issue-3743".to_string()),
+                limit: Some(5),
+                ..RecallBody::default()
+            }),
+        )
+        .await;
+        assert_eq!(recall_status, StatusCode::OK);
+        assert_eq!(recall["source"], "local");
+        assert_eq!(recall["detected_backend"], "local");
+        assert_eq!(recall["fragments"][0]["id"], id);
+
+        let (forget_status, Json(forget)) =
+            memory_forget(State(state), Json(ForgetBody { id })).await;
+        assert_eq!(forget_status, StatusCode::OK);
+        assert_eq!(forget["ok"], true);
+        assert_eq!(forget["source"], "local");
+        assert_eq!(forget["detected_backend"], "local");
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]
