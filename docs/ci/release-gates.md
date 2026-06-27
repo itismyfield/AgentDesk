@@ -66,6 +66,12 @@ high_risk_recovery:
 - `scripts/generate_inventory_docs.py --check` 은 `Script checks` job 마지막 단계에서 하드 블록 (ci-main `scripts` step, ci-pr `scripts` step).
 - 이 drift 검증이 red 면 Full/PG/High-risk 와 동일하게 release gate 위반으로 간주한다.
 
+### Script checks Python runtime
+
+- `scripts/ci-script-checks.sh` 는 Python 3.11+ 를 최소 런타임으로 요구한다. 이는 `tomllib` 같은 Python 3.11 표준 라이브러리 사용과 `scripts/audit_maintainability.py` 정책에 맞춘다.
+- CI 의 `Script checks` 계열 job 은 `actions/setup-python` 으로 Python 3.11 을 명시적으로 설치한다.
+- 로컬에서 `python3` 이 3.10 이하이면 `PYTHON=/path/to/python3.11 ./scripts/ci-script-checks.sh` 로 같은 정책을 재현한다. 지원하지 않는 Python 은 check 본문 실행 전에 명확한 오류로 실패해야 한다.
+
 ## 3. High-risk recovery lane test axes
 
 `#1011`/`#974` 감사로그는 release gate 의 high-risk recovery lane 이 아래 **4 축**을 회귀 방지선으로 유지해야 한다고 명시한다. 레거시 SQLite 기반 `src/integration_tests/tests/high_risk_recovery.rs` 시나리오 하네스는 #3035 Phase 1 에서 제거되었으며, PG-only 회귀 보호는 `src/high_risk_recovery.rs` 로 이전된다. 아래 시나리오 매트릭스(`failure_recovery` / `outbox_boundary` / `delayed_worker` / `idle_session_cleanup` 축)는 제거된 레거시 하네스 기준 기록이며 PG 스위트 재매핑은 후속 Phase 에서 진행한다. 축별 대표 시나리오는 [`docs/high-risk-recovery-lane.md`](../high-risk-recovery-lane.md#release-gate-축-매핑) 참고.

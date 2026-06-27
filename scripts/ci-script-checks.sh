@@ -1,6 +1,34 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+PYTHON="${PYTHON:-python3}"
+
+if ! command -v "$PYTHON" >/dev/null 2>&1; then
+  echo "ERROR: AgentDesk script checks require Python 3.11+, but '$PYTHON' was not found." >&2
+  echo "Set PYTHON=/path/to/python3.11+ or put python3.11+ first on PATH." >&2
+  exit 1
+fi
+
+if ! "$PYTHON" - <<'PY'
+import platform
+import sys
+
+if sys.version_info < (3, 11):
+    print(
+        "ERROR: AgentDesk script checks require Python 3.11+; "
+        f"{sys.executable} is Python {platform.python_version()}.",
+        file=sys.stderr,
+    )
+    print(
+        "Set PYTHON=/path/to/python3.11+ or put python3.11+ first on PATH.",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
+then
+  exit 1
+fi
+
 if command -v shellcheck >/dev/null 2>&1; then
   echo "=== shellcheck scripts ==="
   FAILED=0
@@ -18,16 +46,16 @@ echo "=== PG audit guard ==="
 ./scripts/pg-audit.sh
 
 echo "=== Postgres migration checksum guard ==="
-python3 scripts/check_postgres_migration_checksums.py
+"$PYTHON" scripts/check_postgres_migration_checksums.py
 
 echo "=== State/lint hardening guard ==="
-python3 scripts/audit_state_lint_hardening.py
+"$PYTHON" scripts/audit_state_lint_hardening.py
 
 echo "=== await_holding_lock ratchet guard ==="
-python3 scripts/check_await_holding_lock_ratchet.py
+"$PYTHON" scripts/check_await_holding_lock_ratchet.py
 
 echo "=== Hotfile LOC ratchet guard (#3565) ==="
-python3 scripts/check_hotfile_ratchet.py
+"$PYTHON" scripts/check_hotfile_ratchet.py
 
 echo "=== CI runner hardening guard ==="
 ./scripts/check-ci-runner-hardening.sh
@@ -96,29 +124,30 @@ if [ "$FAIL" -ne 0 ]; then
 fi
 
 echo "=== Portable deployable path lint ==="
-python3 scripts/check-portable-paths.py
-python3 -m unittest \
+"$PYTHON" scripts/check-portable-paths.py
+"$PYTHON" -m unittest \
   tests.test_portable_path_lint \
   tests.test_install_bootstrap_portable \
+  tests.test_script_python_policy \
   tests.test_analyze_prs
 
 echo "=== Generate inventory docs (also gates giant-file registry, #3036) ==="
 # The generator hard-fails (exit 2) on giant-file registry drift: unregistered
 # new giants, ghost registrations left after decomposition, or deadline-less
 # [[entry]] tables in scripts/giant_file_registry.toml.
-python3 scripts/generate_inventory_docs.py
+"$PYTHON" scripts/generate_inventory_docs.py
 
 echo "=== Agent maintenance freshness gate (warn, #1432; LoC hard-gate, #3036) ==="
 # --warning-only keeps the #1432 freshness/touch rollout non-fatal, while
 # --line-count-gate hard-fails on change-surfaces.md production-LoC drift, ghost
 # freeze entries, and decomposition regressions.
-python3 scripts/check_agent_maintenance_docs.py --warning-only --line-count-gate
+"$PYTHON" scripts/check_agent_maintenance_docs.py --warning-only --line-count-gate
 
 echo "=== Agent maintenance freshness tests ==="
-python3 -m unittest tests.test_agent_maintenance_docs
+"$PYTHON" -m unittest tests.test_agent_maintenance_docs
 
 echo "=== Maintainability audit ==="
 mkdir -p target
-python3 scripts/audit_maintainability.py --format yaml > target/maintainability-audit.yaml
-python3 scripts/audit_maintainability.py --check
+"$PYTHON" scripts/audit_maintainability.py --format yaml > target/maintainability-audit.yaml
+"$PYTHON" scripts/audit_maintainability.py --check
 echo "Wrote target/maintainability-audit.yaml"
