@@ -800,10 +800,9 @@ fn classify_injected_prompt_human_direct_input() {
 // injected message id, so it is classified distinctly from human input.
 #[test]
 fn classify_injected_prompt_task_notification_event() {
+    let bare = "<task-notification><status>completed</status><task_id>codex-background-event</task_id></task-notification>";
     assert_eq!(
-        classify_injected_prompt(
-            "<task-notification><status>completed</status><task_id>codex-background-event</task_id></task-notification>"
-        ),
+        classify_injected_prompt(bare),
         InjectedPromptClass::TaskNotificationEvent,
     );
     // Tolerates a leading terminal-control prefix some injectors prepend.
@@ -818,12 +817,35 @@ fn classify_injected_prompt_task_notification_event() {
         classify_injected_prompt("<task-notification kind=\"background\"></task-notification>"),
         InjectedPromptClass::TaskNotificationEvent,
     );
-    assert!(
-        !classify_injected_prompt(
-            "<task-notification><status>completed</status></task-notification>"
-        )
-        .is_human_active_turn()
+    assert_eq!(
+        classify_injected_prompt("<task-notification\nkind=\"background\"></task-notification>"),
+        InjectedPromptClass::TaskNotificationEvent,
+        "task-notification detection must accept newline attribute boundaries",
     );
+    assert_eq!(
+        classify_injected_prompt("<task-notification\tkind=\"background\"></task-notification>"),
+        InjectedPromptClass::TaskNotificationEvent,
+        "task-notification detection must accept tab attribute boundaries",
+    );
+    let wrapped = format!("터미널에 직접 주입된 입력 (tmux : `s`):\n```text\n{bare}\n```");
+    assert_eq!(
+        classify_injected_prompt(&wrapped),
+        InjectedPromptClass::TaskNotificationEvent,
+        "wrapped task notification must classify after peeling the direct-injection wrapper",
+    );
+    let quoted = "please inspect this log line:\n\
+<task-notification><status>completed</status></task-notification>";
+    assert_eq!(
+        classify_injected_prompt(quoted),
+        InjectedPromptClass::HumanTuiDirect,
+        "a human quote of the tag mid-body must stay a normal direct prompt",
+    );
+    assert_eq!(
+        classify_injected_prompt("<task-notification-extra></task-notification-extra>"),
+        InjectedPromptClass::HumanTuiDirect,
+        "task-notification detection must honor tag boundaries",
+    );
+    assert!(!classify_injected_prompt(bare).is_human_active_turn());
 }
 
 // #3716: Codex subagent completions arrive as start-anchored
@@ -852,6 +874,24 @@ fn classify_injected_prompt_subagent_notification_event() {
     assert!(
         super::injected_prompt_policy::is_start_anchored_subagent_notification(wrapped),
         "wrapped subagent_notification must pass after peeling the direct-injection wrapper"
+    );
+
+    let newline_attr = "<subagent_notification\nkind=\"worker\">{\"status\":{\"completed\":\"done\"}}</subagent_notification>";
+    assert_eq!(
+        classify_injected_prompt(newline_attr),
+        InjectedPromptClass::SubagentNotificationEvent,
+        "subagent_notification detection must accept newline attribute boundaries",
+    );
+    let tab_attr = "<subagent_notification\tkind=\"worker\">{\"status\":{\"completed\":\"done\"}}</subagent_notification>";
+    assert_eq!(
+        classify_injected_prompt(tab_attr),
+        InjectedPromptClass::SubagentNotificationEvent,
+        "subagent_notification detection must accept tab attribute boundaries",
+    );
+    assert_eq!(
+        classify_injected_prompt("<subagent_notification_extra>{}</subagent_notification_extra>"),
+        InjectedPromptClass::HumanTuiDirect,
+        "subagent_notification detection must honor tag boundaries",
     );
 
     let quoted = "please inspect this log line:\n<subagent_notification>{\"status\":{\"completed\":\"x\"}}</subagent_notification>";
@@ -927,12 +967,12 @@ fn subagent_notification_card_malformed_payload_omits_raw_payload() {
     assert!(!output.contains("<subagent_notification>"));
 }
 
-// #3393 finding 2: the live-panel terminal BRIDGE is gated on a START-ANCHORED
-// check, distinct from the contains-based CARD classifier. A human direct
-// prompt that QUOTES a notification (embedding a LIVE tool-use-id) still earns
-// its card but must NOT push terminal StatusEvents — so a quoted id cannot
-// false-close a real running slot. A bare real-shape record (incl. a leading
-// injection-wrapper round-trip) still bridges.
+// #3393/#3730: the live-panel terminal BRIDGE and system-event classifier are
+// both gated on a START-ANCHORED check. A human direct prompt that QUOTES a
+// notification (embedding a LIVE tool-use-id) must stay a human prompt and must
+// not push terminal StatusEvents — so a quoted id cannot false-close a real
+// running slot. A bare real-shape record (incl. a leading injection-wrapper
+// round-trip) still bridges.
 #[test]
 fn bridge_guard_is_start_anchored_not_contains() {
     // Human prompt quoting a notification mid-message, with a LIVE tool-use-id
@@ -945,11 +985,10 @@ fn bridge_guard_is_start_anchored_not_contains() {
         !is_start_anchored_task_notification(quoted),
         "a mid-message quoted notification must NOT pass the bridge guard"
     );
-    // …yet the contains-based classifier still routes it to the CARD (the
-    // card behavior is preserved; only the terminal bridge is suppressed).
     assert_eq!(
         classify_injected_prompt(quoted),
-        InjectedPromptClass::TaskNotificationEvent,
+        InjectedPromptClass::HumanTuiDirect,
+        "a mid-message quoted notification must not classify as a system event",
     );
 
     // A bare, start-anchored real-shape record bridges.
@@ -1580,6 +1619,48 @@ fn classify_injected_prompt_wrapped_continuation_is_continuation() {
     );
 }
 
+// #3730: provider-session reuse prompts are machine/system injections. They
+// compact repeated authoritative Discord/role/tool instructions and must render
+// as neutral continuation notes, not raw direct-input blocks.
+#[test]
+fn classify_injected_prompt_provider_session_reuse_is_continuation() {
+    let resumed = "[Provider Session Reuse]\n\
+The prior authoritative Discord, role, and tool instructions already present in this \
+Codex thread still apply. Treat only this turn's user request, reply context, uploaded \
+files, and memory recall below as new actionable input.\n\n[User: 0hbujang] ok";
+    assert_eq!(
+        classify_injected_prompt(resumed),
+        InjectedPromptClass::SystemContinuation,
+    );
+
+    let fresh_fork = "[Provider Session Reuse]\n\
+The prior authoritative Discord, role, and tool instructions already issued to this \
+role in the current dcserver lifetime still apply. Treat only this turn's user request, \
+reply context, uploaded files, and memory recall below as new actionable input.\n\n[User: x]";
+    assert_eq!(
+        classify_injected_prompt(fresh_fork),
+        InjectedPromptClass::SystemContinuation,
+    );
+
+    let wrapped = format!(
+        "터미널에 직접 주입된 입력 (tmux : `AgentDesk-codex-adk-cdx`):\n```text\n{resumed}\n```"
+    );
+    assert_eq!(
+        classify_injected_prompt(&wrapped),
+        InjectedPromptClass::SystemContinuation,
+        "wrapped provider reuse marker must classify after peeling the direct-injection wrapper",
+    );
+
+    let truncated_prologue = "[Provider Session Reuse]\n\
+The prior authoritative Discord, role, and tool instructions already present in this \
+Codex thread still apply.\n\nThis is a human question about the marker.";
+    assert_eq!(
+        classify_injected_prompt(truncated_prologue),
+        InjectedPromptClass::HumanTuiDirect,
+        "provider reuse detection must require the full generated prologue, not just the first sentence",
+    );
+}
+
 // #3100 codex P2: stripping the wrapper is anchored to the START. A human
 // message whose body merely contains/quotes the wrapper marker (not as the
 // leading line) must NOT be unwrapped and must stay a human turn.
@@ -1601,6 +1682,14 @@ fn classify_injected_prompt_wrapper_quoted_mid_body_is_not_continuation() {
     assert_eq!(
         classify_injected_prompt(wrapped_human),
         InjectedPromptClass::HumanTuiDirect,
+    );
+
+    let quoted_reuse = "Why did the prompt include [Provider Session Reuse]\n\
+The prior authoritative Discord, role, and tool instructions already present in this Codex thread still apply?";
+    assert_eq!(
+        classify_injected_prompt(quoted_reuse),
+        InjectedPromptClass::HumanTuiDirect,
+        "provider reuse detection must stay start-anchored to avoid swallowing human questions",
     );
 }
 
