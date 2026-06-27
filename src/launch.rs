@@ -14,29 +14,38 @@ async fn launch_server(state: crate::bootstrap::BootstrapState) -> Result<()> {
         tracing::info!("Pipeline loaded: {}", pipeline_path.display());
     }
 
-    let pg_pool = crate::db::postgres::connect_and_migrate(&config)
+    let pg_pool = crate::db::postgres::connect(&config)
         .await
         .map_err(anyhow::Error::msg)
         .context("Failed to init PostgreSQL")?;
 
-    if let Some(root) = crate::config::runtime_root().as_ref() {
-        let legacy_scan = crate::services::discord_config_audit::scan_legacy_sources(root);
-        let loaded =
-            crate::services::discord_config_audit::load_runtime_config(root).map_err(|error| {
-                anyhow::anyhow!("Failed to reload config after PG migration: {error}")
-            })?;
-        config = crate::services::discord_config_audit::audit_and_reconcile_config_only(
-            root,
-            loaded.config,
-            loaded.path,
-            loaded.existed,
-            &legacy_scan,
-            false,
-        )
-        .map_err(|error| {
-            anyhow::anyhow!("Failed to persist config audit after PG migration: {error}")
-        })?
-        .config;
+    if let Some(pool) = pg_pool.as_ref() {
+        crate::db::postgres::with_startup_advisory_lock(pool, || async {
+            crate::db::postgres::migrate(pool).await?;
+            if let Some(root) = crate::config::runtime_root().as_ref() {
+                let legacy_scan = crate::services::discord_config_audit::scan_legacy_sources(root);
+                let loaded = crate::services::discord_config_audit::load_runtime_config(root)
+                    .map_err(|error| {
+                        format!("Failed to reload config after PG migration: {error}")
+                    })?;
+                config = crate::services::discord_config_audit::audit_and_reconcile_config_only(
+                    root,
+                    loaded.config,
+                    loaded.path,
+                    loaded.existed,
+                    &legacy_scan,
+                    false,
+                )
+                .map_err(|error| {
+                    format!("Failed to persist config audit after PG migration: {error}")
+                })?
+                .config;
+            }
+            crate::db::postgres::startup_reseed_with_warmup_pool(pool, &config).await
+        })
+        .await
+        .map_err(anyhow::Error::msg)
+        .context("Failed to init PostgreSQL")?;
     }
     crate::services::provider_hosting::install_provider_hosting_config(&config);
 
