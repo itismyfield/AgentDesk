@@ -134,6 +134,24 @@ at one `--output` directory does not overwrite sibling reports. Per-cell lease
 files (`/tmp/agentdesk-e2e-relay.<cell>.lease`) let cells run in parallel from
 separate operator sessions.
 
+Post-deploy relay continuity uses a narrower operational wrapper around the
+same driver:
+
+```bash
+python3 scripts/e2e/post_deploy_relay_continuity.py --self-check
+python3 scripts/e2e/post_deploy_relay_continuity.py --fixture pass
+python3 scripts/e2e/post_deploy_relay_continuity.py \
+    --cell claude-tui \
+    --dry-run \
+    --deploy-command 'AGENTDESK_DEPLOY_ALLOW_NON_MAIN=1 scripts/deploy-release.sh --skip-review'
+```
+
+The live form adds `--confirm-live` and runs only TUI cells (`claude-tui` or
+`codex-tui`) through `E-9,E-19` with the release deploy command as the restart
+boundary. See
+[`docs/runbooks/post-deploy-relay-continuity-smoke.md`](../runbooks/post-deploy-relay-continuity-smoke.md)
+for the full runbook and pass/fail evidence.
+
 Destructive steps (`restart_dcserver`, `kill_pane`, `send_keys_no_enter`,
 `cancel_turn`) are gated by both `--allow-destructive` and
 `AGENTDESK_E2E_ALLOW_DESTRUCTIVE=1`.
