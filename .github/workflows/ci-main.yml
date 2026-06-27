@@ -14,6 +14,7 @@ env:
   RUSTC_WRAPPER: sccache
   SCCACHE_CACHE_SIZE: 10G
   SCCACHE_GHA_ENABLED: "true"
+  POSTGRES_SERVICE_IMAGE: ${{ vars.AGENTDESK_POSTGRES_SERVICE_IMAGE }}
 
 jobs:
   changes:
@@ -120,20 +121,6 @@ jobs:
   postgres:
     name: PostgreSQL tests
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d postgres"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     env:
       RUST_BACKTRACE: 1
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
@@ -145,6 +132,9 @@ jobs:
       PGPASSWORD: postgres
     steps:
       - uses: actions/checkout@v4
+
+      - name: Start PostgreSQL service
+        run: ./scripts/ci/postgres-service.sh start
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -175,6 +165,10 @@ jobs:
         timeout-minutes: 15
         run: just test-postgres
 
+      - name: Stop PostgreSQL service
+        if: always()
+        run: ./scripts/ci/postgres-service.sh stop
+
       - name: sccache stats
         if: always()
         run: sccache --show-stats || true
@@ -184,20 +178,6 @@ jobs:
     needs: changes
     if: needs.changes.outputs.high_risk_recovery == 'true'
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d postgres"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     env:
       RUST_BACKTRACE: 1
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
@@ -209,6 +189,9 @@ jobs:
       PGPASSWORD: postgres
     steps:
       - uses: actions/checkout@v4
+
+      - name: Start PostgreSQL service
+        run: ./scripts/ci/postgres-service.sh start
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -231,6 +214,10 @@ jobs:
 
       - name: High-risk recovery lane
         run: "cargo test --bin agentdesk high_risk_recovery:: -- --test-threads=1"
+
+      - name: Stop PostgreSQL service
+        if: always()
+        run: ./scripts/ci/postgres-service.sh stop
 
       - name: sccache stats
         if: always()
