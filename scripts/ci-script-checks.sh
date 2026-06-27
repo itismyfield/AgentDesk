@@ -141,6 +141,10 @@ echo "=== Generate inventory docs (refresh workspace; gate source-of-truth invar
 # [[entry]] tables in scripts/giant_file_registry.toml.
 "$PYTHON" scripts/generate_inventory_docs.py
 
+echo "=== API docs coverage gate (#3719) ==="
+"$PYTHON" scripts/check_api_docs_coverage.py
+"$PYTHON" -m unittest tests.test_api_docs_coverage
+
 echo "=== Agent maintenance freshness gate (warn, #1432; LoC hard-gate, #3036) ==="
 # --warning-only keeps the #1432 freshness/touch rollout non-fatal, while
 # --line-count-gate hard-fails on change-surfaces.md production-LoC drift, ghost
