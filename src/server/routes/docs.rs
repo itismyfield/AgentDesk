@@ -5345,7 +5345,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/memory/recall",
             "memory",
-            "Recall memory fragments by keyword/text. Auto-selects memento or local backend (ADK_FORCE_LOCAL_MEMORY=1 forces local).",
+            "Recall memory fragments by keyword/text from PostgreSQL local_memory. Auto-detects runtime-active memento, but memento recall is not implemented on this HTTP route; when runtime-active memento is selected the endpoint returns 501 instead of falling back to local rows. If memento is unavailable, or ADK_FORCE_LOCAL_MEMORY=1 is set, the route uses local fallback access.",
         )
         .with_params([
             (
@@ -5371,6 +5371,19 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "fragments": [{"id": "mem-abc", "content": "PostgreSQL cutover done", "topic": "pg-cutover"}],
                 "source": "local",
                 "detected_backend": "local"
+            }),
+        )
+        .with_example(
+            json!({"body": {"keywords": ["postgres"], "workspace": "ops"}}),
+            json!({
+                "ok": false,
+                "error": "memento recall bridge is not implemented on /api/memory/recall",
+                "code": "memento_recall_unsupported",
+                "operation": "recall",
+                "source": "memento",
+                "detected_backend": "memento",
+                "local_fallback_available": true,
+                "local_fallback_hint": "set ADK_FORCE_LOCAL_MEMORY=1 to query/delete only PostgreSQL local_memory fallback rows"
             }),
         ),
         ep(
@@ -5411,12 +5424,25 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/memory/forget",
             "memory",
-            "Remove a memory fragment by id. Returns 404 when the id is not found.",
+            "Remove a PostgreSQL local_memory fragment by id. Auto-detects runtime-active memento, but memento forget is not implemented on this HTTP route; when runtime-active memento is selected the endpoint returns 501 instead of deleting local fallback rows. If memento is unavailable, or ADK_FORCE_LOCAL_MEMORY=1 is set, the route uses local fallback access.",
         )
         .with_params([("id", body_param("string", true, "Fragment id returned by remember"))])
         .with_example(
             json!({"body": {"id": "mem-abc"}}),
             json!({"ok": true, "source": "local"}),
+        )
+        .with_example(
+            json!({"body": {"id": "memento:release"}}),
+            json!({
+                "ok": false,
+                "error": "memento forget bridge is not implemented on /api/memory/forget",
+                "code": "memento_forget_unsupported",
+                "operation": "forget",
+                "source": "memento",
+                "detected_backend": "memento",
+                "local_fallback_available": true,
+                "local_fallback_hint": "set ADK_FORCE_LOCAL_MEMORY=1 to query/delete only PostgreSQL local_memory fallback rows"
+            }),
         ),
         // provider-cli safe migration
         ep(
