@@ -1,5 +1,6 @@
 use super::*;
 use crate::services::discord::InflightTurnState;
+use crate::services::discord::http::{edit_channel_message, send_channel_message};
 use crate::services::discord::outbound::delivery_record as dr; // #3089 B2b
 use crate::services::discord::replace_outcome_policy::watcher_partial_continuation_retry_plan;
 
@@ -1705,15 +1706,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     let indicator = SPINNER[spin_idx % SPINNER.len()];
                     spin_idx += 1;
 
-                    // #3003 single-chokepoint orphan reclaim: reclaim a watcher-created
-                    // external-input v2 panel the moment its turn is abandoned (stopped/
-                    // cancelled → inflight cleared, or a recent turn-stop tombstone).
-                    // Positioned BEFORE every early-`continue` guard below (silent /
-                    // bridge-delivered / inflight-missing / recent-stop) so none can skip
-                    // it — the recurring orphan source. Committed turns null out
-                    // `status_panel_msg_id` at completion, so a finalized panel is safe.
-                    // #3351: reclaim the turn's stuck relay placeholder alongside the
-                    // panel (still-placeholder gated; real responses never deleted).
                     let tick_placeholder_reclaim = watcher_should_reclaim_orphan_turn_placeholder(
                         turn_is_external_input_for_session,
                         placeholder_msg_id,
@@ -2394,49 +2386,47 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         &watcher_provider,
                     );
 
-                    if display_text != last_edit_text {
-                        match placeholder_msg_id {
+                    if crate::services::discord::single_message_panel::streaming_footer_text_changed(
+                        single_message_panel_footer_mode,
+                        &last_edit_text,
+                        &display_text,
+                    ) {
+                        let edit_committed = match placeholder_msg_id {
                             Some(msg_id) => {
-                                // Edit existing placeholder
                                 rate_limit_wait(&shared, channel_id).await;
-                                let _ = crate::services::discord::http::edit_channel_message(
-                                    &http,
-                                    channel_id,
-                                    msg_id,
-                                    &display_text,
-                                )
-                                .await;
+                                edit_channel_message(&http, channel_id, msg_id, &display_text)
+                                    .await
+                                    .is_ok()
                             }
                             None => {
-                                // Create new placeholder
                                 if let Ok(msg) =
-                                    crate::services::discord::http::send_channel_message(
-                                        &http,
-                                        channel_id,
-                                        &display_text,
-                                    )
-                                    .await
+                                    send_channel_message(&http, channel_id, &display_text).await
                                 {
                                     placeholder_msg_id = Some(msg.id);
                                     placeholder_from_restored_inflight = false;
+                                    true
+                                } else {
+                                    false
                                 }
                             }
+                        };
+                        if edit_committed {
+                            last_edit_text = display_text;
+                            persist_watcher_stream_progress(
+                                &watcher_provider,
+                                channel_id,
+                                &tmux_session_name,
+                                turn_identity_for_panel.as_ref(),
+                                placeholder_msg_id,
+                                &full_response,
+                                response_sent_offset,
+                                tool_state.current_tool_line.as_deref(),
+                                tool_state.prev_tool_status.as_deref(),
+                                task_notification_kind,
+                                tool_state.any_tool_used,
+                                tool_state.has_post_tool_text,
+                            );
                         }
-                        last_edit_text = display_text;
-                        persist_watcher_stream_progress(
-                            &watcher_provider,
-                            channel_id,
-                            &tmux_session_name,
-                            turn_identity_for_panel.as_ref(),
-                            placeholder_msg_id,
-                            &full_response,
-                            response_sent_offset,
-                            tool_state.current_tool_line.as_deref(),
-                            tool_state.prev_tool_status.as_deref(),
-                            task_notification_kind,
-                            tool_state.any_tool_used,
-                            tool_state.has_post_tool_text,
-                        );
                     }
                 }
             }

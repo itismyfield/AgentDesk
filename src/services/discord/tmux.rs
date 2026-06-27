@@ -479,43 +479,12 @@ enum SuppressedPlaceholderAction {
     Edit(String),
 }
 
-fn is_spinner_prefix_char(ch: char) -> bool {
-    matches!(
-        ch,
-        '⠏' | '⠋' | '⠙' | '⠹' | '⠸' | '⠼' | '⠴' | '⠦' | '⠧' | '⠇'
-    )
-}
-
-fn is_inprogress_indicator_line(line: &str) -> bool {
-    line.trim_start()
-        .chars()
-        .next()
-        .is_some_and(is_spinner_prefix_char)
-}
-
-fn strip_inprogress_indicators(body: &str) -> String {
-    let mut lines: Vec<&str> = body
-        .lines()
-        .filter(|line| !is_inprogress_indicator_line(line))
-        .collect();
-    while lines.last().is_some_and(|line| line.trim().is_empty()) {
-        lines.pop();
-    }
-    lines.join("\n")
-}
-
-fn strip_placeholder_terminal_status(text: &str, provider: &ProviderKind) -> String {
-    let text = super::single_message_panel::strip_streaming_footer(text, provider)
-        .unwrap_or_else(|| text.to_string());
-    strip_inprogress_indicators(&text)
-}
-
 fn rewrite_placeholder_as_terminal_suppressed(
     text: &str,
     label: &str,
     provider: &ProviderKind,
 ) -> String {
-    let cleaned = strip_placeholder_terminal_status(text, provider);
+    let cleaned = super::single_message_panel::strip_placeholder_terminal_status(text, provider);
     let trimmed = cleaned.trim_end();
     if trimmed.ends_with(label) {
         return trimmed.to_string();
@@ -576,9 +545,10 @@ fn orphan_suppressed_placeholder_action(
 
     let body = reconstructed_inflight_placeholder_body(state);
     let placeholder_was_exposed = state.response_sent_offset > 0
-        || !strip_placeholder_terminal_status(&body, provider)
+        || !super::single_message_panel::strip_placeholder_terminal_status(&body, provider)
             .trim()
-            .is_empty();
+            .is_empty()
+        || super::single_message_panel::streaming_footer_only_surface_was_exposed(&body, provider);
     if !placeholder_was_exposed {
         return SuppressedPlaceholderAction::Delete;
     }
@@ -642,7 +612,7 @@ enum PlaceholderSuppressDecision {
 }
 
 fn strip_placeholder_indicators_for_preserve(text: &str, provider: &ProviderKind) -> String {
-    strip_placeholder_terminal_status(text, provider)
+    super::single_message_panel::strip_placeholder_terminal_status(text, provider)
         .trim_end()
         .to_string()
 }
@@ -678,6 +648,11 @@ fn decide_placeholder_suppression(
                     ),
                 };
             }
+            let footer_only_was_exposed =
+                super::single_message_panel::streaming_footer_only_surface_was_exposed(
+                    ctx.last_edit_text,
+                    ctx.provider,
+                );
             match suppressed_placeholder_action(
                 ctx.placeholder_msg_id.is_some(),
                 ctx.provider,
@@ -686,6 +661,9 @@ fn decide_placeholder_suppression(
             ) {
                 SuppressedPlaceholderAction::None => PlaceholderSuppressDecision::None,
                 SuppressedPlaceholderAction::Delete => PlaceholderSuppressDecision::Delete,
+                SuppressedPlaceholderAction::Edit(content) if footer_only_was_exposed => {
+                    PlaceholderSuppressDecision::Edit(content)
+                }
                 // #3533: this duplicate-relay guard fires because a bridge turn
                 // already owns delivery, so an exposed body was/will be delivered by
                 // it — preserve it (strip the live spinner) instead of stamping
@@ -1030,9 +1008,16 @@ fn suppressed_placeholder_action(
     }
 
     let placeholder_was_exposed = response_sent_offset > 0
-        || !strip_placeholder_terminal_status(last_edit_text, provider)
-            .trim()
-            .is_empty();
+        || !super::single_message_panel::strip_placeholder_terminal_status(
+            last_edit_text,
+            provider,
+        )
+        .trim()
+        .is_empty()
+        || super::single_message_panel::streaming_footer_only_surface_was_exposed(
+            last_edit_text,
+            provider,
+        );
     if placeholder_was_exposed {
         SuppressedPlaceholderAction::Edit(rewrite_placeholder_as_terminal_suppressed(
             last_edit_text,
@@ -1116,23 +1101,25 @@ mod placeholder_suppression_tests {
     }
 
     #[test]
-    fn footer_mode_status_only_placeholder_deletes() {
+    fn footer_mode_status_only_placeholder_edits_to_keep_message_target() {
         let placeholder = footer_only_placeholder();
 
-        assert_eq!(
-            suppressed_placeholder_action(true, &ProviderKind::Claude, 0, &placeholder),
-            SuppressedPlaceholderAction::Delete
-        );
+        let action = suppressed_placeholder_action(true, &ProviderKind::Claude, 0, &placeholder);
+        let SuppressedPlaceholderAction::Edit(content) = action else {
+            panic!("footer-only placeholder should edit instead of deleting its message target");
+        };
+        assert_eq!(content, SUPPRESSED_INTERNAL_LABEL);
     }
 
     #[test]
-    fn completion_footer_only_placeholder_deletes() {
+    fn completion_footer_only_placeholder_edits_to_keep_message_target() {
         let placeholder = completion_footer_only_placeholder();
 
-        assert_eq!(
-            suppressed_placeholder_action(true, &ProviderKind::Claude, 0, &placeholder),
-            SuppressedPlaceholderAction::Delete
-        );
+        let action = suppressed_placeholder_action(true, &ProviderKind::Claude, 0, &placeholder);
+        let SuppressedPlaceholderAction::Edit(content) = action else {
+            panic!("completion-footer-only placeholder should edit instead of deleting");
+        };
+        assert_eq!(content, SUPPRESSED_INTERNAL_LABEL);
     }
 
     #[test]
@@ -1277,15 +1264,17 @@ mod placeholder_suppression_tests {
     }
 
     #[test]
-    fn active_bridge_unexposed_placeholder_still_deletes() {
-        // No body and no sent offset → nothing to preserve; deleting the bare
-        // spinner placeholder is unchanged behavior.
+    fn active_bridge_footer_only_placeholder_edits_to_preserve_target() {
+        // No body and no sent offset still carries a visible single-message
+        // footer. Keep the Discord message id alive so the bridge-owned
+        // completion footer can edit the same target instead of hitting 404.
         let placeholder = footer_only_placeholder();
         let ctx = active_bridge_ctx(&placeholder, 0, false);
-        assert_eq!(
-            decide_placeholder_suppression(&ctx),
-            PlaceholderSuppressDecision::Delete
-        );
+        let PlaceholderSuppressDecision::Edit(content) = decide_placeholder_suppression(&ctx)
+        else {
+            panic!("footer-only active bridge placeholder should edit, not delete");
+        };
+        assert_eq!(content, SUPPRESSED_INTERNAL_LABEL);
     }
 }
 

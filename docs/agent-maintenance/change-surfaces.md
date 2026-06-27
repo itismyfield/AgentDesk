@@ -138,10 +138,12 @@
     heartbeat timestamp selection into `watchers/lifecycle_decision.rs` and
     keeps lifecycle below its frozen ratchet; -6 from #3736 removing legacy
     remote-profile restore plumbing while remote SSH is disabled).
-  - `src/services/discord/tmux.rs` (2048 lines after #2558 dead-code sweep;
+  - `src/services/discord/tmux.rs` (2033 lines after #2558 dead-code sweep;
     +1 from #3384 restored-seed undelivered-body discard guard;
     +38 for suppressed-label noise, user report 2026-06-12: provider-aware
     status/footer stripping in the placeholder suppression decisions;
+    -15 from #3717 footer-only placeholder target preservation plus status-strip
+    helper extraction to `single_message_panel.rs`;
     +4 from #3167: the monitor-auto-turn start passes `ActiveTurnKind::Background`
     so a queued user message can supersede the low-priority monitor/loop turn;
     failover guard; #3087 `session_panel_instance_key`/`write_spawn_nonce`
@@ -1071,10 +1073,11 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6238 lines; production LoC; the BRIDGE
+  - `src/services/discord/turn_bridge/mod.rs` (6234 lines; production LoC; the BRIDGE
     spawn/turn-lifecycle surface — `spawn_turn_bridge` and the per-channel
     turn loop. #3479 extracted the task/session-panel line rendering +
     active-placeholder-card helpers into the `panel_lifecycle.rs` leaf.
+    #3717 skips status-panel-v2 footer edits when only the spinner frame changes.
     Registered giant-file (#3038 decompose target — see
     `giant-file-registry.md`, owner `discord-relay`, deadline 2026-08-31).
     It surfaced as a giant only after #3028 fixed the prod/test splitter: an

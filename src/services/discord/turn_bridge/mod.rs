@@ -3467,19 +3467,8 @@ pub(super) fn spawn_turn_bridge(
                                 {
                                     pending_key.message_id = current_msg_id;
                                 }
-                                // #1255 codex round-1 P2: rollover advanced
-                                // `current_msg_id` past the message that owned the
-                                // active long-running placeholder. The old message
-                                // now holds delivered response content; retarget
-                                // the controller onto the new message_id so the
-                                // eventual terminal transition lands on the live
-                                // card instead of overwriting that frozen chunk.
-                                // codex round-2 P2: drop the active pointer if the
-                                // retarget edit fails — otherwise we'd suppress
-                                // streaming with no card visible.
-                                // codex round-4 P2: detach the old key first so
-                                // its `Active` controller entry doesn't linger as
-                                // a non-evictable row in the cap-bounded map.
+                                // #1255: rollover retargets the controller to the
+                                // new message and detaches the old key first.
                                 if let Some((old_key, snapshot, close_trigger, ack_consumed)) =
                                     long_running_placeholder_active.as_ref()
                                 {
@@ -3543,27 +3532,34 @@ pub(super) fn spawn_turn_bridge(
                     &provider,
                 );
 
-                // #1255 codex round-1 P2: while a long-running placeholder owns
-                // `current_msg_id`, the controller is the sole writer. Skipping the
-                // regular streaming edit prevents `stable_display_text` from
-                // overwriting the `🔄 백그라운드 처리 중` card mid-flight.
-                if stable_display_text != last_edit_text
+                if super::single_message_panel::streaming_footer_text_changed(
+                    single_message_panel_footer_mode,
+                    &last_edit_text,
+                    &stable_display_text,
+                )
                     && !done
                     && last_status_edit.elapsed() >= status_interval
                     && long_running_placeholder_active.is_none()
                     && pending_long_running_open_after_state_save.is_none()
                     && pending_long_running_retarget_after_state_save.is_none()
                 {
-                    let _ = gateway
-                        .edit_message(channel_id, current_msg_id, &stable_display_text)
-                        .await;
-                    last_edit_text = stable_display_text;
+                    let edit_ok = TurnGateway::edit_message(
+                        gateway.as_ref(),
+                        channel_id,
+                        current_msg_id,
+                        &stable_display_text,
+                    )
+                    .await
+                    .is_ok();
                     last_status_edit = tokio::time::Instant::now();
-                    inflight_state.current_msg_id = current_msg_id.get();
-                    inflight_state.current_msg_len = last_edit_text.len();
-                    inflight_state.response_sent_offset = response_sent_offset;
-                    inflight_state.full_response = full_response.clone();
-                    state_dirty = true;
+                    if edit_ok {
+                        last_edit_text = stable_display_text;
+                        inflight_state.current_msg_id = current_msg_id.get();
+                        inflight_state.current_msg_len = last_edit_text.len();
+                        inflight_state.response_sent_offset = response_sent_offset;
+                        inflight_state.full_response = full_response.clone();
+                        state_dirty = true;
+                    }
                 }
             }
 
