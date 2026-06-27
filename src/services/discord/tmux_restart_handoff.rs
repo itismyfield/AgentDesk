@@ -122,8 +122,13 @@ fn restart_handoff_notice_target(
     RestartHandoffNoticeTarget::Edit(state.current_msg_id)
 }
 
-fn forget_completion_footer_for_restart_handoff(channel_id: ChannelId) {
-    super::single_message_panel::completion_footer_forget_registered_target(channel_id);
+fn forget_completion_footer_for_restart_handoff(
+    channel_id: ChannelId,
+    message_id: serenity::MessageId,
+) -> bool {
+    super::single_message_panel::completion_footer_forget_registered_target_if_message(
+        channel_id, message_id,
+    )
 }
 
 pub(super) fn resolve_dispatched_thread_dispatch_from_db(
@@ -276,13 +281,14 @@ pub(super) async fn start_restart_handoff_from_state(
     best_response: &str,
 ) -> bool {
     let stale_text = super::turn_bridge::stale_inflight_message(best_response);
-    forget_completion_footer_for_restart_handoff(channel_id);
     match restart_handoff_notice_target(&state) {
         RestartHandoffNoticeTarget::Edit(current_msg_id) => {
+            let current_msg_id = serenity::MessageId::new(current_msg_id);
+            forget_completion_footer_for_restart_handoff(channel_id, current_msg_id);
             let relay_ok = super::formatting::replace_long_message_raw(
                 http,
                 channel_id,
-                serenity::MessageId::new(current_msg_id),
+                current_msg_id,
                 &stale_text,
                 shared,
             )
@@ -540,7 +546,10 @@ mod notice_target_tests {
             true,
         );
 
-        super::forget_completion_footer_for_restart_handoff(channel_id);
+        assert!(super::forget_completion_footer_for_restart_handoff(
+            channel_id,
+            MessageId::new(3_089_302),
+        ));
 
         assert_eq!(
             super::super::single_message_panel::completion_footer_edit_for_registered_target_at(
@@ -551,5 +560,37 @@ mod notice_target_tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn restart_handoff_keeps_different_completion_footer_target() {
+        let channel_id = ChannelId::new(3_089_212);
+        let shared = super::super::make_shared_data_for_tests();
+        super::super::single_message_panel::completion_footer_forget_registered_target(channel_id);
+        let _ = super::super::single_message_panel::register_completion_footer_target(
+            channel_id,
+            MessageId::new(3_089_312),
+            &ProviderKind::Codex,
+            1_800_000_000,
+            "Final answer",
+            None,
+            true,
+        );
+
+        assert!(!super::forget_completion_footer_for_restart_handoff(
+            channel_id,
+            MessageId::new(3_089_313),
+        ));
+
+        assert!(
+            super::super::single_message_panel::completion_footer_edit_for_registered_target_at(
+                shared.as_ref(),
+                channel_id,
+                "⠸",
+                1_800_000_005,
+            )
+            .is_some()
+        );
+        super::super::single_message_panel::completion_footer_forget_registered_target(channel_id);
     }
 }

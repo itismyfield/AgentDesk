@@ -929,7 +929,7 @@
     marker suppression for stop-control transcript envelopes; +62 from #3304:
     slash-command canonical prompt keys for `<command-*>` XML vs
     `/command args` dedupe, plus focused loop skill-expansion regressions).
-  - `src/services/discord/recovery_engine.rs` (3433 lines; -5 net from #3711/#3712 extracting rebind runtime/output-path resolution to
+  - `src/services/discord/recovery_engine.rs` (3437 lines; -5 net from #3711/#3712 extracting rebind runtime/output-path resolution to
     `recovery_engine/rebind_runtime.rs` while adding direct Codex TUI detection
     so rebind can rebuild rollout bindings when possible and return 409 instead
     of synthesizing inert legacy-wrapper inflight rows; +2 from #3668 re-exporting `success_result_end_offset_after_offset` (pub(in discord)) so the relay_recovery F2 tail-answer guard can require terminal success evidence; +24 from f12b09366 backstop missed turn intake (drain-restart ownerless-inflight recovery: phase_policy/relay_recovery/relay_health predicates); +15 from #3610 PR-2 codex r2 Issue-2 storm-guard comment at the committed-branch anchor-repost dispose (passes `tmux_alive = false` so a transient send-new is budget-bounded, not pane-preserved forever; the now-unused liveness probe is dropped); +33 from #3610 PR-2 anchor-repost fallback (flag-gated, default OFF); +26 from #3680 relay recovery review hardening; +9 from #3582 stamping
@@ -993,10 +993,13 @@
     short-replace through the unified controller behind a flag (default OFF) — the
     one-arm gate at `relay_recovered_terminal_text_to_placeholder` is offset by
     non-#-tag prose-comment compaction in the same root, the cutover body lives in
-    the sub-1000-prod-LoC sibling `recovery_paths/controller_cutover.rs`).
-  - `src/services/discord/relay_recovery.rs` (1007 lines; #3680 split relay
+    the sub-1000-prod-LoC sibling `recovery_paths/controller_cutover.rs`; +4 from
+    #3717 guarding completion-footer registry forgets by the exact takeover
+    message id).
+  - `src/services/discord/relay_recovery.rs` (1006 lines; #3680 split relay
     recovery reattach/self-heal path; new behavior is bugfix-only until a
-    follow-up extraction drops it below the giant-file threshold).
+    follow-up extraction drops it below the giant-file threshold; net -1 from
+    #3717 moving completion-footer target ownership cleanup to a sibling helper).
   - `src/services/discord/health.rs` (417 prod lines after the #3038 Phase A
     directory decomposition; module root keeps the `HealthRegistry` core +
     re-export surface, and the former monolith body lives in flat
