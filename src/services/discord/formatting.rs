@@ -1052,6 +1052,25 @@ mod status_panel_v2_formatter_tests {
     }
 
     #[test]
+    fn format_for_discord_sanitizes_provider_reuse_user_prefixed_subagent_3777() {
+        let input = "[Provider Session Reuse]\n\
+The prior authoritative Discord, role, and tool instructions already present in this \
+Codex thread still apply. Treat only this turn's user request, reply context, uploaded \
+files, and memory recall below as new actionable input.\n\n\
+[User: 0hbujang (ID: 343742347365974026)] \
+<subagent_notification>{\"agent_path\":\"/tmp/private-agent\",\"status\":{\"completed\":\"Review complete.\"}}</subagent_notification>";
+
+        let output = format_for_discord_with_provider(input, &ProviderKind::Codex);
+        assert!(output.contains("Subagent completed"));
+        assert!(output.contains("Review complete."));
+        assert!(!output.contains("[Provider Session Reuse]"));
+        assert!(!output.contains("[User:"));
+        assert!(!output.contains("<subagent_notification>"));
+        assert!(!output.contains("agent_path"));
+        assert!(!output.contains("/tmp/private-agent"));
+    }
+
+    #[test]
     fn format_for_discord_preserves_blank_lines_inside_code_block_3475() {
         // #3475 acceptance: the blank-line collapse must NOT touch code block
         // contents, so relayed code/tool output keeps its intentional spacing.

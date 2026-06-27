@@ -107,6 +107,8 @@ fn normalized_start_anchored_injection(prompt: &str) -> String {
     let normalized = strip_leading_injection_wrapper(normalized);
     let normalized = normalized.trim_start();
     let normalized = strip_provider_session_reuse_prologue(normalized).unwrap_or(normalized);
+    let normalized = normalized.trim_start();
+    let normalized = strip_leading_user_author_prefix(normalized).unwrap_or(normalized);
     normalized.trim_start().to_string()
 }
 
@@ -139,6 +141,13 @@ fn strip_provider_session_reuse_prologue(normalized: &str) -> Option<&str> {
 fn provider_reuse_tail<'a>(rest: &'a str, prologue: &str) -> Option<&'a str> {
     rest.strip_prefix(prologue)
         .and_then(|tail| tail.strip_prefix("\n\n"))
+}
+
+fn strip_leading_user_author_prefix(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("[User: ")?;
+    let close = rest.find(']')?;
+    let tail = rest[close + 1..].trim_start();
+    starts_with_xmlish_tag(tail, "subagent_notification").then_some(tail)
 }
 
 fn starts_with_xmlish_tag(text: &str, tag: &str) -> bool {
@@ -222,10 +231,30 @@ mod tests {
     }
 
     #[test]
+    fn detects_provider_reuse_user_prefixed_subagent_notifications_3777() {
+        let raw =
+            r#"<subagent_notification>{"status":{"completed":"done"}}</subagent_notification>"#;
+        let prefixed = format!("{RESUMED_PREFIX}[User: 0hbujang (ID: 343742347365974026)] {raw}");
+        assert!(is_start_anchored_subagent_notification(&prefixed));
+        assert!(
+            sanitize_start_anchored_subagent_notification(&prefixed)
+                .expect("card")
+                .contains("Subagent completed")
+        );
+
+        let wrapped = format!("터미널에 직접 주입된 입력 (tmux : `s`):\n```text\n{prefixed}\n```");
+        assert!(is_start_anchored_subagent_notification(&wrapped));
+    }
+
+    #[test]
     fn human_mid_body_quote_is_not_sanitized() {
         let quoted = "please inspect this log line:\n<subagent_notification>{\"status\":{\"completed\":\"x\"}}</subagent_notification>";
         assert!(!is_start_anchored_subagent_notification(quoted));
         assert!(sanitize_start_anchored_subagent_notification(quoted).is_none());
+
+        let prefixed_human = "[User: 0hbujang] please inspect this log line:\n<subagent_notification>{\"status\":{\"completed\":\"x\"}}</subagent_notification>";
+        assert!(!is_start_anchored_subagent_notification(prefixed_human));
+        assert!(sanitize_start_anchored_subagent_notification(prefixed_human).is_none());
     }
 
     #[test]
