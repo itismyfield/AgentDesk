@@ -3004,7 +3004,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/github/issues/create",
             "github",
-            "Create a GitHub issue with server-enforced issue markdown format. Successful creation returns HTTP 201 Created (not 200) with the issue payload. dry_run returns 200 OK with rendered_body and no side effects.",
+            "Create a GitHub issue with server-enforced issue markdown format. Successful creation returns HTTP 201 Created (not 200) with the issue payload. block_on records positive GitHub issue-number dependencies for auto-queue via the rendered `## 의존성` section and kanban metadata. dry_run returns 200 OK with rendered_body, no side effects, and capabilities that show auto_dispatch is not supported by this public contract.",
         )
         .with_params([
             (
@@ -3065,19 +3065,11 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 ),
             ),
             (
-                "auto_dispatch",
-                body_param(
-                    "boolean",
-                    false,
-                    "Reserved for future dispatch automation; currently returns 501 when true",
-                ),
-            ),
-            (
                 "block_on",
                 body_param(
                     "array[number]",
                     false,
-                    "Reserved for dependency blocking; currently returns 501 when non-empty",
+                    "Optional positive GitHub issue numbers rendered into `## 의존성` and stored as kanban metadata `depends_on` for auto-queue dependency gating",
                 ),
             ),
             (
@@ -3124,6 +3116,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "content": ["render issue body"],
                 "dod": ["response includes rendered_body"],
                 "agent_id": "project-agentdesk",
+                "block_on": [3718],
                 "dry_run": true
             }),
             json!({
@@ -3139,8 +3132,15 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "announcement_message_id": null,
                 "announcement_sync_error": null,
                 "applied_labels": ["agent:project-agentdesk"],
-                "rendered_body": "## 배경\nCheck the generated markdown before creating anything.\n\n## 내용\n- render issue body\n\n## DoD\n- [ ] response includes rendered_body",
+                "rendered_body": "## 배경\nCheck the generated markdown before creating anything.\n\n## 내용\n- render issue body\n\n## 의존성\n- #3718\n\n## DoD\n- [ ] response includes rendered_body",
                 "validation_warnings": [],
+                "capabilities": {
+                    "auto_dispatch": false,
+                    "block_on": true,
+                    "unsupported_features": ["auto_dispatch"]
+                },
+                "block_on": [3718],
+                "unsupported_features": [],
                 "issue_format_version": 1,
                 "pmd_format_version": 1
             }),
@@ -6194,6 +6194,47 @@ mod tests {
         let (status, _headers, routed) = resolve_docs_segment("api-friction-markers", false);
         assert_eq!(status, StatusCode::OK);
         assert_eq!(routed["path"], "/api/docs/api-friction-markers");
+    }
+
+    #[test]
+    fn github_issue_create_docs_surface_block_on_and_auto_dispatch_capabilities() {
+        let endpoints = all_endpoints();
+        let endpoint = endpoints
+            .iter()
+            .find(|endpoint| {
+                endpoint.method == "POST" && endpoint.path == "/api/github/issues/create"
+            })
+            .expect("POST /api/github/issues/create must be documented");
+
+        assert!(
+            !endpoint.params.contains_key("auto_dispatch"),
+            "unsupported auto_dispatch must not be advertised as a public request param"
+        );
+        assert!(
+            endpoint.params.contains_key("block_on"),
+            "supported block_on dependency contract must be documented"
+        );
+        assert!(
+            endpoint.description.contains("capabilities")
+                && endpoint.description.contains("auto_dispatch")
+                && endpoint.description.contains("block_on records positive"),
+            "docs must explain block_on support and dry_run capability discovery: {}",
+            endpoint.description
+        );
+
+        let dry_run = endpoint
+            .dry_run_example
+            .as_ref()
+            .expect("issue create docs must include dry_run discovery example");
+        assert_eq!(dry_run.status, Some(200));
+        assert_eq!(dry_run.response["capabilities"]["auto_dispatch"], false);
+        assert_eq!(dry_run.response["capabilities"]["block_on"], true);
+        assert_eq!(
+            dry_run.response["capabilities"]["unsupported_features"],
+            json!(["auto_dispatch"])
+        );
+        assert_eq!(dry_run.response["block_on"], json!([3718]));
+        assert_eq!(dry_run.response["unsupported_features"], json!([]));
     }
 
     #[test]
