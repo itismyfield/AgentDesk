@@ -1,5 +1,8 @@
 //! Outbound response sanitizer for AgentDesk-owned hidden context.
 
+#[path = "subagent_notification_card.rs"]
+pub(in crate::services::discord) mod subagent_notification_card;
+
 const TUI_IDLE_RESPONSE_CHROME_PREFIXES: &[&str] = &[
     "No response requested.",
     "Continue from where you left off.",
@@ -35,6 +38,12 @@ const HIDDEN_LINE_PREFIXES: &[&str] = &[
 ];
 
 pub(crate) fn sanitize_hidden_context(input: &str) -> String {
+    if let Some(card) =
+        subagent_notification_card::sanitize_start_anchored_subagent_notification(input)
+    {
+        return card;
+    }
+
     let mut out = Vec::new();
     let mut in_code_block = false;
     let mut dropping_block = false;
@@ -81,6 +90,13 @@ pub(crate) fn sanitize_hidden_context(input: &str) -> String {
     }
 
     trim_blank_edges(out)
+}
+
+pub(crate) fn sanitize_hidden_context_and_strip_chrome(input: &str) -> String {
+    let sanitized = sanitize_hidden_context(input);
+    let stripped = strip_leading_tui_response_chrome(&sanitized);
+    subagent_notification_card::sanitize_start_anchored_subagent_notification(&stripped)
+        .unwrap_or(stripped)
 }
 
 /// Remove leading Claude/Codex TUI housekeeping text that can be emitted by

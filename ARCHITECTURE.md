@@ -679,6 +679,7 @@ src/
 │   │   ├── status_panel_orphan_store.rs
 │   │   ├── steering.rs
 │   │   ├── streaming_finalizer.rs
+│   │   ├── subagent_notification_card.rs
 │   │   ├── task_supervisor.rs
 │   │   ├── terminal_ui_obligation.rs
 │   │   ├── tmux.rs

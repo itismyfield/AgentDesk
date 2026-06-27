@@ -907,9 +907,7 @@ pub(crate) fn tmux_runtime_paths(tmux_session_name: &str) -> (String, String) {
 }
 
 pub(in crate::services::discord) fn stale_inflight_message(saved_response: &str) -> String {
-    let cleaned = crate::services::discord::response_sanitizer::strip_leading_tui_response_chrome(
-        saved_response.trim(),
-    );
+    let cleaned = restart_saved_response_for_discord(saved_response);
     let cleaned = cleaned.trim();
     if cleaned.is_empty() {
         "⚠️ AgentDesk가 재시작되어 진행 중이던 응답을 이어붙이지 못했습니다.".to_string()
@@ -923,9 +921,7 @@ pub(in crate::services::discord) fn handoff_interrupted_message(
     restart_mode: InflightRestartMode,
     saved_response: &str,
 ) -> String {
-    let cleaned = crate::services::discord::response_sanitizer::strip_leading_tui_response_chrome(
-        saved_response.trim(),
-    );
+    let cleaned = restart_saved_response_for_discord(saved_response);
     let cleaned = cleaned.trim();
     match restart_mode {
         InflightRestartMode::DrainRestart => {
@@ -947,6 +943,12 @@ pub(in crate::services::discord) fn handoff_interrupted_message(
     }
 }
 
+fn restart_saved_response_for_discord(saved_response: &str) -> String {
+    crate::services::discord::response_sanitizer::sanitize_hidden_context_and_strip_chrome(
+        saved_response.trim(),
+    )
+}
+
 pub(super) fn is_dcserver_restart_command(input: &str) -> bool {
     let lower = input.to_lowercase();
 
@@ -961,4 +963,56 @@ pub(super) fn is_dcserver_restart_command(input: &str) -> bool {
     lower.contains("launchctl")
         && lower.contains("com.agentdesk.dcserver")
         && (lower.contains("kickstart") || lower.contains("bootstrap") || lower.contains("bootout"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RAW_SUBAGENT: &str = r#"<subagent_notification>
+{"agent_path":"/tmp/private-agent","status":{"completed":"Read-only review complete.\n\n1. Check relay path."}}
+</subagent_notification>"#;
+    const CHROME_RAW_SUBAGENT: &str = "No response requested.\n<subagent_notification>{\"agent_path\":\"/tmp/private-agent\",\"status\":{\"completed\":\"Read-only review complete.\"}}</subagent_notification>";
+
+    #[test]
+    fn stale_inflight_message_hides_raw_subagent_notification() {
+        let message = stale_inflight_message(RAW_SUBAGENT);
+
+        assert!(message.contains("Subagent completed"));
+        assert!(message.contains("Read-only review complete."));
+        assert!(message.contains("[Interrupted by restart]"));
+        assert!(!message.contains("<subagent_notification>"));
+        assert!(!message.contains("agent_path"));
+        assert!(!message.contains("/tmp/private-agent"));
+        assert!(!message.contains("{\""));
+    }
+
+    #[test]
+    fn handoff_interrupted_message_hides_raw_subagent_notification() {
+        let message = handoff_interrupted_message(InflightRestartMode::DrainRestart, RAW_SUBAGENT);
+
+        assert!(message.contains("Subagent completed"));
+        assert!(message.contains("Read-only review complete."));
+        assert!(message.contains("[Restart handoff incomplete]"));
+        assert!(!message.contains("<subagent_notification>"));
+        assert!(!message.contains("agent_path"));
+        assert!(!message.contains("/tmp/private-agent"));
+        assert!(!message.contains("{\""));
+    }
+
+    #[test]
+    fn restart_messages_sanitize_subagent_after_tui_chrome_strip() {
+        let stale = stale_inflight_message(CHROME_RAW_SUBAGENT);
+        assert!(stale.contains("Subagent completed"));
+        assert!(stale.contains("Read-only review complete."));
+        assert!(!stale.contains("No response requested."));
+        assert!(!stale.contains("<subagent_notification>"));
+        assert!(!stale.contains("agent_path"));
+
+        let handoff =
+            handoff_interrupted_message(InflightRestartMode::DrainRestart, CHROME_RAW_SUBAGENT);
+        assert!(handoff.contains("Subagent completed"));
+        assert!(!handoff.contains("<subagent_notification>"));
+        assert!(!handoff.contains("agent_path"));
+    }
 }
