@@ -319,7 +319,7 @@ fn canonical_category(category: &str) -> &'static str {
         "dispatches" | "dispatched-sessions" | "internal" | "messages" | "sessions" => "dispatches",
         "auto-queue" | "cron" | "queue" => "queue",
         "routines" => "routines",
-        "analytics" | "auth" | "cluster" | "docs" | "health" | "monitoring" | "stats"
+        "analytics" | "auth" | "cluster" | "docs" | "health" | "monitoring" | "stats" | "v1"
         | "provider-cli" => "ops",
         "discord" | "github" | "github-dashboard" | "meetings" => "integrations",
         "departments" | "memory" | "offices" | "onboarding" | "policies" | "settings"
@@ -486,6 +486,7 @@ fn category_description(category: &str) -> &'static str {
         "settings" => "Settings surfaces, live overrides, precedence, and onboarding contracts.",
         "skills" => "Skill catalog and usage ranking.",
         "stats" => "Aggregate system counters.",
+        "v1" => "Versioned dashboard read models and compatibility settings endpoints.",
         _ => "Miscellaneous API endpoints.",
     }
 }
@@ -5444,6 +5445,178 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "local_fallback_hint": "set ADK_FORCE_LOCAL_MEMORY=1 to query/delete only PostgreSQL local_memory fallback rows"
             }),
         ),
+        // #3719 mounted-route coverage: compact docs for routes that were
+        // mounted but absent from the curated /api/docs endpoint list.
+        ep(
+            "GET",
+            "/api/agents/diag/{identifier}",
+            "agents",
+            "Agent diagnostic snapshot by id or role identifier.",
+        )
+        .with_params([(
+            "identifier",
+            path_param("Agent id, role id, or configured agent identifier"),
+        )]),
+        ep(
+            "GET",
+            "/api/analytics/policy-hooks",
+            "analytics",
+            "Policy hook timeout and execution counters.",
+        ),
+        ep(
+            "GET",
+            "/api/github/pr-summary",
+            "github",
+            "Fetch a GitHub PR summary from the AgentDesk cache, with gh CLI fallback on cache miss.",
+        )
+        .with_params([
+            ("repo", query_param("string", true, "Repository in owner/name form")),
+            ("pr", query_param("integer", true, "Pull request number")),
+            (
+                "force_refresh",
+                query_param("boolean", false, "Bypass cached value and refetch"),
+            ),
+            (
+                "expected_head_sha",
+                query_param("string", false, "Use cache only when the head SHA matches"),
+            ),
+        ]),
+        ep(
+            "POST",
+            "/api/github/pr-summary/invalidate",
+            "github",
+            "Invalidate one cached GitHub PR summary entry.",
+        )
+        .with_params([
+            ("repo", body_param("string", true, "Repository in owner/name form")),
+            ("pr", body_param("integer", true, "Pull request number")),
+        ]),
+        ep(
+            "GET",
+            "/api/maintenance/jobs",
+            "ops",
+            "List maintenance job status records from PostgreSQL.",
+        ),
+        ep(
+            "GET",
+            "/api/queue/phase-gates/violations",
+            "auto-queue",
+            "Report pending or active auto-queue entries whose batch phase is ahead of the run phase pointer.",
+        ),
+        ep(
+            "POST",
+            "/api/queue/runs/{id}/entries",
+            "auto-queue",
+            "Append a GitHub issue entry to an existing auto-queue run.",
+        )
+        .with_params([
+            ("id", path_param("Auto-queue run id")),
+            ("issue_number", body_param("integer", true, "GitHub issue number")),
+            ("thread_group", body_param("integer", false, "Optional thread-group override")),
+            ("batch_phase", body_param("integer", false, "Optional batch phase override")),
+        ]),
+        ep(
+            "GET",
+            "/api/round-table-meetings/channels",
+            "meetings",
+            "List Discord channels available to round-table meeting workflows.",
+        ),
+        ep(
+            "POST",
+            "/api/inflight/rebind",
+            "dispatches",
+            "Recover an orphaned live tmux session by rebinding inflight state and respawning its watcher.",
+        ),
+        ep(
+            "POST",
+            "/api/sessions/{session_key}/idle-recap",
+            "sessions",
+            "Trigger an idle-recap card for a resumable dispatched session.",
+        )
+        .with_params([(
+            "session_key",
+            path_param("Dispatched session key to recap"),
+        )]),
+        ep(
+            "GET",
+            "/api/v1/overview",
+            "v1",
+            "Versioned dashboard overview combining health, agents, kanban, dispatch, token, and sparkline summaries.",
+        ),
+        ep(
+            "GET",
+            "/api/v1/agents",
+            "v1",
+            "Versioned dashboard agent list, optionally filtered by officeId.",
+        )
+        .with_params([(
+            "officeId",
+            query_param("string", false, "Optional office id filter"),
+        )]),
+        ep(
+            "GET",
+            "/api/v1/tokens",
+            "v1",
+            "Versioned token usage summary for range or period query windows.",
+        )
+        .with_params([
+            ("range", query_param("string", false, "Usage window such as 7d or 30d")),
+            ("period", query_param("string", false, "Legacy alias for range")),
+        ]),
+        ep(
+            "GET",
+            "/api/v1/kanban",
+            "v1",
+            "Versioned dashboard kanban summary.",
+        ),
+        ep(
+            "GET",
+            "/api/v1/ops/health",
+            "v1",
+            "Versioned operational health payload with bottleneck annotations.",
+        ),
+        ep(
+            "GET",
+            "/api/v1/stream",
+            "v1",
+            "Versioned Server-Sent Events stream with optional last-event-id replay.",
+        ),
+        ep(
+            "GET",
+            "/api/v1/activity",
+            "v1",
+            "Versioned activity feed with limit and cursor pagination.",
+        )
+        .with_params([
+            ("limit", query_param("integer", false, "Maximum activity items")),
+            ("before", query_param("string", false, "Cursor returned by a prior page")),
+        ]),
+        ep(
+            "GET",
+            "/api/v1/achievements",
+            "v1",
+            "Versioned achievement bundle, optionally scoped to an agent.",
+        )
+        .with_params([(
+            "agentId",
+            query_param("string", false, "Optional agent id filter"),
+        )]),
+        ep(
+            "GET",
+            "/api/v1/settings",
+            "v1",
+            "Versioned settings list compatible with the dashboard settings surface.",
+        ),
+        ep(
+            "PATCH",
+            "/api/v1/settings/{key}",
+            "v1",
+            "Patch one versioned settings value using the dashboard-compatible settings contract.",
+        )
+        .with_params([
+            ("key", path_param("Settings key")),
+            ("value", body_param("any", true, "New settings value")),
+        ]),
         // provider-cli safe migration
         ep(
             "GET",
