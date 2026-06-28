@@ -1,4 +1,5 @@
 use super::super::{inflight, task_supervisor};
+use super::claude_idle_bridge::compose_tui_idle_response;
 use super::*;
 #[cfg(unix)]
 pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {

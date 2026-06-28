@@ -152,12 +152,11 @@ use self::synthetic_start::{
     codex_ownerless_external_input_inflight_needs_rollout_recovery, defer_synthetic_turn_start,
     finish_tui_direct_synthetic_pre_save_failure, finish_tui_direct_synthetic_turn_if_current,
     pending_start_abort_cleanup_fn, restore_pending_starts, synthetic_start_prior_turn_view,
-    wait_for_tui_direct_watcher_synthetic_claim,
+    tui_direct_synthetic_inflight_active_for_prompt, wait_for_tui_direct_watcher_synthetic_claim,
 };
 #[cfg(test)]
 use self::synthetic_start::{
-    release_stale_ownerless_tui_direct_mailbox_if_current,
-    tui_direct_synthetic_inflight_active_for_prompt, tui_direct_watcher_can_own_output,
+    release_stale_ownerless_tui_direct_mailbox_if_current, tui_direct_watcher_can_own_output,
 };
 
 #[cfg(unix)]
