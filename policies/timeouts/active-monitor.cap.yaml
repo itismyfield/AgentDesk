@@ -15,14 +15,8 @@ db:
       - sessions
       - session_termination_events
   raw_sql:
-    mode: legacy
-    capabilities:
-      - active_monitor_legacy_raw_db
-    markers_required: false
-    rationale: broad legacy timeout monitor DB access pinned by no-silent-growth baseline
-    no_silent_growth:
-      callsites: 18
-      fingerprint: sha256:01464111232ee18b4a513d3a77a985067a30cb8322a85af55d669e842a15d21b
+    mode: forbidden
+    rationale: active monitor session/deadlock DB access is mediated by agentdesk.timeouts.* and agentdesk.kv.*
 exec:
   allow:
     - tmux

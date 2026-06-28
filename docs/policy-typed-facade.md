@@ -29,6 +29,14 @@ Current typed facade entrypoints:
 | `agentdesk.kanban` | `setReviewStatus(card_id, status, opts)` | Updates the review status without raw `kanban_cards.review_status` UPDATEs. |
 | `agentdesk.queue` | `status()` | Returns typed queue and outbox counts without exposing raw queue tables to JS. |
 | `agentdesk.autoQueue` | `updateEntryStatus(entry_id, status, source, opts)` | Updates `auto_queue_entries` status cleanly, logging the transition. |
+| `agentdesk.timeouts` | `clearDeadlockCountersForFreshSessions(stale_scan_minutes)` | Deletes stale `deadlock_check:*` markers for active sessions with fresh heartbeats. |
+| `agentdesk.timeouts` | `listStaleWorkingSessions(grace_minutes)` | Returns stale `turn_active`/`working` sessions plus active dispatch status for safe stale-session recovery. |
+| `agentdesk.timeouts` | `listDeadlockCandidates(stale_scan_minutes, limit)` | Returns bounded stale session candidates ordered by heartbeat without exposing session SQL to JS. |
+| `agentdesk.timeouts` | `markSessionIdle(session_key, opts)` | Transitions a stale active session to `idle`, optionally clearing `active_dispatch_id`. |
+| `agentdesk.timeouts` | `getDispatchType(dispatch_id)` | Returns a dispatch type or `null` for review-hang targeting. |
+| `agentdesk.timeouts` | `recordDeadlockTermination(payload)` | Inserts the deadlock-policy termination audit row with fixed component/reason fields. |
+| `agentdesk.timeouts` | `cleanupDeadlockCountersForInactiveSessions()` | Deletes `deadlock_check:*` markers whose sessions are no longer active. |
+| `agentdesk.timeouts` | `cleanupDeadlockHistoryBefore(cutoff_ms)` | Deletes old `deadlock_history:*` markers by timestamp suffix. |
 | `agentdesk.dispatch` | `create(...)` | Existing typed command, retained as-is. |
 | `agentdesk.kv` | `get/set/delete(...)` | Existing typed KV facade, preferred over `kv_meta` SQL. |
 
@@ -53,6 +61,7 @@ Other scalar columns keep the same shape as `query`; the difference is limited t
 - Prefer `agentdesk.cards.list(...)` over ad hoc `SELECT ... FROM kanban_cards`.
 - Prefer `agentdesk.cards.assign(...)` and `agentdesk.cards.setPriority(...)` over direct `UPDATE kanban_cards`.
 - Prefer `agentdesk.review.entryContext(...)` and `agentdesk.review.recordEntry(...)` for review round planning over ad hoc `task_dispatches`/`kanban_cards.review_round` SQL.
+- Prefer `agentdesk.timeouts.*` for active-monitor stale-session scans, session idle transitions, deadlock cleanup, dispatch-type lookups, and termination audits.
 - Prefer `agentdesk.kv.*` over `kv_meta` SQL.
 - Keep `agentdesk.db.*` for gaps, debugging, or transitional policy code only.
 
@@ -76,6 +85,20 @@ Other scalar columns keep the same shape as `query`; the difference is limited t
 
 The migrated slice covers `onReviewEnter` and its round-planning logic. A static test blocks any future `agentdesk.db.*` reintroduction inside that slice.
 
+`policies/timeouts/active-monitor.js` now routes Section I deadlock monitoring through:
+
+- `agentdesk.timeouts.clearDeadlockCountersForFreshSessions`
+- `agentdesk.timeouts.listStaleWorkingSessions`
+- `agentdesk.timeouts.listDeadlockCandidates`
+- `agentdesk.timeouts.markSessionIdle`
+- `agentdesk.timeouts.getDispatchType`
+- `agentdesk.timeouts.recordDeadlockTermination`
+- `agentdesk.timeouts.cleanupDeadlockCountersForInactiveSessions`
+- `agentdesk.timeouts.cleanupDeadlockHistoryBefore`
+- `agentdesk.kv.get/set/delete`
+
+The active-monitor policy capability manifest sets `db.raw_sql.mode=forbidden`, so static capability checks fail if `agentdesk.db.*` is reintroduced in that file.
+
 ## Backlog
 
 Typed-facade gaps are tracked as explicit follow-up slices instead of silent exceptions:
@@ -84,6 +107,6 @@ Typed-facade gaps are tracked as explicit follow-up slices instead of silent exc
 | --- | --- | --- |
 | `policies/review-automation.js` | verdict handling, pipeline-stage lookup, PR tracking card reads | typed review outcome + pipeline stage query facade |
 | `policies/kanban-rules.js` | preflight helpers, dispatch-completion reads, metadata merge helpers | typed preflight facade + card metadata patch facade |
-| `policies/timeouts.js` | stale dispatch/session scans, kv cleanup, long-turn alert queries | typed timeout scan facade + kv sweep facade |
+| `policies/timeouts.js` | remaining stale dispatch/orphan/long-turn alert queries outside active-monitor Section I | typed timeout scan facade + kv sweep facade |
 
 These slices remain allowed to use `agentdesk.db.*` until they are migrated and individually placed behind the same enforcement pattern.

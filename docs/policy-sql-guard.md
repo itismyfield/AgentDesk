@@ -35,7 +35,7 @@ DB callsites must migrate to a typed facade or carry a
 `legacy-raw-db: policy=<name> capability=<intent> source_event=<hook>` marker
 so audit logs can attribute the capability.
 
-The current audited baseline is 184 raw DB callsites across 30 policy files.
+The current audited baseline is 166 raw DB callsites across 29 policy files.
 Four nearby `legacy-raw-db` marker comments annotate existing escape-hatch
 callsites. This baseline records the existing trusted-automation surface; it is
 not permission for silent growth.
@@ -163,9 +163,12 @@ The first rollout manifests are checked in for:
 - `policies/review-automation.cap.yaml`
 - `policies/merge-automation.cap.yaml`
 
-All three are in `legacy` raw SQL mode with pinned baselines. This prevents
-silent growth in the highest-risk policy files while keeping the runtime guard
-behavior unchanged.
+`review-automation` and `merge-automation` remain in `legacy` raw SQL mode with
+pinned baselines. `timeouts/active-monitor` has been migrated to typed timeout
+facades and now uses `forbidden` raw SQL mode, so any new `agentdesk.db.*`
+callsite in that file fails the static check. This prevents silent growth in
+the highest-risk policy files while keeping the runtime guard behavior
+unchanged.
 
 ### Enforcement Plan
 

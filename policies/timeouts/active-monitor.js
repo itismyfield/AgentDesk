@@ -42,11 +42,7 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
   function reviewDispatchType(dispatchId) {
     if (!dispatchId) return null;
     try {
-      var rows = agentdesk.db.query(
-        "SELECT dispatch_type FROM task_dispatches WHERE id = ?",
-        [dispatchId]
-      );
-      return rows.length > 0 ? rows[0].dispatch_type : null;
+      return agentdesk.timeouts.getDispatchType(dispatchId);
     } catch (e) {
       agentdesk.log.warn("[deadlock] Failed to inspect dispatch type for " + dispatchId + ": " + e);
       return null;
@@ -84,22 +80,13 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
       var iInProgress = agentdesk.pipeline.nextGatedTarget(iInitial, iCfg);
 
       // 먼저: heartbeat가 신선한 working 세션의 카운터를 리셋 (비연속 스톨 누적 방지)
-      agentdesk.db.execute(
-        "DELETE FROM kv_meta WHERE key IN (" +
-        "SELECT 'deadlock_check:' || session_key FROM sessions " +
-        "WHERE status IN ('turn_active', 'working') " +
-        "AND last_heartbeat >= datetime('now', '-" + STALE_SCAN_MINUTES + " minutes')" +
-        ")"
-      );
+      agentdesk.timeouts.clearDeadlockCountersForFreshSessions(STALE_SCAN_MINUTES);
 
       // Fix stale working sessions: if status=working but no inflight file exists,
       // the turn has ended but DB wasn't updated. Fix to idle.
       // #219: Increased grace period from 3min to 10min — agents running long tool
       // calls (cargo build, subagents) may not send heartbeats for several minutes.
-      var staleWorkingSessions = agentdesk.db.query(
-        "SELECT session_key FROM sessions WHERE status IN ('turn_active', 'working') " +
-        "AND last_heartbeat < datetime('now', '-10 minutes')"
-      );
+      var staleWorkingSessions = agentdesk.timeouts.listStaleWorkingSessions(10);
       for (var sw = 0; sw < staleWorkingSessions.length; sw++) {
         var swKey = staleWorkingSessions[sw].session_key;
         var tmuxName = (swKey || "").split(":").pop();
@@ -119,15 +106,10 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
           // Without this, the dispatch stays "pending" as an orphan and gets
           // re-delivered or auto-completed, causing the failure loop.
           try {
-            var swSessInfo = agentdesk.db.query(
-              "SELECT active_dispatch_id FROM sessions WHERE session_key = ?", [swKey]
-            );
-            if (swSessInfo.length > 0 && swSessInfo[0].active_dispatch_id) {
-              var swDispId = swSessInfo[0].active_dispatch_id;
-              var swDispStatus = agentdesk.db.query(
-                "SELECT status FROM task_dispatches WHERE id = ?", [swDispId]
-              );
-              if (swDispStatus.length > 0 && (swDispStatus[0].status === "pending" || swDispStatus[0].status === "dispatched")) {
+            if (staleWorkingSessions[sw].active_dispatch_id) {
+              var swDispId = staleWorkingSessions[sw].active_dispatch_id;
+              var swDispStatus = staleWorkingSessions[sw].active_dispatch_status;
+              if (swDispStatus === "pending" || swDispStatus === "dispatched") {
                 agentdesk.dispatch.markFailed(swDispId, "Stale working session recovery — no active tmux session after 10min");
                 agentdesk.log.warn("[deadlock] Failed stale dispatch " + swDispId + " for session " + swKey);
               }
@@ -135,25 +117,14 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
           } catch(dispErr) {
             agentdesk.log.warn("[deadlock] Failed to mark dispatch for " + swKey + ": " + dispErr);
           }
-          agentdesk.db.execute(
-            "UPDATE sessions " +
-            "SET status = 'idle', active_dispatch_id = NULL, last_heartbeat = datetime('now') " +
-            "WHERE session_key = ? AND status IN ('turn_active', 'working')",
-            [swKey]
-          );
+          agentdesk.timeouts.markSessionIdle(swKey, { clear_active_dispatch_id: true });
           agentdesk.log.info("[deadlock] Fixed stale working session → idle: " + swKey);
         }
       }
 
       // 데드락 의심 세션: sessions.last_heartbeat 기반 판별
       // deadlock-manager 자신의 세션은 제외 (자기 자신을 오탐하는 무한 루프 방지)
-      var staleSessions = agentdesk.db.query(
-        "SELECT session_key, agent_id, active_dispatch_id, last_heartbeat " +
-        "FROM sessions WHERE status IN ('turn_active', 'working') " +
-        "AND session_key NOT LIKE '%deadlock-manager%' " +
-        "AND last_heartbeat < datetime('now', '-" + STALE_SCAN_MINUTES + " minutes') " +
-        "ORDER BY last_heartbeat ASC LIMIT 50"
-      );
+      var staleSessions = agentdesk.timeouts.listDeadlockCandidates(STALE_SCAN_MINUTES, 50);
       for (var dl = 0; dl < staleSessions.length; dl++) {
         var sess = staleSessions[dl];
         var deadlockKey = "deadlock_check:" + sess.session_key;
@@ -176,7 +147,7 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
         // Recent terminal output is the authoritative signal for "normal progress".
         // A live pane alone is not enough — hung tools can leave a pane alive forever.
         if (tmuxAlive && inflightProgress.recent && !inflightProgress.max_turn_reached) {
-          agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [deadlockKey]);
+          agentdesk.kv.delete(deadlockKey);
           var extendMin = sessionDeadlockMinutes;
           if (inflightProgress.turn_age_min !== null) {
             extendMin = Math.min(
@@ -213,31 +184,24 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
         // 활성 턴(inflight)이 없는 working 세션은 idle로 전환하고 스킵
         // (턴 완료 후 세션 상태가 working으로 남은 stale 케이스)
         if (!tmuxAlive || (!inflightProgress.channel_id && !inflightProgress.recent)) {
-          agentdesk.db.execute(
-            "UPDATE sessions " +
-            "SET status = 'idle', last_heartbeat = datetime('now') " +
-            "WHERE session_key = ? AND status IN ('turn_active', 'working')",
-            [sess.session_key]
-          );
-          agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [deadlockKey]);
+          agentdesk.timeouts.markSessionIdle(sess.session_key, { clear_active_dispatch_id: false });
+          agentdesk.kv.delete(deadlockKey);
           agentdesk.log.info("[deadlock] Stale working session → idle (no active turn): " + sess.session_key);
           continue;
         }
 
         // Check extension count + last check timestamp
-        var extRecord = agentdesk.db.query(
-          "SELECT value FROM kv_meta WHERE key = ?", [deadlockKey]
-        );
+        var extValue = agentdesk.kv.get(deadlockKey);
         var extensions = 0;
         var lastCheckAt = 0;
-        if (extRecord.length > 0) {
+        if (extValue) {
           try {
-            var parsed = JSON.parse(extRecord[0].value);
+            var parsed = JSON.parse(extValue);
             extensions = parsed.count || 0;
             lastCheckAt = parsed.ts || 0;
           } catch(e) {
             // 기존 형식(숫자만) 마이그레이션
-            extensions = parseInt(extRecord[0].value) || 0;
+            extensions = parseInt(extValue) || 0;
           }
         }
 
@@ -317,37 +281,35 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
               " turn_age_min=" + (inflightProgress.turn_age_min === null ? "null" : Math.round(inflightProgress.turn_age_min)) +
               " kill_ok=" + (!!forceKillResp.tmux_killed) +
               " inflight_cleared=" + (!!forceKillResp.inflight_cleared);
-            agentdesk.db.execute(
-              "INSERT INTO session_termination_events (session_key, dispatch_id, killer_component, reason_code, reason_text, probe_snapshot, tmux_alive) VALUES (?, ?, ?, ?, ?, ?, ?)",
-              [sess.session_key, sess.active_dispatch_id || null, "deadlock_policy", "deadlock_timeout",
-               timeoutLabel + " — " + (redispatched ? "redispatched" : "cancelled"), probeInfo, tmuxAlive ? 1 : 0]
-            );
+            agentdesk.timeouts.recordDeadlockTermination({
+              session_key: sess.session_key,
+              dispatch_id: sess.active_dispatch_id || null,
+              reason_text: timeoutLabel + " — " + (redispatched ? "redispatched" : "cancelled"),
+              probe_snapshot: probeInfo,
+              tmux_alive: !!tmuxAlive
+            });
           } catch (e) { /* fire-and-forget */ }
 
           // 6) 이력 기록 (legacy)
-          agentdesk.db.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)",
-            ["deadlock_history:" + sess.session_key + ":" + Date.now(),
-             JSON.stringify({
-               session_key: sess.session_key,
-               agent_id: sess.agent_id,
-               dispatch_id: sess.active_dispatch_id,
-               retry_dispatch_id: forceKillResp.retry_dispatch_id || null,
-               extensions: extensions,
-               action: redispatched ? "force_cancel_and_redispatch" : "force_cancel_only",
-               ts: new Date().toISOString()
-             })]
+          agentdesk.kv.set(
+            "deadlock_history:" + sess.session_key + ":" + Date.now(),
+            JSON.stringify({
+              session_key: sess.session_key,
+              agent_id: sess.agent_id,
+              dispatch_id: sess.active_dispatch_id,
+              retry_dispatch_id: forceKillResp.retry_dispatch_id || null,
+              extensions: extensions,
+              action: redispatched ? "force_cancel_and_redispatch" : "force_cancel_only",
+              ts: new Date().toISOString()
+            })
           );
 
           // 카운터 삭제 (다음 세션은 새 카운터)
-          agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [deadlockKey]);
+          agentdesk.kv.delete(deadlockKey);
 
         } else {
           // ── 데드락 의심: 카운터 증가 (타임스탬프 포함, last_heartbeat 인위적 덮어쓰기 없음) ──
-          agentdesk.db.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)",
-            [deadlockKey, JSON.stringify({ count: extensions + 1, ts: nowMs })]
-          );
+          agentdesk.kv.set(deadlockKey, JSON.stringify({ count: extensions + 1, ts: nowMs }));
           agentdesk.log.warn("[deadlock] Session " + sess.session_key +
             " — heartbeat stale " + sessionDeadlockMinutes + "min. Extension " +
             (extensions + 1) + "/" + sessionMaxExtensions);
@@ -360,24 +322,10 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
       }
 
       // Clean up deadlock counters for sessions no longer working
-      agentdesk.db.execute(
-        "DELETE FROM kv_meta WHERE key LIKE 'deadlock_check:%' AND " +
-        "REPLACE(key, 'deadlock_check:', '') NOT IN (" +
-        "  SELECT session_key FROM sessions WHERE status IN ('turn_active', 'working')" +
-        ")"
-      );
+      agentdesk.timeouts.cleanupDeadlockCountersForInactiveSessions();
 
       // Clean up old deadlock history entries (7일 이상)
-      var historyKeys = agentdesk.db.query(
-        "SELECT key FROM kv_meta WHERE key LIKE 'deadlock_history:%'"
-      );
       var sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-      for (var hk = 0; hk < historyKeys.length; hk++) {
-        var parts = historyKeys[hk].key.split(":");
-        var ts = parseInt(parts[parts.length - 1], 10);
-        if (ts && ts < sevenDaysAgo) {
-          agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [historyKeys[hk].key]);
-        }
-      }
+      agentdesk.timeouts.cleanupDeadlockHistoryBefore(sevenDaysAgo);
     };
 };
