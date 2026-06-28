@@ -627,8 +627,8 @@ fn subagent_parent_tool_use_id(value: &Value) -> Option<String> {
 
 /// Builds [`StatusEvent::SubagentActivity`] events for a nested subagent record,
 /// one per tool_use block, keyed by the parent Task id so the panel updates the
-/// owning slot's recent line (same `[Tool] args` summary) — a long background
-/// subagent surfaces its step, not an opaque "running".
+/// owning slot's recent line with the tool class. Raw nested tool arguments stay
+/// in transcript/log retrieval paths, not normal Discord relay panels.
 fn subagent_activity_status_events(value: &Value, parent_id: String) -> Vec<StatusEvent> {
     let blocks: Vec<(&str, String)> = match value.get("type").and_then(Value::as_str) {
         Some("assistant") => value
@@ -670,18 +670,11 @@ fn subagent_activity_status_events(value: &Value, parent_id: String) -> Vec<Stat
         .collect()
 }
 
-/// Formats a subagent's tool step into a compact activity line, e.g.
-/// `[Bash] cargo test`. Falls back to the bare tool label when no args summary
-/// is available. Returns `None` only when the tool name is unusable.
-fn subagent_activity_line(name: &str, input: &str) -> Option<String> {
+/// Formats a subagent's tool step into a compact activity line such as `[Bash]`.
+/// Returns `None` only when the tool name is unusable.
+fn subagent_activity_line(name: &str, _input: &str) -> Option<String> {
     use super::common::tool_prefix;
-    let args = format_tool_input(name, input);
-    let args = args.trim();
-    let line = if args.is_empty() {
-        tool_prefix(name)
-    } else {
-        format!("{} {}", tool_prefix(name), args)
-    };
+    let line = tool_prefix(name);
     let line = normalize_summary(&line);
     (!line.trim().is_empty()).then_some(truncate_chars(&line, EVENT_LINE_MAX_CHARS))
 }

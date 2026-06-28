@@ -29,6 +29,8 @@ use common::CHANNEL_EVENT_CAPACITY;
 pub(in crate::services::discord) use completion_footer::TerminalSlotId;
 use completion_footer::{CompletionFooterRender, render_completion_footer};
 use context_panel::ContextPanelSnapshot;
+use recent_events::render_compact_events;
+#[cfg(test)]
 use recent_events::render_events;
 use session_panel::SessionPanelSnapshot;
 use status_panel::{CompletedKind, DerivedStatus, StatusPanelState, render_status_panel};
@@ -45,8 +47,7 @@ use status_panel::{render_recent_section_header, truncate_status_panel_sections}
 
 pub(in crate::services::discord) use recent_events::RecentPlaceholderEvent;
 pub(in crate::services::discord) use status_events::{
-    status_events_from_task_notification_with_tool_use_id,
-    status_events_from_task_notification_xml, status_events_from_tool_result_with_id,
+    status_events_from_task_notification_with_tool_use_id, status_events_from_tool_result_with_id,
     status_events_from_tool_use_with_id,
 };
 // #3034: the bare (no-id) variants are consumed only by the `tests` submodule
@@ -162,6 +163,19 @@ impl PlaceholderLiveEvents {
         &self,
         channel_id: ChannelId,
     ) -> Option<String> {
+        self.render_compact_block(channel_id)
+    }
+
+    fn render_compact_block(&self, channel_id: ChannelId) -> Option<String> {
+        let entry = self.by_channel.get(&channel_id)?;
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        render_compact_events(guard.iter())
+    }
+
+    #[cfg(test)]
+    fn render_raw_block_for_tests(&self, channel_id: ChannelId) -> Option<String> {
         let entry = self.by_channel.get(&channel_id)?;
         let guard = entry
             .lock()

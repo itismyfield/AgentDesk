@@ -223,7 +223,7 @@ pub(super) fn render_task_tool_slot(slot: &TaskToolSlot) -> String {
         detail_parts.push(escape_status_panel_markdown(task_id));
     }
     if let Some(summary) = slot.summary.as_deref() {
-        if slot.task_id.as_deref() != Some(summary) {
+        if slot.task_id.as_deref() != Some(summary) && summary != label {
             detail_parts.push(escape_status_panel_markdown(summary));
         }
     }

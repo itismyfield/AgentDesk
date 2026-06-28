@@ -613,12 +613,8 @@ fn render_derived_status(status: &DerivedStatus) -> String {
         DerivedStatus::Completed {
             kind: CompletedKind::Foreground,
         } => "✅ **응답 완료**".to_string(),
-        DerivedStatus::ToolRunning { name, summary } => {
-            let mut rendered = tool_prefix(name);
-            if let Some(summary) = summary.as_deref().filter(|value| !value.trim().is_empty()) {
-                rendered.push(' ');
-                rendered.push_str(&escape_status_panel_markdown(&normalize_summary(summary)));
-            }
+        DerivedStatus::ToolRunning { name, summary: _ } => {
+            let rendered = tool_prefix(name);
             format!("🔧 도구 실행 중 ({})", truncate_chars(&rendered, 140))
         }
         DerivedStatus::SubagentRunning { desc } => {

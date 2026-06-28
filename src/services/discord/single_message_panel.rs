@@ -8,13 +8,13 @@ pub(in crate::services::discord) use completion_footer_registry::*;
 /// turn message keeps a compact task summary. The LIVE streaming panel uses the
 /// larger `SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES` below.
 pub(in crate::services::discord) const SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES: usize = 600;
-/// #3497: byte budget for the LIVE single-message footer panel BODY (🖥️ Recent
-/// terminal block + Tasks/Subagents/Context; excludes the spinner/status header).
-/// Larger than the completion budget so a terminal-heavy turn shows the full
-/// Recent block during streaming instead of a truncated/dropped one. The relay
-/// body auto-uses the remaining message space (`DISCORD_MSG_LIMIT − footer_len −
-/// margin`) and rolls over when longer, so commentary is preserved across
-/// messages rather than starving the terminal panel.
+/// #3497: byte budget for the LIVE single-message footer panel BODY (Recent +
+/// Tasks/Subagents/Context; excludes the spinner/status header). Normal Recent
+/// output is compact after #3806, but the footer clamp still handles legacy or
+/// debug-shaped fenced Recent sections as whole blocks. The relay body auto-uses
+/// the remaining message space (`DISCORD_MSG_LIMIT − footer_len − margin`) and
+/// rolls over when longer, so commentary is preserved across messages rather
+/// than starving the terminal panel.
 pub(in crate::services::discord) const SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES: usize = 1200;
 pub(in crate::services::discord) const SINGLE_MESSAGE_PANEL_SPINNER_FRAMES: &[&str] =
     &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -1022,9 +1022,9 @@ mod tests {
         ));
     }
 
-    /// #3394: the footer finalization sink must re-balance fence parity. A panel
-    /// whose fenced Recent block is chopped by the 600-byte body clamp must not
-    /// emit a dangling ``` for Discord to render as literal text.
+    /// #3394: the footer finalization sink must re-balance fence parity. A
+    /// legacy/debug-shaped fenced Recent block chopped by the body clamp must
+    /// not emit a dangling ``` for Discord to render as literal text.
     #[test]
     fn footer_status_block_repairs_dangling_fence_after_clamp_3394() {
         let panel = format!(
@@ -1042,10 +1042,11 @@ mod tests {
         assert!(!block.contains("```text") || fences >= 2);
     }
 
-    /// #3495: when the 600-byte panel clamp severs the fenced 🖥️ Recent block,
-    /// the WHOLE section (header + fence + body) is dropped — Discord must never
-    /// see a bare `🖥️ Recent` header with no terminal body (the intermittent
-    /// "터미널 칸이 사라짐" symptom). When the block fits, it is preserved intact.
+    /// #3495: when the panel clamp severs a legacy/debug-shaped fenced 🖥️ Recent
+    /// block, the WHOLE section (header + fence + body) is dropped — Discord
+    /// must never see a bare `🖥️ Recent` header with no terminal body (the
+    /// intermittent "터미널 칸이 사라짐" symptom). When the block fits, it is
+    /// preserved intact.
     #[test]
     fn footer_panel_clamp_drops_severed_recent_section_3495() {
         // Small leading line so the cut lands inside the Recent section: the

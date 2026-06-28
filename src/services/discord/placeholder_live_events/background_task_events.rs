@@ -16,7 +16,7 @@ pub(super) fn slots_enabled_by_footer_flag() -> bool {
 pub(super) fn start_event_from_bash_tool_use(
     name: &str,
     value: &Value,
-    args_summary: Option<String>,
+    _args_summary: Option<String>,
     tool_use_id: Option<&str>,
     footer_mode_enabled: bool,
 ) -> Option<StatusEvent> {
@@ -25,7 +25,7 @@ pub(super) fn start_event_from_bash_tool_use(
     }
     Some(StatusEvent::BackgroundTaskStart {
         name: name.to_string(),
-        summary: task_summary(value).or(args_summary)?,
+        summary: task_summary(value).unwrap_or_else(|| "Bash".to_string()),
         tool_use_id: clean_tool_use_id(tool_use_id)?,
     })
 }
@@ -100,7 +100,7 @@ fn run_in_background(value: &Value) -> bool {
 }
 
 fn task_summary(value: &Value) -> Option<String> {
-    ["description", "desc", "command"]
+    ["description", "desc"]
         .into_iter()
         .find_map(|key| value.get(key).and_then(Value::as_str))
         .map(normalize_summary)
