@@ -130,10 +130,11 @@ pub(in crate::services::discord) async fn dispose_recovery_relay_outcome(
 /// (e.g. a same-named tmux respawn) is rejected before we get here. This adds the
 /// per-turn TEMPORAL check on top: the frontier is channel-scoped and holds the
 /// LATEST commit, so for it to be THIS turn's anchor its recorded `range` must be
-/// (a) a real non-empty slice (`end > start`) and (b) reach at least as far as the
-/// turn's persisted `last_offset` — the committed terminal answer covered the
-/// output the row last saw. `turn_start_offset` (when present) must not sit ABOVE
-/// the anchor's end, which would mean the anchor predates this turn's slice.
+/// (a) a real non-empty slice (`end > start`), (b) contain the turn's persisted
+/// `last_offset` — the committed terminal answer covered the output the row last
+/// saw but is not a future slice from another delivery channel — and (c)
+/// `turn_start_offset` (when present) must not sit ABOVE the anchor's end, which
+/// would mean the anchor predates this turn's slice.
 ///
 /// Conservative on missing data: an absent `last_offset` signal cannot happen
 /// (it is a plain `u64`), but a `range_end == 0` / empty range fails (a), so a
@@ -152,6 +153,12 @@ fn anchor_range_matches_turn(
     if end < last_offset {
         return false;
     }
+    // Also reject a later owner-frontier slice. Owner records can be shared by
+    // multiple delivery channels, so a stale row whose last_offset is before the
+    // anchor's start must not borrow a later channel's terminal anchor.
+    if last_offset <= start {
+        return false;
+    }
     // (c) the turn's own start must not be beyond the anchor's end (a later turn).
     if let Some(turn_start) = turn_start_offset {
         if turn_start > end {
@@ -159,6 +166,119 @@ fn anchor_range_matches_turn(
         }
     }
     true
+}
+
+fn anchor_panel_channel_matches_turn(
+    anchor_panel_channel_id: u64,
+    delivery_channel_id: u64,
+) -> bool {
+    anchor_panel_channel_id != 0 && anchor_panel_channel_id == delivery_channel_id
+}
+
+/// Durable delivery records are keyed by the tmux watcher's offset-authority
+/// channel. The sidecar owner is the preferred lookup key, but it is deliberately
+/// not the only key: rollback or mixed-binary windows can leave a current
+/// same-channel delivery record behind while an older owner-context sidecar still
+/// points elsewhere. Try the legacy row key after the sidecar-selected key misses
+/// or fails the structural stale-anchor guards.
+fn anchor_record_lookup_channel_ids(
+    provider: &ProviderKind,
+    state: &inflight::InflightTurnState,
+) -> Vec<u64> {
+    let mut channel_ids = Vec::with_capacity(2);
+    if let Some(tmux_session_name) = state.tmux_session_name.as_deref()
+        && let Some(owner) =
+            super::super::outbound::delivery_record::watcher_owner_channel_for_delivery_channel(
+                provider,
+                ChannelId::new(state.channel_id),
+                tmux_session_name,
+            )
+    {
+        channel_ids.push(owner.get());
+    }
+    let fallback_channel_id = state.delivery_record_owner_channel_id();
+    if !channel_ids.contains(&fallback_channel_id) {
+        channel_ids.push(fallback_channel_id);
+    }
+    channel_ids
+}
+
+fn matching_recovery_anchors(
+    provider: &ProviderKind,
+    state: &inflight::InflightTurnState,
+    tmux_session_name: &str,
+) -> Vec<(
+    u64,
+    super::super::outbound::delivery_record::CurrentGenerationAnchor,
+)> {
+    use super::super::outbound::delivery_record;
+
+    let mut anchors = Vec::with_capacity(2);
+    for record_channel_id in anchor_record_lookup_channel_ids(provider, state) {
+        let Some(anchor) = delivery_record::current_generation_delivered_anchor(
+            provider,
+            ChannelId::new(record_channel_id),
+            tmux_session_name,
+        ) else {
+            tracing::debug!(
+                provider = %provider.as_str(),
+                channel = state.channel_id,
+                record_channel = record_channel_id,
+                "  · recovery anchor-repost: no current anchor at candidate record channel"
+            );
+            continue;
+        };
+
+        // When an owner record is shared by multiple delivery channels, the
+        // terminal anchor must still live in THIS row's delivery channel.
+        if !anchor_panel_channel_matches_turn(anchor.panel_channel_id, state.channel_id) {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = state.channel_id,
+                record_channel = record_channel_id,
+                anchor_channel_id = anchor.panel_channel_id,
+                "  ✗ recovery anchor-repost: anchor channel does not match this turn — trying next candidate (stale-owner guard)"
+            );
+            continue;
+        }
+
+        // The anchor's recorded range must belong to THIS recovered turn.
+        if !anchor_range_matches_turn(anchor.range, state.turn_start_offset, state.last_offset) {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = state.channel_id,
+                record_channel = record_channel_id,
+                anchor_range = ?anchor.range,
+                turn_start_offset = ?state.turn_start_offset,
+                last_offset = state.last_offset,
+                "  ✗ recovery anchor-repost: anchor range does not match this turn — trying next candidate (stale-anchor guard)"
+            );
+            continue;
+        }
+
+        anchors.push((record_channel_id, anchor));
+    }
+    anchors
+}
+
+fn first_repost_anchor_if_all_probed_candidates_gone(
+    probed_anchors: &[(
+        u64,
+        super::super::outbound::delivery_record::CurrentGenerationAnchor,
+        super::super::placeholder_sweeper::PlaceholderProbe,
+    )],
+) -> Option<(
+    u64,
+    super::super::outbound::delivery_record::CurrentGenerationAnchor,
+)> {
+    let mut first_gone = None;
+    for (record_channel_id, anchor, probe) in probed_anchors {
+        if !anchor_probe_should_repost(*probe) {
+            return None;
+        }
+        first_gone.get_or_insert((*record_channel_id, *anchor));
+    }
+    first_gone
 }
 
 /// #3610 PR-2 (pure/testable): given a placeholder probe of the durable anchor,
@@ -190,9 +310,10 @@ fn anchor_probe_should_repost(probe: super::super::placeholder_sweeper::Placehol
 ///   generation gate AND a populated non-zero `(panel_msg_id, panel_channel_id)`;
 ///   we additionally reject an EMPTY `terminal_text` (no blank repost) and a
 ///   `range` that does not match this turn ([`anchor_range_matches_turn`]).
-/// * **G3** — probe the anchor: repost ONLY on `MessageGone` (404/403/410). A live
-///   message (`StillPlaceholder` / `AlreadyDelivered`) or a transient
-///   `ProbeFailed` → `None` (never duplicate a live or unverified message).
+/// * **G3** — probe every structurally matching anchor candidate: repost ONLY
+///   when ALL candidates are `MessageGone` (404/403/410). A live message
+///   (`StillPlaceholder` / `AlreadyDelivered`) or a transient `ProbeFailed` on
+///   ANY candidate → `None` (never duplicate a live or unverified message).
 /// * **G4** — relay as a NEW message: the anchor is gone so it cannot be edited;
 ///   we pass `placeholder = None`, which routes through `send_long_message_raw`
 ///   (NOT an edit). Returns `Some(outcome)` for the caller to `dispose_*`.
@@ -209,7 +330,6 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
     state: &inflight::InflightTurnState,
     terminal_text: &str,
 ) -> Option<RecoveryRelayOutcome> {
-    use super::super::outbound::delivery_record;
     use super::super::placeholder_sweeper;
 
     // G1: flag OFF → no-op (outermost guard; dark deploy is byte-identical).
@@ -223,71 +343,48 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
     }
 
     // G2b: resolve the current-generation, fully-populated anchor (the reader is
-    // the stale-anchor structural guard: generation-gated + non-zero pair).
-    //
-    // KNOWN LIMITATION (codex r2 Issue-1) — same-channel coverage only.
-    // The delivery record is FILE-KEYED by the offset-authority channel
-    // (`watcher_owner_channel_id`; delivery_record.rs `DeliveredCommit` doc), but
-    // here we can only key by `state.channel_id`, the DELIVERY channel. For the
-    // common case these are identical (sink / watcher-owned turns set
-    // `watcher_owner_channel_id == delivery_channel_id == channel_id`; the bulk of
-    // the watcher-owned recovery population), so this covers them.
-    //
-    // The bridge-reused-watcher CROSS-channel case (owner ≠ delivery — a recovered
-    // bridge edits its own dispatch channel while leasing on a DIFFERENT resolved
-    // owner channel; terminal_controller_cutover `Channel split`) is NOT covered:
-    // its record lives under the owner-channel file, so this owner-blind read
-    // returns `None` and the caller falls through to the byte-identical legacy
-    // finish+clear (a coverage GAP — a missed repost — NOT a mis-repost; current
-    // behavior is preserved). We deliberately do NOT guess the owner key:
-    // `InflightTurnState` carries no `watcher_owner_channel_id` (its only non-
-    // delivery channel field, `logical_channel_id`, is the THREAD→parent mapping,
-    // a different axis — keying on it would read the WRONG record and risk
-    // duplicating a live message). Extending coverage requires persisting the
-    // owner channel on the inflight row (or an owner→delivery index); until then
-    // cross-channel rows stay a no-op here.
-    let channel = ChannelId::new(state.channel_id);
+    // the stale-anchor structural guard: generation-gated + non-zero pair). The
+    // delivery record is normally keyed by `watcher_owner_channel_id`, but stale
+    // owner-context sidecars must not mask a valid legacy same-channel record left
+    // by an older binary. Never use `logical_channel_id` here: it is a
+    // thread-parent mapping, not the offset-authority key.
     let tmux_session_name = state.tmux_session_name.as_deref().unwrap_or("");
-    let anchor =
-        delivery_record::current_generation_delivered_anchor(provider, channel, tmux_session_name)?;
-
-    // G2c: the anchor's recorded range must belong to THIS recovered turn.
-    if !anchor_range_matches_turn(anchor.range, state.turn_start_offset, state.last_offset) {
-        tracing::warn!(
-            provider = %provider.as_str(),
-            channel = state.channel_id,
-            anchor_range = ?anchor.range,
-            turn_start_offset = ?state.turn_start_offset,
-            last_offset = state.last_offset,
-            "  ✗ recovery anchor-repost: anchor range does not match this turn — no-op (stale-anchor guard)"
-        );
+    let candidates = matching_recovery_anchors(provider, state, tmux_session_name);
+    if candidates.is_empty() {
         return None;
     }
-
-    // G3: probe the anchored message; repost ONLY when it is permanently gone.
-    let probe = placeholder_sweeper::probe_placeholder_state(
-        http,
-        anchor.panel_channel_id,
-        anchor.panel_msg_id,
-    )
-    .await;
-    if !anchor_probe_should_repost(probe) {
-        tracing::info!(
-            provider = %provider.as_str(),
-            channel = state.channel_id,
-            anchor_msg_id = anchor.panel_msg_id,
-            anchor_channel_id = anchor.panel_channel_id,
-            ?probe,
-            "  · recovery anchor-repost: anchor probe is not MessageGone — no-op"
-        );
-        return None;
+    let mut probed_anchors = Vec::with_capacity(candidates.len());
+    for (record_channel_id, anchor) in candidates {
+        // G3: probe the anchored message; repost ONLY when every structurally
+        // matching candidate is permanently gone.
+        let probe = placeholder_sweeper::probe_placeholder_state(
+            http,
+            anchor.panel_channel_id,
+            anchor.panel_msg_id,
+        )
+        .await;
+        probed_anchors.push((record_channel_id, anchor, probe));
+        if !anchor_probe_should_repost(probe) {
+            tracing::info!(
+                provider = %provider.as_str(),
+                channel = state.channel_id,
+                record_channel = record_channel_id,
+                anchor_msg_id = anchor.panel_msg_id,
+                anchor_channel_id = anchor.panel_channel_id,
+                ?probe,
+                "  · recovery anchor-repost: a candidate anchor probe is not MessageGone — no-op"
+            );
+        }
     }
+    let (record_channel_id, anchor) =
+        first_repost_anchor_if_all_probed_candidates_gone(&probed_anchors)?;
 
     // G4: the anchor is gone → send a NEW message (placeholder = None → send-new,
     // NOT an edit). Repost into the channel the anchor lived in.
     tracing::warn!(
         provider = %provider.as_str(),
         channel = state.channel_id,
+        record_channel = record_channel_id,
         anchor_msg_id = anchor.panel_msg_id,
         anchor_channel_id = anchor.panel_channel_id,
         "  ↻ recovery anchor-repost: committed terminal message is GONE — reposting (send-new)"
@@ -513,35 +610,106 @@ mod tests {
     //! #3297 finding-3 red-green: a force-clear must leave a real on-disk
     //! artifact carrying the FULL response text (the prior implementation
     //! only WARN-logged a 160-char tail and wrote nothing).
+    use poise::serenity_prelude::ChannelId;
     use tempfile::TempDir;
 
     use super::super::super::inflight::InflightTurnState;
+    use super::super::super::outbound::delivery_record;
     use super::super::super::placeholder_sweeper::PlaceholderProbe;
     use super::{
-        RecoveryForceClearReport, anchor_probe_should_repost, anchor_range_matches_turn,
+        RecoveryForceClearReport, anchor_panel_channel_matches_turn, anchor_probe_should_repost,
+        anchor_range_matches_turn, anchor_record_lookup_channel_ids,
+        first_repost_anchor_if_all_probed_candidates_gone, matching_recovery_anchors,
         persist_force_clear_report_in_root,
     };
     use crate::services::provider::ProviderKind;
+    use std::path::Path;
+
+    struct AgentdeskRootGuard(Option<std::ffi::OsString>);
+
+    impl AgentdeskRootGuard {
+        fn set(path: &Path) -> Self {
+            let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
+            unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", path) };
+            Self(previous)
+        }
+    }
+
+    impl Drop for AgentdeskRootGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
 
     fn make_state(channel_id: u64) -> InflightTurnState {
-        let mut state = InflightTurnState::new(
-            ProviderKind::Codex,
-            channel_id,
-            Some("adk-cdx".to_string()),
-            7,
-            42,
-            43,
-            "hello".to_string(),
-            Some("session-3293".to_string()),
-            Some(format!("AgentDesk-codex-adk-cdx-{channel_id}")),
-            Some("/tmp/out.jsonl".to_string()),
-            Some("/tmp/in.fifo".to_string()),
-            0,
-        );
+        let mut state: InflightTurnState = serde_json::from_value(serde_json::json!({
+            "version": 9,
+            "provider": "codex",
+            "channel_id": channel_id,
+            "channel_name": "adk-cdx",
+            "request_owner_user_id": 7,
+            "user_msg_id": 42,
+            "current_msg_id": 43,
+            "current_msg_len": 0,
+            "user_text": "hello",
+            "source": "text",
+            "session_id": "session-3293",
+            "tmux_session_name": format!("AgentDesk-codex-adk-cdx-{channel_id}"),
+            "output_path": "/tmp/out.jsonl",
+            "input_fifo_path": "/tmp/in.fifo",
+            "last_offset": 0,
+            "full_response": "",
+            "response_sent_offset": 0,
+            "started_at": "2026-06-28 10:00:00",
+            "updated_at": "2026-06-28 10:00:00",
+            "watcher_owns_live_relay": false
+        }))
+        .expect("test inflight row should deserialize");
         state.session_key = Some("sk-3293".to_string());
         state.dispatch_id = Some("disp-3293".to_string());
         state.recovery_relay_attempts = 2;
         state
+    }
+
+    fn touch_generation_marker(tmux_session_name: &str) -> i64 {
+        let generation_path =
+            crate::services::tmux_common::session_temp_path(tmux_session_name, "generation");
+        if let Some(parent) = Path::new(&generation_path).parent() {
+            std::fs::create_dir_all(parent).expect("create runtime sessions dir");
+        }
+        std::fs::write(&generation_path, "test-generation").expect("touch generation marker");
+        crate::services::discord::tmux::read_generation_file_mtime_ns(tmux_session_name)
+    }
+
+    fn write_current_generation_anchor(
+        provider: &ProviderKind,
+        channel_id: u64,
+        tmux_session_name: &str,
+        range: (u64, u64),
+        panel_channel_id: u64,
+        panel_msg_id: u64,
+    ) {
+        let generation_mtime_ns =
+            crate::services::discord::tmux::read_generation_file_mtime_ns(tmux_session_name);
+        assert_ne!(
+            generation_mtime_ns, 0,
+            "test generation marker must exist before writing a current anchor"
+        );
+        delivery_record::write_delivered_frontier(
+            provider,
+            channel_id,
+            delivery_record::DeliveredCommit {
+                range,
+                generation_mtime_ns,
+                attempts: 1,
+                panel_msg_id: Some(panel_msg_id),
+                panel_channel_id: Some(panel_channel_id),
+            },
+        )
+        .expect("write delivery record anchor");
     }
 
     #[test]
@@ -641,7 +809,196 @@ mod tests {
         // (b) anchor end BELOW the row's last_offset → the commit did not cover
         // what this turn last observed (stale/partial anchor) → reject.
         assert!(!anchor_range_matches_turn((0, 100), Some(0), 443_154));
+        // (b2) anchor start ABOVE/AT the row's last_offset → this is a later
+        // owner-frontier slice, not the recovered row's terminal anchor.
+        assert!(!anchor_range_matches_turn((200, 300), Some(0), 100));
+        assert!(!anchor_range_matches_turn((100, 300), Some(0), 100));
         // (c) the turn's start is ABOVE the anchor end → a later turn → reject.
         assert!(!anchor_range_matches_turn((0, 100), Some(200), 100));
+    }
+
+    #[test]
+    fn anchor_panel_channel_must_match_delivery_channel() {
+        assert!(anchor_panel_channel_matches_turn(200, 200));
+        assert!(!anchor_panel_channel_matches_turn(0, 200));
+        assert!(!anchor_panel_channel_matches_turn(300, 200));
+    }
+
+    #[test]
+    fn anchor_record_lookup_uses_owner_channel_when_persisted() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _root_guard = AgentdeskRootGuard::set(temp.path());
+        let mut state = make_state(200);
+        state.logical_channel_id = Some(999);
+        state.set_watcher_owner_channel_id(100);
+
+        assert_eq!(
+            anchor_record_lookup_channel_ids(&ProviderKind::Codex, &state),
+            vec![100]
+        );
+    }
+
+    #[test]
+    fn anchor_record_lookup_uses_sidecar_owner_when_inflight_field_missing() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _root_guard = AgentdeskRootGuard::set(temp.path());
+        let mut state = make_state(200);
+        state.watcher_owner_channel_id = None;
+        state.logical_channel_id = Some(999);
+        let tmux_session_name = state.tmux_session_name.as_deref().unwrap();
+        touch_generation_marker(tmux_session_name);
+        delivery_record::record_watcher_owner_channel_context(
+            &ProviderKind::Codex,
+            ChannelId::new(200),
+            ChannelId::new(100),
+            tmux_session_name,
+        )
+        .expect("write owner-context sidecar");
+
+        assert_eq!(
+            anchor_record_lookup_channel_ids(&ProviderKind::Codex, &state),
+            vec![100, 200]
+        );
+    }
+
+    #[test]
+    fn anchor_record_lookup_falls_back_to_delivery_channel_for_legacy_rows() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _root_guard = AgentdeskRootGuard::set(temp.path());
+        let mut state = make_state(200);
+        state.watcher_owner_channel_id = None;
+        state.logical_channel_id = Some(999);
+
+        assert_eq!(
+            anchor_record_lookup_channel_ids(&ProviderKind::Codex, &state),
+            vec![200]
+        );
+    }
+
+    #[test]
+    fn anchor_selection_falls_back_when_stale_sidecar_anchor_is_absent() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _root_guard = AgentdeskRootGuard::set(temp.path());
+        let mut state = make_state(200);
+        state.watcher_owner_channel_id = None;
+        state.turn_start_offset = Some(0);
+        state.last_offset = 150;
+        let tmux_session_name = state.tmux_session_name.as_deref().unwrap();
+        let generation_mtime_ns = touch_generation_marker(tmux_session_name);
+        assert_ne!(generation_mtime_ns, 0);
+        delivery_record::record_watcher_owner_channel_context(
+            &ProviderKind::Codex,
+            ChannelId::new(200),
+            ChannelId::new(100),
+            tmux_session_name,
+        )
+        .expect("write stale owner-context sidecar");
+        write_current_generation_anchor(
+            &ProviderKind::Codex,
+            200,
+            tmux_session_name,
+            (0, 200),
+            200,
+            999,
+        );
+
+        let anchors = matching_recovery_anchors(&ProviderKind::Codex, &state, tmux_session_name);
+
+        assert_eq!(anchors.len(), 1);
+        let (record_channel_id, anchor) = anchors[0];
+        assert_eq!(record_channel_id, 200);
+        assert_eq!(anchor.panel_channel_id, 200);
+        assert_eq!(anchor.panel_msg_id, 999);
+    }
+
+    #[test]
+    fn anchor_selection_keeps_legacy_candidate_when_sidecar_anchor_also_matches() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _root_guard = AgentdeskRootGuard::set(temp.path());
+        let mut state = make_state(200);
+        state.watcher_owner_channel_id = None;
+        state.turn_start_offset = Some(0);
+        state.last_offset = 150;
+        let tmux_session_name = state.tmux_session_name.as_deref().unwrap();
+        touch_generation_marker(tmux_session_name);
+        delivery_record::record_watcher_owner_channel_context(
+            &ProviderKind::Codex,
+            ChannelId::new(200),
+            ChannelId::new(100),
+            tmux_session_name,
+        )
+        .expect("write owner-context sidecar");
+        write_current_generation_anchor(
+            &ProviderKind::Codex,
+            100,
+            tmux_session_name,
+            (0, 200),
+            200,
+            888,
+        );
+        write_current_generation_anchor(
+            &ProviderKind::Codex,
+            200,
+            tmux_session_name,
+            (0, 200),
+            200,
+            999,
+        );
+
+        let anchors = matching_recovery_anchors(&ProviderKind::Codex, &state, tmux_session_name);
+
+        assert_eq!(
+            anchors
+                .iter()
+                .map(|(record_channel_id, anchor)| (*record_channel_id, anchor.panel_msg_id))
+                .collect::<Vec<_>>(),
+            vec![(100, 888), (200, 999)]
+        );
+    }
+
+    #[test]
+    fn anchor_probe_sequence_reposts_only_when_all_candidates_are_gone() {
+        let anchor = delivery_record::CurrentGenerationAnchor {
+            panel_msg_id: 888,
+            panel_channel_id: 200,
+            range: (0, 200),
+        };
+        assert_eq!(
+            first_repost_anchor_if_all_probed_candidates_gone(&[(
+                100,
+                anchor,
+                PlaceholderProbe::MessageGone,
+            )]),
+            Some((100, anchor))
+        );
+        assert_eq!(
+            first_repost_anchor_if_all_probed_candidates_gone(&[
+                (100, anchor, PlaceholderProbe::MessageGone),
+                (200, anchor, PlaceholderProbe::AlreadyDelivered),
+            ]),
+            None
+        );
+        assert_eq!(
+            first_repost_anchor_if_all_probed_candidates_gone(&[
+                (100, anchor, PlaceholderProbe::MessageGone),
+                (200, anchor, PlaceholderProbe::ProbeFailed),
+            ]),
+            None
+        );
     }
 }

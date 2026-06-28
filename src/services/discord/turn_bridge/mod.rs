@@ -932,6 +932,7 @@ fn handle_watcher_runtime_handoff(
     }
     inflight_state.input_fifo_path = fifo_path;
     inflight_state.last_offset = last_offset;
+    *state_dirty |= inflight_state.set_watcher_owner_channel_id(watcher_owner_channel_id.get());
     // #2235 NOTE: we deliberately do NOT durably save the row here.
     // `watcher_owns_live_relay` is still `false` at this point and only flips
     // to `true` after the watcher is successfully claimed and spawned (the
@@ -977,6 +978,7 @@ fn handle_watcher_runtime_handoff(
             "turn_bridge_runtime_ready",
         );
         *watcher_owner_channel_id = claim.owner_channel_id();
+        *state_dirty |= inflight_state.set_watcher_owner_channel_id(watcher_owner_channel_id.get());
         (claim.should_spawn(), claim.replaced_existing())
     };
     #[cfg(not(unix))]
@@ -1546,6 +1548,7 @@ pub(super) fn spawn_turn_bridge(
         };
 
         let mut inflight_state = bridge.inflight_state.clone();
+        inflight_state.set_watcher_owner_channel_id(resolved_watcher_owner_channel_id.get());
         // Codex P2: a no-anchor recovery turn (bridge.current_msg_id == None)
         // had a fresh placeholder created above into the working `current_msg_id`,
         // but the cloned inflight still carries `current_msg_id == 0`. Mirror the
@@ -2843,6 +2846,7 @@ pub(super) fn spawn_turn_bridge(
                                     "turn_bridge_tmux_ready",
                                 );
                                 watcher_owner_channel_id = claim.owner_channel_id();
+                                let _ = inflight_state.set_watcher_owner_channel_id(watcher_owner_channel_id.get());
                                 (claim.should_spawn(), claim.replaced_existing())
                             };
                             #[cfg(not(unix))]
