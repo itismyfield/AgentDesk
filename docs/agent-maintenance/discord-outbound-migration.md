@@ -31,6 +31,8 @@ Last refreshed: 2026-06-16 (against `main` @ `8ec7336e32eb6ef89e1143fab2543f2fc6
 >
 > Last refreshed: 2026-06-26 (#3709/#3710 — TUI-direct bridge long terminal relay now calls the explicit long-message-with-rollback gateway method instead of falling through the single-message trait default. The trait default itself now splits and rolls back partial chunks for custom test gateways. `turn_bridge/mod.rs` completion logging remains blocked until terminal delivery is committed, so a placeholder-only `RejectOverLimit` failure can no longer be logged as a completed relay. No v3 outbound API shape or durable delivery-record writer changed).
 >
+> Last refreshed: 2026-06-28 (#3746 — release health now reports the delivery-record rollout mode as `delivery_record_rollout`: shadow flag state, authority flag state, effective dedup authority, same-turn backward-write enforcement mode, and configuration warning count. This is read-only visibility; `AGENTDESK_DELIVERY_RECORD_AUTHORITY=OFF` still means `effective_committed_offset` uses the in-memory committed offset and the same-turn backward-write guard remains observe-only. Synthetic-resume paths that intentionally read the current-generation durable frontier flag-independently are unchanged).
+>
 > Companion docs: [`docs/discord-outbound-remaining-producers.md`](../discord-outbound-remaining-producers.md) (#1175 closure), [`docs/source-of-truth.md`](../source-of-truth.md).
 
 This is the single source of truth for "where is each Discord outbound callsite

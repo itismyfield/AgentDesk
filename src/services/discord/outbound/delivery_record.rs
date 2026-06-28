@@ -365,6 +365,56 @@ pub(in crate::services::discord) fn delivery_record_authority_enabled() -> bool 
     })
 }
 
+pub(super) fn delivery_record_rollout_health_json() -> serde_json::Value {
+    delivery_record_rollout_health_json_for_flags(
+        delivery_record_shadow_enabled(),
+        delivery_record_authority_enabled(),
+    )
+}
+
+fn delivery_record_rollout_health_json_for_flags(
+    shadow_enabled: bool,
+    authority_enabled: bool,
+) -> serde_json::Value {
+    let mode = match (shadow_enabled, authority_enabled) {
+        (false, false) => "off",
+        (true, false) => "shadow_only",
+        (false, true) => "authority_only",
+        (true, true) => "shadow_and_authority",
+    };
+    let dedup_authority = if authority_enabled {
+        "durable_delivery_record_frontier"
+    } else {
+        "in_memory_committed_offset"
+    };
+    let same_turn_backward_write_enforcement = if authority_enabled {
+        "enforcing"
+    } else {
+        "observe_only"
+    };
+    let mut configuration_warnings = Vec::new();
+    if !authority_enabled {
+        configuration_warnings.push(serde_json::json!(
+            "delivery_record_authority_disabled: durable frontiers are not the default committed-offset authority"
+        ));
+    }
+    if authority_enabled && !shadow_enabled {
+        configuration_warnings.push(serde_json::json!(
+            "delivery_record_shadow_disabled: authority is enabled without shadow mirror telemetry"
+        ));
+    }
+    let warning_count = configuration_warnings.len();
+    serde_json::json!({
+        "shadow_enabled": shadow_enabled,
+        "authority_enabled": authority_enabled,
+        "mode": mode,
+        "dedup_authority": dedup_authority,
+        "same_turn_backward_write_enforcement": same_turn_backward_write_enforcement,
+        "warning_count": warning_count,
+        "configuration_warnings": configuration_warnings,
+    })
+}
+
 /// #3089 B3 / #3416 (pure, testable): the same-turn monotonic guard's enforce
 /// decision. Returns `true` (block the backward inflight write) ONLY when the
 /// durable delivered-frontier authority is ON **and** a same-turn offset moved
@@ -1023,6 +1073,54 @@ mod tests {
         assert!(authority_blocks_backward_inflight_write(true, false, true));
         assert!(authority_blocks_backward_inflight_write(true, true, false));
         assert!(authority_blocks_backward_inflight_write(true, false, false));
+    }
+
+    #[test]
+    fn delivery_record_rollout_health_reports_off_as_observable_warning() {
+        let json = delivery_record_rollout_health_json_for_flags(false, false);
+        assert_eq!(json["mode"], "off");
+        assert_eq!(json["shadow_enabled"], false);
+        assert_eq!(json["authority_enabled"], false);
+        assert_eq!(json["dedup_authority"], "in_memory_committed_offset");
+        assert_eq!(json["same_turn_backward_write_enforcement"], "observe_only");
+        assert_eq!(json["warning_count"], 1);
+        assert!(
+            json["configuration_warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|warning| warning
+                    .as_str()
+                    .unwrap()
+                    .starts_with("delivery_record_authority_disabled"))
+        );
+    }
+
+    #[test]
+    fn delivery_record_rollout_health_reports_enforcing_modes() {
+        let shadow_only = delivery_record_rollout_health_json_for_flags(true, false);
+        assert_eq!(shadow_only["mode"], "shadow_only");
+        assert_eq!(shadow_only["warning_count"], 1);
+
+        let authority_only = delivery_record_rollout_health_json_for_flags(false, true);
+        assert_eq!(authority_only["mode"], "authority_only");
+        assert_eq!(
+            authority_only["same_turn_backward_write_enforcement"],
+            "enforcing"
+        );
+        assert_eq!(authority_only["warning_count"], 1);
+
+        let enforcing = delivery_record_rollout_health_json_for_flags(true, true);
+        assert_eq!(enforcing["mode"], "shadow_and_authority");
+        assert_eq!(
+            enforcing["dedup_authority"],
+            "durable_delivery_record_frontier"
+        );
+        assert_eq!(
+            enforcing["same_turn_backward_write_enforcement"],
+            "enforcing"
+        );
+        assert_eq!(enforcing["warning_count"], 0);
     }
 
     #[test]
