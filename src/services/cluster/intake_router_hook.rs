@@ -18,9 +18,11 @@
 //!    partial unique index, DB timeout), fall back to local execution
 //!    so a routing failure can never lose an intake.
 //!
-//! Phase 5 will add the env-var driven config and ops CLI; this PR
-//! ships the hook + observe-mode plumbing only.
+//! `cluster.intake_routing` is the primary authority for disabled /
+//! observe / enforce mode. `ADK_INTAKE_ROUTING_MODE` remains as an
+//! emergency override and is surfaced in health.
 
+use crate::config::{ClusterIntakeRoutingConfig, ClusterIntakeRoutingMode};
 use crate::db::intake_outbox::{
     InsertPendingPayload, IntakeInsertConflict, classify_insert_pending_error, insert_pending,
 };
@@ -30,8 +32,7 @@ use crate::services::cluster::intake_routing::{
 use sqlx::PgPool;
 
 /// How aggressively to apply the Phase-2 routing decision in front of
-/// the existing leader intake path. Phase 5 promotes the config from
-/// an env-var snapshot (read at startup) into per-agent overrides.
+/// the existing leader intake path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IntakeRoutingMode {
     /// Hook is a no-op; the leader runs every intake locally as today.
@@ -49,21 +50,156 @@ pub(crate) enum IntakeRoutingMode {
 }
 
 impl IntakeRoutingMode {
-    /// Read the global mode from the `ADK_INTAKE_ROUTING_MODE` env
-    /// var, defaulting to `Disabled` for unrecognised / unset values.
-    /// Phase 5 ops CLI will toggle this at runtime via per-agent rows.
-    pub(crate) fn from_env() -> Self {
-        match std::env::var("ADK_INTAKE_ROUTING_MODE")
-            .ok()
-            .as_deref()
-            .map(|s| s.trim().to_ascii_lowercase())
-            .as_deref()
-        {
-            Some("observe") => Self::Observe,
-            Some("enforce") => Self::Enforce,
-            _ => Self::Disabled,
+    fn from_config(mode: ClusterIntakeRoutingMode) -> Self {
+        match mode {
+            ClusterIntakeRoutingMode::Disabled => Self::Disabled,
+            ClusterIntakeRoutingMode::Observe => Self::Observe,
+            ClusterIntakeRoutingMode::Enforce => Self::Enforce,
         }
     }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Observe => "observe",
+            Self::Enforce => "enforce",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IntakeRoutingModeSource {
+    ConfigYaml,
+    EnvOverride,
+}
+
+impl IntakeRoutingModeSource {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ConfigYaml => "yaml",
+            Self::EnvOverride => "env_override",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IntakeRoutingEnvOverride {
+    Disabled,
+    Observe,
+    Enforce,
+    Invalid,
+}
+
+impl IntakeRoutingEnvOverride {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Observe => "observe",
+            Self::Enforce => "enforce",
+            Self::Invalid => "invalid",
+        }
+    }
+
+    fn mode(self) -> IntakeRoutingMode {
+        match self {
+            Self::Disabled | Self::Invalid => IntakeRoutingMode::Disabled,
+            Self::Observe => IntakeRoutingMode::Observe,
+            Self::Enforce => IntakeRoutingMode::Enforce,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EffectiveIntakeRoutingConfig {
+    pub(crate) mode: IntakeRoutingMode,
+    pub(crate) source: IntakeRoutingModeSource,
+    pub(crate) yaml_enabled: bool,
+    pub(crate) yaml_mode: ClusterIntakeRoutingMode,
+    pub(crate) env_override: Option<&'static str>,
+    pub(crate) warnings: Vec<&'static str>,
+    pub(crate) forward_pre_claim_timeout_secs: u64,
+    pub(crate) stale_claim_recovery_secs: u64,
+}
+
+impl EffectiveIntakeRoutingConfig {
+    pub(crate) fn mode_is_enforce(&self) -> bool {
+        matches!(self.mode, IntakeRoutingMode::Enforce)
+    }
+
+    pub(crate) fn worker_consumer_should_spawn(&self) -> bool {
+        !matches!(self.mode, IntakeRoutingMode::Disabled)
+    }
+
+    pub(crate) fn status_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "mode": self.mode.as_str(),
+            "source": self.source.as_str(),
+            "yaml": {
+                "enabled": self.yaml_enabled,
+                "mode": self.yaml_mode.as_str(),
+                "forward_pre_claim_timeout_secs": self.forward_pre_claim_timeout_secs,
+                "stale_claim_recovery_secs": self.stale_claim_recovery_secs,
+            },
+            "env_override": self.env_override,
+            "warning_count": self.warnings.len(),
+            "configuration_warnings": self.warnings,
+        })
+    }
+}
+
+fn parse_intake_routing_env_override(value: &str) -> IntakeRoutingEnvOverride {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "disabled" | "disable" | "off" | "false" | "0" => IntakeRoutingEnvOverride::Disabled,
+        "observe" => IntakeRoutingEnvOverride::Observe,
+        "enforce" => IntakeRoutingEnvOverride::Enforce,
+        _ => IntakeRoutingEnvOverride::Invalid,
+    }
+}
+
+fn effective_intake_routing_config_for(
+    config: &ClusterIntakeRoutingConfig,
+    env_override: Option<&str>,
+) -> EffectiveIntakeRoutingConfig {
+    let yaml_mode = if config.enabled {
+        IntakeRoutingMode::from_config(config.mode)
+    } else {
+        IntakeRoutingMode::Disabled
+    };
+    let parsed_env = env_override.map(parse_intake_routing_env_override);
+    let (mode, source) = match parsed_env {
+        Some(value) => (value.mode(), IntakeRoutingModeSource::EnvOverride),
+        None => (yaml_mode, IntakeRoutingModeSource::ConfigYaml),
+    };
+    let mut warnings = Vec::new();
+    if parsed_env == Some(IntakeRoutingEnvOverride::Invalid) {
+        warnings.push("invalid_ADK_INTAKE_ROUTING_MODE_fail_closed");
+    }
+    EffectiveIntakeRoutingConfig {
+        mode,
+        source,
+        yaml_enabled: config.enabled,
+        yaml_mode: config.mode,
+        env_override: parsed_env.map(IntakeRoutingEnvOverride::as_str),
+        warnings,
+        forward_pre_claim_timeout_secs: config.forward_pre_claim_timeout_secs,
+        stale_claim_recovery_secs: config.stale_claim_recovery_secs,
+    }
+}
+
+pub(crate) fn effective_intake_routing_config() -> EffectiveIntakeRoutingConfig {
+    let config = crate::config_live_reload::current()
+        .map(|config| config.cluster.intake_routing.clone())
+        .unwrap_or_else(|| crate::config::load_graceful().cluster.intake_routing);
+    let env_override = std::env::var("ADK_INTAKE_ROUTING_MODE").ok();
+    effective_intake_routing_config_for(&config, env_override.as_deref())
+}
+
+pub(crate) fn effective_intake_routing_mode() -> IntakeRoutingMode {
+    effective_intake_routing_config().mode
+}
+
+pub(crate) fn intake_routing_status_json() -> serde_json::Value {
+    effective_intake_routing_config().status_json()
 }
 
 /// What the hook decided. The intake gate uses this to choose between
@@ -493,47 +629,41 @@ mod unit_tests {
     use super::*;
 
     #[test]
-    fn intake_routing_mode_from_env_parses_observe_enforce_disabled() {
-        // SAFETY: tests run serially within a thread, but env state is
-        // process-global. Restore on drop.
-        struct EnvGuard {
-            previous: Option<String>,
-        }
-        impl EnvGuard {
-            fn set(value: Option<&str>) -> Self {
-                let previous = std::env::var("ADK_INTAKE_ROUTING_MODE").ok();
-                match value {
-                    Some(v) => unsafe { std::env::set_var("ADK_INTAKE_ROUTING_MODE", v) },
-                    None => unsafe { std::env::remove_var("ADK_INTAKE_ROUTING_MODE") },
-                }
-                Self { previous }
-            }
-        }
-        impl Drop for EnvGuard {
-            fn drop(&mut self) {
-                match &self.previous {
-                    Some(v) => unsafe { std::env::set_var("ADK_INTAKE_ROUTING_MODE", v) },
-                    None => unsafe { std::env::remove_var("ADK_INTAKE_ROUTING_MODE") },
-                }
-            }
-        }
+    fn effective_intake_routing_config_resolves_yaml_and_env_override() {
+        let mut yaml = ClusterIntakeRoutingConfig::default();
+        assert_eq!(
+            effective_intake_routing_config_for(&yaml, None).mode,
+            IntakeRoutingMode::Disabled
+        );
 
-        {
-            let _g = EnvGuard::set(Some("observe"));
-            assert_eq!(IntakeRoutingMode::from_env(), IntakeRoutingMode::Observe);
-        }
-        {
-            let _g = EnvGuard::set(Some("ENFORCE"));
-            assert_eq!(IntakeRoutingMode::from_env(), IntakeRoutingMode::Enforce);
-        }
-        {
-            let _g = EnvGuard::set(Some("garbage"));
-            assert_eq!(IntakeRoutingMode::from_env(), IntakeRoutingMode::Disabled);
-        }
-        {
-            let _g = EnvGuard::set(None);
-            assert_eq!(IntakeRoutingMode::from_env(), IntakeRoutingMode::Disabled);
-        }
+        yaml.enabled = true;
+        assert_eq!(
+            effective_intake_routing_config_for(&yaml, None).mode,
+            IntakeRoutingMode::Observe
+        );
+
+        yaml.mode = ClusterIntakeRoutingMode::Enforce;
+        let from_yaml = effective_intake_routing_config_for(&yaml, None);
+        assert_eq!(from_yaml.mode, IntakeRoutingMode::Enforce);
+        assert_eq!(from_yaml.source, IntakeRoutingModeSource::ConfigYaml);
+
+        let env_observe = effective_intake_routing_config_for(&yaml, Some("observe"));
+        assert_eq!(env_observe.mode, IntakeRoutingMode::Observe);
+        assert_eq!(env_observe.source, IntakeRoutingModeSource::EnvOverride);
+        assert_eq!(env_observe.env_override, Some("observe"));
+
+        let env_disabled = effective_intake_routing_config_for(&yaml, Some("OFF"));
+        assert_eq!(env_disabled.mode, IntakeRoutingMode::Disabled);
+        assert_eq!(env_disabled.env_override, Some("disabled"));
+
+        let invalid = effective_intake_routing_config_for(&yaml, Some("garbage"));
+        assert_eq!(invalid.mode, IntakeRoutingMode::Disabled);
+        assert_eq!(invalid.source, IntakeRoutingModeSource::EnvOverride);
+        assert_eq!(invalid.env_override, Some("invalid"));
+        assert_eq!(
+            invalid.warnings,
+            vec!["invalid_ADK_INTAKE_ROUTING_MODE_fail_closed"]
+        );
     }
 }
 

@@ -574,8 +574,8 @@ retried as attempt 2 on leader, succeeded."
 ```yaml
 cluster:
   intake_routing:
-    # Hard kill switch — flip false during incident response to
-    # disable all intake forwarding cluster-wide. Hot-reload supported.
+    # Hard kill switch. Leave false until worker nodes have been restarted
+    # with the intake worker consumer enabled at least once.
     enabled: true
     # observe: emit decision events but do NOT INSERT outbox rows.
     # enforce: actually forward.
@@ -588,6 +588,28 @@ cluster:
     # without reaching 'accepted', re-mark pending so another node
     # can pick up. Tuned > worker startup grace.
     stale_claim_recovery_secs: 60
+```
+
+Implemented authority (#3749): `cluster.intake_routing` is the primary
+source of truth. `ADK_INTAKE_ROUTING_MODE` remains as an emergency
+process override and wins over YAML when set (`disabled`/`off`/`false`/`0`,
+`observe`, `enforce`; invalid values fail closed to `disabled`). Operators
+can confirm the effective `mode`, `source`, YAML values, and warning count
+through `/api/health` or `/api/health/detail` under `intake_routing`.
+
+Operational reload note: worker consumers are spawned when the effective mode
+is `observe` or `enforce`. Start from `enabled: true, mode: "observe"` and
+restart once to put consumers on standby; then observe→enforce rollback/promote
+changes are read by the hook and `/node` from the runtime config snapshot. A
+disabled→enabled rollout should be treated as restart-required so workers are
+definitely present before the leader inserts outbox rows.
+
+Future outbox-sweep tunables still tracked by this design but not part of the
+#3749 runtime authority yet:
+
+```yaml
+cluster:
+  intake_routing:
     # Round-3 P1 #3: fast SLA on `accepted` not reaching `spawned`.
     # Auto-retry is forbidden post-accept, so this surfaces as an
     # operator alert only. Default 2 minutes; tune up if Unreal cold
@@ -1020,9 +1042,10 @@ Discord operator alerts (24h dedupe, mirror of #1994's
 ## Implementation phases
 
 Each phase ships as its own PR and merges independently. The leader
-hook is **gated behind `cluster.intake_routing.mode`** (default
-`observe`) so Phase 4 emits decisions but does not actually forward
-until Phase 5 flips to `enforce`.
+hook is **gated behind the effective `cluster.intake_routing` mode**.
+Absent config defaults to disabled; once `enabled=true`, the mode default is
+`observe` so Phase 4 emits decisions but does not actually forward until the
+operator flips to `enforce`.
 
 ### Phase 1 — Schema migration (lowest risk, no behaviour change)
 - New migration `0070_intake_node_routing.sql`:
@@ -1216,9 +1239,14 @@ depend on 2-pre.3 specifically — it can ship in parallel with
 For incident response when `enforce` mode causes problems:
 
 1. Operator flips `cluster.intake_routing.mode = observe` in
-   `agentdesk.yaml` and reloads config.
-2. New intakes go `Local` immediately (leader snapshots config
-   inside the short insert transaction).
+   `agentdesk.yaml` and reloads config, or restarts with
+   `ADK_INTAKE_ROUTING_MODE=observe` as an emergency override. Confirm
+   `/api/health.intake_routing.mode == "observe"` and inspect `source`
+   (`yaml` or `env_override`) before sending more traffic.
+2. New intakes go `Local` immediately once the leader sees observe mode.
+   If the process was started with `cluster.intake_routing.enabled=false`,
+   restart with `enabled=true, mode=observe` before later promoting back to
+   enforce so worker consumers are present.
 3. **In-flight rows are NOT auto-cancelled.** State machine
    continues:
    - `pending`/`claimed` rows continue per the normal sweep flow.
@@ -1264,9 +1292,10 @@ Codex high-effort review at every phase boundary.
 
 ## Rollout / kill switch
 
-- `cluster.intake_routing.enabled = true` ships as default; `mode =
-  observe` ships as default. Operators flip `mode` to `enforce` only
-  after Phase 4 observation looks healthy.
+- `cluster.intake_routing.enabled = false` ships as the safe default.
+  Operators opt in with `enabled=true, mode=observe`, restart once so worker
+  consumers are present, and flip `mode` to `enforce` only after observation
+  looks healthy.
 - Per-agent opt-in: `agents.preferred_intake_node_labels = '[]'` (the
   default) means current behaviour. We never change behaviour for an
   agent without an explicit operator UPDATE.

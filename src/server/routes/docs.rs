@@ -549,6 +549,19 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                     "same_turn_backward_write_enforcement": "observe_only",
                     "warning_count": 1
                 },
+                "intake_routing": {
+                    "mode": "disabled",
+                    "source": "yaml",
+                    "yaml": {
+                        "enabled": false,
+                        "mode": "observe",
+                        "forward_pre_claim_timeout_secs": 12,
+                        "stale_claim_recovery_secs": 60
+                    },
+                    "env_override": null,
+                    "warning_count": 0,
+                    "configuration_warnings": []
+                },
                 "latest_startup_doctor": {
                     "available": true,
                     "status": "warned",
@@ -594,6 +607,19 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                     "mode": "shadow_and_authority",
                     "dedup_authority": "durable_delivery_record_frontier",
                     "same_turn_backward_write_enforcement": "enforcing",
+                    "warning_count": 0,
+                    "configuration_warnings": []
+                },
+                "intake_routing": {
+                    "mode": "observe",
+                    "source": "yaml",
+                    "yaml": {
+                        "enabled": true,
+                        "mode": "observe",
+                        "forward_pre_claim_timeout_secs": 12,
+                        "stale_claim_recovery_secs": 60
+                    },
+                    "env_override": null,
                     "warning_count": 0,
                     "configuration_warnings": []
                 },

@@ -354,6 +354,8 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             ))
             .unwrap_or_else(|_| serde_json::json!({}));
         json["delivery_record_rollout"] = delivery_record_rollout_health_json();
+        json["intake_routing"] =
+            crate::services::cluster::intake_router_hook::intake_routing_status_json();
 
         let http_status = if status.is_http_ready() {
             StatusCode::OK
@@ -446,6 +448,8 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             json["opencode"] = opencode_block;
         }
         json["delivery_record_rollout"] = delivery_record_rollout_health_json();
+        json["intake_routing"] =
+            crate::services::cluster::intake_router_hook::intake_routing_status_json();
         let json = if detailed {
             with_latest_startup_doctor(json, true)
         } else {
@@ -581,6 +585,7 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
     let startup_degraded = json.get("startup_degraded").cloned();
     let startup_degraded_reasons = json.get("startup_degraded_reasons").cloned();
     let delivery_record_rollout = json.get("delivery_record_rollout").cloned();
+    let intake_routing = json.get("intake_routing").cloned();
     // Public OpenCode summary is count-only and never includes the per-server
     // `warm_servers` array, pids, ports, or startup tails (spec C-3). The
     // upstream `opencode_warm_pool_json(false)` already produced a count-only
@@ -615,6 +620,9 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
     }
     if let Some(delivery_record_rollout) = delivery_record_rollout {
         public["delivery_record_rollout"] = delivery_record_rollout;
+    }
+    if let Some(intake_routing) = intake_routing {
+        public["intake_routing"] = intake_routing;
     }
     if let Some(opencode_public) = opencode_public {
         public["opencode"] = opencode_public;
@@ -2393,6 +2401,34 @@ mod tests {
         }));
         assert_eq!(public["delivery_record_rollout"]["mode"], json!("off"));
         assert_eq!(public["delivery_record_rollout"]["warning_count"], json!(1));
+        assert_eq!(public["ok"], json!(true));
+    }
+
+    #[test]
+    fn public_health_json_preserves_intake_routing_state() {
+        let public = public_health_json(json!({
+            "status": "healthy",
+            "version": "0.1.2",
+            "db": true,
+            "dashboard": true,
+            "server_up": true,
+            "intake_routing": {
+                "mode": "observe",
+                "source": "yaml",
+                "yaml": {
+                    "enabled": true,
+                    "mode": "observe",
+                    "forward_pre_claim_timeout_secs": 12,
+                    "stale_claim_recovery_secs": 60
+                },
+                "env_override": null,
+                "warning_count": 0,
+                "configuration_warnings": []
+            }
+        }));
+        assert_eq!(public["intake_routing"]["mode"], json!("observe"));
+        assert_eq!(public["intake_routing"]["source"], json!("yaml"));
+        assert_eq!(public["intake_routing"]["warning_count"], json!(0));
         assert_eq!(public["ok"], json!(true));
     }
 
