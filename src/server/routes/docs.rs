@@ -1253,15 +1253,23 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             ("message", body_param("string", false, "Alias for content")),
             (
                 "source",
-                body_param("string", false, "Known agent role_id or internal source; defaults to system"),
+                body_param("string", false, "Source label allowed for the caller class: CLI uses agentdesk-cli/operator, dashboard uses dashboard or an agent role_id, and internal labels such as system/headless_turn require a loopback internal caller"),
             ),
             (
                 "bot",
                 body_param("string", false, "Delivery bot: announce (default) or notify"),
             ),
+            (
+                "X-AgentDesk-Source",
+                header_param(
+                    "string",
+                    false,
+                    "Caller class attestation: cli, dashboard, or loopback/internal",
+                ),
+            ),
         ])
         .with_example(
-            json!({"body": {"target": "channel:1473922824350601297", "content": "hello", "source": "system", "bot": "notify"}}),
+            json!({"body": {"target": "channel:1473922824350601297", "content": "hello", "source": "operator", "bot": "notify"}}),
             json!({"ok": true, "message_id": "1500000000000000000"}),
         )
         .with_error_example(
@@ -1269,7 +1277,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             json!({"body": {"target": "channel:1473922824350601297"}}),
             json!({"error": "content is required", "ok": false}),
         )
-        .with_curl("curl -X POST http://localhost:8787/api/discord/send -H 'Content-Type: application/json' -d '{\"target\":\"channel:1473922824350601297\",\"content\":\"hello\",\"source\":\"system\",\"bot\":\"notify\"}'"),
+        .with_curl("curl -X POST http://localhost:8787/api/discord/send -H 'Content-Type: application/json' -H 'X-AgentDesk-Source: cli' -d '{\"target\":\"channel:1473922824350601297\",\"content\":\"hello\",\"source\":\"operator\",\"bot\":\"notify\"}'"),
         ep(
             "POST",
             "/api/discord/bot-tokens/reload",
@@ -6606,6 +6614,7 @@ mod tests {
             "message",
             "source",
             "bot",
+            "X-AgentDesk-Source",
         ] {
             assert!(
                 send.params.contains_key(param),
@@ -6633,7 +6642,12 @@ mod tests {
             .request["body"];
         assert_eq!(example_body["target"], "channel:1473922824350601297");
         assert_eq!(example_body["content"], "hello");
-        assert_eq!(example_body["source"], "system");
+        assert_eq!(example_body["source"], "operator");
+        assert!(
+            send.curl_example
+                .expect("send docs must include a curl example")
+                .contains("X-AgentDesk-Source: cli")
+        );
     }
 
     #[test]

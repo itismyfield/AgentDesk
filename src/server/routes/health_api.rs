@@ -21,6 +21,7 @@ use crate::services::provider::ProviderKind;
 use super::AppState;
 
 const OUTBOX_AGE_DEGRADED_SECS: i64 = 60;
+const X_AGENTDESK_SOURCE: &str = "x-agentdesk-source";
 const ACTIVE_SESSION_AUDIT_QUERY: &str =
     "SELECT session_key, provider, status, active_dispatch_id, last_heartbeat,
                 thread_channel_id, channel_id
@@ -155,6 +156,26 @@ fn discord_control_endpoints_allowed(
     }
 
     bearer_token_matches(config, headers)
+}
+
+fn discord_send_caller_class(
+    peer_addr: SocketAddr,
+    headers: &HeaderMap,
+) -> health::SendCallerClass {
+    let source_header = headers.get(X_AGENTDESK_SOURCE);
+    let header_class = source_header
+        .and_then(|value| value.to_str().ok())
+        .and_then(health::SendCallerClass::from_header);
+    match header_class {
+        Some(health::SendCallerClass::LoopbackInternal) if peer_addr.ip().is_loopback() => {
+            health::SendCallerClass::LoopbackInternal
+        }
+        Some(health::SendCallerClass::LoopbackInternal) => health::SendCallerClass::Unknown,
+        Some(class) => class,
+        None if source_header.is_some() => health::SendCallerClass::Unknown,
+        None if peer_addr.ip().is_loopback() => health::SendCallerClass::LoopbackInternal,
+        None => health::SendCallerClass::Unknown,
+    }
 }
 
 /// Build combined DB + Discord provider health.
@@ -1676,8 +1697,19 @@ pub async fn send_handler(
     };
 
     let body_str = String::from_utf8_lossy(&body);
-    let (status_str, response_body) =
-        health::handle_send(registry, None, state.pg_pool_ref(), &body_str).await;
+    let caller_class = discord_send_caller_class(peer_addr, &headers);
+    let (status_str, response_body) = if caller_class == health::SendCallerClass::LoopbackInternal {
+        health::handle_send(registry, None, state.pg_pool_ref(), &body_str).await
+    } else {
+        crate::services::discord::outbound::send_api::handle_send_with_caller(
+            registry,
+            None,
+            state.pg_pool_ref(),
+            &body_str,
+            caller_class,
+        )
+        .await
+    };
     let status = parse_status_code(status_str);
     let json: serde_json::Value =
         serde_json::from_str(&response_body).unwrap_or(serde_json::json!({"error": "internal"}));
@@ -1867,7 +1899,8 @@ pub async fn senddm_handler(
 mod tests {
     use super::{
         ACTIVE_SESSION_AUDIT_QUERY, RegistryPurgeDecision, discord_control_endpoints_allowed,
-        public_health_json, registry_purge_decision, stale_mailbox_repair_applied,
+        discord_send_caller_class, public_health_json, registry_purge_decision,
+        stale_mailbox_repair_applied,
     };
     use axum::{
         body::{Body, to_bytes},
@@ -1889,6 +1922,12 @@ mod tests {
                 .parse()
                 .expect("valid bearer header"),
         );
+        headers
+    }
+
+    fn source_headers(source: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-agentdesk-source", source.parse().expect("valid source"));
         headers
     }
 
@@ -1949,6 +1988,45 @@ mod tests {
             Some("10.0.0.5:8791".parse().unwrap()),
             &bearer_headers("wrong")
         ));
+    }
+
+    #[test]
+    fn discord_send_caller_class_uses_header_when_present() {
+        use crate::services::discord::health::SendCallerClass;
+
+        let loopback = "127.0.0.1:8791".parse().unwrap();
+        let remote = "10.0.0.5:8791".parse().unwrap();
+
+        assert_eq!(
+            discord_send_caller_class(loopback, &source_headers("cli")),
+            SendCallerClass::Cli
+        );
+        assert_eq!(
+            discord_send_caller_class(loopback, &source_headers("dashboard")),
+            SendCallerClass::Dashboard
+        );
+        assert_eq!(
+            discord_send_caller_class(loopback, &source_headers("not-a-caller-class")),
+            SendCallerClass::Unknown
+        );
+        assert_eq!(
+            discord_send_caller_class(remote, &source_headers("internal")),
+            SendCallerClass::Unknown
+        );
+    }
+
+    #[test]
+    fn discord_send_caller_class_keeps_headerless_loopback_compatibility() {
+        use crate::services::discord::health::SendCallerClass;
+
+        assert_eq!(
+            discord_send_caller_class("127.0.0.1:8791".parse().unwrap(), &empty_headers()),
+            SendCallerClass::LoopbackInternal
+        );
+        assert_eq!(
+            discord_send_caller_class("10.0.0.5:8791".parse().unwrap(), &empty_headers()),
+            SendCallerClass::Unknown
+        );
     }
 
     fn test_api_router_with_config(config: crate::config::Config) -> axum::Router {
@@ -2086,6 +2164,31 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn discord_send_router_applies_explicit_cli_source_gate_on_loopback() {
+        let mut config = crate::config::Config::default();
+        config.server.host = "0.0.0.0".to_string();
+        let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
+        let app = test_api_router_with_config_and_registry(config, Some(registry));
+
+        let mut request = control_request_for(
+            "/discord/send",
+            "127.0.0.1:8791",
+            r#"{"target":"channel:999999999999999999","content":"hello","source":"system"}"#,
+        );
+        request
+            .headers_mut()
+            .insert("x-agentdesk-source", "cli".parse().unwrap());
+
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["error"], "source not allowed for this caller");
     }
 
     #[tokio::test]

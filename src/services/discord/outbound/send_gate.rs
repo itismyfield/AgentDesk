@@ -52,7 +52,7 @@ pub(crate) async fn send_message_with_backends_and_delivery_id(
     summary: Option<&str>,
     delivery_id: Option<ManualOutboundDeliveryId<'_>>,
 ) -> (&'static str, String) {
-    send_message_with_backends_and_delivery_options(
+    send_message_with_backends_and_delivery_options_for_caller(
         registry,
         db,
         pg_pool,
@@ -63,6 +63,35 @@ pub(crate) async fn send_message_with_backends_and_delivery_id(
         summary,
         delivery_id,
         ManualOutboundOptions::default(),
+        SendCallerClass::LoopbackInternal,
+    )
+    .await
+}
+
+pub(crate) async fn send_message_with_backends_and_delivery_id_for_caller(
+    registry: &HealthRegistry,
+    db: Option<&Db>,
+    pg_pool: Option<&PgPool>,
+    target: &str,
+    content: &str,
+    source: &str,
+    bot: &str,
+    summary: Option<&str>,
+    delivery_id: Option<ManualOutboundDeliveryId<'_>>,
+    caller_class: SendCallerClass,
+) -> (&'static str, String) {
+    send_message_with_backends_and_delivery_options_for_caller(
+        registry,
+        db,
+        pg_pool,
+        target,
+        content,
+        source,
+        bot,
+        summary,
+        delivery_id,
+        ManualOutboundOptions::default(),
+        caller_class,
     )
     .await
 }
@@ -104,6 +133,35 @@ pub(crate) async fn send_message_with_backends_and_delivery_options(
     delivery_id: Option<ManualOutboundDeliveryId<'_>>,
     options: ManualOutboundOptions,
 ) -> (&'static str, String) {
+    send_message_with_backends_and_delivery_options_for_caller(
+        registry,
+        db,
+        pg_pool,
+        target,
+        content,
+        source,
+        bot,
+        summary,
+        delivery_id,
+        options,
+        SendCallerClass::LoopbackInternal,
+    )
+    .await
+}
+
+async fn send_message_with_backends_and_delivery_options_for_caller(
+    registry: &HealthRegistry,
+    db: Option<&Db>,
+    pg_pool: Option<&PgPool>,
+    target: &str,
+    content: &str,
+    source: &str,
+    bot: &str,
+    summary: Option<&str>,
+    delivery_id: Option<ManualOutboundDeliveryId<'_>>,
+    options: ManualOutboundOptions,
+    caller_class: SendCallerClass,
+) -> (&'static str, String) {
     if content.is_empty() {
         return (
             "400 Bad Request",
@@ -141,10 +199,16 @@ pub(crate) async fn send_message_with_backends_and_delivery_options(
     // response body. That made enumerating the whitelist trivial and gave a
     // log-injection assist. The full label is preserved in `tracing::warn!`
     // for operators.
-    if !is_allowed_send_source(source) {
+    let source_allowed = if caller_class == SendCallerClass::LoopbackInternal {
+        is_allowed_send_source(source)
+    } else {
+        is_allowed_send_source_for(source, caller_class)
+    };
+    if !source_allowed {
         tracing::warn!(
             source,
             bot,
+            caller_class = ?caller_class,
             "/api/discord/send rejected: source label not allowed for caller class"
         );
         return (
@@ -235,7 +299,7 @@ pub(crate) async fn send_message_with_backends_and_delivery_options(
         }
         if !authorized
             && options.allow_unbound_internal_channel
-            && is_allowed_send_source(source)
+            && is_allowed_send_source_for(source, caller_class)
             && target.trim_start().starts_with("channel:")
             && target_channel_accessible
         {
@@ -305,6 +369,12 @@ pub enum SendCallerClass {
     /// most restrictive bucket.
     #[allow(dead_code)]
     Unknown,
+}
+
+impl Default for SendCallerClass {
+    fn default() -> Self {
+        Self::LoopbackInternal
+    }
 }
 
 impl SendCallerClass {
@@ -425,6 +495,47 @@ mod send_source_tests {
     }
 
     #[test]
+    fn dashboard_can_use_dashboard_or_known_agent_role_labels() {
+        assert!(is_allowed_send_source_for(
+            "dashboard",
+            SendCallerClass::Dashboard
+        ));
+
+        let _lock = crate::config::shared_test_env_lock().lock().unwrap(); // agentdesk-audit: allow-unwrap — test setup in #[cfg(test)] mod
+        let temp = tempfile::tempdir().unwrap(); // agentdesk-audit: allow-unwrap — test setup in #[cfg(test)] mod
+        std::fs::create_dir_all(temp.path().join("config")).unwrap(); // agentdesk-audit: allow-unwrap — test setup in #[cfg(test)] mod
+        std::fs::write(
+            temp.path().join("config/agentdesk.yaml"),
+            r#"
+server: {}
+agents:
+  - id: project-agentdesk
+    name: AgentDesk
+    provider: codex
+    channels:
+      codex:
+        id: "123"
+        prompt_file: "/tmp/project-agentdesk.md"
+        workspace: "/tmp"
+        provider: codex
+"#,
+        )
+        .unwrap(); // agentdesk-audit: allow-unwrap — test setup in #[cfg(test)] mod
+        let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
+        assert!(is_allowed_send_source_for(
+            "project-agentdesk",
+            SendCallerClass::Dashboard
+        ));
+
+        match previous_root {
+            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+        }
+    }
+
+    #[test]
     fn unknown_caller_class_only_allows_known_agents() {
         // Without a verified caller class we still let messages through when
         // the source matches a registered agent role id (the agent identity
@@ -466,6 +577,7 @@ mod send_source_tests {
         std::fs::write(
             temp.path().join("config/agentdesk.yaml"),
             r#"
+server: {}
 discord:
   dm_default_agent: family-counsel
 agents:

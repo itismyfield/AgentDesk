@@ -9,7 +9,7 @@ use super::manual_delivery::{
     ManualDeliveryOutcome, ManualOutboundDeliveryId, SerenityManualOutboundClient,
     deliver_manual_dm_notification, is_reserved_voice_correlation_namespace,
 };
-use super::send_gate::send_message_with_backends_and_delivery_id;
+use super::send_gate::{SendCallerClass, send_message_with_backends_and_delivery_id_for_caller};
 use crate::db::Db;
 use crate::services::discord::health::{HealthRegistry, resolve_bot_http};
 use crate::services::discord::outbound::shared_outbound_deduper;
@@ -19,6 +19,23 @@ pub async fn handle_send<'a>(
     sqlite: Option<&Db>,
     pg_pool: Option<&PgPool>,
     body: &str,
+) -> (&'a str, String) {
+    handle_send_with_caller(
+        registry,
+        sqlite,
+        pg_pool,
+        body,
+        SendCallerClass::LoopbackInternal,
+    )
+    .await
+}
+
+pub async fn handle_send_with_caller<'a>(
+    registry: &HealthRegistry,
+    sqlite: Option<&Db>,
+    pg_pool: Option<&PgPool>,
+    body: &str,
+    caller_class: SendCallerClass,
 ) -> (&'a str, String) {
     let Ok(json) = serde_json::from_str::<serde_json::Value>(body) else {
         return (
@@ -79,7 +96,7 @@ pub async fn handle_send<'a>(
         );
     }
 
-    send_message_with_backends_and_delivery_id(
+    send_message_with_backends_and_delivery_id_for_caller(
         registry,
         sqlite,
         pg_pool,
@@ -89,6 +106,7 @@ pub async fn handle_send<'a>(
         bot,
         summary,
         delivery_id,
+        caller_class,
     )
     .await
 }
@@ -406,11 +424,65 @@ mod handle_send_contract_tests {
     //! directory decomposition. All expectations capture current behavior
     //! as-is (no seam; empty `HealthRegistry`).
 
-    use crate::services::discord::health::HealthRegistry;
+    use crate::services::discord::health::{HealthRegistry, SendCallerClass};
 
-    use super::handle_send;
+    use super::{handle_send, handle_send_with_caller};
 
-    #[tokio::test]
+    struct TestRuntimeRoot {
+        previous_root: Option<std::ffi::OsString>,
+        _temp: tempfile::TempDir,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl TestRuntimeRoot {
+        fn new() -> Self {
+            let lock = crate::config::shared_test_env_lock()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
+            let temp = tempfile::tempdir().expect("temp runtime root"); // agentdesk-audit: allow-unwrap — test setup in #[cfg(test)] mod
+            unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+            Self {
+                previous_root,
+                _temp: temp,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for TestRuntimeRoot {
+        fn drop(&mut self) {
+            match &self.previous_root {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
+
+    async fn assert_source_gate_body(
+        caller_class: SendCallerClass,
+        source: &str,
+        expected_status: &str,
+        expected_error: &str,
+    ) {
+        let _runtime_root = TestRuntimeRoot::new();
+        let registry = HealthRegistry::new();
+        let body = serde_json::json!({
+            "target": "channel:999999999999999999",
+            "content": "hi",
+            "source": source,
+        })
+        .to_string();
+
+        let (status, body) =
+            handle_send_with_caller(&registry, None, None, &body, caller_class).await;
+        assert_eq!(status, expected_status);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap(); // agentdesk-audit: allow-unwrap — test response JSON should parse
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["error"], expected_error);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn invalid_json_body_is_a_400_with_pinned_body() {
         let registry = HealthRegistry::new();
         let (status, body) = handle_send(&registry, None, None, "not json").await;
@@ -418,8 +490,9 @@ mod handle_send_contract_tests {
         assert_eq!(body, r#"{"ok":false,"error":"invalid JSON"}"#);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn missing_content_is_a_400_with_pinned_body() {
+        let _runtime_root = TestRuntimeRoot::new();
         let registry = HealthRegistry::new();
         let (status, body) =
             handle_send(&registry, None, None, r#"{"target":"channel:123"}"#).await;
@@ -427,8 +500,9 @@ mod handle_send_contract_tests {
         assert_eq!(body, r#"{"ok":false,"error":"content is required"}"#);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn missing_target_is_a_400_invalid_target() {
+        let _runtime_root = TestRuntimeRoot::new();
         let registry = HealthRegistry::new();
         let (status, body) = handle_send(&registry, None, None, r#"{"content":"hi"}"#).await;
         assert_eq!(status, "400 Bad Request");
@@ -440,8 +514,9 @@ mod handle_send_contract_tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn channel_id_fallback_reaches_target_resolution_like_explicit_target() {
+        let _runtime_root = TestRuntimeRoot::new();
         let registry = HealthRegistry::new();
         // Legacy `channel_id` (numeric, no `channel:` prefix) must be accepted
         // via the fallback + prefixing path and produce the exact same
@@ -470,5 +545,62 @@ mod handle_send_contract_tests {
             fallback_body,
             r#"{"ok":false,"error":"channel not in role-map"}"#
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cli_caller_can_use_cli_sources_but_not_system() {
+        assert_source_gate_body(
+            SendCallerClass::Cli,
+            "agentdesk-cli",
+            "403 Forbidden",
+            "channel not in role-map",
+        )
+        .await;
+        assert_source_gate_body(
+            SendCallerClass::Cli,
+            "operator",
+            "403 Forbidden",
+            "channel not in role-map",
+        )
+        .await;
+        assert_source_gate_body(
+            SendCallerClass::Cli,
+            "system",
+            "403 Forbidden",
+            "source not allowed for this caller",
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dashboard_unknown_and_loopback_use_caller_specific_source_gate() {
+        assert_source_gate_body(
+            SendCallerClass::Dashboard,
+            "dashboard",
+            "403 Forbidden",
+            "channel not in role-map",
+        )
+        .await;
+        assert_source_gate_body(
+            SendCallerClass::Dashboard,
+            "headless_turn",
+            "403 Forbidden",
+            "source not allowed for this caller",
+        )
+        .await;
+        assert_source_gate_body(
+            SendCallerClass::Unknown,
+            "slo_alerter",
+            "403 Forbidden",
+            "source not allowed for this caller",
+        )
+        .await;
+        assert_source_gate_body(
+            SendCallerClass::LoopbackInternal,
+            "headless_turn",
+            "403 Forbidden",
+            "channel not in role-map",
+        )
+        .await;
     }
 }
