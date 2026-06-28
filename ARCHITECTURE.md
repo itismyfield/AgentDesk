@@ -448,7 +448,8 @@ src/
 │   │   │   ├── finalizer_identity.rs
 │   │   │   ├── model.rs
 │   │   │   ├── rebind_reap.rs
-│   │   │   └── store.rs
+│   │   │   ├── store.rs
+│   │   │   └── watcher_state.rs
 │   │   ├── outbound/
 │   │   │   ├── confirmation.rs
 │   │   │   ├── decision.rs

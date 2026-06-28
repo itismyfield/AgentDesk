@@ -1302,14 +1302,16 @@
     2026-08-31, #3036)).
   - `src/services/discord/{commands/text_commands.rs,
     discord_config_audit.rs, router/intake_gate.rs}` (all 1000+ production
-    lines) and `src/services/discord/inflight.rs` (3016 lines; #3680 relay
+    lines) and `src/services/discord/inflight.rs` (2686 lines; #3680 relay
     recovery review hardening; #3685 exposes the inflight sidecar lock
     crate-wide for locked legacy rebind backfill; #3715 moved the #3635
     dead-watcher rebind-origin reap helpers into
     `src/services/discord/inflight/rebind_reap.rs`, while the parent preserves
     the #3581 None-owner predicate and sidecar state contract; #3809 adds a
     read-only single-row loader for deterministic idle-recap diagnostics that
-    must not run compatibility backfills or cleanup writes).
+    must not run compatibility backfills or cleanup writes; #3835 moved the
+    watcher progress / terminal commit / relay-watermark locked update helpers
+    into `src/services/discord/inflight/watcher_state.rs`).
   - `src/services/discord/placeholder_sweeper.rs` (1004 lines; crossed the giant
     threshold in #3635 when the dead-watcher reap branch joined the async
     rebind-origin sweep arm — tracked decompose target, see `giant-file-registry.md` (owner
