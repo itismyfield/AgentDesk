@@ -110,9 +110,9 @@
   - `src/dispatch/dispatch_context.rs` (2803 lines).
   - `src/dispatch/dispatch_create.rs` (1385 lines).
   - `src/dispatch/dispatch_status.rs` (1508 lines).
-  - `src/services/dispatches/outbox_route.rs` (1120 lines; route extraction
+  - `src/services/dispatches/outbox_route.rs` (1182 lines; route extraction
     orchestration surface from #1722, split before adding non-bugfix behavior).
-  - `src/services/dispatches/discord_delivery/orchestration.rs` (1490 lines;
+  - `src/services/dispatches/discord_delivery/orchestration.rs` (1498 lines;
     delivery orchestration surface extracted from the route layer in #1760,
     split before adding non-bugfix behavior).
 - active_callsite_coverage: n/a.
@@ -1515,7 +1515,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   `src/services/settings.rs` (1114) — service-layer route support surfaces
   split out of the large dashboard route modules. (`src/services/onboarding.rs`
   and `src/services/api_friction.rs` have been removed/decomposed.)
-- `src/services/dispatches/outbox_route.rs` (1120) — dispatch outbox route
+- `src/services/dispatches/outbox_route.rs` (1182) — dispatch outbox route
   support extracted from the route layer; split before adding non-bugfix
   behavior.
 - `src/services/claude.rs` (2963), `src/services/gemini.rs` (1358),

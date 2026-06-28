@@ -16,6 +16,7 @@ use crate::services::dispatches::outbox_route::{
     build_minimal_dispatch_message, format_dispatch_message, prefix_dispatch_message,
     review_submission_hint, review_target_hint,
 };
+use crate::services::dispatches::result_header::prepend_review_result_header;
 use sqlx::PgPool;
 use std::sync::OnceLock;
 
@@ -1354,9 +1355,16 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
 
     let (kind, message) = if verdict == "pass" || verdict == "approved" {
         let url_line = issue_url.map(|u| format!("\n{u}")).unwrap_or_default();
+        let body = format!("✅ [리뷰 통과] {title} — done으로 이동{url_line}");
         (
             ReviewFollowupKind::Pass,
-            format!("✅ [리뷰 통과] {title} — done으로 이동{url_line}"),
+            prepend_review_result_header(
+                &title,
+                None,
+                review_context_json.as_ref(),
+                verdict,
+                &body,
+            ),
         )
     } else {
         let url_line = issue_url.map(|u| format!("\n{u}")).unwrap_or_default();

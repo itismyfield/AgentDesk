@@ -20,6 +20,11 @@ use crate::services::dispatches::discord_delivery::{
     DispatchTransport, HttpDispatchTransport, discord_api_url,
     send_review_result_to_primary_with_transport,
 };
+use crate::services::dispatches::result_header::{
+    ResultHeaderMergeStatus, build_review_decision_completion_header,
+    build_review_decision_dispatch_header, build_work_completion_result_header,
+    prepend_result_header,
+};
 use crate::services::git::GitCommand;
 
 #[derive(Clone, Debug)]
@@ -294,7 +299,52 @@ fn format_merge_status(merge_status: DispatchMergeStatus) -> &'static str {
     }
 }
 
+fn result_header_merge_status(merge_status: DispatchMergeStatus) -> ResultHeaderMergeStatus {
+    match merge_status {
+        DispatchMergeStatus::Noop => ResultHeaderMergeStatus::Noop,
+        DispatchMergeStatus::Pending => ResultHeaderMergeStatus::Pending,
+        DispatchMergeStatus::Merged => ResultHeaderMergeStatus::Merged,
+        DispatchMergeStatus::Unknown => ResultHeaderMergeStatus::Unknown,
+    }
+}
+
+fn review_decision_summary_body(
+    result_json: Option<&serde_json::Value>,
+    duration_seconds: Option<i64>,
+) -> Option<String> {
+    let decision = json_string_field(result_json, "decision")?;
+    let decision_label = match decision.to_ascii_lowercase().replace('_', "-").as_str() {
+        "accept" | "auto-accept" => "accept",
+        "dispute" => "dispute",
+        "dismiss" => "dismiss",
+        _ => return None,
+    };
+    let source = json_string_field(result_json, "completion_source")
+        .map(|source| format!("\nsource {source}"))
+        .unwrap_or_default();
+    Some(format!(
+        "🔔 리뷰 검토 완료: {decision_label}{source}\n소요 시간 {}",
+        format_dispatch_duration(duration_seconds),
+    ))
+}
+
+fn build_review_decision_completion_summary(info: &CompletedDispatchInfo) -> Option<String> {
+    let result_json = parse_json_value(info.result_json.as_deref(), "result_json");
+    let context_json = parse_json_value(info.context_json.as_deref(), "context_json");
+    let header = build_review_decision_completion_header(
+        result_json.as_ref(),
+        context_json.as_ref(),
+        &info.card_id,
+    );
+    let body = review_decision_summary_body(result_json.as_ref(), info.duration_seconds)?;
+    Some(prepend_result_header(&body, header))
+}
+
 fn build_dispatch_completion_summary(info: &CompletedDispatchInfo) -> Option<String> {
+    if info.dispatch_type == "review-decision" {
+        return build_review_decision_completion_summary(info);
+    }
+
     if !is_work_dispatch_type(&info.dispatch_type) {
         return None;
     }
@@ -328,14 +378,23 @@ fn build_dispatch_completion_summary(info: &CompletedDispatchInfo) -> Option<Str
         duration_seconds: info.duration_seconds,
     };
 
-    Some(format!(
+    let body = format!(
         "🔔 완료 요약: {}개 파일, +{}/-{}, {}\n소요 시간 {}",
         summary.stats.files_changed,
         summary.stats.additions,
         summary.stats.deletions,
         format_merge_status(summary.merge_status),
         format_dispatch_duration(summary.duration_seconds),
-    ))
+    );
+    let header = build_work_completion_result_header(
+        result_json.as_ref(),
+        context_json.as_ref(),
+        &info.card_id,
+        completed_branch.as_deref(),
+        completed_without_changes,
+        result_header_merge_status(summary.merge_status),
+    );
+    Some(prepend_result_header(&body, header))
 }
 
 async fn ensure_thread_is_postable(
@@ -1014,7 +1073,10 @@ fn render_dispatch_message(
     }
     lines.push(instruction_line.to_string());
 
-    prefix_dispatch_message(dispatch_type.unwrap_or("dispatch"), &lines.join("\n"))
+    let header =
+        build_review_decision_dispatch_header(dispatch_type, issue_number, title, context_json);
+    let body = prepend_result_header(&lines.join("\n"), header);
+    prefix_dispatch_message(dispatch_type.unwrap_or("dispatch"), &body)
 }
 
 pub(crate) fn build_minimal_dispatch_message(
@@ -1136,6 +1198,74 @@ mod tests {
         assert_eq!(
             extract_review_verdict(Some(r#"{"verdict":"improve"}"#)),
             "improve"
+        );
+    }
+
+    #[test]
+    fn review_decision_dispatch_header_renders_rework_without_body_changes() {
+        let message = format_dispatch_message(
+            "dispatch-1",
+            "Fix deterministic headers",
+            None,
+            Some(3810),
+            Some("review-decision"),
+            Some(r#"{"verdict":"rework","pr_number":123}"#),
+        );
+
+        assert!(message.starts_with("── review-decision dispatch ──\n"));
+        assert!(message.contains("리뷰 REWORK · 수정 필요\n"));
+        assert!(message.contains("대상: issue=#3810, pr=#123\n"));
+        assert!(message.contains("다음: accept/dispute/dismiss 결정\n\n"));
+        assert!(message.contains("DISPATCH:dispatch-1 [⚖️ 리뷰 검토] - #3810"));
+        assert!(message.contains("한 줄 지시: GitHub 리뷰 피드백을 확인"));
+    }
+
+    #[test]
+    fn dispatch_completion_summary_prepends_header_and_preserves_body() {
+        let info = CompletedDispatchInfo {
+            dispatch_type: "implementation".to_string(),
+            status: "completed".to_string(),
+            card_id: "card-1".to_string(),
+            result_json: Some(
+                r#"{"work_outcome":"noop","completed_without_changes":true}"#.to_string(),
+            ),
+            context_json: Some(r#"{"issue_number":3810}"#.to_string()),
+            thread_id: Some("123".to_string()),
+            duration_seconds: Some(125),
+        };
+
+        let message = build_dispatch_completion_summary(&info).expect("completion summary");
+
+        assert!(message.starts_with(
+            "작업 PASS · 변경 없음\n대상: issue=#3810\n다음: 후속 단계 진행 가능\n\n"
+        ));
+        assert!(message.contains("🔔 완료 요약: 0개 파일, +0/-0, noop\n소요 시간 3분"));
+    }
+
+    #[test]
+    fn review_decision_completion_summary_prepends_decision_header() {
+        let info = CompletedDispatchInfo {
+            dispatch_type: "review-decision".to_string(),
+            status: "completed".to_string(),
+            card_id: "card-1".to_string(),
+            result_json: Some(
+                r#"{"decision":"dispute","completion_source":"review_decision_api"}"#.to_string(),
+            ),
+            context_json: Some(r#"{"issue_number":3810,"pr_number":3845}"#.to_string()),
+            thread_id: Some("123".to_string()),
+            duration_seconds: Some(61),
+        };
+
+        let message = build_dispatch_completion_summary(&info).expect("completion summary");
+
+        assert!(message.starts_with(
+            "리뷰 검토 DISPUTE · 재리뷰 필요\n\
+             대상: issue=#3810, pr=#3845\n\
+             다음: review dispatch 진행\n\n"
+        ));
+        assert!(
+            message
+                .contains("🔔 리뷰 검토 완료: dispute\nsource review_decision_api\n소요 시간 2분")
         );
     }
 
