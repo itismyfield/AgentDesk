@@ -50,7 +50,7 @@ use self::idle_transcript_scan::{
 // behavior-identical; the names are re-imported here so the parent's call sites
 // (and the test module) stay byte-identical.
 #[cfg(unix)]
-mod rehydration;
+pub(in crate::services::discord) mod rehydration;
 #[cfg(unix)]
 use self::rehydration::{
     codex_tui_rehydrated_binding_from_rollout_path, rehydrate_existing_claude_tui_bindings,

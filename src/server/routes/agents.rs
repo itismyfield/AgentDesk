@@ -307,6 +307,12 @@ pub async fn agent_diag(
     let task_notification_kind = inflight
         .as_ref()
         .and_then(|state| state.task_notification_kind.clone());
+    let tmux_relay_adoption = tmux_relay_adoption_json(
+        session.provider.as_deref(),
+        tmux_name.as_deref(),
+        session.thread_channel_id.as_deref(),
+        watcher_snapshot_json.as_ref(),
+    );
 
     (
         StatusCode::OK,
@@ -329,6 +335,7 @@ pub async fn agent_diag(
             "oldest_child_spawned_at": oldest_child_spawned_at,
             "children": child_inventory,
             "tui_prompt_readiness": tui_prompt_readiness,
+            "tmux_relay_adoption": tmux_relay_adoption,
             // #tui-hook-ttl-buffer (TSK-P1-003 surfaced early per the missing
             // output-schema contract): additive, process-global snapshot of the
             // in-memory hook registry. New top-level field — existing diag
@@ -423,6 +430,145 @@ fn tui_prompt_readiness_json(
     _tmux_name: Option<&str>,
     _cwd: Option<&str>,
     _provider_session_id: Option<&str>,
+) -> Option<Value> {
+    None
+}
+
+#[cfg(unix)]
+fn tmux_relay_adoption_json(
+    provider: Option<&str>,
+    tmux_name: Option<&str>,
+    channel_id: Option<&str>,
+    watcher_snapshot: Option<&Value>,
+) -> Option<Value> {
+    let tmux_name = tmux_name.map(str::trim).filter(|value| !value.is_empty())?;
+    let pane_liveness = crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux_name);
+    let tmux_session_exists = crate::services::tmux_diagnostics::tmux_session_exists(tmux_name);
+    let watcher_attached = watcher_snapshot
+        .and_then(|value| value.get("attached"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let watcher_tmux_session = watcher_snapshot
+        .and_then(|value| value.get("tmux_session"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let watcher_tmux_matches = watcher_tmux_session.as_deref() == Some(tmux_name);
+    let watcher_owner_channel_id = watcher_snapshot
+        .and_then(|value| value.get("watcher_owner_channel_id"))
+        .and_then(Value::as_u64);
+    let parsed_channel_id = channel_id.and_then(|value| value.trim().parse::<u64>().ok());
+    let dead_marker_path = crate::services::tmux_common::session_dead_marker_path(tmux_name);
+    let state = classify_tmux_relay_adoption_state(
+        pane_liveness,
+        tmux_session_exists,
+        watcher_attached,
+        watcher_tmux_matches,
+    );
+    let pane_liveness_label = match pane_liveness {
+        crate::services::platform::tmux::PaneLiveness::Live => "live",
+        crate::services::platform::tmux::PaneLiveness::DeadOrAbsent => "dead_or_absent",
+        crate::services::platform::tmux::PaneLiveness::ProbeError => "probe_error",
+    };
+
+    Some(json!({
+        "state": state,
+        "provider": provider.unwrap_or(""),
+        "channel_id": parsed_channel_id,
+        "tmux_session": tmux_name,
+        "tmux_session_exists": tmux_session_exists,
+        "tmux_pane_liveness": pane_liveness_label,
+        "tmux_pane_alive": matches!(
+            pane_liveness,
+            crate::services::platform::tmux::PaneLiveness::Live
+        ),
+        "stale_dead_marker_present": FsPath::new(&dead_marker_path).exists(),
+        "watcher_attached": watcher_attached,
+        "watcher_tmux_session": watcher_tmux_session,
+        "watcher_tmux_matches": watcher_tmux_matches,
+        "watcher_owner_channel_id": watcher_owner_channel_id,
+    }))
+}
+
+#[cfg(unix)]
+fn classify_tmux_relay_adoption_state(
+    pane_liveness: crate::services::platform::tmux::PaneLiveness,
+    tmux_session_exists: bool,
+    watcher_attached: bool,
+    watcher_tmux_matches: bool,
+) -> &'static str {
+    match pane_liveness {
+        crate::services::platform::tmux::PaneLiveness::ProbeError => "unknown",
+        crate::services::platform::tmux::PaneLiveness::DeadOrAbsent if !tmux_session_exists => {
+            "no_tmux"
+        }
+        crate::services::platform::tmux::PaneLiveness::DeadOrAbsent => "tmux_dead_or_absent",
+        crate::services::platform::tmux::PaneLiveness::Live => {
+            if watcher_attached && watcher_tmux_matches {
+                "adopted"
+            } else {
+                "tmux_live_not_adopted"
+            }
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tmux_relay_adoption_state_tests {
+    use crate::services::platform::tmux::PaneLiveness;
+
+    #[test]
+    fn live_tmux_without_matching_watcher_is_reported_as_not_adopted() {
+        assert_eq!(
+            super::classify_tmux_relay_adoption_state(PaneLiveness::Live, true, false, false),
+            "tmux_live_not_adopted"
+        );
+        assert_eq!(
+            super::classify_tmux_relay_adoption_state(PaneLiveness::Live, true, true, false),
+            "tmux_live_not_adopted"
+        );
+    }
+
+    #[test]
+    fn live_tmux_with_matching_watcher_is_adopted() {
+        assert_eq!(
+            super::classify_tmux_relay_adoption_state(PaneLiveness::Live, true, true, true),
+            "adopted"
+        );
+    }
+
+    #[test]
+    fn absent_and_probe_error_states_are_distinct() {
+        assert_eq!(
+            super::classify_tmux_relay_adoption_state(
+                PaneLiveness::DeadOrAbsent,
+                false,
+                false,
+                false,
+            ),
+            "no_tmux"
+        );
+        assert_eq!(
+            super::classify_tmux_relay_adoption_state(
+                PaneLiveness::DeadOrAbsent,
+                true,
+                false,
+                false,
+            ),
+            "tmux_dead_or_absent"
+        );
+        assert_eq!(
+            super::classify_tmux_relay_adoption_state(PaneLiveness::ProbeError, true, false, false,),
+            "unknown"
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn tmux_relay_adoption_json(
+    _provider: Option<&str>,
+    _tmux_name: Option<&str>,
+    _channel_id: Option<&str>,
+    _watcher_snapshot: Option<&Value>,
 ) -> Option<Value> {
     None
 }
