@@ -22,15 +22,79 @@ fn semantic_terminal_boundary_allowed(line: &str, idx: usize, ch: char) -> bool 
         return false;
     }
 
-    let token_before_dot = line[..idx].rsplit(char::is_whitespace).next().unwrap_or("");
     if before.is_some_and(|ch| ch.is_ascii_alphanumeric())
-        && after.is_some_and(|ch| ch.is_ascii_lowercase())
-        && !has_hangul(token_before_dot)
+        && extension_join_candidate(line, idx, &line[idx + ch.len_utf8()..])
     {
         return false;
     }
 
     true
+}
+
+fn token_before_dot(line: &str, dot_idx: usize) -> &str {
+    line[..dot_idx]
+        .rsplit(|ch: char| ch.is_whitespace() || matches!(ch, '`' | '(' | '[' | '{' | '/' | '\\'))
+        .next()
+        .unwrap_or("")
+}
+
+fn leading_extension_token(text: &str) -> &str {
+    let trimmed = text.trim_start();
+    let end = trimmed
+        .char_indices()
+        .find(|(_, ch)| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')))
+        .map(|(idx, _)| idx)
+        .unwrap_or(trimmed.len());
+    &trimmed[..end]
+}
+
+fn common_extension_token(token: &str) -> bool {
+    matches!(
+        token,
+        "bash"
+            | "css"
+            | "csv"
+            | "db"
+            | "env"
+            | "gif"
+            | "html"
+            | "jpeg"
+            | "jpg"
+            | "js"
+            | "json"
+            | "jsx"
+            | "lock"
+            | "log"
+            | "md"
+            | "pdf"
+            | "png"
+            | "py"
+            | "rs"
+            | "scss"
+            | "sh"
+            | "sql"
+            | "sqlite"
+            | "svg"
+            | "toml"
+            | "ts"
+            | "tsx"
+            | "txt"
+            | "webp"
+            | "xml"
+            | "yaml"
+            | "yml"
+            | "zsh"
+    )
+}
+
+fn extension_join_candidate(line: &str, dot_idx: usize, incoming: &str) -> bool {
+    let before = token_before_dot(line, dot_idx);
+    let extension = leading_extension_token(incoming);
+    !before.is_empty() && !has_hangul(before) && common_extension_token(extension)
+}
+
+fn inline_code_span_open(line: &str) -> bool {
+    line.chars().filter(|ch| *ch == '`').count() % 2 == 1
 }
 
 fn markdown_continuation_head(text: &str) -> bool {
@@ -93,6 +157,35 @@ pub(in crate::services::discord) fn message_split_boundary(
     }
 }
 
+fn continuation_context_prefix(index: usize, total: usize) -> String {
+    let full = format!("[{}/{}]\n", index + 1, total);
+    if full.len() <= 10 {
+        return full;
+    }
+    let partial = format!("[{}]\n", index + 1);
+    if partial.len() <= 10 {
+        partial
+    } else {
+        "[+]\n".to_string()
+    }
+}
+
+pub(in crate::services::discord) fn add_continuation_context(chunks: Vec<String>) -> Vec<String> {
+    if chunks.len() <= 1 {
+        return chunks;
+    }
+    let total = chunks.len();
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            let prefix = continuation_context_prefix(index, total);
+            debug_assert!(prefix.len() <= 10);
+            format!("{prefix}{chunk}")
+        })
+        .collect()
+}
+
 pub(in crate::services::discord) fn semantic_chunk_separator_needed(
     prefix: &str,
     incoming: &str,
@@ -110,6 +203,9 @@ pub(in crate::services::discord) fn semantic_chunk_separator_needed(
 
     let tail_line = prefix.rsplit('\n').next().unwrap_or(prefix).trim_end();
     if markdown_continuation_tail(tail_line) {
+        return false;
+    }
+    if inline_code_span_open(tail_line) {
         return false;
     }
 
@@ -132,9 +228,7 @@ pub(in crate::services::discord) fn semantic_chunk_separator_needed(
             return false;
         }
         if before.is_some_and(|ch| ch.is_ascii_alphanumeric())
-            && next.is_some_and(|ch| ch.is_ascii_lowercase())
-            && !has_hangul(tail_line)
-            && !tail_line.chars().any(char::is_whitespace)
+            && extension_join_candidate(tail_line, last_idx, incoming)
         {
             return false;
         }

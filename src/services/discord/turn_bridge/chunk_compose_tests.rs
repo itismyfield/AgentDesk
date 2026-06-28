@@ -158,6 +158,17 @@ fn semantic_sentence_boundary_avoids_decimal_and_single_token_extension_splits()
     let mut file = String::from("config.");
     append_streamed_text_chunk(&mut file, "yaml");
     assert_eq!(file, "config.yaml");
+
+    let mut prose_file = String::from("Open config.");
+    append_streamed_text_chunk(&mut prose_file, "yaml");
+    assert_eq!(prose_file, "Open config.yaml");
+}
+
+#[test]
+fn semantic_sentence_boundary_avoids_open_inline_code_splits() {
+    let mut inline_code = String::from("Use `done.");
+    append_streamed_text_chunk(&mut inline_code, "` now");
+    assert_eq!(inline_code, "Use `done.` now");
 }
 
 #[test]

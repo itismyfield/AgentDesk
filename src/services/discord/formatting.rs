@@ -1252,7 +1252,8 @@ files, and memory recall below as new actionable input.\n\n\
     mod a0_characterization_tests {
         use super::super::super::semantic_boundaries::semantic_sentence_split_boundary;
         use super::super::{
-            DISCORD_MSG_LIMIT, plan_streaming_rollover, split_message, streaming_split_boundary,
+            DISCORD_MSG_LIMIT, long_message_reply_builders, plan_streaming_rollover, split_message,
+            streaming_split_boundary,
         };
 
         // -------------------------------------------------------------------
@@ -1360,6 +1361,20 @@ files, and memory recall below as new actionable input.\n\n\
                 chunks[1].starts_with("```rust\n"),
                 "next chunk re-opens the fence with the same language tag"
             );
+        }
+
+        #[test]
+        fn a0_long_message_reply_builders_add_compact_continuation_context() {
+            let body = "a".repeat(2500);
+            let replies = long_message_reply_builders(&body);
+            assert_eq!(replies.len(), 2);
+            let first = replies[0].content.as_ref().expect("first content");
+            let second = replies[1].content.as_ref().expect("second content");
+
+            assert!(first.starts_with("[1/2]\n"));
+            assert!(second.starts_with("[2/2]\n"));
+            assert!(first.len() <= DISCORD_MSG_LIMIT);
+            assert!(second.len() <= DISCORD_MSG_LIMIT);
         }
 
         // -------------------------------------------------------------------
@@ -1734,7 +1749,7 @@ pub(super) async fn send_long_message_ctx(ctx: Context<'_>, text: &str) -> Resul
         return Ok(());
     }
 
-    let chunks = split_message(text);
+    let chunks = super::semantic_boundaries::add_continuation_context(split_message(text));
     let total = chunks.len();
     for (i, chunk) in chunks.iter().enumerate() {
         tracing::debug!(
@@ -1763,7 +1778,7 @@ pub(in crate::services::discord) fn long_message_reply_builders(
         return vec![poise::CreateReply::default().content(text.to_string())];
     }
 
-    split_message(text)
+    super::semantic_boundaries::add_continuation_context(split_message(text))
         .into_iter()
         .map(|chunk| poise::CreateReply::default().content(chunk))
         .collect()
@@ -1862,7 +1877,7 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference(
         }
     }
 
-    let chunks = split_message(text);
+    let chunks = super::semantic_boundaries::add_continuation_context(split_message(text));
     let total = chunks.len();
     // #3082 part B: hold the per-channel answer-flush barrier for the whole
     // multi-chunk send so a queued-turn notice POST cannot interleave between
@@ -1942,7 +1957,7 @@ pub(super) async fn send_long_message_raw_with_rollback(
     shared: &Arc<SharedData>,
 ) -> Result<Vec<MessageId>, Error> {
     let payload_byte_len = text.len();
-    let chunks = split_message(text);
+    let chunks = super::semantic_boundaries::add_continuation_context(split_message(text));
     let total = chunks.len();
     let rollback_key = replace_continuation_rollback_key(channel_id, rollback_anchor_msg_id);
 
@@ -2227,7 +2242,7 @@ pub(super) async fn replace_long_message_raw_with_outcome(
     shared: &Arc<SharedData>,
 ) -> Result<ReplaceLongMessageOutcome, Error> {
     let payload_byte_len = text.len();
-    let chunks = split_message(text);
+    let chunks = super::semantic_boundaries::add_continuation_context(split_message(text));
     let total = chunks.len();
     let Some(first_chunk) = chunks.first() else {
         tracing::debug!(
