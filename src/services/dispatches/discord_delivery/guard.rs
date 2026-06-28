@@ -502,6 +502,56 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn kv_meta_markers_remain_authoritative_when_typed_shadow_missing() {
+        let pg_db = create_test_pg_db().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        let notified_dispatch_id = "dispatch-kv-notified-authority";
+        seed_dispatch(&pool, notified_dispatch_id).await;
+        sqlx::query("INSERT INTO kv_meta (key, value) VALUES ($1, $2)")
+            .bind(notified_key(notified_dispatch_id))
+            .bind(notified_dispatch_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(
+            !claim_dispatch_delivery_guard(Some(&pool), notified_dispatch_id)
+                .await
+                .unwrap(),
+            "kv_meta notified marker must block sends without a typed shadow row"
+        );
+        assert_eq!(delivery_event_count(&pool, notified_dispatch_id).await, 0);
+
+        let reserving_dispatch_id = "dispatch-kv-reserving-authority";
+        seed_dispatch(&pool, reserving_dispatch_id).await;
+        sqlx::query(
+            "INSERT INTO kv_meta (key, value, expires_at)
+             VALUES ($1, $2, NOW() + INTERVAL '5 minutes')",
+        )
+        .bind(reserving_key(reserving_dispatch_id))
+        .bind(reserving_dispatch_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(
+            !claim_dispatch_delivery_guard(Some(&pool), reserving_dispatch_id)
+                .await
+                .unwrap(),
+            "kv_meta reservation marker must block sends without a typed shadow row"
+        );
+        assert_eq!(
+            kv_meta_count(&pool, &reserving_key(reserving_dispatch_id)).await,
+            1
+        );
+        assert_eq!(delivery_event_count(&pool, reserving_dispatch_id).await, 0);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
     #[test]
     fn delivery_result_status_maps_to_event_status() {
         let skipped = DispatchNotifyDeliveryResult::success(

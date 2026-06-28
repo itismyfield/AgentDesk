@@ -2,7 +2,9 @@
 
 Source issue: #1952
 
-Last refreshed: 2026-05-08
+Current tracker: #3747
+
+Last refreshed: 2026-06-28
 
 ## Scope
 
@@ -11,7 +13,13 @@ dedupe authority from the legacy `kv_meta` reservation/finalization path to a
 fully typed `dispatch_delivery_events` claim path.
 
 The current 2026-05-08 decision is NO-GO, so this runbook is documentation for a
-future cutover, not an instruction to change production today.
+future cutover, not an instruction to change production today. Until #3747 or a
+successor tracker records GO, runtime source of truth remains:
+
+- `kv_meta['dispatch_reserving:{dispatch_id}']` for in-flight reservation;
+- `kv_meta['dispatch_notified:{dispatch_id}']` for final delivery dedupe;
+- `dispatch_delivery_events` for diagnostic, typed-read, shadow-write,
+  duplicate-metadata, API/dashboard, and reconciliation state.
 
 ## Rollback Goal
 
@@ -31,12 +39,13 @@ without deleting or rewriting typed delivery rows:
   reconciliation drift after that cutover.
 - The release process can deploy a rollback commit through
   `scripts/deploy-release.sh`.
-- No follow-up cleanup that deletes legacy guard support, especially #1864, has
-  been released.
+- No follow-up cleanup that deletes legacy guard support has been released.
+  The closed #1864 issue is historical cleanup tracking, not current approval to
+  remove the guard.
 
 ## Immediate Containment
 
-1. Stop the roll-forward sequence. Do not start #1864.
+1. Stop the roll-forward sequence. Do not remove legacy guard support.
 2. Capture the current reconciliation snapshot:
 
    ```bash
@@ -126,11 +135,17 @@ Then send or observe one routine dispatch and confirm:
 
 Only retry typed authority after all of these are true:
 
-- release dual-write has at least seven full KST days of observation;
-- at least 500 typed dispatch delivery events have been recorded;
-- every mismatch in the cutover window is zero or explicitly justified;
-- this runbook has one reviewer sign-off;
-- #1864 remains blocked until one post-cutover release passes.
+- release dual-write has at least seven full KST days of observation after all
+  prerequisite surfaces are deployed;
+- at least 500 typed dispatch delivery events have been recorded in the same
+  cutover observation window;
+- every mismatch in the cutover window is zero or tied to a concrete dispatch id
+  and explicitly justified;
+- legacy pre-shadow history is excluded from the cutover-window mismatch count
+  only when the event or key can be shown to predate shadow writes;
+- this runbook has one reviewer sign-off for the GO attempt;
+- legacy `kv_meta` shadow writes remain enabled for one full release after typed
+  authority flips, and cleanup starts only after that post-cutover release.
 
 ## Sign-Off
 

@@ -2,9 +2,32 @@
 
 Source issue: #1952
 
+Current tracker: #3747
+
 Decision: NO-GO
 
 All observation times are KST.
+
+## Tracking Status
+
+#1952 is closed because this report completed the requested go/no-go exercise
+and recorded a NO-GO decision. The closure does not mean typed
+`dispatch_delivery_events` authority was approved.
+
+#1864 is also closed, but the legacy guard cleanup it described remains blocked
+by this NO-GO decision. The current open tracking issue for the remaining
+typed-authority cutover work is #3747. Do not remove or weaken the legacy
+`kv_meta` guard based on the closed state of #1952 or #1864.
+
+Current runtime source of truth:
+
+- `kv_meta['dispatch_reserving:{dispatch_id}']` is authoritative for in-flight
+  reservation.
+- `kv_meta['dispatch_notified:{dispatch_id}']` is authoritative for final
+  delivery dedupe.
+- `dispatch_delivery_events` is diagnostic, typed-read, shadow-write,
+  duplicate-metadata, API/dashboard, and reconciliation state until a future GO
+  decision changes the authority contract.
 
 ## Evidence Sources
 
@@ -127,10 +150,17 @@ finalization path in place, with typed delivery rows retained for audit,
 reconciliation, dashboard display, and duplicate metadata where already
 supported.
 
-#1864 remains blocked. It should not start until a future GO report confirms:
+#1864 cleanup remains blocked even though the historical GitHub issue is closed.
+The current tracker for the next GO attempt is #3747. Legacy guard removal
+should not start until a future GO report confirms:
 
-- seven full KST days of release dual-write observation;
-- at least 500 typed delivery events;
-- zero cutover-window mismatches, or every mismatch fully justified;
-- rollback runbook reviewer sign-off;
-- one release has passed after the typed-authority cutover.
+- seven full KST days of release dual-write observation after all prerequisite
+  surfaces are present;
+- at least 500 typed delivery events in the same cutover observation window;
+- zero cutover-window mismatches, or every in-window mismatch tied to a concrete
+  dispatch id and fully justified;
+- justified exclusion of legacy pre-shadow history from the cutover-window
+  mismatch count;
+- rollback runbook reviewer sign-off for the GO attempt;
+- one full release of post-cutover `kv_meta` shadow writes after the
+  typed-authority cutover.
