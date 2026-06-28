@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 
 use crate::services::discord::health::HealthRegistry;
+use crate::services::discord::session_identity::{SessionIdentity, tmux_name_from_session_key};
 use crate::services::provider::ProviderKind;
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 use crate::services::turn_lifecycle::{
@@ -77,7 +78,7 @@ async fn force_purge_channel_mailbox(
             provider, channel_id,
         );
     let token_hash = session_key
-        .and_then(crate::services::discord::session_identity::SessionIdentity::parse)
+        .and_then(SessionIdentity::parse)
         .and_then(|identity| identity.token_hash)
         .unwrap_or_else(|| format!("force-purge-channel-{}", channel_id.get()));
     let Some(handle) =
@@ -244,12 +245,8 @@ impl QueueService {
                         .as_deref()
                         .and_then(|channel_id| channel_id.parse::<u64>().ok())
                         .map(ChannelId::new);
-                    let tmux_name = active_turn
-                        .session_key
-                        .split(':')
-                        .next_back()
-                        .unwrap_or_default()
-                        .to_string();
+                    let tmux_name = tmux_name_from_session_key(&active_turn.session_key)
+                        .unwrap_or_else(|| active_turn.session_key.clone());
                     let target = TurnLifecycleTarget {
                         provider: provider_kind,
                         channel_id: parsed_channel_id,
@@ -515,9 +512,10 @@ impl QueueService {
 
         let tmux_name = session_key
             .as_deref()
-            .and_then(|session_key| session_key.split(':').next_back())
-            .unwrap_or_default()
-            .to_string();
+            .map(|session_key| {
+                tmux_name_from_session_key(session_key).unwrap_or_else(|| session_key.to_string())
+            })
+            .unwrap_or_default();
         let target = TurnLifecycleTarget {
             provider: provider_kind,
             channel_id: parsed_channel_id,

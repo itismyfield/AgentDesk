@@ -1013,7 +1013,8 @@
     children (`send_target`, `send_gate`, `send_api`, `manual_delivery`) to
     `outbound/` while preserving the `health::` re-export API; #1879
     snapshot/mailbox extraction, and #3082 answer-flush-barrier field).
-  - `src/services/discord/health/recovery.rs` (2732 lines; +2 from #3711/#3712 mapping direct TUI runtime-binding-unavailable rebind failures to 409 Conflict; #3676 moved
+  - `src/services/discord/health/recovery.rs` (2729 lines; -3 from #3795
+    routing session-key tail fallback through `SessionIdentity`; +2 from #3711/#3712 mapping direct TUI runtime-binding-unavailable rebind failures to 409 Conflict; #3676 moved
     `tmux_alive_relay_dead` watchdog reattach logic into sibling
     `health/relay_dead_reattach.rs`, leaving recovery.rs with only the
     pre-cleanup hook so final transcript output can be delivered without
@@ -1460,11 +1461,12 @@
   - `src/db/kanban_cards/` (1932 total lines; kanban card persistence and
     GitHub sync lookup surface).
   - `src/db/postgres.rs` (1280 lines; #3651: the `FOREGROUND_RESERVE` process-global, the `background_should_yield` backpressure predicate + pure `should_yield_for_counters` helper, the `clamp_foreground_reserve` helper that keeps the background budget >= 1 for small `pool_max` configs, reserve install+clamp in `connect`, and the predicate + clamp unit tests; #3690: preferred_intake_node_labels upsert/sync + COALESCE preserve; #3692: `agent_roster_sync_enabled` leader-ownership gate on the roster sync; #3722 adds the bounded startup advisory lock wrapper plus concurrency coverage for migration/config-audit/reseed startup sections).
-  - `src/db/dispatched_sessions.rs` (1628 lines; dispatched session
+  - `src/db/dispatched_sessions.rs` (1627 lines; dispatched session
     persistence helpers. #3306: +48 for the narrow `load_session_channel_id_pg`
     durable-truth accessor the idle-relay drift self-heal reads; #3693: +2 to
     include `cwd` in provider resume selector lookup; #3718 makes runtime
-    activity heartbeat refresh monotonic via `GREATEST`).
+    activity heartbeat refresh monotonic via `GREATEST`; -1 from #3795 using
+    the central `SessionIdentity` tmux-tail helper).
   - `src/db/session_transcripts.rs` is a retained PG-cleanup surface (now below
     the giant-file threshold; bugfix only).
   - `src/db/prompt_manifests/` (directory, refactored).
@@ -1492,7 +1494,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   `src/services/auto_queue/cancel_run.rs` (1032) is also giant-file territory;
   split before further non-bugfix growth.
 - `src/services/onboarding/mod.rs` (2937),
-  `src/services/dispatched_sessions.rs` (1546), and
+  `src/services/dispatched_sessions.rs` (1550), and
   `src/services/settings.rs` (1114) — service-layer route support surfaces
   split out of the large dashboard route modules. (`src/services/onboarding.rs`
   and `src/services/api_friction.rs` have been removed/decomposed.)
@@ -1547,7 +1549,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   while the prior turn streams; +20 from #3637 centralizing post-paste error
   cleanup and making draft clearing cancel-agnostic.)
 - `src/services/memory/memento.rs` (1893).
-- `src/services/dispatched_sessions.rs` (1546) — dispatched session domain
+- `src/services/dispatched_sessions.rs` (1550) — dispatched session domain
   service. This is the post-#1515 SRP extraction target for route/database
   callsites, but the module itself is now giant-file territory; split focused
   helpers before adding non-bugfix behavior. (+5 from #3169 exposing the idle-
@@ -1555,7 +1557,9 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   watchdog liveness guard; +47 from #3693 making kill-tmux's `resumable` claim
   match Claude TUI transcript-backed resume semantics; +105 from #3718 making
   idle-kill skip active-dispatch sessions, use runtime output age as the
-  live-activity guard anchor, and log kill/skip timing decisions.)
+  live-activity guard anchor, and log kill/skip timing decisions; +4 from #3795
+  replacing inline session-key split errors with central `SessionIdentity`
+  helper calls and explicit legacy/namespaced error messages.)
 - `src/services/settings.rs` (1114) — settings domain service extracted from
   the route layer in #1519. Keep follow-up changes bugfix-only unless the file
   is split further.

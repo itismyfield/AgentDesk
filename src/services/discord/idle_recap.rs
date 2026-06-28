@@ -859,11 +859,8 @@ pub(in crate::services::discord) async fn spawn_clear_captured_idle_recap_for_ch
 
 /// Extract `tmux_session_name` from a session_key — the part after the last
 /// `:`. Mirrors `parseSessionTmuxName` from `policies/lib/timeouts-helpers.js`.
-pub(crate) fn tmux_session_name_from_key(session_key: &str) -> Option<&str> {
-    session_key
-        .rsplit_once(':')
-        .map(|(_, name)| name)
-        .filter(|s| !s.is_empty())
+pub(crate) fn tmux_session_name_from_key(session_key: &str) -> Option<String> {
+    crate::services::discord::session_identity::tmux_name_from_session_key(session_key)
 }
 
 /// #3146 Part 1 (codex clear/post race): does this channel currently have an

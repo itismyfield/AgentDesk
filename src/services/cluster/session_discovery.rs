@@ -56,6 +56,7 @@ use super::session_matcher::{
     match_session_detailed,
 };
 use super::session_registry::{RegistryChange, SessionRegistry, global_session_registry};
+use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::platform::tmux::{EnumeratedSession, list_sessions_with_pane_command};
 use crate::services::provider::{ProviderKind, parse_provider_and_channel_from_tmux_name};
 
@@ -351,9 +352,9 @@ fn normalize_nonempty(value: Option<&str>) -> Option<String> {
 
 fn tmux_name_and_segment_from_session_key(
     session_key: &str,
-) -> Option<(&str, ProviderKind, String)> {
-    let (_, tmux_name) = session_key.rsplit_once(':')?;
-    let (provider, tmux_segment) = parse_provider_and_channel_from_tmux_name(tmux_name)?;
+) -> Option<(String, ProviderKind, String)> {
+    let tmux_name = tmux_name_from_session_key(session_key)?;
+    let (provider, tmux_segment) = parse_provider_and_channel_from_tmux_name(&tmux_name)?;
     Some((tmux_name, provider, tmux_segment))
 }
 
@@ -362,7 +363,7 @@ fn live_tmux_segment_from_session_key(
     live_session_names: &HashSet<String>,
 ) -> Option<(ProviderKind, String)> {
     let (tmux_name, provider, tmux_segment) = tmux_name_and_segment_from_session_key(session_key)?;
-    if !live_session_names.contains(tmux_name) {
+    if !live_session_names.contains(&tmux_name) {
         tracing::debug!(
             session_key = %session_key,
             tmux_name = %tmux_name,

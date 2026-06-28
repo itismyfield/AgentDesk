@@ -158,7 +158,7 @@ async fn run_idle_recap_post_job(
     // timeout). Both legs degrade gracefully to "no summary" — the card
     // still ships its token / idle header in that case.
     let scrollback = match idle_recap::tmux_session_name_from_key(&session_key) {
-        Some(name) => idle_recap::capture_tmux_scrollback(name).await,
+        Some(name) => idle_recap::capture_tmux_scrollback(&name).await,
         None => None,
     };
     // Fallback for runtimes without a live tmux pane (notably `claude-e`,

@@ -944,7 +944,7 @@ pub async fn stop_agent_turn(
     }
 
     let session_key = session.session_key.clone();
-    let tmux_name = session_key.split(':').next_back().unwrap_or(&session_key);
+    let tmux_name = extract_tmux_name(&session_key).unwrap_or_else(|| session_key.clone());
     let lifecycle = stop_turn_preserving_queue(
         state.health_registry.as_deref(),
         &TurnLifecycleTarget {
@@ -954,7 +954,7 @@ pub async fn stop_agent_turn(
                 .as_deref()
                 .and_then(|value| value.parse::<u64>().ok())
                 .map(poise::serenity_prelude::ChannelId::new),
-            tmux_name: tmux_name.to_string(),
+            tmux_name: tmux_name.clone(),
         },
         &format!("사용자가 {id} 에이전트 턴 수동 중단 (POST /api/agents/{id}/turn/stop)"),
     )

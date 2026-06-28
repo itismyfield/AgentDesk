@@ -25,10 +25,10 @@
 //!
 //! This module consolidates the **parse** half into one unit-tested surface.
 //! The **build** half already lives in `ProviderKind::build_tmux_session_name`
-//! and `adk_session::build_namespaced_session_key`; those stay put. Existing
-//! call sites can migrate to [`SessionIdentity::parse`] opportunistically —
-//! the old inline `split_once(':')` patterns remain equivalent until each
-//! site is touched.
+//! and `adk_session::build_namespaced_session_key`; those stay put. Production
+//! call sites that parse session keys should route through
+//! [`SessionIdentity::parse`] or [`tmux_name_from_session_key`], leaving raw
+//! colon splitting only for this parser or non-session string formats.
 //!
 //! See `docs/recovery-paths.md` for the broader recovery-module SSoT plan.
 
@@ -62,26 +62,43 @@ impl SessionIdentity {
             return None;
         }
 
-        // Split on the FIRST `:` — everything before is the host (or the
-        // provider/token/host triple), everything after is the tmux name.
-        let (prefix, tmux_raw) = trimmed.split_once(':')?;
+        // Split on the LAST `:` for compatibility with old provider/channel
+        // prefixes such as `claude:<channel_id>:<tmux>`. The canonical forms
+        // still have exactly one colon.
+        let (prefix, tmux_raw) = trimmed.rsplit_once(':')?;
         let tmux_name = tmux_raw.trim();
         if tmux_name.is_empty() {
             return None;
         }
 
-        // `prefix` has 0 or 2 '/' separators. 0 = legacy `host`;
-        // 2 = namespaced `provider/token/host`.
+        // `prefix` has 0 or 2 '/' separators for canonical keys. Legacy audit
+        // rows also used `host/alias:tmux`; preserve that by taking the final
+        // slash segment as the host unless the prefix starts with a known
+        // provider and is therefore a malformed namespaced key.
         let prefix_parts: Vec<&str> = prefix.splitn(3, '/').collect();
         let (host, provider_from_key, token_hash, namespaced) = match prefix_parts.as_slice() {
-            [provider, token, host_part] if !provider.is_empty() && !token.is_empty() => (
-                host_part.trim().to_string(),
-                Some((*provider).to_string()),
-                Some((*token).to_string()),
-                true,
+            [provider, token, host_part] if ProviderKind::from_str(provider).is_some() => {
+                if provider.is_empty() || token.is_empty() || host_part.trim().is_empty() {
+                    return None;
+                }
+                (
+                    host_part.trim().to_string(),
+                    Some((*provider).to_string()),
+                    Some((*token).to_string()),
+                    true,
+                )
+            }
+            [provider, ..]
+                if ProviderKind::from_str(provider).is_some() && prefix.contains('/') =>
+            {
+                return None;
+            }
+            _ => (
+                prefix.rsplit('/').next()?.trim().to_string(),
+                None,
+                None,
+                false,
             ),
-            [host_only] => (host_only.trim().to_string(), None, None, false),
-            _ => return None,
         };
 
         if host.is_empty() {
@@ -116,12 +133,82 @@ impl SessionIdentity {
 /// Extract just the tmux session name from a session key in either form.
 ///
 /// Convenience wrapper around [`SessionIdentity::parse`] for call sites that
-/// only need the tmux tail. Previously duplicated across
-/// `services/queue.rs`, `server/routes/agents.rs`, `db/session_agent_resolution.rs`,
-/// and `server/routes/dispatched_sessions.rs`. New code should prefer this.
-// #3034: deliberate consolidation helper ("new code should prefer this"); no
-// live caller has migrated yet. Kept as the canonical session-key tail parser.
-#[allow(dead_code)]
+/// only need the tmux tail. New code should prefer this over ad hoc separator
+/// parsing.
 pub fn tmux_name_from_session_key(session_key: &str) -> Option<String> {
     SessionIdentity::parse(session_key).map(|id| id.tmux_name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SessionIdentity, tmux_name_from_session_key};
+
+    #[test]
+    fn parses_legacy_session_key() {
+        let identity = SessionIdentity::parse(" mac-mini:AgentDesk-codex-adk-cdx ").unwrap();
+
+        assert!(!identity.namespaced);
+        assert_eq!(identity.provider_from_key, None);
+        assert_eq!(identity.token_hash, None);
+        assert_eq!(identity.host, "mac-mini");
+        assert_eq!(identity.tmux_name, "AgentDesk-codex-adk-cdx");
+        assert_eq!(identity.legacy_key(), "mac-mini:AgentDesk-codex-adk-cdx");
+    }
+
+    #[test]
+    fn parses_namespaced_session_key() {
+        let identity =
+            SessionIdentity::parse("codex/hash123/mac-mini:AgentDesk-codex-adk-cdx-t123").unwrap();
+
+        assert!(identity.namespaced);
+        assert_eq!(identity.provider_from_key.as_deref(), Some("codex"));
+        assert_eq!(identity.token_hash.as_deref(), Some("hash123"));
+        assert_eq!(identity.host, "mac-mini");
+        assert_eq!(identity.tmux_name, "AgentDesk-codex-adk-cdx-t123");
+        assert_eq!(
+            identity.legacy_key(),
+            "mac-mini:AgentDesk-codex-adk-cdx-t123"
+        );
+        assert_eq!(
+            tmux_name_from_session_key("codex/hash123/mac-mini:AgentDesk-codex-adk-cdx-t123")
+                .as_deref(),
+            Some("AgentDesk-codex-adk-cdx-t123")
+        );
+    }
+
+    #[test]
+    fn legacy_parser_preserves_last_colon_tail_and_host_aliases() {
+        let multi_colon = SessionIdentity::parse(
+            "claude:1473922824350601297:agentdesk-claude-channel-1473922824350601297",
+        )
+        .unwrap();
+        assert!(!multi_colon.namespaced);
+        assert_eq!(multi_colon.host, "claude:1473922824350601297");
+        assert_eq!(
+            multi_colon.tmux_name,
+            "agentdesk-claude-channel-1473922824350601297"
+        );
+        assert_eq!(
+            tmux_name_from_session_key(
+                "claude:1473922824350601297:agentdesk-claude-channel-1473922824350601297"
+            )
+            .as_deref(),
+            Some("agentdesk-claude-channel-1473922824350601297")
+        );
+
+        let host_alias = SessionIdentity::parse("remote-host/farbox:codex-1234").unwrap();
+        assert!(!host_alias.namespaced);
+        assert_eq!(host_alias.host, "farbox");
+        assert_eq!(host_alias.tmux_name, "codex-1234");
+    }
+
+    #[test]
+    fn rejects_missing_or_empty_parts() {
+        assert!(SessionIdentity::parse("").is_none());
+        assert!(SessionIdentity::parse("mac-mini").is_none());
+        assert!(SessionIdentity::parse(":AgentDesk-codex-adk-cdx").is_none());
+        assert!(SessionIdentity::parse("mac-mini: ").is_none());
+        assert!(SessionIdentity::parse("codex//mac-mini:AgentDesk-codex-adk-cdx").is_none());
+        assert!(SessionIdentity::parse("codex/hash123/:AgentDesk-codex-adk-cdx").is_none());
+    }
 }

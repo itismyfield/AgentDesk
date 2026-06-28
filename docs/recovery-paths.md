@@ -125,9 +125,10 @@ All three paths parse the same session-key shapes. Parsing is centralised in
 - legacy: `<host>:<tmux_name>`
 - namespaced: `<provider>/<token_hash>/<host>:<tmux_name>`
 
-Existing scattered `split_once(':')` call sites
-(`services/queue.rs`, `server/routes/session_activity.rs`, etc.) continue to
-compile — they are slated for migration in follow-up cleanups.
+Production session-key call sites that need host/tmux identity route through
+`SessionIdentity::parse` or its `tmux_name_from_session_key` wrapper. Remaining
+raw colon splitting uses are non-session string parsing, the parser
+implementation itself, or explicitly out-of-scope compatibility surfaces.
 
 ## Inflight Cleanup SSoT
 
@@ -162,8 +163,6 @@ lane (`docs/high-risk-recovery-lane.md`).
 Tracked under #1074 follow-ups:
 
 - Mechanical split of `recovery_engine.rs` into the three path modules.
-- Migrate remaining inline `split_once(':')` sites to
-  `session_identity::SessionIdentity::parse`.
 - Move `reregister_active_turn_from_inflight` and
   `rebind_inflight_for_channel` helpers into `recovery::runtime` and
   `recovery::manual_rebind` respectively, leaving `recovery_engine.rs` as a

@@ -45,7 +45,7 @@ async fn reap_orphan_thread_tmux(deleted_keys: &[String]) -> usize {
                     continue;
                 };
                 if crate::services::platform::tmux::kill_session(
-                    tmux_name,
+                    &tmux_name,
                     "stale thread session GC — DB row removed",
                 ) {
                     killed += 1;
@@ -64,21 +64,21 @@ async fn reap_orphan_thread_tmux(deleted_keys: &[String]) -> usize {
 }
 
 #[cfg(unix)]
-fn deleted_thread_tmux_reap_candidate<'a>(
-    session_key: &'a str,
+fn deleted_thread_tmux_reap_candidate(
+    session_key: &str,
     current_owner_marker: &str,
     belongs_to_current_runtime: impl Fn(&str, &str) -> bool,
     has_session: impl Fn(&str) -> bool,
-) -> Option<&'a str> {
-    // session_key format is `hostname:tmux_name`.
-    let (_, tmux_name) = session_key.split_once(':')?;
+) -> Option<String> {
+    let tmux_name =
+        crate::services::discord::session_identity::tmux_name_from_session_key(session_key)?;
     let (_, channel_name) =
-        crate::services::provider::parse_provider_and_channel_from_tmux_name(tmux_name)?;
+        crate::services::provider::parse_provider_and_channel_from_tmux_name(&tmux_name)?;
     crate::services::discord::adk_session::parse_thread_channel_id_from_name(&channel_name)?;
-    if !belongs_to_current_runtime(tmux_name, current_owner_marker) {
+    if !belongs_to_current_runtime(&tmux_name, current_owner_marker) {
         return None;
     }
-    if !has_session(tmux_name) {
+    if !has_session(&tmux_name) {
         return None;
     }
     Some(tmux_name)
@@ -110,7 +110,16 @@ mod thread_session_gc_tests {
                 &belongs_to_current_runtime,
                 &has_session,
             ),
-            Some(owned_thread)
+            Some(owned_thread.to_string())
+        );
+        assert_eq!(
+            deleted_thread_tmux_reap_candidate(
+                &format!("codex/hash123/host:{owned_thread}"),
+                marker,
+                &belongs_to_current_runtime,
+                &has_session,
+            ),
+            Some(owned_thread.to_string())
         );
         assert_eq!(
             deleted_thread_tmux_reap_candidate(

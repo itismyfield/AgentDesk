@@ -7,6 +7,7 @@ use crate::db::auto_queue::slot_predicate::{
     DispatchSlotPolarity, active_dispatch_on_slot_predicate,
 };
 use crate::services::discord::health::HealthRegistry;
+use crate::services::discord::session_identity::tmux_name_from_session_key;
 
 #[derive(Debug, Clone)]
 struct RuntimeSlotClearTarget {
@@ -93,9 +94,9 @@ async fn build_slot_clear_target_pg(
             .filter(|value| !value.trim().is_empty())
             .or_else(|| {
                 session_key.as_deref().and_then(|key| {
-                    key.split_once(':').and_then(|(_, tmux_name)| {
+                    tmux_name_from_session_key(key).and_then(|tmux_name| {
                         crate::services::provider::parse_provider_and_channel_from_tmux_name(
-                            tmux_name,
+                            &tmux_name,
                         )
                         .map(|(provider, _)| provider.as_str().to_string())
                     })
