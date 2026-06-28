@@ -66,7 +66,6 @@ grandfathered_baseline_paths = [
   "src/server/routes/agents_crud.rs",
   "src/server/routes/agents_setup.rs",
   "src/server/routes/dispatches/thread_reuse.rs",
-  "src/server/routes/docs.rs",
   "src/server/routes/escalation.rs",
   "src/server/routes/health_api.rs",
   "src/server/routes/kanban.rs",
@@ -293,14 +292,6 @@ file = "src/services/discord/inflight.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
 decompose_issue = "#3835"
-
-[[entry]]
-# #3721 first-batch promotion: largest API-facing grandfathered file; split
-# static endpoint inventory and guide bodies from the route handlers.
-file = "src/server/routes/docs.rs"
-owner = "server-runtime"
-deadline = "2026-10-31"
-decompose_issue = "#3836"
 
 [[entry]]
 # #3721 first-batch promotion: Discord message intake execution mixes request

@@ -137,6 +137,88 @@ class ApiDocsCoverageTest(unittest.TestCase):
                 [pair("GET", "/api/documented")],
             )
 
+    def test_parser_follows_docs_inventory_child_module(self) -> None:
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            docs = tmp_path / "docs.rs"
+            docs.write_text("mod inventory;\n", encoding="utf-8")
+            inventory_dir = tmp_path / "docs"
+            inventory_dir.mkdir()
+            (inventory_dir / "inventory.rs").write_text(
+                textwrap.dedent(
+                    """
+                    pub(super) fn all_endpoints() {
+                        vec![
+                            ep("GET", "/api/from-inventory", "docs", "description"),
+                        ];
+                    }
+                    """
+                ).lstrip("\n"),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                CHECKER.parse_docs_endpoints(docs),
+                [pair("GET", "/api/from-inventory")],
+            )
+
+    def test_parser_follows_inventory_endpoint_parts(self) -> None:
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            docs = tmp_path / "docs.rs"
+            docs.write_text("mod inventory;\n", encoding="utf-8")
+            inventory_dir = tmp_path / "docs"
+            inventory_dir.mkdir()
+            (inventory_dir / "inventory.rs").write_text(
+                textwrap.dedent(
+                    """
+                    mod endpoints;
+
+                    pub(super) fn all_endpoints() {
+                        endpoints::all()
+                    }
+                    """
+                ).lstrip("\n"),
+                encoding="utf-8",
+            )
+            endpoint_parts = inventory_dir / "inventory" / "endpoints"
+            endpoint_parts.mkdir(parents=True)
+            (endpoint_parts / "mod.rs").write_text(
+                textwrap.dedent(
+                    """
+                    mod part_01;
+                    mod part_02;
+                    mod part_03;
+
+                    fn all() {
+                        endpoints.extend(part_01::endpoints());
+                        endpoints.extend(part_02::endpoints());
+                    }
+                    """
+                ).lstrip("\n"),
+                encoding="utf-8",
+            )
+            (endpoint_parts / "part_01.rs").write_text(
+                'fn endpoints() { vec![ep("GET", "/api/one", "docs", "description")]; }\n',
+                encoding="utf-8",
+            )
+            (endpoint_parts / "part_02.rs").write_text(
+                'fn endpoints() { vec![ep("POST", "/api/two", "docs", "description")]; }\n',
+                encoding="utf-8",
+            )
+            (endpoint_parts / "part_03.rs").write_text(
+                (
+                    'fn endpoints() { vec![ep("DELETE", "/api/not-extended", '
+                    '"docs", "description")]; }\n'
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                CHECKER.parse_docs_endpoints(docs),
+                [pair("GET", "/api/one"), pair("POST", "/api/two")],
+            )
+
     def test_mounted_route_collection_includes_v1_router(self) -> None:
         mounted = set(CHECKER.collect_mounted_api_endpoints())
 
