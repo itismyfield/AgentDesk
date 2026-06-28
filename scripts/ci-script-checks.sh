@@ -51,6 +51,13 @@ echo "=== Postgres migration checksum guard ==="
 echo "=== State/lint hardening guard ==="
 "$PYTHON" scripts/audit_state_lint_hardening.py
 
+echo "=== Policy DB capability manifest guard (#3734) ==="
+"$PYTHON" scripts/check_policy_db_capabilities.py --no-silent-growth \
+  --require-manifest policies/timeouts/active-monitor.cap.yaml \
+  --require-manifest policies/review-automation.cap.yaml \
+  --require-manifest policies/merge-automation.cap.yaml
+"$PYTHON" -m unittest tests.test_policy_db_capabilities
+
 echo "=== await_holding_lock ratchet guard ==="
 "$PYTHON" scripts/check_await_holding_lock_ratchet.py
 

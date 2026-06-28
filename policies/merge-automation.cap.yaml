@@ -1,0 +1,41 @@
+version: 1
+policy: merge-automation
+trust: trusted-automation
+source_events:
+  - onCardTerminal
+  - onTick5min
+include_files:
+  - policies/lib/merge-notification-dispatcher.js
+db:
+  read:
+    tables:
+      - auto_queue_entries
+      - auto_queue_runs
+      - issue_specs
+      - kanban_cards
+      - kv_meta
+      - sessions
+      - task_dispatches
+      - test_phase_runs
+  write:
+    tables:
+      - kanban_cards
+      - kv_meta
+  raw_sql:
+    mode: legacy
+    capabilities:
+      - merge_automation_legacy_raw_db
+    markers_required: false
+    rationale: broad legacy merge automation DB access pinned by no-silent-growth baseline
+    no_silent_growth:
+      callsites: 21
+      fingerprint: sha256:97bc5a54a0815356381d47ed38420291977b41679f59534ed60463f4768bd73c
+exec:
+  allow:
+    - gh
+    - git
+    - tmux
+http:
+  loopback_only: true
+session:
+  kill: false
