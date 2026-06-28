@@ -360,10 +360,12 @@ fn run_claude_tui_warm_followup_submit_and_stream(
                     crate::services::claude_tui::input::prompt_readiness_snapshot(
                         tmux_session_name,
                     );
+                let requeue_for_retry = claude_tui_followup_wait_error_requeue_for_retry(&err);
                 emit_claude_tui_busy_followup_notice(
                     &sender,
                     tmux_session_name,
                     &post_wait_snapshot,
+                    requeue_for_retry,
                 );
                 log_producer_exit(
                     "tui_warm_followup_busy_pre_submit",
@@ -382,7 +384,7 @@ fn run_claude_tui_warm_followup_submit_and_stream(
                         "initial_busy_snapshot_prompt_draft_detected": snapshot.prompt_draft_detected,
                         "wait_outcome": if timed_out { "timeout" } else { "error" },
                         "wait_error": err.clone(),
-                        "requeue_for_retry": crate::services::claude::claude_tui_followup_requeue_enabled(),
+                        "requeue_for_retry": requeue_for_retry,
                     }),
                 );
                 // The busy-timeout is PRE-submit: the prompt was never sent to
@@ -390,7 +392,7 @@ fn run_claude_tui_warm_followup_submit_and_stream(
                 // When requeue is enabled, surface it as a retryable error so the
                 // turn bridge re-queues the inflight message (it holds owner/
                 // msg_id/text); otherwise keep the legacy drop-with-busy-notice.
-                if crate::services::claude::claude_tui_followup_requeue_enabled() {
+                if requeue_for_retry {
                     return ClaudeTuiWarmFollowupSubmitOutcome::Terminal(Err(err));
                 }
                 return ClaudeTuiWarmFollowupSubmitOutcome::Terminal(Ok(()));
@@ -595,6 +597,69 @@ fn run_claude_tui_warm_followup_submit_and_stream(
         }
     }
     ClaudeTuiWarmFollowupSubmitOutcome::FallThroughRecreate
+}
+
+fn claude_tui_followup_wait_error_requeue_for_retry(error: &str) -> bool {
+    crate::services::claude_tui::input::is_prompt_ready_timeout_error(error)
+        && crate::services::claude::claude_tui_followup_requeue_enabled()
+}
+
+#[cfg(test)]
+mod followup_wait_error_requeue_tests {
+    use super::*;
+
+    const FOLLOWUP_REQUEUE_ENV: &str = "AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE";
+
+    struct EnvRestore {
+        previous: Option<String>,
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match self.previous.as_deref() {
+                Some(value) => unsafe { std::env::set_var(FOLLOWUP_REQUEUE_ENV, value) },
+                None => unsafe { std::env::remove_var(FOLLOWUP_REQUEUE_ENV) },
+            }
+        }
+    }
+
+    fn with_followup_requeue_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared test env lock poisoned");
+        let _restore = EnvRestore {
+            previous: std::env::var(FOLLOWUP_REQUEUE_ENV).ok(),
+        };
+        match value {
+            Some(value) => unsafe { std::env::set_var(FOLLOWUP_REQUEUE_ENV, value) },
+            None => unsafe { std::env::remove_var(FOLLOWUP_REQUEUE_ENV) },
+        }
+        f()
+    }
+
+    #[test]
+    fn followup_wait_requeue_requires_timeout_error() {
+        with_followup_requeue_env(None, || {
+            assert!(claude_tui_followup_wait_error_requeue_for_retry(
+                "timeout waiting for claude tui follow-up prompt input readiness after 45s"
+            ));
+            assert!(!claude_tui_followup_wait_error_requeue_for_retry(
+                "unexpected prompt wait error"
+            ));
+            assert!(!claude_tui_followup_wait_error_requeue_for_retry(
+                crate::services::claude_tui::input::PROMPT_READY_CANCELLED_ERROR
+            ));
+        });
+    }
+
+    #[test]
+    fn followup_wait_requeue_respects_emergency_opt_out() {
+        with_followup_requeue_env(Some("0"), || {
+            assert!(!claude_tui_followup_wait_error_requeue_for_retry(
+                "timeout waiting for claude tui follow-up prompt input readiness after 45s"
+            ));
+        });
+    }
 }
 
 /// Attempt a warm follow-up against an existing live Claude TUI tmux session.

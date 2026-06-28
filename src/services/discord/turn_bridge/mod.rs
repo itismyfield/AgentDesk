@@ -2,6 +2,7 @@ mod cancel_finalize_policy;
 mod chunk_compose;
 mod completion_guard;
 mod context_window;
+mod followup_requeue;
 mod headless_delivery;
 mod memory_lifecycle;
 mod output_lifecycle;
@@ -82,8 +83,8 @@ pub(in crate::services::discord) use status_panel::{
     complete_status_panel_v2_with_http, normalize_status_panel_message_id,
 };
 pub(super) use streaming_edit_text::{
-    bridge_pre_submission_tui_prompt_error, bridge_tui_transport_error_should_skip_quiescence,
-    build_turn_bridge_streaming_edit_text,
+    CLAUDE_TUI_FOLLOWUP_REQUEUE_DELIVERY_NOTICE, bridge_claude_tui_followup_requeue_prompt_error,
+    bridge_tui_transport_error_should_skip_quiescence, build_turn_bridge_streaming_edit_text,
 };
 pub(super) use task_notification_lifecycle::{
     close_all_tracked_background_children, close_next_tracked_background_child,
@@ -3854,6 +3855,18 @@ pub(super) fn spawn_turn_bridge(
             tracing::warn!("  [{ts}] ⚠ invalid API_FRICTION marker: {error}");
         }
 
+        let claude_tui_followup_pre_submit_requeue_candidate =
+            crate::services::claude::claude_tui_followup_requeue_enabled()
+                && bridge_claude_tui_followup_requeue_prompt_error(
+                    &provider,
+                    inflight_state.runtime_kind,
+                    &full_response,
+                );
+        if claude_tui_followup_pre_submit_requeue_candidate {
+            full_response = CLAUDE_TUI_FOLLOWUP_REQUEUE_DELIVERY_NOTICE.to_string();
+            inflight_state.full_response = full_response.clone();
+        }
+
         let is_prompt_too_long = full_response.contains("__prompt too long__");
         let review_dispatch_warning = if !cancelled && !is_prompt_too_long {
             guard_review_dispatch_completion(
@@ -5609,12 +5622,13 @@ pub(super) fn spawn_turn_bridge(
             // the two gate sites.
             #[cfg(unix)]
             {
-                let tui_transport_error_skip_gate = transport_error
-                    && bridge_tui_transport_error_should_skip_quiescence(
+                let tui_transport_error_skip_gate = claude_tui_followup_pre_submit_requeue_candidate
+                    || (transport_error
+                        && bridge_tui_transport_error_should_skip_quiescence(
                         &provider,
                         inflight_state.runtime_kind,
                         &full_response,
-                    );
+                        ));
                 let bridge_gate_outcome = if terminal_delivery_committed
                     && !preserve_inflight_for_cleanup_retry
                     && !tui_transport_error_skip_gate
@@ -5643,36 +5657,17 @@ pub(super) fn spawn_turn_bridge(
                             "TUI transport error was already delivered; skipping quiescence gate so inflight cleanup can complete"
                         );
                     }
-                    if crate::services::claude::claude_tui_followup_requeue_enabled()
-                        && bridge_pre_submission_tui_prompt_error(&provider, &full_response)
-                    {
-                        // The follow-up never delivered its prompt (pre-submit
-                        // busy-timeout), so re-queue the inflight message to the
-                        // back of the mailbox for a retry instead of dropping it.
-                        super::mailbox_requeue_inflight_for_followup_retry(
+                    if claude_tui_followup_pre_submit_requeue_candidate {
+                        followup_requeue::requeue_claude_tui_followup_pre_submit_timeout(
                             &shared_owned,
                             &provider,
                             channel_id,
                             &inflight_state,
+                            dispatch_id.as_deref(),
+                            adk_session_key.as_deref(),
+                            turn_id.as_str(),
                         )
                         .await;
-                        tracing::info!(
-                            provider = %provider.as_str(),
-                            channel = channel_id.get(),
-                            user_msg_id = inflight_state.user_msg_id,
-                            "claude_tui follow-up pre-submit timeout: re-queued inflight message for retry"
-                        );
-                        // The bridge has already finalized the active turn and
-                        // computed its drain decision before this requeue runs, so
-                        // without an explicit kickoff the re-queued retry would sit
-                        // idle until unrelated activity pokes the mailbox. Schedule a
-                        // deferred idle-queue kickoff so it drains once the pane frees.
-                        super::schedule_deferred_idle_queue_kickoff(
-                            shared_owned.clone(),
-                            provider.clone(),
-                            channel_id,
-                            "claude_tui_followup_requeue_inflight",
-                        );
                     }
                     super::tmux::TuiCompletionGateOutcome::NotGated
                 };

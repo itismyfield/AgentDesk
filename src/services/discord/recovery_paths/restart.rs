@@ -674,6 +674,7 @@ mod tests {
         state
     }
 
+    #[cfg(unix)]
     fn touch_generation_marker(tmux_session_name: &str) -> i64 {
         let generation_path =
             crate::services::tmux_common::session_temp_path(tmux_session_name, "generation");
@@ -684,6 +685,7 @@ mod tests {
         crate::services::discord::tmux::read_generation_file_mtime_ns(tmux_session_name)
     }
 
+    #[cfg(unix)]
     fn write_current_generation_anchor(
         provider: &ProviderKind,
         channel_id: u64,
@@ -841,6 +843,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn anchor_record_lookup_uses_sidecar_owner_when_inflight_field_missing() {
         let _lock = crate::config::shared_test_env_lock()
@@ -884,6 +887,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn anchor_selection_falls_back_when_stale_sidecar_anchor_is_absent() {
         let _lock = crate::config::shared_test_env_lock()
@@ -923,6 +927,7 @@ mod tests {
         assert_eq!(anchor.panel_msg_id, 999);
     }
 
+    #[cfg(unix)]
     #[test]
     fn anchor_selection_keeps_legacy_candidate_when_sidecar_anchor_also_matches() {
         let _lock = crate::config::shared_test_env_lock()

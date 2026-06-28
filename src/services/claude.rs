@@ -84,19 +84,87 @@ pub(crate) fn with_claude_tui_session_turn_lock<R>(
     f()
 }
 
-/// Opt-in (default OFF) via env `AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE=1`: when
-/// set, a claude TUI warm follow-up that hits the PRE-submit busy-timeout
-/// surfaces a retryable error so the turn bridge re-queues the inflight message
-/// instead of dropping it. The timeout is pre-submit (the prompt was never sent
-/// to the pane), so the retry cannot double-send. Off by default pending live
-/// validation of the race-path queue dynamics.
+const CLAUDE_TUI_FOLLOWUP_REQUEUE_ENV: &str = "AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE";
+
+/// Default ON; set `AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE` to `0`, `false`,
+/// `off`, `no`, `disable`, or `disabled` for emergency opt-out.
 pub(crate) fn claude_tui_followup_requeue_enabled() -> bool {
-    std::env::var("AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE")
-        .map(|value| {
-            let value = value.trim();
-            value == "1" || value.eq_ignore_ascii_case("true")
-        })
-        .unwrap_or(false)
+    let Ok(value) = std::env::var(CLAUDE_TUI_FOLLOWUP_REQUEUE_ENV) else {
+        return true;
+    };
+    !matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "off" | "no" | "disable" | "disabled"
+    )
+}
+
+#[cfg(test)]
+mod claude_tui_followup_requeue_flag_tests {
+    use super::*;
+
+    struct EnvRestore {
+        previous: Option<String>,
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match self.previous.as_deref() {
+                Some(value) => unsafe {
+                    std::env::set_var(CLAUDE_TUI_FOLLOWUP_REQUEUE_ENV, value);
+                },
+                None => unsafe {
+                    std::env::remove_var(CLAUDE_TUI_FOLLOWUP_REQUEUE_ENV);
+                },
+            }
+        }
+    }
+
+    fn with_requeue_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared test env lock poisoned");
+        let _restore = EnvRestore {
+            previous: std::env::var(CLAUDE_TUI_FOLLOWUP_REQUEUE_ENV).ok(),
+        };
+        match value {
+            Some(value) => unsafe {
+                std::env::set_var(CLAUDE_TUI_FOLLOWUP_REQUEUE_ENV, value);
+            },
+            None => unsafe {
+                std::env::remove_var(CLAUDE_TUI_FOLLOWUP_REQUEUE_ENV);
+            },
+        }
+        f()
+    }
+
+    #[test]
+    fn followup_requeue_defaults_on_when_env_is_unset() {
+        with_requeue_env(None, || assert!(claude_tui_followup_requeue_enabled()));
+    }
+
+    #[test]
+    fn followup_requeue_respects_emergency_opt_out_values() {
+        for value in ["0", "false", "FALSE", "off", "no", "disable", "disabled"] {
+            with_requeue_env(Some(value), || {
+                assert!(
+                    !claude_tui_followup_requeue_enabled(),
+                    "{value} should disable follow-up requeue"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn followup_requeue_keeps_legacy_opt_in_and_invalid_values_enabled() {
+        for value in ["1", "true", "TRUE", "on", "yes", "unexpected"] {
+            with_requeue_env(Some(value), || {
+                assert!(
+                    claude_tui_followup_requeue_enabled(),
+                    "{value} should leave follow-up requeue enabled"
+                );
+            });
+        }
+    }
 }
 
 /// Resolve the path to the claude binary.
