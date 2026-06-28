@@ -93,8 +93,18 @@ pub(super) fn build_watcher_streaming_edit_text(
             provider,
         )
     } else {
-        build_streaming_placeholder_text(current_portion, status_block)
+        let formatted = crate::services::discord::formatting::format_for_discord_with_status_panel(
+            current_portion,
+            provider,
+        );
+        build_streaming_placeholder_text(&formatted, status_block)
     }
+}
+
+pub(super) fn watcher_streaming_rollover_should_skip(current_portion: &str) -> bool {
+    crate::services::discord::response_sanitizer::subagent_notification_card::streaming_rollover_should_skip(
+        current_portion,
+    )
 }
 
 pub(super) fn watcher_should_suppress_streaming_after_bridge_delivery(
@@ -132,6 +142,89 @@ pub(super) fn watcher_fallback_edit_failure_can_delete_original_placeholder(
     // the original message id may already contain partial assistant content.
     // Without a Discord probe proving it is a pure placeholder, preserve it.
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_watcher_streaming_edit_text, watcher_streaming_rollover_should_skip};
+    use crate::services::provider::ProviderKind;
+
+    #[test]
+    fn rollover_skips_subagent_notification_then_sanitizes_edit_3818() {
+        let current_portion = format!(
+            r#"<subagent_notification>
+{{"agent_path":"/tmp/adk-issue-3818-subagent-xml/private-agent","status":{{"completed":"{}"}}}}
+</subagent_notification>"#,
+            "Review complete. ".repeat(220),
+        );
+        let status_block = "⠙ 계속 처리 중";
+        let raw_plan = crate::services::discord::formatting::plan_streaming_rollover(
+            &current_portion,
+            status_block,
+        )
+        .expect("raw notification would otherwise roll over");
+
+        assert!(raw_plan.frozen_chunk.contains("<subagent_notification>"));
+        assert!(watcher_streaming_rollover_should_skip(&current_portion));
+
+        let rendered = build_watcher_streaming_edit_text(
+            false,
+            &current_portion,
+            status_block,
+            &ProviderKind::Codex,
+        );
+        assert!(rendered.contains("Subagent completed"));
+        assert!(!rendered.contains("<subagent_notification>"));
+        assert!(!rendered.contains("</subagent_notification>"));
+        assert!(!rendered.contains("agent_path"));
+        assert!(!rendered.contains("/tmp/adk-issue-3818-subagent-xml"));
+    }
+
+    #[test]
+    fn rollover_skips_tui_chrome_prefixed_subagent_notification_3818() {
+        let current_portion = format!(
+            "No response requested.\n<subagent_notification>\n{{\"agent_path\":\"/tmp/adk-issue-3818-subagent-xml/private-agent\",\"status\":{{\"completed\":\"{}\"}}}}\n</subagent_notification>",
+            "Implementation worker complete. ".repeat(180),
+        );
+
+        assert!(watcher_streaming_rollover_should_skip(&current_portion));
+
+        let rendered = build_watcher_streaming_edit_text(
+            false,
+            &current_portion,
+            "⠙ 계속 처리 중",
+            &ProviderKind::Codex,
+        );
+        assert!(rendered.contains("Subagent completed"));
+        assert!(!rendered.contains("No response requested."));
+        assert!(!rendered.contains("<subagent_notification>"));
+        assert!(!rendered.contains("</subagent_notification>"));
+        assert!(!rendered.contains("agent_path"));
+        assert!(!rendered.contains("/tmp/adk-issue-3818-subagent-xml"));
+    }
+
+    #[test]
+    fn legacy_streaming_edit_sanitizes_subagent_notification_3818() {
+        let current_portion = r#"<subagent_notification>
+{"agent_path":"/tmp/adk-issue-3818-subagent-xml/review-agent","status":{"completed":"Read-only review complete.\n\nVERDICT: CLEAN"}}
+</subagent_notification>"#;
+
+        let rendered = build_watcher_streaming_edit_text(
+            false,
+            current_portion,
+            "⠙ 계속 처리 중",
+            &ProviderKind::Codex,
+        );
+
+        assert!(rendered.contains("Subagent completed"));
+        assert!(rendered.contains("Read-only review complete."));
+        assert!(rendered.contains("VERDICT: CLEAN"));
+        assert!(rendered.ends_with("⠙ 계속 처리 중"));
+        assert!(!rendered.contains("<subagent_notification>"));
+        assert!(!rendered.contains("</subagent_notification>"));
+        assert!(!rendered.contains("agent_path"));
+        assert!(!rendered.contains("/tmp/adk-issue-3818-subagent-xml"));
+    }
 }
 
 /// #3107: inflight-INDEPENDENT probe — capture the pane right now and classify

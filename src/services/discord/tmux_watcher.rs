@@ -2281,6 +2281,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         let Some(msg_id) = placeholder_msg_id else {
                             break;
                         };
+                        if watcher_streaming_rollover_should_skip(current_portion) {
+                            break;
+                        }
                         let Some(plan) = plan_streaming_rollover(current_portion, &status_block)
                         else {
                             break;

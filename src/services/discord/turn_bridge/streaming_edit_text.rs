@@ -31,25 +31,8 @@ pub(in crate::services::discord) fn build_turn_bridge_streaming_edit_text(
 pub(in crate::services::discord) fn bridge_streaming_rollover_should_skip(
     current_portion: &str,
 ) -> bool {
-    streaming_subagent_notification_card(current_portion).is_some()
-}
-
-fn streaming_subagent_notification_card(current_portion: &str) -> Option<String> {
-    let direct =
-        crate::services::discord::response_sanitizer::subagent_notification_card::sanitize_start_anchored_subagent_notification(
-            current_portion,
-        );
-    if direct.is_some() {
-        return direct;
-    }
-    let stripped = crate::services::discord::response_sanitizer::strip_leading_tui_response_chrome(
+    super::response_sanitizer::subagent_notification_card::streaming_rollover_should_skip(
         current_portion,
-    );
-    if stripped == current_portion {
-        return None;
-    }
-    crate::services::discord::response_sanitizer::subagent_notification_card::sanitize_start_anchored_subagent_notification(
-        &stripped,
     )
 }
 
