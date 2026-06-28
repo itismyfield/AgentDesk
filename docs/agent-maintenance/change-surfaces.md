@@ -1498,7 +1498,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   behavior.
 - `src/services/claude.rs` (2963), `src/services/gemini.rs` (1358),
   `src/services/qwen.rs` (2196), `src/services/codex.rs` (3023),
-  `src/services/opencode.rs` (2760), `src/services/provider.rs` (1818) —
+  `src/services/opencode.rs` (2760), `src/services/provider.rs` (1613) —
   provider adapters. (#3034 removed dead non-cancel `execute_command_simple*`
   twins from the claude/codex/gemini adapters and a superseded
   `select_counterpart_from` from provider. #3263 added the Codex max-of-cache
@@ -1518,7 +1518,9 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   production LoC, and leaves the #3262 turn-lock machinery in the claude.rs
   root. #3711 adds +12 in codex.rs to persist Codex TUI rollout markers when
   idle relay bindings are registered, so dcserver restart rehydrate has a
-  stable rollout identity.)
+  stable rollout identity. #3744 retired the unwired generalized envelope and
+  fresh-fork dev-role dedup stubs from provider.rs, leaving only the live Codex
+  resumed-session compaction path.)
 - `src/services/codex_tui/rollout_tail.rs` (1831) — Codex TUI rollout tail
   parsing and resume identity surface; split before adding non-bugfix behavior
   beyond the #2169 session identity fix and the #3343 message-boundary

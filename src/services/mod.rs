@@ -33,11 +33,6 @@ pub mod dispatches;
 // live on clean sibling modules. Remove during dispatches_followup dead-code cleanup.
 #[allow(dead_code)]
 pub mod dispatches_followup;
-// #3034: intentional-but-unwired #2662 envelope-dedup infrastructure (opt-in
-// via AGENTDESK_ENVELOPE_DEDUP, awaiting a follow-up to flip the policy);
-// scoped allow retained pending a human decision to wire or remove it.
-#[allow(dead_code)]
-pub mod envelope_dedup;
 pub mod escalation_settings;
 pub mod gemini;
 pub mod git;
@@ -72,11 +67,9 @@ pub mod platform;
 #[allow(dead_code)]
 pub mod pr_summary;
 pub mod process;
-// #3034: residual dead code here is the intentional-but-unwired #2662/#2668
-// envelope + dev-role dedup infrastructure (gated behind AGENTDESK_ENVELOPE_DEDUP
-// and the per-process dev-role registry, awaiting a follow-up to wire it) plus a
-// dormant recovery-priming constructor; scoped allow retained pending a human
-// decision. Genuinely orphaned items have already been removed.
+// #3034: residual dead code here is a dormant recovery-priming constructor;
+// scoped allow retained pending provider recovery cleanup. The old #2662/#2668
+// envelope/dev-role dedup stubs were retired by #3744.
 #[allow(dead_code)]
 pub mod provider;
 pub mod provider_auth;
