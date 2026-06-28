@@ -6,41 +6,17 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use poise::serenity_prelude::ChannelId;
-use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Row, postgres::PgRow};
+use serde::Deserialize;
 use std::net::SocketAddr;
 
 use crate::db::session_status::is_active_status;
-use crate::server::routes::active_session_audit::{
-    self, ActiveSessionAuditReport, ActiveSessionAuditSettings, RawSessionRow,
-};
 use crate::services::discord::{health, outbound};
-use crate::services::disk_monitor;
 use crate::services::provider::ProviderKind;
+use crate::services::{disk_monitor, health_diagnostics};
 
 use super::AppState;
 
-const OUTBOX_AGE_DEGRADED_SECS: i64 = 60;
 const X_AGENTDESK_SOURCE: &str = "x-agentdesk-source";
-const ACTIVE_SESSION_AUDIT_QUERY: &str =
-    "SELECT session_key, provider, status, active_dispatch_id, last_heartbeat,
-                thread_channel_id, channel_id
-           FROM sessions
-          WHERE parent_session_id IS NULL
-            AND (NULLIF($2, '') IS NULL OR instance_id IS NULL OR instance_id = $2)
-            AND (
-                status IN ('turn_active', 'working')
-                OR COALESCE(btrim(active_dispatch_id), '') <> ''
-            )
-          ORDER BY last_heartbeat ASC NULLS FIRST, id ASC
-          LIMIT $1";
-
-struct DispatchOutboxStats {
-    pending: i64,
-    retrying: i64,
-    permanent_failures: i64,
-    oldest_pending_age: i64,
-}
 
 #[derive(Debug, Deserialize)]
 pub struct AckDispatchOutboxFailuresRequest {
@@ -50,15 +26,6 @@ pub struct AckDispatchOutboxFailuresRequest {
     pub reason: Option<String>,
     #[serde(default)]
     pub dry_run: Option<bool>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct ChannelSessionState {
-    agent_id: Option<String>,
-    provider: Option<String>,
-    status: Option<String>,
-    active_dispatch_id: Option<String>,
-    thread_channel_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -182,7 +149,7 @@ fn discord_send_caller_class(
 /// Public callers receive only a redacted safe summary; authenticated/local
 /// detail callers receive provider/config/outbox diagnostics.
 async fn health_response(state: &AppState, detailed: bool) -> Response {
-    let server_up = probe_server_up(state.pg_pool_ref()).await;
+    let server_up = health_diagnostics::probe_server_up(state.pg_pool_ref()).await;
 
     // Check if dashboard dist is available
     let dashboard_ok = {
@@ -199,7 +166,7 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
         crate::cli::agentdesk_runtime_root().unwrap_or_else(|| std::path::PathBuf::from("/"));
     let disk_snapshot = disk_monitor::probe(&disk_probe_path);
 
-    let outbox_stats = load_dispatch_outbox_stats(state.pg_pool_ref()).await;
+    let outbox_stats = health_diagnostics::load_dispatch_outbox_stats(state.pg_pool_ref()).await;
     let outbox_json = outbox_stats.as_ref().map(|stats| {
         serde_json::json!({
             "pending": stats.pending,
@@ -212,8 +179,10 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
         .as_ref()
         .map(|stats| stats.oldest_pending_age)
         .unwrap_or(0);
-    let config_audit_report = load_config_audit_report_pg(state.pg_pool_ref()).await;
-    let pipeline_override_report = load_pipeline_override_report_pg(state.pg_pool_ref()).await;
+    let config_audit_report =
+        health_diagnostics::load_config_audit_report_pg(state.pg_pool_ref()).await;
+    let pipeline_override_report =
+        health_diagnostics::load_pipeline_override_report_pg(state.pg_pool_ref()).await;
 
     if let Some(ref registry) = state.health_registry {
         let discord_snapshot = if detailed {
@@ -225,12 +194,17 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
         let mut json =
             serde_json::to_value(discord_snapshot).unwrap_or_else(|_| serde_json::json!({}));
         if detailed {
-            enrich_mailbox_session_state(&mut json, state).await;
+            health_diagnostics::enrich_mailbox_session_state(&mut json, state.pg_pool_ref()).await;
             // #stale-running-session-reconciler-audit: read-only DB active-session
             // mismatch audit. Detail-only (never on public GET), additive block,
             // no DB/session/runtime mutation. Runs AFTER mailbox enrichment so it
             // is off the hot public health path (REQ-003/REQ-004).
-            json["active_session_audit"] = build_active_session_audit(state).await.to_json();
+            json["active_session_audit"] = health_diagnostics::build_active_session_audit(
+                state.pg_pool_ref(),
+                state.cluster_instance_id.as_deref(),
+            )
+            .await
+            .to_json();
         }
         let mut degraded_reasons = json["degraded_reasons"]
             .as_array()
@@ -251,7 +225,7 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             status = status.worsen(health::HealthStatus::Unhealthy);
             degraded_reasons.push(serde_json::json!("db_unavailable"));
         }
-        if outbox_age >= OUTBOX_AGE_DEGRADED_SECS {
+        if outbox_age >= health_diagnostics::OUTBOX_AGE_DEGRADED_SECS {
             status = status.worsen(health::HealthStatus::Degraded);
             degraded_reasons.push(serde_json::json!(format!(
                 "dispatch_outbox_oldest_pending_age:{}",
@@ -346,7 +320,7 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
         // the public `/api/health` endpoint. Additive: a NEW diagnostic block,
         // not a new `degraded_reasons` category.
         let (gate_enabled_override, gate_danger_override) =
-            load_dispatch_gate_runtime_overrides(state.pg_pool_ref()).await;
+            health_diagnostics::load_dispatch_gate_runtime_overrides(state.pg_pool_ref()).await;
         json["rate_limit_dispatch_gate"] =
             serde_json::to_value(crate::services::dispatch_gate::diagnostics_with_overrides(
                 gate_enabled_override,
@@ -442,7 +416,12 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             json["pipeline_overrides"] = report;
         }
         if detailed {
-            json["active_session_audit"] = build_active_session_audit(state).await.to_json();
+            json["active_session_audit"] = health_diagnostics::build_active_session_audit(
+                state.pg_pool_ref(),
+                state.cluster_instance_id.as_deref(),
+            )
+            .await
+            .to_json();
         }
         if let Some(opencode_block) = opencode_warm_pool_json(detailed) {
             json["opencode"] = opencode_block;
@@ -654,26 +633,12 @@ async fn cluster_standby_without_gateway(
     if instance_id.is_empty() {
         return false;
     }
-    let Some(pool) = state.pg_pool_ref() else {
-        return false;
-    };
-    let ttl_secs = state.config.cluster.lease_ttl_secs.max(1) as f64;
-    sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT effective_role
-          FROM worker_nodes
-         WHERE instance_id = $1
-           AND last_heartbeat_at >= NOW() - ($2::double precision * INTERVAL '1 second')
-        "#,
+    health_diagnostics::is_recent_cluster_worker(
+        state.pg_pool_ref(),
+        instance_id,
+        state.config.cluster.lease_ttl_secs,
     )
-    .bind(instance_id)
-    .bind(ttl_secs)
-    .fetch_optional(pool)
     .await
-    .ok()
-    .flatten()
-    .as_deref()
-        == Some("worker")
 }
 
 fn stale_mailbox_repair_applied(
@@ -706,249 +671,6 @@ fn registry_purge_decision(purge_requested: bool, repair_status: &str) -> Regist
     } else {
         RegistryPurgeDecision::Skip("repair_not_fully_applied")
     }
-}
-
-async fn load_config_audit_report_pg(pg_pool: Option<&PgPool>) -> Option<serde_json::Value> {
-    let pool = pg_pool?;
-    let raw = sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
-        .bind("config_audit_report")
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()?;
-    serde_json::from_str(&raw).ok()
-}
-
-async fn load_pipeline_override_report_pg(pg_pool: Option<&PgPool>) -> Option<serde_json::Value> {
-    let pool = pg_pool?;
-    let raw = sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
-        .bind("pipeline_override_health_report")
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()?;
-    serde_json::from_str(&raw).ok()
-}
-
-/// Read the dispatch-gate enable flag and gate danger threshold persisted via
-/// `PUT /api/settings/runtime-config` (`kv_meta` `runtime-config` JSON) so the
-/// diagnostics block reports the EFFECTIVE values the gate uses, not the
-/// YAML-only fallback. Returns `(None, None)` for the displayed settings when
-/// no pool / no override exists.
-async fn load_dispatch_gate_runtime_overrides(
-    pg_pool: Option<&PgPool>,
-) -> (Option<bool>, Option<u64>) {
-    let Some(pool) = pg_pool else {
-        return (None, None);
-    };
-    let runtime_config =
-        sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
-            .bind("runtime-config")
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
-    let (enabled, danger, _stale) =
-        crate::services::dispatch_gate::persisted_runtime_overrides(runtime_config.as_ref());
-    (enabled, danger)
-}
-
-async fn load_channel_session_state(
-    pg_pool: Option<&PgPool>,
-    channel_id: u64,
-) -> Option<ChannelSessionState> {
-    let channel_id = channel_id.to_string();
-    if let Some(pool) = pg_pool {
-        let row = sqlx::query(
-            "SELECT agent_id, provider, status, active_dispatch_id, thread_channel_id
-               FROM sessions
-              WHERE thread_channel_id = $1
-              ORDER BY last_heartbeat DESC NULLS LAST, id DESC
-              LIMIT 1",
-        )
-        .bind(&channel_id)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()?;
-        return Some(ChannelSessionState {
-            agent_id: row.try_get("agent_id").ok(),
-            provider: row.try_get("provider").ok(),
-            status: row.try_get("status").ok(),
-            active_dispatch_id: row.try_get("active_dispatch_id").ok(),
-            thread_channel_id: row.try_get("thread_channel_id").ok(),
-        });
-    }
-    None
-}
-
-/// #2049 Finding 16: the handler-layer pre-check uses
-/// `dispatch_id.trim().is_empty()` but the UPDATE WHERE used
-/// `active_dispatch_id = ''`. A whitespace-only dispatch id (e.g. `' '`)
-/// would pass the UPDATE but be rejected by the pre-check, so the two
-/// definitions of "no live work" disagreed. `COALESCE(btrim(...), '') = ''`
-/// makes them match.
-async fn mark_channel_sessions_disconnected(
-    pg_pool: Option<&PgPool>,
-    channel_id: u64,
-) -> Result<usize, String> {
-    let channel_id = channel_id.to_string();
-    if let Some(pool) = pg_pool {
-        return sqlx::query(
-            "UPDATE sessions
-                SET status = 'disconnected',
-                    active_dispatch_id = NULL
-              WHERE thread_channel_id = $1
-                AND status IN ('turn_active', 'working')
-                AND COALESCE(btrim(active_dispatch_id), '') = ''",
-        )
-        .bind(&channel_id)
-        .execute(pool)
-        .await
-        .map(|result| result.rows_affected() as usize)
-        .map_err(|error| format!("mark postgres sessions disconnected: {error}"));
-    }
-    Err("postgres pool unavailable".to_string())
-}
-
-async fn enrich_mailbox_session_state(json: &mut serde_json::Value, state: &AppState) {
-    let Some(mailboxes) = json
-        .get_mut("mailboxes")
-        .and_then(serde_json::Value::as_array_mut)
-    else {
-        return;
-    };
-    for mailbox in mailboxes {
-        let Some(channel_id) = mailbox
-            .get("channel_id")
-            .and_then(serde_json::Value::as_u64)
-        else {
-            continue;
-        };
-        if let Some(session) = load_channel_session_state(state.pg_pool_ref(), channel_id).await {
-            let active_dispatch_present = session
-                .active_dispatch_id
-                .as_deref()
-                .is_some_and(|id| !id.trim().is_empty());
-            mailbox["session_record_present"] = serde_json::json!(true);
-            mailbox["session_agent_id"] = serde_json::json!(session.agent_id);
-            mailbox["session_provider"] = serde_json::json!(session.provider);
-            mailbox["session_status"] = serde_json::json!(session.status);
-            mailbox["session_active_dispatch_id"] = serde_json::json!(session.active_dispatch_id);
-            mailbox["session_thread_channel_id"] = serde_json::json!(session.thread_channel_id);
-            if active_dispatch_present {
-                mailbox["active_dispatch_present"] = serde_json::json!(true);
-            }
-        } else {
-            mailbox["session_record_present"] = serde_json::json!(false);
-            mailbox["session_status"] = serde_json::Value::Null;
-            mailbox["session_active_dispatch_id"] = serde_json::Value::Null;
-        }
-    }
-}
-
-/// Build the read-only `active_session_audit` block for `/api/health/detail`.
-///
-/// Reads audit settings live from `config_live_reload::current()` (hot-reload,
-/// no restart) with compiled-in fallbacks. When disabled by config it returns
-/// the empty `enabled:false` block WITHOUT issuing the DB query (rollback path).
-/// Otherwise it runs ONE bounded `SELECT` (`LIMIT` = max_candidates) against the
-/// existing `sessions` columns and classifies the rows with the pure
-/// [`active_session_audit`] classifier. No UPDATE/INSERT/DELETE, no tmux probe.
-async fn build_active_session_audit(state: &AppState) -> ActiveSessionAuditReport {
-    let runtime = crate::config_live_reload::current().map(|cfg| {
-        (
-            cfg.runtime.active_session_audit_enabled,
-            cfg.runtime.active_session_audit_stale_secs,
-            cfg.runtime.active_session_audit_max_candidates,
-        )
-    });
-    let (enabled_override, stale_override, cap_override) = runtime.unwrap_or((None, None, None));
-    let settings =
-        ActiveSessionAuditSettings::from_overrides(enabled_override, stale_override, cap_override);
-
-    if !settings.enabled {
-        return ActiveSessionAuditReport::disabled(settings.stale_secs);
-    }
-
-    let Some(pool) = state.pg_pool_ref() else {
-        return ActiveSessionAuditReport::disabled(settings.stale_secs);
-    };
-
-    let local_instance_id = state.cluster_instance_id.as_deref();
-    let (rows, raw_matches_total) =
-        load_active_session_audit_rows(pool, settings.max_candidates, local_instance_id).await;
-    let mut resolver = crate::services::session_activity::SessionActivityResolver::new();
-    active_session_audit::classify_active_session_audit(
-        &rows,
-        &mut resolver,
-        settings,
-        raw_matches_total,
-        chrono::Utc::now(),
-    )
-}
-
-/// One bounded `SELECT` for raw active-like sessions (`turn_active`, legacy
-/// `working`, OR a non-empty `active_dispatch_id`). Read-only. Fetches one
-/// sentinel row beyond the cap so `truncated` can be computed without an
-/// uncapped `COUNT(*)`. Duplicate rows are not possible because each row is a
-/// distinct `sessions` row; precedence dedup of the raw signal happens in the
-/// classifier.
-async fn load_active_session_audit_rows(
-    pool: &PgPool,
-    max_candidates: u64,
-    local_instance_id: Option<&str>,
-) -> (Vec<RawSessionRow>, usize) {
-    let capped = max_candidates.min(i64::MAX as u64) as usize;
-    let limit = max_candidates.saturating_add(1).min(i64::MAX as u64) as i64;
-    let local_instance_id = local_instance_id.map(str::trim).unwrap_or("");
-    // Surface the staleness-relevant rows FIRST so the LIMIT keeps the candidates
-    // that matter: NULL/unknown heartbeats (can't be proven fresh) come first,
-    // then the OLDEST heartbeats. Ordering newest-first would let stale/zombie
-    // rows beyond the cap escape the audit entirely — the opposite of intent.
-    let query = sqlx::query(ACTIVE_SESSION_AUDIT_QUERY)
-        .bind(limit)
-        .bind(local_instance_id);
-    let rows = match query.fetch_all(pool).await {
-        Ok(rows) => rows,
-        Err(error) => {
-            tracing::debug!(
-                event = "active_session_audit_query_failed",
-                error = %error,
-                "active-session audit query failed; emitting empty candidate set"
-            );
-            return (Vec::new(), 0);
-        }
-    };
-    let raw_matches_seen = rows.len();
-    let mapped: Vec<RawSessionRow> = rows
-        .iter()
-        .take(capped)
-        .map(|row| RawSessionRow {
-            session_key: row.try_get("session_key").ok(),
-            provider: row.try_get("provider").ok(),
-            status: row.try_get("status").ok(),
-            active_dispatch_id: row.try_get("active_dispatch_id").ok(),
-            last_heartbeat: pg_timestamp_to_rfc3339(row, "last_heartbeat"),
-            thread_channel_id: row.try_get("thread_channel_id").ok(),
-            channel_id: row.try_get("channel_id").ok(),
-        })
-        .collect();
-    (mapped, raw_matches_seen)
-}
-
-/// Read a (possibly `timestamptz`/`timestamp`/`text`) heartbeat column into a
-/// string the audit classifier + `SessionActivityResolver` can parse. Falls back
-/// across representations so schema variance does not panic the read.
-fn pg_timestamp_to_rfc3339(row: &PgRow, column: &str) -> Option<String> {
-    if let Ok(Some(ts)) = row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(column) {
-        return Some(ts.to_rfc3339());
-    }
-    if let Ok(Some(naive)) = row.try_get::<Option<chrono::NaiveDateTime>, _>(column) {
-        return Some(naive.format("%Y-%m-%d %H:%M:%S").to_string());
-    }
-    row.try_get::<Option<String>, _>(column).ok().flatten()
 }
 
 /// Build the additive `opencode` warm-pool diagnostics block.
@@ -1034,7 +756,7 @@ pub async fn list_dispatch_outbox_failures_handler(
             Json(serde_json::json!({"ok": false, "error": "pg pool unavailable"})),
         );
     };
-    match load_failed_dispatch_outbox_rows(pool, None).await {
+    match health_diagnostics::load_failed_dispatch_outbox_rows(pool, None).await {
         Ok(rows) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1070,7 +792,7 @@ pub async fn ack_dispatch_outbox_failures_handler(
             })),
         );
     }
-    let rows = match load_failed_dispatch_outbox_rows(pool, ids).await {
+    let rows = match health_diagnostics::load_failed_dispatch_outbox_rows(pool, ids).await {
         Ok(rows) => rows,
         Err(error) => {
             return (
@@ -1113,7 +835,8 @@ pub async fn ack_dispatch_outbox_failures_handler(
         .map(str::trim)
         .filter(|reason| !reason.is_empty())
         .unwrap_or("operator acknowledged failed dispatch_outbox rows");
-    match acknowledge_failed_dispatch_outbox_rows(pool, &row_ids, reason).await {
+    match health_diagnostics::acknowledge_failed_dispatch_outbox_rows(pool, &row_ids, reason).await
+    {
         Ok(acknowledged_ids) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1313,7 +1036,8 @@ pub async fn stale_mailbox_repair_handler(
         None
     };
     let before_session_state =
-        load_channel_session_state(state.pg_pool_ref(), request.channel_id).await;
+        health_diagnostics::load_channel_session_state(state.pg_pool_ref(), request.channel_id)
+            .await;
     if before_session_state
         .as_ref()
         .and_then(|session| session.active_dispatch_id.as_deref())
@@ -1493,8 +1217,11 @@ pub async fn stale_mailbox_repair_handler(
     } else {
         false
     };
-    let session_disconnect_result =
-        mark_channel_sessions_disconnected(state.pg_pool_ref(), request.channel_id).await;
+    let session_disconnect_result = health_diagnostics::mark_channel_sessions_disconnected(
+        state.pg_pool_ref(),
+        request.channel_id,
+    )
+    .await;
     let (session_disconnected_count, session_disconnect_error) = match session_disconnect_result {
         Ok(count) => (count, None),
         Err(error) => (0, Some(error)),
@@ -1557,7 +1284,8 @@ pub async fn stale_mailbox_repair_handler(
         }
     };
     let after_session_state =
-        load_channel_session_state(state.pg_pool_ref(), request.channel_id).await;
+        health_diagnostics::load_channel_session_state(state.pg_pool_ref(), request.channel_id)
+            .await;
     let residual_inflight = after_watcher_inflight
         .as_ref()
         .is_some_and(|snapshot| snapshot.inflight_state_present || snapshot.attached);
@@ -1916,9 +1644,8 @@ pub async fn senddm_handler(
 #[cfg(test)]
 mod tests {
     use super::{
-        ACTIVE_SESSION_AUDIT_QUERY, RegistryPurgeDecision, discord_control_endpoints_allowed,
-        discord_send_caller_class, public_health_json, registry_purge_decision,
-        stale_mailbox_repair_applied,
+        RegistryPurgeDecision, discord_control_endpoints_allowed, discord_send_caller_class,
+        public_health_json, registry_purge_decision, stale_mailbox_repair_applied,
     };
     use axum::{
         body::{Body, to_bytes},
@@ -2318,14 +2045,6 @@ mod tests {
         assert!(public.get("active_session_audit").is_none());
     }
 
-    #[test]
-    fn active_session_audit_query_filters_foreign_and_background_rows() {
-        assert!(ACTIVE_SESSION_AUDIT_QUERY.contains("parent_session_id IS NULL"));
-        assert!(ACTIVE_SESSION_AUDIT_QUERY.contains("instance_id IS NULL OR instance_id = $2"));
-        assert!(ACTIVE_SESSION_AUDIT_QUERY.contains("thread_channel_id, channel_id"));
-        assert!(!ACTIVE_SESSION_AUDIT_QUERY.contains("COALESCE(thread_channel_id, channel_id)"));
-    }
-
     /// [TEST-003] public health omits the per-server OpenCode warm_servers
     /// array but may keep the count-only summary; no pid/port/tail leaks.
     #[test]
@@ -2523,183 +2242,4 @@ fn parse_status_code(s: &str) -> StatusCode {
         "503 Service Unavailable" => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
-}
-
-async fn load_dispatch_outbox_stats(pg_pool: Option<&PgPool>) -> Option<DispatchOutboxStats> {
-    if let Some(pool) = pg_pool {
-        if let Some(stats) = load_dispatch_outbox_stats_pg(pool).await {
-            return Some(stats);
-        }
-        tracing::warn!("[health] failed to load dispatch_outbox stats from PostgreSQL");
-    }
-    None
-}
-
-async fn probe_server_up(pg_pool: Option<&PgPool>) -> bool {
-    if let Some(pool) = pg_pool {
-        return sqlx::query_scalar::<_, i32>("SELECT 1")
-            .fetch_one(pool)
-            .await
-            .is_ok();
-    }
-    false
-}
-
-async fn load_dispatch_outbox_stats_pg(pool: &PgPool) -> Option<DispatchOutboxStats> {
-    let pending = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::BIGINT FROM dispatch_outbox WHERE status = 'pending'",
-    )
-    .fetch_one(pool)
-    .await
-    .ok()?;
-    let retrying = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::BIGINT FROM dispatch_outbox WHERE status = 'pending' AND retry_count > 0",
-    )
-    .fetch_one(pool)
-    .await
-    .ok()?;
-    let failed = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::BIGINT FROM dispatch_outbox WHERE status = 'failed'",
-    )
-    .fetch_one(pool)
-    .await
-    .ok()?;
-    // Use COALESCE(next_attempt_at, created_at) so rows that were re-queued
-    // by boot reconcile (processing→pending) reflect their re-queue time,
-    // not the original creation time. This keeps the promote health gate
-    // accurate after restarts without inflating age with rows that the
-    // outbox worker is about to pick up.
-    let oldest_pending_age = sqlx::query_scalar::<_, i64>(
-        "SELECT COALESCE(
-             CAST(
-                 EXTRACT(
-                     EPOCH FROM (NOW() - MIN(COALESCE(next_attempt_at, created_at)))
-                 ) AS BIGINT
-             ),
-             0
-         )
-         FROM dispatch_outbox
-         WHERE status = 'pending'
-           AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())",
-    )
-    .fetch_one(pool)
-    .await
-    .ok()?;
-
-    Some(DispatchOutboxStats {
-        pending,
-        retrying,
-        permanent_failures: failed,
-        oldest_pending_age,
-    })
-}
-
-async fn load_failed_dispatch_outbox_rows(
-    pool: &PgPool,
-    ids: Option<&[i64]>,
-) -> Result<Vec<serde_json::Value>, sqlx::Error> {
-    let rows = if let Some(ids) = ids {
-        if ids.is_empty() {
-            Vec::new()
-        } else {
-            sqlx::query(
-                "SELECT o.id,
-                        o.dispatch_id,
-                        o.action,
-                        o.agent_id,
-                        o.card_id,
-                        o.title,
-                        o.retry_count,
-                        o.error,
-                        o.delivery_status,
-                        o.delivery_result,
-                        o.created_at,
-                        o.processed_at,
-                        td.status AS dispatch_status
-                   FROM dispatch_outbox o
-              LEFT JOIN task_dispatches td ON td.id = o.dispatch_id
-                  WHERE o.status = 'failed'
-                    AND o.id = ANY($1)
-               ORDER BY o.processed_at DESC NULLS LAST, o.id DESC",
-            )
-            .bind(ids)
-            .fetch_all(pool)
-            .await?
-        }
-    } else {
-        sqlx::query(
-            "SELECT o.id,
-                    o.dispatch_id,
-                    o.action,
-                    o.agent_id,
-                    o.card_id,
-                    o.title,
-                    o.retry_count,
-                    o.error,
-                    o.delivery_status,
-                    o.delivery_result,
-                    o.created_at,
-                    o.processed_at,
-                    td.status AS dispatch_status
-               FROM dispatch_outbox o
-          LEFT JOIN task_dispatches td ON td.id = o.dispatch_id
-              WHERE o.status = 'failed'
-           ORDER BY o.processed_at DESC NULLS LAST, o.id DESC
-              LIMIT 100",
-        )
-        .fetch_all(pool)
-        .await?
-    };
-
-    rows.into_iter()
-        .map(dispatch_outbox_failure_row_json)
-        .collect()
-}
-
-fn dispatch_outbox_failure_row_json(row: PgRow) -> Result<serde_json::Value, sqlx::Error> {
-    Ok(serde_json::json!({
-        "id": row.try_get::<i64, _>("id")?,
-        "dispatch_id": row.try_get::<Option<String>, _>("dispatch_id")?,
-        "action": row.try_get::<String, _>("action")?,
-        "agent_id": row.try_get::<Option<String>, _>("agent_id")?,
-        "card_id": row.try_get::<Option<String>, _>("card_id")?,
-        "title": row.try_get::<Option<String>, _>("title")?,
-        "retry_count": row.try_get::<i64, _>("retry_count")?,
-        "error": row.try_get::<Option<String>, _>("error")?,
-        "delivery_status": row.try_get::<Option<String>, _>("delivery_status")?,
-        "delivery_result": row.try_get::<Option<serde_json::Value>, _>("delivery_result")?,
-        "created_at": row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("created_at")?,
-        "processed_at": row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("processed_at")?,
-        "dispatch_status": row.try_get::<Option<String>, _>("dispatch_status")?,
-    }))
-}
-
-async fn acknowledge_failed_dispatch_outbox_rows(
-    pool: &PgPool,
-    ids: &[i64],
-    reason: &str,
-) -> Result<Vec<i64>, sqlx::Error> {
-    if ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    sqlx::query_scalar(
-        "UPDATE dispatch_outbox
-            SET status = 'acknowledged',
-                delivery_status = 'acknowledged',
-                delivery_result = jsonb_build_object(
-                    'acknowledged_at', NOW(),
-                    'reason', $2::TEXT,
-                    'previous_delivery_status', delivery_status,
-                    'previous_delivery_result', delivery_result
-                ),
-                claimed_at = NULL,
-                claim_owner = NULL
-          WHERE status = 'failed'
-            AND id = ANY($1)
-      RETURNING id",
-    )
-    .bind(ids)
-    .bind(reason)
-    .fetch_all(pool)
-    .await
 }

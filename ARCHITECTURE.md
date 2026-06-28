@@ -205,7 +205,6 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── tuning_aggregate.rs
 │   │   │   └── verdict_route.rs
-│   │   ├── active_session_audit.rs
 │   │   ├── agents.rs
 │   │   ├── agents_crud.rs
 │   │   ├── agents_setup.rs
@@ -838,6 +837,8 @@ src/
 │   ├── escalation_settings.rs
 │   ├── gemini.rs
 │   ├── github_issue_creation.rs
+│   ├── health_active_session_audit.rs
+│   ├── health_diagnostics.rs
 │   ├── issue_announcements.rs
 │   ├── kanban.rs
 │   ├── kanban_cards.rs
