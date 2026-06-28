@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -184,6 +186,56 @@ class LiveVoiceMediaReportTests(unittest.TestCase):
         self.assertEqual(report["status"], "failed")
         self.assertIn("voice_latency_turn metric was not emitted", report["raw_failure_reasons"])
 
+    def test_build_scenario_report_rejects_latency_from_unrelated_utterance(self):
+        events = [
+            _event(
+                "voice_flight_event",
+                1_000,
+                {
+                    "route": "queued",
+                    "voice_channel_id": 222,
+                    "utterance_id": "utt-current",
+                    "stt_mode": "file",
+                },
+            ),
+            _event(
+                "voice_flight_event",
+                1_100,
+                {
+                    "route": "foreground_speak",
+                    "voice_channel_id": 222,
+                    "utterance_id": "utt-current",
+                },
+            ),
+            _event(
+                "voice_latency_turn",
+                1_200,
+                {
+                    "channel_id": 222,
+                    "utterance_id": "utt-previous",
+                    "total_ms": 118,
+                    "recorded_at_ms": 1_200,
+                },
+            ),
+        ]
+        evidence = smoke.ScenarioEvidence(
+            scenario_id=smoke.SCENARIOS[0].scenario_id,
+            started_at_ms=900,
+            completed_at_ms=1_300,
+            events=events,
+            cleanup_evidence={"status": "passed", "raw_failure_reasons": []},
+            timing_stages=smoke.TimingStages(),
+        )
+
+        report = smoke.build_scenario_report(smoke.SCENARIOS[0], evidence, self.config)
+
+        self.assertEqual(report["status"], "failed")
+        self.assertIsNone(report["voice_latency_turn"])
+        self.assertIn(
+            "voice_latency_turn metric did not match observed utterance_id",
+            report["raw_failure_reasons"],
+        )
+
     def test_barge_in_report_requires_cancellation_evidence(self):
         spec = smoke.SCENARIOS[1]
         events = [
@@ -236,6 +288,61 @@ class LiveVoiceMediaReportTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "voice live media smoke failures"):
             smoke.validate_report(report)
+
+
+class LiveVoiceMediaCleanupTests(unittest.TestCase):
+    def setUp(self):
+        self.config = smoke.load_config(_args(), _env())
+
+    def test_cleanup_without_any_probe_fails_closed(self):
+        config = smoke.dataclasses.replace(self.config, agent_id=None, cleanup_command=None)
+
+        result = asyncio.run(
+            smoke.run_cleanup_check(
+                config,
+                smoke.SCENARIOS[0],
+                [],
+                smoke.TimingStages(),
+            )
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("cleanup verification was not configured", result["raw_failure_reasons"])
+
+    def test_cleanup_unavailable_fails_closed(self):
+        unavailable = {
+            "status": "unavailable",
+            "source": "agent_turn_api",
+            "raw_failure_reasons": ["connection refused"],
+        }
+
+        with mock.patch.object(smoke, "_cleanup_from_agent_turn", return_value=unavailable):
+            result = asyncio.run(
+                smoke.run_cleanup_check(
+                    self.config,
+                    smoke.SCENARIOS[0],
+                    [],
+                    smoke.TimingStages(),
+                )
+            )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("connection refused", result["raw_failure_reasons"])
+
+    def test_cleanup_requires_explicit_false_for_voice_lifecycle_flags(self):
+        failures = smoke._cleanup_flag_failures(
+            {
+                "stale_voice_session": False,
+                "playback_task_active": False,
+                "foreground_call_active": False,
+            },
+            source="cleanup command",
+        )
+
+        self.assertEqual(
+            failures,
+            ["cleanup command did not prove voice_turn_link_active=false"],
+        )
 
 
 if __name__ == "__main__":

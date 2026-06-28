@@ -500,7 +500,26 @@ def _latency_for_utterance(
         utterance_id = event.get("utterance_id")
         if isinstance(utterance_id, str) and utterance_id in utterance_set:
             return dict(event)
-    return dict(latency_events[-1]) if latency_events else None
+    return None
+
+
+CLEANUP_PROOF_FIELDS = (
+    "stale_voice_session",
+    "playback_task_active",
+    "foreground_call_active",
+    "voice_turn_link_active",
+)
+
+
+def _cleanup_flag_failures(payload: Mapping[str, Any], *, source: str) -> list[str]:
+    failures: list[str] = []
+    for key in CLEANUP_PROOF_FIELDS:
+        value = payload.get(key)
+        if value is True:
+            failures.append(f"{source} reports {key}=true")
+        elif value is not False:
+            failures.append(f"{source} did not prove {key}=false")
+    return failures
 
 
 def _failure_source(failures: Sequence[str]) -> str | None:
@@ -528,6 +547,7 @@ def build_scenario_report(
     flight_events = payloads_for(evidence.events, "voice_flight_event")
     latency_events = payloads_for(evidence.events, "voice_latency_turn")
     utterance_ids = unique_utterance_ids(flight_events)
+    latency = _latency_for_utterance(latency_events, utterance_ids)
     stt_events = [
         event
         for event in flight_events
@@ -543,8 +563,11 @@ def build_scenario_report(
         failures.append("no utterance_id observed from live voice media path")
     if not stt_events:
         failures.append("no STT/transcript voice_flight_event observed")
-    if spec.require_latency and not latency_events:
-        failures.append("voice_latency_turn metric was not emitted")
+    if spec.require_latency and not latency:
+        if latency_events:
+            failures.append("voice_latency_turn metric did not match observed utterance_id")
+        else:
+            failures.append("voice_latency_turn metric was not emitted")
     if spec.require_cancel:
         explicit_stop = [event for event in flight_events if event.get("route") == "explicit_stop"]
         if not explicit_stop:
@@ -558,7 +581,6 @@ def build_scenario_report(
     elif config.require_cleanup_check and cleanup_status in {"not_configured", "unavailable"}:
         failures.append("cleanup check was required but no cleanup evidence was available")
 
-    latency = _latency_for_utterance(latency_events, utterance_ids)
     first_stt = stt_events[0] if stt_events else {}
     foreground_decision = next(
         (
@@ -749,11 +771,12 @@ async def wait_for_evidence(
         )
         flight = payloads_for(last, "voice_flight_event")
         latency = payloads_for(last, "voice_latency_turn")
+        utterance_ids = unique_utterance_ids(flight)
         routes = {event.get("route") for event in flight}
         expected = set(spec.setup_expected_routes + spec.expected_routes)
         route_ok = expected.issubset(routes)
         stt_ok = any(event.get("utterance_id") and event.get("stt_mode") for event in flight)
-        latency_ok = bool(latency) or not spec.require_latency
+        latency_ok = _latency_for_utterance(latency, utterance_ids) is not None or not spec.require_latency
         cancel_ok = (
             not spec.require_cancel
             or any(
@@ -789,6 +812,7 @@ def _cleanup_from_agent_turn(config: LiveSmokeConfig) -> dict[str, Any] | None:
         failures.append(f"pending queue depth is {status.get('pending_queue_depth')}")
     if status.get("inflight_age_secs") is not None:
         failures.append("agent turn reports saved inflight state")
+    failures.extend(_cleanup_flag_failures(status, source="agent turn API"))
     return {
         "status": "failed" if failures else "passed",
         "source": "agent_turn_api",
@@ -828,14 +852,7 @@ def _cleanup_from_command(config: LiveSmokeConfig, spec: ScenarioSpec, utterance
         raw_failure_reasons.append(f"cleanup command exited {result.returncode}: {result.stderr.strip()}")
     if payload.get("ok") is False:
         raw_failure_reasons.append("cleanup command returned ok=false")
-    for key in (
-        "stale_voice_session",
-        "playback_task_active",
-        "foreground_call_active",
-        "voice_turn_link_active",
-    ):
-        if payload.get(key) is True:
-            raw_failure_reasons.append(f"{key}=true")
+    raw_failure_reasons.extend(_cleanup_flag_failures(payload, source="cleanup command"))
     return {
         "status": "failed" if raw_failure_reasons else "passed",
         "source": "cleanup_command",
@@ -864,16 +881,18 @@ async def run_cleanup_check(
     timing.cleanup_check_ms = int((time.monotonic() - started) * 1000)
     if not checks:
         return {
-            "status": "not_configured",
+            "status": "failed",
             "source": "none",
-            "raw_failure_reasons": [],
+            "raw_failure_reasons": ["cleanup verification was not configured"],
         }
     failures = [
         reason
         for check in checks
-        if check.get("status") == "failed"
+        if check.get("status") in {"failed", "unavailable"}
         for reason in check.get("raw_failure_reasons", [])
     ]
+    if any(check.get("status") == "unavailable" for check in checks) and not failures:
+        failures.append("cleanup verification was unavailable")
     return {
         "status": "failed" if failures else "passed",
         "checks": checks,

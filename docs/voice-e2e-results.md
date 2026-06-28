@@ -116,9 +116,10 @@ Optional dependencies/config:
   `ADK_VOICE_LIVE_UTTERANCE_IDS`, `ADK_VOICE_LIVE_VOICE_CHANNEL_ID`, and
   `ADK_VOICE_LIVE_TEXT_CHANNEL_ID`, and should print JSON with `ok: true` plus
   stale-state booleans such as `stale_voice_session`, `playback_task_active`,
-  `foreground_call_active`, and `voice_turn_link_active`. Set
-  `ADK_VOICE_LIVE_REQUIRE_CLEANUP_CHECK=1` to fail when no cleanup proof is
-  available.
+  `foreground_call_active`, and `voice_turn_link_active`, all explicitly set to
+  `false`. Cleanup proof is fail-closed: unavailable probes, missing cleanup
+  probes, or missing stale-state booleans fail the scenario instead of being
+  folded into a pass.
 
 Covered unattended live scenarios:
 
@@ -134,7 +135,8 @@ Report contract:
   is `true`, and tokens are never written to the report.
 - Each scenario records guild/channel ids, scenario id, utterance ids, media
   receive counters, STT/transcript evidence, routing/foreground decision,
-  TTS/playback or cancellation evidence, `voice_latency_turn`, raw
+  TTS/playback or cancellation evidence, an utterance-matched
+  `voice_latency_turn`, raw
   `voice_flight_event` payloads, cleanup evidence, timing stages, and raw
   failure reasons.
 - `failure_attribution.source` separates likely `discord_media`, `stt_tts`,
