@@ -46,7 +46,6 @@ direct_discord_sends = [
   # announce-token fallback is removed; deliver_outbound currently collapses
   # HTTP status / Discord error code into a string on edit failures.
   "src/services/issue_announcements.rs#direct_discord_sends:c953e696eec38deb",
-  "src/services/discord/router/intake_gate.rs#direct_discord_sends:0a2beaabe9619b4f",
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:2bf7e5b93d0fda6b",
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:07b7e52940af8eab",
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:1cc530214eb6c5d6",

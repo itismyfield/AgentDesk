@@ -13,11 +13,13 @@ pub(in crate::services::discord) mod delivery_record; // #3089 B0
 pub(crate) mod manual_delivery;
 pub(crate) mod message;
 pub(crate) mod policy;
+pub(in crate::services::discord) mod reaction_control;
 pub(crate) mod result;
 pub(crate) mod send_api;
 pub(crate) mod send_gate;
 pub(crate) mod send_target;
 pub(crate) mod send_to_agent;
+pub(in crate::services::discord) mod serenity_reference;
 mod transport;
 pub(in crate::services::discord) mod turn_output_controller; // #3089 A1
 
