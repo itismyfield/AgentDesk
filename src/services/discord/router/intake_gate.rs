@@ -1,3 +1,6 @@
+use super::super::outbound::reaction_control::{
+    ReactionControlReplyReason, send_reaction_control_reply,
+};
 use super::super::*;
 
 mod busy_duplicate_notice;
@@ -800,24 +803,6 @@ pub(super) fn classify_removed_control_reaction(
     }
 }
 
-async fn send_reaction_control_reply(
-    ctx: &serenity::Context,
-    shared: &std::sync::Arc<SharedData>,
-    channel_id: serenity::ChannelId,
-    message_id: serenity::MessageId,
-    content: &str,
-) {
-    rate_limit_wait(shared, channel_id).await;
-    let _ = channel_id
-        .send_message(
-            &ctx.http,
-            serenity::builder::CreateMessage::new()
-                .reference_message((channel_id, message_id))
-                .content(content),
-        )
-        .await;
-}
-
 /// #3009: when a follow-up message is *merged* into the previous queue head
 /// (`MailboxEnqueueOutcome::merged == true`), the head intervention's
 /// `message_id` is rewritten to this follow-up's id while the older ids are
@@ -1268,6 +1253,7 @@ async fn render_visible_queued_ack(
                 &data.shared,
                 channel_id,
                 user_msg_id,
+                ReactionControlReplyReason::QueuedCardPostFailed,
                 "📬 큐에 추가됨 — 카드 표시는 실패했지만 메시지는 큐잉되었습니다.",
             )
             .await;
@@ -1594,6 +1580,7 @@ async fn handle_reaction_remove(
                         &data.shared,
                         channel_id,
                         removed_reaction.message_id,
+                        ReactionControlReplyReason::AlreadyStopping,
                         "Already stopping...",
                     )
                     .await;

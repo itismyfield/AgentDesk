@@ -126,17 +126,19 @@ These callsites already use the unified delivery engine. Rows marked
 | `src/services/discord/gateway.rs:359` (`send_intake_placeholder`) | `placeholder_sends` (intake) | **migrated_v3**. Posts the `"..."` placeholder before a turn via direct v3. Uses `preserve_inline_content().without_idempotency()` to preserve streaming behavior. |
 | `src/services/discord/gateway.rs:377` (`edit_outbound_message`) | `placeholder_sends` (edit) | **migrated_v3**. Encodes edit through `OutboundOperation::Edit`. |
 | `src/services/discord/gateway.rs:400` (`TurnGateway::{send_message, edit_message}`) | turn-bridge messages/edits | **migrated_v3 transitively via gateway**. Used for handoff, rollover freeze, snapshot, stable update, and terminal edit. |
+| `src/services/discord/router/intake_gate.rs` (`send_reaction_control_reply`) | reaction-control lifecycle replies | **migrated_v3**. Short fixed replies for queued-card POST fallback and duplicate stop now use referenced v3 lifecycle notices. Correlation = `intake-reaction-control:<channel_id>:<message_id>`, semantic = `intake-reaction-control:<channel_id>:<message_id>:<reason_key>`. |
 | `src/services/discord/monitoring_status.rs:115` (`deliver_monitoring_status`) | monitoring status | **migrated_v3**. Status banner send + edit with `preserve_inline_content`; edits use `without_idempotency()`. |
 | `src/services/discord/meeting_orchestrator.rs:754, 796` (`meeting_outbound_message` / edit path) | meeting status / cancel / parse-error | **migrated_v3**. Stable meeting dedup metadata plus `OutboundOperation::Edit`. |
 | `src/services/routines/discord_log.rs:486, 531` (`deliver_or_update_discord_summary`) | routine Discord summary | **migrated_v3**. Uses direct v3 send/edit and disables semantic dedupe for repeated summary writes. |
 | `src/integration_tests/discord_flow/scenarios.rs` (removed in #3035 Phase 1) | integration test harness | Mock-Discord roundtrip for §1.2 validation; legacy-sqlite-only harness deleted. |
 | `src/integration_tests/agents_setup_e2e.rs` (removed in #3035 Phase 1) | integration test | Wizard-ready E2E; legacy-sqlite-only harness deleted. |
 
-Total **direct migrated_v3 production families: 11** (`dispatch_outbox`,
+Total **direct migrated_v3 production families: 12** (`dispatch_outbox`,
 `review_notifications`, final dispatch completion summaries, issue
 announcements, monitoring status, meeting notifications, routine Discord
 summaries, CLI text/DM helper, short manual notifications, short manual DM
-notifications, and gateway/turn-bridge placeholder sends/edits).
+notifications, intake reaction-control replies, and gateway/turn-bridge
+placeholder sends/edits).
 
 No production caller uses the removed legacy facade. Verify with
 `git grep -n 'deliver_outbound' -- src/services src/bin tests`.
@@ -168,10 +170,9 @@ interaction tokens or ephemeral visibility.
 | `src/services/discord/commands/meeting_cmd.rs:33, 42, 83, 97` | `/meeting` ACK | excluded |
 | `src/services/discord/commands/text_commands.rs:1239` | text-command running banner | excluded |
 | `src/services/discord/commands/model_picker.rs:60, 132` | `/model` picker | excluded |
-| `src/services/discord/router/intake_gate.rs:258` | reaction-control reply | excluded — reply with reference inside slash interaction |
 | `src/services/discord/router/intake_gate.rs:960, 1071` | "duplicate-queue" + "drain-pending" notices | candidate — these are bot notifications, not interaction tokens. Triage: **low priority**, very short fixed strings, no length risk. |
 
-Total commands-bucket: **62 callsites**, all explicitly excluded.
+Total commands-bucket: **61 callsites**, all explicitly excluded.
 
 #### B.2 File / attachment uploads
 
@@ -273,7 +274,7 @@ button hits the manual outbound API, which is covered under §3.A
    Remove the manual `/api/discord/send` and `/api/discord/send-dm` over-2k compatibility shims
    once v3 can send multipart attachment payloads or explicitly delegate to a
    chunk/attachment transport variant.
-5. **Direct-send candidates (low priority).** §B.1
+5. **Direct-send candidates (low priority).** §B.1 remaining duplicate/drain
    intake-gate notices, §B.4 tmux lifecycle notices, §B.5 router announces.
    Each is a fixed short string; v3 buys consistent dedup keying.
 6. **Out of scope (separate follow-up issues recommended).**
@@ -300,6 +301,12 @@ button hits the manual outbound API, which is covered under §3.A
   `v3_dm_user_target_resolves_before_posting` verifies `OutboundTarget::DmUser`
   resolves before first post and duplicate replay does not resolve the DM
   channel again.
+- `src/services/discord/outbound/delivery.rs`:
+  `v3_referenced_send_preserves_reference_and_dedupes` verifies referenced v3
+  sends preserve the reply target and duplicate replay avoids a second post.
+- `src/services/discord/outbound/reaction_control.rs`:
+  `reaction_control_reply_ids_are_stable_per_message_and_reason` verifies the
+  reaction-control lifecycle replies keep stable correlation and semantic ids.
 - `src/services/discord/turn_bridge/mod.rs`:
   `final_completion_delivery_stays_blocked_until_terminal_message_commits`
   verifies final completion delivery remains blocked until the terminal Discord
