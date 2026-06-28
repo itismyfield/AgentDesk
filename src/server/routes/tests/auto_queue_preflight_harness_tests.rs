@@ -219,6 +219,7 @@ async fn run_basic_roundtrip(
                     "work_outcome": "sandbox_preflight_pass",
                     "completion_source": "auto_queue_preflight_fixture",
                     "fixture_id": fixture.fixture_id,
+                    "sandbox_preflight": true,
                     "production_mutation_allowed": false
                 }
             })),
@@ -657,8 +658,6 @@ async fn run_review_paths(
     append_card_dispatches(&pool, report, card_id).await?;
     append_unique(&mut report.dispatch_ids, review_dispatch_id);
     append_unique(&mut report.dispatch_ids, review_decision_id);
-    strip_fixture_execution_target_context(&pool, fixture).await?;
-    cleanup_fixture_dispatch_outbox(&pool, fixture).await?;
     force_fixture_run_terminal(&pool, &run_id).await?;
     finish_report_snapshot(&app, &pool, fixture, report, &run_id).await?;
     db.drop().await;
@@ -1048,6 +1047,7 @@ async fn complete_live_dispatches_for_run(
                     "completion_source": "auto_queue_preflight_fixture",
                     "fixture_id": fixture.fixture_id.as_str(),
                     "scenario_kind": fixture.scenario_kind.as_str(),
+                    "sandbox_preflight": true,
                     "production_mutation_allowed": false
                 }
             })),
@@ -1243,6 +1243,7 @@ async fn prepare_review_fixture_target(
         .unwrap_or_default();
     result.insert("completed_commit".to_string(), json!(reviewed_commit));
     result.insert("sandbox_review_target".to_string(), json!(true));
+    result.insert("sandbox_preflight".to_string(), json!(true));
     result.insert("production_mutation_allowed".to_string(), json!(false));
     sqlx::query(
         "UPDATE task_dispatches
@@ -1490,117 +1491,6 @@ async fn append_card_dispatches(
         append_unique(&mut report.dispatch_ids, dispatch_id);
     }
     Ok(())
-}
-
-async fn cleanup_fixture_dispatch_outbox(
-    pool: &sqlx::PgPool,
-    fixture: &PreflightFixture,
-) -> Result<(), String> {
-    sqlx::query(
-        "DELETE FROM dispatch_outbox
-         WHERE dispatch_id IN (
-             SELECT td.id
-             FROM task_dispatches td
-             JOIN kanban_cards c ON c.id = td.kanban_card_id
-             WHERE c.metadata->>'fixture_id' = $1
-         )",
-    )
-    .bind(&fixture.fixture_id)
-    .execute(pool)
-    .await
-    .map_err(|error| {
-        format!(
-            "cleanup fixture dispatch_outbox rows for {}: {error}",
-            fixture.fixture_id
-        )
-    })?;
-    Ok(())
-}
-
-async fn strip_fixture_execution_target_context(
-    pool: &sqlx::PgPool,
-    fixture: &PreflightFixture,
-) -> Result<(), String> {
-    let rows = sqlx::query(
-        "SELECT td.id, td.context
-         FROM task_dispatches td
-         JOIN kanban_cards c ON c.id = td.kanban_card_id
-         WHERE c.metadata->>'fixture_id' = $1
-           AND td.context IS NOT NULL
-           AND BTRIM(td.context) <> ''
-         ORDER BY td.created_at ASC, td.id ASC",
-    )
-    .bind(&fixture.fixture_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| {
-        format!(
-            "load fixture dispatch contexts for {}: {error}",
-            fixture.fixture_id
-        )
-    })?;
-
-    for row in rows {
-        let dispatch_id: String = row
-            .try_get("id")
-            .map_err(|error| format!("decode fixture dispatch id: {error}"))?;
-        let context_raw: String = row
-            .try_get("context")
-            .map_err(|error| format!("decode fixture dispatch context {dispatch_id}: {error}"))?;
-        let mut context = serde_json::from_str::<Value>(&context_raw)
-            .map_err(|error| format!("parse fixture dispatch context {dispatch_id}: {error}"))?;
-        let before = context.to_string();
-        strip_execution_target_fields(&mut context);
-        let after = context.to_string();
-        if after == before {
-            continue;
-        }
-        sqlx::query(
-            "UPDATE task_dispatches
-             SET context = $2,
-                 updated_at = NOW()
-             WHERE id = $1",
-        )
-        .bind(&dispatch_id)
-        .bind(after)
-        .execute(pool)
-        .await
-        .map_err(|error| format!("strip fixture dispatch context {dispatch_id}: {error}"))?;
-    }
-    Ok(())
-}
-
-fn strip_execution_target_fields(value: &mut Value) {
-    match value {
-        Value::Object(map) => {
-            let keys_to_remove: Vec<String> = map
-                .keys()
-                .filter(|key| {
-                    let lower = key.to_ascii_lowercase();
-                    lower.contains("worktree") || lower.contains("branch")
-                })
-                .cloned()
-                .collect();
-            for key in keys_to_remove {
-                map.remove(&key);
-            }
-            for child in map.values_mut() {
-                strip_execution_target_fields(child);
-            }
-        }
-        Value::Array(items) => {
-            for child in items {
-                strip_execution_target_fields(child);
-            }
-        }
-        Value::String(text) => {
-            let lower = text.to_ascii_lowercase();
-            if lower.contains("worktree") || lower.contains("branch") {
-                *text = "sandbox_stripped_execution_target".to_string();
-            }
-        }
-        _ => {}
-    }
 }
 
 async fn count_dispatches_for_card(
@@ -2399,6 +2289,7 @@ async fn load_safety_proof(pool: &sqlx::PgPool) -> Result<SafetyProof, String> {
          LIMIT 10",
     )
     .await?;
+    let worktree_or_branch_context_rows = load_worktree_or_branch_context_rows(pool).await?;
 
     Ok(SafetyProof {
         production_card_count: scalar_i64(
@@ -2435,15 +2326,56 @@ async fn load_safety_proof(pool: &sqlx::PgPool) -> Result<SafetyProof, String> {
         )
         .await?,
         dispatch_outbox_notify_rows,
-        worktree_or_branch_context_count: scalar_i64(
-            pool,
-            "SELECT COUNT(*)::BIGINT
-             FROM task_dispatches
-             WHERE context LIKE '%worktree%'
-                OR context LIKE '%branch%'",
-        )
-        .await?,
+        worktree_or_branch_context_count: worktree_or_branch_context_rows.len() as i64,
+        worktree_or_branch_context_rows,
     })
+}
+
+async fn load_worktree_or_branch_context_rows(pool: &sqlx::PgPool) -> Result<Vec<Value>, String> {
+    let rows = sqlx::query(
+        "SELECT id, dispatch_type, status, context
+         FROM task_dispatches
+         WHERE context IS NOT NULL
+           AND BTRIM(context) <> ''
+         ORDER BY created_at ASC, id ASC",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("load dispatch contexts for safety proof: {error}"))?;
+    let mut matches = Vec::new();
+    for row in rows {
+        let context_raw: String = row
+            .try_get("context")
+            .map_err(|error| format!("decode dispatch context for safety proof: {error}"))?;
+        let context = serde_json::from_str::<Value>(&context_raw)
+            .map_err(|error| format!("parse dispatch context for safety proof: {error}"))?;
+        if !json_has_execution_target_context(&context) {
+            continue;
+        }
+        matches.push(json!({
+            "id": row.try_get::<String, _>("id")
+                .map_err(|error| format!("decode dispatch id for safety proof: {error}"))?,
+            "dispatch_type": row.try_get::<Option<String>, _>("dispatch_type")
+                .map_err(|error| format!("decode dispatch type for safety proof: {error}"))?,
+            "status": row.try_get::<String, _>("status")
+                .map_err(|error| format!("decode dispatch status for safety proof: {error}"))?,
+            "context": context,
+        }));
+    }
+    Ok(matches)
+}
+
+fn json_has_execution_target_context(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => object.iter().any(|(key, child)| {
+            let lower = key.to_ascii_lowercase();
+            lower.contains("worktree")
+                || lower.contains("branch")
+                || json_has_execution_target_context(child)
+        }),
+        Value::Array(items) => items.iter().any(json_has_execution_target_context),
+        _ => false,
+    }
 }
 
 async fn load_limited_json_rows(pool: &sqlx::PgPool, sql: &str) -> Result<Vec<Value>, String> {

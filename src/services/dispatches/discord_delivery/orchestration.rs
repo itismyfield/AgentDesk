@@ -1302,6 +1302,16 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
         {
             decision_context.insert("target_repo".to_string(), serde_json::json!(target_repo));
         }
+        if review_context_json
+            .as_ref()
+            .is_some_and(crate::services::dispatches_followup::sandbox_preflight_suppresses_outbox)
+        {
+            decision_context.insert("sandbox_preflight".to_string(), serde_json::json!(true));
+            decision_context.insert(
+                "production_mutation_allowed".to_string(),
+                serde_json::json!(false),
+            );
+        }
 
         return match create_review_decision_followup_dispatch(
             db,
@@ -1423,13 +1433,27 @@ fn create_review_decision_followup_dispatch(
             let title = title.to_string();
             let context = context.clone();
             move |bridge_pool| async move {
-                crate::dispatch::create_dispatch_core(
+                let options =
+                    if crate::services::dispatches_followup::sandbox_preflight_suppresses_outbox(
+                        &context,
+                    ) {
+                        // Sandbox preflight exercises the production review follow-up path
+                        // while proving notification side effects stay suppressed.
+                        crate::dispatch::DispatchCreateOptions {
+                            skip_outbox: true,
+                            sidecar_dispatch: false,
+                        }
+                    } else {
+                        crate::dispatch::DispatchCreateOptions::default()
+                    };
+                crate::dispatch::create_dispatch_core_with_options(
                     &bridge_pool,
                     &card_id,
                     &agent_id,
                     "review-decision",
                     &title,
                     &context,
+                    options,
                 )
                 .await
                 .map_err(|error| error.to_string())

@@ -112,7 +112,7 @@
   - `src/dispatch/dispatch_status.rs` (1508 lines).
   - `src/services/dispatches/outbox_route.rs` (1182 lines; route extraction
     orchestration surface from #1722, split before adding non-bugfix behavior).
-  - `src/services/dispatches/discord_delivery/orchestration.rs` (1498 lines;
+  - `src/services/dispatches/discord_delivery/orchestration.rs` (1522 lines;
     delivery orchestration surface extracted from the route layer in #1760,
     split before adding non-bugfix behavior).
 - active_callsite_coverage: n/a.

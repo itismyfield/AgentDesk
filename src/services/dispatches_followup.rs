@@ -16,13 +16,65 @@
 //! all funnel through the same `queue_dispatch_followup_sync` / `_pg` pair,
 //! giving the call graph a single finalize guard shape.
 
+use serde_json::Value;
 use sqlx::PgPool;
+
+pub(crate) fn sandbox_preflight_suppresses_outbox(value: &Value) -> bool {
+    value
+        .get("sandbox_preflight")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        && value
+            .get("production_mutation_allowed")
+            .and_then(Value::as_bool)
+            == Some(false)
+}
+
+pub(crate) fn serialized_json_suppresses_outbox(raw: &str) -> bool {
+    serde_json::from_str::<Value>(raw)
+        .ok()
+        .as_ref()
+        .is_some_and(sandbox_preflight_suppresses_outbox)
+}
+
+pub(crate) async fn dispatch_suppresses_outbox_pg(
+    pg_pool: &PgPool,
+    dispatch_id: &str,
+) -> Result<bool, String> {
+    let row = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+        "SELECT context, result
+         FROM task_dispatches
+         WHERE id = $1",
+    )
+    .bind(dispatch_id)
+    .fetch_optional(pg_pool)
+    .await
+    .map_err(|error| {
+        format!("load dispatch outbox suppression marker for {dispatch_id}: {error}")
+    })?;
+    Ok(row.is_some_and(|(context, result)| {
+        context
+            .as_deref()
+            .is_some_and(serialized_json_suppresses_outbox)
+            || result
+                .as_deref()
+                .is_some_and(serialized_json_suppresses_outbox)
+    }))
+}
 
 /// Queue a dispatch completion follow-up row on Postgres.
 ///
 /// `ON CONFLICT DO NOTHING` preserves the single-finalize invariant for
 /// manual/outbox/recovery callers.
 pub async fn queue_dispatch_followup_pg(pg_pool: &PgPool, dispatch_id: &str) -> Result<(), String> {
+    if dispatch_suppresses_outbox_pg(pg_pool, dispatch_id).await? {
+        tracing::debug!(
+            dispatch_id = %dispatch_id,
+            "sandbox preflight dispatch suppressed followup outbox enqueue"
+        );
+        return Ok(());
+    }
+
     sqlx::query(
         "INSERT INTO dispatch_outbox (dispatch_id, action)
          VALUES ($1, 'followup')

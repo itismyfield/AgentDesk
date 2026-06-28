@@ -116,6 +116,7 @@ pub(crate) struct SafetyProof {
     pub(crate) dispatch_outbox_notify_count: i64,
     pub(crate) dispatch_outbox_notify_rows: Vec<Value>,
     pub(crate) worktree_or_branch_context_count: i64,
+    pub(crate) worktree_or_branch_context_rows: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

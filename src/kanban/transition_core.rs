@@ -137,8 +137,8 @@ async fn ensure_review_dispatch_after_review_enter_pg(
     .await
     .map_err(|error| anyhow::anyhow!("sync review-enter state for {card_id}: {error}"))?;
 
-    let parent_dispatch_id: Option<String> = sqlx::query_scalar(
-        "SELECT id
+    let parent_dispatch: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT id, context, result
          FROM task_dispatches
          WHERE kanban_card_id = $1
            AND dispatch_type IN ('implementation', 'rework')
@@ -150,6 +150,17 @@ async fn ensure_review_dispatch_after_review_enter_pg(
     .fetch_optional(pg_pool)
     .await
     .map_err(|error| anyhow::anyhow!("load review-enter parent dispatch for {card_id}: {error}"))?;
+    let parent_suppresses_outbox =
+        parent_dispatch
+            .as_ref()
+            .is_some_and(|(_id, context, result)| {
+                context.as_deref().is_some_and(
+                    crate::services::dispatches_followup::serialized_json_suppresses_outbox,
+                ) || result.as_deref().is_some_and(
+                    crate::services::dispatches_followup::serialized_json_suppresses_outbox,
+                )
+            });
+    let parent_dispatch_id = parent_dispatch.as_ref().map(|(id, _context, _result)| id);
 
     let mut context = json!({
         "review_dispatch_recovery": "missing_after_review_enter",
@@ -160,8 +171,20 @@ async fn ensure_review_dispatch_after_review_enter_pg(
     {
         obj.insert("parent_dispatch_id".to_string(), json!(parent_dispatch_id));
     }
+    if parent_suppresses_outbox && let Some(obj) = context.as_object_mut() {
+        obj.insert("sandbox_preflight".to_string(), json!(true));
+        obj.insert("production_mutation_allowed".to_string(), json!(false));
+    }
 
     let title = format!("[Review R{review_round}] {card_id}");
+    let create_options = if parent_suppresses_outbox {
+        DispatchCreateOptions {
+            skip_outbox: true,
+            sidecar_dispatch: false,
+        }
+    } else {
+        DispatchCreateOptions::default()
+    };
     match crate::dispatch::create_dispatch_core_with_options(
         pg_pool,
         card_id,
@@ -169,7 +192,7 @@ async fn ensure_review_dispatch_after_review_enter_pg(
         "review",
         &title,
         &context,
-        DispatchCreateOptions::default(),
+        create_options,
     )
     .await
     {
