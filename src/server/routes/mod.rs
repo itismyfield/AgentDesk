@@ -51,6 +51,10 @@ pub mod termination_events;
 pub mod v1;
 pub mod voice_config;
 
+#[cfg(test)]
+#[path = "tests/auto_queue_preflight_harness_tests.rs"]
+mod auto_queue_preflight_harness_tests;
+
 use axum::{
     Router,
     http::header::CONTENT_TYPE,

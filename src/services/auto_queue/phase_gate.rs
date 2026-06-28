@@ -101,7 +101,8 @@ async fn create_activate_dispatch_pg_inner(
                 latest_dispatch_id,
                 repo_id,
                 assigned_agent_id,
-                github_issue_number::BIGINT AS github_issue_number
+                github_issue_number::BIGINT AS github_issue_number,
+                metadata
          FROM kanban_cards
          WHERE id = $1",
     )
@@ -129,6 +130,11 @@ async fn create_activate_dispatch_pg_inner(
     let github_issue_number: Option<i64> = row
         .try_get("github_issue_number")
         .map_err(|error| format!("decode github_issue_number for {card_id}: {error}"))?;
+    let metadata: Option<serde_json::Value> = row
+        .try_get("metadata")
+        .map_err(|error| format!("decode metadata for {card_id}: {error}"))?;
+    let sandbox_preflight_dispatch =
+        metadata_disables_preflight_external_side_effects(metadata.as_ref());
 
     let agent_exists =
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM agents WHERE id = $1")
@@ -143,26 +149,30 @@ async fn create_activate_dispatch_pg_inner(
         ));
     }
 
-    let channel_value = crate::db::agents::resolve_agent_dispatch_channel_pg(
-        pool,
-        to_agent_id,
-        Some(dispatch_type),
-    )
-    .await
-    .map_err(|error| {
-        format!("resolve postgres dispatch channel for {to_agent_id} ({dispatch_type}): {error}")
-    })?
-    .map(|value| value.trim().to_string())
-    .filter(|value| !value.is_empty())
-    .ok_or_else(|| {
-        format!(
-            "Cannot create {dispatch_type} dispatch: agent '{to_agent_id}' has no discord channel (card {card_id})"
+    if !sandbox_preflight_dispatch {
+        let channel_value = crate::db::agents::resolve_agent_dispatch_channel_pg(
+            pool,
+            to_agent_id,
+            Some(dispatch_type),
         )
-    })?;
-    if resolve_activate_dispatch_channel_id(&channel_value).is_none() {
-        return Err(format!(
-            "Cannot create {dispatch_type} dispatch: agent '{to_agent_id}' has invalid discord channel '{channel_value}' (card {card_id})"
-        ));
+        .await
+        .map_err(|error| {
+            format!(
+                "resolve postgres dispatch channel for {to_agent_id} ({dispatch_type}): {error}"
+            )
+        })?
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "Cannot create {dispatch_type} dispatch: agent '{to_agent_id}' has no discord channel (card {card_id})"
+            )
+        })?;
+        if resolve_activate_dispatch_channel_id(&channel_value).is_none() {
+            return Err(format!(
+                "Cannot create {dispatch_type} dispatch: agent '{to_agent_id}' has invalid discord channel '{channel_value}' (card {card_id})"
+            ));
+        }
     }
 
     let effective =
@@ -197,8 +207,18 @@ async fn create_activate_dispatch_pg_inner(
             obj.entry("issue_number".to_string())
                 .or_insert_with(|| json!(issue_number));
         }
+        if sandbox_preflight_dispatch {
+            obj.entry("sandbox_preflight".to_string())
+                .or_insert_with(|| json!(true));
+            obj.entry("fixture_mode".to_string())
+                .or_insert_with(|| json!(true));
+            obj.entry("production_mutation_allowed".to_string())
+                .or_insert_with(|| json!(false));
+        }
     }
-    if crate::dispatch::dispatch_type_requires_fresh_worktree(Some(dispatch_type)) {
+    if !sandbox_preflight_dispatch
+        && crate::dispatch::dispatch_type_requires_fresh_worktree(Some(dispatch_type))
+    {
         let Some((worktree_path, worktree_branch, _, created)) =
             crate::dispatch::ensure_card_worktree(pool, card_id, Some(&context_with_strategy))
                 .await
@@ -493,22 +513,24 @@ async fn create_activate_dispatch_pg_inner(
     .await
     .map_err(|error| format!("insert postgres dispatch event for {dispatch_id}: {error}"))?;
 
-    sqlx::query(
-        "INSERT INTO dispatch_outbox (
-            dispatch_id, action, agent_id, card_id, title, required_capabilities
-         )
-         SELECT $1, 'notify', $2, $3, $4, required_capabilities
-           FROM task_dispatches
-          WHERE id = $1
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(&dispatch_id)
-    .bind(to_agent_id)
-    .bind(card_id)
-    .bind(title)
-    .execute(&mut *tx)
-    .await
-    .map_err(|error| format!("insert postgres dispatch outbox for {dispatch_id}: {error}"))?;
+    if !sandbox_preflight_dispatch {
+        sqlx::query(
+            "INSERT INTO dispatch_outbox (
+                dispatch_id, action, agent_id, card_id, title, required_capabilities
+             )
+             SELECT $1, 'notify', $2, $3, $4, required_capabilities
+               FROM task_dispatches
+              WHERE id = $1
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(&dispatch_id)
+        .bind(to_agent_id)
+        .bind(card_id)
+        .bind(title)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("insert postgres dispatch outbox for {dispatch_id}: {error}"))?;
+    }
 
     for intent in &decision.intents {
         crate::engine::transition_executor_pg::execute_activate_transition_intent_pg(
@@ -543,4 +565,45 @@ async fn create_activate_dispatch_pg_inner(
         .map_err(|error| format!("commit postgres dispatch {dispatch_id}: {error}"))?;
 
     Ok(dispatch_id)
+}
+
+fn metadata_disables_preflight_external_side_effects(metadata: Option<&serde_json::Value>) -> bool {
+    metadata.is_some_and(|metadata| {
+        metadata
+            .get("sandbox_preflight")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+            && metadata
+                .get("production_mutation_allowed")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::metadata_disables_preflight_external_side_effects;
+
+    #[test]
+    fn sandbox_preflight_metadata_disables_external_side_effects_only_when_safe() {
+        assert!(metadata_disables_preflight_external_side_effects(Some(
+            &serde_json::json!({
+                "sandbox_preflight": true,
+                "production_mutation_allowed": false
+            })
+        )));
+        assert!(!metadata_disables_preflight_external_side_effects(Some(
+            &serde_json::json!({
+                "sandbox_preflight": true,
+                "production_mutation_allowed": true
+            })
+        )));
+        assert!(!metadata_disables_preflight_external_side_effects(Some(
+            &serde_json::json!({
+                "sandbox_preflight": false,
+                "production_mutation_allowed": false
+            })
+        )));
+        assert!(!metadata_disables_preflight_external_side_effects(None));
+    }
 }

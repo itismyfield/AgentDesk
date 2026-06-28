@@ -205,6 +205,11 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── tuning_aggregate.rs
 │   │   │   └── verdict_route.rs
+│   │   ├── tests/
+│   │   │   ├── preflight_harness/
+│   │   │   │   ├── types.rs
+│   │   │   │   └── validation.rs
+│   │   │   └── auto_queue_preflight_harness_tests.rs
 │   │   ├── agents.rs
 │   │   ├── agents_crud.rs
 │   │   ├── agents_setup.rs
