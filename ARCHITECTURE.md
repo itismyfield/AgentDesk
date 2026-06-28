@@ -613,10 +613,13 @@ src/
 │   │   │   ├── delivery_lease.rs
 │   │   │   └── watcher_backstop.rs
 │   │   ├── voice_barge_in/
+│   │   │   ├── tests/
+│   │   │   │   └── pcm_harness_tests.rs
 │   │   │   ├── final_result_playback.rs
 │   │   │   ├── foreground_decision.rs
 │   │   │   ├── live_cut_playback.rs
 │   │   │   ├── progress_playback.rs
+│   │   │   ├── receive_hook.rs
 │   │   │   ├── routing.rs
 │   │   │   ├── stt.rs
 │   │   │   └── tts_pipeline.rs

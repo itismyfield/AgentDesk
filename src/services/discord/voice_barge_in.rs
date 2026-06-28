@@ -31,7 +31,7 @@ use crate::voice::tts::{
     TtsRuntime, TtsSynthesisKind,
     playback::{DEFAULT_TTS_CHUNK_MAX_CHARS, play_chunked_with_prefetch},
 };
-use crate::voice::{CompletedUtterance, VoiceConfig, VoiceReceiveHook};
+use crate::voice::{CompletedUtterance, VoiceConfig};
 
 use super::voice_acknowledgement::AcknowledgementConfig;
 #[cfg(test)]
@@ -58,6 +58,9 @@ use foreground_decision::{foreground_ack_text, parse_voice_foreground_decision};
 mod live_cut_playback;
 #[path = "voice_barge_in/progress_playback.rs"]
 mod progress_playback;
+#[path = "voice_barge_in/receive_hook.rs"]
+mod receive_hook;
+pub(in crate::services::discord) use receive_hook::DiscordVoiceBargeInHook;
 #[path = "voice_barge_in/routing.rs"]
 mod routing;
 // S7 (#3038): the agent-voice routing helper block moved into the `routing`
@@ -342,7 +345,9 @@ struct TestVoiceBackgroundStart {
 struct VoiceBargeInTestState {
     foreground_decisions: StdMutex<VecDeque<VoiceForegroundDecision>>,
     background_result_summaries: StdMutex<VecDeque<Option<String>>>,
+    turn_start_outcomes: StdMutex<VecDeque<Result<VoiceBackgroundStartOutcome, String>>>,
     background_handoff_outcomes: StdMutex<VecDeque<Result<VoiceBackgroundStartOutcome, String>>>,
+    turn_starts: StdMutex<Vec<TestVoiceBackgroundStart>>,
     background_starts: StdMutex<Vec<TestVoiceBackgroundStart>>,
     synth_requests: StdMutex<Vec<(u64, String, &'static str)>>,
     play_requests: StdMutex<Vec<(u64, &'static str)>>,
@@ -1045,6 +1050,36 @@ impl VoiceBargeInRuntime {
                 target_channel_id,
                 utterance_id: announcement.utterance_id.clone(),
                 summary: summary.to_string(),
+                message_content: message_content.to_string(),
+            });
+        Some(outcome)
+    }
+
+    #[cfg(test)]
+    fn take_test_turn_start_outcome(
+        &self,
+        driver_kind: VoiceBackgroundDriverKind,
+        source_channel_id: ChannelId,
+        target_channel_id: ChannelId,
+        utterance_id: &str,
+        message_content: &str,
+    ) -> Option<Result<VoiceBackgroundStartOutcome, String>> {
+        let outcome = self
+            .test_state
+            .turn_start_outcomes
+            .lock()
+            .expect("voice test turn start outcomes lock")
+            .pop_front()?;
+        self.test_state
+            .turn_starts
+            .lock()
+            .expect("voice test turn starts lock")
+            .push(TestVoiceBackgroundStart {
+                driver_kind,
+                source_channel_id,
+                target_channel_id,
+                utterance_id: utterance_id.to_string(),
+                summary: String::new(),
                 message_content: message_content.to_string(),
             });
         Some(outcome)
@@ -2278,18 +2313,47 @@ impl VoiceBargeInRuntime {
                 }
             }
         }
-        match driver
-            .start(VoiceBackgroundStartRequest {
-                guild_id,
-                voice_channel_id: source_channel_id,
-                channel_id: source_channel_id,
-                shared,
-                utterance_id: &utterance.utterance_id,
-                generation,
-                message_content: &announcement,
-            })
-            .await
-        {
+        let start_result = {
+            #[cfg(test)]
+            {
+                if let Some(outcome) = self.take_test_turn_start_outcome(
+                    driver.kind(),
+                    source_channel_id,
+                    target_channel_id,
+                    &utterance.utterance_id,
+                    &announcement,
+                ) {
+                    outcome
+                } else {
+                    driver
+                        .start(VoiceBackgroundStartRequest {
+                            guild_id,
+                            voice_channel_id: source_channel_id,
+                            channel_id: source_channel_id,
+                            shared,
+                            utterance_id: &utterance.utterance_id,
+                            generation,
+                            message_content: &announcement,
+                        })
+                        .await
+                }
+            }
+            #[cfg(not(test))]
+            {
+                driver
+                    .start(VoiceBackgroundStartRequest {
+                        guild_id,
+                        voice_channel_id: source_channel_id,
+                        channel_id: source_channel_id,
+                        shared,
+                        utterance_id: &utterance.utterance_id,
+                        generation,
+                        message_content: &announcement,
+                    })
+                    .await
+            }
+        };
+        match start_result {
             Ok(outcome) => {
                 if let Some(message_id) = outcome.message_id {
                     let mut cache_local_metadata = !durable_reserved;
@@ -2640,112 +2704,6 @@ impl VoiceBargeInRuntime {
     }
 }
 
-pub(in crate::services::discord) struct DiscordVoiceBargeInHook {
-    runtime: Arc<VoiceBargeInRuntime>,
-    shared: Arc<SharedData>,
-    provider: ProviderKind,
-}
-
-impl DiscordVoiceBargeInHook {
-    pub(in crate::services::discord) fn new(
-        runtime: Arc<VoiceBargeInRuntime>,
-        shared: Arc<SharedData>,
-        provider: ProviderKind,
-    ) -> Self {
-        Self {
-            runtime,
-            shared,
-            provider,
-        }
-    }
-}
-
-impl VoiceReceiveHook for DiscordVoiceBargeInHook {
-    fn observe_pcm(&self, control_channel_id: u64, user_id: u64, samples: &[i16]) {
-        let channel_id = ChannelId::new(control_channel_id);
-        self.runtime
-            .observe_streaming_stt_pcm_i16(channel_id, user_id, samples);
-        let Some(cut) = self.runtime.observe_live_pcm_i16(channel_id, samples) else {
-            return;
-        };
-
-        let shared = self.shared.clone();
-        // F22 (#2046): playback_owner 라벨 추가 — 어떤 progress / spoken_result
-        // playback 이 cut 되었는지 사후 분석 가능.
-        let playback_owner = self
-            .runtime
-            .playbacks
-            .get(&channel_id.get())
-            .and_then(|entry| entry.value().owner);
-        // Issue #2335 (b): the live PCM cut path is a parallel termination
-        // path that, prior to this fix, did NOT call
-        // `cancel_inflight_foreground_calls`. As a result PCM cut would
-        // silence the speaker / kill the background turn while a
-        // foreground Codex/Claude child kept running to natural exit.
-        //
-        // Codex review (round 2): perform the foreground-token cancel
-        // SYNCHRONOUSLY here, BEFORE the tokio::spawn that handles the (async)
-        // mailbox cancel. If deferred into the spawned task, a fast foreground
-        // call could complete and unregister its token between cut detection and
-        // the spawn being scheduled, in which case `cancel_inflight_foreground_calls`
-        // would see an empty registry and the stale reply / ack / handoff would
-        // still proceed after the user explicitly barged in.
-        let foreground_cancelled = self
-            .runtime
-            .cancel_inflight_foreground_calls(channel_id, "voice_barge_in_live_cut");
-        let runtime = self.runtime.clone();
-        tokio::spawn(async move {
-            let cancel_channel = runtime
-                .active_barge_in_mailbox_channel(&shared, channel_id)
-                .await
-                .unwrap_or(channel_id);
-            let result = super::mailbox_cancel_active_turn_with_reason(
-                &shared,
-                cancel_channel,
-                "voice_barge_in_live_cut",
-            )
-            .await;
-            tracing::info!(
-                channel_id = channel_id.get(),
-                cancel_channel_id = cancel_channel.get(),
-                mean_db = cut.levels.mean_db,
-                max_db = cut.levels.max_db,
-                sensitivity = ?cut.sensitivity,
-                candidate_frames = cut.candidate_frames,
-                playback_owner = ?playback_owner,
-                cancelled = result.token.is_some(),
-                already_stopping = result.already_stopping,
-                foreground_cancelled,
-                "voice live barge-in cut processed"
-            );
-        });
-    }
-
-    fn utterance_completed(&self, control_channel_id: u64, utterance: &CompletedUtterance) {
-        let runtime = self.runtime.clone();
-        let shared = self.shared.clone();
-        let provider = self.provider.clone();
-        let utterance = utterance.clone();
-        tokio::spawn(async move {
-            let channel_id = ChannelId::new(control_channel_id);
-            let outcome = runtime
-                .process_completed_utterance(&shared, &provider, channel_id, &utterance)
-                .await;
-            tracing::debug!(
-                channel_id = channel_id.get(),
-                utterance_id = %utterance.utterance_id,
-                outcome = ?outcome,
-                "voice barge-in transcript processing finished"
-            );
-            // #2156: STT 및 후속 처리가 완료된 시점이므로 utterance wav / segment /
-            // transcript sidecar 를 정리한다. config 가 keep_recordings=true 거나
-            // 환경변수 ADK_VOICE_KEEP_WAV=1 인 경우 cleanup_utterance_artifacts 내부에서
-            // no-op 처리된다.
-            runtime.cleanup_utterance_artifacts(&utterance).await;
-        });
-    }
-}
-
 fn pcm_i16_to_le_bytes(samples: &[i16]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(samples.len() * 2);
     for sample in samples {
@@ -2830,6 +2788,7 @@ mod tests {
         agent_voice_background_channel_for, agent_voice_channel_for_background,
         agent_voice_source_channel_for_background,
     };
+    use crate::voice::VoiceReceiveHook;
     use std::sync::atomic::AtomicUsize;
 
     #[derive(Default)]
@@ -4575,4 +4534,7 @@ mod tests {
         // Should not panic; should not surface errors.
         runtime.cleanup_utterance_artifacts(&utterance).await;
     }
+
+    #[path = "pcm_harness_tests.rs"]
+    mod pcm_harness_tests;
 }

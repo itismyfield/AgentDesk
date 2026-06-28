@@ -1261,7 +1261,7 @@
     was removed from `giant_file_registry.toml`; #3038 S5 locked the final
     root ratchet at 274 production lines).
   - `src/services/discord/session_runtime.rs` (1657 lines; -41 from #3591 dead `assistant_turn_count`/`recent_history_context` 메서드 제거 — 100턴/idle 세션 리셋 폐기 연쇄; -22 from #3736 making legacy remote-profile names non-routing/non-path-affecting while remote SSH is disabled).
-  - `src/services/discord/voice_barge_in.rs` (2823 lines after #3038
+  - `src/services/discord/voice_barge_in.rs` (2781 lines after #3038
     VoiceBargeInRuntime S1 moved the STT method cluster to
     `src/services/discord/voice_barge_in/stt.rs` (314 production lines) and
     S2 moved the progress playback method cluster to
@@ -1278,7 +1278,10 @@
     `src/services/discord/voice_barge_in/routing.rs` (now 500 production
     lines), and S8 moved the foreground decision/parser cluster to
     `src/services/discord/voice_barge_in/foreground_decision.rs` (214
-    production lines);
+    production lines), and #3801 moved the real receive/barge-in hook into
+    `src/services/discord/voice_barge_in/receive_hook.rs` (114 production
+    lines) while adding deterministic PCM harness coverage through the real
+    receive/barge-in path;
     voice STT/TTS, lobby routing, progress mirroring, and barge-in
     orchestration surface; tracked decompose target — see
     `giant-file-registry.md` (owner `voice-runtime`, deadline 2026-08-31,
