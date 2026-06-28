@@ -36,7 +36,7 @@ RAW_DB_METHOD_ALIAS_RE = re.compile(
     rf"""(?:\b(?:var|let|const)\s+)?({IDENT_RE})\s*=\s*{RAW_DB_SURFACE_RE}\s*(?:\.\s*(query|execute)|\[\s*["'](query|execute)["']\s*\])"""
 )
 RAW_DB_METHOD_DESTRUCTURE_RE = re.compile(
-    rf"""\b(?:var|let|const)\s+\{{([^}}]+)\}}\s*=\s*{RAW_DB_SURFACE_RE}\b"""
+    rf"""\b(?:var|let|const)\s+\{{([^}}]+)\}}\s*=\s*{RAW_DB_SURFACE_RE}(?=\s*(?:[;,\)\n]|$))"""
 )
 AGENTDESK_DB_DESTRUCTURE_RE = re.compile(
     rf"""(?:\b(?:var|let|const)\s+)?\{{[^}}]*\bdb\s*(?::\s*({IDENT_RE}))?[^}}]*\}}\s*=\s*agentdesk\b"""
