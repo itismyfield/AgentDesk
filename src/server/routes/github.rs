@@ -500,7 +500,30 @@ pub async fn create_issue(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
     use std::sync::Arc;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
 
     fn test_state() -> AppState {
         let config = crate::config::Config::default();
@@ -533,6 +556,54 @@ mod tests {
             announcement_channel_id: None,
             dry_run: None,
         }
+    }
+
+    fn fake_gh_path(dir: &std::path::Path) -> std::path::PathBuf {
+        #[cfg(windows)]
+        {
+            dir.join("gh.ps1")
+        }
+        #[cfg(not(windows))]
+        {
+            dir.join("gh")
+        }
+    }
+
+    fn install_fake_gh(dir: &std::path::Path, fail_create: bool) -> std::path::PathBuf {
+        let path = fake_gh_path(dir);
+        #[cfg(windows)]
+        let script = if fail_create {
+            r#"
+param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Rest)
+if ($Rest[0] -eq "--version") { Write-Output "gh version 2.0.0"; exit 0 }
+if ($Rest[0] -eq "issue" -and $Rest[1] -eq "create") { Write-Error "boom"; exit 7 }
+Write-Error "unexpected gh args: $Rest"; exit 2
+"#
+        } else {
+            r#"
+param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Rest)
+if ($Rest[0] -eq "--version") { Write-Output "gh version 2.0.0"; exit 0 }
+if ($Rest[0] -eq "issue" -and $Rest[1] -eq "create") { Write-Output "https://github.com/itismyfield/AgentDesk/issues/4242"; exit 0 }
+Write-Error "unexpected gh args: $Rest"; exit 2
+"#
+        };
+        #[cfg(not(windows))]
+        let script = if fail_create {
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'gh version 2.0.0'; exit 0; fi\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"create\" ]; then echo 'boom' >&2; exit 7; fi\necho \"unexpected gh args: $*\" >&2\nexit 2\n"
+        } else {
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'gh version 2.0.0'; exit 0; fi\nif [ \"$1\" = \"issue\" ] && [ \"$2\" = \"create\" ]; then echo 'https://github.com/itismyfield/AgentDesk/issues/4242'; exit 0; fi\necho \"unexpected gh args: $*\" >&2\nexit 2\n"
+        };
+        std::fs::write(&path, script).expect("write fake gh script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&path)
+                .expect("stat fake gh")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&path, permissions).expect("chmod fake gh");
+        }
+        path
     }
 
     #[tokio::test]
@@ -619,6 +690,79 @@ mod tests {
                 .as_str()
                 .is_some_and(|message| message.contains("unsupported reserved issue-create")),
             "non-dry-run unsupported fields must fail as a contract error: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_issue_non_dry_run_maps_shared_service_success_response() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock");
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let fake_gh = install_fake_gh(temp.path(), false);
+        let _gh_guard = EnvVarGuard::set("AGENTDESK_GH_PATH", &fake_gh);
+        let mut body = base_issue_body();
+        body.agent_id = Some("project-agentdesk".to_string());
+        body.block_on = Some(vec![7, 42]);
+
+        let (status, Json(response)) = create_issue(State(test_state()), Json(body)).await;
+
+        assert_eq!(status, StatusCode::CREATED, "{response}");
+        assert_eq!(response["issue"]["number"], json!(4242));
+        assert_eq!(
+            response["issue"]["url"],
+            json!("https://github.com/itismyfield/AgentDesk/issues/4242")
+        );
+        assert_eq!(
+            response["applied_labels"],
+            json!(["agent:project-agentdesk"])
+        );
+        assert_eq!(response["block_on"], json!([7, 42]));
+        assert_eq!(
+            response["issue_creation_origin"],
+            json!("api_github_issues_create")
+        );
+        assert_eq!(response["issue_creation_mode"], json!("standard"));
+        assert_eq!(
+            response["kanban_card_sync_error"],
+            json!("postgres pool unavailable")
+        );
+        assert_eq!(response["kanban_card_sync"]["enabled"], json!(true));
+        assert_eq!(response["announcement_sync"]["enabled"], json!(true));
+        assert_eq!(
+            response["announcement_sync"]["error"],
+            json!("postgres pool unavailable for issue announcement")
+        );
+        assert_eq!(
+            response["announcement_sync_error"],
+            json!("postgres pool unavailable for issue announcement")
+        );
+    }
+
+    #[tokio::test]
+    async fn create_issue_non_dry_run_maps_shared_service_github_failure() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock");
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let fake_gh = install_fake_gh(temp.path(), true);
+        let _gh_guard = EnvVarGuard::set("AGENTDESK_GH_PATH", &fake_gh);
+
+        let (status, Json(response)) =
+            create_issue(State(test_state()), Json(base_issue_body())).await;
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(
+            response["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("gh issue create failed")),
+            "shared service GitHub errors must map to BAD_GATEWAY: {response}"
+        );
+        assert!(
+            response["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("boom")),
+            "fake gh stderr should be preserved in the route error: {response}"
         );
     }
 }

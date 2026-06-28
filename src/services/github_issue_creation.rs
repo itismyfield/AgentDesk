@@ -525,7 +525,7 @@ mod tests {
     #[derive(Debug)]
     struct FakeIssueCreator {
         available: bool,
-        issue: CreatedIssue,
+        result: Result<CreatedIssue, String>,
     }
 
     impl IssueCreator for FakeIssueCreator {
@@ -537,17 +537,34 @@ mod tests {
             &'a self,
             _request: &'a GitHubIssueCreateRequest,
         ) -> IssueCreatorFuture<'a> {
-            Box::pin(async move { Ok(self.issue.clone()) })
+            Box::pin(async move { self.result.clone() })
         }
     }
 
     fn fake_creator() -> FakeIssueCreator {
         FakeIssueCreator {
             available: true,
-            issue: CreatedIssue {
+            result: Ok(CreatedIssue {
                 number: 3742,
                 url: "https://github.com/itismyfield/AgentDesk/issues/3742".to_string(),
-            },
+            }),
+        }
+    }
+
+    fn fake_creator_unavailable() -> FakeIssueCreator {
+        FakeIssueCreator {
+            available: false,
+            result: Ok(CreatedIssue {
+                number: 1,
+                url: "https://github.com/itismyfield/AgentDesk/issues/1".to_string(),
+            }),
+        }
+    }
+
+    fn fake_creator_failure(error: impl Into<String>) -> FakeIssueCreator {
+        FakeIssueCreator {
+            available: true,
+            result: Err(error.into()),
         }
     }
 
@@ -613,5 +630,53 @@ mod tests {
         assert_eq!(result.kanban.skipped_reason.as_deref(), Some(reason));
         assert_eq!(result.announcement.enabled, false);
         assert_eq!(result.announcement.skipped_reason.as_deref(), Some(reason));
+    }
+
+    #[tokio::test]
+    async fn gh_unavailable_short_circuits_before_side_effects() {
+        let request = GitHubIssueCreateRequest::new(
+            "api_github_issues_create",
+            "itismyfield/AgentDesk",
+            "Centralize issue creation",
+            "body",
+        )
+        .with_kanban(KanbanCardSync::enabled(KanbanCardSyncOptions::default()))
+        .with_announcement(IssueAnnouncementSync::enabled(
+            IssueAnnouncementSyncOptions {
+                agent_id: None,
+                announcement_channel_id: Some("123".to_string()),
+                complete_if_closed: true,
+            },
+        ));
+
+        let error = create_github_issue_with_creator(None, request, &fake_creator_unavailable())
+            .await
+            .expect_err("unavailable gh must fail before sync side effects");
+
+        assert_eq!(error, IssueCreationError::GhUnavailable);
+    }
+
+    #[tokio::test]
+    async fn gh_create_failure_is_reported_without_sync_side_effects() {
+        let request = GitHubIssueCreateRequest::new(
+            "api_github_issues_create",
+            "itismyfield/AgentDesk",
+            "Centralize issue creation",
+            "body",
+        )
+        .with_kanban(KanbanCardSync::enabled(KanbanCardSyncOptions::default()))
+        .with_announcement(IssueAnnouncementSync::enabled(
+            IssueAnnouncementSyncOptions {
+                agent_id: None,
+                announcement_channel_id: Some("123".to_string()),
+                complete_if_closed: true,
+            },
+        ));
+
+        let error = create_github_issue_with_creator(None, request, &fake_creator_failure("boom"))
+            .await
+            .expect_err("gh create failure must map to the shared GitHub error");
+
+        assert_eq!(error, IssueCreationError::GitHub("boom".to_string()));
     }
 }
