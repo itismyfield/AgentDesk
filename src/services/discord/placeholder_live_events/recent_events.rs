@@ -1,10 +1,13 @@
 use serde_json::Value;
 
 use super::super::formatting::format_tool_input;
+#[cfg(test)]
 use super::common::{
-    EVENT_BLOCK_MAX_CHARS, EVENT_LINE_MAX_CHARS, EVENT_RENDER_LIMIT, first_content_line,
-    is_harness_task_tool_name, is_internal_tool_error, normalize_summary_multiline,
-    sanitize_for_code_fence, tool_prefix, truncate_chars, value_to_compact_string,
+    EVENT_BLOCK_MAX_CHARS, EVENT_LINE_MAX_CHARS, sanitize_for_code_fence, truncate_chars,
+};
+use super::common::{
+    EVENT_RENDER_LIMIT, first_content_line, is_harness_task_tool_name, is_internal_tool_error,
+    normalize_summary_multiline, tool_prefix, value_to_compact_string,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +77,7 @@ impl RecentPlaceholderEvent {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn render_line(&self) -> String {
         // #3477 item 1: the summary may span several lines. Put the prefix on the
         // first line and indent the continuation lines so the entry stays visually
@@ -95,6 +99,18 @@ impl RecentPlaceholderEvent {
             out.push_str(&cont);
         }
         out
+    }
+
+    fn compact_bucket(&self) -> (&str, &'static str) {
+        let action = match self.prefix.as_str() {
+            "[tool error]" => "오류",
+            "[background]" => "백그라운드",
+            "[Monitor]" => "monitor",
+            "[Task]" => "작업",
+            "[system]" => "시스템",
+            _ => "실행",
+        };
+        (self.prefix.as_str(), action)
     }
 }
 
@@ -234,6 +250,7 @@ fn tool_result_content(block: &Value) -> String {
         .join("\n")
 }
 
+#[cfg(test)]
 pub(super) fn render_events<'a>(
     events: impl DoubleEndedIterator<Item = &'a RecentPlaceholderEvent>,
 ) -> Option<String> {
@@ -262,4 +279,43 @@ pub(super) fn render_events<'a>(
     }
     lines.reverse();
     Some(format!("```text\n{}\n```", lines.join("\n")))
+}
+
+pub(super) fn render_compact_events<'a>(
+    events: impl DoubleEndedIterator<Item = &'a RecentPlaceholderEvent>,
+) -> Option<String> {
+    let mut buckets: Vec<(String, &'static str, usize)> = Vec::new();
+    for event in events.rev().take(EVENT_RENDER_LIMIT) {
+        let (prefix, action) = event.compact_bucket();
+        if let Some((_, _, count)) =
+            buckets
+                .iter_mut()
+                .find(|(existing_prefix, existing_action, _)| {
+                    existing_prefix == prefix && *existing_action == action
+                })
+        {
+            *count += 1;
+            continue;
+        }
+        buckets.push((prefix.to_string(), action, 1));
+    }
+    if buckets.is_empty() {
+        return None;
+    }
+
+    buckets.reverse();
+    Some(
+        buckets
+            .into_iter()
+            .map(|(prefix, action, count)| {
+                let suffix = if count > 1 {
+                    format!(" · {count}회")
+                } else {
+                    String::new()
+                };
+                format!("• {prefix} {action}{suffix}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }

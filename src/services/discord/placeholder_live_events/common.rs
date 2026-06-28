@@ -10,6 +10,7 @@ pub(super) const EVENT_LINE_MAX_CHARS: usize = 100;
 // line. Compact single-line panel cells (Tasks/Subagents) are unaffected — they
 // keep using `normalize_summary` (first line only).
 pub(super) const RECENT_EVENT_MAX_LINES: usize = 4;
+#[cfg(test)]
 pub(super) const EVENT_BLOCK_MAX_CHARS: usize = 1500;
 // Status panels are sent as plain message content, so they must stay under
 // Discord's 2000-character content ceiling rather than the 4096-char embed limit.
@@ -24,6 +25,7 @@ pub(super) const SESSION_PANEL_LINE_MAX_CHARS: usize = 100;
 pub(super) const TASK_PANEL_LINE_MAX_CHARS: usize = 140;
 pub(super) const CONTEXT_PANEL_LINE_MAX_CHARS: usize = 120;
 
+#[cfg(test)]
 pub(super) fn sanitize_for_code_fence(raw: &str) -> String {
     raw.replace('`', "")
 }

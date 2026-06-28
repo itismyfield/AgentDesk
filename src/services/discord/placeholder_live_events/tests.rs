@@ -4,14 +4,13 @@ use super::super::formatting::{
     redact_sensitive_for_placeholder,
 };
 use super::common::{
-    EVENT_BLOCK_MAX_CHARS, EVENT_LINE_MAX_CHARS, EVENT_RENDER_LIMIT, STATUS_PANEL_MAX_CHARS,
-    STATUS_PANEL_TASK_LIMIT,
+    EVENT_BLOCK_MAX_CHARS, EVENT_LINE_MAX_CHARS, STATUS_PANEL_MAX_CHARS, STATUS_PANEL_TASK_LIMIT,
 };
 use super::*;
 use serde_json::json;
 
 #[test]
-fn render_block_keeps_newest_events_under_limit() {
+fn render_block_compacts_newest_events_under_limit() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(42);
     for idx in 0..25 {
@@ -23,14 +22,32 @@ fn render_block_keeps_newest_events_under_limit() {
     }
 
     let block = events.render_block(channel_id).unwrap();
-    assert!(block.starts_with("```text\n"));
-    assert!(block.ends_with("\n```"));
     assert!(block.chars().count() <= EVENT_BLOCK_MAX_CHARS);
     let live_lines = block
         .lines()
-        .filter(|line| line.starts_with("[Bash]"))
+        .filter(|line| line.starts_with("• [Bash]"))
         .collect::<Vec<_>>();
-    assert_eq!(live_lines.len(), EVENT_RENDER_LIMIT);
+    assert_eq!(live_lines.len(), 1);
+    assert!(block.contains("5회"));
+    assert!(!block.contains("echo 24"));
+}
+
+#[test]
+fn raw_debug_block_keeps_newest_events_under_limit() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(43);
+    for idx in 0..25 {
+        events.push_event(
+            channel_id,
+            RecentPlaceholderEvent::tool_use("Bash", &format!(r#"{{"command":"echo {idx}"}}"#))
+                .unwrap(),
+        );
+    }
+
+    let block = events.render_raw_block_for_tests(channel_id).unwrap();
+    assert!(block.starts_with("```text\n"));
+    assert!(block.ends_with("\n```"));
+    assert!(block.chars().count() <= EVENT_BLOCK_MAX_CHARS);
     assert!(!block.contains("echo 19"));
     assert!(block.contains("echo 24"));
 }
@@ -101,7 +118,7 @@ fn monitor_handoff_live_events_stays_under_description_limit_with_long_command()
         );
     }
 
-    let block = events.render_block(channel_id).unwrap();
+    let block = events.render_raw_block_for_tests(channel_id).unwrap();
     let live_lines = block
         .lines()
         .filter(|line| line.starts_with("[Bash]"))
@@ -116,6 +133,7 @@ fn monitor_handoff_live_events_stays_under_description_limit_with_long_command()
     assert!(!block.contains("secret-token"));
     assert!(!block.contains("api_key=secret"));
 
+    let compact_block = events.render_block(channel_id).unwrap();
     let rendered = build_monitor_handoff_placeholder_with_live_events(
         MonitorHandoffStatus::Active,
         MonitorHandoffReason::AsyncDispatch,
@@ -126,7 +144,7 @@ fn monitor_handoff_live_events_stays_under_description_limit_with_long_command()
         Some(&"context ".repeat(200)),
         Some(&"request ".repeat(200)),
         Some(&"progress ".repeat(200)),
-        Some(&block),
+        Some(&compact_block),
     );
 
     assert!(
@@ -135,7 +153,9 @@ fn monitor_handoff_live_events_stays_under_description_limit_with_long_command()
         rendered.len()
     );
     assert!(rendered.contains("[Bash]"));
-    assert!(rendered.contains("```text"));
+    assert!(!rendered.contains("```text"));
+    assert!(!rendered.contains("secret-token"));
+    assert!(!rendered.contains("api_key=secret"));
 }
 
 #[test]
@@ -240,7 +260,39 @@ fn status_panel_renders_derived_tool_state_under_limit() {
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
     assert!(rendered.contains("도구 실행 중"));
     assert!(rendered.contains("[Bash]"));
+    assert!(
+        !rendered.contains("cargo test"),
+        "status header should show the tool class, not raw command text: {rendered}"
+    );
     assert!(rendered.chars().count() <= STATUS_PANEL_MAX_CHARS);
+}
+
+#[test]
+fn status_panel_recent_compacts_raw_command_details() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(78);
+    let raw_command = "cargo test --lib placeholder_live_events -- --nocapture";
+    let tool_args = json!({"command": raw_command}).to_string();
+    events.push_status_events(channel_id, status_events_from_tool_use("Bash", &tool_args));
+    events.push_event(
+        channel_id,
+        RecentPlaceholderEvent::tool_use("Bash", &tool_args).unwrap(),
+    );
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(rendered.contains("🖥️ Recent"));
+    assert!(rendered.contains("• [Bash] 실행"));
+    assert!(!rendered.contains("```text"));
+    assert!(
+        !rendered.contains(raw_command),
+        "normal status panel must not render raw command detail: {rendered}"
+    );
+
+    let raw_debug_block = events.render_raw_block_for_tests(channel_id).unwrap();
+    assert!(
+        raw_debug_block.contains(raw_command),
+        "explicit debug render keeps raw detail available outside the normal status panel"
+    );
 }
 
 #[test]
@@ -257,7 +309,7 @@ fn characterize_rollover_seed_has_no_status_panel_content_s0() {
     let panel = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
     assert!(panel.contains("도구 실행 중"));
     assert!(panel.contains("[Bash]"));
-    assert!(panel.contains("cargo test --lib placeholder_live_events"));
+    assert!(!panel.contains("cargo test --lib placeholder_live_events"));
 
     let status_block = build_processing_status_block("⠸");
     let current_portion = "relay body ".repeat(250);
@@ -2700,6 +2752,37 @@ fn background_bash_slots_are_footer_flag_gated() {
 }
 
 #[test]
+fn background_bash_command_only_slot_hides_raw_command_3806() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_806_002);
+    let raw_command = "codex exec --skip-git-repo-check -m gpt-5.5";
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id_for_footer_mode(
+            "Bash",
+            &json!({
+                "command": raw_command,
+                "run_in_background": true
+            })
+            .to_string(),
+            Some("toolu_raw_command_hidden"),
+            true,
+        ),
+    );
+
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(rendered.contains("Tasks"));
+    assert!(
+        rendered.contains("└ Bash"),
+        "background Bash class should remain visible: {rendered}"
+    );
+    assert!(
+        !rendered.contains(raw_command),
+        "background Bash slot must not leak raw command detail: {rendered}"
+    );
+}
+
+#[test]
 fn background_bash_task_slots_trim_to_task_limit() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(3_089_106);
@@ -2972,9 +3055,9 @@ fn status_panel_pairs_subagent_by_tool_use_id_despite_interleaving() {
 }
 
 // Live subagent activity: a nested subagent record carries the launching Task's
-// id as a top-level `parent_tool_use_id`. Its tool step must surface on the
-// owning subagent slot (`└ type desc — [Tool] args`), not the panel header, so a
-// long (background) subagent is not an opaque "running".
+// id as a top-level `parent_tool_use_id`. Its tool class must surface on the
+// owning subagent slot (`└ type desc — [Tool]`), not the panel header, so a long
+// background subagent is not opaque while raw tool args stay out of the panel.
 #[test]
 fn status_panel_shows_live_subagent_activity_by_parent_id() {
     let events = PlaceholderLiveEvents::default();
@@ -3007,8 +3090,12 @@ fn status_panel_shows_live_subagent_activity_by_parent_id() {
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
     assert!(rendered.contains("general-purpose Audit logs"));
     assert!(
-        rendered.contains("[Bash]") && rendered.contains("grep ERROR app.log"),
+        rendered.contains("[Bash]"),
         "subagent activity line missing, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("grep ERROR app.log"),
+        "subagent activity must not leak raw command args, got: {rendered}"
     );
     // Nested activity must NOT turn the panel header into a foreground tool run.
     assert!(
@@ -3162,6 +3249,10 @@ fn status_panel_background_subagent_shows_live_activity_while_running() {
     assert!(
         rendered.contains("[WebSearch]"),
         "background subagent live activity missing, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("rust async"),
+        "background subagent activity must not leak raw query args, got: {rendered}"
     );
     // Still running — no completion marker yet.
     assert!(
@@ -5941,8 +6032,12 @@ fn status_panel_late_batch_after_completion_keeps_recent_block() {
         "a fresh late batch racing TurnCompleted must not be blanked: {late}"
     );
     assert!(
-        late.contains("LATE_BATCH"),
-        "late content must render: {late}"
+        late.contains("• [Bash] 실행"),
+        "late compact activity must render without raw command text: {late}"
+    );
+    assert!(
+        !late.contains("LATE_BATCH"),
+        "raw late command leaked: {late}"
     );
 }
 
