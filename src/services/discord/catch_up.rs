@@ -343,6 +343,33 @@ impl CatchUpScanStats {
     }
 }
 
+fn catch_up_enqueue_accepted(outcome: &MailboxEnqueueOutcome) -> bool {
+    outcome.enqueued && outcome.persistence_error.is_none()
+}
+
+fn log_catch_up_enqueue_not_accepted(
+    phase: &'static str,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    outcome: &MailboxEnqueueOutcome,
+) {
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    let refusal = outcome
+        .refusal_reason
+        .map(|reason| reason.as_str())
+        .unwrap_or("none");
+    let persistence_error = outcome.persistence_error.as_deref().unwrap_or("none");
+    tracing::warn!(
+        "  [{ts}] ⚠ catch-up {phase}: message {} in channel {} was not committed to queue (enqueued={} merged={} refusal={} persistence_error={})",
+        message_id,
+        channel_id,
+        outcome.enqueued,
+        outcome.merged,
+        refusal,
+        persistence_error
+    );
+}
+
 /// Plain inputs to the catch-up filter, decoupled from `serenity::Message` so
 /// we can unit test the regression scenario without a Discord runtime.
 #[derive(Debug, Clone)]
@@ -662,13 +689,12 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
                 );
                 break;
             }
-            stats.record(outcome);
             if outcome != CatchUpClassification::Recover {
+                stats.record(outcome);
                 continue;
             }
 
-            reaction_cleanup::cleanup_recovered_catch_up_hourglass(http, channel_id, msg.id).await;
-            mailbox_enqueue_intervention(
+            let enqueue = mailbox_enqueue_intervention(
                 shared,
                 provider,
                 channel_id,
@@ -691,6 +717,13 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
                 },
             )
             .await;
+            if !catch_up_enqueue_accepted(&enqueue) {
+                log_catch_up_enqueue_not_accepted("phase1", channel_id, msg.id, &enqueue);
+                continue;
+            }
+
+            stats.record(CatchUpClassification::Recover);
+            reaction_cleanup::cleanup_recovered_catch_up_hourglass(http, channel_id, msg.id).await;
             // Track the newest actually-recovered message for checkpoint
             let mid = msg.id.get();
             if max_recovered_id.map(|m| mid > m).unwrap_or(true) {
@@ -873,7 +906,7 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
                 continue;
             }
 
-            mailbox_enqueue_intervention(
+            let enqueue = mailbox_enqueue_intervention(
                 shared,
                 provider,
                 channel_id,
@@ -896,6 +929,11 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
                 },
             )
             .await;
+            if !catch_up_enqueue_accepted(&enqueue) {
+                log_catch_up_enqueue_not_accepted("phase2", channel_id, msg.id, &enqueue);
+                continue;
+            }
+
             existing_ids.insert(mid);
             phase2_checkpoint = Some(phase2_checkpoint.map_or(mid, |saved| saved.max(mid)));
             channel_recovered += 1;
@@ -925,7 +963,7 @@ mod catch_up_recovery_tests {
     use super::{
         CATCH_UP_RECENT_MAX_PAGES, CATCH_UP_SCAN_PACE_DEFAULT_MS, CatchUpChannelCandidate,
         CatchUpClassification, CatchUpFetchMode, CatchUpMessageView, ChannelId, ProviderKind,
-        catch_up_fetch_mode_for_scan, classify_catch_up_message,
+        catch_up_enqueue_accepted, catch_up_fetch_mode_for_scan, classify_catch_up_message,
         insert_configured_catch_up_candidate, parse_catch_up_scan_pace,
         should_fetch_older_recent_page, should_pace_before_scan,
     };
@@ -1166,5 +1204,34 @@ mod catch_up_recovery_tests {
             catch_up_fetch_mode_for_scan(&candidate, None, None),
             CatchUpFetchMode::After(_)
         ));
+    }
+
+    #[test]
+    fn enqueue_acceptance_requires_queue_success_without_persistence_error() {
+        let accepted = super::super::MailboxEnqueueOutcome {
+            enqueued: true,
+            merged: false,
+            refusal_reason: None,
+            persistence_error: None,
+        };
+        assert!(catch_up_enqueue_accepted(&accepted));
+
+        let refused = super::super::MailboxEnqueueOutcome {
+            enqueued: false,
+            merged: false,
+            refusal_reason: Some(
+                crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdAlreadyQueued,
+            ),
+            persistence_error: None,
+        };
+        assert!(!catch_up_enqueue_accepted(&refused));
+
+        let persistence_failed = super::super::MailboxEnqueueOutcome {
+            enqueued: true,
+            merged: false,
+            refusal_reason: None,
+            persistence_error: Some("disk unavailable".to_string()),
+        };
+        assert!(!catch_up_enqueue_accepted(&persistence_failed));
     }
 }

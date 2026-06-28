@@ -10,6 +10,7 @@ mod discord_io;
 mod dispatch_policy;
 pub(crate) mod formatting;
 mod gateway;
+mod gateway_voice_queue;
 pub(crate) mod health;
 pub(crate) mod http;
 mod idle_detector;
@@ -3833,14 +3834,12 @@ pub(super) async fn kickoff_idle_queues(
             shared,
             token,
         };
-        // #2266: kickoff_idle_queues is the other queued-dispatch entrypoint
-        // alongside `DiscordGateway::dispatch_queued_turn`. It is reached by
-        // `schedule_deferred_idle_queue_kickoff` from the very same race-loss
-        // branch that embeds the voice payload into the queued Intervention,
-        // so we must reinsert the announcement into the per-process store
-        // before re-entering `handle_text_message`. Without this hook the
-        // race-loss path that takes the idle-kickoff branch would still
-        // degrade to plain text.
+        // #2266 compatibility: kickoff_idle_queues is the other queued-dispatch
+        // entrypoint alongside `DiscordGateway::dispatch_queued_turn`. Older
+        // queued interventions may still carry a voice accepted-replay payload,
+        // so reinsert it before re-entering `handle_text_message`. New queue
+        // commits strip that payload and let dispatch claim the durable row
+        // from the readable announcement text.
         if let Some(announcement) = intervention.voice_announcement.as_ref() {
             crate::voice::announce_meta::global_store()
                 .insert_accepted_replay(intervention.message_id, announcement.clone());

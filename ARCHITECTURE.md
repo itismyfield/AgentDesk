@@ -498,6 +498,7 @@ src/
 │   │   │   ├── authorization.rs
 │   │   │   ├── dispatch_trigger.rs
 │   │   │   ├── intake_gate.rs
+│   │   │   ├── intake_queue_transaction.rs
 │   │   │   ├── message_handler.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── response_format.rs
@@ -629,6 +630,7 @@ src/
 │   │   ├── dispatch_policy.rs
 │   │   ├── formatting.rs
 │   │   ├── gateway.rs
+│   │   ├── gateway_voice_queue.rs
 │   │   ├── health.rs
 │   │   ├── http.rs
 │   │   ├── idle_detector.rs

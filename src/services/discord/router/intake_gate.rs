@@ -2,6 +2,11 @@ use super::super::outbound::reaction_control::{
     ReactionControlReplyReason, send_reaction_control_reply,
 };
 use super::super::*;
+use super::intake_queue_transaction::{
+    IntakeQueueAuthorClass, IntakeQueueCommitEffects, IntakeQueueCommitOptions,
+    IntakeQueueCommitSource, IntakeQueuePendingReactionPolicy, SoftInterventionCommitRequest,
+    SoftInterventionSpec, commit_soft_intervention_transaction,
+};
 
 mod busy_duplicate_notice;
 mod node_override_routing;
@@ -243,119 +248,12 @@ async fn resolve_voice_transcript_announcement_for_intake(
     }
 }
 
-async fn claim_voice_transcript_announcement_for_queue(
-    data: &Data,
-    channel_id: serenity::ChannelId,
-    message_id: serenity::MessageId,
-    voice_announcement: &Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
-    context: &'static str,
-) -> bool {
-    if voice_announcement.is_none() {
-        return true;
-    }
-    let Some(pool) = data.shared.pg_pool.as_ref() else {
-        return true;
-    };
-    match crate::voice::announce_meta::mark_voice_announcement_durable_consumed(pool, message_id)
-        .await
-    {
-        Ok(true) => true,
-        Ok(false) => {
-            tracing::info!(
-                channel_id = channel_id.get(),
-                message_id = message_id.get(),
-                context,
-                "voice transcript announcement durable metadata already claimed before queue accept"
-            );
-            false
-        }
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                channel_id = channel_id.get(),
-                message_id = message_id.get(),
-                context,
-                "voice transcript announcement durable metadata claim failed before queue accept"
-            );
-            false
-        }
-    }
-}
-
-fn build_soft_intervention(
-    author_id: serenity::UserId,
-    author_is_bot: bool,
-    message_id: serenity::MessageId,
-    text: &str,
-    reply_context: Option<String>,
-    has_reply_boundary: bool,
-    merge_consecutive: bool,
-    pending_uploads: Vec<String>,
-    // #2266: when the intake-gate sees a voice-transcript announcement and
-    // chooses to enqueue it (busy active turn, thread guard, dispatch
-    // collision, drain mode, reconcile gate), the per-process
-    // `voice::announce_meta` store entry can expire before the queued turn
-    // runs (30s TTL vs. arbitrary queue dwell). Carrying the announcement
-    // inside the Intervention keeps the queued payload self-contained so
-    // every queued-dispatch entrypoint can reinsert it into the store and
-    // recover the voice-transcript framing.
-    voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
-) -> Intervention {
-    Intervention {
-        author_id,
-        author_is_bot,
-        message_id,
-        source_message_ids: vec![message_id],
-        text: text.to_string(),
-        mode: InterventionMode::Soft,
-        created_at: Instant::now(),
-        reply_context,
-        has_reply_boundary,
-        merge_consecutive,
-        pending_uploads,
-        voice_announcement,
-    }
-}
-
-async fn enqueue_soft_intervention(
-    data: &Data,
-    channel_id: serenity::ChannelId,
-    author_id: serenity::UserId,
-    author_is_bot: bool,
-    message_id: serenity::MessageId,
-    text: &str,
-    reply_context: Option<String>,
-    has_reply_boundary: bool,
-    merge_consecutive: bool,
-    pending_uploads: Vec<String>,
-    // #2266: pass-through for the voice-transcript payload (see
-    // `build_soft_intervention` doc-comment).
-    voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
-) -> super::super::MailboxEnqueueOutcome {
-    mailbox_enqueue_intervention(
-        &data.shared,
-        &data.provider,
-        channel_id,
-        build_soft_intervention(
-            author_id,
-            author_is_bot,
-            message_id,
-            text,
-            reply_context,
-            has_reply_boundary,
-            merge_consecutive,
-            pending_uploads,
-            voice_announcement,
-        ),
-    )
-    .await
-}
-
 /// Pick the queue-pending reaction emoji based on the enqueue outcome.
 /// Standalone queue head entries get `📬`; merged-into-previous entries get
 /// `➕` so users can tell merged from standalone at a glance (#1190 follow-up).
+#[cfg(test)]
 pub(super) fn queue_pending_reaction_for(outcome: super::super::MailboxEnqueueOutcome) -> char {
-    if outcome.merged { '➕' } else { '📬' }
+    super::intake_queue_transaction::queue_pending_reaction_for(&outcome)
 }
 
 /// #3182: add the queue-pending reaction (📬 standalone / ➕ merged) and
@@ -403,6 +301,61 @@ async fn add_queue_pending_reaction_self_healing(
             channel_id,
             user_msg_id
         );
+    }
+}
+
+struct IntakeGateQueueEffects<'a> {
+    ctx: &'a serenity::Context,
+    data: &'a Data,
+}
+
+#[async_trait::async_trait]
+impl IntakeQueueCommitEffects for IntakeGateQueueEffects<'_> {
+    async fn enqueue_soft_intervention(
+        &mut self,
+        intervention: SoftInterventionSpec,
+    ) -> super::super::MailboxEnqueueOutcome {
+        let channel_id = intervention.channel_id;
+        mailbox_enqueue_intervention(
+            &self.data.shared,
+            &self.data.provider,
+            channel_id,
+            intervention.into_intervention(),
+        )
+        .await
+    }
+
+    async fn apply_pending_reaction(
+        &mut self,
+        channel_id: serenity::ChannelId,
+        message_id: serenity::MessageId,
+        emoji: char,
+    ) {
+        add_queue_pending_reaction_self_healing(self.ctx, self.data, channel_id, message_id, emoji)
+            .await;
+    }
+
+    fn advance_checkpoint(
+        &mut self,
+        channel_id: serenity::ChannelId,
+        message_id: serenity::MessageId,
+    ) -> u64 {
+        super::super::advance_last_message_checkpoint(
+            &self.data.shared,
+            &self.data.provider,
+            channel_id,
+            message_id,
+        )
+    }
+
+    async fn schedule_idle_kickoff(&mut self) -> usize {
+        super::super::kickoff_idle_queues(
+            self.ctx,
+            &self.data.shared,
+            &self.data.token,
+            &self.data.provider,
+        )
+        .await
     }
 }
 
@@ -1900,13 +1853,15 @@ pub(in crate::services::discord) async fn handle_event(
                 .unwrap_or(channel_id);
             let settings_snapshot = { data.shared.settings.read().await.clone() };
             // #2266: resolve the voice-transcript payload ONCE at the
-            // intake-gate so we can both (a) cheaply classify the message and
-            // (b) embed the full announcement in any queued Intervention we
-            // construct on the busy-channel/thread-guard/drain-mode paths
-            // below. Resolution is non-consuming: local store, durable PG row,
-            // then a short pending-key wait for the gateway-before-send-response
-            // race. Legacy hidden metadata is deliberately not trusted here;
-            // the durable/ref path is the authority for new runtime routing.
+            // intake-gate so queue commits can classify voice messages and
+            // keep them as standalone queue entries. The transaction helper
+            // strips the accepted-replay payload before enqueue; the eventual
+            // dispatch re-resolves and claims the durable row from the readable
+            // announcement text. Resolution is non-consuming: local store,
+            // durable PG row, then a short pending-key wait for the
+            // gateway-before-send-response race. Legacy hidden metadata is
+            // deliberately not trusted here; the durable/ref path is the
+            // authority for new runtime routing.
             let resolved_voice_announcement = resolve_voice_transcript_announcement_for_intake(
                 data.shared.pg_pool.as_ref(),
                 channel_id,
@@ -2333,55 +2288,35 @@ pub(in crate::services::discord) async fn handle_event(
                                 channel_id,
                                 thread_id
                             );
-                            if !claim_voice_transcript_announcement_for_queue(
-                                data,
-                                channel_id,
-                                new_message.id,
-                                &resolved_voice_announcement,
-                                "thread_guard_queue",
-                            )
-                            .await
-                            {
-                                return Ok(());
-                            }
-                            let outcome = enqueue_soft_intervention(
-                                data,
-                                channel_id,
-                                user_id,
-                                new_message.author.bot,
-                                new_message.id,
-                                text,
-                                None,
-                                false,
-                                false,
-                                upload_records.clone(),
-                                // #2266: thread-guard queue path — embed the
-                                // voice payload so the eventual queued
-                                // dispatch can reinsert it into the store
-                                // even if the >30s TTL expires first.
-                                resolved_voice_announcement.clone(),
-                            )
-                            .await;
-                            add_queue_pending_reaction_self_healing(
-                                ctx,
-                                data,
-                                channel_id,
-                                new_message.id,
-                                queue_pending_reaction_for(outcome),
+                            let mut queue_effects = IntakeGateQueueEffects { ctx, data };
+                            let _commit = commit_soft_intervention_transaction(
+                                &mut queue_effects,
+                                SoftInterventionCommitRequest {
+                                    source: IntakeQueueCommitSource::ThreadGuard,
+                                    author_class: IntakeQueueAuthorClass::from_flags(
+                                        new_message.author.bot,
+                                        is_allowed_bot,
+                                    ),
+                                    intervention: SoftInterventionSpec {
+                                        channel_id,
+                                        author_id: user_id,
+                                        author_is_bot: new_message.author.bot,
+                                        message_id: new_message.id,
+                                        text: text.to_string(),
+                                        reply_context: None,
+                                        has_reply_boundary: false,
+                                        merge_consecutive: false,
+                                        pending_uploads: upload_records.clone(),
+                                        // #2266: thread-guard queue path —
+                                        // pass resolved voice metadata only so
+                                        // the transaction can detect voice and
+                                        // enqueue standalone readable text.
+                                        voice_announcement: resolved_voice_announcement.clone(),
+                                    },
+                                    options: IntakeQueueCommitOptions::default(),
+                                },
                             )
                             .await;
-                            // #2044 F12: use monotonic checkpoint helper
-                            // so this hot intake path matches the cancel
-                            // reaction path
-                            // (`mod.rs:advance_last_message_checkpoint`)
-                            // and never regresses the per-channel
-                            // last-processed id.
-                            super::super::advance_last_message_checkpoint(
-                                &data.shared,
-                                &data.provider,
-                                channel_id,
-                                new_message.id,
-                            );
                             return Ok(());
                         }
                     } else {
@@ -2404,43 +2339,41 @@ pub(in crate::services::discord) async fn handle_event(
                 )
                 .await
                 {
-                    let outcome = enqueue_soft_intervention(
-                        data,
-                        channel_id,
-                        user_id,
-                        new_message.author.bot,
-                        new_message.id,
-                        text,
-                        None,
-                        false,
-                        false,
-                        upload_records.clone(),
-                        // #2266: DISPATCH: collision guard — DISPATCH messages
-                        // never carry voice transcripts, so this is always
-                        // None. Explicit for clarity / future audits.
-                        None,
+                    let mut queue_effects = IntakeGateQueueEffects { ctx, data };
+                    let commit = commit_soft_intervention_transaction(
+                        &mut queue_effects,
+                        SoftInterventionCommitRequest {
+                            source: IntakeQueueCommitSource::DispatchGuard,
+                            author_class: IntakeQueueAuthorClass::from_flags(
+                                new_message.author.bot,
+                                is_allowed_bot,
+                            ),
+                            intervention: SoftInterventionSpec {
+                                channel_id,
+                                author_id: user_id,
+                                author_is_bot: new_message.author.bot,
+                                message_id: new_message.id,
+                                text: text.to_string(),
+                                reply_context: None,
+                                has_reply_boundary: false,
+                                merge_consecutive: false,
+                                pending_uploads: upload_records.clone(),
+                                // #2266: DISPATCH: collision guard — DISPATCH messages
+                                // never carry voice transcripts, so this is always
+                                // None. Explicit for clarity / future audits.
+                                voice_announcement: None,
+                            },
+                            options: IntakeQueueCommitOptions::default(),
+                        },
                     )
                     .await;
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::info!(
-                        "  [{ts}] 📬 DISPATCH-GUARD: queued dispatch message in channel {} (active turn in progress)",
-                        channel_id
-                    );
-                    add_queue_pending_reaction_self_healing(
-                        ctx,
-                        data,
-                        channel_id,
-                        new_message.id,
-                        queue_pending_reaction_for(outcome),
-                    )
-                    .await;
-                    // #2044 F12: monotonic checkpoint (see comment above).
-                    super::super::advance_last_message_checkpoint(
-                        &data.shared,
-                        &data.provider,
-                        channel_id,
-                        new_message.id,
-                    );
+                    if commit.accepted() {
+                        tracing::info!(
+                            "  [{ts}] 📬 DISPATCH-GUARD: queued dispatch message in channel {} (active turn in progress)",
+                            channel_id
+                        );
+                    }
                     return Ok(());
                 }
                 // No active turn — fall through to normal processing below
@@ -2454,44 +2387,54 @@ pub(in crate::services::discord) async fn handle_event(
             )
             .await
             {
-                if !claim_voice_transcript_announcement_for_queue(
-                    data,
-                    channel_id,
-                    new_message.id,
-                    &resolved_voice_announcement,
-                    "busy_active_turn_queue",
-                )
-                .await
-                {
-                    return Ok(());
-                }
-                let outcome = enqueue_soft_intervention(
-                    data,
-                    channel_id,
-                    user_id,
-                    new_message.author.bot,
-                    new_message.id,
-                    text,
-                    reply_context.clone(),
-                    has_reply_boundary,
-                    merge_consecutive,
-                    upload_records.clone(),
-                    // #2266: main busy-active-turn queue path — voice transcripts that
-                    // arrive while a previous turn is running flow through here. Embed the
-                    // announcement so the queued dispatch reinserts it into the store even
-                    // if the >30s in-memory TTL expires first.
-                    resolved_voice_announcement.clone(),
-                )
-                .await;
                 let is_shutting_down = data
                     .shared
                     .restart
                     .shutting_down
                     .load(std::sync::atomic::Ordering::Relaxed);
+                let mut queue_effects = IntakeGateQueueEffects { ctx, data };
+                let commit = commit_soft_intervention_transaction(
+                    &mut queue_effects,
+                    SoftInterventionCommitRequest {
+                        source: IntakeQueueCommitSource::BusyActiveTurn,
+                        author_class: IntakeQueueAuthorClass::from_flags(
+                            new_message.author.bot,
+                            is_allowed_bot,
+                        ),
+                        intervention: SoftInterventionSpec {
+                            channel_id,
+                            author_id: user_id,
+                            author_is_bot: new_message.author.bot,
+                            message_id: new_message.id,
+                            text: text.to_string(),
+                            reply_context: reply_context.clone(),
+                            has_reply_boundary,
+                            merge_consecutive,
+                            pending_uploads: upload_records.clone(),
+                            // #2266: main busy-active-turn queue path — voice transcripts that
+                            // arrive while a previous turn is running flow through here. Embed the
+                            // announcement so the queued dispatch reinserts it into the store even
+                            // if the >30s in-memory TTL expires first.
+                            voice_announcement: resolved_voice_announcement.clone(),
+                        },
+                        options: IntakeQueueCommitOptions::default(),
+                    },
+                )
+                .await;
 
-                if !outcome.enqueued {
+                if !commit.accepted() {
+                    if commit.failed() {
+                        rate_limit_wait(&data.shared, channel_id).await;
+                        let _ = channel_id
+                            .say(
+                                &ctx.http,
+                                "⚠️ 메시지 큐 저장 중 오류가 감지되어 접수 표시를 생략했어.",
+                            )
+                            .await;
+                        return Ok(());
+                    }
                     if busy_duplicate_notice::silence_if_already_queued(
-                        outcome.refusal_reason,
+                        commit.refusal_reason(),
                         new_message.id,
                         channel_id,
                     ) {
@@ -2511,31 +2454,12 @@ pub(in crate::services::discord) async fn handle_event(
                         channel_id,
                         new_message.id,
                         text,
-                        outcome.merged,
+                        commit.merged(),
                     )
                     .await;
                 }
 
-                // React 📬 (standalone queue head) or ➕ (merged into previous
-                // head), self-healing against the #3182 late-add race (see
-                // `add_queue_pending_reaction_self_healing`).
-                add_queue_pending_reaction_self_healing(
-                    ctx,
-                    data,
-                    channel_id,
-                    new_message.id,
-                    queue_pending_reaction_for(outcome),
-                )
-                .await;
-
-                // Checkpoint: message successfully queued (#2044 F12 — monotonic).
-                super::super::advance_last_message_checkpoint(
-                    &data.shared,
-                    &data.provider,
-                    channel_id,
-                    new_message.id,
-                );
-                if is_shutting_down {
+                if is_shutting_down && commit.checkpoint_advanced() {
                     let ids: std::collections::HashMap<u64, u64> = data
                         .shared
                         .last_message_ids
@@ -2554,41 +2478,38 @@ pub(in crate::services::discord) async fn handle_event(
                 .reconcile_done
                 .load(std::sync::atomic::Ordering::Relaxed)
             {
-                if !claim_voice_transcript_announcement_for_queue(
-                    data,
-                    channel_id,
-                    new_message.id,
-                    &resolved_voice_announcement,
-                    "reconcile_gate_queue",
-                )
-                .await
-                {
-                    return Ok(());
-                }
-                let _ = enqueue_soft_intervention(
-                    data,
-                    channel_id,
-                    user_id,
-                    new_message.author.bot,
-                    new_message.id,
-                    text,
-                    reply_context.clone(),
-                    has_reply_boundary,
-                    merge_consecutive,
-                    upload_records.clone(),
-                    // #2266: reconcile gate — startup-recovery queue path. Voice transcripts
-                    // that arrive before recovery completes need the embedded payload too.
-                    resolved_voice_announcement.clone(),
+                let mut queue_effects = IntakeGateQueueEffects { ctx, data };
+                let _commit = commit_soft_intervention_transaction(
+                    &mut queue_effects,
+                    SoftInterventionCommitRequest {
+                        source: IntakeQueueCommitSource::ReconcileGate,
+                        author_class: IntakeQueueAuthorClass::from_flags(
+                            new_message.author.bot,
+                            is_allowed_bot,
+                        ),
+                        intervention: SoftInterventionSpec {
+                            channel_id,
+                            author_id: user_id,
+                            author_is_bot: new_message.author.bot,
+                            message_id: new_message.id,
+                            text: text.to_string(),
+                            reply_context: reply_context.clone(),
+                            has_reply_boundary,
+                            merge_consecutive,
+                            pending_uploads: upload_records.clone(),
+                            // #2266: reconcile gate — startup-recovery queue
+                            // path. Resolved voice metadata makes this a
+                            // standalone queued voice entry; durable claim
+                            // remains deferred to dispatch.
+                            voice_announcement: resolved_voice_announcement.clone(),
+                        },
+                        options: IntakeQueueCommitOptions {
+                            pending_reaction: IntakeQueuePendingReactionPolicy::Static('🔄'),
+                            ..IntakeQueueCommitOptions::default()
+                        },
+                    },
                 )
                 .await;
-                // Checkpoint: track last processed message (#2044 F12 — monotonic).
-                super::super::advance_last_message_checkpoint(
-                    &data.shared,
-                    &data.provider,
-                    channel_id,
-                    new_message.id,
-                );
-                formatting::add_reaction_raw(&ctx.http, channel_id, new_message.id, '🔄').await;
                 return Ok(());
             }
 
@@ -2606,59 +2527,49 @@ pub(in crate::services::discord) async fn handle_event(
                     .shutting_down
                     .load(std::sync::atomic::Ordering::Relaxed);
 
-                if !claim_voice_transcript_announcement_for_queue(
-                    data,
-                    channel_id,
-                    new_message.id,
-                    &resolved_voice_announcement,
-                    "drain_mode_queue",
-                )
-                .await
-                {
-                    return Ok(());
-                }
-                let outcome = enqueue_soft_intervention(
-                    data,
-                    channel_id,
-                    user_id,
-                    new_message.author.bot,
-                    new_message.id,
-                    text,
-                    reply_context.clone(),
-                    has_reply_boundary,
-                    merge_consecutive,
-                    upload_records.clone(),
-                    // #2266: drain-mode queue path (restart pending) — pass the embedded voice
-                    // payload so the post-restart dispatch path can reinsert it into the store.
-                    resolved_voice_announcement.clone(),
+                let mut queue_effects = IntakeGateQueueEffects { ctx, data };
+                let commit = commit_soft_intervention_transaction(
+                    &mut queue_effects,
+                    SoftInterventionCommitRequest {
+                        source: IntakeQueueCommitSource::DrainMode,
+                        author_class: IntakeQueueAuthorClass::from_flags(
+                            new_message.author.bot,
+                            is_allowed_bot,
+                        ),
+                        intervention: SoftInterventionSpec {
+                            channel_id,
+                            author_id: user_id,
+                            author_is_bot: new_message.author.bot,
+                            message_id: new_message.id,
+                            text: text.to_string(),
+                            reply_context: reply_context.clone(),
+                            has_reply_boundary,
+                            merge_consecutive,
+                            pending_uploads: upload_records.clone(),
+                            // #2266: drain-mode queue path (restart pending) —
+                            // pass resolved voice metadata so the transaction
+                            // keeps readable voice text standalone.
+                            voice_announcement: resolved_voice_announcement.clone(),
+                        },
+                        options: IntakeQueueCommitOptions::default(),
+                    },
                 )
                 .await;
 
                 let ts = chrono::Local::now().format("%H:%M:%S");
+                if !commit.accepted() {
+                    tracing::info!(
+                        "  [{ts}] ⏸ DRAIN: message from [{user_name}] in channel {} was not accepted into restart queue",
+                        channel_id
+                    );
+                    return Ok(());
+                }
                 tracing::info!(
                     "  [{ts}] ⏸ DRAIN: queued message from [{user_name}] in channel {} (restart pending)",
                     channel_id
                 );
 
-                // React 📬 (standalone) or ➕ (merged into previous queue head).
-                add_queue_pending_reaction_self_healing(
-                    ctx,
-                    data,
-                    channel_id,
-                    new_message.id,
-                    queue_pending_reaction_for(outcome),
-                )
-                .await;
-
-                // Checkpoint: message successfully queued in drain mode (#2044 F12 — monotonic).
-                super::super::advance_last_message_checkpoint(
-                    &data.shared,
-                    &data.provider,
-                    channel_id,
-                    new_message.id,
-                );
-
-                if is_shutting_down {
+                if is_shutting_down && commit.checkpoint_advanced() {
                     // Persist checkpoint to disk immediately during shutdown
                     let ids: std::collections::HashMap<u64, u64> = data
                         .shared
@@ -2692,69 +2603,53 @@ pub(in crate::services::discord) async fn handle_event(
                 if has_active_turn || !has_pending_backlog {
                     None
                 } else {
-                    if !claim_voice_transcript_announcement_for_queue(
-                        data,
-                        channel_id,
-                        new_message.id,
-                        &resolved_voice_announcement,
-                        "idle_backlog_queue",
-                    )
-                    .await
-                    {
-                        return Ok(());
-                    }
+                    let mut queue_effects = IntakeGateQueueEffects { ctx, data };
                     Some(
-                        enqueue_soft_intervention(
-                            data,
-                            channel_id,
-                            user_id,
-                            new_message.author.bot,
-                            new_message.id,
-                            text,
-                            reply_context.clone(),
-                            has_reply_boundary,
-                            merge_consecutive,
-                            upload_records.clone(),
-                            // #2266: queued-behind-idle-backlog path —
-                            // FIFO ordering keeps voice transcripts behind
-                            // pre-existing queue items, so embed the
-                            // payload for the eventual dispatch reinsert.
-                            resolved_voice_announcement.clone(),
+                        commit_soft_intervention_transaction(
+                            &mut queue_effects,
+                            SoftInterventionCommitRequest {
+                                source: IntakeQueueCommitSource::IdleBacklog,
+                                author_class: IntakeQueueAuthorClass::from_flags(
+                                    new_message.author.bot,
+                                    is_allowed_bot,
+                                ),
+                                intervention: SoftInterventionSpec {
+                                    channel_id,
+                                    author_id: user_id,
+                                    author_is_bot: new_message.author.bot,
+                                    message_id: new_message.id,
+                                    text: text.to_string(),
+                                    reply_context: reply_context.clone(),
+                                    has_reply_boundary,
+                                    merge_consecutive,
+                                    pending_uploads: upload_records.clone(),
+                                    // #2266: queued-behind-idle-backlog path —
+                                    // FIFO ordering keeps voice transcripts behind
+                                    // pre-existing queue items; the transaction
+                                    // keeps voice text standalone and defers the
+                                    // durable claim until dispatch.
+                                    voice_announcement: resolved_voice_announcement.clone(),
+                                },
+                                options: IntakeQueueCommitOptions::idle_backlog(),
+                            },
                         )
                         .await,
                     )
                 }
             };
-            if let Some(outcome) = queued_behind_idle_backlog {
+            if let Some(commit) = queued_behind_idle_backlog {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                if outcome.enqueued {
+                if commit.accepted() {
                     tracing::info!(
                         "  [{ts}] 📬 IDLE-QUEUE: queued message from [{user_name}] in channel {} behind pending backlog",
                         channel_id
                     );
-                    add_queue_pending_reaction_self_healing(
-                        ctx,
-                        data,
-                        channel_id,
-                        new_message.id,
-                        queue_pending_reaction_for(outcome),
-                    )
-                    .await;
-                    // #2044 F12: monotonic checkpoint helper.
-                    super::super::advance_last_message_checkpoint(
-                        &data.shared,
-                        &data.provider,
-                        channel_id,
-                        new_message.id,
-                    );
                 } else {
                     tracing::info!(
-                        "  [{ts}] ↪ IDLE-QUEUE: duplicate message from [{user_name}] already pending in channel {}",
+                        "  [{ts}] ↪ IDLE-QUEUE: message from [{user_name}] was not accepted into channel {} backlog",
                         channel_id
                     );
                 }
-                super::super::kickoff_idle_queues(ctx, &data.shared, &data.token, &data.provider)
-                    .await;
                 return Ok(());
             }
 
