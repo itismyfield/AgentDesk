@@ -184,7 +184,33 @@ pub fn resolve_codex_path() -> Option<String> {
 }
 
 fn resolve_codex_binary() -> crate::services::platform::BinaryResolution {
-    crate::services::platform::resolve_provider_binary("codex")
+    let probe = crate::services::platform::probe_provider_binary_version("codex");
+    log_codex_binary_probe(&probe);
+    probe.resolution
+}
+
+fn log_codex_binary_probe(probe: &crate::services::platform::binary_resolver::BinaryVersionProbe) {
+    let resolution = &probe.resolution;
+    let candidate_diagnostics = resolution
+        .attempts
+        .iter()
+        .filter(|attempt| {
+            attempt.starts_with("selected_candidate_version:")
+                || attempt.starts_with("skipped_candidate_success:")
+                || attempt.starts_with("skipped_candidate_failure:")
+        })
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" | ");
+    tracing::info!(
+        provider = "codex",
+        codex_bin = resolution.resolved_path.as_deref().unwrap_or("unknown"),
+        codex_cli_version = probe.version_output.as_deref().unwrap_or("unknown"),
+        source = resolution.source.as_deref().unwrap_or("unknown"),
+        probe_failure_kind = probe.probe_failure_kind.as_deref().unwrap_or("none"),
+        candidate_diagnostics = candidate_diagnostics.as_str(),
+        "codex launch binary resolved"
+    );
 }
 
 fn build_tmux_launch_env_lines(

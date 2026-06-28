@@ -1508,7 +1508,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   support extracted from the route layer; split before adding non-bugfix
   behavior.
 - `src/services/claude.rs` (2963), `src/services/gemini.rs` (1358),
-  `src/services/qwen.rs` (2196), `src/services/codex.rs` (3023),
+  `src/services/qwen.rs` (2196), `src/services/codex.rs` (3049),
   `src/services/opencode.rs` (2760), `src/services/provider.rs` (1613) —
   provider adapters. (#3034 removed dead non-cancel `execute_command_simple*`
   twins from the claude/codex/gemini adapters and a superseded
@@ -1531,7 +1531,8 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   idle relay bindings are registered, so dcserver restart rehydrate has a
   stable rollout identity. #3744 retired the unwired generalized envelope and
   fresh-fork dev-role dedup stubs from provider.rs, leaving only the live Codex
-  resumed-session compaction path.)
+  resumed-session compaction path. #3823 adds Codex launch binary/version
+  diagnostics so skills/list failures caused by CLI/app skew are traceable.)
 - `src/services/codex_tui/rollout_tail.rs` (1831) — Codex TUI rollout tail
   parsing and resume identity surface; split before adding non-bugfix behavior
   beyond the #2169 session identity fix and the #3343 message-boundary
@@ -1574,7 +1575,10 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   migrated launchd validation, Discord notification plumbing, and agent
   execution are the canonical scheduled JS routine surfaces. Split focused
   helper modules before growing these files again.
-- `src/services/platform/binary_resolver.rs` (1221).
+- `src/services/platform/binary_resolver.rs` (1381) — provider CLI resolver
+  surface. #3823 adds macOS Codex.app fallback discovery and all-candidate
+  Codex semver probing so AgentDesk prefers the newest compatible Codex binary
+  instead of silently launching a stale npm shim.
 - `src/services/discord/mod.rs` (now 4056 prod LoC after #3479 item-3 extracted
   the dispatch intake/routing cluster (`intake_dedup` + `dispatch_thread_parents`
   + `dispatch_role_overrides`) verbatim to `discord/shared_state.rs` as
