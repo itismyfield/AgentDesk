@@ -1,6 +1,7 @@
 mod authorization;
 mod dispatch_trigger;
 mod intake_gate;
+mod intake_queue_transaction;
 mod message_handler;
 mod response_format;
 mod thread_binding;
