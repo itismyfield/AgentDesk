@@ -35,6 +35,9 @@ RAW_DB_ALIAS_RE = re.compile(
 RAW_DB_METHOD_ALIAS_RE = re.compile(
     rf"""(?:\b(?:var|let|const)\s+)?({IDENT_RE})\s*=\s*{RAW_DB_SURFACE_RE}\s*(?:\.\s*(query|execute)|\[\s*["'](query|execute)["']\s*\])"""
 )
+RAW_DB_METHOD_DESTRUCTURE_RE = re.compile(
+    rf"""\b(?:var|let|const)\s+\{{([^}}]+)\}}\s*=\s*{RAW_DB_SURFACE_RE}\b"""
+)
 AGENTDESK_DB_DESTRUCTURE_RE = re.compile(
     rf"""(?:\b(?:var|let|const)\s+)?\{{[^}}]*\bdb\s*(?::\s*({IDENT_RE}))?[^}}]*\}}\s*=\s*agentdesk\b"""
 )
@@ -319,6 +322,26 @@ def raw_db_aliases(masked_text: str) -> dict[str, str | None]:
         aliases[match.group(1) or "db"] = None
     for match in RAW_DB_METHOD_ALIAS_RE.finditer(masked_text):
         aliases[match.group(1)] = match.group(2) or match.group(3)
+    for match in RAW_DB_METHOD_DESTRUCTURE_RE.finditer(masked_text):
+        aliases.update(raw_db_method_destructure_aliases(match.group(1)))
+    return aliases
+
+
+def raw_db_method_destructure_aliases(binding_text: str) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for part in binding_text.split(","):
+        binding = part.strip()
+        if not binding:
+            continue
+        if ":" in binding:
+            source, target = binding.split(":", 1)
+            source = source.strip()
+            target = target.strip().split("=", 1)[0].strip()
+        else:
+            source = binding.split("=", 1)[0].strip()
+            target = source
+        if source in {"query", "execute"} and re.fullmatch(IDENT_RE, target):
+            aliases[target] = source
     return aliases
 
 

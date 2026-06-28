@@ -137,6 +137,28 @@ db:
             self.assertEqual(count, 2)
             self.assertEqual(self.run_checker(root, "--no-silent-growth"), 0)
 
+    def test_legacy_baseline_counts_agentdesk_db_method_destructure_callsites(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            policy_path = self.write(
+                root,
+                "policies/example.js",
+                """module.exports = {
+  onTick: function() {
+    const { query, execute: rawExecute } = agentdesk.db;
+    query("SELECT id FROM kanban_cards");
+    rawExecute("DELETE FROM kv_meta WHERE key = ?", ["x"]);
+  }
+};
+""",
+            )
+            callsites = checker.scan_callsites(policy_path, root)
+            count, fingerprint = checker.callsite_baseline(callsites)
+            self.legacy_manifest(root, "example", count, fingerprint)
+
+            self.assertEqual(count, 2)
+            self.assertEqual(self.run_checker(root, "--no-silent-growth"), 0)
+
     def test_legacy_baseline_rejects_alias_growth_from_zero_literal_callsites(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
