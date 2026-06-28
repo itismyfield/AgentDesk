@@ -1,5 +1,6 @@
 id: E-11
 title: cc · cdx 동시 진행, 채널 격리 (#2691 + 7.2)
+agent_mode: real_live
 cells: []  # cross-cell scenario, handled by run_multi_provider_matrix.py
 orchestration: cross_channel
 isolation: required

@@ -8,6 +8,16 @@
 본문은 시나리오·기대 동작·관찰 포인트·체크박스를 포함하며, 실측 후 결과(통과/실패 +
 짧은 메모)를 직접 기록한다.
 
+## agent_mode lane
+
+- 현재 수동 실측 체크리스트는 실제 Discord voice channel, STT/TTS, 외부 agent 응답을
+  쓰므로 `agent_mode: real_live` 로 취급한다.
+- 결정적 PCM/fixture 기반 voice harness 는 `agent_mode: controlled` 로 기록하고,
+  실제 provider 접촉 없이 미디어 파이프라인만 검증한다.
+- live voice media smoke 는 명시적 opt-in 일 때만 `agent_mode: real_live` 로 실행하며,
+  보고서에는 `agent_mode`, cell/provider 식별자, `real_provider_contacted`, 실패 귀속
+  (Discord media, STT/TTS, provider response, relay/reporting)을 남긴다.
+
 ## 머신/클라이언트 분리 (중요)
 
 ADK voice는 Discord 표준 voice channel을 그대로 사용하므로 **사용자 마이크/스피커는

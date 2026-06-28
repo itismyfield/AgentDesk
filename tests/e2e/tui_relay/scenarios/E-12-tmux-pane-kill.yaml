@@ -1,5 +1,6 @@
 id: E-12
 title: 진행 중 tmux kill-pane → "세션 종료" 1회 알림, hang 0 (9.1)
+agent_mode: real_live
 cells: [claude-tui, codex-tui]  # kill-pane assumes a tmux-hosted TUI
 isolation: required
 destructive: true

@@ -20,6 +20,9 @@ python3 scripts/e2e/post_deploy_relay_continuity.py --fixture bad-state
 smoke distinguishes local output from Discord relay continuity and catches
 ownerless inflight, relay-dead, stale proof, and orphaned target states.
 
+Offline checks report `agent_mode: none` and `real_provider_contacted: false`.
+They are fixtures only; they must never satisfy a required live relay gate.
+
 ## Live Dry Run
 
 Use dry run before a release deploy to validate config, channel id lookup, and
@@ -34,6 +37,17 @@ python3 scripts/e2e/post_deploy_relay_continuity.py \
 
 The script resolves the `adk-<cell>-e2e` channel id from
 `~/.adk/release/config/agentdesk.yaml` unless `--channel-id` is supplied.
+Dry run declares the planned live lane but reports `agent_mode_actual: none` and
+`real_provider_contacted: false`; it verifies wiring without contacting the TUI
+provider.
+
+## Agent Mode Contract
+
+The live smoke is an explicit `agent_mode: real_live` scenario. The summary and
+wrapped TUI relay report must include the requested lane, observed lane, cell
+identity, provider identity, `real_provider_contacted`, and failure attribution.
+The wrapper rejects live success unless both `E-9` and `E-19` report
+`agent_mode: real_live` and `real_provider_contacted: true`.
 
 ## Live Smoke
 

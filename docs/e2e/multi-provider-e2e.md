@@ -27,12 +27,30 @@ is in that list.
 
 ```yaml
 id: E-1
+agent_mode: real_live
 cells: [claude-pipe, claude-tui, claude-e, codex-pipe, codex-tui]
 steps:
   - send_prompt: ...
 assertions:
   - ...
 ```
+
+Every scenario must declare `agent_mode`:
+
+| `agent_mode` | Use when | Relay example |
+| --- | --- | --- |
+| `none` | No AgentDesk agent/provider is contacted; the harness checks local state-machine or replay fixtures only. | `E-24`/`E-25` local fixture replay. These can prove parser/finalization contracts, but cannot satisfy live relay gates. |
+| `controlled` | A deterministic test agent, fake provider, scripted responder, or controlled runtime hook owns completion. | Future hook-backed relay gaps such as forced quiescence timeout or synthetic foreign-active state. |
+| `real_live` | The scenario sends work through a real provider/cell and live Discord/runtime boundary. | Normal relay matrix prompts, direct TUI input, cross-channel `E-11`, and post-deploy relay continuity smoke. |
+
+The driver validates metadata against the scenario shape. A scenario that
+declares `none` but sends a prompt, or declares `real_live` while switching to a
+fixture execution lane, fails before it can produce a misleading green report.
+Gate runners can also pass `--required-agent-mode controlled` or
+`--required-agent-mode real_live`; selected scenarios below that lane fail
+instead of silently downgrading. Machine-readable reports include
+`agent_mode`, `agent_mode_actual`, `provider_identity`, `real_provider_contacted`,
+and `failure_attribution` on each scenario.
 
 Provider-specific scenarios (`E-6` claude `/compact`, `E-7` codex `/compact`)
 narrow the list. TUI-keystroke-only scenarios (`E-4`, `E-10`, `E-12`) include
@@ -132,7 +150,10 @@ scripts/e2e/run_tui_relay.py \
 The driver writes `report.<cell>.json` so an orchestrator that aims all 5 cells
 at one `--output` directory does not overwrite sibling reports. Per-cell lease
 files (`/tmp/agentdesk-e2e-relay.<cell>.lease`) let cells run in parallel from
-separate operator sessions.
+separate operator sessions. The top-level report includes `agent_mode_totals`
+and `real_provider_contacted`; individual scenario rows include the provider,
+runtime, worker agent, channel id, raw failure attribution, and whether a real
+provider was contacted.
 
 Post-deploy relay continuity uses a narrower operational wrapper around the
 same driver:
@@ -151,6 +172,13 @@ The live form adds `--confirm-live` and runs only TUI cells (`claude-tui` or
 boundary. See
 [`docs/runbooks/post-deploy-relay-continuity-smoke.md`](../runbooks/post-deploy-relay-continuity-smoke.md)
 for the full runbook and pass/fail evidence.
+
+Auto-queue and voice harnesses use the same lane vocabulary. The sandbox
+auto-queue preflight defaults to `agent_mode=none` or a controlled finalizer
+because it validates generate/dispatch/slot/entry/run truth, not LLM behavior.
+Deterministic PCM voice E2E should use `agent_mode=controlled`; the opt-in live
+Discord media smoke is the voice `agent_mode=real_live` lane and must say
+whether a real provider was contacted.
 
 Destructive steps (`restart_dcserver`, `kill_pane`, `send_keys_no_enter`,
 `cancel_turn`) are gated by both `--allow-destructive` and

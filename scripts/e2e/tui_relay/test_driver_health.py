@@ -134,6 +134,196 @@ def _busy_mailbox(channel_id: str = "99", provider: str = "claude") -> dict:
     return mailbox
 
 
+class AgentModeContract(unittest.TestCase):
+    def test_load_scenarios_requires_agent_mode_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "missing.yaml"
+            path.write_text(
+                """
+id: E-X
+cells: [codex-tui]
+steps: []
+assertions: []
+""",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ValueError) as ctx:
+                driver.load_scenarios(Path(tmp), cell="codex-tui")
+
+        self.assertIn("agent_mode", str(ctx.exception))
+
+    def test_load_scenarios_rejects_none_metadata_for_real_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "mismatch.yaml"
+            path.write_text(
+                """
+id: E-X
+agent_mode: none
+cells: [codex-tui]
+steps:
+  - send_prompt: "hello"
+assertions: []
+""",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ValueError) as ctx:
+                driver.load_scenarios(Path(tmp), cell="codex-tui")
+
+        self.assertIn("declares agent_mode='none'", str(ctx.exception))
+        self.assertIn("plan 'real_live'", str(ctx.exception))
+
+    def test_required_agent_mode_gate_fails_shallower_scenario(self):
+        class FakeClient:
+            base_url = "http://agentdesk.test"
+
+        args = Namespace(
+            cell="codex-tui",
+            channel_id="42",
+            thread_channel_id=None,
+            reset_before_each=False,
+            dry_run=False,
+            queue_runtime_root="/tmp/agentdesk-e2e-test-runtime",
+            hard_reset_session_each=False,
+            allow_destructive=False,
+            required_agent_mode="controlled",
+        )
+        scenario = {"id": "E-X", "agent_mode": "none", "steps": [], "assertions": []}
+
+        result = driver.run_scenario(
+            scenario,
+            args=args,
+            run_id="run-1",
+            client=FakeClient(),  # type: ignore[arg-type]
+        )
+
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["failure_attribution"]["source"], "agent_mode_gate")
+
+    def test_required_agent_mode_gate_fails_skipped_scenario_with_no_actual_mode(self):
+        class FakeClient:
+            base_url = "http://agentdesk.test"
+
+        args = Namespace(
+            cell="claude-tui",
+            channel_id="42",
+            thread_channel_id=None,
+            reset_before_each=False,
+            dry_run=False,
+            queue_runtime_root="/tmp/agentdesk-e2e-test-runtime",
+            hard_reset_session_each=False,
+            allow_destructive=False,
+            required_agent_mode="controlled",
+        )
+        scenario = {
+            "id": "E-16",
+            "agent_mode": "controlled",
+            "skip_reason": "stub until runtime hook exists",
+            "steps": [],
+            "assertions": [],
+        }
+
+        result = driver.run_scenario(
+            scenario,
+            args=args,
+            run_id="run-1",
+            client=FakeClient(),  # type: ignore[arg-type]
+        )
+
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["agent_mode_actual"], "none")
+        self.assertEqual(result["failure_attribution"]["source"], "agent_mode_gate")
+        self.assertIn("observed agent_mode_actual=none", result["reason"])
+
+    def test_controlled_execution_metadata_without_evidence_records_none_actual_mode(self):
+        class FakeClient:
+            base_url = "http://agentdesk.test"
+
+            def __init__(self):
+                self.next_id = 100
+
+            def send_control(self, channel_id, content):  # noqa: ARG002
+                self.next_id += 1
+                return {"id": str(self.next_id)}
+
+            def fetch_messages(self, channel_id, *, after_id=None, limit=100):  # noqa: ARG002
+                return []
+
+        args = Namespace(queue_runtime_root="/tmp/agentdesk-e2e-test-runtime")
+        scenario = {
+            "id": "E-X",
+            "agent_mode": "controlled",
+            "execution": "controlled",
+            "steps": [],
+            "assertions": [],
+        }
+
+        with patch("run_tui_relay.time.sleep"), patch(
+            "run_tui_relay.assert_cell_idle",
+            return_value={"ok": True, "mailbox": "idle"},
+        ):
+            record = driver.run_one_cell(
+                scenario=scenario,
+                cell="codex-tui",
+                channel_id="42",
+                client=FakeClient(),  # type: ignore[arg-type]
+                run_id="run-1",
+                dry_run=False,
+                args=args,
+            )
+
+        self.assertEqual(record["agent_mode_actual"], "none")
+        self.assertFalse(record["real_provider_contacted"])
+        self.assertFalse(record["agent_mode_contract"]["satisfied"])
+
+    def test_controlled_harness_step_records_controlled_actual_mode(self):
+        class FakeClient:
+            base_url = "http://agentdesk.test"
+
+            def __init__(self):
+                self.next_id = 100
+
+            def send_control(self, channel_id, content):  # noqa: ARG002
+                self.next_id += 1
+                return {"id": str(self.next_id)}
+
+            def fetch_messages(self, channel_id, *, after_id=None, limit=100):  # noqa: ARG002
+                return []
+
+        args = Namespace(queue_runtime_root="/tmp/agentdesk-e2e-test-runtime")
+        scenario = {
+            "id": "E-X",
+            "agent_mode": "controlled",
+            "execution": "controlled",
+            "steps": [{"assert_health": {}}],
+            "assertions": [],
+        }
+
+        with (
+            patch("run_tui_relay.time.sleep"),
+            patch("run_tui_relay.assert_health", return_value={"status": "healthy"}),
+            patch(
+                "run_tui_relay.assert_cell_idle",
+                return_value={"ok": True, "mailbox": "idle"},
+            ),
+        ):
+            record = driver.run_one_cell(
+                scenario=scenario,
+                cell="codex-tui",
+                channel_id="42",
+                client=FakeClient(),  # type: ignore[arg-type]
+                run_id="run-1",
+                dry_run=False,
+                args=args,
+            )
+
+        self.assertEqual(record["agent_mode_actual"], "controlled")
+        self.assertEqual(record["controlled_harness_evidence"], ["assert_health"])
+        self.assertFalse(record["real_provider_contacted"])
+        self.assertTrue(record["agent_mode_contract"]["satisfied"])
+
+
 class HealthWait(unittest.TestCase):
     def test_wait_for_health_requires_json_healthy_not_just_http_200(self):
         degraded = {
@@ -1322,6 +1512,7 @@ class ControlFlowPrimitives(unittest.TestCase):
         )
         scenario = {
             "id": "E-18",
+            "agent_mode": "real_live",
             "steps": [
                 {
                     "send_provider_hold_prompt": {
@@ -1360,6 +1551,8 @@ class ControlFlowPrimitives(unittest.TestCase):
             record["provider_hold_prompts"][0]["turn_identity"]["user_msg_id"],
             "9100000000000000123",
         )
+        self.assertEqual(record["agent_mode_actual"], "real_live")
+        self.assertTrue(record["real_provider_contacted"])
 
     def test_run_one_cell_local_fixture_does_not_touch_client_or_health(self):
         class ForbiddenClient:
@@ -1382,6 +1575,7 @@ class ControlFlowPrimitives(unittest.TestCase):
         )
         scenario = {
             "id": "E-25",
+            "agent_mode": "none",
             "execution": "fixture",
             "steps": [
                 {
@@ -1437,6 +1631,8 @@ class ControlFlowPrimitives(unittest.TestCase):
         self.assertEqual(record["relay_count"], 1)
         self.assertEqual(record["post_scenario_idle"]["source"], "local_fixture")
         self.assertTrue(record["fixture_state"]["followup_probe_accepted"])
+        self.assertEqual(record["agent_mode_actual"], "none")
+        self.assertFalse(record["real_provider_contacted"])
 
     def test_run_one_cell_waits_for_hold_state_before_cancel(self):
         class FakeClient:
@@ -1463,6 +1659,7 @@ class ControlFlowPrimitives(unittest.TestCase):
         )
         scenario = {
             "id": "E-18",
+            "agent_mode": "real_live",
             "steps": [
                 {
                     "send_provider_hold_prompt": {
@@ -1535,6 +1732,7 @@ class ControlFlowPrimitives(unittest.TestCase):
             ],
         )
         self.assertEqual(record["cancel_turns"], [{"ok": True}])
+        self.assertEqual(record["agent_mode_actual"], "real_live")
         self.assertEqual(
             record["assertions"][0],
             {
@@ -1622,6 +1820,7 @@ class ControlFlowPrimitives(unittest.TestCase):
         )
         scenario = {
             "id": "E-X",
+            "agent_mode": "real_live",
             "steps": [
                 {
                     "send_prompts_concurrent": {
@@ -1652,6 +1851,7 @@ class ControlFlowPrimitives(unittest.TestCase):
 
         self.assertEqual(client.max_active, 2)
         self.assertCountEqual(client.sent, ["prompt-a", "prompt-b"])
+        self.assertEqual(record["agent_mode_actual"], "real_live")
         self.assertEqual(
             [item["index"] for item in record["concurrent_prompt_batches"][0]],
             [0, 1],
@@ -1675,6 +1875,7 @@ class ControlFlowPrimitives(unittest.TestCase):
         )
         scenario = {
             "id": "E-X",
+            "agent_mode": "real_live",
             "steps": [
                 {
                     "send_keys_sequence": {
@@ -1725,6 +1926,7 @@ class ControlFlowPrimitives(unittest.TestCase):
             record["direct_input_prompts"],
             [{"mode": "send_keys_sequence", "prompt_preview": "final prompt"}],
         )
+        self.assertTrue(record["real_provider_contacted"])
 
     def test_send_keys_sequence_can_pause_between_control_keys(self):
         class FakeClient:
@@ -1744,6 +1946,7 @@ class ControlFlowPrimitives(unittest.TestCase):
         )
         scenario = {
             "id": "E-21",
+            "agent_mode": "real_live",
             "steps": [
                 {
                     "send_keys_sequence": {
@@ -1819,6 +2022,7 @@ class ControlFlowPrimitives(unittest.TestCase):
         )
         scenario = {
             "id": "E-21",
+            "agent_mode": "real_live",
             "steps": [
                 {
                     "send_keys_sequence": {
@@ -1914,7 +2118,7 @@ class ScenarioTeardown(unittest.TestCase):
             hard_reset_session_each=False,
             allow_destructive=False,
         )
-        scenario = {"id": "E-18", "steps": [], "assertions": []}
+        scenario = {"id": "E-18", "agent_mode": "real_live", "steps": [], "assertions": []}
         provider_hold_state = {
             "ok_marker": "[E2E:E18:OK]",
             "ok_marker_seen": True,
@@ -1940,6 +2144,16 @@ class ScenarioTeardown(unittest.TestCase):
                 "cancel_turns": [{"ok": True}],
                 "health_assertions": [{"status": "healthy"}],
                 "post_scenario_idle": {"status": "idle"},
+                "agent_mode": "real_live",
+                "agent_mode_actual": "real_live",
+                "real_provider_contacted": True,
+                "agent_mode_contract": {
+                    "declared": "real_live",
+                    "actual": "real_live",
+                    "dry_run": False,
+                    "real_provider_contacted": True,
+                    "satisfied": True,
+                },
             },
         ):
             result = driver.run_scenario(
@@ -1977,13 +2191,16 @@ class ScenarioTeardown(unittest.TestCase):
             hard_reset_session_each=False,
             allow_destructive=False,
         )
-        scenario = {"id": "E-21", "steps": [], "assertions": []}
+        scenario = {"id": "E-21", "agent_mode": "real_live", "steps": [], "assertions": []}
         partial = {
             "assertions": [],
             "relay_count": 1,
             "raw_count": 2,
             "tmux_key_sequences": [{"mode": "per_key", "count": 4}],
             "wait_timeouts": [{"classification": "direct_input_notified_no_tail_observed"}],
+            "agent_mode": "real_live",
+            "agent_mode_actual": "real_live",
+            "real_provider_contacted": True,
         }
 
         with patch(
@@ -2005,6 +2222,434 @@ class ScenarioTeardown(unittest.TestCase):
         self.assertEqual(result["raw_count"], 2)
         self.assertEqual(result["tmux_key_sequences"], partial["tmux_key_sequences"])
         self.assertEqual(result["wait_timeouts"], partial["wait_timeouts"])
+        self.assertEqual(
+            result["failure_attribution"]["wait_timeout_classifications"],
+            ["direct_input_notified_no_tail_observed"],
+        )
+
+    def test_run_scenario_preserves_agent_mode_record_on_final_assertion_failure(self):
+        class FakeClient:
+            base_url = "http://agentdesk.test"
+
+            def __init__(self):
+                self.control_messages: list[str] = []
+
+            def send_control(self, channel_id, content):  # noqa: ARG002
+                self.control_messages.append(content)
+                return {"id": str(len(self.control_messages))}
+
+            def fetch_messages(self, channel_id, *, limit=50, after_id=None):  # noqa: ARG002
+                return []
+
+            def send_prompt(self, channel_id, content, *, channel_kind="cc"):  # noqa: ARG002
+                return {"id": "101"}
+
+        args = Namespace(
+            cell="codex-tui",
+            channel_id="42",
+            thread_channel_id=None,
+            reset_before_each=False,
+            dry_run=False,
+            queue_runtime_root="/tmp/agentdesk-e2e-test-runtime",
+            hard_reset_session_each=False,
+            allow_destructive=False,
+            required_agent_mode="real_live",
+        )
+        scenario = {
+            "id": "E-X",
+            "agent_mode": "real_live",
+            "steps": [{"send_prompt": "hello"}],
+            "assertions": [{"text_present": "never observed"}],
+        }
+        client = FakeClient()
+
+        with (
+            patch("run_tui_relay.time.sleep", return_value=None),
+            patch(
+                "run_tui_relay.run_assertion",
+                side_effect=assertions.AssertionError("text missing"),
+            ),
+        ):
+            result = driver.run_scenario(
+                scenario,
+                args=args,
+                run_id="run-1",
+                client=client,  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(result["status"], "fail")
+        self.assertTrue(result["real_provider_contacted"])
+        self.assertEqual(result["agent_mode_actual"], "real_live")
+        self.assertTrue(result["agent_mode_contract"]["satisfied"])
+        self.assertEqual(result["failure_attribution"]["source"], "assertion")
+        self.assertTrue(
+            any(message.startswith("### E2E TEARDOWN") for message in client.control_messages),
+            client.control_messages,
+        )
+
+    def test_run_scenario_preserves_agent_mode_record_on_provider_hold_failure(self):
+        class FakeClient:
+            base_url = "http://agentdesk.test"
+
+            def __init__(self):
+                self.control_messages: list[str] = []
+
+            def send_control(self, channel_id, content):  # noqa: ARG002
+                self.control_messages.append(content)
+                return {"id": str(len(self.control_messages))}
+
+            def fetch_messages(self, channel_id, *, limit=50, after_id=None):  # noqa: ARG002
+                return []
+
+            def send_prompt(self, channel_id, content, *, channel_kind="cc"):  # noqa: ARG002
+                return {"id": "101"}
+
+        args = Namespace(
+            cell="claude-tui",
+            channel_id="42",
+            thread_channel_id=None,
+            reset_before_each=False,
+            dry_run=False,
+            queue_runtime_root="/tmp/agentdesk-e2e-test-runtime",
+            hard_reset_session_each=False,
+            allow_destructive=False,
+            required_agent_mode="real_live",
+        )
+        scenario = {
+            "id": "E-X",
+            "agent_mode": "real_live",
+            "steps": [
+                {
+                    "send_provider_hold_prompt": {
+                        "ok_marker": "[OK]",
+                        "late_marker": "[LATE]",
+                    }
+                },
+                {
+                    "wait_for_provider_hold_state": {
+                        "ok_marker": "[OK]",
+                        "late_marker": "[LATE]",
+                    }
+                },
+            ],
+            "assertions": [],
+        }
+        client = FakeClient()
+
+        with (
+            patch("run_tui_relay.time.sleep", return_value=None),
+            patch(
+                "run_tui_relay.wait_for_provider_hold_state",
+                side_effect=assertions.AssertionError("provider hold missing"),
+            ),
+        ):
+            result = driver.run_scenario(
+                scenario,
+                args=args,
+                run_id="run-1",
+                client=client,  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(result["status"], "fail")
+        self.assertTrue(result["real_provider_contacted"])
+        self.assertEqual(result["agent_mode_actual"], "real_live")
+        self.assertTrue(result["agent_mode_contract"]["satisfied"])
+        self.assertEqual(result["failure_attribution"]["source"], "assertion")
+        self.assertEqual(len(result["provider_hold_prompts"]), 1)
+        self.assertTrue(
+            any(message.startswith("### E2E TEARDOWN") for message in client.control_messages),
+            client.control_messages,
+        )
+
+    def test_run_scenario_preserves_agent_mode_record_on_post_send_step_assertion(self):
+        class FakeClient:
+            base_url = "http://agentdesk.test"
+
+            def __init__(self):
+                self.control_messages: list[str] = []
+
+            def send_control(self, channel_id, content):  # noqa: ARG002
+                self.control_messages.append(content)
+                return {"id": str(len(self.control_messages))}
+
+            def fetch_messages(self, channel_id, *, limit=50, after_id=None):  # noqa: ARG002
+                return []
+
+            def send_prompt(self, channel_id, content, *, channel_kind="cc"):  # noqa: ARG002
+                return {"id": "101"}
+
+        args = Namespace(
+            cell="codex-tui",
+            channel_id="42",
+            thread_channel_id=None,
+            reset_before_each=False,
+            dry_run=False,
+            queue_runtime_root="/tmp/agentdesk-e2e-test-runtime",
+            hard_reset_session_each=False,
+            allow_destructive=False,
+            required_agent_mode="real_live",
+        )
+        scenario = {
+            "id": "E-X",
+            "agent_mode": "real_live",
+            "steps": [{"send_prompt": "hello"}, {"assert_health": {"status": "healthy"}}],
+            "assertions": [],
+        }
+        client = FakeClient()
+
+        with (
+            patch("run_tui_relay.time.sleep", return_value=None),
+            patch(
+                "run_tui_relay.assert_health",
+                side_effect=assertions.AssertionError("health failed"),
+            ),
+        ):
+            result = driver.run_scenario(
+                scenario,
+                args=args,
+                run_id="run-1",
+                client=client,  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(result["status"], "fail")
+        self.assertTrue(result["real_provider_contacted"])
+        self.assertEqual(result["agent_mode_actual"], "real_live")
+        self.assertTrue(result["agent_mode_contract"]["satisfied"])
+        self.assertEqual(result["failure_attribution"]["source"], "assertion")
+        self.assertTrue(
+            any(message.startswith("### E2E TEARDOWN") for message in client.control_messages),
+            client.control_messages,
+        )
+
+    def test_run_scenario_preserves_agent_mode_record_on_post_send_exception(self):
+        class FakeClient:
+            base_url = "http://agentdesk.test"
+
+            def __init__(self):
+                self.control_messages: list[str] = []
+                self.fetch_calls = 0
+
+            def send_control(self, channel_id, content):  # noqa: ARG002
+                self.control_messages.append(content)
+                return {"id": str(len(self.control_messages))}
+
+            def fetch_messages(self, channel_id, *, limit=50, after_id=None):  # noqa: ARG002
+                self.fetch_calls += 1
+                if self.fetch_calls >= 2:
+                    raise RuntimeError("discord history read failed")
+                return []
+
+            def send_prompt(self, channel_id, content, *, channel_kind="cc"):  # noqa: ARG002
+                return {"id": "101"}
+
+        args = Namespace(
+            cell="codex-tui",
+            channel_id="42",
+            thread_channel_id=None,
+            reset_before_each=False,
+            dry_run=False,
+            queue_runtime_root="/tmp/agentdesk-e2e-test-runtime",
+            hard_reset_session_each=False,
+            allow_destructive=False,
+            required_agent_mode="real_live",
+        )
+        scenario = {
+            "id": "E-X",
+            "agent_mode": "real_live",
+            "steps": [{"send_prompt": "hello"}],
+            "assertions": [],
+        }
+        client = FakeClient()
+
+        with patch("run_tui_relay.time.sleep", return_value=None):
+            result = driver.run_scenario(
+                scenario,
+                args=args,
+                run_id="run-1",
+                client=client,  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(result["status"], "fail")
+        self.assertTrue(result["real_provider_contacted"])
+        self.assertEqual(result["agent_mode_actual"], "real_live")
+        self.assertTrue(result["agent_mode_contract"]["satisfied"])
+        self.assertEqual(result["failure_attribution"]["source"], "exception")
+        self.assertIn("RuntimeError: discord history read failed", result["reason"])
+        self.assertTrue(
+            any(message.startswith("### E2E TEARDOWN") for message in client.control_messages),
+            client.control_messages,
+        )
+
+    def test_run_scenario_does_not_mark_real_provider_when_send_prompt_fails(self):
+        class FakeClient:
+            base_url = "http://agentdesk.test"
+
+            def __init__(self):
+                self.control_messages: list[str] = []
+
+            def send_control(self, channel_id, content):  # noqa: ARG002
+                self.control_messages.append(content)
+                return {"id": str(len(self.control_messages))}
+
+            def fetch_messages(self, channel_id, *, limit=50, after_id=None):  # noqa: ARG002
+                return []
+
+            def send_prompt(self, channel_id, content, *, channel_kind="cc"):  # noqa: ARG002
+                raise RuntimeError("dispatch refused before provider contact")
+
+        args = Namespace(
+            cell="codex-tui",
+            channel_id="42",
+            thread_channel_id=None,
+            reset_before_each=False,
+            dry_run=False,
+            queue_runtime_root="/tmp/agentdesk-e2e-test-runtime",
+            hard_reset_session_each=False,
+            allow_destructive=False,
+            required_agent_mode="real_live",
+        )
+        scenario = {
+            "id": "E-X",
+            "agent_mode": "real_live",
+            "steps": [{"send_prompt": "hello"}],
+            "assertions": [],
+        }
+        client = FakeClient()
+
+        with patch("run_tui_relay.time.sleep", return_value=None):
+            result = driver.run_scenario(
+                scenario,
+                args=args,
+                run_id="run-1",
+                client=client,  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(result["status"], "fail")
+        self.assertFalse(result["real_provider_contacted"])
+        self.assertEqual(result["agent_mode_actual"], "none")
+        self.assertFalse(result["agent_mode_contract"]["satisfied"])
+        self.assertEqual(result["failure_attribution"]["source"], "exception")
+        self.assertIn("dispatch refused before provider contact", result["reason"])
+        self.assertTrue(
+            any(message.startswith("### E2E TEARDOWN") for message in client.control_messages),
+            client.control_messages,
+        )
+
+    def test_run_scenario_does_not_mark_real_provider_when_direct_input_send_fails(self):
+        class FakeClient:
+            base_url = "http://agentdesk.test"
+
+            def __init__(self):
+                self.control_messages: list[str] = []
+
+            def send_control(self, channel_id, content):  # noqa: ARG002
+                self.control_messages.append(content)
+                return {"id": str(len(self.control_messages))}
+
+            def fetch_messages(self, channel_id, *, limit=50, after_id=None):  # noqa: ARG002
+                return []
+
+        args = Namespace(
+            cell="claude-tui",
+            channel_id="42",
+            thread_channel_id=None,
+            reset_before_each=False,
+            dry_run=False,
+            queue_runtime_root="/tmp/agentdesk-e2e-test-runtime",
+            hard_reset_session_each=False,
+            allow_destructive=False,
+            required_agent_mode="real_live",
+        )
+        scenario = {
+            "id": "E-X",
+            "agent_mode": "real_live",
+            "steps": [{"send_keys": "hello"}],
+            "assertions": [],
+        }
+        client = FakeClient()
+
+        with (
+            patch("run_tui_relay.time.sleep", return_value=None),
+            patch("run_tui_relay.tmux.send_keys", return_value=False),
+        ):
+            result = driver.run_scenario(
+                scenario,
+                args=args,
+                run_id="run-1",
+                client=client,  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(result["status"], "fail")
+        self.assertFalse(result["real_provider_contacted"])
+        self.assertEqual(result["agent_mode_actual"], "none")
+        self.assertFalse(result["agent_mode_contract"]["satisfied"])
+        self.assertEqual(result["failure_attribution"]["source"], "assertion")
+        self.assertIn("tmux send-keys failed", result["reason"])
+        self.assertTrue(
+            any(message.startswith("### E2E TEARDOWN") for message in client.control_messages),
+            client.control_messages,
+        )
+
+    def test_run_scenario_preserves_partial_concurrent_send_success(self):
+        class FakeClient:
+            base_url = "http://agentdesk.test"
+
+            def __init__(self):
+                self.control_messages: list[str] = []
+
+            def send_control(self, channel_id, content):  # noqa: ARG002
+                self.control_messages.append(content)
+                return {"id": str(len(self.control_messages))}
+
+            def fetch_messages(self, channel_id, *, limit=50, after_id=None):  # noqa: ARG002
+                return []
+
+            def send_prompt(self, channel_id, content, *, channel_kind="cc"):  # noqa: ARG002
+                if content == "fail":
+                    raise RuntimeError("dispatch refused before provider contact")
+                return {"id": "101"}
+
+        args = Namespace(
+            cell="codex-tui",
+            channel_id="42",
+            thread_channel_id=None,
+            reset_before_each=False,
+            dry_run=False,
+            queue_runtime_root="/tmp/agentdesk-e2e-test-runtime",
+            hard_reset_session_each=False,
+            allow_destructive=False,
+            required_agent_mode="real_live",
+        )
+        scenario = {
+            "id": "E-X",
+            "agent_mode": "real_live",
+            "steps": [{"send_prompts_concurrent": ["ok", "fail"]}],
+            "assertions": [],
+        }
+        client = FakeClient()
+
+        with patch("run_tui_relay.time.sleep", return_value=None):
+            result = driver.run_scenario(
+                scenario,
+                args=args,
+                run_id="run-1",
+                client=client,  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(result["status"], "fail")
+        self.assertTrue(result["real_provider_contacted"])
+        self.assertEqual(result["agent_mode_actual"], "real_live")
+        self.assertTrue(result["agent_mode_contract"]["satisfied"])
+        self.assertEqual(result["failure_attribution"]["source"], "assertion")
+        self.assertEqual(
+            result["concurrent_prompt_batches"],
+            [[{"index": 0, "channel_id": "42", "message_id": "101"}]],
+        )
+        self.assertIn("send_prompts_concurrent failed", result["reason"])
+        self.assertTrue(
+            any(message.startswith("### E2E TEARDOWN") for message in client.control_messages),
+            client.control_messages,
+        )
 
     def test_run_scenario_posts_teardown_when_idle_assertion_fails(self):
         class FakeClient:
@@ -2030,7 +2675,7 @@ class ScenarioTeardown(unittest.TestCase):
             hard_reset_session_each=False,
             allow_destructive=False,
         )
-        scenario = {"id": "E-X", "steps": [], "assertions": []}
+        scenario = {"id": "E-X", "agent_mode": "none", "steps": [], "assertions": []}
         client = FakeClient()
 
         with (

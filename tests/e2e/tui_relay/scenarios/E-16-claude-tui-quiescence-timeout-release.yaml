@@ -1,5 +1,6 @@
 id: E-16
 title: Claude TUI quiescence timeout still releases mailbox
+agent_mode: controlled
 cells: [claude-tui]
 isolation: required
 skip_reason: >
