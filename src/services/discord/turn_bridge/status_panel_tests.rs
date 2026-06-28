@@ -4,6 +4,7 @@ use super::{
     migrate_separate_status_panel_to_footer, should_open_long_running_placeholder_controller,
     status_panel_completion_action, status_panel_completion_edit_aliases_newer_turn,
     status_panel_completion_ready_after_terminal_body, status_panel_message_id_for_turn,
+    status_panel_wip_inflight_for_completion,
 };
 use crate::services::discord::formatting::ReplaceLongMessageOutcome;
 use crate::services::discord::gateway::TurnGateway;
@@ -11,7 +12,10 @@ use crate::services::discord::inflight::{
     GuardedClearOutcome, clear_inflight_state, clear_inflight_state_if_matches,
     clear_inflight_state_if_matches_zero_owned, load_inflight_state, save_inflight_state,
 };
+use crate::services::git::GitCommand;
+use std::fs;
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
@@ -22,12 +26,20 @@ struct StatusPanelFallbackGateway {
     edited_message_ids: Arc<Mutex<Vec<MessageId>>>,
     edit_error: Option<String>,
     send_id: MessageId,
+    can_chain_locally: bool,
 }
 
 impl StatusPanelFallbackGateway {
     fn with_edit_error(error: &str) -> Self {
         Self {
             edit_error: Some(error.to_string()),
+            ..Self::default()
+        }
+    }
+
+    fn without_local_chain() -> Self {
+        Self {
+            can_chain_locally: false,
             ..Self::default()
         }
     }
@@ -40,6 +52,7 @@ impl Default for StatusPanelFallbackGateway {
             edited_message_ids: Arc::new(Mutex::new(Vec::new())),
             edit_error: None,
             send_id: MessageId::new(1_500_000_000_000_999),
+            can_chain_locally: true,
         }
     }
 }
@@ -139,12 +152,48 @@ impl TurnGateway for StatusPanelFallbackGateway {
     }
 
     fn can_chain_locally(&self) -> bool {
-        true
+        self.can_chain_locally
     }
 
     fn bot_owner_provider(&self) -> Option<ProviderKind> {
         Some(ProviderKind::Claude)
     }
+}
+
+#[tokio::test]
+async fn status_panel_wip_warning_does_not_use_synthetic_gateway_when_http_path_required() {
+    let Some(worktree) = init_git_repo_for_wip_warning() else {
+        return;
+    };
+    fs::write(worktree.path().join("untracked.txt"), "untracked\n").expect("write untracked file");
+
+    let shared = make_status_panel_v2_shared_for_tests();
+    let gateway = StatusPanelFallbackGateway::without_local_chain();
+    let state =
+        wip_warning_inflight_state(&ProviderKind::Claude, 3_792_010, 3_792_011, worktree.path());
+
+    let outcome = super::warn_turn_end_wip_before_status_panel_commit(
+        shared.as_ref(),
+        &gateway,
+        ChannelId::new(3_792_010),
+        Some(&state),
+        "test_wip_warning_http_path",
+    )
+    .await;
+
+    assert_eq!(
+        outcome,
+        crate::services::discord::turn_end_wip_warning::TurnEndWipWarningOutcome::SendFailed,
+        "no local-chain gateway plus no HTTP handle should fail instead of being swallowed"
+    );
+    assert!(
+        gateway
+            .sent_messages
+            .lock()
+            .expect("sent messages lock")
+            .is_empty(),
+        "headless/synthetic gateway sends must not absorb WIP warnings"
+    );
 }
 
 #[test]
@@ -163,20 +212,111 @@ fn make_status_panel_v2_shared_for_tests() -> Arc<crate::services::discord::Shar
 }
 
 fn test_inflight_state() -> InflightTurnState {
-    InflightTurnState::new(
-        ProviderKind::Codex,
-        1,
-        Some("adk-cdx-test".to_string()),
-        2,
-        3,
-        4,
-        "test turn".to_string(),
-        None,
-        None,
-        None,
-        None,
-        0,
-    )
+    serde_json::from_value(serde_json::json!({
+        "version": 9,
+        "provider": "codex",
+        "channel_id": 1,
+        "channel_name": "adk-cdx-test",
+        "request_owner_user_id": 2,
+        "user_msg_id": 3,
+        "current_msg_id": 4,
+        "current_msg_len": 0,
+        "user_text": "test turn",
+        "source": "text",
+        "session_id": null,
+        "tmux_session_name": null,
+        "output_path": null,
+        "input_fifo_path": null,
+        "last_offset": 0,
+        "full_response": "",
+        "response_sent_offset": 0,
+        "started_at": "2026-01-01 00:00:00",
+        "updated_at": "2026-01-01 00:00:00"
+    }))
+    .expect("test inflight state")
+}
+
+fn git_available_for_wip_warning() -> bool {
+    GitCommand::new().arg("--version").run_output().is_ok()
+}
+
+fn init_git_repo_for_wip_warning() -> Option<tempfile::TempDir> {
+    if !git_available_for_wip_warning() {
+        return None;
+    }
+    let temp = tempfile::tempdir().expect("tempdir");
+    GitCommand::new()
+        .repo(temp.path())
+        .arg("init")
+        .run_output()
+        .expect("git init");
+    Some(temp)
+}
+
+struct RuntimeRootGuard {
+    previous: Option<std::ffi::OsString>,
+    _root: tempfile::TempDir,
+}
+
+impl RuntimeRootGuard {
+    fn new() -> Self {
+        let root = tempfile::tempdir().expect("runtime root");
+        let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root.path()) };
+        Self {
+            previous,
+            _root: root,
+        }
+    }
+}
+
+impl Drop for RuntimeRootGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+        }
+    }
+}
+
+fn isolate_agentdesk_runtime_root() -> (std::sync::MutexGuard<'static, ()>, RuntimeRootGuard) {
+    let lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let root = RuntimeRootGuard::new();
+    (lock, root)
+}
+
+fn wip_warning_inflight_state(
+    provider: &ProviderKind,
+    channel_id: u64,
+    user_msg_id: u64,
+    worktree_path: &Path,
+) -> InflightTurnState {
+    let mut state: InflightTurnState = serde_json::from_value(serde_json::json!({
+        "version": 9,
+        "provider": provider.as_str(),
+        "channel_id": channel_id,
+        "channel_name": "wip-warning-integration-test",
+        "request_owner_user_id": 42,
+        "user_msg_id": user_msg_id,
+        "current_msg_id": user_msg_id + 1,
+        "current_msg_len": 0,
+        "user_text": "turn",
+        "source": "text",
+        "session_id": null,
+        "tmux_session_name": null,
+        "output_path": null,
+        "input_fifo_path": null,
+        "last_offset": 0,
+        "full_response": "",
+        "response_sent_offset": 0,
+        "started_at": "2026-01-01 00:00:00",
+        "updated_at": "2026-01-01 00:00:00"
+    }))
+    .expect("wip warning inflight state");
+    state.worktree_path = Some(worktree_path.display().to_string());
+    state
 }
 
 #[test]
@@ -448,6 +588,7 @@ fn status_panel_completion_waits_for_visible_terminal_body() {
 
 #[tokio::test]
 async fn status_panel_fallback_completion_is_blocked_until_body_visible() {
+    let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
     let shared = make_status_panel_v2_shared_for_tests();
     let gateway = StatusPanelFallbackGateway::default();
     let provider = ProviderKind::Claude;
@@ -507,6 +648,7 @@ async fn status_panel_fallback_completion_is_blocked_until_body_visible() {
 
 #[tokio::test]
 async fn status_panel_completion_fallback_posts_when_message_id_is_synthetic() {
+    let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
     let shared = make_status_panel_v2_shared_for_tests();
     let gateway = StatusPanelFallbackGateway::default();
     let provider = ProviderKind::Claude;
@@ -572,7 +714,117 @@ async fn status_panel_completion_fallback_posts_when_message_id_is_synthetic() {
 }
 
 #[tokio::test]
+async fn status_panel_completion_sends_wip_warning_before_completion_surface() {
+    let Some(worktree) = init_git_repo_for_wip_warning() else {
+        return;
+    };
+    fs::write(worktree.path().join("untracked.txt"), "untracked\n").expect("write untracked file");
+
+    let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
+
+    let shared = make_status_panel_v2_shared_for_tests();
+    let gateway = StatusPanelFallbackGateway::default();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(3_792_000);
+    let user_msg_id = 3_792_001;
+    save_inflight_state(&wip_warning_inflight_state(
+        &provider,
+        channel_id.get(),
+        user_msg_id,
+        worktree.path(),
+    ))
+    .expect("save inflight state");
+
+    let mut last_status_panel_text = String::new();
+    let committed = complete_status_panel_v2(
+        shared.as_ref(),
+        &gateway,
+        channel_id,
+        None,
+        &provider,
+        1_700_000_000,
+        &mut last_status_panel_text,
+        false,
+        "test_wip_warning_order",
+        user_msg_id,
+    )
+    .await;
+
+    assert!(committed);
+    let sent_messages = gateway
+        .sent_messages
+        .lock()
+        .expect("sent messages lock")
+        .clone();
+    assert_eq!(sent_messages.len(), 2);
+    assert!(sent_messages[0].contains("WIP uncommitted files detected"));
+    assert!(sent_messages[0].contains(&format!("Workspace: `{}`", worktree.path().display())));
+    assert!(sent_messages[0].contains("Counts: 0 staged, 0 unstaged, 1 untracked."));
+    assert!(sent_messages[1].contains("응답 완료"));
+
+    let committed_retry = complete_status_panel_v2(
+        shared.as_ref(),
+        &gateway,
+        channel_id,
+        None,
+        &provider,
+        1_700_000_000,
+        &mut last_status_panel_text,
+        false,
+        "test_wip_warning_order_retry",
+        user_msg_id,
+    )
+    .await;
+
+    assert!(committed_retry);
+    assert_eq!(
+        gateway
+            .sent_messages
+            .lock()
+            .expect("sent messages lock")
+            .len(),
+        2,
+        "already-committed completion retries must not duplicate WIP warnings"
+    );
+}
+
+#[test]
+fn status_panel_wip_completion_uses_preloaded_recovery_snapshot_after_cleanup() {
+    let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
+    let worktree = tempfile::tempdir().expect("worktree tempdir");
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(3_792_020);
+    let user_msg_id = 3_792_021;
+    let state =
+        wip_warning_inflight_state(&provider, channel_id.get(), user_msg_id, worktree.path());
+    save_inflight_state(&state).expect("save inflight state");
+    assert!(clear_inflight_state(&provider, channel_id.get()));
+    assert!(
+        crate::services::discord::turn_end_wip_warning::load_matching_inflight_state(
+            &provider,
+            channel_id,
+            Some(user_msg_id)
+        )
+        .is_none(),
+        "cleanup should remove the disk row that the old HTTP path reloaded"
+    );
+
+    let selected = status_panel_wip_inflight_for_completion(
+        Some(&state),
+        &provider,
+        channel_id,
+        Some(user_msg_id),
+    )
+    .expect("preloaded recovery snapshot should remain eligible");
+
+    assert_eq!(selected.as_inflight().user_msg_id, user_msg_id);
+    assert_eq!(selected.as_inflight().channel_id, channel_id.get());
+    assert_eq!(selected.as_inflight().worktree_path, state.worktree_path);
+}
+
+#[tokio::test]
 async fn status_panel_completion_fallback_posts_after_unknown_message_edit() {
+    let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
     let shared = make_status_panel_v2_shared_for_tests();
     let gateway = StatusPanelFallbackGateway::with_edit_error("Unknown Message");
     let provider = ProviderKind::Claude;

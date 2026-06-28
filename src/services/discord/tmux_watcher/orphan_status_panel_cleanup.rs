@@ -151,7 +151,7 @@ pub(super) async fn complete_watcher_status_panel_v2(
         last_status_panel_text,
         background,
         "tmux_watcher",
-        expected_user_msg_id,
+        (expected_user_msg_id, None),
     )
     .await
 }

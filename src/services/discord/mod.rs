@@ -86,6 +86,7 @@ pub(in crate::services::discord) mod task_supervisor;
 mod terminal_ui_obligation;
 #[cfg(unix)]
 mod tmux;
+pub(in crate::services::discord) mod turn_end_wip_warning;
 #[cfg(unix)]
 pub(crate) use tmux::write_spawn_nonce;
 #[cfg(unix)]
@@ -133,10 +134,8 @@ pub(crate) use router::HeadlessTurnStartError;
 pub(crate) use session_relay_sink::run_session_bound_discord_relay_supervisor;
 // #3038 S4: re-export the live-placeholder cluster type so `SharedData`
 // declarations/constructors keep the S1/S2/S3 unqualified surface.
-pub(in crate::services::discord) use shared_state::PlaceholderState;
-pub(in crate::services::discord) use shared_state::PolicyRuntime;
-pub(in crate::services::discord) use shared_state::QueuedPlaceholderState;
-pub(in crate::services::discord) use shared_state::RuntimeHttpCache;
+pub(in crate::services::discord) use shared_state::{PlaceholderState, PolicyRuntime};
+pub(in crate::services::discord) use shared_state::{QueuedPlaceholderState, RuntimeHttpCache};
 // #3038 S2: the cluster-D members were `pub(super)` on `SharedData` (visible up
 // to `crate::services`), so the group type is re-exported with that same scope.
 pub(in crate::services) use shared_state::SessionOverrideState;

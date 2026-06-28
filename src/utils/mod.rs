@@ -7,8 +7,5 @@ pub mod github_links;
 pub mod loopback_url;
 pub mod redact;
 pub mod secret_file;
-// #1099 WIP detector is implemented and unit-tested but not yet wired into the
-// turn-end lifecycle; retained pending that integration. Scoped allow keeps the
-// rest of `utils` under dead_code lint.
-#[allow(dead_code)]
+// #1099/#3792 WIP detector used by the Discord turn-end warning facade.
 pub mod wip_detect;

@@ -235,6 +235,18 @@ pub(super) async fn complete_bridge_single_message_completion_footer(
     ) else {
         return true;
     };
+    let inflight = crate::services::discord::turn_end_wip_warning::load_matching_inflight_state(
+        provider,
+        channel_id,
+        Some(owner.user_msg_id),
+    );
+    let _ = crate::services::discord::turn_end_wip_warning::warn_turn_end_wip_with_shared_http(
+        shared,
+        channel_id,
+        inflight.as_ref(),
+        "turn_bridge_single_message_footer",
+    )
+    .await;
     let edited = match edit_bridge_completion_footer(
         shared,
         channel_id,

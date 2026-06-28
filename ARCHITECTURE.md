@@ -736,6 +736,7 @@ src/
 │   │   ├── tui_prompt_relay.rs
 │   │   ├── tui_prompt_relay_controller_cutover.rs
 │   │   ├── tui_task_card.rs
+│   │   ├── turn_end_wip_warning.rs
 │   │   ├── turn_finalizer.rs
 │   │   ├── voice_acknowledgement.rs
 │   │   ├── voice_background_driver.rs

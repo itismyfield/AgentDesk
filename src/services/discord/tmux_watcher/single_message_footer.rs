@@ -288,6 +288,18 @@ pub(super) async fn complete_watcher_single_message_completion_footer(
     else {
         return true;
     };
+    let inflight = crate::services::discord::turn_end_wip_warning::load_matching_inflight_state(
+        provider,
+        channel_id,
+        Some(owner.user_msg_id),
+    );
+    let _ = crate::services::discord::turn_end_wip_warning::warn_turn_end_wip_with_http(
+        http,
+        channel_id,
+        inflight.as_ref(),
+        "tmux_watcher_single_message_footer",
+    )
+    .await;
     rate_limit_wait(shared, channel_id).await;
     let edited = match crate::services::discord::http::edit_channel_message(
         http, channel_id, msg_id, &finalized,

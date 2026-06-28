@@ -3204,22 +3204,14 @@ mod stall_recovery_tests {
 
     #[test]
     fn status_message_id_round_trips_for_status_panel_resume() {
-        let temp = TempDir::new().unwrap();
-        let mut state = InflightTurnState::new(
-            ProviderKind::Claude,
+        let (_lock, temp, _env_reset) = status_panel_test_root();
+        let state = status_panel_test_state(
             42,
-            Some("adk-claude".to_string()),
-            7,
             8,
             99,
-            "hello".to_string(),
-            Some("session-1".to_string()),
-            Some("AgentDesk-claude-adk-claude".to_string()),
-            Some("/tmp/out.jsonl".to_string()),
-            Some("/tmp/in.fifo".to_string()),
-            0,
+            Some("AgentDesk-claude-adk-claude"),
+            Some(123_456),
         );
-        state.status_message_id = Some(123_456);
 
         save_inflight_state_in_root(temp.path(), &state).expect("save inflight state");
 
@@ -3740,6 +3732,38 @@ mod stall_recovery_tests {
     /// Seeds a single inflight row in `root` and returns it. `user_msg_id` /
     /// `current_msg_id` / `status_message_id` are caller-controlled so the
     /// guard semantics can be exercised.
+    fn status_panel_test_state(
+        channel_id: u64,
+        user_msg_id: u64,
+        current_msg_id: u64,
+        tmux_session_name: Option<&str>,
+        status_message_id: Option<u64>,
+    ) -> InflightTurnState {
+        serde_json::from_value(serde_json::json!({
+            "version": 9,
+            "provider": "claude",
+            "channel_id": channel_id,
+            "channel_name": "adk-claude",
+            "request_owner_user_id": user_msg_id,
+            "user_msg_id": user_msg_id,
+            "current_msg_id": current_msg_id,
+            "current_msg_len": 0,
+            "status_message_id": status_message_id,
+            "user_text": "hello",
+            "source": "text",
+            "session_id": "session-1",
+            "tmux_session_name": tmux_session_name,
+            "output_path": "/tmp/out.jsonl",
+            "input_fifo_path": "/tmp/in.fifo",
+            "last_offset": 0,
+            "full_response": "",
+            "response_sent_offset": 0,
+            "started_at": "2026-01-01 00:00:00",
+            "updated_at": "2026-01-01 00:00:00"
+        }))
+        .expect("status-panel test inflight state")
+    }
+
     fn seed_status_panel_state(
         root: &Path,
         channel_id: u64,
@@ -3748,25 +3772,13 @@ mod stall_recovery_tests {
         tmux_session_name: Option<&str>,
         status_message_id: Option<u64>,
     ) -> InflightTurnState {
-        let mut state = InflightTurnState::new(
-            ProviderKind::Claude,
+        let state = status_panel_test_state(
             channel_id,
-            Some("adk-claude".to_string()),
-            user_msg_id,
             user_msg_id,
             current_msg_id,
-            "hello".to_string(),
-            Some("session-1".to_string()),
-            tmux_session_name.map(str::to_string),
-            Some("/tmp/out.jsonl".to_string()),
-            Some("/tmp/in.fifo".to_string()),
-            0,
+            tmux_session_name,
+            status_message_id,
         );
-        // `new()` takes (.., request_owner_user_id, user_msg_id, current_msg_id, ..);
-        // pin the guard-relevant fields explicitly so the test intent is exact.
-        state.user_msg_id = user_msg_id;
-        state.current_msg_id = current_msg_id;
-        state.status_message_id = status_message_id;
         save_inflight_state_in_root(root, &state).expect("seed inflight state");
         state
     }
@@ -3780,7 +3792,7 @@ mod stall_recovery_tests {
 
     #[test]
     fn bind_status_panel_sets_id_when_unguarded() {
-        let temp = TempDir::new().unwrap();
+        let (_lock, temp, _env_reset) = status_panel_test_root();
         seed_status_panel_state(temp.path(), 7001, 10, 11, Some("AgentDesk-claude-a"), None);
 
         let outcome = bind_status_panel_in_root(
@@ -3797,7 +3809,7 @@ mod stall_recovery_tests {
 
     #[test]
     fn bind_status_panel_is_idempotent_when_already_bound() {
-        let temp = TempDir::new().unwrap();
+        let (_lock, temp, _env_reset) = status_panel_test_root();
         seed_status_panel_state(
             temp.path(),
             7002,
@@ -3821,7 +3833,7 @@ mod stall_recovery_tests {
 
     #[test]
     fn bind_status_panel_respects_user_msg_id_guard() {
-        let temp = TempDir::new().unwrap();
+        let (_lock, temp, _env_reset) = status_panel_test_root();
         seed_status_panel_state(temp.path(), 7003, 10, 11, Some("AgentDesk-claude-a"), None);
 
         // Guard expects a different user_msg_id (a newer turn now owns the row).
@@ -3842,7 +3854,7 @@ mod stall_recovery_tests {
 
     #[test]
     fn bind_status_panel_skips_when_real_panel_already_set() {
-        let temp = TempDir::new().unwrap();
+        let (_lock, temp, _env_reset) = status_panel_test_root();
         // A real (non-synthetic) panel id already on the row.
         seed_status_panel_state(
             temp.path(),
@@ -3879,7 +3891,7 @@ mod stall_recovery_tests {
         // already owns must classify as `AlreadyBound`, NOT
         // `SkippedPanelAlreadySet`, even when `skip_if_panel_already_set` is set.
         // Misclassifying it routed the TUI-direct caller to DELETE its own panel.
-        let temp = TempDir::new().unwrap();
+        let (_lock, temp, _env_reset) = status_panel_test_root();
         seed_status_panel_state(
             temp.path(),
             7007,
@@ -3908,7 +3920,7 @@ mod stall_recovery_tests {
     fn bind_status_panel_different_id_skips_and_reports_owned_id() {
         // A DIFFERENT real panel id already set + skip flag → SkippedPanelAlreadySet
         // carrying the row's owned id (so the caller adopts the real panel).
-        let temp = TempDir::new().unwrap();
+        let (_lock, temp, _env_reset) = status_panel_test_root();
         seed_status_panel_state(
             temp.path(),
             7008,
@@ -3938,7 +3950,7 @@ mod stall_recovery_tests {
 
     #[test]
     fn bind_status_panel_overwrites_synthetic_even_with_skip_flag() {
-        let temp = TempDir::new().unwrap();
+        let (_lock, temp, _env_reset) = status_panel_test_root();
         // A synthetic-headless id does NOT count as "already set".
         seed_status_panel_state(
             temp.path(),
@@ -3979,7 +3991,7 @@ mod stall_recovery_tests {
 
     #[test]
     fn clear_status_panel_if_current_clears_on_match() {
-        let temp = TempDir::new().unwrap();
+        let (_lock, temp, _env_reset) = status_panel_test_root();
         seed_status_panel_state(
             temp.path(),
             7101,
@@ -4003,7 +4015,7 @@ mod stall_recovery_tests {
 
     #[test]
     fn clear_status_panel_if_current_preserves_newer_turns_panel_on_mismatch() {
-        let temp = TempDir::new().unwrap();
+        let (_lock, temp, _env_reset) = status_panel_test_root();
         // A newer turn already rebound the panel to 9999; a stale actor still
         // believes it owns 5555 and asks to clear it. The compare-and-clear
         // must NOT wipe the newer turn's panel.
@@ -4030,7 +4042,7 @@ mod stall_recovery_tests {
 
     #[test]
     fn clear_status_panel_if_current_respects_extra_guards() {
-        let temp = TempDir::new().unwrap();
+        let (_lock, temp, _env_reset) = status_panel_test_root();
         seed_status_panel_state(
             temp.path(),
             7103,
@@ -4533,6 +4545,15 @@ mod stall_recovery_tests {
         let reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
         unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", path) };
         reset
+    }
+
+    fn status_panel_test_root() -> (std::sync::MutexGuard<'static, ()>, TempDir, EnvReset) {
+        let lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = TempDir::new().unwrap();
+        let env_reset = set_agentdesk_root_for_test(temp.path());
+        (lock, temp, env_reset)
     }
 
     /// #2427 D/A wire — happy path. When the on-disk inflight has a

@@ -559,7 +559,7 @@ async fn complete_recovery_visible_turn(
         &mut last_status_panel_text,
         background,
         source,
-        Some(state.user_msg_id),
+        (Some(state.user_msg_id), Some(state)),
     )
     .await;
     RecoveryCompletionOutcome::Emitted
@@ -581,20 +581,28 @@ mod recovery_completion_outcome_tests {
     use poise::serenity_prelude::{ChannelId, MessageId};
 
     fn state_for_recovery(user_msg_id: u64) -> super::inflight::InflightTurnState {
-        super::inflight::InflightTurnState::new(
-            ProviderKind::Claude,
-            4243,
-            Some("adk-cc".to_string()),
-            7,
-            user_msg_id,
-            user_msg_id + 1,
-            "prompt".to_string(),
-            Some("session".to_string()),
-            Some("AgentDesk-claude-adk-cc".to_string()),
-            Some("/tmp/claude-transcript.jsonl".to_string()),
-            None,
-            0,
-        )
+        serde_json::from_value(serde_json::json!({
+            "version": 9,
+            "provider": "claude",
+            "channel_id": 4243,
+            "channel_name": "adk-cc",
+            "request_owner_user_id": 7,
+            "user_msg_id": user_msg_id,
+            "current_msg_id": user_msg_id + 1,
+            "current_msg_len": 0,
+            "user_text": "prompt",
+            "source": "text",
+            "session_id": "session",
+            "tmux_session_name": "AgentDesk-claude-adk-cc",
+            "output_path": "/tmp/claude-transcript.jsonl",
+            "input_fifo_path": null,
+            "last_offset": 0,
+            "full_response": "",
+            "response_sent_offset": 0,
+            "started_at": "2026-01-01 00:00:00",
+            "updated_at": "2026-01-01 00:00:00"
+        }))
+        .expect("recovery test inflight state")
     }
 
     #[test]
