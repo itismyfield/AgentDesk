@@ -5,12 +5,16 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use sqlx::{PgPool, Row};
+use sqlx::Row;
 use std::collections::BTreeSet;
 
 use super::AppState;
-use crate::db::kanban::{IssueCardUpsert, upsert_card_from_issue_pg};
 use crate::github;
+use crate::services::github_issue_creation::{
+    GitHubIssueCreateRequest, IssueAnnouncementSync, IssueAnnouncementSyncOptions,
+    IssueCreationError, KanbanCardSync, KanbanCardSyncOptions,
+    create_github_issue_with_side_effects, resolve_known_agent_id_pg,
+};
 
 // ── Body types ─────────────────────────────────────────────────
 
@@ -95,27 +99,6 @@ fn issue_metadata_json(labels: &[String], block_on_issue_numbers: &[i64]) -> Opt
         }
         Some(serde_json::Value::Object(metadata).to_string())
     }
-}
-
-async fn resolve_known_agent_id_pg(
-    pool: &PgPool,
-    agent_id: Option<&str>,
-) -> Result<Option<String>, String> {
-    let Some(agent_id) = agent_id.and_then(trim_non_empty) else {
-        return Ok(None);
-    };
-
-    let exists = sqlx::query_scalar::<_, String>("SELECT id FROM agents WHERE id = $1 LIMIT 1")
-        .bind(&agent_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| format!("resolve agent {agent_id}: {error}"))?;
-
-    if exists.is_none() {
-        tracing::warn!("[issues] ignoring unknown assignee '{agent_id}' for linked kanban card");
-    }
-
-    Ok(exists)
 }
 
 fn resolve_issue_repo(input: &str) -> Result<String, String> {
@@ -444,158 +427,46 @@ pub async fn create_issue(
         .map(|agent_id| vec![format!("agent:{agent_id}")])
         .unwrap_or_default();
 
-    if !github::gh_available() {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "gh CLI is not available on this system"})),
-        );
-    }
+    let issue_create_request = GitHubIssueCreateRequest::new(
+        "api_github_issues_create",
+        repo.clone(),
+        title.clone(),
+        issue_body.clone(),
+    )
+    .with_labels(applied_labels.clone())
+    .with_kanban(KanbanCardSync::enabled(KanbanCardSyncOptions {
+        agent_id: body.agent_id.as_deref().and_then(trim_non_empty),
+        metadata_json: issue_metadata_json(&applied_labels, &block_on_issue_numbers),
+        status_on_create: Some("backlog".to_string()),
+    }))
+    .with_announcement(IssueAnnouncementSync::enabled(
+        IssueAnnouncementSyncOptions {
+            agent_id: body.agent_id.as_deref().and_then(trim_non_empty),
+            announcement_channel_id: body
+                .announcement_channel_id
+                .as_deref()
+                .and_then(trim_non_empty),
+            complete_if_closed: true,
+        },
+    ));
 
-    match github::create_issue_with_labels(&repo, &title, &issue_body, &applied_labels).await {
-        Ok(created) => {
-            let metadata_json = issue_metadata_json(&applied_labels, &block_on_issue_numbers);
-            let (kanban_card_id, kanban_card_sync_error) = if let Some(pool) = state.pg_pool_ref() {
-                let assigned_agent_id = match resolve_known_agent_id_pg(
-                    pool,
-                    body.agent_id.as_deref(),
-                )
-                .await
-                {
-                    Ok(agent_id) => agent_id,
-                    Err(error) => {
-                        tracing::error!(
-                            "[issues] created GitHub issue {}#{} but failed to resolve assignee: {}",
-                            repo,
-                            created.number,
-                            error
-                        );
-                        return (
-                            StatusCode::CREATED,
-                            Json(json!({
-                                "issue": {
-                                    "number": created.number,
-                                    "url": created.url,
-                                    "repo": repo,
-                                },
-                                "kanban_card_id": serde_json::Value::Null,
-                                "kanban_card_sync_error": error,
-                                "applied_labels": applied_labels,
-                                "block_on": block_on_issue_numbers,
-                                "issue_format_version": ISSUE_FORMAT_VERSION,
-                                // deprecated alias kept for transition; remove after clients migrate
-                                "pmd_format_version": ISSUE_FORMAT_VERSION,
-                            })),
-                        );
-                    }
-                };
-                match upsert_card_from_issue_pg(
-                    pool,
-                    IssueCardUpsert {
-                        repo_id: repo.clone(),
-                        issue_number: created.number,
-                        issue_url: Some(created.url.clone()),
-                        title: title.clone(),
-                        description: Some(issue_body.clone()),
-                        priority: None,
-                        assigned_agent_id,
-                        metadata_json: metadata_json.clone(),
-                        status_on_create: Some("backlog".to_string()),
-                    },
-                )
-                .await
-                {
-                    Ok(upserted) => (Some(upserted.card_id), None),
-                    Err(error) => {
-                        tracing::error!(
-                            "[issues] created GitHub issue {}#{} but failed to sync kanban card: {}",
-                            repo,
-                            created.number,
-                            error
-                        );
-                        (None, Some(error))
-                    }
-                }
-            } else {
-                (None, Some("postgres pool unavailable".to_string()))
-            };
-            let (announcement_channel_id, announcement_message_id, announcement_sync_error) =
-                if let Some(pool) = state.pg_pool_ref() {
-                    match crate::services::issue_announcements::create_issue_announcement_pg(
-                        pool,
-                        crate::services::issue_announcements::IssueAnnouncementCreate {
-                            repo: repo.clone(),
-                            issue_number: created.number,
-                            issue_url: created.url.clone(),
-                            title: title.clone(),
-                            agent_id: body.agent_id.as_deref().and_then(trim_non_empty),
-                            announcement_channel_id: body
-                                .announcement_channel_id
-                                .as_deref()
-                                .and_then(trim_non_empty),
-                        },
-                    )
-                    .await
-                    {
-                        Ok(Some(announcement)) => {
-                            if matches!(
-                                github::issue_state(&repo, created.number).as_deref(),
-                                Ok("CLOSED")
-                            ) {
-                                if let Err(error) =
-                                    crate::services::issue_announcements::complete_issue_announcement_pg(
-                                        pool,
-                                        crate::services::issue_announcements::IssueCompletionEvent {
-                                            repo: repo.clone(),
-                                            issue_number: created.number,
-                                            title: Some(title.clone()),
-                                            kind: crate::services::issue_announcements::IssueCompletionKind::Closed,
-                                            pr_number: None,
-                                            pr_url: None,
-                                        },
-                                    )
-                                    .await
-                                {
-                                    tracing::warn!(
-                                        "[issues] immediate completion announcement edit failed for {}#{}: {}",
-                                        repo,
-                                        created.number,
-                                        error
-                                    );
-                                }
-                            }
-                            (
-                                Some(announcement.channel_id),
-                                Some(announcement.message_id),
-                                None,
-                            )
-                        }
-                        Ok(None) => (None, None, None),
-                        Err(error) => {
-                            tracing::warn!(
-                                "[issues] created GitHub issue {}#{} but failed to announce: {}",
-                                repo,
-                                created.number,
-                                error
-                            );
-                            (None, None, Some(error))
-                        }
-                    }
-                } else if body.announcement_channel_id.as_ref().is_some() {
-                    (
-                        None,
-                        None,
-                        Some("postgres pool unavailable for issue announcement".to_string()),
-                    )
-                } else {
-                    (None, None, None)
-                };
+    match create_github_issue_with_side_effects(state.pg_pool_ref(), issue_create_request).await {
+        Ok(result) => {
+            let issue = result.issue;
+            let kanban = result.kanban;
+            let announcement = result.announcement;
+            let kanban_card_id = kanban.card_id.clone();
+            let kanban_card_sync_error = kanban.error.clone();
+            let announcement_channel_id = announcement.channel_id.clone();
+            let announcement_message_id = announcement.message_id.clone();
+            let announcement_sync_error = announcement.error.clone();
 
             (
                 StatusCode::CREATED,
                 Json(json!({
                     "issue": {
-                        "number": created.number,
-                        "url": created.url,
+                        "number": issue.number,
+                        "url": issue.url,
                         "repo": repo,
                     },
                     "kanban_card_id": kanban_card_id,
@@ -603,15 +474,23 @@ pub async fn create_issue(
                     "announcement_channel_id": announcement_channel_id,
                     "announcement_message_id": announcement_message_id,
                     "announcement_sync_error": announcement_sync_error,
-                    "applied_labels": applied_labels,
+                    "applied_labels": result.applied_labels,
                     "block_on": block_on_issue_numbers,
+                    "issue_creation_origin": result.origin,
+                    "issue_creation_mode": result.mode,
+                    "kanban_card_sync": kanban,
+                    "announcement_sync": announcement,
                     "issue_format_version": ISSUE_FORMAT_VERSION,
                     // deprecated alias kept for transition; remove after clients migrate
                     "pmd_format_version": ISSUE_FORMAT_VERSION,
                 })),
             )
         }
-        Err(error) => (
+        Err(IssueCreationError::GhUnavailable) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "gh CLI is not available on this system"})),
+        ),
+        Err(IssueCreationError::GitHub(error)) => (
             StatusCode::BAD_GATEWAY,
             Json(json!({"error": format!("gh issue create failed: {error}")})),
         ),

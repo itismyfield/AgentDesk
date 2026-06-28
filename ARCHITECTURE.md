@@ -834,6 +834,7 @@ src/
 │   ├── envelope_dedup.rs
 │   ├── escalation_settings.rs
 │   ├── gemini.rs
+│   ├── github_issue_creation.rs
 │   ├── issue_announcements.rs
 │   ├── kanban.rs
 │   ├── kanban_cards.rs

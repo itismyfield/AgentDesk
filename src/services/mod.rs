@@ -41,6 +41,7 @@ pub mod envelope_dedup;
 pub mod escalation_settings;
 pub mod gemini;
 pub mod git;
+pub mod github_issue_creation;
 pub mod issue_announcements;
 pub mod kanban;
 pub mod kanban_cards;
