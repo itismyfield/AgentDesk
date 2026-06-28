@@ -1,12 +1,14 @@
 # Voice Epic — E2E 검증 시나리오 (#2027)
 
 마지막 업데이트: 2026-06-29
-구현: #2018 ~ #2031 (Voice 1~13), #3801 unattended PCM harness.
+구현: #2018 ~ #2031 (Voice 1~13), #3801 unattended PCM harness, #3802 unattended live media smoke.
 
-이 문서는 Voice 에픽 마무리에 필요한 E2E 시나리오를 두 lane 으로 정의한다.
+이 문서는 Voice 에픽 마무리에 필요한 E2E 시나리오를 세 lane 으로 정의한다.
 `controlled` lane 은 로컬에서 생성한 PCM 을 실제 receiver/STT/routing/TTS 관측 경로에
-주입하는 결정적 harness 이고, `real_live` lane 은 실제 Discord voice channel + 마이크
-실측 체크리스트다. Controlled harness 는 사람의 voice channel 참여가 필요 없지만,
+주입하는 결정적 harness 이다. Unattended `real_live` lane 은 별도 테스트 speaker bot 이
+실제 Discord voice channel 로 생성 음성을 송출해 Discord gateway/songbird media transport 를
+검증한다. Manual `real_live` lane 은 사람이 실제 Discord client/microphone/speaker 로
+실측하는 체크리스트다. Controlled harness 는 사람이 voice channel 에 참여할 필요가 없지만,
 live Discord media transport 자체를 검증한다고 주장하지 않는다.
 
 ## agent_mode lane
@@ -15,7 +17,7 @@ live Discord media transport 자체를 검증한다고 주장하지 않는다.
   쓰므로 `agent_mode: real_live` 로 취급한다.
 - 결정적 PCM/fixture 기반 voice harness 는 `agent_mode: controlled` 로 기록하고,
   실제 provider 접촉 없이 미디어 파이프라인만 검증한다.
-- live voice media smoke 는 명시적 opt-in 일 때만 `agent_mode: real_live` 로 실행하며,
+- unattended live voice media smoke 는 명시적 opt-in 일 때만 `agent_mode: real_live` 로 실행하며,
   보고서에는 `agent_mode`, cell/provider 식별자, `real_provider_contacted`, 실패 귀속
   (Discord media, STT/TTS, provider response, relay/reporting)을 남긴다.
 
@@ -53,6 +55,105 @@ Report contract:
 - 각 scenario 는 `scenario_id`, `utterance_id`, channel/test identity, transcript/STT 결과,
   foreground/background routing decision, TTS/playback observation, `voice_latency_turn`,
   `voice_flight_events`, timing stages, raw failure reasons 를 기록한다.
+
+## Unattended live Discord media smoke (#3802)
+
+로컬/CI 기본값에서는 실행하지 않는다. 이 lane 은 실제 Discord guild/channel 에 봇 2개가
+접속한다: AgentDesk bot 은 기존 voice runtime 경로로 channel 에 들어가고, 별도 speaker
+bot 은 generated TTS audio 를 Discord voice media 로 송출한다. Speaker bot 이 transcript
+injection 이나 `VoiceReceiver::queue_pcm_for_control_channel` 을 쓰지 않기 때문에 #3801 PCM
+harness 가 우회하는 Discord gateway/songbird receive path 를 검증한다.
+
+명령:
+
+```bash
+ADK_VOICE_LIVE_MEDIA_SMOKE=1 \
+ADK_VOICE_LIVE_SAFETY_ACK=I_UNDERSTAND_THIS_USES_LIVE_DISCORD_VOICE \
+ADK_VOICE_LIVE_TEST_GUILD_ID=<test guild id> \
+ADK_VOICE_LIVE_TEST_VOICE_CHANNEL_ID=<test voice channel id> \
+ADK_VOICE_LIVE_TEST_TEXT_CHANNEL_ID=<paired/control text channel id> \
+ADK_VOICE_LIVE_CONFIRM_GUILD_ID=<same guild id> \
+ADK_VOICE_LIVE_CONFIRM_VOICE_CHANNEL_ID=<same voice channel id> \
+ADK_VOICE_LIVE_AGENTDESK_BOT_ID=<agentdesk bot user id> \
+ADK_VOICE_LIVE_SPEAKER_BOT_TOKEN_FILE=~/.config/agentdesk/voice-smoke-speaker-token \
+ADK_VOICE_LIVE_AGENT_ID=project-agentdesk \
+ADK_VOICE_LIVE_PROVIDER_IDENTITY=codex:project-agentdesk \
+ADK_VOICE_LIVE_REAL_PROVIDER_CONTACTED=true \
+scripts/e2e/run_voice_live_media_smoke.py \
+  --allow-live-discord \
+  --report target/voice-live-media-smoke-report.json
+```
+
+Safety/refusal contract:
+
+- `--allow-live-discord`, `ADK_VOICE_LIVE_MEDIA_SMOKE=1`, and the exact
+  `ADK_VOICE_LIVE_SAFETY_ACK` value are all required.
+- Test guild/channel ids must be set twice: once as target ids and once as
+  confirmation ids. The runner refuses when they differ.
+- A separate speaker bot token is required. If `ADK_VOICE_LIVE_SPEAKER_BOT_ID`
+  is supplied, it must differ from `ADK_VOICE_LIVE_AGENTDESK_BOT_ID`; after login,
+  the runner also refuses if the token resolves to the AgentDesk bot user.
+- AgentDesk must already be in the test voice channel, normally through
+  `voice.auto_join_channel_ids` or an operator-issued `/voice join`. The runner
+  checks voice-channel membership before streaming audio.
+- Normal offline CI should only run
+  `python3 -m unittest scripts/e2e/test_voice_live_media_smoke.py`.
+
+Optional dependencies/config:
+
+- Install `discord.py` with voice support for the speaker client and ensure
+  `ffmpeg` is on PATH for playback.
+- Audio generation uses `edge-tts` when available. Operators can instead set
+  `ADK_VOICE_LIVE_TTS_COMMAND`, a shell template with `{text}`, `{output}`, and
+  `{voice}` placeholders.
+- `ADK_API_BASE_URL` defaults to `http://127.0.0.1:8791`; `ADK_API_AUTH_TOKEN`
+  or `ADK_API_TOKEN` is used when the observability API is protected.
+- The runner polls `/api/analytics/observability?recentLimit=1000` and falls
+  back to `ADK_OBSERVABILITY_EVENTS_PATH` or
+  `~/.adk/release/logs/observability-events.jsonl`.
+- `ADK_VOICE_LIVE_CLEANUP_CHECK_COMMAND` may point to a deployment-specific
+  read-only checker. It receives `ADK_VOICE_LIVE_SCENARIO_ID`,
+  `ADK_VOICE_LIVE_UTTERANCE_IDS`, `ADK_VOICE_LIVE_VOICE_CHANNEL_ID`, and
+  `ADK_VOICE_LIVE_TEXT_CHANNEL_ID`, and should print JSON with `ok: true` plus
+  stale-state booleans such as `stale_voice_session`, `playback_task_active`,
+  `foreground_call_active`, and `voice_turn_link_active`. Set
+  `ADK_VOICE_LIVE_REQUIRE_CLEANUP_CHECK=1` to fail when no cleanup proof is
+  available.
+
+Covered unattended live scenarios:
+
+| scenario_id | 범위 |
+|-------------|------|
+| `normal-short-live-media` | Speaker bot streams a short generated prompt; AgentDesk must emit STT/queued/foreground speak evidence and `voice_latency_turn`. |
+| `barge-in-while-tts-active-live-media` | Speaker bot starts a long-answer prompt, then streams a stop/follow-up utterance; report requires `explicit_stop` cancellation evidence. |
+| `long-answer-background-handoff-summary-live-media` | Speaker bot asks for long/background work; report requires queued/background handoff evidence and latency/playback evidence. |
+
+Report contract:
+
+- Top-level `agent_mode` is `real_live`, `live_discord_media_transport_covered`
+  is `true`, and tokens are never written to the report.
+- Each scenario records guild/channel ids, scenario id, utterance ids, media
+  receive counters, STT/transcript evidence, routing/foreground decision,
+  TTS/playback or cancellation evidence, `voice_latency_turn`, raw
+  `voice_flight_event` payloads, cleanup evidence, timing stages, and raw
+  failure reasons.
+- `failure_attribution.source` separates likely `discord_media`, `stt_tts`,
+  `provider_response`, `cleanup`, and `reporting` failures.
+- `real_provider_contacted` is operator-declared via
+  `ADK_VOICE_LIVE_REAL_PROVIDER_CONTACTED` so controlled-provider staging runs
+  do not masquerade as real-provider coverage.
+
+Relationship to other lanes:
+
+- #3801 PCM harness is deterministic and fast. It validates AgentDesk receive,
+  STT/routing/TTS observability after local PCM injection but intentionally does
+  not cover Discord gateway/songbird media transport.
+- #3802 unattended live media smoke covers the real Discord/songbird transport
+  path without requiring a human speaker/listener, but it is slower and depends
+  on live Discord resources.
+- #3596 manual physical evidence still covers the human Discord client,
+  microphone, speaker, and subjective audio quality path that an unattended bot
+  cannot prove.
 
 ## 머신/클라이언트 분리 (중요)
 

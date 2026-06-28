@@ -1142,6 +1142,11 @@ printf 'fake mp3 bytes' > \"$out\"\n",
     }
 }
 
+#[cfg(not(unix))]
+fn install_command_shims(_temp: &Path, _transcripts: &[&str]) -> CommandShims {
+    panic!("voice PCM harness command shims are only implemented on Unix")
+}
+
 #[cfg(unix)]
 fn make_executable(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
