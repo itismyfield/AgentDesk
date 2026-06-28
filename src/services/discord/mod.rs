@@ -60,6 +60,7 @@ pub(crate) mod restart_report;
 mod role_map;
 mod router;
 mod runtime_bootstrap;
+pub(in crate::services::discord) mod semantic_boundaries;
 // #1446 stall-deadlock recovery: shared post-clear bookkeeping for the THREAD-GUARD
 // + stall-watchdog cleanup paths so neither leaks `global_active` / cancel tokens.
 pub mod runtime_store;

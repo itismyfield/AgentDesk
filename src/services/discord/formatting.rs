@@ -301,6 +301,7 @@ pub(super) fn streaming_split_boundary(text: &str, max_len: usize) -> Option<usi
 
     let preferred = paragraph_split
         .or(newline_split)
+        .or_else(|| super::semantic_boundaries::semantic_sentence_split_boundary(window))
         .or(whitespace_split)
         .unwrap_or(safe_end);
     let split_at = if preferred < safe_end / 2 {
@@ -1249,6 +1250,7 @@ files, and memory recall below as new actionable input.\n\n\
     // `#[cfg(test)] mod` block => ZERO production LoC under the ratchet
     // (formatting.rs baseline 2802 stays unchanged).
     mod a0_characterization_tests {
+        use super::super::super::semantic_boundaries::semantic_sentence_split_boundary;
         use super::super::{
             DISCORD_MSG_LIMIT, plan_streaming_rollover, split_message, streaming_split_boundary,
         };
@@ -1313,6 +1315,22 @@ files, and memory recall below as new actionable input.\n\n\
                 chunks[1], tail,
                 "the boundary newline is stripped from the next chunk head"
             );
+        }
+
+        #[test]
+        fn a0_split_message_uses_semantic_sentence_boundary_when_no_newline_exists() {
+            let head = format!("{}확인합니다.", "a".repeat(1480));
+            let tail = format!("`NullRHI`{}", "b".repeat(1000));
+            let body = format!("{head}{tail}");
+            let chunks = split_message(&body);
+
+            assert_eq!(chunks.len(), 2);
+            assert_eq!(
+                chunks[0], head,
+                "newline-free prose should split at a sentence boundary before hard-splitting"
+            );
+            assert_eq!(chunks[1], tail);
+            assert_eq!(format!("{}{}", chunks[0], chunks[1]), body);
         }
 
         #[test]
@@ -1423,6 +1441,51 @@ files, and memory recall below as new actionable input.\n\n\
                 streaming_split_boundary(&body, 50),
                 Some(31),
                 "single newline wins over a later space"
+            );
+        }
+
+        #[test]
+        fn a0_streaming_split_boundary_sentence_beats_a_later_space() {
+            let head = format!("{}확인합니다.", "x".repeat(20));
+            let body = format!("{}{} {}", head, "y".repeat(5), "z".repeat(100));
+            assert_eq!(
+                streaming_split_boundary(&body, 50),
+                Some(head.len()),
+                "sentence boundary wins over a later whitespace split"
+            );
+        }
+
+        #[test]
+        fn a0_semantic_sentence_split_boundary_skips_markdown_continuations_and_code_fences() {
+            assert_eq!(
+                semantic_sentence_split_boundary("확인합니다.`NullRHI`"),
+                Some("확인합니다.".len()),
+                "inline-code follow-up after Korean sentence is a readable split point"
+            );
+            assert_eq!(
+                semantic_sentence_split_boundary("- item. more text"),
+                None,
+                "list items keep their existing markdown continuation behavior"
+            );
+            assert_eq!(
+                semantic_sentence_split_boundary("| Col | value."),
+                None,
+                "table-like lines keep their existing markdown continuation behavior"
+            );
+            assert_eq!(
+                semantic_sentence_split_boundary("version 1.2"),
+                None,
+                "decimal points are not sentence boundaries"
+            );
+            assert_eq!(
+                semantic_sentence_split_boundary("config.yaml"),
+                None,
+                "single-token file extensions are not sentence boundaries"
+            );
+            assert_eq!(
+                semantic_sentence_split_boundary("```text\nDone.\n```"),
+                None,
+                "code-fence content must not be sentence-split"
             );
         }
 
@@ -2928,10 +2991,8 @@ pub(super) fn split_message(text: &str) -> Vec<String> {
         // back to a hard split at `safe_end` (or skip the orphan newline when
         // `safe_end` is also 0 due to a multi-byte char on the boundary).
         let safe_end = floor_char_boundary(remaining, effective_limit);
-        let (mut split_at, mut boundary_kind) = match remaining[..safe_end].rfind('\n') {
-            Some(idx) => (idx, "newline"),
-            None => (safe_end, "hard"),
-        };
+        let (mut split_at, mut boundary_kind) =
+            super::semantic_boundaries::message_split_boundary(remaining, safe_end);
         if split_at == 0 {
             if safe_end > 0 {
                 split_at = safe_end;

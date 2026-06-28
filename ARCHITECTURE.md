@@ -675,6 +675,7 @@ src/
 │   │   ├── role_map.rs
 │   │   ├── runtime_bootstrap.rs
 │   │   ├── runtime_store.rs
+│   │   ├── semantic_boundaries.rs
 │   │   ├── session_identity.rs
 │   │   ├── session_relay_sink.rs
 │   │   ├── session_runtime.rs

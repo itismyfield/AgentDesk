@@ -1218,10 +1218,14 @@
     `turn_finalizer/watcher_backstop.rs` (watcher far-backstop tunables +
     terminal-or-defer verdict pair). Bugfix only outside a
     finalizer-decomposition plan).
-  - `src/services/discord/formatting.rs` (2802 lines; #3818 keeps only the
-    placeholder-status subagent-notification summary hook here while moving the
-    shared streaming-rollover predicate to `subagent_notification_card.rs`, so
-    the file stays at its frozen baseline; net +0 from #3034 scoped
+  - `src/services/discord/formatting.rs` (2801 lines; #3807 wires semantic
+    sentence-boundary callsites here while keeping the shared helper in
+    `semantic_boundaries.rs`, so the frozen giant stays below baseline;
+    worker-local presentation logic only, no relay ownership/lease change.
+    #3818 keeps only the placeholder-status subagent-notification summary hook
+    here while moving the shared streaming-rollover predicate to
+    `subagent_notification_card.rs`. Historical freeze notes: net +0 from #3034
+    scoped
     dead-code allows on the `MonitorHandoffReason::InlineTimeout` /
     `MonitorHandoffStatus::Failed` reserved variants — the two added `#[allow]`
     lines were offset by collapsing the adjacent reason comments back to inline

@@ -126,3 +126,51 @@ fn closed_code_fence_then_boundary_normalizes() {
     append_streamed_text_chunk(&mut full_response, "\n\nafter");
     assert_eq!(full_response, "```\ncode\n```\n\nafter");
 }
+
+#[test]
+fn semantic_sentence_boundary_separates_glued_korean_progress_chunks() {
+    let mut inline_code = String::from("확인하겠습니다.");
+    append_streamed_text_chunk(&mut inline_code, "`NullRHI`");
+    assert_eq!(inline_code, "확인하겠습니다.\n\n`NullRHI`");
+
+    let mut identifier = String::from("보겠습니다.");
+    append_streamed_text_chunk(&mut identifier, "Monolith는");
+    assert_eq!(identifier, "보겠습니다.\n\nMonolith는");
+
+    let mut lower = String::from("완료.");
+    append_streamed_text_chunk(&mut lower, "local");
+    assert_eq!(lower, "완료.\n\nlocal");
+}
+
+#[test]
+fn semantic_sentence_boundary_separates_ascii_status_chunks() {
+    let mut full_response = String::from("Review complete.");
+    append_streamed_text_chunk(&mut full_response, "VERDICT: CLEAN");
+    assert_eq!(full_response, "Review complete.\n\nVERDICT: CLEAN");
+}
+
+#[test]
+fn semantic_sentence_boundary_avoids_decimal_and_single_token_extension_splits() {
+    let mut decimal = String::from("version 1.");
+    append_streamed_text_chunk(&mut decimal, "2");
+    assert_eq!(decimal, "version 1.2");
+
+    let mut file = String::from("config.");
+    append_streamed_text_chunk(&mut file, "yaml");
+    assert_eq!(file, "config.yaml");
+}
+
+#[test]
+fn semantic_sentence_boundary_does_not_touch_lists_tables_or_open_fences() {
+    let mut list = String::from("- item.");
+    append_streamed_text_chunk(&mut list, "- next");
+    assert_eq!(list, "- item.- next");
+
+    let mut table = String::from("| Col |");
+    append_streamed_text_chunk(&mut table, "| Next |");
+    assert_eq!(table, "| Col || Next |");
+
+    let mut fence = String::from("```text\ncomplete.\n");
+    append_streamed_text_chunk(&mut fence, "VERDICT");
+    assert_eq!(fence, "```text\ncomplete.\nVERDICT");
+}
