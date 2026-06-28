@@ -236,6 +236,71 @@ class LiveVoiceMediaReportTests(unittest.TestCase):
             report["raw_failure_reasons"],
         )
 
+    def test_build_scenario_report_uses_pre_start_grace_only_as_diagnostics(self):
+        events = [
+            _event(
+                "voice_flight_event",
+                900,
+                {
+                    "route": "queued",
+                    "voice_channel_id": 222,
+                    "utterance_id": "utt-old",
+                    "stt_mode": "file",
+                },
+            ),
+            _event(
+                "voice_latency_turn",
+                950,
+                {
+                    "channel_id": 222,
+                    "utterance_id": "utt-old",
+                    "total_ms": 118,
+                    "recorded_at_ms": 950,
+                },
+            ),
+            _event(
+                "voice_flight_event",
+                1_100,
+                {
+                    "route": "queued",
+                    "voice_channel_id": 222,
+                    "utterance_id": "utt-current",
+                    "stt_mode": "file",
+                },
+            ),
+            _event(
+                "voice_flight_event",
+                1_200,
+                {
+                    "route": "foreground_speak",
+                    "voice_channel_id": 222,
+                    "utterance_id": "utt-current",
+                },
+            ),
+        ]
+        evidence = smoke.ScenarioEvidence(
+            scenario_id=smoke.SCENARIOS[0].scenario_id,
+            started_at_ms=1_000,
+            completed_at_ms=1_300,
+            events=events,
+            cleanup_evidence={"status": "passed", "raw_failure_reasons": []},
+            timing_stages=smoke.TimingStages(),
+        )
+
+        report = smoke.build_scenario_report(smoke.SCENARIOS[0], evidence, self.config)
+
+        self.assertEqual(report["status"], "failed")
+        self.assertEqual(report["utterance_id"], "utt-current")
+        self.assertEqual(report["utterance_ids"], ["utt-current"])
+        self.assertEqual(report["diagnostic_grace_utterance_ids"], ["utt-old", "utt-current"])
+        self.assertIsNone(report["voice_latency_turn"])
+        self.assertEqual(report["media_receive_counters"]["latency_events"], 0)
+        self.assertEqual(report["media_receive_counters"]["diagnostic_grace_latency_events"], 1)
+        self.assertIn(
+            "voice_latency_turn metric was not emitted",
+            report["raw_failure_reasons"],
+        )
+
     def test_barge_in_report_requires_cancellation_evidence(self):
         spec = smoke.SCENARIOS[1]
         events = [

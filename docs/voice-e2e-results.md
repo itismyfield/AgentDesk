@@ -139,6 +139,10 @@ Report contract:
   `voice_latency_turn`, raw
   `voice_flight_event` payloads, cleanup evidence, timing stages, and raw
   failure reasons.
+- The runner may keep a short pre-start observability grace window for
+  diagnostics, but pass/fail evidence, representative `utterance_id`, and
+  `voice_latency_turn` matching are derived only from events recorded at or
+  after the scenario start timestamp.
 - `failure_attribution.source` separates likely `discord_media`, `stt_tts`,
   `provider_response`, `cleanup`, and `reporting` failures.
 - `real_provider_contacted` is operator-declared via

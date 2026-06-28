@@ -465,11 +465,28 @@ def events_since(
     return matched
 
 
-def payloads_for(events: Sequence[Mapping[str, Any]], event_type: str) -> list[dict[str, Any]]:
+def event_timestamp_ms(event: Mapping[str, Any]) -> int | None:
+    try:
+        timestamp_ms = int(event.get("timestamp_ms", 0))
+    except (TypeError, ValueError):
+        return None
+    return timestamp_ms if timestamp_ms > 0 else None
+
+
+def payloads_for(
+    events: Sequence[Mapping[str, Any]],
+    event_type: str,
+    *,
+    since_ms: int | None = None,
+) -> list[dict[str, Any]]:
     payloads: list[dict[str, Any]] = []
     for event in events:
         if event.get("event_type") != event_type:
             continue
+        if since_ms is not None:
+            timestamp_ms = event_timestamp_ms(event)
+            if timestamp_ms is None or timestamp_ms < since_ms:
+                continue
         payload = event.get("payload")
         if isinstance(payload, dict):
             payloads.append(dict(payload))
@@ -500,6 +517,17 @@ def _latency_for_utterance(
         utterance_id = event.get("utterance_id")
         if isinstance(utterance_id, str) and utterance_id in utterance_set:
             return dict(event)
+    return None
+
+
+def _scenario_utterance_id(flight_events: Sequence[Mapping[str, Any]], spec: ScenarioSpec) -> str | None:
+    expected_routes = set(spec.expected_routes)
+    for event in reversed(flight_events):
+        if event.get("route") not in expected_routes:
+            continue
+        utterance_id = event.get("utterance_id")
+        if isinstance(utterance_id, str) and utterance_id:
+            return utterance_id
     return None
 
 
@@ -544,10 +572,16 @@ def build_scenario_report(
     env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     env = env or {}
-    flight_events = payloads_for(evidence.events, "voice_flight_event")
-    latency_events = payloads_for(evidence.events, "voice_latency_turn")
+    diagnostic_flight_events = payloads_for(evidence.events, "voice_flight_event")
+    diagnostic_latency_events = payloads_for(evidence.events, "voice_latency_turn")
+    flight_events = payloads_for(evidence.events, "voice_flight_event", since_ms=evidence.started_at_ms)
+    latency_events = payloads_for(evidence.events, "voice_latency_turn", since_ms=evidence.started_at_ms)
     utterance_ids = unique_utterance_ids(flight_events)
-    latency = _latency_for_utterance(latency_events, utterance_ids)
+    scenario_utterance_id = _scenario_utterance_id(flight_events, spec)
+    latency = _latency_for_utterance(
+        latency_events,
+        [scenario_utterance_id] if scenario_utterance_id else [],
+    )
     stt_events = [
         event
         for event in flight_events
@@ -561,6 +595,8 @@ def build_scenario_report(
             failures.append(f"missing voice_flight_event route {route!r}")
     if not utterance_ids:
         failures.append("no utterance_id observed from live voice media path")
+    elif scenario_utterance_id is None:
+        failures.append("no utterance_id observed for the scenario's expected live voice route")
     if not stt_events:
         failures.append("no STT/transcript voice_flight_event observed")
     if spec.require_latency and not latency:
@@ -606,8 +642,9 @@ def build_scenario_report(
         "scenario_id": spec.scenario_id,
         "status": "passed" if not failures else "failed",
         "agent_mode": "real_live",
-        "utterance_id": utterance_ids[-1] if utterance_ids else None,
+        "utterance_id": scenario_utterance_id,
         "utterance_ids": utterance_ids,
+        "diagnostic_grace_utterance_ids": unique_utterance_ids(diagnostic_flight_events),
         "guild_id": config.guild_id,
         "channel_id": config.voice_channel_id,
         "control_text_channel_id": config.text_channel_id,
@@ -621,6 +658,8 @@ def build_scenario_report(
             "stt_events": len(stt_events),
             "latency_events": len(latency_events),
             "unique_utterances": len(utterance_ids),
+            "diagnostic_grace_voice_flight_events": len(diagnostic_flight_events),
+            "diagnostic_grace_latency_events": len(diagnostic_latency_events),
         },
         "transcript_result": {
             "stt_mode": first_stt.get("stt_mode"),
@@ -637,6 +676,7 @@ def build_scenario_report(
         ),
         "voice_latency_turn": latency,
         "voice_flight_events": flight_events,
+        "diagnostic_grace_voice_flight_events": diagnostic_flight_events,
         "cleanup_evidence": evidence.cleanup_evidence,
         "timing_stages": evidence.timing_stages.to_json(),
         "failure_attribution": {
@@ -769,14 +809,22 @@ async def wait_for_evidence(
             since_ms=started_at_ms - 2_000,
             channel_ids=config.evidence_channel_ids,
         )
-        flight = payloads_for(last, "voice_flight_event")
-        latency = payloads_for(last, "voice_latency_turn")
+        flight = payloads_for(last, "voice_flight_event", since_ms=started_at_ms)
+        latency = payloads_for(last, "voice_latency_turn", since_ms=started_at_ms)
         utterance_ids = unique_utterance_ids(flight)
+        scenario_utterance_id = _scenario_utterance_id(flight, spec)
         routes = {event.get("route") for event in flight}
         expected = set(spec.setup_expected_routes + spec.expected_routes)
         route_ok = expected.issubset(routes)
         stt_ok = any(event.get("utterance_id") and event.get("stt_mode") for event in flight)
-        latency_ok = _latency_for_utterance(latency, utterance_ids) is not None or not spec.require_latency
+        latency_ok = (
+            _latency_for_utterance(
+                latency,
+                [scenario_utterance_id] if scenario_utterance_id else [],
+            )
+            is not None
+            or not spec.require_latency
+        )
         cancel_ok = (
             not spec.require_cancel
             or any(
@@ -867,9 +915,11 @@ async def run_cleanup_check(
     spec: ScenarioSpec,
     events: Sequence[dict[str, Any]],
     timing: TimingStages,
+    *,
+    started_at_ms: int | None = None,
 ) -> dict[str, Any]:
     started = time.monotonic()
-    flight_events = payloads_for(events, "voice_flight_event")
+    flight_events = payloads_for(events, "voice_flight_event", since_ms=started_at_ms)
     utterance_ids = unique_utterance_ids(flight_events)
     checks = []
     command_check = await asyncio.to_thread(_cleanup_from_command, config, spec, utterance_ids)
@@ -943,7 +993,7 @@ async def run_scenario(
     )
     await asyncio.sleep(spec.settle_s)
     events = await wait_for_evidence(spec, config, started_at_ms, timing)
-    cleanup = await run_cleanup_check(config, spec, events, timing)
+    cleanup = await run_cleanup_check(config, spec, events, timing, started_at_ms=started_at_ms)
     return ScenarioEvidence(
         scenario_id=spec.scenario_id,
         started_at_ms=started_at_ms,
