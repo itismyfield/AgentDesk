@@ -24,8 +24,46 @@ pub(in crate::services::discord) fn build_turn_bridge_streaming_edit_text(
             provider,
         )
     } else {
-        super::formatting::build_streaming_placeholder_text(current_portion, status_block)
+        build_provider_streaming_placeholder_text(current_portion, status_block, provider)
     }
+}
+
+pub(in crate::services::discord) fn bridge_streaming_rollover_should_skip(
+    current_portion: &str,
+) -> bool {
+    streaming_subagent_notification_card(current_portion).is_some()
+}
+
+fn streaming_subagent_notification_card(current_portion: &str) -> Option<String> {
+    let direct =
+        crate::services::discord::response_sanitizer::subagent_notification_card::sanitize_start_anchored_subagent_notification(
+            current_portion,
+        );
+    if direct.is_some() {
+        return direct;
+    }
+    let stripped = crate::services::discord::response_sanitizer::strip_leading_tui_response_chrome(
+        current_portion,
+    );
+    if stripped == current_portion {
+        return None;
+    }
+    crate::services::discord::response_sanitizer::subagent_notification_card::sanitize_start_anchored_subagent_notification(
+        &stripped,
+    )
+}
+
+fn build_provider_streaming_placeholder_text(
+    current_portion: &str,
+    status_block: &str,
+    provider: &ProviderKind,
+) -> String {
+    if current_portion.is_empty() {
+        return super::formatting::build_streaming_placeholder_text("", status_block);
+    }
+    let formatted =
+        super::formatting::format_for_discord_with_status_panel(current_portion, provider);
+    super::formatting::build_streaming_placeholder_text(&formatted, status_block)
 }
 
 pub(in crate::services::discord) fn bridge_pre_submission_tui_prompt_error(
@@ -140,6 +178,72 @@ mod streaming_edit_text_tests {
         );
 
         assert_eq!(rendered, "Partial answer\n\n⠙ 계속 처리 중");
+    }
+
+    #[test]
+    fn legacy_streaming_edit_sanitizes_subagent_notification_3777() {
+        let current_portion = r#"<subagent_notification>
+{"agent_path":"/tmp/agent","status":{"completed":"Read-only review complete.\n\nVERDICT: CLEAN"}}
+</subagent_notification>"#;
+        let rendered = build_turn_bridge_streaming_edit_text(
+            false,
+            current_portion,
+            "⠙ 계속 처리 중",
+            &ProviderKind::Codex,
+        );
+
+        assert!(rendered.contains("Subagent completed"));
+        assert!(rendered.contains("Read-only review complete."));
+        assert!(rendered.contains("VERDICT: CLEAN"));
+        assert!(rendered.ends_with("⠙ 계속 처리 중"));
+        assert!(!rendered.contains("<subagent_notification>"));
+        assert!(!rendered.contains("agent_path"));
+        assert!(!rendered.contains("/tmp/agent"));
+    }
+
+    #[test]
+    fn rollover_skips_start_anchored_subagent_notification_3777() {
+        let current_portion = format!(
+            r#"<subagent_notification>
+{{"agent_path":"/tmp/agent","status":{{"completed":"{}"}}}}
+</subagent_notification>"#,
+            "x".repeat(2400),
+        );
+
+        assert!(bridge_streaming_rollover_should_skip(&current_portion));
+
+        let rendered = build_turn_bridge_streaming_edit_text(
+            false,
+            &current_portion,
+            "⠙ 계속 처리 중",
+            &ProviderKind::Codex,
+        );
+        assert!(rendered.contains("Subagent completed"));
+        assert!(!rendered.contains("<subagent_notification>"));
+        assert!(!rendered.contains("agent_path"));
+        assert!(rendered.len() <= 2000);
+    }
+
+    #[test]
+    fn rollover_skips_chrome_prefixed_subagent_notification_3777() {
+        let current_portion = format!(
+            "No response requested.\n<subagent_notification>\n{{\"agent_path\":\"/tmp/agent\",\"status\":{{\"completed\":\"{}\"}}}}\n</subagent_notification>",
+            "x".repeat(2400),
+        );
+
+        assert!(bridge_streaming_rollover_should_skip(&current_portion));
+
+        let rendered = build_turn_bridge_streaming_edit_text(
+            false,
+            &current_portion,
+            "⠙ 계속 처리 중",
+            &ProviderKind::Codex,
+        );
+        assert!(rendered.contains("Subagent completed"));
+        assert!(!rendered.contains("No response requested."));
+        assert!(!rendered.contains("<subagent_notification>"));
+        assert!(!rendered.contains("agent_path"));
+        assert!(rendered.len() <= 2000);
     }
 
     #[test]

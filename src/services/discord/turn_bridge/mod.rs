@@ -84,7 +84,8 @@ pub(in crate::services::discord) use status_panel::{
 };
 pub(super) use streaming_edit_text::{
     CLAUDE_TUI_FOLLOWUP_REQUEUE_DELIVERY_NOTICE, bridge_claude_tui_followup_requeue_prompt_error,
-    bridge_tui_transport_error_should_skip_quiescence, build_turn_bridge_streaming_edit_text,
+    bridge_streaming_rollover_should_skip, bridge_tui_transport_error_should_skip_quiescence,
+    build_turn_bridge_streaming_edit_text,
 };
 pub(super) use task_notification_lifecycle::{
     close_all_tracked_background_children, close_next_tracked_background_child,
@@ -3422,6 +3423,9 @@ pub(super) fn spawn_turn_bridge(
                         current_tool_line.as_deref(),
                         &full_response,
                     );
+                    if bridge_streaming_rollover_should_skip(current_portion) {
+                        break;
+                    }
                     let Some(plan) =
                         super::formatting::plan_streaming_rollover(current_portion, &status_block)
                     else {

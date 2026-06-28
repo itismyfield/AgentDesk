@@ -1069,7 +1069,7 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6233 lines; production LoC; +4
+  - `src/services/discord/turn_bridge/mod.rs` (6237 lines; production LoC; +4
     from #3751 stamping the delivery-record owner channel into inflight state
     before cross-channel restart recovery reads durable anchors; the BRIDGE
     spawn/turn-lifecycle surface — `spawn_turn_bridge` and the per-channel
@@ -1078,6 +1078,9 @@
     #3717 skips status-panel-v2 footer edits when only the spinner frame changes.
     #3752 extracted the Claude TUI follow-up pre-submit requeue side effect into
     `followup_requeue.rs`.
+    #3777 skips streaming rollover for start-anchored Codex subagent
+    notifications so live edits render the shared card instead of freezing raw
+    XML/JSON chunks.
     Registered giant-file (#3038 decompose target — see
     `giant-file-registry.md`, owner `discord-relay`, deadline 2026-08-31).
     It surfaced as a giant only after #3028 fixed the prod/test splitter: an
