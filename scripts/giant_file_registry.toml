@@ -115,7 +115,10 @@ grandfathered_baseline_paths = [
   "src/services/discord/settings.rs",
   "src/services/discord/tmux.rs",
   "src/services/discord/tmux_watcher.rs",
-  "src/services/discord/tui_prompt_relay.rs",
+  # tui_prompt_relay.rs dropped below the prod-giant threshold in #3833 after
+  # external-input ownership, synthetic-start, and Claude idle relay glue moved
+  # into `tui_prompt_relay/` child modules. Removed from the promoted entry list
+  # and from this frozen baseline so a future re-expansion cannot be hidden here.
   # completion_guard.rs decomposed in #3479 (-> 872 prod LoC); win-locked out of
   # both `grandfathered` and this frozen baseline (see note in `grandfathered`).
   # turn_bridge/tmux_runtime.rs dropped to 964 prod LoC in #3479 (the pure
@@ -271,14 +274,6 @@ file = "src/services/discord/tmux_watcher.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
 decompose_issue = "#3832"
-
-[[entry]]
-# #3721 first-batch promotion: external-input relay hotfile with high churn and
-# mixed synthetic-turn, bridge-tail, and idle-tail responsibilities.
-file = "src/services/discord/tui_prompt_relay.rs"
-owner = "discord-relay"
-deadline = "2026-10-31"
-decompose_issue = "#3833"
 
 [[entry]]
 # #3721 first-batch promotion: restart/runtime/manual-rebind recovery paths

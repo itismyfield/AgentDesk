@@ -591,12 +591,17 @@ src/
 │   │   │   ├── anchor_completion.rs
 │   │   │   ├── bridge_completion.rs
 │   │   │   ├── bridge_gateway.rs
+│   │   │   ├── claude_idle_bridge.rs
+│   │   │   ├── claude_idle_runtime.rs
+│   │   │   ├── claude_idle_tail.rs
 │   │   │   ├── codex_idle_rollout.rs
 │   │   │   ├── idle_offset_resolution.rs
 │   │   │   ├── idle_transcript_scan.rs
 │   │   │   ├── injected_prompt_policy.rs
 │   │   │   ├── launch_script.rs
 │   │   │   ├── rehydration.rs
+│   │   │   ├── relay_ownership.rs
+│   │   │   ├── synthetic_start.rs
 │   │   │   └── tests.rs
 │   │   ├── turn_bridge/
 │   │   │   ├── completion_guard/

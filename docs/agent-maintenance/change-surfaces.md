@@ -8,7 +8,7 @@
 > [`docs/generated/giant-file-registry.md`](../generated/giant-file-registry.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-06-17 (against #3552 watcher invariant-severity TOCTOU fix — removed the racy tmux pre-save `response_sent_offset_monotonic` emit; the lock-atomic inflight save-path is the single authoritative emitter).
+> Last refreshed: 2026-06-29 (against #3833 tui_prompt_relay external-input relay decomposition — root dropped below the production giant threshold; promoted giant registry entry removed).
 >
 > PR #3456 dcserver-robustness: freeze counts re-synced after the reconcile
 > row-allocation churn reduction (`src/reconcile.rs` now 1816 prod lines) and the
@@ -553,7 +553,11 @@
     Moved unit tests live in sibling `utf8_chunk_decoder_tests.rs` /
     `terminal_readiness_tests.rs`; both child modules sit under the
     `tmux_watcher/**` 700-line namespace cap.
-  - `src/services/discord/tui_prompt_relay.rs` (4310 production lines; #3296
+  - `src/services/discord/tui_prompt_relay.rs` (no longer a registered giant as
+    of #3833; external-input ownership, synthetic-start, and Claude idle
+    tail/runtime/bridge glue moved into `tui_prompt_relay/` child modules while
+    preserving the parent spawn/provider wiring surface. Historical context:
+    #3296
     codex r1+r2: the ABORT cleanup hook pins the foreign prior inflight's
     identity — the live row at the record instant, or the worker's LAST-VIEW
     identity when that row just vanished — and persists the marker via

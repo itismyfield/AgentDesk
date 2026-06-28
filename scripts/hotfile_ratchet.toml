@@ -69,7 +69,10 @@
 # #3715: 7789 -> 4007 by moving the inline `#[cfg(test)] mod tests` body into
 # `tui_prompt_relay/tests.rs` and the Codex idle rollout tail/rebind loop into
 # `tui_prompt_relay/codex_idle_rollout.rs`; no production behavior change.
-"src/services/discord/tui_prompt_relay.rs" = 4007
+# #3833: 4007 -> 999 by moving external-input ownership, synthetic-start, and
+# Claude idle-tail/runtime/bridge glue into `tui_prompt_relay/` child modules;
+# behavior-preserving decomposition.
+"src/services/discord/tui_prompt_relay.rs" = 999
 # #3560: 6612 -> 6621 (+9), reviewable admission — footer-mode separate-panel
 # migration reconcile call + comment at the resume entry. Helper body lives in
 # turn_bridge/status_panel.rs; this is the minimal call-site cost.
