@@ -1002,10 +1002,6 @@
     #3717 guarding completion-footer registry forgets by the exact takeover
     message id; -13 from #3736 removing legacy remote-profile restore plumbing
     while remote SSH is disabled).
-  - `src/services/discord/relay_recovery.rs` (1006 lines; #3680 split relay
-    recovery reattach/self-heal path; new behavior is bugfix-only until a
-    follow-up extraction drops it below the giant-file threshold; net -1 from
-    #3717 moving completion-footer target ownership cleanup to a sibling helper).
   - `src/services/discord/health.rs` (417 prod lines after the #3038 Phase A
     directory decomposition; module root keeps the `HealthRegistry` core +
     re-export surface, and the former monolith body lives in flat

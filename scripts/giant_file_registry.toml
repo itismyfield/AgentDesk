@@ -323,16 +323,10 @@ owner = "discord-relay"
 deadline = "2026-08-31"
 decompose_issue = "#3405"
 
-[[entry]]
-# Crossed the 1000-prod-LoC threshold in #3680: relay recovery gained the
-# bounded watcher-reattach planner/apply guards for ownerless inflight recovery
-# and multi-runtime channel ownership. Keep future relay recovery orchestration
-# growth honest; split action planning/apply execution into child modules once
-# the reattach lifecycle stabilizes.
-file = "src/services/discord/relay_recovery.rs"
-owner = "discord-relay"
-deadline = "2026-08-31"
-decompose_issue = "#3405"
+# NOTE: src/services/discord/relay_recovery.rs previously had an [[entry]] here;
+# #3779 extracted auto-heal attempt accounting into a sibling module, dropping
+# the root below the prod-giant threshold. Its entry and ratchet baseline are
+# removed to avoid a ghost registration.
 
 [[entry]]
 # Crossed the 1000-prod-LoC threshold in #3739: worker-local LoopOwned Tokio
