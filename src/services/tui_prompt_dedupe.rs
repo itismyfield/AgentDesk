@@ -861,7 +861,8 @@ fn observe_prompt_candidates_by_tmux_inner(
         // prompts → candidates stay empty → `PromptObservation::Ignored`.
         if prompt.is_empty()
             || is_synthetic_tui_user_prompt_for_provider(&provider, prompt)
-            || is_discord_relayed_user_prompt(prompt)
+            || (is_discord_relayed_user_prompt(prompt)
+                && !is_user_prefixed_subagent_notification_machine_event(prompt))
         {
             continue;
         }
@@ -1325,6 +1326,89 @@ fn is_discord_relayed_user_prompt(prompt: &str) -> bool {
         tail = &tail[id_at + "(ID: ".len()..];
     }
     false
+}
+
+fn is_user_prefixed_subagent_notification_machine_event(prompt: &str) -> bool {
+    let mut current = prompt.trim_start();
+    let mut saw_user_prefix = false;
+
+    loop {
+        if let Some(tail) = strip_provider_session_reuse_prologue(current) {
+            current = tail.trim_start();
+            continue;
+        }
+
+        let stripped_chrome = strip_leading_tui_response_chrome(current);
+        if stripped_chrome != current {
+            current = stripped_chrome.trim_start();
+            continue;
+        }
+
+        if let Some(tail) = strip_leading_user_author_prefix(current) {
+            saw_user_prefix = true;
+            current = tail.trim_start();
+            continue;
+        }
+
+        break;
+    }
+
+    saw_user_prefix && starts_with_xmlish_tag(current.trim_start(), "subagent_notification")
+}
+
+fn strip_provider_session_reuse_prologue(normalized: &str) -> Option<&str> {
+    const RESUMED_THREAD_PROLOGUE: &str = "The prior authoritative Discord, role, and tool \
+         instructions already present in this Codex thread still apply. Treat only this turn's \
+         user request, reply context, uploaded files, and memory recall below as new actionable \
+         input.";
+    const FRESH_FORK_PROLOGUE: &str = "The prior authoritative Discord, role, and tool \
+         instructions already issued to this role in the current dcserver lifetime still apply. \
+         Treat only this turn's user request, reply context, uploaded files, and memory recall \
+         below as new actionable input.";
+
+    let rest = normalized
+        .strip_prefix("[Provider Session Reuse]")?
+        .trim_start();
+    provider_reuse_tail(rest, RESUMED_THREAD_PROLOGUE)
+        .or_else(|| provider_reuse_tail(rest, FRESH_FORK_PROLOGUE))
+}
+
+fn provider_reuse_tail<'a>(rest: &'a str, prologue: &str) -> Option<&'a str> {
+    rest.strip_prefix(prologue)
+        .and_then(|tail| tail.strip_prefix("\n\n"))
+}
+
+fn strip_leading_tui_response_chrome(input: &str) -> &str {
+    let mut stripped = input;
+    loop {
+        let trimmed = stripped.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("No response requested.")
+            && (rest.is_empty()
+                || rest.starts_with('\n')
+                || rest.starts_with('\r')
+                || rest.chars().next().is_some_and(|ch| !ch.is_whitespace()))
+        {
+            stripped = rest;
+            continue;
+        }
+        return trimmed;
+    }
+}
+
+fn strip_leading_user_author_prefix(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("[User: ")?;
+    let close = rest.find(']')?;
+    Some(rest[close + 1..].trim_start())
+}
+
+fn starts_with_xmlish_tag(text: &str, tag: &str) -> bool {
+    let Some(rest) = text.strip_prefix('<') else {
+        return false;
+    };
+    let Some(rest) = rest.strip_prefix(tag) else {
+        return false;
+    };
+    rest.starts_with('>') || rest.chars().next().is_some_and(char::is_whitespace)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2528,6 +2612,48 @@ mod tests {
             !external_input_relay_lease_present("claude", "tmux-3527", 42),
             "a [User:] relay re-observation must not create an ExternalInput lease (#3527)"
         );
+    }
+
+    #[test]
+    fn observe_publishes_user_prefixed_subagent_notification_machine_event_3818() {
+        // #3818 regression: Codex subagent completions can be wrapped by
+        // Provider Session Reuse and the Discord author prefix before the TUI
+        // observer sees them. The #3527 self-relay filter must not swallow these
+        // terminal machine events, or the card renderer never gets a chance to
+        // hide the raw XML envelope from Discord.
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+        let prompt = "[Provider Session Reuse]\n\
+The prior authoritative Discord, role, and tool instructions already present in this \
+Codex thread still apply. Treat only this turn's user request, reply context, uploaded \
+files, and memory recall below as new actionable input.\n\n\
+[User: 0hbujang (ID: 343742347365974026)] No response requested.\n\
+<subagent_notification>{\"agent_path\":\"/tmp/private\",\"status\":{\"completed\":\"Review complete.\"}}</subagent_notification>";
+
+        assert_eq!(
+            observe_prompt_by_tmux("codex", "tmux-3818", prompt),
+            PromptObservation::PublishedSshDirect,
+            "start-anchored subagent_notification must bypass the [User:] duplicate filter"
+        );
+        assert!(clear_external_input_relay_lease("codex", "tmux-3818", 42));
+
+        let chrome_before_user = "[Provider Session Reuse]\n\
+The prior authoritative Discord, role, and tool instructions already present in this \
+Codex thread still apply. Treat only this turn's user request, reply context, uploaded \
+files, and memory recall below as new actionable input.\n\n\
+No response requested.\n\
+[User: 0hbujang (ID: 343742347365974026)] \
+<subagent_notification>{\"agent_path\":\"/tmp/private\",\"status\":{\"completed\":\"Review complete.\"}}</subagent_notification>";
+        assert_eq!(
+            observe_prompt_by_tmux("codex", "tmux-3818-chrome-first", chrome_before_user),
+            PromptObservation::PublishedSshDirect,
+            "TUI chrome before the Discord author prefix must not re-enable the [User:] duplicate filter"
+        );
+        assert!(clear_external_input_relay_lease(
+            "codex",
+            "tmux-3818-chrome-first",
+            42
+        ));
     }
 
     #[test]

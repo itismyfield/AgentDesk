@@ -896,7 +896,7 @@
     normal long SILENT tool run (e.g. a big build) is never mistaken for an idle
     hang, with the 4h hard ceiling as the real backstop, and noted the limitation
     in the idle-kill error message + a delayed-event test).
-  - `src/services/tui_prompt_dedupe.rs` (1625 lines; shared TUI prompt
+  - `src/services/tui_prompt_dedupe.rs` (1709 lines; shared TUI prompt
     fingerprinting/dedupe state for hook and rollout relay paths, bugfix only
     outside an extraction plan; +20 from #3676: Codex rollout user prompts now
     prefer the stable message entry id when present so Codex TUI direct prompt
@@ -907,7 +907,10 @@
     returns `(prompt, Option<uuid>)`, a `relayed_entry_ids_by_tmux` ledger
     (PROMPT_ANCHOR_TTL-purged, ring-capped) + `PromptObservation::SuppressedReplayedEntry`,
     and `observe_prompt_by_tmux_with_entry_id_at` suppress an already-relayed entry
-    re-encountered after a relay-watermark reset / jsonl head rotation BY IDENTITY
+    re-encountered after a relay-watermark reset / jsonl head rotation BY IDENTITY;
+    +84 from #3818: user-prefixed subagent notification machine events now bypass
+    the Discord self-relay duplicate filter after provider-reuse/TUI-chrome
+    wrapper peeling so the sanitizer can render a card instead of raw XML
     (never by inflight/EOF observation), so the idle-transcript scanner cannot mint
     a phantom synthetic inflight; a genuinely new prompt carries a new uuid and is
     never suppressed (#3459/#3303 missed-prompt guard); +37 from #3527: `is_discord_relayed_user_prompt`

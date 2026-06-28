@@ -1074,6 +1074,32 @@ files, and memory recall below as new actionable input.\n\n\
     }
 
     #[test]
+    fn format_for_discord_sanitizes_provider_reuse_chrome_then_user_subagent_3818() {
+        let input = "[Provider Session Reuse]\n\
+The prior authoritative Discord, role, and tool instructions already present in this \
+Codex thread still apply. Treat only this turn's user request, reply context, uploaded \
+files, and memory recall below as new actionable input.\n\n\
+No response requested.\n\
+[User: 0hbujang (ID: 343742347365974026)] \
+<subagent_notification>{\"agent_path\":\"/tmp/private-agent\",\"status\":{\"completed\":\"Review complete.\"}}</subagent_notification>";
+
+        let output = format_for_discord_with_provider(input, &ProviderKind::Codex);
+        assert!(output.contains("Subagent completed"));
+        assert!(output.contains("Review complete."));
+        assert!(!output.contains("[Provider Session Reuse]"));
+        assert!(!output.contains("No response requested."));
+        assert!(!output.contains("[User:"));
+        assert!(!output.contains("<subagent_notification>"));
+        assert!(!output.contains("agent_path"));
+        assert!(!output.contains("/tmp/private-agent"));
+
+        let status_panel_output = format_for_discord_with_status_panel(input, &ProviderKind::Codex);
+        assert!(status_panel_output.contains("Subagent completed"));
+        assert!(!status_panel_output.contains("<subagent_notification>"));
+        assert!(!status_panel_output.contains("[User:"));
+    }
+
+    #[test]
     fn placeholder_status_block_summarizes_subagent_notification_3818() {
         let input = r#"<subagent_notification>
 {"agent_path":"/tmp/private-agent","status":{"completed":"Review complete.\n\nVERDICT: CLEAN"}}

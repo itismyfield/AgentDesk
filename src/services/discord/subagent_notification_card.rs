@@ -127,16 +127,39 @@ fn extract_payload(prompt: &str) -> Result<String, ()> {
 
 fn normalized_start_anchored_injection(prompt: &str) -> String {
     let normalized = strip_terminal_controls(prompt);
-    let normalized = normalized.trim_start();
-    let normalized = strip_leading_injection_wrapper(normalized);
-    let normalized = normalized.trim_start();
-    let normalized = strip_provider_session_reuse_prologue(normalized).unwrap_or(normalized);
-    let normalized = normalized.trim_start();
-    let normalized =
-        strip_leading_user_author_prefix(normalized).unwrap_or_else(|| normalized.to_string());
-    let normalized = normalized.trim_start();
-    let normalized = super::strip_leading_tui_response_chrome(normalized);
-    normalized.trim_start().to_string()
+    let mut current = normalized.trim_start().to_string();
+
+    loop {
+        let before = current.clone();
+
+        let unwrapped = strip_leading_injection_wrapper(&current);
+        if unwrapped != current {
+            current = unwrapped.trim_start().to_string();
+            continue;
+        }
+
+        if let Some(tail) = strip_provider_session_reuse_prologue(&current) {
+            current = tail.trim_start().to_string();
+            continue;
+        }
+
+        let stripped_chrome = super::strip_leading_tui_response_chrome(&current);
+        if stripped_chrome != current {
+            current = stripped_chrome.trim_start().to_string();
+            continue;
+        }
+
+        if let Some(tail) = strip_leading_user_author_prefix(&current) {
+            current = tail.trim_start().to_string();
+            continue;
+        }
+
+        if current == before {
+            break;
+        }
+    }
+
+    current.trim_start().to_string()
 }
 
 fn strip_leading_injection_wrapper(text: &str) -> &str {
@@ -295,6 +318,18 @@ mod tests {
             "{RESUMED_PREFIX}[User: 0hbujang (ID: 343742347365974026)] No response requested.\n{raw}"
         );
         assert!(is_start_anchored_subagent_notification(&user_prefixed));
+
+        let chrome_before_user = format!(
+            "{RESUMED_PREFIX}No response requested.\n[User: 0hbujang (ID: 343742347365974026)] {raw}"
+        );
+        assert!(is_start_anchored_subagent_notification(&chrome_before_user));
+        assert!(streaming_rollover_should_skip(&chrome_before_user));
+        let card = sanitize_start_anchored_subagent_notification(&chrome_before_user)
+            .expect("chrome-before-user subagent card");
+        assert!(card.contains("Subagent completed"));
+        assert!(!card.contains("No response requested."));
+        assert!(!card.contains("[User:"));
+        assert!(!card.contains("<subagent_notification>"));
     }
 
     #[test]
