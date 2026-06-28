@@ -140,7 +140,7 @@ pub(crate) fn validate_preflight_snapshot(snapshot: &PreflightSnapshot) -> Vec<S
     }
     if safety.worktree_or_branch_context_count != 0 {
         failures.push(format!(
-            "sandbox preflight recorded worktree/branch context: {}",
+            "sandbox preflight recorded worktree/branch context/result: {}",
             safety.worktree_or_branch_context_count
         ));
     }

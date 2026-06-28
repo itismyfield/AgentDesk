@@ -22,6 +22,33 @@ fn state_enters_review(pipeline: &crate::pipeline::PipelineConfig, status: &str)
         .is_some_and(|hooks| hooks.on_enter.iter().any(|name| name == "OnReviewEnter"))
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    static PREFLIGHT_SUPPRESS_REVIEW_ENTER_OUTBOX: bool;
+}
+
+#[cfg(test)]
+pub(crate) async fn with_preflight_review_enter_outbox_suppressed<F>(future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    PREFLIGHT_SUPPRESS_REVIEW_ENTER_OUTBOX
+        .scope(true, future)
+        .await
+}
+
+#[cfg(test)]
+fn suppress_review_enter_outbox_for_preflight_harness() -> bool {
+    PREFLIGHT_SUPPRESS_REVIEW_ENTER_OUTBOX
+        .try_with(|value| *value)
+        .unwrap_or(false)
+}
+
+#[cfg(not(test))]
+fn suppress_review_enter_outbox_for_preflight_harness() -> bool {
+    false
+}
+
 async fn ensure_review_dispatch_after_review_enter_pg(
     pg_pool: &sqlx::PgPool,
     pipeline: &crate::pipeline::PipelineConfig,
@@ -137,8 +164,8 @@ async fn ensure_review_dispatch_after_review_enter_pg(
     .await
     .map_err(|error| anyhow::anyhow!("sync review-enter state for {card_id}: {error}"))?;
 
-    let parent_dispatch: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT id, context, result
+    let parent_dispatch_id: Option<String> = sqlx::query_scalar(
+        "SELECT id
          FROM task_dispatches
          WHERE kanban_card_id = $1
            AND dispatch_type IN ('implementation', 'rework')
@@ -150,34 +177,19 @@ async fn ensure_review_dispatch_after_review_enter_pg(
     .fetch_optional(pg_pool)
     .await
     .map_err(|error| anyhow::anyhow!("load review-enter parent dispatch for {card_id}: {error}"))?;
-    let parent_suppresses_outbox =
-        parent_dispatch
-            .as_ref()
-            .is_some_and(|(_id, context, result)| {
-                context.as_deref().is_some_and(
-                    crate::services::dispatches_followup::serialized_json_suppresses_outbox,
-                ) || result.as_deref().is_some_and(
-                    crate::services::dispatches_followup::serialized_json_suppresses_outbox,
-                )
-            });
-    let parent_dispatch_id = parent_dispatch.as_ref().map(|(id, _context, _result)| id);
 
     let mut context = json!({
         "review_dispatch_recovery": "missing_after_review_enter",
         "source": source.unwrap_or("transition"),
     });
-    if let Some(parent_dispatch_id) = parent_dispatch_id
+    if let Some(parent_dispatch_id) = parent_dispatch_id.as_deref()
         && let Some(obj) = context.as_object_mut()
     {
         obj.insert("parent_dispatch_id".to_string(), json!(parent_dispatch_id));
     }
-    if parent_suppresses_outbox && let Some(obj) = context.as_object_mut() {
-        obj.insert("sandbox_preflight".to_string(), json!(true));
-        obj.insert("production_mutation_allowed".to_string(), json!(false));
-    }
 
     let title = format!("[Review R{review_round}] {card_id}");
-    let create_options = if parent_suppresses_outbox {
+    let create_options = if suppress_review_enter_outbox_for_preflight_harness() {
         DispatchCreateOptions {
             skip_outbox: true,
             sidecar_dispatch: false,

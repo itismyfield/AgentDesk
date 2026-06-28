@@ -1,4 +1,8 @@
-use axum::{Json, extract::State, http::StatusCode};
+use axum::{
+    Json,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+};
 use serde_json::json;
 
 use super::super::AppState;
@@ -8,6 +12,31 @@ use crate::services::provider::ProviderKind;
 // `Json<T>` extraction is location-independent; the handler references the
 // services path.
 use crate::services::review_decision::SubmitVerdictBody;
+
+#[cfg(test)]
+const PREFLIGHT_SUPPRESS_FOLLOWUP_OUTBOX_HEADER: &str =
+    "x-agentdesk-preflight-suppress-followup-outbox";
+
+fn request_suppresses_followup_outbox(headers: &HeaderMap) -> bool {
+    #[cfg(test)]
+    {
+        return headers
+            .get(PREFLIGHT_SUPPRESS_FOLLOWUP_OUTBOX_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes"
+                )
+            });
+    }
+
+    #[cfg(not(test))]
+    {
+        let _ = headers;
+        false
+    }
+}
 
 /// Write a review-passed marker file for the reviewed commit.
 /// `deploy-release.sh` checks this before allowing release deploy.
@@ -209,6 +238,7 @@ async fn emit_card_updated(state: &AppState, card_id: &str) {
 /// via OnReviewVerdict hook. No hardcoded card state changes.
 pub async fn submit_verdict(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<SubmitVerdictBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     // #116: accept removed — it's a review-decision action, not a counter-model verdict.
@@ -523,7 +553,9 @@ pub async fn submit_verdict(
         )
         .await;
 
-        if let Some(pool) = state.pg_pool_ref() {
+        if let Some(pool) = state.pg_pool_ref()
+            && !request_suppresses_followup_outbox(&headers)
+        {
             if let Err(error) = crate::services::dispatches_followup::queue_dispatch_followup_pg(
                 pool,
                 &body.dispatch_id,

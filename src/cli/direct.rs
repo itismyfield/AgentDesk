@@ -1,7 +1,7 @@
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
 };
 use regex::Regex;
 use serde_json::{Value, json};
@@ -379,8 +379,12 @@ pub(crate) async fn cmd_review_verdict(
             commit: commit.map(str::to_string),
             provider: provider.map(str::to_string),
         };
-        let (status, body) =
-            crate::server::routes::review_verdict::submit_verdict(State(state), Json(body)).await;
+        let (status, body) = crate::server::routes::review_verdict::submit_verdict(
+            State(state),
+            HeaderMap::new(),
+            Json(body),
+        )
+        .await;
         route_json(status, body)
     })
     .await

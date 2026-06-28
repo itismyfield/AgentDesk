@@ -554,10 +554,17 @@ async fn run_review_paths(
     )
     .await?;
 
-    crate::services::dispatches::outbox_route::handle_completed_dispatch_followups_with_pg(
+    let transport =
+        crate::services::dispatches::discord_delivery::HttpDispatchTransport::from_runtime_with_pg(
+            None,
+            Some(pool.clone()),
+        );
+    crate::services::dispatches::discord_delivery::send_review_result_to_primary_for_preflight_harness_with_transport(
         None,
-        Some(&pool),
+        card_id,
         &review_dispatch_id,
+        "improve",
+        &transport,
     )
     .await
     .map_err(|error| {
@@ -2041,6 +2048,9 @@ async fn request_json(
         .method(method.clone())
         .uri(path.clone())
         .header(header::AUTHORIZATION, format!("Bearer {auth_token}"));
+    if path == "/api/reviews/verdict" {
+        builder = builder.header("x-agentdesk-preflight-suppress-followup-outbox", "1");
+    }
     let request_body = match body {
         Some(value) => {
             builder = builder.header(header::CONTENT_TYPE, "application/json");
@@ -2051,11 +2061,13 @@ async fn request_json(
     let request = builder
         .body(request_body)
         .map_err(|error| format!("build request {method} {path}: {error}"))?;
-    let response = app
-        .clone()
-        .oneshot(request)
-        .await
-        .map_err(|error| format!("send request {method} {path}: {error}"))?;
+    let request_future = app.clone().oneshot(request);
+    let response = if path == "/api/reviews/decision" {
+        crate::kanban::with_preflight_review_enter_outbox_suppressed(request_future).await
+    } else {
+        request_future.await
+    }
+    .map_err(|error| format!("send request {method} {path}: {error}"))?;
     let status = response.status();
     let bytes = to_bytes(response.into_body(), usize::MAX)
         .await
@@ -2333,10 +2345,10 @@ async fn load_safety_proof(pool: &sqlx::PgPool) -> Result<SafetyProof, String> {
 
 async fn load_worktree_or_branch_context_rows(pool: &sqlx::PgPool) -> Result<Vec<Value>, String> {
     let rows = sqlx::query(
-        "SELECT id, dispatch_type, status, context
+        "SELECT id, dispatch_type, status, context, result
          FROM task_dispatches
-         WHERE context IS NOT NULL
-           AND BTRIM(context) <> ''
+         WHERE (context IS NOT NULL AND BTRIM(context) <> '')
+            OR (result IS NOT NULL AND BTRIM(result) <> '')
          ORDER BY created_at ASC, id ASC",
     )
     .fetch_all(pool)
@@ -2344,38 +2356,80 @@ async fn load_worktree_or_branch_context_rows(pool: &sqlx::PgPool) -> Result<Vec
     .map_err(|error| format!("load dispatch contexts for safety proof: {error}"))?;
     let mut matches = Vec::new();
     for row in rows {
-        let context_raw: String = row
+        let id = row
+            .try_get::<String, _>("id")
+            .map_err(|error| format!("decode dispatch id for safety proof: {error}"))?;
+        let context_raw: Option<String> = row
             .try_get("context")
             .map_err(|error| format!("decode dispatch context for safety proof: {error}"))?;
-        let context = serde_json::from_str::<Value>(&context_raw)
-            .map_err(|error| format!("parse dispatch context for safety proof: {error}"))?;
-        if !json_has_execution_target_context(&context) {
+        let result_raw: Option<String> = row
+            .try_get("result")
+            .map_err(|error| format!("decode dispatch result for safety proof: {error}"))?;
+        let context = parse_optional_dispatch_json(context_raw.as_deref(), "context", &id)?;
+        let result = parse_optional_dispatch_json(result_raw.as_deref(), "result", &id)?;
+        if !context
+            .as_ref()
+            .is_some_and(json_has_execution_target_context)
+            && !result
+                .as_ref()
+                .is_some_and(json_has_execution_target_context)
+        {
             continue;
         }
         matches.push(json!({
-            "id": row.try_get::<String, _>("id")
-                .map_err(|error| format!("decode dispatch id for safety proof: {error}"))?,
+            "id": id,
             "dispatch_type": row.try_get::<Option<String>, _>("dispatch_type")
                 .map_err(|error| format!("decode dispatch type for safety proof: {error}"))?,
             "status": row.try_get::<String, _>("status")
                 .map_err(|error| format!("decode dispatch status for safety proof: {error}"))?,
-            "context": context,
+            "context": context.unwrap_or(Value::Null),
+            "result": result.unwrap_or(Value::Null),
         }));
     }
     Ok(matches)
 }
 
+fn parse_optional_dispatch_json(
+    raw: Option<&str>,
+    column: &str,
+    dispatch_id: &str,
+) -> Result<Option<Value>, String> {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Ok(None);
+    };
+    serde_json::from_str::<Value>(raw)
+        .map(Some)
+        .map_err(|error| format!("parse dispatch {column} for safety proof {dispatch_id}: {error}"))
+}
+
 fn json_has_execution_target_context(value: &Value) -> bool {
     match value {
         Value::Object(object) => object.iter().any(|(key, child)| {
-            let lower = key.to_ascii_lowercase();
-            lower.contains("worktree")
-                || lower.contains("branch")
-                || json_has_execution_target_context(child)
+            is_execution_target_json_key(key) || json_has_execution_target_context(child)
         }),
         Value::Array(items) => items.iter().any(json_has_execution_target_context),
         _ => false,
     }
+}
+
+fn is_execution_target_json_key(key: &str) -> bool {
+    let normalized = key.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "worktree"
+            | "worktrees"
+            | "worktree_path"
+            | "worktree_branch"
+            | "branch"
+            | "target_branch"
+            | "base_branch"
+            | "main_branch"
+            | "completed_worktree_path"
+            | "completed_branch"
+    ) || normalized.ends_with("_worktree")
+        || normalized.ends_with("_worktrees")
+        || normalized.ends_with("_worktree_path")
+        || normalized.ends_with("_branch")
 }
 
 async fn load_limited_json_rows(pool: &sqlx::PgPool, sql: &str) -> Result<Vec<Value>, String> {

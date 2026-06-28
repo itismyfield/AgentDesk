@@ -4,6 +4,8 @@ mod thread_reuse;
 mod transport;
 
 pub(crate) use guard::send_dispatch_with_delivery_guard;
+#[cfg(test)]
+pub(crate) use orchestration::send_review_result_to_primary_for_preflight_harness_with_transport;
 pub(crate) use orchestration::{
     HttpDispatchTransport, persist_dispatch_message_target_and_add_pending_reaction_with_pg,
     send_dispatch_to_discord_with_pg_result, send_review_result_to_primary_with_transport,
