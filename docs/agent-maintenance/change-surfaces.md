@@ -137,7 +137,9 @@
     construction from the watcher-spawn handle; #3718 moved runtime mtime
     heartbeat timestamp selection into `watchers/lifecycle_decision.rs` and
     keeps lifecycle below its frozen ratchet; -6 from #3736 removing legacy
-    remote-profile restore plumbing while remote SSH is disabled).
+    remote-profile restore plumbing while remote SSH is disabled; ±0 from
+    #3815 moving direct Codex TUI resume restore helpers into
+    `watchers/codex_tui_restore.rs` while adding the restore branch).
   - `src/services/discord/tmux.rs` (2033 lines after #2558 dead-code sweep;
     +1 from #3384 restored-seed undelivered-body discard guard;
     +38 for suppressed-label noise, user report 2026-06-12: provider-aware

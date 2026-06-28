@@ -617,6 +617,7 @@ src/
 │   │   │   ├── stt.rs
 │   │   │   └── tts_pipeline.rs
 │   │   ├── watchers/
+│   │   │   ├── codex_tui_restore.rs
 │   │   │   ├── lifecycle.rs
 │   │   │   └── lifecycle_decision.rs
 │   │   ├── adk_session.rs
