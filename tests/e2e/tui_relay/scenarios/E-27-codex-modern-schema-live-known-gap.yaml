@@ -1,0 +1,17 @@
+id: E-27
+title: Codex modern-schema production parser known gap
+agent_mode: controlled
+coverage_class: unsupported-known-gap
+cells: [codex-pipe, codex-tui]
+isolation: required
+skip_reason: >
+  Known gap for #3798: E-25 proves Codex response_item plus
+  event_msg/task_complete finalization through deterministic fixture replay, but
+  the matrix does not yet drive a real Codex runtime stream or a controlled safe
+  injection point that passes through the production event parser.
+acceptance_criteria:
+  - Exercise response_item and event_msg/task_complete frames through the production parser.
+  - Relay the task_complete final body with head-to-tail completeness.
+  - Prove follow-up readiness after finalization.
+steps: []
+assertions: []

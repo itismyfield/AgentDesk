@@ -28,6 +28,7 @@ is in that list.
 ```yaml
 id: E-1
 agent_mode: real_live
+coverage_class: live
 cells: [claude-pipe, claude-tui, claude-e, codex-pipe, codex-tui]
 steps:
   - send_prompt: ...
@@ -43,6 +44,21 @@ Every scenario must declare `agent_mode`:
 | `controlled` | A deterministic test agent, fake provider, scripted responder, or controlled runtime hook owns completion. | Future hook-backed relay gaps such as forced quiescence timeout or synthetic foreign-active state. |
 | `real_live` | The scenario sends work through a real provider/cell and live Discord/runtime boundary. | Normal relay matrix prompts, direct TUI input, cross-channel `E-11`, and post-deploy relay continuity smoke. |
 
+Every scenario must also declare `coverage_class`:
+
+| `coverage_class` | Use when | Gate behavior |
+| --- | --- | --- |
+| `live` | The row exercises the live Discord/runtime/provider path, or a controlled production-parser/hook path that is allowed to count as live coverage while `agent_mode` records whether a real provider was contacted. | Can satisfy `--required-coverage-class live` if its actual class remains live. |
+| `fixture` | The row replays deterministic local data without Discord, tmux, dcserver, or provider contact. | Useful parser/finalization coverage, but fails `--required-coverage-class live`. |
+| `unsupported-known-gap` | The row is a machine-readable gap placeholder with `skip_reason` and acceptance criteria. | Excluded from green live-gate claims and fails `--required-coverage-class live`. |
+
+`agent_mode` and `coverage_class` are independent axes. A future safe
+production-parser injection can be `agent_mode: controlled` and
+`coverage_class: live`; a local replay remains `agent_mode: none` and
+`coverage_class: fixture`. Gate runners can pass `--required-coverage-class live`
+to make selected fixture or known-gap rows fail instead of being counted as live
+confidence.
+
 The driver validates metadata against the scenario shape. A scenario that
 declares `none` but sends a prompt, or declares `real_live` while switching to a
 fixture execution lane, fails before it can produce a misleading green report.
@@ -50,7 +66,8 @@ Gate runners can also pass `--required-agent-mode controlled` or
 `--required-agent-mode real_live`; selected scenarios below that lane fail
 instead of silently downgrading. Machine-readable reports include
 `agent_mode`, `agent_mode_actual`, `provider_identity`, `real_provider_contacted`,
-and `failure_attribution` on each scenario.
+`coverage_class`, `coverage_class_actual`, `run_id`, and `failure_attribution`
+on each scenario.
 
 Provider-specific scenarios (`E-6` claude `/compact`, `E-7` codex `/compact`)
 narrow the list. TUI-keystroke-only scenarios (`E-4`, `E-10`, `E-12`) include
@@ -84,7 +101,10 @@ they run through the YAML harness without Discord, tmux, or live dcserver state.
 result-text relay plus clean finalization. `E-25` replays modern Codex
 `response_item` plus `event_msg/task_complete` frames and asserts final text
 relay, task-complete finalization, follow-up readiness, and no stale
-health/queue degradation.
+health/queue degradation. `E-26` through `E-29` are explicit
+`unsupported-known-gap` rows for live coverage not yet implemented: exact
+CronCreate live creation, Codex modern-schema production-parser/live stream,
+Codex live tool-command coverage, and `claude-e` tool-use-to-text completeness.
 
 ## #2943 Scenario Coverage And Gaps
 
@@ -105,21 +125,19 @@ Covered P0/P1 backlog items:
 
 Remaining exact gaps:
 
-- Exact `CronCreate` live creation is still not claimed by `E-24`: the harness
-  now has deterministic local replay for the exact `CronCreate`/`Background`
-  classification and relay contract, but it does not create a live cron job.
-- Codex modern-schema live injection is still not claimed by `E-25`: the harness
-  now has fixture-level replay for `response_item` + `event_msg/task_complete`
-  frames, but normal Codex cells still provide only indirect live coverage.
-- Live tool-command coverage is not claimed for `codex-pipe` or `codex-tui`:
-  those worker roles cannot execute shell/tool commands in the E2E scenario
-  contract. Codex relay coverage for modern completion frames remains in
-  deterministic fixture `E-25`.
-- `tool_use->text completeness` for `claude-e` is not claimed by `E-22`: the
-  scenario relies on `wait_for_provider_hold_state`, and there is no current
-  local/non-live fixture proving `claude-e` persists the same
-  `any_tool_used=true` and `has_post_tool_text=false` inflight witness before
-  post-tool text. Follow-up needed before adding `claude-e` to `E-22`.
+- Exact `CronCreate` live creation is still not claimed by `E-24`; `E-26` is
+  the `unsupported-known-gap` row for the live CronCreate creation/background
+  notification/finalization lane.
+- Codex modern-schema live or production-parser injection is still not claimed
+  by `E-25`; `E-27` is the `unsupported-known-gap` row for the safe parser
+  injection or real runtime stream lane.
+- Live tool-command coverage is not claimed for `codex-pipe` or `codex-tui`;
+  `E-28` is the `unsupported-known-gap` row because those worker roles cannot
+  execute shell/tool commands in the current E2E contract.
+- `tool_use->text completeness` for `claude-e` is not claimed by `E-22`; `E-29`
+  is the `unsupported-known-gap` row until the harness has a live witness or
+  fixture proving the same `any_tool_used=true` and
+  `has_post_tool_text=false` inflight state before post-tool text.
 
 ## Driver
 
@@ -144,6 +162,7 @@ scripts/e2e/run_tui_relay.py \
     [--scenarios tests/e2e/tui_relay/scenarios] \
     [--filter E-1,E-5] \
     [--output out/e2e/tui_relay/<run-id>] \
+    [--required-coverage-class live] \
     [--dry-run]
 ```
 
@@ -151,9 +170,10 @@ The driver writes `report.<cell>.json` so an orchestrator that aims all 5 cells
 at one `--output` directory does not overwrite sibling reports. Per-cell lease
 files (`/tmp/agentdesk-e2e-relay.<cell>.lease`) let cells run in parallel from
 separate operator sessions. The top-level report includes `agent_mode_totals`
-and `real_provider_contacted`; individual scenario rows include the provider,
-runtime, worker agent, channel id, raw failure attribution, and whether a real
-provider was contacted.
+`coverage_class_totals`, `coverage_class_violations`, and
+`real_provider_contacted`; individual scenario rows include the provider,
+runtime, worker agent, channel id, run id, raw failure attribution,
+`coverage_class_actual`, and whether a real provider was contacted.
 
 Post-deploy relay continuity uses a narrower operational wrapper around the
 same driver:
@@ -178,7 +198,11 @@ auto-queue preflight defaults to `agent_mode=none` or a controlled finalizer
 because it validates generate/dispatch/slot/entry/run truth, not LLM behavior.
 Deterministic PCM voice E2E should use `agent_mode=controlled`; the opt-in live
 Discord media smoke is the voice `agent_mode=real_live` lane and must say
-whether a real provider was contacted.
+whether a real provider was contacted. The live media runner is
+`scripts/e2e/run_voice_live_media_smoke.py`; it fails closed unless explicit
+test guild/channel ids, an AgentDesk bot id, a separate speaker bot token, and
+live-safety confirmation env vars are set. Its report separates Discord media,
+STT/TTS, provider response, cleanup, and reporting failures.
 
 Destructive steps (`restart_dcserver`, `kill_pane`, `send_keys_no_enter`,
 `cancel_turn`) are gated by both `--allow-destructive` and

@@ -85,6 +85,12 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("AGENTDESK_E2E_REQUIRED_AGENT_MODE"),
         help="Fail selected scenarios whose declared agent_mode is below this gate.",
     )
+    parser.add_argument(
+        "--required-coverage-class",
+        choices=cell_driver.COVERAGE_CLASSES,
+        default=os.environ.get("AGENTDESK_E2E_REQUIRED_COVERAGE_CLASS"),
+        help="Fail selected scenarios whose declared coverage_class is below this gate.",
+    )
     return parser.parse_args()
 
 
@@ -131,6 +137,7 @@ def load_cross_channel_scenarios(scenarios_dir: Path) -> list[dict[str, Any]]:
             raise ValueError(f"{yaml_path} declares cross_channel without config")
         data["__path__"] = str(yaml_path)
         cell_driver.validate_scenario_agent_mode(data)
+        cell_driver.validate_scenario_coverage_class(data)
         scenarios.append(data)
     return scenarios
 
@@ -192,6 +199,8 @@ def run_cell(
         cmd.append("--dry-run")
     if args.required_agent_mode:
         cmd.extend(["--required-agent-mode", str(args.required_agent_mode)])
+    if args.required_coverage_class:
+        cmd.extend(["--required-coverage-class", str(args.required_coverage_class)])
     if args.allow_destructive:
         cmd.append("--allow-destructive")
     if not args.reset_before_each:
@@ -218,6 +227,8 @@ def run_cell(
         "report": str(report_path),
         "totals": (report or {}).get("totals"),
         "agent_mode_totals": (report or {}).get("agent_mode_totals"),
+        "coverage_class_totals": (report or {}).get("coverage_class_totals"),
+        "coverage_class_violations": (report or {}).get("coverage_class_violations"),
         "real_provider_contacted": bool((report or {}).get("real_provider_contacted")),
         "ok": proc.returncode == 0 and bool(report),
     }
@@ -572,11 +583,18 @@ def run_cross_channel_scenario(
 ) -> dict[str, Any]:
     scenario_id = str(scenario.get("id"))
     declared_agent_mode = cell_driver.scenario_agent_mode(scenario)
+    declared_coverage_class = cell_driver.scenario_coverage_class(scenario)
+    initial_coverage_actual = cell_driver._initial_coverage_class_actual(  # noqa: SLF001
+        scenario,
+        declared=declared_coverage_class,
+        dry_run=bool(args.dry_run),
+    )
     result: dict[str, Any] = {
         "kind": "cross_channel",
         "pass_index": pass_index,
         "id": scenario_id,
         "path": scenario.get("__path__"),
+        "run_id": run_id,
         "status": "skipped",
         "reason": None,
         "agent_mode": declared_agent_mode,
@@ -590,6 +608,17 @@ def run_cross_channel_scenario(
             actual="none",
             dry_run=bool(args.dry_run),
             real_provider_contacted=False,
+        ),
+        "coverage_class": declared_coverage_class,
+        "coverage_class_planned": cell_driver.infer_planned_coverage_class(
+            scenario,
+            declared=declared_coverage_class,
+        ),
+        "coverage_class_actual": initial_coverage_actual,
+        "coverage_class_contract": cell_driver._coverage_class_contract(  # noqa: SLF001
+            declared=declared_coverage_class,
+            actual=initial_coverage_actual,
+            dry_run=bool(args.dry_run),
         ),
         "real_provider_contacted": False,
         "failure_attribution": None,
@@ -609,6 +638,20 @@ def run_cross_channel_scenario(
         result["failure_attribution"] = cell_driver._failure_attribution(  # noqa: SLF001
             "agent_mode_gate",
             gate_violation,
+        )
+        return result
+
+    coverage_gate_violation = cell_driver.required_coverage_class_violation(
+        declared=declared_coverage_class,
+        required=getattr(args, "required_coverage_class", None),
+        scenario_id=scenario_id,
+    )
+    if coverage_gate_violation:
+        result["status"] = "fail"
+        result["reason"] = coverage_gate_violation
+        result["failure_attribution"] = cell_driver._failure_attribution(  # noqa: SLF001
+            "coverage_class_gate",
+            coverage_gate_violation,
         )
         return result
 
@@ -637,6 +680,20 @@ def run_cross_channel_scenario(
             result["failure_attribution"] = cell_driver._failure_attribution(  # noqa: SLF001
                 "agent_mode_gate",
                 observed_gate_violation,
+            )
+            return result
+        observed_coverage_gate_violation = cell_driver.required_coverage_class_violation(
+            declared=declared_coverage_class,
+            actual=str(result["coverage_class_actual"]),
+            required=getattr(args, "required_coverage_class", None),
+            scenario_id=scenario_id,
+        )
+        if observed_coverage_gate_violation and not args.dry_run:
+            result["status"] = "fail"
+            result["reason"] = observed_coverage_gate_violation
+            result["failure_attribution"] = cell_driver._failure_attribution(  # noqa: SLF001
+                "coverage_class_gate",
+                observed_coverage_gate_violation,
             )
             return result
         result["ok"] = True
@@ -678,6 +735,12 @@ def run_cross_channel_scenario(
             )
         )
         result["status"] = "pass"
+        result["coverage_class_actual"] = "live"
+        result["coverage_class_contract"] = cell_driver._coverage_class_contract(  # noqa: SLF001
+            declared=declared_coverage_class,
+            actual="live",
+            dry_run=bool(args.dry_run),
+        )
         result["ok"] = True
         result["completed_at"] = dt.datetime.now().isoformat(timespec="seconds")
         return result
@@ -893,6 +956,12 @@ def run_cross_channel_scenario(
         if teardown_errors:
             result["teardown_errors"] = teardown_errors
         result["status"] = "pass"
+        result["coverage_class_actual"] = "live"
+        result["coverage_class_contract"] = cell_driver._coverage_class_contract(  # noqa: SLF001
+            declared=declared_coverage_class,
+            actual="live",
+            dry_run=False,
+        )
         result["ok"] = True
     except assertions.AssertionError as error:
         result["status"] = "fail"
@@ -941,6 +1010,48 @@ def _matrix_agent_mode_totals(results: list[dict[str, Any]]) -> dict[str, int]:
         if mode in totals:
             totals[mode] += 1
     return totals
+
+
+def _matrix_coverage_class_totals(results: list[dict[str, Any]]) -> dict[str, int]:
+    totals = {coverage: 0 for coverage in cell_driver.COVERAGE_CLASSES}
+    for result in results:
+        nested = result.get("coverage_class_totals")
+        if isinstance(nested, dict):
+            for coverage in totals:
+                totals[coverage] += int(nested.get(coverage) or 0)
+            continue
+        coverage = str(result.get("coverage_class") or "")
+        if coverage in totals:
+            totals[coverage] += 1
+    return totals
+
+
+def _matrix_coverage_class_violations(
+    results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    violations: list[dict[str, Any]] = []
+    for result in results:
+        nested = result.get("coverage_class_violations")
+        if isinstance(nested, list):
+            violations.extend(item for item in nested if isinstance(item, dict))
+        attribution = result.get("failure_attribution")
+        if not isinstance(attribution, dict):
+            continue
+        if attribution.get("source") != "coverage_class_gate":
+            continue
+        violations.append(
+            {
+                "kind": result.get("kind"),
+                "id": result.get("id"),
+                "cell": result.get("cell"),
+                "provider": result.get("provider"),
+                "runtime": result.get("runtime"),
+                "coverage_class": result.get("coverage_class"),
+                "coverage_class_actual": result.get("coverage_class_actual"),
+                "reason": result.get("reason"),
+            }
+        )
+    return violations
 
 
 def main() -> int:
@@ -998,6 +1109,8 @@ def main() -> int:
         "passes": pass_count,
         "cross_channel_scenarios": [str(scenario.get("id")) for scenario in cross_scenarios],
         "agent_mode_totals": _matrix_agent_mode_totals(results),
+        "coverage_class_totals": _matrix_coverage_class_totals(results),
+        "coverage_class_violations": _matrix_coverage_class_violations(results),
         "real_provider_contacted": any(
             result.get("real_provider_contacted") is True for result in results
         ),

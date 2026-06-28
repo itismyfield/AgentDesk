@@ -1,6 +1,7 @@
 id: E-1
 title: 짧은 단일 프롬프트 → 응답 1회 relay
 agent_mode: real_live
+coverage_class: live
 cells: [claude-pipe, claude-tui, claude-e, codex-pipe, codex-tui]
 isolation: required
 steps:

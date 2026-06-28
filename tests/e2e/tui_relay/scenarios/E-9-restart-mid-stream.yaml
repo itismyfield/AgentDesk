@@ -1,6 +1,7 @@
 id: E-9
 title: 스트리밍 중 dev 재기동 — sentinel marker 후 restart, 청크 이어 emit, 중복 0
 agent_mode: real_live
+coverage_class: live
 cells: [claude-pipe, claude-tui, claude-e, codex-pipe, codex-tui]
 isolation: required
 destructive: true

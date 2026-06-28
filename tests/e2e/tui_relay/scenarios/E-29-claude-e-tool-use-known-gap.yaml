@@ -1,0 +1,17 @@
+id: E-29
+title: claude-e tool-use-to-text completeness known gap
+agent_mode: real_live
+coverage_class: unsupported-known-gap
+cells: [claude-e]
+isolation: required
+skip_reason: >
+  Known gap for #3798: E-22 covers tool_use-to-text completeness for
+  relay-backed Claude pipe/TUI cells via wait_for_provider_hold_state, but
+  claude-e does not yet have a live witness or fixture proving the same
+  any_tool_used and has_post_tool_text inflight state before post-tool text.
+acceptance_criteria:
+  - Produce a claude-e tool-use witness equivalent to wait_for_provider_hold_state.
+  - Relay the post-tool head/middle/tail body in order without truncation.
+  - Keep completion chrome after the user-visible body.
+steps: []
+assertions: []

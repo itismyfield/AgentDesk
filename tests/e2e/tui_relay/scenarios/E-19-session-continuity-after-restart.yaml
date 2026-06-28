@@ -1,6 +1,7 @@
 id: E-19
 title: dcserver restart preserves live tmux session identity
 agent_mode: real_live
+coverage_class: live
 cells: [claude-tui, codex-tui]
 isolation: required
 destructive: true

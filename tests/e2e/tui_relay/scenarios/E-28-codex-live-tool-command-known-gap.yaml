@@ -1,0 +1,17 @@
+id: E-28
+title: Codex live tool-command coverage known gap
+agent_mode: real_live
+coverage_class: unsupported-known-gap
+cells: [codex-pipe, codex-tui]
+isolation: required
+skip_reason: >
+  Known gap for #3798: Codex relay cells currently provide live text and
+  lifecycle coverage, but their E2E worker role does not execute live shell or
+  tool commands. Tool-command completeness therefore cannot be counted as a
+  green live lane for codex-pipe or codex-tui.
+acceptance_criteria:
+  - Execute a live Codex tool-command path or supported command fixture.
+  - Observe provider/tool state through production relay handling.
+  - Assert final text completeness and clean post-turn readiness.
+steps: []
+assertions: []

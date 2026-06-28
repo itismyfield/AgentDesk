@@ -1,6 +1,7 @@
 id: E-22
 title: tool_use 이후 후속 텍스트 head-to-tail 완결성
 agent_mode: real_live
+coverage_class: live
 cells: [claude-pipe, claude-tui]
 isolation: required
 acceptance_criteria:

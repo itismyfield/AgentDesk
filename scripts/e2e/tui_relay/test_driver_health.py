@@ -174,6 +174,52 @@ assertions: []
         self.assertIn("declares agent_mode='none'", str(ctx.exception))
         self.assertIn("plan 'real_live'", str(ctx.exception))
 
+    def test_load_scenarios_requires_coverage_class_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "missing-coverage.yaml"
+            path.write_text(
+                """
+id: E-X
+agent_mode: real_live
+cells: [codex-tui]
+steps:
+  - send_prompt: "hello"
+assertions: []
+""",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ValueError) as ctx:
+                driver.load_scenarios(Path(tmp), cell="codex-tui")
+
+        self.assertIn("coverage_class", str(ctx.exception))
+
+    def test_load_scenarios_rejects_live_coverage_for_fixture_lane(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "mismatch-coverage.yaml"
+            path.write_text(
+                """
+id: E-X
+agent_mode: none
+coverage_class: live
+cells: [codex-tui]
+execution: fixture
+steps:
+  - replay_fixture:
+      kind: codex_modern_schema
+      provider: codex
+      frames: []
+assertions: []
+""",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ValueError) as ctx:
+                driver.load_scenarios(Path(tmp), cell="codex-tui")
+
+        self.assertIn("declares coverage_class='live'", str(ctx.exception))
+        self.assertIn("plan 'fixture'", str(ctx.exception))
+
     def test_required_agent_mode_gate_fails_shallower_scenario(self):
         class FakeClient:
             base_url = "http://agentdesk.test"
@@ -200,6 +246,42 @@ assertions: []
 
         self.assertEqual(result["status"], "fail")
         self.assertEqual(result["failure_attribution"]["source"], "agent_mode_gate")
+
+    def test_required_coverage_class_gate_fails_fixture_scenario(self):
+        class FakeClient:
+            base_url = "http://agentdesk.test"
+
+        args = Namespace(
+            cell="codex-tui",
+            channel_id="42",
+            thread_channel_id=None,
+            reset_before_each=False,
+            dry_run=True,
+            queue_runtime_root="/tmp/agentdesk-e2e-test-runtime",
+            hard_reset_session_each=False,
+            allow_destructive=False,
+            required_coverage_class="live",
+        )
+        scenario = {
+            "id": "E-X",
+            "agent_mode": "none",
+            "coverage_class": "fixture",
+            "execution": "fixture",
+            "steps": [],
+            "assertions": [],
+        }
+
+        result = driver.run_scenario(
+            scenario,
+            args=args,
+            run_id="run-1",
+            client=FakeClient(),  # type: ignore[arg-type]
+        )
+
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["coverage_class"], "fixture")
+        self.assertEqual(result["failure_attribution"]["source"], "coverage_class_gate")
+        self.assertIn("declares fixture", result["reason"])
 
     def test_required_agent_mode_gate_fails_skipped_scenario_with_no_actual_mode(self):
         class FakeClient:
@@ -1576,6 +1658,7 @@ class ControlFlowPrimitives(unittest.TestCase):
         scenario = {
             "id": "E-25",
             "agent_mode": "none",
+            "coverage_class": "fixture",
             "execution": "fixture",
             "steps": [
                 {
@@ -1632,6 +1715,8 @@ class ControlFlowPrimitives(unittest.TestCase):
         self.assertEqual(record["post_scenario_idle"]["source"], "local_fixture")
         self.assertTrue(record["fixture_state"]["followup_probe_accepted"])
         self.assertEqual(record["agent_mode_actual"], "none")
+        self.assertEqual(record["coverage_class_actual"], "fixture")
+        self.assertTrue(record["coverage_class_contract"]["satisfied"])
         self.assertFalse(record["real_provider_contacted"])
 
     def test_run_one_cell_waits_for_hold_state_before_cancel(self):
@@ -2118,7 +2203,13 @@ class ScenarioTeardown(unittest.TestCase):
             hard_reset_session_each=False,
             allow_destructive=False,
         )
-        scenario = {"id": "E-18", "agent_mode": "real_live", "steps": [], "assertions": []}
+        scenario = {
+            "id": "E-18",
+            "agent_mode": "real_live",
+            "coverage_class": "live",
+            "steps": [],
+            "assertions": [],
+        }
         provider_hold_state = {
             "ok_marker": "[E2E:E18:OK]",
             "ok_marker_seen": True,
@@ -2152,6 +2243,14 @@ class ScenarioTeardown(unittest.TestCase):
                     "actual": "real_live",
                     "dry_run": False,
                     "real_provider_contacted": True,
+                    "satisfied": True,
+                },
+                "coverage_class": "live",
+                "coverage_class_actual": "live",
+                "coverage_class_contract": {
+                    "declared": "live",
+                    "actual": "live",
+                    "dry_run": False,
                     "satisfied": True,
                 },
             },

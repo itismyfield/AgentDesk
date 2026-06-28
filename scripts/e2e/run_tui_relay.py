@@ -55,6 +55,12 @@ SUPPORTED_CELLS: tuple[str, ...] = (
 )
 AGENT_MODES: tuple[str, ...] = ("none", "controlled", "real_live")
 AGENT_MODE_RANK = {mode: rank for rank, mode in enumerate(AGENT_MODES)}
+COVERAGE_CLASSES: tuple[str, ...] = ("live", "fixture", "unsupported-known-gap")
+COVERAGE_CLASS_RANK = {
+    "unsupported-known-gap": 0,
+    "fixture": 1,
+    "live": 2,
+}
 REAL_PROVIDER_STEP_KEYS: tuple[str, ...] = (
     "send_prompt",
     "send_provider_hold_prompt",
@@ -113,6 +119,9 @@ REPORT_RECORD_KEYS: tuple[str, ...] = (
     "agent_mode",
     "agent_mode_actual",
     "agent_mode_contract",
+    "coverage_class",
+    "coverage_class_actual",
+    "coverage_class_contract",
     "provider_identity",
     "real_provider_contacted",
     "controlled_harness_evidence",
@@ -235,6 +244,15 @@ def parse_args() -> argparse.Namespace:
             "this required gate."
         ),
     )
+    parser.add_argument(
+        "--required-coverage-class",
+        choices=COVERAGE_CLASSES,
+        default=os.environ.get("AGENTDESK_E2E_REQUIRED_COVERAGE_CLASS"),
+        help=(
+            "Fail selected scenarios whose coverage_class is shallower than "
+            "this required gate, e.g. live."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -280,6 +298,39 @@ def scenario_agent_mode(scenario: dict[str, Any]) -> str:
         scenario.get("agent_mode"),
         scenario_id=str(scenario.get("id") or scenario.get("__path__") or "<unknown>"),
     )
+
+
+def normalize_coverage_class(value: Any, *, scenario_id: str | None = None) -> str:
+    coverage = str(value or "").strip().lower()
+    if coverage not in COVERAGE_CLASS_RANK:
+        label = f" for {scenario_id}" if scenario_id else ""
+        raise ValueError(
+            f"coverage_class{label} must be one of "
+            f"{', '.join(COVERAGE_CLASSES)}; got {value!r}"
+        )
+    return coverage
+
+
+def infer_planned_coverage_class(
+    scenario: dict[str, Any],
+    *,
+    declared: str | None = None,
+) -> str:
+    if scenario.get("skip_reason") and declared is not None:
+        return declared
+    if is_local_fixture_scenario(scenario):
+        return "fixture"
+    agent_mode = str(scenario.get("agent_mode") or "").strip().lower()
+    if agent_mode == "none":
+        return "fixture"
+    return "live"
+
+
+def scenario_coverage_class(scenario: dict[str, Any]) -> str:
+    scenario_id = str(scenario.get("id") or scenario.get("__path__") or "<unknown>")
+    if "coverage_class" not in scenario:
+        return infer_planned_coverage_class(scenario)
+    return normalize_coverage_class(scenario.get("coverage_class"), scenario_id=scenario_id)
 
 
 def provider_identity(cell: str, channel_id: str | None = None) -> dict[str, Any]:
@@ -370,6 +421,25 @@ def validate_scenario_agent_mode(scenario: dict[str, Any]) -> str:
     return declared
 
 
+def validate_scenario_coverage_class(scenario: dict[str, Any]) -> str:
+    scenario_id = str(scenario.get("id") or scenario.get("__path__") or "<unknown>")
+    if "coverage_class" not in scenario:
+        raise ValueError(f"{scenario_id} must declare coverage_class")
+    declared = scenario_coverage_class(scenario)
+    if declared == "unsupported-known-gap" and not scenario.get("skip_reason"):
+        raise ValueError(
+            f"{scenario_id} declares coverage_class='unsupported-known-gap' "
+            "without skip_reason"
+        )
+    planned = infer_planned_coverage_class(scenario, declared=declared)
+    if declared != planned:
+        raise ValueError(
+            f"{scenario_id} declares coverage_class={declared!r}, but scenario "
+            f"steps plan {planned!r}; update metadata or execution lane"
+        )
+    return declared
+
+
 def required_agent_mode_violation(
     *,
     declared: str,
@@ -392,6 +462,33 @@ def required_agent_mode_violation(
             )
         return (
             f"agent_mode gate requires {required_mode}, but {scenario_id} "
+            f"declares {declared}"
+        )
+    return None
+
+
+def required_coverage_class_violation(
+    *,
+    declared: str,
+    actual: str | None = None,
+    required: str | None,
+    scenario_id: str,
+) -> str | None:
+    if not required:
+        return None
+    required_class = normalize_coverage_class(required, scenario_id=scenario_id)
+    if actual is not None:
+        observed_class = normalize_coverage_class(actual, scenario_id=scenario_id)
+    else:
+        observed_class = declared
+    if COVERAGE_CLASS_RANK[observed_class] < COVERAGE_CLASS_RANK[required_class]:
+        if actual is not None:
+            return (
+                f"coverage_class gate requires {required_class}, but {scenario_id} "
+                f"observed coverage_class_actual={observed_class}"
+            )
+        return (
+            f"coverage_class gate requires {required_class}, but {scenario_id} "
             f"declares {declared}"
         )
     return None
@@ -426,6 +523,35 @@ def _apply_observed_required_agent_mode_gate(
     return True
 
 
+def _apply_observed_required_coverage_class_gate(
+    result: dict[str, Any],
+    *,
+    required: str | None,
+    declared: str,
+    scenario_id: str,
+    record: dict[str, Any] | None = None,
+) -> bool:
+    actual = result.get("coverage_class_actual")
+    if actual is None:
+        return False
+    violation = required_coverage_class_violation(
+        declared=declared,
+        actual=str(actual),
+        required=required,
+        scenario_id=scenario_id,
+    )
+    if not violation:
+        return False
+    result["status"] = "fail"
+    result["reason"] = violation
+    result["failure_attribution"] = _failure_attribution(
+        "coverage_class_gate",
+        violation,
+        record=record,
+    )
+    return True
+
+
 def _agent_mode_contract(
     *,
     declared: str,
@@ -440,6 +566,35 @@ def _agent_mode_contract(
         "real_provider_contacted": real_provider_contacted,
         "satisfied": dry_run or declared == actual,
     }
+
+
+def _coverage_class_contract(
+    *,
+    declared: str,
+    actual: str,
+    dry_run: bool,
+) -> dict[str, Any]:
+    return {
+        "declared": declared,
+        "actual": actual,
+        "dry_run": dry_run,
+        "satisfied": dry_run or declared == actual,
+    }
+
+
+def _initial_coverage_class_actual(
+    scenario: dict[str, Any],
+    *,
+    declared: str,
+    dry_run: bool,
+) -> str:
+    if dry_run:
+        return declared
+    if is_local_fixture_scenario(scenario):
+        return "fixture"
+    if declared == "unsupported-known-gap":
+        return "unsupported-known-gap"
+    return "unsupported-known-gap"
 
 
 def _failure_attribution(
@@ -488,6 +643,14 @@ def _mark_real_provider_contacted(
         dry_run=dry_run,
         real_provider_contacted=True,
     )
+    declared_coverage_class = record.get("coverage_class")
+    if declared_coverage_class:
+        record["coverage_class_actual"] = "live"
+        record["coverage_class_contract"] = _coverage_class_contract(
+            declared=str(declared_coverage_class),
+            actual="live",
+            dry_run=dry_run,
+        )
 
 
 def observed_agent_mode(scenario: dict[str, Any], record: dict[str, Any]) -> str:
@@ -512,6 +675,40 @@ def _refresh_agent_mode_record(
         actual=actual_mode,
         dry_run=dry_run,
         real_provider_contacted=bool(record.get("real_provider_contacted")),
+    )
+
+
+def observed_coverage_class(
+    scenario: dict[str, Any],
+    record: dict[str, Any],
+    *,
+    dry_run: bool,
+) -> str:
+    declared = scenario_coverage_class(scenario)
+    if dry_run:
+        return declared
+    if record.get("local_fixture") or is_local_fixture_scenario(scenario):
+        return "fixture"
+    if declared == "unsupported-known-gap":
+        return "unsupported-known-gap"
+    if record.get("real_provider_contacted") or record.get("controlled_harness_evidence"):
+        return "live"
+    return "unsupported-known-gap"
+
+
+def _refresh_coverage_class_record(
+    record: dict[str, Any],
+    *,
+    scenario: dict[str, Any],
+    declared_coverage_class: str,
+    dry_run: bool,
+) -> None:
+    actual_class = observed_coverage_class(scenario, record, dry_run=dry_run)
+    record["coverage_class_actual"] = actual_class
+    record["coverage_class_contract"] = _coverage_class_contract(
+        declared=declared_coverage_class,
+        actual=actual_class,
+        dry_run=dry_run,
     )
 
 
@@ -594,6 +791,7 @@ def load_scenarios(scenarios_dir: Path, *, cell: str) -> list[dict[str, Any]]:
             continue
         data["__path__"] = str(yaml_path)
         validate_scenario_agent_mode(data)
+        validate_scenario_coverage_class(data)
         scenarios.append(data)
     return scenarios
 
@@ -2238,9 +2436,20 @@ def run_scenario(
         scenario,
         declared=declared_agent_mode,
     )
+    declared_coverage_class = scenario_coverage_class(scenario)
+    planned_coverage_class = infer_planned_coverage_class(
+        scenario,
+        declared=declared_coverage_class,
+    )
+    initial_coverage_actual = _initial_coverage_class_actual(
+        scenario,
+        declared=declared_coverage_class,
+        dry_run=bool(args.dry_run),
+    )
     result: dict[str, Any] = {
         "id": scenario_id,
         "path": scenario.get("__path__"),
+        "run_id": run_id,
         "cell": cell,
         "provider": cell_provider(cell),
         "runtime": cell_runtime(cell),
@@ -2257,6 +2466,14 @@ def run_scenario(
             actual="none",
             dry_run=bool(args.dry_run),
             real_provider_contacted=False,
+        ),
+        "coverage_class": declared_coverage_class,
+        "coverage_class_planned": planned_coverage_class,
+        "coverage_class_actual": initial_coverage_actual,
+        "coverage_class_contract": _coverage_class_contract(
+            declared=declared_coverage_class,
+            actual=initial_coverage_actual,
+            dry_run=bool(args.dry_run),
         ),
         "provider_identity": provider_identity(cell, args.channel_id),
         "real_provider_contacted": False,
@@ -2277,6 +2494,12 @@ def run_scenario(
                 declared=declared_agent_mode,
                 scenario_id=scenario_id,
             )
+            _apply_observed_required_coverage_class_gate(
+                result,
+                required=getattr(args, "required_coverage_class", None),
+                declared=declared_coverage_class,
+                scenario_id=scenario_id,
+            )
         return result
     result["channel_id"] = target_channel_id
     result["provider_identity"] = provider_identity(cell, target_channel_id)
@@ -2295,6 +2518,20 @@ def run_scenario(
         )
         return result
 
+    coverage_gate_violation = required_coverage_class_violation(
+        declared=declared_coverage_class,
+        required=getattr(args, "required_coverage_class", None),
+        scenario_id=scenario_id,
+    )
+    if coverage_gate_violation:
+        result["status"] = "fail"
+        result["reason"] = coverage_gate_violation
+        result["failure_attribution"] = _failure_attribution(
+            "coverage_class_gate",
+            coverage_gate_violation,
+        )
+        return result
+
     if scenario.get("skip_reason"):
         result["reason"] = str(scenario["skip_reason"])
         result["acceptance_criteria"] = scenario.get("acceptance_criteria")
@@ -2307,6 +2544,12 @@ def run_scenario(
                 result,
                 required=getattr(args, "required_agent_mode", None),
                 declared=declared_agent_mode,
+                scenario_id=scenario_id,
+            )
+            _apply_observed_required_coverage_class_gate(
+                result,
+                required=getattr(args, "required_coverage_class", None),
+                declared=declared_coverage_class,
                 scenario_id=scenario_id,
             )
         return result
@@ -2329,6 +2572,12 @@ def run_scenario(
                 result,
                 required=getattr(args, "required_agent_mode", None),
                 declared=declared_agent_mode,
+                scenario_id=scenario_id,
+            )
+            _apply_observed_required_coverage_class_gate(
+                result,
+                required=getattr(args, "required_coverage_class", None),
+                declared=declared_coverage_class,
                 scenario_id=scenario_id,
             )
         return result
@@ -2377,6 +2626,14 @@ def run_scenario(
             record=window,
         ):
             pass
+        elif not args.dry_run and _apply_observed_required_coverage_class_gate(
+            result,
+            required=getattr(args, "required_coverage_class", None),
+            declared=declared_coverage_class,
+            scenario_id=scenario_id,
+            record=window,
+        ):
+            pass
         elif not args.dry_run and result.get("agent_mode_actual") != declared_agent_mode:
             result["status"] = "fail"
             result["reason"] = (
@@ -2385,6 +2642,21 @@ def run_scenario(
             )
             result["failure_attribution"] = _failure_attribution(
                 "agent_mode_contract",
+                str(result["reason"]),
+                record=window,
+            )
+        elif (
+            not args.dry_run
+            and result.get("coverage_class_actual") != declared_coverage_class
+        ):
+            result["status"] = "fail"
+            result["reason"] = (
+                "coverage_class contract mismatch: "
+                f"declared={declared_coverage_class} "
+                f"actual={result.get('coverage_class_actual')}"
+            )
+            result["failure_attribution"] = _failure_attribution(
+                "coverage_class_contract",
                 str(result["reason"]),
                 record=window,
             )
@@ -2423,6 +2695,12 @@ def run_scenario(
                 declared_agent_mode=declared_agent_mode,
                 dry_run=args.dry_run,
             )
+            _refresh_coverage_class_record(
+                partial_record,
+                scenario=scenario,
+                declared_coverage_class=declared_coverage_class,
+                dry_run=args.dry_run,
+            )
             _merge_record_into_result(result, partial_record)
         result["failure_attribution"] = _failure_attribution(
             "assertion",
@@ -2451,6 +2729,12 @@ def run_scenario(
                 partial_record,
                 scenario=scenario,
                 declared_agent_mode=declared_agent_mode,
+                dry_run=args.dry_run,
+            )
+            _refresh_coverage_class_record(
+                partial_record,
+                scenario=scenario,
+                declared_coverage_class=declared_coverage_class,
                 dry_run=args.dry_run,
             )
             _merge_record_into_result(result, partial_record)
@@ -2490,6 +2774,7 @@ def run_one_cell(
 ) -> dict[str, Any]:
     scenario_id = scenario.get("id")
     declared_agent_mode = scenario_agent_mode(scenario)
+    declared_coverage_class = scenario_coverage_class(scenario)
     if is_local_fixture_scenario(scenario):
         return run_local_fixture_scenario(
             scenario=scenario,
@@ -2509,6 +2794,21 @@ def run_one_cell(
             actual="none",
             dry_run=dry_run,
             real_provider_contacted=False,
+        ),
+        "coverage_class": declared_coverage_class,
+        "coverage_class_actual": _initial_coverage_class_actual(
+            scenario,
+            declared=declared_coverage_class,
+            dry_run=dry_run,
+        ),
+        "coverage_class_contract": _coverage_class_contract(
+            declared=declared_coverage_class,
+            actual=_initial_coverage_class_actual(
+                scenario,
+                declared=declared_coverage_class,
+                dry_run=dry_run,
+            ),
+            dry_run=dry_run,
         ),
         "provider_identity": provider_identity(cell, channel_id),
         "real_provider_contacted": False,
@@ -2761,6 +3061,12 @@ def run_one_cell(
                     declared_agent_mode=declared_agent_mode,
                     dry_run=dry_run,
                 )
+                _refresh_coverage_class_record(
+                    record,
+                    scenario=scenario,
+                    declared_coverage_class=declared_coverage_class,
+                    dry_run=dry_run,
+                )
                 raise ScenarioStepAssertionError(str(error), record=record) from error
         elif "restart_dcserver" in step:
             target = args.restart_target_override or (step["restart_dcserver"] or {}).get(
@@ -2959,6 +3265,12 @@ def run_one_cell(
             declared_agent_mode=declared_agent_mode,
             dry_run=dry_run,
         )
+        _refresh_coverage_class_record(
+            record,
+            scenario=scenario,
+            declared_coverage_class=declared_coverage_class,
+            dry_run=dry_run,
+        )
         raise ScenarioStepAssertionError(str(error), record=record) from error
 
     send_teardown_marker(
@@ -2974,6 +3286,12 @@ def run_one_cell(
         declared_agent_mode=declared_agent_mode,
         dry_run=False,
     )
+    _refresh_coverage_class_record(
+        record,
+        scenario=scenario,
+        declared_coverage_class=declared_coverage_class,
+        dry_run=False,
+    )
     return record
 
 
@@ -2987,6 +3305,7 @@ def run_local_fixture_scenario(
 ) -> dict[str, Any]:
     scenario_id = str(scenario.get("id"))
     declared_agent_mode = scenario_agent_mode(scenario)
+    declared_coverage_class = scenario_coverage_class(scenario)
     record: dict[str, Any] = {
         "assertions": [],
         "local_fixture": True,
@@ -2998,6 +3317,13 @@ def run_local_fixture_scenario(
             actual="none",
             dry_run=dry_run,
             real_provider_contacted=False,
+        ),
+        "coverage_class": declared_coverage_class,
+        "coverage_class_actual": "fixture",
+        "coverage_class_contract": _coverage_class_contract(
+            declared=declared_coverage_class,
+            actual="fixture",
+            dry_run=dry_run,
         ),
         "provider_identity": provider_identity(cell, channel_id),
         "real_provider_contacted": False,
@@ -3428,6 +3754,37 @@ def agent_mode_totals(results: list[dict[str, Any]]) -> dict[str, int]:
     return totals
 
 
+def coverage_class_totals(results: list[dict[str, Any]]) -> dict[str, int]:
+    totals = {coverage: 0 for coverage in COVERAGE_CLASSES}
+    for result in results:
+        coverage = str(result.get("coverage_class") or "")
+        if coverage in totals:
+            totals[coverage] += 1
+    return totals
+
+
+def coverage_class_violations(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    violations: list[dict[str, Any]] = []
+    for result in results:
+        attribution = result.get("failure_attribution")
+        if not isinstance(attribution, dict):
+            continue
+        if attribution.get("source") != "coverage_class_gate":
+            continue
+        violations.append(
+            {
+                "id": result.get("id"),
+                "cell": result.get("cell"),
+                "provider": result.get("provider"),
+                "runtime": result.get("runtime"),
+                "coverage_class": result.get("coverage_class"),
+                "coverage_class_actual": result.get("coverage_class_actual"),
+                "reason": result.get("reason"),
+            }
+        )
+    return violations
+
+
 def main() -> int:
     args = parse_args()
     cell = args.cell
@@ -3475,6 +3832,8 @@ def main() -> int:
         "channel_id": args.channel_id,
         "provider_identity": provider_identity(cell, args.channel_id),
         "agent_mode_totals": agent_mode_totals(results),
+        "coverage_class_totals": coverage_class_totals(results),
+        "coverage_class_violations": coverage_class_violations(results),
         "real_provider_contacted": any(
             result.get("real_provider_contacted") is True for result in results
         ),

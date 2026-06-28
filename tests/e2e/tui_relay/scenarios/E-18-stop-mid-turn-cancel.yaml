@@ -1,6 +1,7 @@
 id: E-18
 title: cancel_turn 중단 후 late marker 미전송 보장
 agent_mode: real_live
+coverage_class: live
 cells: [claude-pipe, claude-tui, codex-pipe, codex-tui]
 isolation: required
 destructive: true

@@ -1,0 +1,17 @@
+id: E-26
+title: exact CronCreate live creation known gap
+agent_mode: real_live
+coverage_class: unsupported-known-gap
+cells: [claude-pipe]
+isolation: required
+skip_reason: >
+  Known gap for #3798: E-24 proves the exact CronCreate/Background relay shape
+  through deterministic local fixture replay, but the matrix does not yet create
+  a live CronCreate job and observe the resulting background task notification
+  through the live Discord/runtime/provider boundary.
+acceptance_criteria:
+  - Create a live CronCreate job from the tested cell.
+  - Observe the background task notification through production relay handling.
+  - Relay result.result text and finalize without stale queue or health state.
+steps: []
+assertions: []

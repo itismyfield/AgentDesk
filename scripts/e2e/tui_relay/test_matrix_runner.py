@@ -66,6 +66,98 @@ agents:
         ):
             self.assertTrue(matrix.parse_args().reset_before_each)
 
+    def test_run_cell_passes_required_coverage_class_to_driver(self):
+        args = Namespace(
+            base_url="http://agentdesk.test",
+            scenarios="tests/e2e/tui_relay/scenarios",
+            filter="E-25",
+            dry_run=True,
+            required_agent_mode=None,
+            required_coverage_class="live",
+            allow_destructive=False,
+            reset_before_each=True,
+            hard_reset_session_each=False,
+            queue_runtime_root="/tmp/agentdesk-e2e-test-runtime",
+            turn_start_timeout_s=5,
+        )
+        captured: dict[str, list[str]] = {}
+
+        def fake_run(cmd, check=False, text=True):  # noqa: ARG001
+            captured["cmd"] = list(cmd)
+            out_index = cmd.index("--output") + 1
+            report_dir = Path(cmd[out_index])
+            report_dir.mkdir(parents=True, exist_ok=True)
+            (report_dir / "report.codex-tui.json").write_text(
+                """
+{
+  "totals": {"pass": 0, "fail": 1, "skipped": 0},
+  "agent_mode_totals": {"none": 1, "controlled": 0, "real_live": 0},
+  "coverage_class_totals": {"live": 0, "fixture": 1, "unsupported-known-gap": 0},
+  "coverage_class_violations": [
+    {"id": "E-25", "cell": "codex-tui", "coverage_class": "fixture"}
+  ],
+  "real_provider_contacted": false
+}
+""",
+                encoding="utf-8",
+            )
+            return Namespace(returncode=1)
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "run_multi_provider_matrix.subprocess.run",
+            side_effect=fake_run,
+        ):
+            result = matrix.run_cell(
+                cell="codex-tui",
+                channel_id="555",
+                args=args,
+                output_dir=Path(tmp),
+                pass_index=1,
+            )
+
+        self.assertIn("--required-coverage-class", captured["cmd"])
+        self.assertIn("live", captured["cmd"])
+        self.assertEqual(
+            result["coverage_class_totals"],
+            {"live": 0, "fixture": 1, "unsupported-known-gap": 0},
+        )
+        self.assertEqual(result["coverage_class_violations"][0]["id"], "E-25")
+
+    def test_matrix_coverage_totals_and_violations_aggregate_nested_reports(self):
+        results = [
+            {
+                "kind": "cell",
+                "coverage_class_totals": {
+                    "live": 2,
+                    "fixture": 1,
+                    "unsupported-known-gap": 0,
+                },
+                "coverage_class_violations": [
+                    {"id": "E-24", "cell": "claude-pipe"}
+                ],
+            },
+            {
+                "kind": "cross_channel",
+                "id": "E-11",
+                "coverage_class": "live",
+            },
+            {
+                "kind": "cross_channel",
+                "id": "E-X",
+                "coverage_class": "unsupported-known-gap",
+                "coverage_class_actual": "unsupported-known-gap",
+                "failure_attribution": {"source": "coverage_class_gate"},
+                "reason": "coverage_class gate requires live",
+            },
+        ]
+
+        self.assertEqual(
+            matrix._matrix_coverage_class_totals(results),  # noqa: SLF001
+            {"live": 3, "fixture": 1, "unsupported-known-gap": 1},
+        )
+        violations = matrix._matrix_coverage_class_violations(results)  # noqa: SLF001
+        self.assertEqual([item["id"] for item in violations], ["E-24", "E-X"])
+
 
 def _relay_msg(msg_id: int, content: str) -> dict:
     return {
@@ -357,6 +449,8 @@ class CrossChannelMatrix(unittest.TestCase):
         self.assertTrue(result["real_provider_contacted"])
         self.assertEqual(result["agent_mode_actual"], "real_live")
         self.assertTrue(result["agent_mode_contract"]["satisfied"])
+        self.assertEqual(result["coverage_class_actual"], "live")
+        self.assertTrue(result["coverage_class_contract"]["satisfied"])
         self.assertEqual(FakeClient.max_active, 2)
         self.assertIn(
             (
@@ -436,6 +530,8 @@ class CrossChannelMatrix(unittest.TestCase):
         self.assertFalse(result["real_provider_contacted"])
         self.assertEqual(result["agent_mode_actual"], "none")
         self.assertFalse(result["agent_mode_contract"]["satisfied"])
+        self.assertEqual(result["coverage_class_actual"], "unsupported-known-gap")
+        self.assertFalse(result["coverage_class_contract"]["satisfied"])
         self.assertIn("cross-channel dispatch failed", result["reason"])
 
     def test_cross_channel_required_real_live_fails_missing_selected_cells(self):
@@ -462,6 +558,34 @@ class CrossChannelMatrix(unittest.TestCase):
         self.assertEqual(result["agent_mode_actual"], "none")
         self.assertEqual(result["failure_attribution"]["source"], "agent_mode_gate")
         self.assertIn("observed agent_mode_actual=none", result["reason"])
+
+    def test_cross_channel_required_live_coverage_fails_known_gap_row(self):
+        scenario = dict(self.e11)
+        scenario["id"] = "E-X"
+        scenario["coverage_class"] = "unsupported-known-gap"
+        scenario["skip_reason"] = "known gap"
+        args = Namespace(
+            base_url="http://agentdesk.test",
+            dry_run=True,
+            queue_runtime_root="/tmp/agentdesk-e2e-test-runtime",
+            reset_before_each=False,
+            required_coverage_class="live",
+            turn_start_timeout_s=5,
+        )
+
+        result = matrix.run_cross_channel_scenario(
+            scenario,
+            args=args,
+            run_id="run-1",
+            channel_ids=self.channel_ids,
+            selected_cells=["claude-tui", "codex-tui"],
+            pass_index=1,
+        )
+
+        self.assertEqual(result["status"], "fail")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["failure_attribution"]["source"], "coverage_class_gate")
+        self.assertIn("declares unsupported-known-gap", result["reason"])
 
     def test_cross_channel_non_leak_fails_on_sibling_marker(self):
         class LeakyClient:

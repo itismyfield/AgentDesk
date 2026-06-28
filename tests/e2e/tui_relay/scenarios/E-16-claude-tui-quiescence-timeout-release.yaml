@@ -1,6 +1,7 @@
 id: E-16
 title: Claude TUI quiescence timeout still releases mailbox
 agent_mode: controlled
+coverage_class: unsupported-known-gap
 cells: [claude-tui]
 isolation: required
 skip_reason: >

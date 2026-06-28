@@ -1,6 +1,7 @@
 id: E-7
 title: Codex /compact 직후 새 입력 readiness (#2695)
 agent_mode: real_live
+coverage_class: live
 cells: [codex-pipe, codex-tui]  # Codex /compact readiness is codex-only
 isolation: required
 steps:

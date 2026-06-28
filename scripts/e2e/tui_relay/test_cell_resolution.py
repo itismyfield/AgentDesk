@@ -365,6 +365,7 @@ class ScenarioFilter(unittest.TestCase):
                 self.assertIn("E-24", ids)
                 e24 = next(s for s in scenarios if s.get("id") == "E-24")
                 self.assertEqual(e24.get("execution"), "fixture")
+                self.assertEqual(e24.get("coverage_class"), "fixture")
                 self.assertIn(
                     {
                         "fixture_task_notification": {
@@ -387,6 +388,7 @@ class ScenarioFilter(unittest.TestCase):
                 self.assertIn("E-25", ids)
                 e25 = next(s for s in scenarios if s.get("id") == "E-25")
                 self.assertEqual(e25.get("execution"), "fixture")
+                self.assertEqual(e25.get("coverage_class"), "fixture")
                 self.assertIn(
                     {
                         "fixture_task_complete_finalized": {
@@ -399,6 +401,28 @@ class ScenarioFilter(unittest.TestCase):
                 self.assertTrue(driver.is_local_fixture_scenario(e25))
             else:
                 self.assertNotIn("E-25", ids)
+
+    def test_known_gap_rows_are_machine_readable_and_non_live(self):
+        expected = {
+            "E-26": {"claude-pipe"},
+            "E-27": {"codex-pipe", "codex-tui"},
+            "E-28": {"codex-pipe", "codex-tui"},
+            "E-29": {"claude-e"},
+        }
+        for cell in driver.SUPPORTED_CELLS:
+            scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
+            by_id = {str(s.get("id")): s for s in scenarios}
+            for scenario_id, cells in expected.items():
+                if cell in cells:
+                    scenario = by_id[scenario_id]
+                    self.assertEqual(
+                        scenario.get("coverage_class"),
+                        "unsupported-known-gap",
+                    )
+                    self.assertIn("skip_reason", scenario)
+                    self.assertIn("acceptance_criteria", scenario)
+                else:
+                    self.assertNotIn(scenario_id, by_id)
 
     def test_e11_excluded_everywhere(self):
         for cell in driver.SUPPORTED_CELLS:
