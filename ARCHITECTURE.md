@@ -364,6 +364,9 @@ src/
 │   │   ├── rollout_tail.rs
 │   │   └── session.rs
 │   ├── discord/
+│   │   ├── catch_up/
+│   │   │   ├── classification.rs
+│   │   │   └── phase2.rs
 │   │   ├── commands/
 │   │   │   ├── diagnostics/
 │   │   │   │   ├── mod.rs
