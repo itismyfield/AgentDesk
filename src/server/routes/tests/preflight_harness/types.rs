@@ -7,6 +7,10 @@ pub(crate) struct PreflightFixture {
     pub(crate) repo: String,
     pub(crate) group: String,
     pub(crate) pipeline_id: String,
+    #[serde(default = "default_scenario_kind")]
+    pub(crate) scenario_kind: String,
+    #[serde(default = "default_agent_mode")]
+    pub(crate) agent_mode: String,
     pub(crate) agent_id: String,
     #[serde(default)]
     pub(crate) agent_name: Option<String>,
@@ -16,6 +20,12 @@ pub(crate) struct PreflightFixture {
     pub(crate) review_mode: String,
     #[serde(default = "default_max_concurrent_threads")]
     pub(crate) max_concurrent_threads: i64,
+    #[serde(default)]
+    pub(crate) pipeline_config: Option<Value>,
+    #[serde(default)]
+    pub(crate) required_transitions: Vec<PreflightTransitionExpectation>,
+    #[serde(default)]
+    pub(crate) expected_preflight_failures: Vec<String>,
     pub(crate) entries: Vec<PreflightFixtureEntry>,
 }
 
@@ -35,14 +45,27 @@ pub(crate) struct PreflightFixtureEntry {
     pub(crate) phase_gate_kind: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct PreflightTransitionExpectation {
+    pub(crate) from: String,
+    pub(crate) to: String,
+    #[serde(default = "default_transition_supported")]
+    pub(crate) supported: bool,
+    #[serde(default)]
+    pub(crate) label: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub(crate) struct PreflightIdentity {
     pub(crate) fixture_id: String,
     pub(crate) repo: String,
     pub(crate) group: String,
     pub(crate) pipeline_id: String,
+    pub(crate) scenario_kind: String,
     pub(crate) agent_id: String,
+    pub(crate) agent_mode: String,
     pub(crate) review_mode: String,
+    pub(crate) real_provider_contacted: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -72,6 +95,7 @@ pub(crate) struct EntryTerminal {
 pub(crate) struct DispatchTerminal {
     pub(crate) id: String,
     pub(crate) status: String,
+    pub(crate) dispatch_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -102,6 +126,8 @@ pub(crate) struct PreflightReport {
     pub(crate) dispatch_ids: Vec<String>,
     pub(crate) slot_ids: Vec<SlotId>,
     pub(crate) phase_gate_state: Vec<Value>,
+    pub(crate) scenario_observations: Vec<Value>,
+    pub(crate) preflight_failure_reasons: Vec<String>,
     pub(crate) terminal_status: TerminalStatus,
     pub(crate) raw_failure_reasons: Vec<String>,
     pub(crate) endpoint_observations: Vec<EndpointObservation>,
@@ -135,6 +161,7 @@ pub(crate) struct EntrySnapshot {
 pub(crate) struct DispatchSnapshot {
     pub(crate) id: String,
     pub(crate) status: String,
+    pub(crate) dispatch_type: Option<String>,
 }
 
 impl PreflightReport {
@@ -145,8 +172,11 @@ impl PreflightReport {
                 repo: fixture.repo.clone(),
                 group: fixture.group.clone(),
                 pipeline_id: fixture.pipeline_id.clone(),
+                scenario_kind: fixture.scenario_kind.clone(),
                 agent_id: fixture.agent_id.clone(),
+                agent_mode: fixture.agent_mode.clone(),
                 review_mode: fixture.review_mode.clone(),
+                real_provider_contacted: false,
             },
             ..Self::default()
         }
@@ -161,6 +191,14 @@ fn default_review_mode() -> String {
     "disabled".to_string()
 }
 
+fn default_scenario_kind() -> String {
+    "basic_roundtrip".to_string()
+}
+
+fn default_agent_mode() -> String {
+    "none".to_string()
+}
+
 fn default_priority() -> String {
     "high".to_string()
 }
@@ -171,4 +209,8 @@ fn default_phase_gate_kind() -> String {
 
 fn default_max_concurrent_threads() -> i64 {
     1
+}
+
+fn default_transition_supported() -> bool {
+    true
 }

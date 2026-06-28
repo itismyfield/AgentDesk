@@ -3,6 +3,8 @@
   "repo": "agentdesk/preflight-fixture",
   "group": "sandbox-auto-queue",
   "pipeline_id": "repo-group-pipeline-fixture-v1",
+  "scenario_kind": "basic_roundtrip",
+  "agent_mode": "none",
   "agent_id": "auto-queue-preflight-agent",
   "agent_name": "Auto Queue Preflight Agent",
   "auth_token": "auto-queue-preflight-token",

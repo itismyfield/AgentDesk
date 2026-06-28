@@ -6,6 +6,7 @@ use axum::{
 use serde_json::{Value, json};
 use sqlx::{Column, Row};
 use std::{
+    collections::BTreeSet,
     env, fs,
     path::{Path, PathBuf},
 };
@@ -65,6 +66,7 @@ fn auto_queue_preflight_detects_split_brain_completion() {
         dispatches: vec![DispatchSnapshot {
             id: "dispatch-split-brain".to_string(),
             status: "completed".to_string(),
+            dispatch_type: Some("implementation".to_string()),
         }],
         reserved_slots: Vec::new(),
         phase_gates: Vec::new(),
@@ -81,6 +83,23 @@ fn auto_queue_preflight_detects_split_brain_completion() {
 }
 
 async fn run_preflight(
+    fixture: &PreflightFixture,
+    report: &mut PreflightReport,
+) -> Result<(), String> {
+    validate_fixture_lane(fixture)?;
+    match fixture.scenario_kind.as_str() {
+        "basic_roundtrip" => run_basic_roundtrip(fixture, report).await,
+        "phase_gate_paths" => run_phase_gate_paths(fixture, report).await,
+        "review_paths" => run_review_paths(fixture, report).await,
+        "multislot_recovery" => run_multislot_recovery(fixture, report).await,
+        "pipeline_compatibility" => run_pipeline_compatibility(fixture, report).await,
+        other => Err(format!(
+            "unknown auto-queue preflight scenario_kind={other}"
+        )),
+    }
+}
+
+async fn run_basic_roundtrip(
     fixture: &PreflightFixture,
     report: &mut PreflightReport,
 ) -> Result<(), String> {
@@ -141,7 +160,11 @@ async fn run_preflight(
         &fixture.auth_token,
         Method::POST,
         "/api/queue/dispatch-next".to_string(),
-        Some(json!({ "run_id": run_id, "repo": fixture.repo, "agent_id": fixture.agent_id })),
+        Some(json!({
+            "run_id": run_id.as_str(),
+            "repo": fixture.repo.as_str(),
+            "agent_id": fixture.agent_id.as_str()
+        })),
     )
     .await?;
     if dispatch_next.get("error").is_some() {
@@ -245,6 +268,1018 @@ async fn run_preflight(
     Ok(())
 }
 
+async fn run_phase_gate_paths(
+    fixture: &PreflightFixture,
+    report: &mut PreflightReport,
+) -> Result<(), String> {
+    if fixture.entries.len() < 2 {
+        return Err("phase_gate_paths fixture must contain at least two entries".to_string());
+    }
+    if fixture.review_mode != "disabled" {
+        return Err("phase_gate_paths fixture must use review_mode=disabled".to_string());
+    }
+
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate_with_max_connections(8).await;
+    seed_fixture(&pool, fixture).await?;
+    let app = build_preflight_app(pool.clone(), fixture)?;
+    let (run_id, entries) = generate_fixture_run(&app, &pool, fixture, report).await?;
+
+    dispatch_next_for_run(&app, &pool, fixture, report, &run_id).await?;
+    complete_live_dispatches_for_run(&app, &pool, fixture, report, &run_id).await?;
+
+    let blocked_card_id = entries
+        .first()
+        .map(|entry| entry.card_id.as_str())
+        .ok_or_else(|| "phase_gate_paths missing first generated entry".to_string())?;
+    let blocking_gate_dispatch = insert_synthetic_dispatch(
+        &pool,
+        fixture,
+        blocked_card_id,
+        "phase-gate",
+        "completed",
+        phase_gate_context(fixture, &run_id, 0, Some(1), false),
+        Some(json!({
+            "verdict": "phase_gate_failed",
+            "summary": "sandbox blocked phase gate"
+        })),
+    )
+    .await?;
+    crate::db::auto_queue::save_phase_gate_state_on_pg(
+        &pool,
+        &run_id,
+        0,
+        &crate::db::auto_queue::PhaseGateStateWrite {
+            status: "failed".to_string(),
+            verdict: Some("phase_gate_failed".to_string()),
+            dispatch_ids: vec![blocking_gate_dispatch.clone()],
+            pass_verdict: "phase_gate_passed".to_string(),
+            next_phase: Some(1),
+            final_phase: false,
+            anchor_card_id: Some(blocked_card_id.to_string()),
+            failure_reason: Some("sandbox blocked phase gate".to_string()),
+            created_at: None,
+        },
+    )
+    .await?;
+    record_observation(
+        report,
+        "phase_gate_blocked",
+        json!({
+            "run_id": run_id,
+            "dispatch_id": blocking_gate_dispatch,
+            "phase": 0,
+            "reason": "sandbox blocked phase gate"
+        }),
+    );
+
+    let blocked_dispatch = dispatch_next_for_run(&app, &pool, fixture, report, &run_id).await?;
+    if blocked_dispatch
+        .get("message")
+        .and_then(Value::as_str)
+        .is_none_or(|message| !message.contains("phase gate"))
+    {
+        report.raw_failure_reasons.push(format!(
+            "phase gate did not visibly block dispatch-next: {blocked_dispatch}"
+        ));
+    }
+
+    request_json(
+        &app,
+        report,
+        &fixture.auth_token,
+        Method::PATCH,
+        format!("/api/dispatches/{blocking_gate_dispatch}"),
+        Some(json!({
+            "result": {
+                "verdict": "phase_gate_passed",
+                "summary": "sandbox repaired phase gate"
+            }
+        })),
+    )
+    .await?;
+    request_json(
+        &app,
+        report,
+        &fixture.auth_token,
+        Method::POST,
+        format!("/api/queue/runs/{run_id}/phase-gates/repair"),
+        Some(json!({ "phase": 0, "dispatch_id": blocking_gate_dispatch.as_str() })),
+    )
+    .await?;
+    record_observation(
+        report,
+        "phase_gate_repaired",
+        json!({ "run_id": run_id.as_str(), "phase": 0 }),
+    );
+    sqlx::query("UPDATE kanban_cards SET status = 'done' WHERE id = $1")
+        .bind(blocked_card_id)
+        .execute(&pool)
+        .await
+        .map_err(|error| format!("mark repaired phase 0 card terminal: {error}"))?;
+    record_observation(
+        report,
+        "phase_gate_phase_terminal",
+        json!({ "run_id": run_id.as_str(), "phase": 0, "card_id": blocked_card_id }),
+    );
+    let next_thread_group = entries
+        .last()
+        .and_then(|entry| {
+            fixture
+                .entries
+                .iter()
+                .find(|fixture_entry| Some(fixture_entry.issue_number) == entry.issue_number)
+                .and_then(|fixture_entry| fixture_entry.thread_group)
+        })
+        .unwrap_or(1);
+    crate::db::auto_queue::rebind_slot_for_group_agent_pg(
+        &pool,
+        &run_id,
+        next_thread_group,
+        &fixture.agent_id,
+        1,
+    )
+    .await?;
+    record_observation(
+        report,
+        "phase_gate_next_slot_rebound",
+        json!({
+            "run_id": run_id.as_str(),
+            "phase": 1,
+            "thread_group": next_thread_group,
+            "slot_index": 1,
+        }),
+    );
+
+    dispatch_next_for_run(&app, &pool, fixture, report, &run_id).await?;
+    let phase_one_live = live_dispatch_ids_for_run(&pool, &run_id).await?;
+    if phase_one_live.is_empty() {
+        report.raw_failure_reasons.push(format!(
+            "phase gate repair did not allow phase 1 dispatch for run {run_id}"
+        ));
+    }
+
+    let final_card_id = entries
+        .last()
+        .map(|entry| entry.card_id.as_str())
+        .ok_or_else(|| "phase_gate_paths missing final generated entry".to_string())?;
+    let final_gate_dispatch = insert_synthetic_dispatch(
+        &pool,
+        fixture,
+        final_card_id,
+        "phase-gate",
+        "pending",
+        phase_gate_context(fixture, &run_id, 1, None, true),
+        None,
+    )
+    .await?;
+    crate::db::auto_queue::save_phase_gate_state_on_pg(
+        &pool,
+        &run_id,
+        1,
+        &crate::db::auto_queue::PhaseGateStateWrite {
+            status: "pending".to_string(),
+            verdict: None,
+            dispatch_ids: vec![final_gate_dispatch.clone()],
+            pass_verdict: "phase_gate_passed".to_string(),
+            next_phase: None,
+            final_phase: true,
+            anchor_card_id: Some(final_card_id.to_string()),
+            failure_reason: Some("sandbox final phase gate pending".to_string()),
+            created_at: None,
+        },
+    )
+    .await?;
+    complete_live_dispatches_for_run(&app, &pool, fixture, report, &run_id).await?;
+    request_json(
+        &app,
+        report,
+        &fixture.auth_token,
+        Method::PATCH,
+        format!("/api/dispatches/{final_gate_dispatch}"),
+        Some(json!({
+            "status": "completed",
+            "allowed_from": ["pending", "dispatched"],
+            "result": {
+                "verdict": "phase_gate_passed",
+                "summary": "sandbox final phase gate passed"
+            }
+        })),
+    )
+    .await?;
+    append_unique(&mut report.dispatch_ids, final_gate_dispatch);
+    record_observation(
+        report,
+        "phase_gate_final_completed",
+        json!({ "run_id": run_id.as_str(), "phase": 1, "expected_run_status": "completed" }),
+    );
+
+    finish_report_snapshot(&app, &pool, fixture, report, &run_id).await?;
+    db.drop().await;
+    Ok(())
+}
+
+async fn run_review_paths(
+    fixture: &PreflightFixture,
+    report: &mut PreflightReport,
+) -> Result<(), String> {
+    if fixture.agent_mode != "controlled" {
+        return Err("review_paths fixture must declare agent_mode=controlled".to_string());
+    }
+
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate_with_max_connections(8).await;
+    seed_fixture(&pool, fixture).await?;
+    let app = build_preflight_app(pool.clone(), fixture)?;
+    let (run_id, entries) = generate_fixture_run(&app, &pool, fixture, report).await?;
+    dispatch_next_for_run(&app, &pool, fixture, report, &run_id).await?;
+    complete_live_dispatches_for_run(&app, &pool, fixture, report, &run_id).await?;
+
+    let card_id = entries
+        .first()
+        .map(|entry| entry.card_id.as_str())
+        .ok_or_else(|| "review_paths fixture generated no entry".to_string())?;
+    let review_dispatch_id =
+        ensure_synthetic_review_dispatch(&pool, fixture, card_id, "review").await?;
+    let second_review_dispatch_id =
+        ensure_synthetic_review_dispatch(&pool, fixture, card_id, "review").await?;
+    if review_dispatch_id != second_review_dispatch_id {
+        report.raw_failure_reasons.push(format!(
+            "review dispatch creation was not idempotent: {review_dispatch_id} vs {second_review_dispatch_id}"
+        ));
+    }
+
+    let review_decision_id =
+        ensure_synthetic_review_dispatch(&pool, fixture, card_id, "review-decision").await?;
+    request_json(
+        &app,
+        report,
+        &fixture.auth_token,
+        Method::PATCH,
+        format!("/api/dispatches/{review_decision_id}"),
+        Some(json!({
+            "status": "completed",
+            "allowed_from": ["pending", "dispatched"],
+            "result": {
+                "decision": "accept",
+                "summary": "controlled review-decision accepted without live agent"
+            }
+        })),
+    )
+    .await?;
+    insert_synthetic_dispatch(
+        &pool,
+        fixture,
+        card_id,
+        "rework",
+        "completed",
+        json!({
+            "sandbox_preflight": true,
+            "fixture_mode": true,
+            "production_mutation_allowed": false,
+            "review_mode": fixture.review_mode,
+            "loop": "controlled_rework"
+        }),
+        Some(json!({ "summary": "controlled rework loop completed" })),
+    )
+    .await?;
+    let review_after_rework =
+        ensure_synthetic_review_dispatch(&pool, fixture, card_id, "review").await?;
+    if review_after_rework != review_dispatch_id {
+        report.raw_failure_reasons.push(format!(
+            "rework loop created duplicate review dispatch: initial={review_dispatch_id} after={review_after_rework}"
+        ));
+    }
+
+    sqlx::query("UPDATE kanban_cards SET status = 'done' WHERE id = $1")
+        .bind(card_id)
+        .execute(&pool)
+        .await
+        .map_err(|error| format!("mark review_paths card terminal: {error}"))?;
+    record_observation(
+        report,
+        "review_paths_controlled",
+        json!({
+            "run_id": run_id,
+            "card_id": card_id,
+            "review_dispatch_id": review_dispatch_id,
+            "review_decision_id": review_decision_id,
+            "direct_review": "idempotent",
+            "skip_rework_terminal_auto_approve": true,
+            "duplicate_review_dispatches": count_dispatches_for_card(&pool, card_id, "review", Some(&["pending", "dispatched"])).await?
+        }),
+    );
+    request_json(
+        &app,
+        report,
+        &fixture.auth_token,
+        Method::PATCH,
+        format!("/api/dispatches/{review_dispatch_id}"),
+        Some(json!({
+            "status": "completed",
+            "allowed_from": ["pending", "dispatched"],
+            "result": {
+                "verdict": "accepted",
+                "summary": "controlled review completed without live agent"
+            }
+        })),
+    )
+    .await?;
+    append_unique(&mut report.dispatch_ids, review_dispatch_id);
+    append_unique(&mut report.dispatch_ids, review_decision_id);
+    force_fixture_run_terminal(&pool, &run_id).await?;
+    finish_report_snapshot(&app, &pool, fixture, report, &run_id).await?;
+    db.drop().await;
+    Ok(())
+}
+
+async fn run_multislot_recovery(
+    fixture: &PreflightFixture,
+    report: &mut PreflightReport,
+) -> Result<(), String> {
+    if fixture.entries.len() < 3 || fixture.max_concurrent_threads < 2 {
+        return Err(
+            "multislot_recovery fixture must contain at least three entries and max_concurrent_threads >= 2"
+                .to_string(),
+        );
+    }
+
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate_with_max_connections(8).await;
+    seed_fixture(&pool, fixture).await?;
+    let app = build_preflight_app(pool.clone(), fixture)?;
+    let (run_id, entries) = generate_fixture_run(&app, &pool, fixture, report).await?;
+
+    let reversed: Vec<String> = entries
+        .iter()
+        .rev()
+        .map(|entry| entry.entry_id.clone())
+        .collect();
+    request_json(
+        &app,
+        report,
+        &fixture.auth_token,
+        Method::PATCH,
+        "/api/queue/reorder".to_string(),
+        Some(json!({ "ordered_ids": reversed.clone(), "agent_id": fixture.agent_id.as_str() })),
+    )
+    .await?;
+    record_observation(
+        report,
+        "reorder_applied",
+        json!({ "run_id": run_id.as_str(), "first_after_reorder": reversed.first() }),
+    );
+
+    dispatch_next_for_run(&app, &pool, fixture, report, &run_id).await?;
+    let inflight = load_entry_snapshots(&pool, &report.entry_ids).await?;
+    let occupied_slots: BTreeSet<i64> = inflight
+        .iter()
+        .filter(|entry| entry.status == "dispatched")
+        .filter_map(|entry| entry.slot_index)
+        .collect();
+    if occupied_slots.len() < 2 {
+        report.raw_failure_reasons.push(format!(
+            "multislot dispatch did not allocate multiple same-agent slots: {inflight:?}"
+        ));
+    }
+    record_observation(
+        report,
+        "multislot_dispatched",
+        json!({
+            "run_id": run_id,
+            "agent_id": fixture.agent_id,
+            "slot_indexes": occupied_slots.iter().copied().collect::<Vec<_>>()
+        }),
+    );
+
+    request_json(
+        &app,
+        report,
+        &fixture.auth_token,
+        Method::POST,
+        format!("/api/queue/cancel?run_id={run_id}"),
+        None,
+    )
+    .await?;
+    request_json(
+        &app,
+        report,
+        &fixture.auth_token,
+        Method::POST,
+        format!("/api/queue/runs/{run_id}/restore"),
+        None,
+    )
+    .await?;
+    record_observation(
+        report,
+        "cancel_restore_recovered",
+        json!({ "run_id": run_id.as_str() }),
+    );
+
+    if let Some(terminal_cleanup_entry) = entries.last() {
+        sqlx::query("UPDATE kanban_cards SET status = 'done' WHERE id = $1")
+            .bind(&terminal_cleanup_entry.card_id)
+            .execute(&pool)
+            .await
+            .map_err(|error| format!("seed terminal-card cleanup fallback: {error}"))?;
+        record_observation(
+            report,
+            "terminal_card_cleanup_seeded",
+            json!({
+                "entry_id": terminal_cleanup_entry.entry_id,
+                "card_id": terminal_cleanup_entry.card_id,
+            }),
+        );
+    }
+
+    drain_run_to_terminal(&app, &pool, fixture, report, &run_id).await?;
+    finish_report_snapshot(&app, &pool, fixture, report, &run_id).await?;
+    db.drop().await;
+    Ok(())
+}
+
+async fn run_pipeline_compatibility(
+    fixture: &PreflightFixture,
+    report: &mut PreflightReport,
+) -> Result<(), String> {
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate_with_max_connections(8).await;
+    seed_fixture(&pool, fixture).await?;
+    let app = build_preflight_app(pool.clone(), fixture)?;
+    let (run_id, _) = generate_fixture_run(&app, &pool, fixture, report).await?;
+
+    crate::pipeline::ensure_loaded();
+    let pipeline =
+        crate::pipeline::resolve_for_card_pg(&pool, Some(&fixture.repo), Some(&fixture.agent_id))
+            .await;
+    for expected in &fixture.required_transitions {
+        let supported = pipeline
+            .find_transition(&expected.from, &expected.to)
+            .is_some();
+        let label = expected.label.as_deref().unwrap_or("transition");
+        record_observation(
+            report,
+            "pipeline_transition_check",
+            json!({
+                "repo": fixture.repo,
+                "agent_id": fixture.agent_id,
+                "label": label,
+                "from": expected.from,
+                "to": expected.to,
+                "expected_supported": expected.supported,
+                "actual_supported": supported,
+            }),
+        );
+        match (expected.supported, supported) {
+            (true, false) => report.raw_failure_reasons.push(format!(
+                "pipeline compatibility missing required transition {label}: {} -> {} for repo {} agent {}",
+                expected.from, expected.to, fixture.repo, fixture.agent_id
+            )),
+            (false, true) => report.raw_failure_reasons.push(format!(
+                "pipeline compatibility expected unsupported transition but found {label}: {} -> {} for repo {} agent {}",
+                expected.from, expected.to, fixture.repo, fixture.agent_id
+            )),
+            (false, false) => report.preflight_failure_reasons.push(format!(
+                "unsupported direct transition {label}: {} -> {} for repo {} agent {}",
+                expected.from, expected.to, fixture.repo, fixture.agent_id
+            )),
+            (true, true) => {}
+        }
+    }
+    for expected in &fixture.expected_preflight_failures {
+        if !report
+            .preflight_failure_reasons
+            .iter()
+            .any(|reason| reason.contains(expected))
+        {
+            report.raw_failure_reasons.push(format!(
+                "expected preflight failure containing {expected:?}, got {:?}",
+                report.preflight_failure_reasons
+            ));
+        }
+    }
+    if fixture.expected_preflight_failures.is_empty()
+        && !report.preflight_failure_reasons.is_empty()
+    {
+        report.raw_failure_reasons.push(format!(
+            "unexpected pipeline preflight failures: {:?}",
+            report.preflight_failure_reasons
+        ));
+    }
+
+    finish_report_snapshot(&app, &pool, fixture, report, &run_id).await?;
+    db.drop().await;
+    Ok(())
+}
+
+fn validate_fixture_lane(fixture: &PreflightFixture) -> Result<(), String> {
+    match fixture.agent_mode.as_str() {
+        "none" | "controlled" => Ok(()),
+        "real_live" if live_preflight_allowed() => Ok(()),
+        "real_live" => Err(
+            "agent_mode=real_live requires AGENTDESK_AUTO_QUEUE_PREFLIGHT_ALLOW_LIVE=1".to_string(),
+        ),
+        other => Err(format!(
+            "unknown auto-queue preflight agent_mode={other}; expected none, controlled, or real_live"
+        )),
+    }
+}
+
+fn live_preflight_allowed() -> bool {
+    env::var("AGENTDESK_AUTO_QUEUE_PREFLIGHT_ALLOW_LIVE")
+        .ok()
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+}
+
+async fn generate_fixture_run(
+    app: &Router,
+    pool: &sqlx::PgPool,
+    fixture: &PreflightFixture,
+    report: &mut PreflightReport,
+) -> Result<(String, Vec<GeneratedEntryRow>), String> {
+    let generate = request_json(
+        app,
+        report,
+        &fixture.auth_token,
+        Method::POST,
+        "/api/queue/generate".to_string(),
+        Some(generate_body_for_fixture(fixture)),
+    )
+    .await?;
+    let run_id = required_string(&generate, &["run", "id"])?;
+    report.run_id = Some(run_id.clone());
+
+    let generated_entries = load_generated_entries(pool, &run_id).await?;
+    if generated_entries.is_empty() {
+        return Err(format!(
+            "/api/queue/generate created no entries for fixture {}",
+            fixture.fixture_id
+        ));
+    }
+    report.entry_ids = generated_entries
+        .iter()
+        .map(|entry| entry.entry_id.clone())
+        .collect();
+    record_observation(
+        report,
+        "generated_run",
+        json!({
+            "run_id": run_id,
+            "entry_ids": report.entry_ids,
+            "issue_numbers": generated_entries
+                .iter()
+                .filter_map(|entry| entry.issue_number)
+                .collect::<Vec<_>>(),
+        }),
+    );
+
+    Ok((run_id, generated_entries))
+}
+
+fn generate_body_for_fixture(fixture: &PreflightFixture) -> Value {
+    json!({
+        "repo": fixture.repo.as_str(),
+        "agent_id": fixture.agent_id.as_str(),
+        "review_mode": fixture.review_mode.as_str(),
+        "max_concurrent_threads": fixture.max_concurrent_threads,
+        "force": true,
+        "entries": fixture.entries.iter().map(|entry| {
+            json!({
+                "issue_number": entry.issue_number,
+                "batch_phase": entry.batch_phase.unwrap_or(0),
+                "thread_group": entry.thread_group.unwrap_or(0),
+                "phase_gate_kind": entry.phase_gate_kind.as_str(),
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+async fn dispatch_next_for_run(
+    app: &Router,
+    pool: &sqlx::PgPool,
+    fixture: &PreflightFixture,
+    report: &mut PreflightReport,
+    run_id: &str,
+) -> Result<Value, String> {
+    let dispatch_next = request_json(
+        app,
+        report,
+        &fixture.auth_token,
+        Method::POST,
+        "/api/queue/dispatch-next".to_string(),
+        Some(json!({
+            "run_id": run_id,
+            "repo": fixture.repo.as_str(),
+            "agent_id": fixture.agent_id.as_str()
+        })),
+    )
+    .await?;
+    if dispatch_next.get("error").is_some() {
+        report.raw_failure_reasons.push(format!(
+            "/api/queue/dispatch-next returned error body: {dispatch_next}"
+        ));
+    }
+
+    let count = dispatch_next
+        .get("count")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let dispatched_count = dispatch_next
+        .get("dispatched")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let pending_group_count = dispatch_next
+        .get("pending_groups")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let visibly_blocked = dispatch_next
+        .get("message")
+        .and_then(Value::as_str)
+        .is_some_and(|message| message.contains("phase gate"));
+    if count <= 0 && dispatched_count == 0 && pending_group_count > 0 && !visibly_blocked {
+        report.raw_failure_reasons.push(format!(
+            "/api/queue/dispatch-next did not activate or visibly block work: {dispatch_next}"
+        ));
+    }
+
+    append_entry_bound_dispatches(pool, report).await?;
+    record_observation(
+        report,
+        "dispatch_next",
+        json!({
+            "run_id": run_id,
+            "count": count,
+            "dispatched_count": dispatched_count,
+            "message": dispatch_next.get("message").cloned().unwrap_or(Value::Null),
+        }),
+    );
+    Ok(dispatch_next)
+}
+
+async fn complete_live_dispatches_for_run(
+    app: &Router,
+    pool: &sqlx::PgPool,
+    fixture: &PreflightFixture,
+    report: &mut PreflightReport,
+    run_id: &str,
+) -> Result<(), String> {
+    let dispatch_ids = live_dispatch_ids_for_run(pool, run_id).await?;
+    for dispatch_id in dispatch_ids {
+        request_json(
+            app,
+            report,
+            &fixture.auth_token,
+            Method::PATCH,
+            format!("/api/dispatches/{dispatch_id}"),
+            Some(json!({
+                "status": "completed",
+                "allowed_from": ["pending", "dispatched"],
+                "result": {
+                    "summary": "sandbox auto-queue advanced preflight dispatch completed",
+                    "assistant_message": "sandbox auto-queue advanced preflight dispatch completed",
+                    "agent_response_present": true,
+                    "work_outcome": "sandbox_preflight_pass",
+                    "completion_source": "auto_queue_preflight_fixture",
+                    "fixture_id": fixture.fixture_id.as_str(),
+                    "scenario_kind": fixture.scenario_kind.as_str(),
+                    "production_mutation_allowed": false
+                }
+            })),
+        )
+        .await?;
+        append_unique(&mut report.dispatch_ids, dispatch_id);
+    }
+    append_entry_bound_dispatches(pool, report).await
+}
+
+async fn append_entry_bound_dispatches(
+    pool: &sqlx::PgPool,
+    report: &mut PreflightReport,
+) -> Result<(), String> {
+    let entries = load_entry_snapshots(pool, &report.entry_ids).await?;
+    for dispatch_id in dispatch_ids_from_entries(&entries) {
+        append_unique(&mut report.dispatch_ids, dispatch_id);
+    }
+    Ok(())
+}
+
+async fn finish_report_snapshot(
+    app: &Router,
+    pool: &sqlx::PgPool,
+    fixture: &PreflightFixture,
+    report: &mut PreflightReport,
+    run_id: &str,
+) -> Result<(), String> {
+    let status_final = request_json(
+        app,
+        report,
+        &fixture.auth_token,
+        Method::GET,
+        queue_path("/api/queue/status", fixture, Some(20)),
+        None,
+    )
+    .await?;
+    report.status_final = Some(status_final);
+
+    let history_final = request_json(
+        app,
+        report,
+        &fixture.auth_token,
+        Method::GET,
+        queue_path("/api/queue/history", fixture, Some(8)),
+        None,
+    )
+    .await?;
+    report.history_final = Some(history_final.clone());
+
+    let snapshot = load_snapshot(
+        pool,
+        Some(run_id),
+        &report.entry_ids,
+        &report.dispatch_ids,
+        report,
+    )
+    .await?;
+    apply_snapshot_to_report(report, &snapshot);
+    report
+        .raw_failure_reasons
+        .extend(validate_preflight_snapshot(&snapshot));
+    report
+        .raw_failure_reasons
+        .extend(validate_history_contains_run(&history_final, run_id));
+    Ok(())
+}
+
+fn phase_gate_context(
+    fixture: &PreflightFixture,
+    run_id: &str,
+    phase: i64,
+    next_phase: Option<i64>,
+    final_phase: bool,
+) -> Value {
+    json!({
+        "sandbox_preflight": true,
+        "fixture_mode": true,
+        "fixture_id": fixture.fixture_id.as_str(),
+        "scenario_kind": fixture.scenario_kind.as_str(),
+        "agent_mode": fixture.agent_mode.as_str(),
+        "production_mutation_allowed": false,
+        "phase_gate": {
+            "run_id": run_id,
+            "batch_phase": phase,
+            "phase": phase,
+            "next_phase": next_phase,
+            "final_phase": final_phase,
+            "pass_verdict": "phase_gate_passed",
+            "checks": ["merge_verified", "issue_closed", "build_passed"]
+        }
+    })
+}
+
+async fn insert_synthetic_dispatch(
+    pool: &sqlx::PgPool,
+    fixture: &PreflightFixture,
+    card_id: &str,
+    dispatch_type: &str,
+    status: &str,
+    context: Value,
+    result: Option<Value>,
+) -> Result<String, String> {
+    let dispatch_id = format!(
+        "preflight-{}-{}",
+        sanitize_identifier(dispatch_type),
+        uuid::Uuid::new_v4()
+    );
+    let title = format!(
+        "Sandbox preflight {} for {}",
+        dispatch_type, fixture.fixture_id
+    );
+    let result_string = result.map(|value| value.to_string());
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+             id, kanban_card_id, to_agent_id, dispatch_type, status, title,
+             context, result, created_at, updated_at, completed_at
+         )
+         VALUES (
+             $1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(),
+             CASE WHEN $5 IN ('completed', 'failed', 'cancelled') THEN NOW() ELSE NULL END
+         )",
+    )
+    .bind(&dispatch_id)
+    .bind(card_id)
+    .bind(&fixture.agent_id)
+    .bind(dispatch_type)
+    .bind(status)
+    .bind(title)
+    .bind(context.to_string())
+    .bind(result_string)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("insert synthetic {dispatch_type} dispatch for {card_id}: {error}"))?;
+    Ok(dispatch_id)
+}
+
+async fn ensure_synthetic_review_dispatch(
+    pool: &sqlx::PgPool,
+    fixture: &PreflightFixture,
+    card_id: &str,
+    dispatch_type: &str,
+) -> Result<String, String> {
+    if let Some(existing) = sqlx::query_scalar::<_, String>(
+        "SELECT id
+         FROM task_dispatches
+         WHERE kanban_card_id = $1
+           AND dispatch_type = $2
+           AND status IN ('pending', 'dispatched')
+         ORDER BY created_at ASC, id ASC
+         LIMIT 1",
+    )
+    .bind(card_id)
+    .bind(dispatch_type)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load existing synthetic {dispatch_type} dispatch: {error}"))?
+    {
+        return Ok(existing);
+    }
+
+    insert_synthetic_dispatch(
+        pool,
+        fixture,
+        card_id,
+        dispatch_type,
+        "pending",
+        json!({
+            "sandbox_preflight": true,
+            "fixture_mode": true,
+            "fixture_id": fixture.fixture_id.as_str(),
+            "scenario_kind": fixture.scenario_kind.as_str(),
+            "agent_mode": fixture.agent_mode.as_str(),
+            "production_mutation_allowed": false,
+            "review_mode": fixture.review_mode.as_str(),
+            "controlled_agent_provider": "stub"
+        }),
+        None,
+    )
+    .await
+}
+
+async fn count_dispatches_for_card(
+    pool: &sqlx::PgPool,
+    card_id: &str,
+    dispatch_type: &str,
+    statuses: Option<&[&str]>,
+) -> Result<i64, String> {
+    if let Some(statuses) = statuses {
+        let statuses: Vec<String> = statuses
+            .iter()
+            .map(|status| (*status).to_string())
+            .collect();
+        return sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM task_dispatches
+             WHERE kanban_card_id = $1
+               AND dispatch_type = $2
+               AND status = ANY($3::TEXT[])",
+        )
+        .bind(card_id)
+        .bind(dispatch_type)
+        .bind(statuses)
+        .fetch_one(pool)
+        .await
+        .map_err(|error| format!("count {dispatch_type} dispatches for {card_id}: {error}"));
+    }
+
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT
+         FROM task_dispatches
+         WHERE kanban_card_id = $1
+           AND dispatch_type = $2",
+    )
+    .bind(card_id)
+    .bind(dispatch_type)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| format!("count {dispatch_type} dispatches for {card_id}: {error}"))
+}
+
+async fn live_dispatch_ids_for_run(
+    pool: &sqlx::PgPool,
+    run_id: &str,
+) -> Result<Vec<String>, String> {
+    let rows = sqlx::query_scalar::<_, String>(
+        "SELECT DISTINCT td.id
+         FROM auto_queue_entries e
+         JOIN task_dispatches td ON td.id = e.dispatch_id
+         WHERE e.run_id = $1
+           AND td.status IN ('pending', 'dispatched')
+         ORDER BY td.id ASC",
+    )
+    .bind(run_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("load live dispatches for run {run_id}: {error}"))?;
+    Ok(rows)
+}
+
+async fn drain_run_to_terminal(
+    app: &Router,
+    pool: &sqlx::PgPool,
+    fixture: &PreflightFixture,
+    report: &mut PreflightReport,
+    run_id: &str,
+) -> Result<(), String> {
+    for _ in 0..12 {
+        complete_live_dispatches_for_run(app, pool, fixture, report, run_id).await?;
+        if pending_or_dispatched_entry_count(pool, run_id).await? == 0 {
+            return Ok(());
+        }
+        let before = pending_or_dispatched_entry_count(pool, run_id).await?;
+        dispatch_next_for_run(app, pool, fixture, report, run_id).await?;
+        complete_live_dispatches_for_run(app, pool, fixture, report, run_id).await?;
+        let after = pending_or_dispatched_entry_count(pool, run_id).await?;
+        if after == 0 {
+            return Ok(());
+        }
+        if after >= before {
+            break;
+        }
+    }
+
+    report.raw_failure_reasons.push(format!(
+        "run {run_id} did not drain to terminal states; pending_or_dispatched_entries={}",
+        pending_or_dispatched_entry_count(pool, run_id).await?
+    ));
+    Ok(())
+}
+
+async fn pending_or_dispatched_entry_count(
+    pool: &sqlx::PgPool,
+    run_id: &str,
+) -> Result<i64, String> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT
+         FROM auto_queue_entries
+         WHERE run_id = $1
+           AND status IN ('pending', 'dispatched')",
+    )
+    .bind(run_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| format!("count pending/dispatched entries for run {run_id}: {error}"))
+}
+
+async fn force_fixture_run_terminal(pool: &sqlx::PgPool, run_id: &str) -> Result<(), String> {
+    sqlx::query(
+        "UPDATE auto_queue_entries
+         SET status = 'done',
+             completed_at = COALESCE(completed_at, NOW())
+         WHERE run_id = $1
+           AND status IN ('pending', 'dispatched')",
+    )
+    .bind(run_id)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("force fixture entries terminal for run {run_id}: {error}"))?;
+
+    sqlx::query(
+        "UPDATE auto_queue_runs
+         SET status = 'completed',
+             completed_at = COALESCE(completed_at, NOW())
+         WHERE id = $1",
+    )
+    .bind(run_id)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("force fixture run terminal for {run_id}: {error}"))?;
+
+    crate::db::auto_queue::release_run_slots_pg(pool, run_id)
+        .await
+        .map_err(|error| format!("release fixture slots for run {run_id}: {error}"))?;
+    Ok(())
+}
+
+fn record_observation(report: &mut PreflightReport, kind: &str, payload: Value) {
+    let mut object = serde_json::Map::new();
+    object.insert("kind".to_string(), Value::String(kind.to_string()));
+    match payload {
+        Value::Object(payload) => {
+            object.extend(payload);
+        }
+        other => {
+            object.insert("value".to_string(), other);
+        }
+    }
+    report.scenario_observations.push(Value::Object(object));
+}
+
+fn append_unique(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|seen| seen == &value) {
+        values.push(value);
+    }
+}
+
 fn build_preflight_app(pool: sqlx::PgPool, fixture: &PreflightFixture) -> Result<Router, String> {
     let mut config = crate::config::Config::default();
     config.server.host = "127.0.0.1".to_string();
@@ -266,12 +1301,7 @@ fn build_preflight_app(pool: sqlx::PgPool, fixture: &PreflightFixture) -> Result
 }
 
 async fn seed_fixture(pool: &sqlx::PgPool, fixture: &PreflightFixture) -> Result<(), String> {
-    let pipeline_config = json!({
-        "fixture_mode": true,
-        "pipeline_id": fixture.pipeline_id,
-        "group": fixture.group,
-        "production_mutation_allowed": false
-    });
+    let pipeline_config = fixture_pipeline_config(fixture)?;
     sqlx::query(
         "INSERT INTO github_repos (id, display_name, sync_enabled, default_agent_id, pipeline_config)
          VALUES ($1, $2, FALSE, $3, $4::jsonb)
@@ -365,9 +1395,31 @@ async fn seed_fixture(pool: &sqlx::PgPool, fixture: &PreflightFixture) -> Result
     Ok(())
 }
 
+fn fixture_pipeline_config(fixture: &PreflightFixture) -> Result<Value, String> {
+    let mut object = match fixture.pipeline_config.clone() {
+        Some(Value::Object(object)) => object,
+        Some(other) => {
+            return Err(format!(
+                "fixture pipeline_config must be a JSON object when present, got {other}"
+            ));
+        }
+        None => serde_json::Map::new(),
+    };
+    object.insert("fixture_mode".to_string(), json!(true));
+    object.insert(
+        "pipeline_id".to_string(),
+        json!(fixture.pipeline_id.as_str()),
+    );
+    object.insert("group".to_string(), json!(fixture.group.as_str()));
+    object.insert("production_mutation_allowed".to_string(), json!(false));
+    Ok(Value::Object(object))
+}
+
 #[derive(Debug, Clone)]
 struct GeneratedEntryRow {
     entry_id: String,
+    card_id: String,
+    issue_number: Option<i64>,
 }
 
 async fn load_generated_entries(
@@ -375,10 +1427,17 @@ async fn load_generated_entries(
     run_id: &str,
 ) -> Result<Vec<GeneratedEntryRow>, String> {
     let rows = sqlx::query(
-        "SELECT id
-         FROM auto_queue_entries
-         WHERE run_id = $1
-         ORDER BY priority_rank ASC, id ASC",
+        "SELECT e.id,
+                e.kanban_card_id,
+                c.github_issue_number::BIGINT AS github_issue_number
+         FROM auto_queue_entries e
+         LEFT JOIN kanban_cards c ON c.id = e.kanban_card_id
+         WHERE e.run_id = $1
+         ORDER BY COALESCE(e.batch_phase, 0) ASC,
+                  COALESCE(e.thread_group, 0) ASC,
+                  e.priority_rank ASC,
+                  c.github_issue_number ASC,
+                  e.id ASC",
     )
     .bind(run_id)
     .fetch_all(pool)
@@ -391,6 +1450,12 @@ async fn load_generated_entries(
                 entry_id: row
                     .try_get("id")
                     .map_err(|error| format!("decode generated entry id: {error}"))?,
+                card_id: row
+                    .try_get("kanban_card_id")
+                    .map_err(|error| format!("decode generated entry card id: {error}"))?,
+                issue_number: row
+                    .try_get("github_issue_number")
+                    .map_err(|error| format!("decode generated entry issue number: {error}"))?,
             })
         })
         .collect()
@@ -560,12 +1625,13 @@ async fn load_dispatch_snapshots(
 ) -> Result<Vec<DispatchSnapshot>, String> {
     let mut dispatches = Vec::with_capacity(dispatch_ids.len());
     for dispatch_id in dispatch_ids {
-        let row = sqlx::query("SELECT id, status FROM task_dispatches WHERE id = $1")
-            .bind(dispatch_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| format!("load dispatch snapshot {dispatch_id}: {error}"))?
-            .ok_or_else(|| format!("dispatch {dispatch_id} missing from task_dispatches"))?;
+        let row =
+            sqlx::query("SELECT id, status, dispatch_type FROM task_dispatches WHERE id = $1")
+                .bind(dispatch_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|error| format!("load dispatch snapshot {dispatch_id}: {error}"))?
+                .ok_or_else(|| format!("dispatch {dispatch_id} missing from task_dispatches"))?;
         dispatches.push(DispatchSnapshot {
             id: row
                 .try_get("id")
@@ -573,6 +1639,9 @@ async fn load_dispatch_snapshots(
             status: row
                 .try_get("status")
                 .map_err(|error| format!("decode dispatch status {dispatch_id}: {error}"))?,
+            dispatch_type: row
+                .try_get("dispatch_type")
+                .map_err(|error| format!("decode dispatch type {dispatch_id}: {error}"))?,
         });
     }
     Ok(dispatches)

@@ -1,0 +1,42 @@
+{
+  "fixture_id": "issue-3800-multislot-recovery",
+  "repo": "agentdesk/preflight-fixture-multislot",
+  "group": "sandbox-auto-queue-advanced",
+  "pipeline_id": "repo-group-pipeline-fixture-v1",
+  "scenario_kind": "multislot_recovery",
+  "agent_mode": "controlled",
+  "agent_id": "auto-queue-preflight-multislot-agent",
+  "agent_name": "Auto Queue Preflight Multislot Agent",
+  "auth_token": "auto-queue-preflight-token",
+  "review_mode": "disabled",
+  "max_concurrent_threads": 2,
+  "entries": [
+    {
+      "issue_number": 3800201,
+      "title": "Fixture: multislot recovery A",
+      "description": "Synthetic same-agent multislot fixture card.",
+      "priority": "high",
+      "batch_phase": 0,
+      "thread_group": 0,
+      "phase_gate_kind": "pr-confirm"
+    },
+    {
+      "issue_number": 3800202,
+      "title": "Fixture: multislot recovery B",
+      "description": "Synthetic same-agent multislot fixture card.",
+      "priority": "high",
+      "batch_phase": 0,
+      "thread_group": 1,
+      "phase_gate_kind": "pr-confirm"
+    },
+    {
+      "issue_number": 3800203,
+      "title": "Fixture: terminal cleanup fallback",
+      "description": "Synthetic same-agent fixture card whose kanban status is forced terminal during recovery.",
+      "priority": "high",
+      "batch_phase": 0,
+      "thread_group": 2,
+      "phase_gate_kind": "pr-confirm"
+    }
+  ]
+}

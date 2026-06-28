@@ -1,0 +1,90 @@
+{
+  "fixture_id": "issue-3800-pipeline-compatibility",
+  "repo": "agentdesk/preflight-fixture-pipeline",
+  "group": "sandbox-auto-queue-advanced",
+  "pipeline_id": "repo-group-pipeline-fixture-v1",
+  "scenario_kind": "pipeline_compatibility",
+  "agent_mode": "none",
+  "agent_id": "auto-queue-preflight-pipeline-agent",
+  "agent_name": "Auto Queue Preflight Pipeline Agent",
+  "auth_token": "auto-queue-preflight-token",
+  "review_mode": "disabled",
+  "max_concurrent_threads": 1,
+  "pipeline_config": {
+    "states": [
+      { "id": "backlog", "label": "Backlog" },
+      { "id": "requested", "label": "Requested" },
+      { "id": "ready", "label": "Ready" },
+      { "id": "in_progress", "label": "In Progress" },
+      { "id": "review", "label": "Review" },
+      { "id": "done", "label": "Done", "terminal": true }
+    ],
+    "transitions": [
+      { "from": "backlog", "to": "requested", "type": "free" },
+      { "from": "requested", "to": "ready", "type": "free" },
+      {
+        "from": "ready",
+        "to": "in_progress",
+        "type": "gated",
+        "gates": ["has_active_dispatch"]
+      },
+      { "from": "in_progress", "to": "review", "type": "free" },
+      {
+        "from": "review",
+        "to": "done",
+        "type": "gated",
+        "gates": ["review_verdict_pass"]
+      }
+    ],
+    "gates": {
+      "has_active_dispatch": {
+        "type": "builtin",
+        "check": "has_active_dispatch",
+        "description": "Dispatch must be attached before entering implementation."
+      },
+      "review_verdict_pass": {
+        "type": "builtin",
+        "check": "review_verdict_pass",
+        "description": "Review must pass before entering done."
+      }
+    }
+  },
+  "required_transitions": [
+    {
+      "from": "backlog",
+      "to": "requested",
+      "supported": true,
+      "label": "backlog to requested intake"
+    },
+    {
+      "from": "requested",
+      "to": "ready",
+      "supported": true,
+      "label": "requested to ready"
+    },
+    {
+      "from": "ready",
+      "to": "in_progress",
+      "supported": true,
+      "label": "ready to implementation"
+    },
+    {
+      "from": "requested",
+      "to": "backlog",
+      "supported": false,
+      "label": "reverse requested to backlog"
+    }
+  ],
+  "expected_preflight_failures": ["requested -> backlog"],
+  "entries": [
+    {
+      "issue_number": 3800301,
+      "title": "Fixture: pipeline compatibility",
+      "description": "Synthetic pipeline fixture card used to verify requested/backlog/ready/done transition compatibility.",
+      "priority": "high",
+      "batch_phase": 0,
+      "thread_group": 0,
+      "phase_gate_kind": "pr-confirm"
+    }
+  ]
+}

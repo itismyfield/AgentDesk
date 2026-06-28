@@ -28,6 +28,7 @@ pub(crate) fn apply_snapshot_to_report(report: &mut PreflightReport, snapshot: &
             .map(|dispatch| DispatchTerminal {
                 id: dispatch.id.clone(),
                 status: dispatch.status.clone(),
+                dispatch_type: dispatch.dispatch_type.clone(),
             })
             .collect(),
     };
@@ -39,6 +40,9 @@ pub(crate) fn validate_preflight_snapshot(snapshot: &PreflightSnapshot) -> Vec<S
 
     for dispatch in &snapshot.dispatches {
         if dispatch.status != "completed" {
+            continue;
+        }
+        if !is_entry_bound_dispatch(dispatch.dispatch_type.as_deref()) {
             continue;
         }
         let matching_entries: Vec<&EntrySnapshot> = snapshot
@@ -142,6 +146,13 @@ pub(crate) fn validate_preflight_snapshot(snapshot: &PreflightSnapshot) -> Vec<S
     }
 
     failures
+}
+
+fn is_entry_bound_dispatch(dispatch_type: Option<&str>) -> bool {
+    matches!(
+        dispatch_type,
+        None | Some("implementation") | Some("plan") | Some("plan-review")
+    )
 }
 
 pub(crate) fn validate_history_contains_run(history: &Value, run_id: &str) -> Vec<String> {

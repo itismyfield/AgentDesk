@@ -1,0 +1,24 @@
+{
+  "fixture_id": "issue-3800-review",
+  "repo": "agentdesk/preflight-fixture-review",
+  "group": "sandbox-auto-queue-advanced",
+  "pipeline_id": "repo-group-pipeline-fixture-v1",
+  "scenario_kind": "review_paths",
+  "agent_mode": "controlled",
+  "agent_id": "auto-queue-preflight-review-agent",
+  "agent_name": "Auto Queue Preflight Review Agent",
+  "auth_token": "auto-queue-preflight-token",
+  "review_mode": "enabled",
+  "max_concurrent_threads": 1,
+  "entries": [
+    {
+      "issue_number": 3800101,
+      "title": "Fixture: controlled review dispatch",
+      "description": "Synthetic review fixture card. Review, decision, and rework dispatches are created inside the temporary database only.",
+      "priority": "high",
+      "batch_phase": 0,
+      "thread_group": 0,
+      "phase_gate_kind": "pr-confirm"
+    }
+  ]
+}
