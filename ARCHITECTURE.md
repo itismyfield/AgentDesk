@@ -656,6 +656,7 @@ src/
 │   │   ├── relay_health.rs
 │   │   ├── relay_owner_observability.rs
 │   │   ├── relay_recovery.rs
+│   │   ├── relay_recovery_auto_heal_attempts.rs
 │   │   ├── relay_recovery_completion_footer.rs
 │   │   ├── replace_outcome_policy.rs
 │   │   ├── response_sanitizer.rs
