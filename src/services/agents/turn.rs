@@ -361,11 +361,7 @@ pub async fn list_agent_turn_history_pg_json(
 }
 
 pub fn extract_tmux_name(session_key: &str) -> Option<String> {
-    session_key
-        .split_once(':')
-        .map(|(_, tmux_name)| tmux_name.trim())
-        .filter(|tmux_name| !tmux_name.is_empty())
-        .map(str::to_string)
+    crate::services::discord::session_identity::tmux_name_from_session_key(session_key)
 }
 
 fn ansi_escape_re() -> &'static Regex {

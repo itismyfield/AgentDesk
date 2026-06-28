@@ -364,7 +364,7 @@ CREATE TABLE task_dispatches (
 -- 세션 (기존 PCD dispatched_sessions 유지)
 CREATE TABLE sessions (
   id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_key         TEXT UNIQUE,         -- hostname:tmux-session
+  session_key         TEXT UNIQUE,         -- legacy host:tmux or namespaced provider/token/host:tmux
   agent_id            TEXT REFERENCES agents(id),
   provider            TEXT DEFAULT 'claude',
   status              TEXT DEFAULT 'disconnected',

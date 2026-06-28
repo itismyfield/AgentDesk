@@ -3753,7 +3753,12 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "Kill only the tmux process for an idle session while preserving the session row and provider resume metadata.",
         )
         .with_params([
-            ("session_key", path_param("Session key in host:tmux_name form")),
+            (
+                "session_key",
+                path_param(
+                    "Session key in legacy host:tmux_name or namespaced provider/token/host:tmux_name form",
+                ),
+            ),
             (
                 "reason",
                 body_param(
@@ -3765,7 +3770,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ])
         .with_example(
             json!({
-                "path": {"session_key": "provider:AgentDesk-claude-adk-cc"},
+                "path": {"session_key": "claude/hash123/mac-mini:AgentDesk-claude-adk-cc"},
                 "body": {"reason": "idle 6시간 초과 — 자동 정리"}
             }),
             json!({
