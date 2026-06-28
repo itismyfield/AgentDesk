@@ -92,6 +92,80 @@ db:
 
             self.assertEqual(self.run_checker(root, "--no-silent-growth"), 1)
 
+    def test_legacy_baseline_counts_agentdesk_db_alias_callsites(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            policy_path = self.write(
+                root,
+                "policies/example.js",
+                """module.exports = {
+  onTick: function() {
+    var db = agentdesk.db;
+    db.query("SELECT id FROM kanban_cards");
+    db["execute"]("DELETE FROM kv_meta WHERE key = ?", ["x"]);
+  }
+};
+""",
+            )
+            callsites = checker.scan_callsites(policy_path, root)
+            count, fingerprint = checker.callsite_baseline(callsites)
+            self.legacy_manifest(root, "example", count, fingerprint)
+
+            self.assertEqual(count, 2)
+            self.assertEqual(self.run_checker(root, "--no-silent-growth"), 0)
+
+    def test_legacy_baseline_counts_agentdesk_db_method_alias_callsites(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            policy_path = self.write(
+                root,
+                "policies/example.js",
+                """module.exports = {
+  onTick: function() {
+    const query = agentdesk["db"].query;
+    const execute = agentdesk.db["execute"];
+    query("SELECT id FROM kanban_cards");
+    execute("DELETE FROM kv_meta WHERE key = ?", ["x"]);
+  }
+};
+""",
+            )
+            callsites = checker.scan_callsites(policy_path, root)
+            count, fingerprint = checker.callsite_baseline(callsites)
+            self.legacy_manifest(root, "example", count, fingerprint)
+
+            self.assertEqual(count, 2)
+            self.assertEqual(self.run_checker(root, "--no-silent-growth"), 0)
+
+    def test_legacy_baseline_rejects_alias_growth_from_zero_literal_callsites(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            policy_path = self.write(
+                root,
+                "policies/example.js",
+                """module.exports = {
+  onTick: function() {
+    return null;
+  }
+};
+""",
+            )
+            callsites = checker.scan_callsites(policy_path, root)
+            count, fingerprint = checker.callsite_baseline(callsites)
+            self.legacy_manifest(root, "example", count, fingerprint)
+            policy_path.write_text(
+                """module.exports = {
+  onTick: function() {
+    var db = agentdesk.db;
+    return db.query("SELECT id FROM kanban_cards");
+  }
+};
+""",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(self.run_checker(root, "--no-silent-growth"), 1)
+
     def test_marker_mode_requires_runtime_visible_marker_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

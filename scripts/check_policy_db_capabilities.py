@@ -23,8 +23,21 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 POLICIES_ROOT = REPO_ROOT / "policies"
 LEGACY_BROAD_MODES = {"legacy"}
 ALLOWED_RAW_MODES = {"forbidden", "audited", "transitional", *LEGACY_BROAD_MODES}
-RAW_DB_RE = re.compile(r"agentdesk\.db\.(query|execute)\s*\(")
+IDENT_RE = r"[A-Za-z_$][A-Za-z0-9_$]*"
+RAW_DB_SURFACE_RE = r"""agentdesk\s*(?:\.\s*db|\[\s*["']db["']\s*\])"""
+RAW_DB_CALL_RE = re.compile(
+    rf"""{RAW_DB_SURFACE_RE}\s*(?:\.\s*(query|execute)|\[\s*["'](query|execute)["']\s*\])\s*\("""
+)
 MARKER_RE = re.compile(r"legacy-raw-db:\s*([^*\n]+)")
+RAW_DB_ALIAS_RE = re.compile(
+    rf"""(?:\b(?:var|let|const)\s+)?({IDENT_RE})\s*=\s*{RAW_DB_SURFACE_RE}(?=\s*(?:[;,\)\n]|$))"""
+)
+RAW_DB_METHOD_ALIAS_RE = re.compile(
+    rf"""(?:\b(?:var|let|const)\s+)?({IDENT_RE})\s*=\s*{RAW_DB_SURFACE_RE}\s*(?:\.\s*(query|execute)|\[\s*["'](query|execute)["']\s*\])"""
+)
+AGENTDESK_DB_DESTRUCTURE_RE = re.compile(
+    rf"""(?:\b(?:var|let|const)\s+)?\{{[^}}]*\bdb\s*(?::\s*({IDENT_RE}))?[^}}]*\}}\s*=\s*agentdesk\b"""
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -221,26 +234,153 @@ def marker_in_call_expression(expression: str) -> dict[str, str]:
     return parse_marker(matches[-1])
 
 
+def mask_js_comments_and_strings(text: str) -> str:
+    masked: list[str] = []
+    comment: str | None = None
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < len(text) else ""
+        if comment == "line":
+            if ch == "\n":
+                comment = None
+                masked.append(ch)
+            else:
+                masked.append(" ")
+            i += 1
+            continue
+        if comment == "block":
+            if ch == "*" and nxt == "/":
+                comment = None
+                masked.extend("  ")
+                i += 2
+            else:
+                masked.append("\n" if ch == "\n" else " ")
+                i += 1
+            continue
+        if ch == "/" and nxt == "/":
+            comment = "line"
+            masked.extend("  ")
+            i += 2
+            continue
+        if ch == "/" and nxt == "*":
+            comment = "block"
+            masked.extend("  ")
+            i += 2
+            continue
+        if ch in {"'", '"', "`"}:
+            literal, end = read_js_string_literal(text, i)
+            replacement = (
+                literal
+                if literal_value(literal) in {"db", "query", "execute"}
+                else "".join("\n" if c == "\n" else " " for c in literal)
+            )
+            masked.append(replacement)
+            i = end
+            continue
+        masked.append(ch)
+        i += 1
+    return "".join(masked)
+
+
+def read_js_string_literal(text: str, start: int) -> tuple[str, int]:
+    quote = text[start]
+    escaped = False
+    i = start + 1
+    while i < len(text):
+        ch = text[i]
+        if escaped:
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch == quote:
+            return text[start : i + 1], i + 1
+        i += 1
+    return text[start:], len(text)
+
+
+def literal_value(literal: str) -> str:
+    if len(literal) < 2:
+        return ""
+    quote = literal[0]
+    if quote not in {"'", '"', "`"} or literal[-1] != quote:
+        return ""
+    value = literal[1:-1]
+    if "\\" in value:
+        return ""
+    return value
+
+
+def raw_db_aliases(masked_text: str) -> dict[str, str | None]:
+    aliases: dict[str, str | None] = {}
+    for match in RAW_DB_ALIAS_RE.finditer(masked_text):
+        aliases[match.group(1)] = None
+    for match in AGENTDESK_DB_DESTRUCTURE_RE.finditer(masked_text):
+        aliases[match.group(1) or "db"] = None
+    for match in RAW_DB_METHOD_ALIAS_RE.finditer(masked_text):
+        aliases[match.group(1)] = match.group(2) or match.group(3)
+    return aliases
+
+
+def alias_call_regex(alias: str) -> re.Pattern[str]:
+    escaped_alias = re.escape(alias)
+    return re.compile(
+        rf"""(?<![.\w$])\b{escaped_alias}\s*(?:\.\s*(query|execute)|\[\s*["'](query|execute)["']\s*\])\s*\("""
+    )
+
+
+def method_alias_call_regex(alias: str) -> re.Pattern[str]:
+    return re.compile(rf"""(?<![.\w$])\b{re.escape(alias)}\s*\(""")
+
+
+def callsite_from_match(
+    text: str,
+    path: Path,
+    rel_path: str,
+    match: re.Match[str],
+    op: str,
+) -> Callsite:
+    expression = extract_call_expression(text, match.start(), match.end() - 1)
+    line = text.count("\n", 0, match.start()) + 1
+    return Callsite(
+        path=path,
+        rel_path=rel_path,
+        line=line,
+        op=op,
+        expression=expression,
+        marker=marker_in_call_expression(expression),
+    )
+
+
 def scan_callsites(path: Path, repo_root: Path = REPO_ROOT) -> list[Callsite]:
     repo_root = repo_root.resolve()
     path = (repo_root / path).resolve() if not path.is_absolute() else path.resolve()
     text = path.read_text(encoding="utf-8")
+    masked_text = mask_js_comments_and_strings(text)
     rel_path = path.relative_to(repo_root).as_posix()
     callsites: list[Callsite] = []
-    for match in RAW_DB_RE.finditer(text):
-        op = match.group(1)
-        expression = extract_call_expression(text, match.start(), match.end() - 1)
-        line = text.count("\n", 0, match.start()) + 1
-        callsites.append(
-            Callsite(
-                path=path,
-                rel_path=rel_path,
-                line=line,
-                op=op,
-                expression=expression,
-                marker=marker_in_call_expression(expression),
-            )
-        )
+    seen: set[tuple[int, int]] = set()
+    for match in RAW_DB_CALL_RE.finditer(masked_text):
+        op = match.group(1) or match.group(2)
+        callsites.append(callsite_from_match(text, path, rel_path, match, op))
+        seen.add((match.start(), match.end()))
+    for alias, method_op in raw_db_aliases(masked_text).items():
+        if method_op:
+            pattern = method_alias_call_regex(alias)
+            for match in pattern.finditer(masked_text):
+                if (match.start(), match.end()) in seen:
+                    continue
+                callsites.append(callsite_from_match(text, path, rel_path, match, method_op))
+                seen.add((match.start(), match.end()))
+            continue
+        pattern = alias_call_regex(alias)
+        for match in pattern.finditer(masked_text):
+            if (match.start(), match.end()) in seen:
+                continue
+            op = match.group(1) or match.group(2)
+            callsites.append(callsite_from_match(text, path, rel_path, match, op))
+            seen.add((match.start(), match.end()))
+    callsites.sort(key=lambda callsite: (callsite.rel_path, callsite.line, callsite.expression))
     return callsites
 
 
