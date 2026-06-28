@@ -20,6 +20,9 @@ use crate::db::meetings::{
 };
 use crate::services::discord::meeting_artifact_store::UpsertMeetingBody;
 use crate::services::discord::{health, meeting, settings};
+use crate::services::github_issue_creation::{
+    GitHubIssueCreateRequest, create_github_issue_with_side_effects,
+};
 use crate::services::provider::ProviderKind;
 
 // ── Body types ─────────────────────────────────────────────────
@@ -780,18 +783,39 @@ pub async fn create_issues(
             String::new()
         };
 
-        // Use the shared async/timeout-bounded GitHub helper so this route
-        // does not block the Tokio worker on a direct gh subprocess call.
-        match crate::github::create_issue(&repo, title, &body_text).await {
-            Ok(issue) => {
-                let url = issue.url;
+        let issue_create_request = GitHubIssueCreateRequest::github_only(
+            "meeting_issue_creation",
+            repo.clone(),
+            title.to_string(),
+            body_text.clone(),
+            "meeting issue creation stores issue_url in meeting metadata and intentionally skips kanban/announcement sync",
+        );
+
+        match create_github_issue_with_side_effects(Some(pool), issue_create_request).await {
+            Ok(result) => {
+                let issue_number = result.issue.number;
+                let url = result.issue.url.clone();
+                let kanban_card_sync = result.kanban.clone();
+                let announcement_sync = result.announcement.clone();
                 // Store result
                 let _ = store_issue_url_pg(pool, &id, &key, &url).await;
-                results.push(json!({"key": key, "title": title, "assignee": "", "ok": true, "issue_url": url, "attempted_at": chrono::Utc::now().timestamp()}));
+                results.push(json!({
+                    "key": key,
+                    "title": title,
+                    "assignee": "",
+                    "ok": true,
+                    "issue_url": url,
+                    "issue_number": issue_number,
+                    "issue_creation_origin": result.origin,
+                    "issue_creation_mode": result.mode.as_str(),
+                    "kanban_card_sync": kanban_card_sync,
+                    "announcement_sync": announcement_sync,
+                    "attempted_at": chrono::Utc::now().timestamp()
+                }));
                 created += 1;
             }
             Err(error) => {
-                results.push(json!({"key": key, "title": title, "assignee": "", "ok": false, "error": error, "attempted_at": chrono::Utc::now().timestamp()}));
+                results.push(json!({"key": key, "title": title, "assignee": "", "ok": false, "error": error.to_string(), "attempted_at": chrono::Utc::now().timestamp()}));
                 failed += 1;
             }
         }

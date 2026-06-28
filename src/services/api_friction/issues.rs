@@ -7,6 +7,10 @@ use super::patterns::{
     load_pattern_candidates_pg,
 };
 use crate::github::CreatedIssue;
+use crate::services::github_issue_creation::{
+    GitHubIssueCreateRequest, GitHubIssueCreationResult, IssueAnnouncementSyncOutcome,
+    IssueCreationMode, KanbanCardSyncOutcome, create_github_issue_with_side_effects,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct ProcessedApiFrictionIssue {
@@ -17,6 +21,9 @@ pub(crate) struct ProcessedApiFrictionIssue {
     pub event_count: usize,
     pub issue_number: i64,
     pub issue_url: String,
+    pub issue_creation_mode: IssueCreationMode,
+    pub kanban_card_sync: KanbanCardSyncOutcome,
+    pub announcement_sync: IssueAnnouncementSyncOutcome,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -95,14 +102,24 @@ async fn process_pattern_issue_pg(
     let issue_title = issue_title(&pattern);
     let issue_body = build_issue_body_pg(pg_pool, &pattern).await?;
 
-    match crate::github::create_issue(&pattern.repo_id, &issue_title, &issue_body).await {
-        Ok(issue) => {
-            upsert_created_issue_pg(pg_pool, &pattern, &issue_title, &issue_body, &issue).await?;
+    let issue_create_request = GitHubIssueCreateRequest::github_only(
+        "api_friction_issue_processing",
+        pattern.repo_id.clone(),
+        issue_title.clone(),
+        issue_body.clone(),
+        "API-friction issue processing persists issue_url in api_friction_issues and intentionally skips kanban/announcement sync",
+    );
+
+    match create_github_issue_with_side_effects(Some(pg_pool), issue_create_request).await {
+        Ok(result) => {
+            upsert_created_issue_pg(pg_pool, &pattern, &issue_title, &issue_body, &result.issue)
+                .await?;
             Ok(ApiFrictionPatternProcessResult::Created(processed_issue(
-                &pattern, issue,
+                &pattern, result,
             )))
         }
         Err(error) => {
+            let error = error.to_string();
             record_issue_creation_failure_pg(pg_pool, &pattern, &issue_title, &issue_body, &error)
                 .await?;
             Ok(ApiFrictionPatternProcessResult::Failed(pattern_failure(
@@ -222,7 +239,11 @@ fn event_count_i32(event_count: usize) -> Result<i32, String> {
         .map_err(|_| format!("api_friction event_count exceeds postgres integer: {event_count}"))
 }
 
-fn processed_issue(pattern: &ApiFrictionPattern, issue: CreatedIssue) -> ProcessedApiFrictionIssue {
+fn processed_issue(
+    pattern: &ApiFrictionPattern,
+    result: GitHubIssueCreationResult,
+) -> ProcessedApiFrictionIssue {
+    let issue = result.issue;
     ProcessedApiFrictionIssue {
         fingerprint: pattern.fingerprint.clone(),
         endpoint: pattern.endpoint.clone(),
@@ -231,6 +252,9 @@ fn processed_issue(pattern: &ApiFrictionPattern, issue: CreatedIssue) -> Process
         event_count: pattern.event_count,
         issue_number: issue.number,
         issue_url: issue.url,
+        issue_creation_mode: result.mode,
+        kanban_card_sync: result.kanban,
+        announcement_sync: result.announcement,
     }
 }
 
