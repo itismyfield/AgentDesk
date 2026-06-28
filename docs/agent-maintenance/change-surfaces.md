@@ -142,7 +142,7 @@
     `watchers/codex_tui_restore.rs` while adding the restore branch; -207 from
     #3840 moving heartbeat/activity helpers into
     `watchers/lifecycle/activity.rs`).
-  - `src/services/discord/tmux.rs` (2039 lines after #2558 dead-code sweep;
+  - `src/services/discord/tmux.rs` (1463 lines after #2558 dead-code sweep;
     +6 from #3818 sanitizing restored/orphan subagent-notification placeholders;
     +1 from #3384 restored-seed undelivered-body discard guard;
     +38 for suppressed-label noise, user report 2026-06-12: provider-aware
@@ -184,7 +184,8 @@
     non-owned `last_offset` from the in-lock disk reload). The duplicated
     in-bounds/monotonic local mutation block collapsed into the helper, and the
     function gained a `require_identity: Option<&InflightTurnIdentity>` param so a
-    late-frame fresh row B is rejected;
+    late-frame fresh row B is rejected; -576 from #3841 extracting placeholder
+    suppression helpers to `tmux_placeholder_suppression.rs`;
     still giant-file territory).
   - `src/services/discord/tmux_watcher.rs` (6935 production lines; +10 from #3558
     (codex review follow-up) routing the two remaining session-bound-relay-success
