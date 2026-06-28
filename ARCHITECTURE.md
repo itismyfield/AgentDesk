@@ -649,6 +649,8 @@ src/
 │   │   │   ├── stt.rs
 │   │   │   └── tts_pipeline.rs
 │   │   ├── watchers/
+│   │   │   ├── lifecycle/
+│   │   │   │   └── activity.rs
 │   │   │   ├── codex_tui_restore.rs
 │   │   │   ├── lifecycle.rs
 │   │   │   └── lifecycle_decision.rs
