@@ -4,21 +4,23 @@
 
 > Drift policy: see [docs/generated/README.md](README.md#generated-docs-drift-policy).
 
-Automated audit of giant files, route SRP violations, direct Discord sends, manual JSON row mapping, limit/days clamp duplication, git subprocess callsites, legacy SQLite references, source-of-truth alias writes, and namespace size caps. See `scripts/audit_maintainability.py` (#1282).
+Automated audit of giant files, route SRP violations, direct Discord sends, service-to-server backflow, manual JSON row mapping, limit/days clamp duplication, git subprocess callsites, legacy SQLite references, source-of-truth alias writes, and namespace size caps. See `scripts/audit_maintainability.py` (#1282).
 
-Hard-gating is **enabled** for 6 checks: `giant_files`, `namespace_size_caps`, `direct_discord_sends`, `git_subprocess_callsites`, `legacy_sqlite_refs`, `source_of_truth_alias_writes`.
+Hard-gating is **enabled** for 8 checks: `giant_files`, `giant_file_ratchet`, `namespace_size_caps`, `direct_discord_sends`, `manual_json_row_mapping`, `git_subprocess_callsites`, `legacy_sqlite_refs`, `source_of_truth_alias_writes`.
 
-Baseline no-regression gates are **enabled** for 1 checks: `route_srp_violations`.
+Baseline no-regression gates are **enabled** for 2 checks: `route_srp_violations`, `service_server_backflow`.
 
 ## Summary
 
 | Rule | Hits | Hard gate | Baseline gate |
 |---|---:|:--:|:--:|
 | `giant_files` | 0 | YES | no |
+| `giant_file_ratchet` | 0 | YES | no |
 | `namespace_size_caps` | 0 | YES | no |
-| `route_srp_violations` | 16 | no | YES |
+| `route_srp_violations` | 11 | no | YES |
+| `service_server_backflow` | 0 | no | YES |
 | `direct_discord_sends` | 0 | YES | no |
-| `manual_json_row_mapping` | 0 | no | no |
+| `manual_json_row_mapping` | 0 | YES | no |
 | `limit_clamp_duplication` | 0 | no | no |
 | `git_subprocess_callsites` | 0 | YES | no |
 | `legacy_sqlite_refs` | 0 | YES | no |
@@ -27,6 +29,12 @@ Baseline no-regression gates are **enabled** for 1 checks: `route_srp_violations
 ## Giant files (`giant_files`)
 
 Production Rust files in src/ with >= 1000 lines that are not listed in docs/agent-maintenance/change-surfaces.md.
+
+_No findings._
+
+## Giant file re-inflation ratchet (`giant_file_ratchet`)
+
+Production giants listed in scripts/audit_maintainability_giant_baseline.toml must not exceed their frozen production-LoC baseline.
 
 _No findings._
 
@@ -42,22 +50,23 @@ Files under src/server/routes/ that mix raw SQL, json!() shaping, and crate::ser
 
 | Severity | File | Line | Message |
 |---|---|---:|---|
-| warn | `src/server/routes/agents.rs` |  | route file mixes SQL (10), json!() (72), and crate::services calls (16) |
-| warn | `src/server/routes/agents_crud.rs` |  | route file mixes SQL (40), json!() (73), and crate::services calls (6) |
+| warn | `src/server/routes/agents_crud.rs` |  | route file mixes SQL (40), json!() (77), and crate::services calls (7) |
 | warn | `src/server/routes/agents_setup.rs` |  | route file mixes SQL (7), json!() (12), and crate::services calls (2) |
 | warn | `src/server/routes/cron_api.rs` |  | route file mixes SQL (2), json!() (12), and crate::services calls (1) |
-| warn | `src/server/routes/dispatches/thread_reuse.rs` |  | route file mixes SQL (36), json!() (19), and crate::services calls (1) |
-| warn | `src/server/routes/escalation.rs` |  | route file mixes SQL (44), json!() (38), and crate::services calls (3) |
-| warn | `src/server/routes/github.rs` |  | route file mixes SQL (8), json!() (27), and crate::services calls (5) |
-| warn | `src/server/routes/health_api.rs` |  | route file mixes SQL (20), json!() (64), and crate::services calls (6) |
-| warn | `src/server/routes/meetings.rs` |  | route file mixes SQL (68), json!() (70), and crate::services calls (3) |
-| warn | `src/server/routes/memory_api.rs` |  | route file mixes SQL (8), json!() (15), and crate::services calls (8) |
-| warn | `src/server/routes/pipeline.rs` |  | route file mixes SQL (8), json!() (19), and crate::services calls (4) |
-| warn | `src/server/routes/provider_cli_api.rs` |  | route file mixes SQL (5), json!() (12), and crate::services calls (30) |
-| warn | `src/server/routes/queue_api.rs` |  | route file mixes SQL (4), json!() (15), and crate::services calls (5) |
-| warn | `src/server/routes/review_verdict/decision_route.rs` |  | route file mixes SQL (44), json!() (22), and crate::services calls (1) |
-| warn | `src/server/routes/review_verdict/verdict_route.rs` |  | route file mixes SQL (5), json!() (19), and crate::services calls (4) |
-| warn | `src/server/routes/stats.rs` |  | route file mixes SQL (32), json!() (9), and crate::services calls (1) |
+| warn | `src/server/routes/escalation.rs` |  | route file mixes SQL (24), json!() (24), and crate::services calls (3) |
+| warn | `src/server/routes/github.rs` |  | route file mixes SQL (8), json!() (34), and crate::services calls (5) |
+| warn | `src/server/routes/health_api.rs` |  | route file mixes SQL (30), json!() (106), and crate::services calls (17) |
+| warn | `src/server/routes/memory_api.rs` |  | route file mixes SQL (17), json!() (18), and crate::services calls (7) |
+| warn | `src/server/routes/provider_cli_api.rs` |  | route file mixes SQL (3), json!() (12), and crate::services calls (6) |
+| warn | `src/server/routes/queue_api.rs` |  | route file mixes SQL (4), json!() (15), and crate::services calls (3) |
+| warn | `src/server/routes/review_verdict/verdict_route.rs` |  | route file mixes SQL (5), json!() (19), and crate::services calls (5) |
+| warn | `src/server/routes/stats.rs` |  | route file mixes SQL (32), json!() (10), and crate::services calls (2) |
+
+## Service/server backflow (`service_server_backflow`)
+
+Files under src/services/ that reference crate::server or super::server server-layer modules.
+
+_No findings._
 
 ## Direct Discord send/edit (`direct_discord_sends`)
 
