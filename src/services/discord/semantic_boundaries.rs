@@ -48,6 +48,13 @@ fn leading_extension_token(text: &str) -> &str {
     &trimmed[..end]
 }
 
+fn incoming_extension_token_and_rest(text: &str) -> (&str, &str) {
+    let trimmed = text.trim_start();
+    let token = leading_extension_token(trimmed);
+    let rest = &trimmed[token.len()..];
+    (token, rest)
+}
+
 fn common_extension_token(token: &str) -> bool {
     matches!(
         token,
@@ -87,10 +94,44 @@ fn common_extension_token(token: &str) -> bool {
     )
 }
 
+fn likely_file_stem_token(token: &str) -> bool {
+    token
+        .chars()
+        .any(|ch| ch.is_ascii_digit() || matches!(ch, '_' | '-' | '.'))
+        || matches!(
+            token.to_ascii_lowercase().as_str(),
+            "app"
+                | "cargo"
+                | "changelog"
+                | "client"
+                | "config"
+                | "defaults"
+                | "dockerfile"
+                | "index"
+                | "lib"
+                | "license"
+                | "main"
+                | "makefile"
+                | "mod"
+                | "package"
+                | "readme"
+                | "requirements"
+                | "schema"
+                | "server"
+                | "settings"
+                | "test"
+                | "tests"
+                | "tsconfig"
+        )
+}
+
 fn extension_join_candidate(line: &str, dot_idx: usize, incoming: &str) -> bool {
     let before = token_before_dot(line, dot_idx);
-    let extension = leading_extension_token(incoming);
-    !before.is_empty() && !has_hangul(before) && common_extension_token(extension)
+    let (extension, rest) = incoming_extension_token_and_rest(incoming);
+    !before.is_empty()
+        && !has_hangul(before)
+        && common_extension_token(extension)
+        && (rest.trim().is_empty() || likely_file_stem_token(before))
 }
 
 fn inline_code_span_open(line: &str) -> bool {

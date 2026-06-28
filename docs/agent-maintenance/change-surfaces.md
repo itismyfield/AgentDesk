@@ -1016,7 +1016,8 @@
     children (`send_target`, `send_gate`, `send_api`, `manual_delivery`) to
     `outbound/` while preserving the `health::` re-export API; #1879
     snapshot/mailbox extraction, and #3082 answer-flush-barrier field).
-  - `src/services/discord/health/recovery.rs` (2729 lines; -3 from #3795
+  - `src/services/discord/health/recovery.rs` (2731 lines; +2 from #3807 applying
+    compact continuation context to stale-leak recovery split delivery; -3 from #3795
     routing session-key tail fallback through `SessionIdentity`; +2 from #3711/#3712 mapping direct TUI runtime-binding-unavailable rebind failures to 409 Conflict; #3676 moved
     `tmux_alive_relay_dead` watchdog reattach logic into sibling
     `health/relay_dead_reattach.rs`, leaving recovery.rs with only the
@@ -1219,8 +1220,8 @@
     terminal-or-defer verdict pair). Bugfix only outside a
     finalizer-decomposition plan).
   - `src/services/discord/formatting.rs` (2801 lines; #3807 wires semantic
-    sentence-boundary callsites here while keeping the shared helper in
-    `semantic_boundaries.rs`, so the frozen giant stays below baseline;
+    sentence-boundary callsites while keeping the shared boundary classifier
+    and compact continuation-context helper in `semantic_boundaries.rs`;
     worker-local presentation logic only, no relay ownership/lease change.
     #3818 keeps only the placeholder-status subagent-notification summary hook
     here while moving the shared streaming-rollover predicate to

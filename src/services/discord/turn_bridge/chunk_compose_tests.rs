@@ -147,6 +147,10 @@ fn semantic_sentence_boundary_separates_ascii_status_chunks() {
     let mut full_response = String::from("Review complete.");
     append_streamed_text_chunk(&mut full_response, "VERDICT: CLEAN");
     assert_eq!(full_response, "Review complete.\n\nVERDICT: CLEAN");
+
+    let mut prose = String::from("Review complete.");
+    append_streamed_text_chunk(&mut prose, "log follows");
+    assert_eq!(prose, "Review complete.\n\nlog follows");
 }
 
 #[test]

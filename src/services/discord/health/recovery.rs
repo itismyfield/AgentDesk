@@ -2428,7 +2428,9 @@ async fn maybe_recover_completed_stale_leak(
     // Discord's 2000). For multi-chunk recovery we first consult the durable
     // per-chunk ledger. Legacy/pre-ledger retries can still derive a prefix
     // from live Discord state, then seed the ledger before continuing.
-    let chunks = discord::formatting::split_message(&delivery_text);
+    let chunks = discord::semantic_boundaries::add_continuation_context(
+        discord::formatting::split_message(&delivery_text),
+    );
     if chunks.is_empty() {
         return false;
     }
