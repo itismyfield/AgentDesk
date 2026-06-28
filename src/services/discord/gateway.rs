@@ -1118,7 +1118,15 @@ mod tests {
         let sent = gateway.sent.lock().expect("sent lock");
         assert_eq!(
             sent.iter()
-                .map(|(_, chunk)| chunk.as_str())
+                .map(|(_, chunk)| {
+                    chunk
+                        .split_once('\n')
+                        .filter(|(prefix, _)| {
+                            prefix.starts_with('[') && prefix.ends_with(']') && prefix.contains('/')
+                        })
+                        .map(|(_, body)| body)
+                        .unwrap_or(chunk.as_str())
+                })
                 .collect::<String>(),
             body
         );

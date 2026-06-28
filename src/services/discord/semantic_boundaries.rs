@@ -160,8 +160,8 @@ fn markdown_continuation_tail(line: &str) -> bool {
         || trimmed.starts_with("> ")
 }
 
-pub(in crate::services::discord) fn semantic_sentence_split_boundary(text: &str) -> Option<usize> {
-    let mut in_code_block = false;
+fn semantic_sentence_split_boundary_from(text: &str, starts_in_code_block: bool) -> Option<usize> {
+    let mut in_code_block = starts_in_code_block;
     let mut offset = 0;
     let mut boundary = None;
 
@@ -169,8 +169,14 @@ pub(in crate::services::discord) fn semantic_sentence_split_boundary(text: &str)
         let line = segment.strip_suffix('\n').unwrap_or(segment);
         let fence_line = line_starts_code_fence(line);
         if !in_code_block && !fence_line && !markdown_continuation_tail(line) {
+            let mut in_inline_code = false;
             for (idx, ch) in line.char_indices() {
-                if semantic_terminal_char(ch) && semantic_terminal_boundary_allowed(line, idx, ch) {
+                if ch == '`' {
+                    in_inline_code = !in_inline_code;
+                } else if !in_inline_code
+                    && semantic_terminal_char(ch)
+                    && semantic_terminal_boundary_allowed(line, idx, ch)
+                {
                     boundary = Some(offset + idx + ch.len_utf8());
                 }
             }
@@ -184,14 +190,19 @@ pub(in crate::services::discord) fn semantic_sentence_split_boundary(text: &str)
     boundary
 }
 
+pub(in crate::services::discord) fn semantic_sentence_split_boundary(text: &str) -> Option<usize> {
+    semantic_sentence_split_boundary_from(text, false)
+}
+
 pub(in crate::services::discord) fn message_split_boundary(
     remaining: &str,
     safe_end: usize,
+    starts_in_code_block: bool,
 ) -> (usize, &'static str) {
     let window = &remaining[..safe_end];
     if let Some(idx) = window.rfind('\n') {
         (idx, "newline")
-    } else if let Some(idx) = semantic_sentence_split_boundary(window) {
+    } else if let Some(idx) = semantic_sentence_split_boundary_from(window, starts_in_code_block) {
         (idx, "semantic")
     } else {
         (safe_end, "hard")

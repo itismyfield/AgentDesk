@@ -1250,7 +1250,9 @@ files, and memory recall below as new actionable input.\n\n\
     // `#[cfg(test)] mod` block => ZERO production LoC under the ratchet
     // (formatting.rs baseline 2802 stays unchanged).
     mod a0_characterization_tests {
-        use super::super::super::semantic_boundaries::semantic_sentence_split_boundary;
+        use super::super::super::semantic_boundaries::{
+            message_split_boundary, semantic_sentence_split_boundary,
+        };
         use super::super::{
             DISCORD_MSG_LIMIT, long_message_reply_builders, plan_streaming_rollover, split_message,
             streaming_split_boundary,
@@ -1476,6 +1478,17 @@ files, and memory recall below as new actionable input.\n\n\
                 semantic_sentence_split_boundary("확인합니다.`NullRHI`"),
                 Some("확인합니다.".len()),
                 "inline-code follow-up after Korean sentence is a readable split point"
+            );
+            assert_eq!(
+                semantic_sentence_split_boundary("Use `foo.bar` in config"),
+                None,
+                "inline code punctuation is not a sentence split point"
+            );
+            let code_window = "println!(\"done.\"); keep streaming inside fence";
+            assert_eq!(
+                message_split_boundary(code_window, code_window.len(), true),
+                (code_window.len(), "hard"),
+                "already-open code fences must not use semantic sentence splits"
             );
             assert_eq!(
                 semantic_sentence_split_boundary("- item. more text"),
@@ -3007,7 +3020,7 @@ pub(super) fn split_message(text: &str) -> Vec<String> {
         // `safe_end` is also 0 due to a multi-byte char on the boundary).
         let safe_end = floor_char_boundary(remaining, effective_limit);
         let (mut split_at, mut boundary_kind) =
-            super::semantic_boundaries::message_split_boundary(remaining, safe_end);
+            super::semantic_boundaries::message_split_boundary(remaining, safe_end, in_code_block);
         if split_at == 0 {
             if safe_end > 0 {
                 split_at = safe_end;

@@ -35,6 +35,8 @@ Last refreshed: 2026-06-16 (against `main` @ `8ec7336e32eb6ef89e1143fab2543f2fc6
 >
 > Last refreshed: 2026-06-28 (#3751 — `InflightTurnState` still carries `watcher_owner_channel_id` for same-binary fast reads, but the mixed-binary-safe source of restart recovery is the separate `discord_delivery_owner_context` sidecar stored under the delivery channel. `recovery_paths/restart.rs::try_recover_anchor_repost` first resolves that sidecar delivery-channel → watcher-owner mapping, falls back to the inflight field / `state.channel_id` for legacy rows, and rejects shared-owner stale anchors whose recorded `panel_channel_id` does not match the recovered delivery channel or whose range starts at/after the row's `last_offset`. `logical_channel_id` remains a thread-parent axis and is explicitly not used for delivery-record lookup. The repost target still comes from recorded `panel_channel_id`; stale-generation and `MessageGone` guards are unchanged).
 >
+> Last refreshed: 2026-06-29 (#3807 — manual notification over-limit chunk delivery now wraps `split_message` output with compact continuation context markers, matching the other long-message split paths. This is still the existing compatibility chunk shim in `outbound/manual_delivery.rs`; no v3 outbound API shape, dedup writer, attachment policy, or direct-send inventory category changed).
+>
 > Companion docs: [`docs/discord-outbound-remaining-producers.md`](../discord-outbound-remaining-producers.md) (#1175 closure), [`docs/source-of-truth.md`](../source-of-truth.md).
 
 This is the single source of truth for "where is each Discord outbound callsite
@@ -319,6 +321,9 @@ button hits the manual outbound API, which is covered under §3.A
   `api_send_rejects_user_supplied_voice_delivery_id_namespace` verifies manual
   `/api/discord/send` callers cannot forge the reserved `voice:` correlation
   namespace used by voice announce delivery ids.
+- `src/services/discord/outbound/manual_delivery.rs`:
+  #3807 keeps the manual over-limit notification path on the compatibility
+  chunk shim while adding compact continuation context to each split message.
 
 ## 6. Guardrail proposal (DoD #4)
 
