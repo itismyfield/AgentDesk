@@ -14,7 +14,7 @@ use crate::db::session_status::is_active_status;
 use crate::server::routes::active_session_audit::{
     self, ActiveSessionAuditReport, ActiveSessionAuditSettings, RawSessionRow,
 };
-use crate::services::discord::health;
+use crate::services::discord::{health, outbound};
 use crate::services::disk_monitor;
 use crate::services::provider::ProviderKind;
 
@@ -353,6 +353,7 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
                 gate_danger_override,
             ))
             .unwrap_or_else(|_| serde_json::json!({}));
+        json["delivery_record_rollout"] = delivery_record_rollout_health_json();
 
         let http_status = if status.is_http_ready() {
             StatusCode::OK
@@ -444,6 +445,7 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
         if let Some(opencode_block) = opencode_warm_pool_json(detailed) {
             json["opencode"] = opencode_block;
         }
+        json["delivery_record_rollout"] = delivery_record_rollout_health_json();
         let json = if detailed {
             with_latest_startup_doctor(json, true)
         } else {
@@ -545,6 +547,10 @@ fn ensure_startup_doctor_state_reason(
     }
 }
 
+fn delivery_record_rollout_health_json() -> serde_json::Value {
+    outbound::delivery_record_rollout_health_json()
+}
+
 fn public_health_json(json: serde_json::Value) -> serde_json::Value {
     let status = json
         .get("status")
@@ -574,6 +580,7 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
     let startup_status = json.get("startup_status").cloned();
     let startup_degraded = json.get("startup_degraded").cloned();
     let startup_degraded_reasons = json.get("startup_degraded_reasons").cloned();
+    let delivery_record_rollout = json.get("delivery_record_rollout").cloned();
     // Public OpenCode summary is count-only and never includes the per-server
     // `warm_servers` array, pids, ports, or startup tails (spec C-3). The
     // upstream `opencode_warm_pool_json(false)` already produced a count-only
@@ -605,6 +612,9 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
     }
     if let Some(startup_degraded_reasons) = startup_degraded_reasons {
         public["startup_degraded_reasons"] = startup_degraded_reasons;
+    }
+    if let Some(delivery_record_rollout) = delivery_record_rollout {
+        public["delivery_record_rollout"] = delivery_record_rollout;
     }
     if let Some(opencode_public) = opencode_public {
         public["opencode"] = opencode_public;
@@ -2359,6 +2369,31 @@ mod tests {
         assert_eq!(public["status"], json!("degraded"));
         assert_eq!(public["ok"], json!(false));
         assert_eq!(public["degraded"], json!(true));
+    }
+
+    #[test]
+    fn public_health_json_preserves_delivery_record_rollout_state() {
+        let public = public_health_json(json!({
+            "status": "healthy",
+            "version": "0.1.2",
+            "db": true,
+            "dashboard": true,
+            "server_up": true,
+            "delivery_record_rollout": {
+                "shadow_enabled": false,
+                "authority_enabled": false,
+                "mode": "off",
+                "dedup_authority": "in_memory_committed_offset",
+                "same_turn_backward_write_enforcement": "observe_only",
+                "warning_count": 1,
+                "configuration_warnings": [
+                    "delivery_record_authority_disabled: durable frontiers are not the default committed-offset authority"
+                ]
+            }
+        }));
+        assert_eq!(public["delivery_record_rollout"]["mode"], json!("off"));
+        assert_eq!(public["delivery_record_rollout"]["warning_count"], json!(1));
+        assert_eq!(public["ok"], json!(true));
     }
 
     #[test]

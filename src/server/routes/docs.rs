@@ -541,6 +541,14 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "status": "healthy",
                 "server_up": true,
                 "fully_recovered": true,
+                "delivery_record_rollout": {
+                    "shadow_enabled": false,
+                    "authority_enabled": false,
+                    "mode": "off",
+                    "dedup_authority": "in_memory_committed_offset",
+                    "same_turn_backward_write_enforcement": "observe_only",
+                    "warning_count": 1
+                },
                 "latest_startup_doctor": {
                     "available": true,
                     "status": "warned",
@@ -580,6 +588,15 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "status": "healthy",
                 "server_up": true,
                 "fully_recovered": true,
+                "delivery_record_rollout": {
+                    "shadow_enabled": true,
+                    "authority_enabled": true,
+                    "mode": "shadow_and_authority",
+                    "dedup_authority": "durable_delivery_record_frontier",
+                    "same_turn_backward_write_enforcement": "enforcing",
+                    "warning_count": 0,
+                    "configuration_warnings": []
+                },
                 "latest_startup_doctor": {
                     "available": true,
                     "status": "failed",

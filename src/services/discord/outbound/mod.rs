@@ -43,3 +43,7 @@ pub(crate) fn shared_outbound_deduper() -> &'static OutboundDeduper {
     static DEDUPER: OnceLock<OutboundDeduper> = OnceLock::new();
     DEDUPER.get_or_init(OutboundDeduper::new)
 }
+
+pub(crate) fn delivery_record_rollout_health_json() -> serde_json::Value {
+    delivery_record::delivery_record_rollout_health_json()
+}
