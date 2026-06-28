@@ -77,6 +77,15 @@ pub(in crate::services::discord) struct InflightTurnState {
     pub provider: String,
     pub channel_id: u64,
     pub channel_name: Option<String>,
+    /// Offset-authority channel for tmux watcher delivery records.
+    ///
+    /// This is usually identical to `channel_id`, but a bridge turn can reuse a
+    /// watcher owned by another channel. Durable delivery records are keyed by
+    /// that owner channel, while `channel_id` remains the Discord delivery
+    /// channel. `logical_channel_id` is a thread-parent axis and must not be
+    /// used as a substitute.
+    #[serde(default)]
+    pub watcher_owner_channel_id: Option<u64>,
     #[serde(default)]
     pub logical_channel_id: Option<u64>,
     #[serde(default)]
@@ -569,6 +578,68 @@ mod turn_source_tests {
             RelayOwnerKind::StandbyRelay
         );
     }
+
+    #[test]
+    fn watcher_owner_channel_id_defaults_absent_legacy_rows_to_none() {
+        let state: InflightTurnState = serde_json::from_value(serde_json::json!({
+            "version": 9,
+            "provider": "codex",
+            "channel_id": 42,
+            "channel_name": "adk-cdx",
+            "request_owner_user_id": 7,
+            "user_msg_id": 8,
+            "current_msg_id": 9,
+            "current_msg_len": 0,
+            "user_text": "hello",
+            "source": "text",
+            "session_id": null,
+            "tmux_session_name": "AgentDesk-codex-adk-cdx",
+            "output_path": "/tmp/out.jsonl",
+            "input_fifo_path": null,
+            "last_offset": 0,
+            "full_response": "",
+            "response_sent_offset": 0,
+            "started_at": "2026-06-28 10:00:00",
+            "updated_at": "2026-06-28 10:00:00",
+            "watcher_owns_live_relay": false
+        }))
+        .expect("legacy row without owner channel should deserialize");
+
+        assert_eq!(state.watcher_owner_channel_id, None);
+        assert_eq!(state.delivery_record_owner_channel_id(), 42);
+    }
+
+    #[test]
+    fn watcher_owner_channel_id_round_trips_when_present() {
+        let json = serde_json::json!({
+            "version": 9,
+            "provider": "codex",
+            "channel_id": 42,
+            "channel_name": "adk-cdx",
+            "watcher_owner_channel_id": 99,
+            "request_owner_user_id": 7,
+            "user_msg_id": 8,
+            "current_msg_id": 9,
+            "current_msg_len": 0,
+            "user_text": "hello",
+            "source": "text",
+            "session_id": null,
+            "tmux_session_name": "AgentDesk-codex-adk-cdx",
+            "output_path": "/tmp/out.jsonl",
+            "input_fifo_path": null,
+            "last_offset": 0,
+            "full_response": "",
+            "response_sent_offset": 0,
+            "started_at": "2026-06-28 10:00:00",
+            "updated_at": "2026-06-28 10:00:00",
+            "watcher_owns_live_relay": false
+        });
+        assert_eq!(json["watcher_owner_channel_id"], serde_json::json!(99));
+        let parsed: InflightTurnState =
+            serde_json::from_value(json).expect("deserialize owner channel");
+        assert_eq!(parsed.watcher_owner_channel_id, Some(99));
+        assert_eq!(parsed.delivery_record_owner_channel_id(), 99);
+    }
 }
 
 impl InflightTurnState {
@@ -612,6 +683,7 @@ impl InflightTurnState {
             provider: provider_name,
             channel_id,
             channel_name,
+            watcher_owner_channel_id: Some(channel_id),
             logical_channel_id: Some(channel_id),
             thread_id: None,
             thread_title: None,
@@ -725,6 +797,36 @@ impl InflightTurnState {
     pub(in crate::services::discord) fn set_relay_owner_kind(&mut self, kind: RelayOwnerKind) {
         self.relay_owner_kind = kind;
         self.watcher_owns_live_relay = matches!(kind, RelayOwnerKind::Watcher);
+    }
+
+    pub(in crate::services::discord) fn set_watcher_owner_channel_id(
+        &mut self,
+        owner_channel_id: u64,
+    ) -> bool {
+        let normalized = (owner_channel_id != 0).then_some(owner_channel_id);
+        let changed = self.watcher_owner_channel_id != normalized;
+        self.watcher_owner_channel_id = normalized;
+        if let (Some(provider), Some(tmux_session_name)) = (
+            ProviderKind::from_str(&self.provider),
+            self.tmux_session_name.as_deref().filter(|name| !name.is_empty()),
+        ) && let Some(owner_channel_id) = normalized
+            && let Err(error) =
+                crate::services::discord::outbound::delivery_record::record_watcher_owner_channel_context(
+                    &provider,
+                    poise::serenity_prelude::ChannelId::new(self.channel_id),
+                    poise::serenity_prelude::ChannelId::new(owner_channel_id),
+                    tmux_session_name,
+                )
+        {
+            tracing::info!("⚠ delivery-record owner-channel save failed: {error}");
+        }
+        changed
+    }
+
+    pub(in crate::services::discord) fn delivery_record_owner_channel_id(&self) -> u64 {
+        self.watcher_owner_channel_id
+            .filter(|id| *id != 0)
+            .unwrap_or(self.channel_id)
     }
 
     pub(in crate::services::discord) fn terminal_delivery_completed(&self) -> bool {
