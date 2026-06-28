@@ -89,6 +89,30 @@ pub enum BotTokenReloadStatus {
     RuntimeRootUnavailable,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BotTokenReloadScopeStatus {
+    ReloadSupported,
+    RestartRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BotTokenReloadScope {
+    pub scope: &'static str,
+    pub status: BotTokenReloadScopeStatus,
+    pub live_reload_supported: bool,
+    pub restart_required: bool,
+    pub token_source: &'static str,
+    pub detail: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BotTokenReloadScopes {
+    pub utility_rest_clients: BotTokenReloadScope,
+    pub provider_runtime_cached_token: BotTokenReloadScope,
+    pub provider_gateway_session: BotTokenReloadScope,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BotTokenReloadEntry {
     pub bot: &'static str,
@@ -106,7 +130,37 @@ pub struct BotTokenReloadReport {
     pub runtime_root_available: bool,
     pub any_reloaded: bool,
     pub utility_bot_user_ids_invalidated: bool,
+    pub scopes: BotTokenReloadScopes,
     pub provider_cached_bot_token_scope: &'static str,
+}
+
+pub fn bot_token_reload_scopes() -> BotTokenReloadScopes {
+    BotTokenReloadScopes {
+        utility_rest_clients: BotTokenReloadScope {
+            scope: "utility_rest_clients",
+            status: BotTokenReloadScopeStatus::ReloadSupported,
+            live_reload_supported: true,
+            restart_required: false,
+            token_source: "credential/announce_bot_token and credential/notify_bot_token",
+            detail: "POST /api/discord/bot-tokens/reload rebuilds announce/notify HealthRegistry REST clients in place.",
+        },
+        provider_runtime_cached_token: BotTokenReloadScope {
+            scope: "provider_runtime_cached_token",
+            status: BotTokenReloadScopeStatus::RestartRequired,
+            live_reload_supported: false,
+            restart_required: true,
+            token_source: "discord.bots.<name>.token or credential/<name>_bot_token selected at provider runtime startup",
+            detail: "SharedData.cached_bot_token is a OnceCell per provider runtime, so rotated provider REST fallback credentials are not adopted until dcserver restarts.",
+        },
+        provider_gateway_session: BotTokenReloadScope {
+            scope: "provider_gateway_session",
+            status: BotTokenReloadScopeStatus::RestartRequired,
+            live_reload_supported: false,
+            restart_required: true,
+            token_source: "discord.bots.<name>.token or credential/<name>_bot_token selected at provider runtime startup",
+            detail: "Discord gateway sessions are created by provider runtimes at startup; reconnecting them with a rotated token requires a dcserver restart.",
+        },
+    }
 }
 
 /// Registry that providers register with so the unified axum API can query all of them.
@@ -422,6 +476,7 @@ impl HealthRegistry {
             any_reloaded: announce.reloaded || notify.reloaded,
             utility_bot_user_ids_invalidated: announce.user_id_cache_invalidated
                 || notify.user_id_cache_invalidated,
+            scopes: bot_token_reload_scopes(),
             provider_cached_bot_token_scope: "announce/notify HealthRegistry clients are reloaded; provider runtime SharedData.cached_bot_token is restart-only",
             announce,
             notify,

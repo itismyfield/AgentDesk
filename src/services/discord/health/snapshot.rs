@@ -1,11 +1,11 @@
 use poise::serenity_prelude::ChannelId;
 use serde::Serialize;
 
-use super::HealthRegistry;
 use super::mailbox::MailboxHealthSnapshot;
 use super::provider_probe::{self, ProviderHealthSnapshot};
 use super::redaction;
 use super::session_enrichment::SessionEnrichment;
+use super::{BotTokenReloadScopes, HealthRegistry, bot_token_reload_scopes};
 use crate::services::discord;
 use crate::services::discord::SharedData;
 use crate::services::discord::relay_health::{
@@ -138,6 +138,7 @@ pub struct DiscordHealthSnapshot {
     queue_depth: usize,
     watcher_count: usize,
     recovery_duration: f64,
+    bot_token_reload_scopes: BotTokenReloadScopes,
     degraded_reasons: Vec<String>,
     providers: Vec<ProviderHealthSnapshot>,
     mailboxes: Vec<MailboxHealthSnapshot>,
@@ -763,6 +764,7 @@ async fn build_health_snapshot_with_options(
         queue_depth,
         watcher_count,
         recovery_duration,
+        bot_token_reload_scopes: bot_token_reload_scopes(),
         degraded_reasons,
         providers: provider_entries,
         mailboxes: mailbox_entries,

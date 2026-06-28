@@ -1352,6 +1352,32 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                     "runtime_root_available": true,
                     "any_reloaded": true,
                     "utility_bot_user_ids_invalidated": true,
+                    "scopes": {
+                        "utility_rest_clients": {
+                            "scope": "utility_rest_clients",
+                            "status": "reload_supported",
+                            "live_reload_supported": true,
+                            "restart_required": false,
+                            "token_source": "credential/announce_bot_token and credential/notify_bot_token",
+                            "detail": "POST /api/discord/bot-tokens/reload rebuilds announce/notify HealthRegistry REST clients in place."
+                        },
+                        "provider_runtime_cached_token": {
+                            "scope": "provider_runtime_cached_token",
+                            "status": "restart_required",
+                            "live_reload_supported": false,
+                            "restart_required": true,
+                            "token_source": "discord.bots.<name>.token or credential/<name>_bot_token selected at provider runtime startup",
+                            "detail": "SharedData.cached_bot_token is a OnceCell per provider runtime, so rotated provider REST fallback credentials are not adopted until dcserver restarts."
+                        },
+                        "provider_gateway_session": {
+                            "scope": "provider_gateway_session",
+                            "status": "restart_required",
+                            "live_reload_supported": false,
+                            "restart_required": true,
+                            "token_source": "discord.bots.<name>.token or credential/<name>_bot_token selected at provider runtime startup",
+                            "detail": "Discord gateway sessions are created by provider runtimes at startup; reconnecting them with a rotated token requires a dcserver restart."
+                        }
+                    },
                     "provider_cached_bot_token_scope": "announce/notify HealthRegistry clients are reloaded; provider runtime SharedData.cached_bot_token is restart-only"
                 }
             }),

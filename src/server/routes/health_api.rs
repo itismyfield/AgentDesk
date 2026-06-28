@@ -1467,7 +1467,7 @@ pub async fn send_handler(
 /// This only rotates the utility bots backed by `HealthRegistry`
 /// (`credential/announce_bot_token`, `credential/notify_bot_token`). Provider
 /// runtime gateway token caches are `OnceCell`s and still require a dcserver
-/// restart; the response reports that scope explicitly.
+/// restart; the response reports each reload scope explicitly.
 ///
 /// See `send_handler` for the rationale on the mandatory
 /// `ConnectInfo<SocketAddr>` extractor and non-loopback Bearer requirement.
@@ -2006,12 +2006,113 @@ mod tests {
             assert_eq!(body["report"]["announce"]["status"], "reloaded");
             assert_eq!(body["report"]["notify"]["status"], "reloaded");
             assert_eq!(
+                body["report"]["scopes"]["utility_rest_clients"]["status"],
+                "reload_supported"
+            );
+            assert_eq!(
+                body["report"]["scopes"]["utility_rest_clients"]["restart_required"],
+                false
+            );
+            assert_eq!(
+                body["report"]["scopes"]["provider_runtime_cached_token"]["status"],
+                "restart_required"
+            );
+            assert_eq!(
+                body["report"]["scopes"]["provider_runtime_cached_token"]["restart_required"],
+                true
+            );
+            assert_eq!(
+                body["report"]["scopes"]["provider_gateway_session"]["status"],
+                "restart_required"
+            );
+            assert_eq!(
+                body["report"]["scopes"]["provider_gateway_session"]["restart_required"],
+                true
+            );
+            assert_eq!(
                 body["report"]["provider_cached_bot_token_scope"],
                 "announce/notify HealthRegistry clients are reloaded; provider runtime SharedData.cached_bot_token is restart-only"
             );
             assert!(!String::from_utf8_lossy(&bytes).contains("announce-token"));
             assert!(!String::from_utf8_lossy(&bytes).contains("notify-token"));
         });
+    }
+
+    #[test]
+    fn discord_bot_token_reload_router_reports_missing_or_invalid_credentials() {
+        let runtime_root = tempfile::tempdir().expect("temp runtime root");
+        let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+        crate::runtime_layout::ensure_credential_layout(runtime_root.path()).unwrap();
+        let notify_path =
+            crate::runtime_layout::credential_token_path(runtime_root.path(), "notify");
+        crate::utils::secret_file::write_secret_file(&notify_path, "   \n")
+            .expect("write invalid notify token");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let mut config = crate::config::Config::default();
+            config.server.host = "0.0.0.0".to_string();
+            let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
+            let app = test_api_router_with_config_and_registry(config, Some(registry));
+
+            let response = app
+                .oneshot(reload_bot_tokens_request("127.0.0.1:8791"))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+            assert_eq!(body["ok"], false);
+            assert_eq!(body["status"], "no_valid_credentials_loaded");
+            assert_eq!(body["report"]["announce"]["status"], "missing_or_invalid");
+            assert_eq!(body["report"]["announce"]["previous_client_kept"], false);
+            assert_eq!(body["report"]["notify"]["status"], "missing_or_invalid");
+            assert_eq!(body["report"]["notify"]["previous_client_kept"], false);
+            assert_eq!(
+                body["report"]["scopes"]["provider_runtime_cached_token"]["restart_required"],
+                true
+            );
+            let response_text = String::from_utf8_lossy(&bytes);
+            assert!(!response_text.contains("announce-token"));
+            assert!(!response_text.contains("notify-token"));
+        });
+    }
+
+    #[tokio::test]
+    async fn health_detail_reports_provider_runtime_bot_token_restart_required() {
+        let mut config = crate::config::Config::default();
+        config.server.host = "0.0.0.0".to_string();
+        let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
+        let app = test_api_router_with_config_and_registry(config, Some(registry));
+
+        let mut request = Request::builder()
+            .method("GET")
+            .uri("/health/detail")
+            .body(Body::empty())
+            .unwrap();
+        request.extensions_mut().insert(axum::extract::ConnectInfo(
+            "127.0.0.1:8791".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        let response = app.oneshot(request).await.unwrap();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(
+            body["bot_token_reload_scopes"]["provider_runtime_cached_token"]["status"],
+            "restart_required"
+        );
+        assert_eq!(
+            body["bot_token_reload_scopes"]["provider_runtime_cached_token"]["restart_required"],
+            true
+        );
+        assert_eq!(
+            body["bot_token_reload_scopes"]["provider_gateway_session"]["restart_required"],
+            true
+        );
     }
 
     #[test]
