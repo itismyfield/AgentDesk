@@ -9,9 +9,9 @@
 //! public `/api/health` response, and it NEVER mutates DB/session/runtime state.
 //!
 //! This module holds the pure classifier + output schema so it is unit-testable
-//! independently of the axum route and the database. The route layer
-//! ([`super::health_api`]) fetches the bounded candidate rows and the live
-//! config, then calls [`classify_active_session_audit`].
+//! independently of the axum route and the database. The health diagnostics
+//! service fetches the bounded candidate rows and live config, then calls
+//! [`classify_active_session_audit`].
 //!
 //! Repair-path recommendations delegate to EXISTING mechanisms only (P0 never
 //! calls them): `stale_mailbox` → `/api/health/stale-mailbox-repair`,
@@ -28,12 +28,12 @@ use crate::services::session_activity::{EffectiveSessionState, SessionActivityRe
 /// Compiled-in defaults used when the matching `RuntimeSettingsConfig` override
 /// is unset/empty. `STALE_SECS` doubles as the post-restart/long-turn grace
 /// window (baseline aligned with the stall-watchdog positive-liveness budget).
-pub(super) const DEFAULT_STALE_SECS: u64 = 120;
-pub(super) const DEFAULT_MAX_CANDIDATES: u64 = 50;
-pub(super) const MIN_MAX_CANDIDATES: u64 = 1;
-pub(super) const MAX_MAX_CANDIDATES: u64 = 500;
+pub(crate) const DEFAULT_STALE_SECS: u64 = 120;
+pub(crate) const DEFAULT_MAX_CANDIDATES: u64 = 50;
+pub(crate) const MIN_MAX_CANDIDATES: u64 = 1;
+pub(crate) const MAX_MAX_CANDIDATES: u64 = 500;
 /// `high_confidence_count` counts candidates at or above this confidence.
-pub(super) const HIGH_CONFIDENCE_THRESHOLD: f64 = 0.75;
+pub(crate) const HIGH_CONFIDENCE_THRESHOLD: f64 = 0.75;
 
 /// Which raw DB signal selected the session as active-like. Stable reason code.
 /// Selection precedence when multiple match: `active_dispatch_id` > `turn_active`
@@ -184,7 +184,7 @@ impl ActiveSessionAuditReport {
 
 /// Resolved, None-safe audit settings derived from the live config snapshot.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct ActiveSessionAuditSettings {
+pub(crate) struct ActiveSessionAuditSettings {
     pub enabled: bool,
     pub stale_secs: u64,
     pub max_candidates: u64,
@@ -194,7 +194,7 @@ impl ActiveSessionAuditSettings {
     /// Build from the optional `RuntimeSettingsConfig` overrides, applying the
     /// compiled-in defaults and bounds. `enabled` defaults to ON when unset.
     /// `stale_secs == Some(0)` is treated as unset (avoids a 0s grace footgun).
-    pub(super) fn from_overrides(
+    pub(crate) fn from_overrides(
         enabled: Option<bool>,
         stale_secs: Option<u64>,
         max_candidates: Option<u64>,
@@ -301,7 +301,7 @@ fn confidence_score(
 /// entirely (not surfaced as low-confidence). `raw_matches_total` is the bounded
 /// raw active-like row count observed by the route layer (`cap + 1` sentinel at
 /// most), used only to compute `truncated`.
-pub(super) fn classify_active_session_audit(
+pub(crate) fn classify_active_session_audit(
     rows: &[RawSessionRow],
     resolver: &mut SessionActivityResolver,
     settings: ActiveSessionAuditSettings,
