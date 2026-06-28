@@ -10,6 +10,7 @@ use super::{
     DISCORD_MSG_LIMIT, SharedData,
     placeholder_cleanup::{PlaceholderCleanupOutcome, classify_delete_error},
     rate_limit_wait,
+    response_sanitizer::subagent_notification_card,
 };
 use crate::utils::format::tail_with_ellipsis_bytes;
 
@@ -847,9 +848,10 @@ pub(super) fn format_for_discord_with_status_panel(
 mod status_panel_v2_formatter_tests {
     use super::{
         MonitorHandoffReason, MonitorHandoffStatus, build_monitor_handoff_placeholder,
-        build_monitor_handoff_placeholder_with_live_events, build_status_panel_streaming_edit_text,
-        build_streaming_placeholder_text, format_for_discord, format_for_discord_with_provider,
-        format_for_discord_with_status_panel, plan_streaming_rollover,
+        build_monitor_handoff_placeholder_with_live_events, build_placeholder_status_block,
+        build_status_panel_streaming_edit_text, build_streaming_placeholder_text,
+        format_for_discord, format_for_discord_with_provider, format_for_discord_with_status_panel,
+        plan_streaming_rollover,
     };
     use crate::services::provider::ProviderKind;
 
@@ -1068,6 +1070,25 @@ files, and memory recall below as new actionable input.\n\n\
         assert!(!output.contains("<subagent_notification>"));
         assert!(!output.contains("agent_path"));
         assert!(!output.contains("/tmp/private-agent"));
+    }
+
+    #[test]
+    fn placeholder_status_block_summarizes_subagent_notification_3818() {
+        let input = r#"<subagent_notification>
+{"agent_path":"/tmp/private-agent","status":{"completed":"Review complete.\n\nVERDICT: CLEAN"}}
+</subagent_notification>"#;
+
+        let from_full_response = build_placeholder_status_block("⠙", None, None, input);
+        assert!(from_full_response.contains("Subagent completed"));
+        assert!(!from_full_response.contains("<subagent_notification>"));
+        assert!(!from_full_response.contains("agent_path"));
+        assert!(!from_full_response.contains("/tmp/private-agent"));
+
+        let from_current_tool = build_placeholder_status_block("⠙", None, Some(input), "");
+        assert!(from_current_tool.contains("Subagent completed"));
+        assert!(!from_current_tool.contains("<subagent_notification>"));
+        assert!(!from_current_tool.contains("agent_path"));
+        assert!(!from_current_tool.contains("/tmp/private-agent"));
     }
 
     #[test]
@@ -3573,8 +3594,11 @@ pub(super) fn build_placeholder_status_block(
     current_tool_line: Option<&str>,
     full_response: &str,
 ) -> String {
-    let raw_tool_status = resolve_raw_tool_status(current_tool_line, full_response);
-    let tool_status = humanize_tool_status(raw_tool_status);
+    let tool_status =
+        subagent_notification_card::status_summary_from(current_tool_line, full_response)
+            .unwrap_or_else(|| {
+                humanize_tool_status(resolve_raw_tool_status(current_tool_line, full_response))
+            });
     format!("{indicator} {tool_status}")
 }
 

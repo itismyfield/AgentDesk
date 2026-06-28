@@ -140,7 +140,8 @@
     remote-profile restore plumbing while remote SSH is disabled; ±0 from
     #3815 moving direct Codex TUI resume restore helpers into
     `watchers/codex_tui_restore.rs` while adding the restore branch).
-  - `src/services/discord/tmux.rs` (2033 lines after #2558 dead-code sweep;
+  - `src/services/discord/tmux.rs` (2039 lines after #2558 dead-code sweep;
+    +6 from #3818 sanitizing restored/orphan subagent-notification placeholders;
     +1 from #3384 restored-seed undelivered-body discard guard;
     +38 for suppressed-label noise, user report 2026-06-12: provider-aware
     status/footer stripping in the placeholder suppression decisions;
@@ -1217,7 +1218,10 @@
     `turn_finalizer/watcher_backstop.rs` (watcher far-backstop tunables +
     terminal-or-defer verdict pair). Bugfix only outside a
     finalizer-decomposition plan).
-  - `src/services/discord/formatting.rs` (2798 lines; net +0 from #3034 scoped
+  - `src/services/discord/formatting.rs` (2802 lines; #3818 keeps only the
+    placeholder-status subagent-notification summary hook here while moving the
+    shared streaming-rollover predicate to `subagent_notification_card.rs`, so
+    the file stays at its frozen baseline; net +0 from #3034 scoped
     dead-code allows on the `MonitorHandoffReason::InlineTimeout` /
     `MonitorHandoffStatus::Failed` reserved variants — the two added `#[allow]`
     lines were offset by collapsing the adjacent reason comments back to inline

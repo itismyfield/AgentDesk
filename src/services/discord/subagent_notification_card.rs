@@ -67,6 +67,30 @@ pub(in crate::services::discord) fn sanitize_start_anchored_subagent_notificatio
         .then(|| format_subagent_notification_card(None, input))
 }
 
+pub(in crate::services::discord) fn status_summary(input: &str) -> Option<String> {
+    sanitize_start_anchored_subagent_notification(input).map(|card| {
+        card.lines()
+            .next()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .unwrap_or("Subagent notification")
+            .to_string()
+    })
+}
+
+pub(in crate::services::discord) fn status_summary_from(
+    current_tool_line: Option<&str>,
+    full_response: &str,
+) -> Option<String> {
+    current_tool_line
+        .and_then(status_summary)
+        .or_else(|| status_summary(full_response))
+}
+
+pub(in crate::services::discord) fn streaming_rollover_should_skip(input: &str) -> bool {
+    status_summary(input).is_some()
+}
+
 fn parse(prompt: &str) -> Result<Render, ()> {
     let payload = extract_payload(prompt)?;
     let envelope: Envelope = serde_json::from_str(&payload).map_err(|_| ())?;
@@ -108,7 +132,10 @@ fn normalized_start_anchored_injection(prompt: &str) -> String {
     let normalized = normalized.trim_start();
     let normalized = strip_provider_session_reuse_prologue(normalized).unwrap_or(normalized);
     let normalized = normalized.trim_start();
-    let normalized = strip_leading_user_author_prefix(normalized).unwrap_or(normalized);
+    let normalized =
+        strip_leading_user_author_prefix(normalized).unwrap_or_else(|| normalized.to_string());
+    let normalized = normalized.trim_start();
+    let normalized = super::strip_leading_tui_response_chrome(normalized);
     normalized.trim_start().to_string()
 }
 
@@ -143,11 +170,12 @@ fn provider_reuse_tail<'a>(rest: &'a str, prologue: &str) -> Option<&'a str> {
         .and_then(|tail| tail.strip_prefix("\n\n"))
 }
 
-fn strip_leading_user_author_prefix(text: &str) -> Option<&str> {
+fn strip_leading_user_author_prefix(text: &str) -> Option<String> {
     let rest = text.strip_prefix("[User: ")?;
     let close = rest.find(']')?;
     let tail = rest[close + 1..].trim_start();
-    starts_with_xmlish_tag(tail, "subagent_notification").then_some(tail)
+    let tail = super::strip_leading_tui_response_chrome(tail);
+    starts_with_xmlish_tag(&tail, "subagent_notification").then_some(tail)
 }
 
 fn starts_with_xmlish_tag(text: &str, tag: &str) -> bool {
@@ -244,6 +272,29 @@ mod tests {
 
         let wrapped = format!("터미널에 직접 주입된 입력 (tmux : `s`):\n```text\n{prefixed}\n```");
         assert!(is_start_anchored_subagent_notification(&wrapped));
+    }
+
+    #[test]
+    fn detects_provider_reuse_tui_chrome_subagent_notifications_3818() {
+        let raw =
+            r#"<subagent_notification>{"status":{"completed":"done"}}</subagent_notification>"#;
+        let prefixed = format!("{RESUMED_PREFIX}No response requested.\n{raw}");
+        assert!(is_start_anchored_subagent_notification(&prefixed));
+        assert!(streaming_rollover_should_skip(&prefixed));
+        assert_eq!(
+            status_summary(&prefixed).as_deref(),
+            Some("✅ Subagent completed")
+        );
+        assert!(
+            sanitize_start_anchored_subagent_notification(&prefixed)
+                .expect("card")
+                .contains("Subagent completed")
+        );
+
+        let user_prefixed = format!(
+            "{RESUMED_PREFIX}[User: 0hbujang (ID: 343742347365974026)] No response requested.\n{raw}"
+        );
+        assert!(is_start_anchored_subagent_notification(&user_prefixed));
     }
 
     #[test]
