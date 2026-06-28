@@ -441,6 +441,7 @@ src/
 │   │   │   └── watcher_respawn.rs
 │   │   ├── idle_recap/
 │   │   │   ├── context_display.rs
+│   │   │   ├── relay_integrity.rs
 │   │   │   └── scrollback.rs
 │   │   ├── inflight/
 │   │   │   ├── budget.rs
@@ -452,6 +453,7 @@ src/
 │   │   │   ├── confirmation.rs
 │   │   │   ├── decision.rs
 │   │   │   ├── delivery.rs
+│   │   │   ├── delivery_frontier_probe.rs
 │   │   │   ├── delivery_record.rs
 │   │   │   ├── manual_delivery.rs
 │   │   │   ├── message.rs

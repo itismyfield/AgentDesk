@@ -2730,6 +2730,19 @@ pub(super) fn load_inflight_state(
     }
 }
 
+/// Load a single inflight state without compatibility backfills or cleanup.
+///
+/// Use this for diagnostic/read-only probes that must not mutate sidecar state.
+pub(super) fn load_inflight_state_read_only(
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> Option<InflightTurnState> {
+    let root = inflight_runtime_root()?;
+    let path = inflight_state_path(&root, provider, channel_id);
+    let data = fs::read_to_string(&path).ok()?;
+    parse_inflight_state_content(&data).ok()
+}
+
 pub(super) fn load_inflight_states(provider: &ProviderKind) -> Vec<InflightTurnState> {
     let Some(root) = inflight_runtime_root() else {
         return Vec::new();

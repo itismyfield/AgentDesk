@@ -176,11 +176,37 @@ async fn run_idle_recap_post_job(
         }
         _ => None,
     };
-    let summary = match scrollback.as_deref() {
-        Some(text) => idle_recap::summarize_with_haiku(text).await,
+    let composer = match scrollback.as_deref() {
+        Some(text) => idle_recap::compose_with_haiku(text).await,
         None => None,
     };
-    let content = idle_recap::compose_recap_text(&snapshot, summary.as_deref());
+    let relay_probe = match ProviderKind::from_str(&snapshot.provider) {
+        Some(provider) => idle_recap::probe_relay_integrity(&snapshot, &provider, channel_id, None),
+        None => idle_recap::decide_relay_integrity(idle_recap::RelayIntegrityInput {
+            provider: snapshot.provider.clone(),
+            session_key: snapshot.session_key.clone(),
+            provider_session_id: snapshot
+                .claude_session_id
+                .as_deref()
+                .or(snapshot.raw_provider_session_id.as_deref())
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string),
+            channel_id,
+            recap_message_id: None,
+            output_path: None,
+            output_end: None,
+            committed_end: None,
+            committed_source: None,
+            committed_range: None,
+            anchor_message_id: None,
+            anchor_channel_id: None,
+            unknown_reason: Some("provider kind unsupported".to_string()),
+        }),
+    };
+    let content = idle_recap::compose_recap_text(&snapshot, composer.as_ref(), &relay_probe);
+    let actions =
+        idle_recap::RecapCardActions::for_probe_and_composer(&relay_probe, composer.as_ref());
 
     // #3146 Part 1 (codex clear/post race): the scrollback + Haiku compose
     // above can take seconds. During that window a TUI-driven turn may have
@@ -221,7 +247,7 @@ async fn run_idle_recap_post_job(
         idle_recap::delete_previous_card(http.as_ref(), prev_chan as u64, prev_msg as u64).await;
     }
 
-    match idle_recap::post_recap_card(http.as_ref(), channel_id, &content).await {
+    match idle_recap::post_recap_card(http.as_ref(), channel_id, &content, actions).await {
         Ok(message_id) => {
             // #3146 Part 1 (codex R3 P1 — check-then-post TOCTOU): the pre-post
             // `should_post_recap` check above and the Discord POST are not
@@ -306,7 +332,11 @@ async fn run_idle_recap_post_job(
                 session_key = %session_key,
                 channel_id = channel_id,
                 message_id = message_id,
-                summary_present = summary.is_some(),
+                summary_present = composer
+                    .as_ref()
+                    .and_then(|output| output.summary.as_ref())
+                    .is_some(),
+                relay_status = relay_probe.status.label(),
                 "idle_recap detached post job completed"
             );
             Ok(())

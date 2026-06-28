@@ -433,6 +433,17 @@ decompose_issue = "#3016"
 # dropping its production LoC below the giant threshold. Its entry (and ratchet
 # baseline) were removed to avoid a ghost registration.
 
+[[entry]]
+# Re-crossed the 1000-prod-LoC threshold in #3809 when idle recap gained the
+# deterministic relay-integrity probe wiring, suspect-only diagnostic action,
+# and suggested-reply action plan. Keep any further relay-probe/reporting
+# growth in `idle_recap/` child modules and decompose the recap interaction
+# orchestration once the card-action contract stabilizes.
+file = "src/services/discord/idle_recap.rs"
+owner = "discord-relay"
+deadline = "2026-08-31"
+decompose_issue = "#3405"
+
 # NOTE: src/services/discord/turn_bridge/terminal_delivery.rs previously had an
 # [[entry]] here; the #3028 splitter fix dropped its production LoC below the
 # giant threshold (its inline test mod was being miscounted as production), so it
