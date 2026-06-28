@@ -363,6 +363,8 @@ src/
 │   │   ├── stream_relay.rs
 │   │   └── watcher_supervisor.rs
 │   ├── codex_tui/
+│   │   ├── rollout_tail/
+│   │   │   └── parser.rs
 │   │   ├── input.rs
 │   │   ├── mod.rs
 │   │   ├── rollout_index.rs

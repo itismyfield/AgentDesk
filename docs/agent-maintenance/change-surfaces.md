@@ -1544,7 +1544,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   fresh-fork dev-role dedup stubs from provider.rs, leaving only the live Codex
   resumed-session compaction path. #3823 adds Codex launch binary/version
   diagnostics so skills/list failures caused by CLI/app skew are traceable.)
-- `src/services/codex_tui/rollout_tail.rs` (1831) — Codex TUI rollout tail
+- `src/services/codex_tui/rollout_tail.rs` (1270) — Codex TUI rollout tail
   parsing and resume identity surface; split before adding non-bugfix behavior
   beyond the #2169 session identity fix and the #3343 message-boundary
   separator unified across the streamed `StreamMessage::Text` surface and the
@@ -1552,6 +1552,9 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   newline witness is the single source of truth so the two surfaces mirror);
   +4 from #3676 threading Codex rollout user-message entry ids into TUI prompt
   dedupe so restart/offset rewind cannot mint duplicate direct-input anchors;
+  #3843 moved rollout parser state and JSON event mapping into
+  `src/services/codex_tui/rollout_tail/parser.rs` without changing public
+  tail/replay entry points or completion heuristics;
   +59 from #3711 persisting rollout markers as soon as the live rollout is
   discovered and adding claimed-rollout candidate selection for restart
   rehydrate.
