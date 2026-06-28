@@ -33,14 +33,12 @@ pub mod dispatches;
 // live on clean sibling modules. Remove during dispatches_followup dead-code cleanup.
 #[allow(dead_code)]
 pub mod dispatches_followup;
-// #3034: intentional-but-unwired #2662 envelope-dedup infrastructure (opt-in
-// via AGENTDESK_ENVELOPE_DEDUP, awaiting a follow-up to flip the policy);
-// scoped allow retained pending a human decision to wire or remove it.
-#[allow(dead_code)]
-pub mod envelope_dedup;
 pub mod escalation_settings;
 pub mod gemini;
 pub mod git;
+pub mod github_issue_creation;
+pub mod health_active_session_audit;
+pub mod health_diagnostics;
 pub mod issue_announcements;
 pub mod kanban;
 pub mod kanban_cards;
@@ -71,11 +69,9 @@ pub mod platform;
 #[allow(dead_code)]
 pub mod pr_summary;
 pub mod process;
-// #3034: residual dead code here is the intentional-but-unwired #2662/#2668
-// envelope + dev-role dedup infrastructure (gated behind AGENTDESK_ENVELOPE_DEDUP
-// and the per-process dev-role registry, awaiting a follow-up to wire it) plus a
-// dormant recovery-priming constructor; scoped allow retained pending a human
-// decision. Genuinely orphaned items have already been removed.
+// #3034: residual dead code here is a dormant recovery-priming constructor;
+// scoped allow retained pending provider recovery cleanup. The old #2662/#2668
+// envelope/dev-role dedup stubs were retired by #3744.
 #[allow(dead_code)]
 pub mod provider;
 pub mod provider_auth;
@@ -125,5 +121,8 @@ pub mod turn_cancel_finalizer;
 pub mod turn_lifecycle;
 pub mod turn_orchestrator;
 
-// Compatibility alias: code referencing services::remote::* uses the stub
+// Compatibility alias only: code referencing `services::remote::*` still
+// compiles, but the target module is disabled per #1606/#2175/#2193. A real
+// `services::remote` must replace `remote_stub` only when the ADR prerequisites
+// in `docs/codex-remote-ssh-policy.md` are satisfied.
 pub use remote_stub as remote;

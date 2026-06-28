@@ -4,7 +4,9 @@ Source issue: #1791
 
 Epic: #1790
 
-Last refreshed: 2026-05-08
+Last refreshed: 2026-06-28
+
+Current tracker: #3747
 
 ## Background
 
@@ -34,7 +36,19 @@ make that state queryable without changing first-step delivery behavior.
 ## Current rollout state
 
 The legacy `kv_meta` markers remain the authoritative reservation and
-finalization guard until the cutover go/no-go issue #1952 passes. However,
+finalization guard until a future cutover GO decision lands. The current open
+tracker for the remaining typed-authority work is #3747.
+
+The historical tracking issues should not be interpreted as a completed typed
+cutover:
+
+- #1952 is closed because it produced the 2026-05-08 NO-GO decision report.
+  That issue completed the go/no-go exercise; it did not approve typed
+  authority.
+- #1864 is closed as historical cleanup tracking, but the cleanup remains
+  blocked by the NO-GO decision. Removing or weakening the legacy guard requires
+  a new GO decision under #3747 or a successor issue.
+
 `dispatch_delivery_events` is no longer write-only shadow data. The current
 guard reads typed rows to:
 
@@ -47,8 +61,23 @@ guard reads typed rows to:
 That means operators should use the typed table for delivery diagnosis during
 rollout while still treating `kv_meta` as the source of truth for whether the
 legacy guard has reserved or finalized a notification. Full typed-table
-authority remains incomplete until #1952 approves cutover; legacy guard removal
-stays deferred to follow-up issue #1864.
+authority remains incomplete until #3747 or a successor tracker records a future
+GO decision.
+
+## Runtime and operator source of truth
+
+Until the future GO decision:
+
+| State | Current source of truth | Typed-table role |
+| ----- | ----------------------- | ---------------- |
+| In-flight reservation | `kv_meta['dispatch_reserving:{dispatch_id}']` | Diagnostic/shadow row; typed active reservations are read to avoid duplicate sends during rollout but do not replace the legacy marker. |
+| Final delivery dedupe | `kv_meta['dispatch_notified:{dispatch_id}']` | Diagnostic, typed-read, duplicate metadata, API/dashboard, and reconciliation state. |
+| Cutover readiness | #3747 plus the latest cutover report | Evidence source only; not runtime authority. |
+
+Operators should diagnose delivery through `dispatch_delivery_events`, the
+delivery-events API, and the dashboard panel, but should treat `kv_meta` as the
+authoritative reservation/finalization guard until a future GO changes this
+contract.
 
 ## Non-Goals
 
@@ -204,12 +233,21 @@ Dashboard surfaces:
 
 ## Cutover Criteria
 
-The typed table can become authoritative only after all of these are true:
+The next GO checklist for #3747 or a successor tracker must pass all of these
+items before the typed table can become authoritative:
 
-- Dual-write has run in release for at least seven days or 500 dispatch
-  notification attempts, whichever comes later.
-- Reconciliation reports zero `kv_meta` versus typed-table mismatches for
-  `dispatch_reserving:*` and `dispatch_notified:*` over the cutover window.
+- Release soak duration: dual-write/shadow mode has run in release for at least
+  seven full KST days after the relevant reconciliation, API/dashboard, rollback,
+  recovery, and replay surfaces are available in that release.
+- Dispatch volume: the same observation window includes at least 500 new
+  dispatch notification attempts. If seven days elapse before 500 attempts, keep
+  soaking until both thresholds pass.
+- Mismatch window: reconciliation reports zero `kv_meta` versus typed-table
+  mismatches for `dispatch_reserving:*` and `dispatch_notified:*` inside the
+  cutover observation window, or every in-window mismatch is tied to a concrete
+  dispatch id and explicitly justified. Legacy pre-shadow history may be
+  excluded only when the event or key can be shown to predate the shadow-write
+  window; cumulative `missing_typed` counts are not sufficient by themselves.
 - Recovery tests prove that expired reservations can be retried without
   duplicate Discord posts.
 - Duplicate replay tests prove that the typed active unique key returns the
@@ -219,18 +257,32 @@ The typed table can become authoritative only after all of these are true:
 - `GET /api/dispatches/{id}/events` and the Kanban detail delivery-events panel
   have been deployed in release long enough for operators to use them during at
   least one real dispatch incident or routine verification pass.
-- The rollout has an explicit rollback: re-enable `kv_meta` as the authority and
-  ignore typed read decisions without deleting typed rows.
+- Rollback sign-off: the rollback runbook has explicit reviewer sign-off for the
+  GO attempt and says how to re-enable `kv_meta` as the authority and ignore
+  typed read decisions without deleting typed rows.
+- Post-cutover shadow window: after a GO flips typed authority, keep legacy
+  `kv_meta` shadow writes for one full release before starting any cleanup that
+  removes the legacy guard.
+- Tests pin the selected authority mode. Before GO, guard tests must assert that
+  bare `kv_meta` reservation/finalization markers still block sends even when
+  typed shadow rows are missing. A typed-authority cutover PR must update those
+  tests in the same change that flips runtime authority.
 
 Once those criteria pass, switch runtime reads and dedupe claims to
 `dispatch_delivery_events`, keep shadow `kv_meta` writes for one release, then
-remove the legacy guard in follow-up issue #1864.
+track legacy guard removal in the active cutover tracker or a successor cleanup
+issue. The closed #1864 issue is a historical reference, not current approval to
+remove the guard.
 
 ## Cutover Decision Log
 
 | Date       | Decision | Report                                                                                                      | Notes                                                                                                                                                                                         |
 | ---------- | -------- | ----------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 2026-05-08 | NO-GO    | [dispatch-delivery-events-cutover-2026-05-08.md](../reports/dispatch-delivery-events-cutover-2026-05-08.md) | Release snapshot had 188 typed events, 1099 cumulative reconciliation mismatches, and no seven-day post-prerequisite soak. Keep the legacy reservation/finalization path; do not start #1864. |
+
+As of 2026-06-28, #3747 is the single current open tracker for the remaining
+typed-authority cutover work. #1952 and #1864 are closed historical issues and
+must not be used to infer that typed authority completed.
 
 Rollback procedure for a future typed-authority cutover:
 [dispatch-delivery-cutover-rollback.md](../runbooks/dispatch-delivery-cutover-rollback.md).

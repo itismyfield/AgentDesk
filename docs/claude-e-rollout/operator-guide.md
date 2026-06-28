@@ -24,6 +24,19 @@ Channels with no explicit `runtime` inherit the provider-level value;
 provider with no explicit `runtime` falls back to the legacy
 `tui_hosting` boolean.
 
+## Claude TUI follow-up retry boundary
+
+Claude TUI warm follow-ups are automatically requeued by default when the
+failure is proven to be a pre-submit busy timeout: the readiness wait timed out
+before AgentDesk sent the prompt into the pane. That path is safe to retry
+because the provider never received the follow-up text. Set
+`AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE=0` (also accepts `false`, `off`, `no`,
+`disable`, or `disabled`) only as an emergency opt-out.
+
+Do not auto-requeue post-submit or ambiguous failures as a fresh prompt. Once
+the prompt may have reached the pane, retrying can double-send user input; those
+paths must keep the existing terminal/finalize or manual-recovery behavior.
+
 ## Live toggle
 
 1. Edit either

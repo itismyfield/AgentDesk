@@ -1,6 +1,9 @@
 use super::*;
 use crate::services::discord::watcher_lifecycle_decision::runtime_activity_heartbeat_at;
 
+#[path = "codex_tui_restore.rs"]
+mod codex_restore;
+
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum LivenessProbeOutcome {
     /// No dead marker observed; the tmux pane liveness check answered.
@@ -15,29 +18,6 @@ pub(super) enum LivenessProbeOutcome {
     StaleMarkerClearAndAlive,
     /// Dead marker present and the pane really is gone — honour the marker.
     MarkerHonoredDead,
-}
-
-/// #2795 — for codex_tui sessions whose AgentDesk-side relay JSONL does not
-/// exist on disk, look up the actual codex rollout transcript by the
-/// inflight `session_id`. Returns `None` when the inflight is absent, is not
-/// a codex_tui handoff, lacks a session_id, or no rollout matches.
-fn codex_tui_rollout_fallback_for_session(
-    provider: &crate::services::provider::ProviderKind,
-    channel_id: serenity::model::id::ChannelId,
-) -> Option<String> {
-    if *provider != crate::services::provider::ProviderKind::Codex {
-        return None;
-    }
-    let state = super::super::inflight::load_inflight_state(provider, channel_id.get())?;
-    if !matches!(
-        state.runtime_kind,
-        Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui)
-    ) {
-        return None;
-    }
-    let session_id = state.session_id.as_deref()?;
-    let rollout = crate::services::codex_tui::rollout_tail::find_rollout_by_session_id(session_id)?;
-    Some(rollout.display().to_string())
 }
 
 /// #2853 — for claude_tui sessions whose AgentDesk-side relay JSONL never lands
@@ -2269,6 +2249,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         session_name: String,
         initial_offset: u64,
         restored_turn: Option<RestoredWatcherTurn>,
+        codex_direct_resume_fallback: Option<codex_restore::DirectResumeFallback>,
     }
 
     // Dead sessions that need DB cleanup (idle status report + tmux kill)
@@ -2418,12 +2399,13 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         );
 
         let mut selected_claude_tui_fallback_transcript: Option<std::path::PathBuf> = None;
+        let mut codex_direct_resume_fallback = None;
         let output_path =
             match crate::services::tmux_common::resolve_session_temp_path(session_name, "jsonl") {
                 Some(path) => path,
                 None => {
                     if let Some(path) =
-                        codex_tui_rollout_fallback_for_session(&provider, *channel_id)
+                        codex_restore::rollout_fallback_for_session(&provider, *channel_id)
                     {
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         tracing::info!(
@@ -2432,6 +2414,16 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                             path
                         );
                         path
+                    } else if let Some(path) =
+                        codex_restore::rollout_fallback_for_live_direct_resume(
+                            &provider,
+                            session_name,
+                            *channel_id,
+                        )
+                    {
+                        let output_path = path.output_path().to_string();
+                        codex_direct_resume_fallback = Some(path);
+                        output_path
                     } else if let Some(path) = claude_tui_transcript_fallback_path(
                         &provider,
                         session_name,
@@ -2542,7 +2534,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             );
         }
 
-        if !tmux_session_has_live_pane(session_name) {
+        if !probe_tmux_session_liveness(session_name).await {
             let ts = chrono::Local::now().format("%H:%M:%S");
             if let Some(diag) = build_tmux_death_diagnostic(session_name, Some(&output_path)) {
                 tracing::info!(
@@ -2609,6 +2601,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             session_name: session_name.to_string(),
             initial_offset,
             restored_turn,
+            codex_direct_resume_fallback,
         });
         if let Some(path) = selected_claude_tui_fallback_transcript {
             restore_claimed_claude_tui_transcripts.insert(path);
@@ -2621,11 +2614,6 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         let mut data = shared.core.lock().await;
         for (channel_id, channel_name) in &owned_sessions {
             let persisted_path = load_last_session_path(
-                shared.pg_pool.as_ref(),
-                &shared.token_hash,
-                channel_id.get(),
-            );
-            let remote_profile = load_last_remote_profile(
                 shared.pg_pool.as_ref(),
                 &shared.token_hash,
                 channel_id.get(),
@@ -2670,7 +2658,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                         cleared: false,
                         channel_name: Some(channel_name.clone()),
                         category_name: None,
-                        remote_profile_name: remote_profile.clone(),
+                        remote_profile_name: None,
                         channel_id: Some(channel_id.get()),
 
                         last_active: tokio::time::Instant::now(),
@@ -2708,7 +2696,6 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                     configured_path,
                     db_cwd,
                     persisted_path,
-                    remote_profile.as_deref(),
                     reusable_worktree,
                 );
                 if let Some(path) = effective_path {
@@ -2774,6 +2761,13 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                 pw.session_name
             );
             continue;
+        }
+        if let Some(fallback) = pw.codex_direct_resume_fallback {
+            codex_restore::commit_live_direct_resume_fallback(
+                &pw.session_name,
+                pw.channel_id,
+                fallback,
+            );
         }
 
         let ts = chrono::Local::now().format("%H:%M:%S");

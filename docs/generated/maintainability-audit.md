@@ -56,8 +56,11 @@ Files under src/server/routes/ that mix raw SQL, json!() shaping, and crate::ser
 | warn | `src/server/routes/dispatches/thread_reuse.rs` |  | route file mixes SQL (12), json!() (22), and crate::services calls (2) |
 | warn | `src/server/routes/escalation.rs` |  | route file mixes SQL (24), json!() (24), and crate::services calls (3) |
 | warn | `src/server/routes/github.rs` |  | route file mixes SQL (8), json!() (30), and crate::services calls (5) |
+| warn | `src/server/routes/github.rs` |  | route file mixes SQL (8), json!() (34), and crate::services calls (5) |
 | warn | `src/server/routes/health_api.rs` |  | route file mixes SQL (30), json!() (103), and crate::services calls (15) |
+| warn | `src/server/routes/health_api.rs` |  | route file mixes SQL (30), json!() (106), and crate::services calls (17) |
 | warn | `src/server/routes/memory_api.rs` |  | route file mixes SQL (8), json!() (16), and crate::services calls (8) |
+| warn | `src/server/routes/memory_api.rs` |  | route file mixes SQL (17), json!() (18), and crate::services calls (7) |
 | warn | `src/server/routes/provider_cli_api.rs` |  | route file mixes SQL (3), json!() (12), and crate::services calls (6) |
 | warn | `src/server/routes/queue_api.rs` |  | route file mixes SQL (4), json!() (15), and crate::services calls (3) |
 | warn | `src/server/routes/review_verdict/verdict_route.rs` |  | route file mixes SQL (5), json!() (19), and crate::services calls (5) |

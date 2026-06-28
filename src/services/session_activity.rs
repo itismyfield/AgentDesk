@@ -7,6 +7,7 @@ use crate::db::session_status::{
     AWAITING_BG, AWAITING_USER, DISCONNECTED, IDLE, is_active_status, is_bg_wait_status,
     is_terminal_status, is_user_wait_status, normalize_session_status,
 };
+use crate::services::discord::session_identity::SessionIdentity;
 
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::tmux_session_has_live_pane;
@@ -239,13 +240,9 @@ where
 }
 
 fn parse_session_key(session_key: &str) -> Option<(String, String)> {
-    let (host_prefix, tmux_name) = session_key.split_once(':')?;
-    let host = host_prefix.rsplit('/').next().and_then(normalize_host)?;
-    let tmux_name = tmux_name.trim();
-    if tmux_name.is_empty() {
-        return None;
-    }
-    Some((host, tmux_name.to_string()))
+    let identity = SessionIdentity::parse(session_key)?;
+    let host = normalize_host(&identity.host)?;
+    Some((host, identity.tmux_name))
 }
 
 fn normalize_host(host: &str) -> Option<String> {
@@ -336,5 +333,24 @@ mod tests {
         );
         assert!(!state.is_working);
         assert!(resolver.tmux_live_cache.is_empty());
+    }
+
+    #[test]
+    fn parse_session_key_accepts_namespaced_keys() {
+        assert_eq!(
+            parse_session_key("codex/hash123/LocalBox.local:AgentDesk-codex-adk-cdx"),
+            Some((
+                "localbox".to_string(),
+                "AgentDesk-codex-adk-cdx".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_session_key_preserves_legacy_host_alias_keys() {
+        assert_eq!(
+            parse_session_key("remote-host/LocalBox.local:codex-1234"),
+            Some(("localbox".to_string(), "codex-1234".to_string()))
+        );
     }
 }

@@ -14,14 +14,10 @@ use super::*;
 // so the classifier, formatters, and card parser stay in sync. The parent's
 // glob (`use super::*`) does not re-export these `use`-imported names, so the
 // child module imports them directly to keep the moved bodies byte-identical.
-use serde::Deserialize;
-
+use super::super::response_sanitizer::subagent_notification_card;
 use super::super::tui_task_card::{
     strip_terminal_controls, truncate_chars_ascii as truncate_chars,
 };
-
-const SUBAGENT_NOTIFICATION_PREVIEW_CHARS: usize = 900;
-const SUBAGENT_NOTIFICATION_PREVIEW_LINES: usize = 8;
 
 /// Classification of TUI-injected prompt text. Each class drives different
 /// lifecycle handling: human/task turns get active-turn ownership, continuation
@@ -64,12 +60,13 @@ impl InjectedPromptClass {
 }
 
 /// Pure classifier for injected TUI prompt text. Order is load-bearing:
-/// continuation banners win before machine notifications and slash-control echoes.
+/// start-anchored subagent envelopes win before generic continuation banners
+/// because Provider Session Reuse may wrap the machine-event tail.
 pub(super) fn classify_injected_prompt(prompt: &str) -> InjectedPromptClass {
-    if is_system_continuation_prompt(prompt) {
-        InjectedPromptClass::SystemContinuation
-    } else if is_start_anchored_subagent_notification(prompt) {
+    if is_start_anchored_subagent_notification(prompt) {
         InjectedPromptClass::SubagentNotificationEvent
+    } else if is_system_continuation_prompt(prompt) {
+        InjectedPromptClass::SystemContinuation
     } else if is_task_notification_prompt(prompt) {
         InjectedPromptClass::TaskNotificationEvent
     } else if is_slash_command_control_prompt(prompt) {
@@ -148,8 +145,7 @@ pub(super) fn is_start_anchored_task_notification(prompt: &str) -> bool {
 /// This is deliberately START-ANCHORED: a human prompt that quotes the XML-ish
 /// tag mid-body remains a normal TUI-direct prompt.
 pub(super) fn is_start_anchored_subagent_notification(prompt: &str) -> bool {
-    let normalized = normalized_start_anchored_injection(prompt);
-    starts_with_xmlish_tag(&normalized, "subagent_notification")
+    subagent_notification_card::is_start_anchored_subagent_notification(prompt)
 }
 
 fn starts_with_xmlish_tag(text: &str, tag: &str) -> bool {
@@ -242,115 +238,8 @@ pub(super) fn format_ssh_direct_prompt_notification(
     )
 }
 
-#[derive(Debug, Deserialize)]
-struct SubagentNotificationEnvelope {
-    status: Option<SubagentNotificationStatus>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SubagentNotificationStatus {
-    completed: Option<String>,
-    failed: Option<String>,
-}
-
 pub(super) fn format_subagent_notification_card(tmux_session_name: &str, prompt: &str) -> String {
-    match parse_subagent_notification(prompt) {
-        Ok(SubagentNotificationRender::Completed(report)) => {
-            format_subagent_notification_report(tmux_session_name, "✅", "completed", &report)
-        }
-        Ok(SubagentNotificationRender::Failed(report)) => {
-            format_subagent_notification_report(tmux_session_name, "❌", "failed", &report)
-        }
-        Ok(SubagentNotificationRender::Unknown) => format!(
-            "📋 Subagent notification (tmux : `{}`) — no completed/failed status",
-            sanitize_inline_code(tmux_session_name),
-        ),
-        Err(_) => format!(
-            "⚠️ Subagent notification (tmux : `{}`) — malformed payload omitted",
-            sanitize_inline_code(tmux_session_name),
-        ),
-    }
-}
-
-enum SubagentNotificationRender {
-    Completed(String),
-    Failed(String),
-    Unknown,
-}
-
-fn parse_subagent_notification(prompt: &str) -> Result<SubagentNotificationRender, ()> {
-    let payload = extract_subagent_notification_payload(prompt)?;
-    let envelope: SubagentNotificationEnvelope = serde_json::from_str(&payload).map_err(|_| ())?;
-    let status = envelope.status.ok_or(())?;
-    if let Some(report) = status.completed.filter(|report| !report.trim().is_empty()) {
-        return Ok(SubagentNotificationRender::Completed(report));
-    }
-    if let Some(report) = status.failed.filter(|report| !report.trim().is_empty()) {
-        return Ok(SubagentNotificationRender::Failed(report));
-    }
-    Ok(SubagentNotificationRender::Unknown)
-}
-
-fn extract_subagent_notification_payload(prompt: &str) -> Result<String, ()> {
-    const OPEN: &str = "<subagent_notification";
-    const CLOSE: &str = "</subagent_notification>";
-
-    let normalized = normalized_start_anchored_injection(prompt);
-    if !normalized.starts_with(OPEN) {
-        return Err(());
-    }
-    let after_open_name = &normalized[OPEN.len()..];
-    let Some(first) = after_open_name.chars().next() else {
-        return Err(());
-    };
-    if first != '>' && !first.is_whitespace() {
-        return Err(());
-    }
-    let open_end = normalized.find('>').ok_or(())? + 1;
-    let after_open = &normalized[open_end..];
-    let close_start = after_open.find(CLOSE).ok_or(())?;
-    Ok(after_open[..close_start].trim().to_string())
-}
-
-fn format_subagent_notification_report(
-    tmux_session_name: &str,
-    icon: &str,
-    status: &str,
-    report: &str,
-) -> String {
-    let preview = subagent_report_preview(report);
-    let mut lines = vec![format!(
-        "{icon} Subagent {status} (tmux : `{}`)",
-        sanitize_inline_code(tmux_session_name),
-    )];
-    if !preview.is_empty() {
-        lines.push(String::new());
-        lines.push(preview);
-    }
-    lines.join("\n")
-}
-
-fn subagent_report_preview(report: &str) -> String {
-    let report = strip_terminal_controls(report);
-    let mut collected: Vec<String> = Vec::new();
-    for line in report.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        collected.push(sanitize_subagent_report_line(line));
-        if collected.len() >= SUBAGENT_NOTIFICATION_PREVIEW_LINES {
-            break;
-        }
-    }
-    truncate_chars(&collected.join("\n"), SUBAGENT_NOTIFICATION_PREVIEW_CHARS)
-}
-
-fn sanitize_subagent_report_line(value: &str) -> String {
-    value
-        .replace('\r', " ")
-        .replace('\n', " ")
-        .replace("```", "` ` `")
+    subagent_notification_card::format_subagent_notification_card(Some(tmux_session_name), prompt)
 }
 
 /// Canonical command kind for slash-control dedupe and kind-only notes.

@@ -20,6 +20,7 @@ use crate::services::discord::outbound::{
     DISCORD_HARD_LIMIT_CHARS, DISCORD_SAFE_LIMIT_CHARS, DiscordOutboundClient, OutboundDedupClaim,
     OutboundDedupReservation, OutboundDedupWait, OutboundDeduper,
 };
+use crate::services::discord::semantic_boundaries::add_continuation_context;
 use crate::services::dispatches::discord_delivery::{
     DispatchMessagePostError, DispatchMessagePostErrorKind,
 };
@@ -568,7 +569,7 @@ async fn deliver_chunked_manual_notification<C: ManualOutboundClient>(
     content: &str,
 ) -> Result<ManualDeliveryOutcome, DispatchMessagePostError> {
     let mut last_message_id = None;
-    for chunk in split_message(content) {
+    for chunk in add_continuation_context(split_message(content)) {
         let message_id = client.post_message(channel_id, &chunk).await?;
         last_message_id = Some(message_id);
     }

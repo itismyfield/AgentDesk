@@ -663,6 +663,7 @@ mod tests {
     use crate::services::discord::formatting;
     use crate::services::discord::formatting::ReplaceLongMessageOutcome;
     use crate::services::discord::gateway::{GatewayFuture, TurnGateway};
+    use crate::services::discord::semantic_boundaries::add_continuation_context;
     use crate::services::provider::ProviderKind;
     use poise::serenity_prelude::{ChannelId, MessageId};
     use std::sync::{Arc, Mutex};
@@ -692,7 +693,7 @@ mod tests {
             let sent_chunks = self.sent_chunks.clone();
             let fail_after_sent_chunks = self.fail_after_sent_chunks;
             Box::pin(async move {
-                let chunks = formatting::split_message(content);
+                let chunks = add_continuation_context(formatting::split_message(content));
                 let mut message_ids = Vec::new();
                 for (index, chunk) in chunks.iter().enumerate() {
                     sent_chunks

@@ -1661,6 +1661,74 @@ Codex thread still apply.\n\nThis is a human question about the marker.";
     );
 }
 
+#[test]
+fn classify_injected_prompt_provider_session_reuse_subagent_stays_subagent_event() {
+    let resumed = "[Provider Session Reuse]\n\
+The prior authoritative Discord, role, and tool instructions already present in this \
+Codex thread still apply. Treat only this turn's user request, reply context, uploaded \
+files, and memory recall below as new actionable input.\n\n\
+<subagent_notification>{\"agent_path\":\"/tmp/private\",\"status\":{\"completed\":\"Review complete.\"}}</subagent_notification>";
+
+    assert_eq!(
+        classify_injected_prompt(resumed),
+        InjectedPromptClass::SubagentNotificationEvent,
+        "provider-session reuse wrapping must not downgrade subagent notifications to generic continuation events",
+    );
+    let output = format_subagent_notification_card("AgentDesk-codex-adk-cdx", resumed);
+    assert!(output.contains("Subagent completed"));
+    assert!(output.contains("Review complete."));
+    assert!(!output.contains("[Provider Session Reuse]"));
+    assert!(!output.contains("<subagent_notification>"));
+    assert!(!output.contains("agent_path"));
+    assert!(!output.contains("/tmp/private"));
+}
+
+#[test]
+fn classify_provider_reuse_user_prefixed_subagent_stays_subagent_event_3777() {
+    let resumed = "[Provider Session Reuse]\n\
+The prior authoritative Discord, role, and tool instructions already present in this \
+Codex thread still apply. Treat only this turn's user request, reply context, uploaded \
+files, and memory recall below as new actionable input.\n\n\
+[User: 0hbujang (ID: 343742347365974026)] \
+<subagent_notification>{\"agent_path\":\"/tmp/private\",\"status\":{\"completed\":\"Review complete.\"}}</subagent_notification>";
+
+    assert_eq!(
+        classify_injected_prompt(resumed),
+        InjectedPromptClass::SubagentNotificationEvent,
+        "provider-session reuse user prefix must not hide subagent machine events",
+    );
+    let output = format_subagent_notification_card("AgentDesk-codex-adk-cdx", resumed);
+    assert!(output.contains("Subagent completed"));
+    assert!(output.contains("Review complete."));
+    assert!(!output.contains("[User:"));
+    assert!(!output.contains("<subagent_notification>"));
+    assert!(!output.contains("agent_path"));
+}
+
+#[test]
+fn classify_provider_reuse_chrome_then_user_prefixed_subagent_3818() {
+    let resumed = "[Provider Session Reuse]\n\
+The prior authoritative Discord, role, and tool instructions already present in this \
+Codex thread still apply. Treat only this turn's user request, reply context, uploaded \
+files, and memory recall below as new actionable input.\n\n\
+No response requested.\n\
+[User: 0hbujang (ID: 343742347365974026)] \
+<subagent_notification>{\"agent_path\":\"/tmp/private\",\"status\":{\"completed\":\"Review complete.\"}}</subagent_notification>";
+
+    assert_eq!(
+        classify_injected_prompt(resumed),
+        InjectedPromptClass::SubagentNotificationEvent,
+        "provider reuse + TUI chrome + user prefix must still render as a subagent card, not a raw direct prompt",
+    );
+    let output = format_subagent_notification_card("AgentDesk-codex-adk-cdx", resumed);
+    assert!(output.contains("Subagent completed"));
+    assert!(output.contains("Review complete."));
+    assert!(!output.contains("No response requested."));
+    assert!(!output.contains("[User:"));
+    assert!(!output.contains("<subagent_notification>"));
+    assert!(!output.contains("agent_path"));
+}
+
 // #3100 codex P2: stripping the wrapper is anchored to the START. A human
 // message whose body merely contains/quotes the wrapper marker (not as the
 // leading line) must NOT be unwrapped and must stay a human turn.

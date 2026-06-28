@@ -1,0 +1,26 @@
+version: 1
+policy: timeouts/active-monitor
+trust: trusted-automation
+source_events:
+  - timeouts.onTick30s
+db:
+  read:
+    tables:
+      - kv_meta
+      - sessions
+      - task_dispatches
+  write:
+    tables:
+      - kv_meta
+      - sessions
+      - session_termination_events
+  raw_sql:
+    mode: forbidden
+    rationale: active monitor session/deadlock DB access is mediated by agentdesk.timeouts.* and agentdesk.kv.*
+exec:
+  allow:
+    - tmux
+http:
+  loopback_only: true
+session:
+  kill: true

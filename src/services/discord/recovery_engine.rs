@@ -3,7 +3,7 @@ use super::inflight::optional_message_id;
 use super::recovery_paths::restart::dispose_recovery_relay_outcome;
 use super::recovery_paths::shared::RecoveryRelayOutcome;
 use super::settings::{
-    load_last_remote_profile, load_last_session_path, resolve_role_binding,
+    load_last_session_path, resolve_role_binding,
     validate_bot_channel_routing_with_provider_channel,
 };
 use super::single_message_panel as smp;
@@ -2907,11 +2907,6 @@ pub(super) async fn restore_inflight_turns(
                         continue;
                     }
                 };
-                let saved_remote = load_last_remote_profile(
-                    shared.pg_pool.as_ref(),
-                    &shared.token_hash,
-                    channel_id.get(),
-                );
                 let mut data = shared.core.lock().await;
                 let session = data
                     .sessions
@@ -2924,7 +2919,7 @@ pub(super) async fn restore_inflight_turns(
                         history: Vec::new(),
                         pending_uploads: Vec::new(),
                         cleared: false,
-                        remote_profile_name: saved_remote,
+                        remote_profile_name: None,
                         channel_id: Some(channel_id.get()),
                         channel_name: effective_channel_name.clone(),
                         category_name: None,
@@ -3153,12 +3148,6 @@ pub(super) async fn restore_inflight_turns(
                 continue;
             }
         };
-        let saved_remote = load_last_remote_profile(
-            shared.pg_pool.as_ref(),
-            &shared.token_hash,
-            channel_id.get(),
-        );
-
         let cancel_token = Arc::new(CancelToken::new());
         super::turn_bridge::bind_cancel_token_tmux_runtime(
             provider,
@@ -3180,7 +3169,7 @@ pub(super) async fn restore_inflight_turns(
                     history: Vec::new(),
                     pending_uploads: Vec::new(),
                     cleared: false,
-                    remote_profile_name: saved_remote.clone(),
+                    remote_profile_name: None,
                     channel_id: Some(channel_id.get()),
                     channel_name: channel_name.clone(),
                     category_name: None,
@@ -3197,9 +3186,7 @@ pub(super) async fn restore_inflight_turns(
             if session.channel_name.is_none() {
                 session.channel_name = channel_name.clone();
             }
-            if session.remote_profile_name.is_none() {
-                session.remote_profile_name = saved_remote;
-            }
+            session.remote_profile_name = None;
             restore_recovered_session_worktree(session, &state);
         }
 

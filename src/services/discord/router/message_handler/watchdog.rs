@@ -516,6 +516,36 @@ pub(super) fn attach_paused_turn_watcher(
     channel_id
 }
 
+pub(super) fn attach_paused_turn_watcher_for_inflight(
+    shared: &Arc<SharedData>,
+    http: Arc<serenity::Http>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    tmux_session_name: Option<String>,
+    output_path: Option<String>,
+    initial_offset: u64,
+    source: &'static str,
+    inflight_state: &mut InflightTurnState,
+) -> serenity::ChannelId {
+    let owner_channel_id = attach_paused_turn_watcher(
+        shared,
+        http,
+        provider,
+        channel_id,
+        tmux_session_name,
+        output_path,
+        initial_offset,
+        source,
+    );
+    if inflight_state.set_watcher_owner_channel_id(owner_channel_id.get())
+        && let Err(error) = save_inflight_state(inflight_state)
+    {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!("  [{ts}]   ⚠ inflight owner-channel save failed: {error}");
+    }
+    owner_channel_id
+}
+
 #[cfg(unix)]
 fn attach_paused_turn_watcher_inner(
     request: PausedTurnWatcherAttachRequest,

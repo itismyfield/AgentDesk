@@ -10,6 +10,7 @@ mod discord_io;
 mod dispatch_policy;
 pub(crate) mod formatting;
 mod gateway;
+mod gateway_voice_queue;
 pub(crate) mod health;
 pub(crate) mod http;
 mod idle_detector;
@@ -59,6 +60,7 @@ pub(crate) mod restart_report;
 mod role_map;
 mod router;
 mod runtime_bootstrap;
+pub(in crate::services::discord) mod semantic_boundaries;
 // #1446 stall-deadlock recovery: shared post-clear bookkeeping for the THREAD-GUARD
 // + stall-watchdog cleanup paths so neither leaks `global_active` / cancel tokens.
 pub mod runtime_store;
@@ -192,7 +194,7 @@ use restart_report::flush_restart_reports;
 use router::handle_event;
 use settings::{
     RoleBinding, channel_upload_dir, cleanup_old_uploads, load_bot_settings,
-    load_last_remote_profile, load_last_session_path, resolve_role_binding, save_bot_settings,
+    load_last_session_path, resolve_role_binding, save_bot_settings,
     validate_bot_channel_routing_with_provider_channel,
 };
 #[cfg(unix)]
@@ -3326,11 +3328,10 @@ pub(in crate::services::discord) async fn mailbox_requeue_inflight_for_followup_
     provider: &ProviderKind,
     channel_id: ChannelId,
     inflight_state: &InflightTurnState,
-) {
-    let request_owner_user_id = inflight_state.request_owner_user_id;
+) -> MailboxEnqueueOutcome {
     let user_msg_id = inflight_state.user_msg_id;
     if user_msg_id == 0 || inflight_state.user_text.trim().is_empty() {
-        return;
+        return MailboxEnqueueOutcome::default();
     }
     let message_id = MessageId::new(user_msg_id);
     // FIX #6 (Codex P2): rebuild the retry Intervention from the persisted
@@ -3339,7 +3340,7 @@ pub(in crate::services::discord) async fn mailbox_requeue_inflight_for_followup_
     // context, attachments, and voice metadata. Legacy rows (pre-v9) default
     // these to None/empty/false, matching the previous behavior exactly.
     let intervention = Intervention {
-        author_id: UserId::new(request_owner_user_id),
+        author_id: UserId::new(inflight_state.request_owner_user_id),
         author_is_bot: false,
         message_id,
         source_message_ids: vec![message_id],
@@ -3352,7 +3353,147 @@ pub(in crate::services::discord) async fn mailbox_requeue_inflight_for_followup_
         pending_uploads: inflight_state.followup_pending_uploads.clone(),
         voice_announcement: inflight_state.followup_voice_announcement.clone(),
     };
-    let _ = mailbox_enqueue_intervention(shared, provider, channel_id, intervention).await;
+    mailbox_enqueue_intervention(shared, provider, channel_id, intervention).await
+}
+
+#[cfg(test)]
+mod followup_retry_requeue_tests {
+    use super::*;
+
+    const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
+
+    struct EnvGuard {
+        previous: Option<String>,
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.previous.as_deref() {
+                Some(value) => unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, value) },
+                None => unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) },
+            }
+        }
+    }
+
+    fn followup_inflight(channel_id: ChannelId, user_msg_id: MessageId) -> InflightTurnState {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            channel_id.get(),
+            Some("adk-cc".to_string()),
+            42,
+            user_msg_id.get(),
+            user_msg_id.get() + 1,
+            "please continue".to_string(),
+            Some("session-3752".to_string()),
+            Some("AgentDesk-claude-3752".to_string()),
+            Some("/tmp/agentdesk-3752.jsonl".to_string()),
+            None,
+            0,
+        );
+        state.set_followup_requeue_context(
+            Some("reply context".to_string()),
+            true,
+            false,
+            vec!["attachment-a".to_string(), "attachment-b".to_string()],
+            None,
+        );
+        state
+    }
+
+    #[test]
+    fn pre_submit_requeue_preserves_context_and_returns_enqueue_outcome() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard {
+            previous: std::env::var(AGENTDESK_ROOT_DIR_ENV).ok(),
+        };
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path()) };
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let shared = make_shared_data_for_tests();
+            let provider = ProviderKind::Claude;
+            let channel_id = ChannelId::new(3_752_001);
+            let user_msg_id = MessageId::new(3_752_101);
+            let state = followup_inflight(channel_id, user_msg_id);
+
+            let outcome =
+                mailbox_requeue_inflight_for_followup_retry(&shared, &provider, channel_id, &state)
+                    .await;
+
+            assert!(outcome.enqueued);
+            assert!(!outcome.merged);
+            assert_eq!(outcome.refusal_reason, None);
+            assert_eq!(outcome.persistence_error, None);
+
+            let snapshot = mailbox_snapshot(&shared, channel_id).await;
+            assert_eq!(snapshot.intervention_queue.len(), 1);
+            let intervention = &snapshot.intervention_queue[0];
+            assert_eq!(intervention.author_id, UserId::new(42));
+            assert_eq!(intervention.message_id, user_msg_id);
+            assert_eq!(intervention.source_message_ids, vec![user_msg_id]);
+            assert_eq!(intervention.text, "please continue");
+            assert_eq!(intervention.reply_context.as_deref(), Some("reply context"));
+            assert!(intervention.has_reply_boundary);
+            assert!(!intervention.merge_consecutive);
+            assert_eq!(
+                intervention.pending_uploads,
+                vec!["attachment-a".to_string(), "attachment-b".to_string()]
+            );
+            assert!(intervention.voice_announcement.is_none());
+        });
+    }
+
+    #[test]
+    fn pre_submit_requeue_reports_duplicate_refusal_outcome() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard {
+            previous: std::env::var(AGENTDESK_ROOT_DIR_ENV).ok(),
+        };
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path()) };
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let shared = make_shared_data_for_tests();
+            let provider = ProviderKind::Claude;
+            let channel_id = ChannelId::new(3_752_002);
+            let user_msg_id = MessageId::new(3_752_102);
+            let state = followup_inflight(channel_id, user_msg_id);
+
+            let first =
+                mailbox_requeue_inflight_for_followup_retry(&shared, &provider, channel_id, &state)
+                    .await;
+            let second =
+                mailbox_requeue_inflight_for_followup_retry(&shared, &provider, channel_id, &state)
+                    .await;
+
+            assert!(first.enqueued);
+            assert!(!second.enqueued);
+            assert_eq!(
+                second.refusal_reason,
+                Some(
+                    crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdAlreadyQueued
+                )
+            );
+            let snapshot = mailbox_snapshot(&shared, channel_id).await;
+            assert_eq!(
+                snapshot.intervention_queue.len(),
+                1,
+                "duplicate pre-submit requeue must not create a second queued prompt"
+            );
+        });
+    }
 }
 
 async fn mailbox_cancel_soft_intervention(
@@ -3694,14 +3835,12 @@ pub(super) async fn kickoff_idle_queues(
             shared,
             token,
         };
-        // #2266: kickoff_idle_queues is the other queued-dispatch entrypoint
-        // alongside `DiscordGateway::dispatch_queued_turn`. It is reached by
-        // `schedule_deferred_idle_queue_kickoff` from the very same race-loss
-        // branch that embeds the voice payload into the queued Intervention,
-        // so we must reinsert the announcement into the per-process store
-        // before re-entering `handle_text_message`. Without this hook the
-        // race-loss path that takes the idle-kickoff branch would still
-        // degrade to plain text.
+        // #2266 compatibility: kickoff_idle_queues is the other queued-dispatch
+        // entrypoint alongside `DiscordGateway::dispatch_queued_turn`. Older
+        // queued interventions may still carry a voice accepted-replay payload,
+        // so reinsert it before re-entering `handle_text_message`. New queue
+        // commits strip that payload and let dispatch claim the durable row
+        // from the readable announcement text.
         if let Some(announcement) = intervention.voice_announcement.as_ref() {
             crate::voice::announce_meta::global_store()
                 .insert_accepted_replay(intervention.message_id, announcement.clone());

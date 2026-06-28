@@ -354,6 +354,9 @@ class CrossChannelMatrix(unittest.TestCase):
 
         self.assertEqual(result["status"], "pass")
         self.assertTrue(result["ok"])
+        self.assertTrue(result["real_provider_contacted"])
+        self.assertEqual(result["agent_mode_actual"], "real_live")
+        self.assertTrue(result["agent_mode_contract"]["satisfied"])
         self.assertEqual(FakeClient.max_active, 2)
         self.assertIn(
             (
@@ -386,6 +389,79 @@ class CrossChannelMatrix(unittest.TestCase):
             {"marker_absent": {"marker": "[E2E:E11:CC-MARKER]", "surface": "relay"}},
             all_specs,
         )
+
+    def test_cross_channel_dispatch_failure_before_send_does_not_report_provider_contact(self):
+        class FailingClient:
+            def __init__(self, **kwargs):
+                self.base_url = kwargs["base_url"]
+
+            def send_control(self, channel_id, content):  # noqa: ARG002
+                return {"id": "1"}
+
+            def fetch_messages(self, channel_id, *, limit=50, after_id=None):  # noqa: ARG002
+                return []
+
+            def send_prompt(self, channel_id, content, *, channel_kind="cc"):  # noqa: ARG002
+                raise RuntimeError("provider send unavailable")
+
+        args = Namespace(
+            base_url="http://agentdesk.test",
+            dry_run=False,
+            queue_runtime_root="/tmp/agentdesk-e2e-test-runtime",
+            reset_before_each=False,
+            turn_start_timeout_s=5,
+        )
+
+        with (
+            patch(
+                "run_multi_provider_matrix.cell_driver.discord.DiscordClient",
+                FailingClient,
+            ),
+            patch(
+                "run_multi_provider_matrix.guard_no_foreign_live_state",
+                return_value={"status": "isolated"},
+            ),
+            patch("run_multi_provider_matrix.time.sleep", return_value=None),
+        ):
+            result = matrix.run_cross_channel_scenario(
+                self.e11,
+                args=args,
+                run_id="run-1",
+                channel_ids=self.channel_ids,
+                selected_cells=["claude-tui", "codex-tui"],
+                pass_index=1,
+            )
+
+        self.assertEqual(result["status"], "fail")
+        self.assertFalse(result["real_provider_contacted"])
+        self.assertEqual(result["agent_mode_actual"], "none")
+        self.assertFalse(result["agent_mode_contract"]["satisfied"])
+        self.assertIn("cross-channel dispatch failed", result["reason"])
+
+    def test_cross_channel_required_real_live_fails_missing_selected_cells(self):
+        args = Namespace(
+            base_url="http://agentdesk.test",
+            dry_run=False,
+            queue_runtime_root="/tmp/agentdesk-e2e-test-runtime",
+            reset_before_each=False,
+            required_agent_mode="real_live",
+            turn_start_timeout_s=5,
+        )
+
+        result = matrix.run_cross_channel_scenario(
+            self.e11,
+            args=args,
+            run_id="run-1",
+            channel_ids=self.channel_ids,
+            selected_cells=["claude-tui"],
+            pass_index=1,
+        )
+
+        self.assertEqual(result["status"], "fail")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["agent_mode_actual"], "none")
+        self.assertEqual(result["failure_attribution"]["source"], "agent_mode_gate")
+        self.assertIn("observed agent_mode_actual=none", result["reason"])
 
     def test_cross_channel_non_leak_fails_on_sibling_marker(self):
         class LeakyClient:

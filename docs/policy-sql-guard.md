@@ -35,9 +35,16 @@ DB callsites must migrate to a typed facade or carry a
 `legacy-raw-db: policy=<name> capability=<intent> source_event=<hook>` marker
 so audit logs can attribute the capability.
 
-The current audited baseline is 195 unmarked raw DB callsites plus 3 annotated
-escape-hatch callsites. This baseline records the existing trusted-automation
-surface; it is not permission for silent growth.
+The current audited baseline is 166 raw DB callsites across 29 policy files.
+Four nearby `legacy-raw-db` marker comments annotate existing escape-hatch
+callsites. This baseline records the existing trusted-automation surface; it is
+not permission for silent growth.
+
+Static manifest enforcement now runs through
+`scripts/check_policy_db_capabilities.py --no-silent-growth`. The check only
+applies to policies with checked-in `policies/**/*.cap.yaml` manifests. It does
+not change runtime policy execution or `src/engine/sql_guard.rs`; it makes drift
+visible before runtime denial is introduced.
 
 ## Additional Protected Table Candidates
 
@@ -67,6 +74,8 @@ trust: trusted-automation
 source_events:
   - onCardCompleted
   - onTick
+include_files:
+  - policies/lib/merge-notification-dispatcher.js
 db:
   read:
     tables:
@@ -81,6 +90,9 @@ db:
       - task_dispatches
   raw_sql:
     mode: audited
+    capabilities:
+      - merge_candidate_inspection
+      - merge_request_tracking
     markers_required: true
 exec:
   allow:
@@ -100,21 +112,71 @@ session:
 | `policy` | Policy basename without `.js`; must match the file it describes. |
 | `trust` | Must be `trusted-automation` for repo policies. Other trust levels are out of scope until untrusted policy loading exists. |
 | `source_events` | Hook names or scheduler events that exercise the listed capabilities. |
+| `include_files` | Optional repo-relative helper files whose raw DB callsites are runtime-reachable from this policy and should share the manifest baseline. |
 | `db.read.tables` | Tables the policy can read through raw SQL or typed facades. |
 | `db.write.tables` | Tables or table columns the policy can write directly or through typed facades. |
 | `db.write.guarded_targets` | Guarded targets the policy must not mutate through raw SQL. |
-| `db.raw_sql.mode` | `forbidden`, `audited`, or `transitional`. MVP defaults to `audited` for legacy policies. |
+| `db.raw_sql.mode` | `forbidden`, `audited`, `transitional`, or `legacy`. MVP defaults to `audited` for marker-based policies; `legacy` is only for policy-wide transitional access pinned by `no_silent_growth`. |
+| `db.raw_sql.capabilities` | Named raw DB intents accepted for the policy. Marker-based policies must use one of these names in `legacy-raw-db capability=...`; `legacy` mode uses this as the explicit broad raw DB capability. |
 | `db.raw_sql.markers_required` | Whether raw SQL callsites need the `legacy-raw-db` marker. |
+| `db.raw_sql.no_silent_growth.callsites` | Expected `agentdesk.db.query/execute` callsite count for a manifest-enabled legacy policy. |
+| `db.raw_sql.no_silent_growth.fingerprint` | SHA-256 baseline over the manifest-enabled policy's current raw DB callsites. |
 | `exec.allow` | Executable names allowed through the policy exec bridge. |
 | `http.loopback_only` | Must be `true` for policy HTTP calls. |
 | `session.kill` | Whether policy code may request session termination. |
 
+### Static Check Workflow
+
+The CI/script guard is:
+
+```bash
+python3 scripts/check_policy_db_capabilities.py --no-silent-growth \
+  --require-manifest policies/timeouts/active-monitor.cap.yaml \
+  --require-manifest policies/review-automation.cap.yaml \
+  --require-manifest policies/merge-automation.cap.yaml
+```
+
+`scripts/ci-script-checks.sh` runs the guard with those required first-rollout
+manifests and the focused unittest suite.
+For manifest-enabled policies, the check accepts raw DB callsites in two ways:
+
+- A `legacy-raw-db` SQL comment inside the `agentdesk.db.*` call expression
+  includes `policy`, `capability`, and `source_event`; the capability and source
+  event must be declared by the manifest. Keeping the marker inside the SQL
+  string makes the static check and runtime `policy.raw_db_audit` attribution
+  see the same fields.
+- The manifest uses explicit `db.raw_sql.mode: legacy` and its
+  `no_silent_growth` count/fingerprint matches the current callsite set.
+
+To add or intentionally change a manifest-enabled policy's raw DB surface,
+review the policy diff, prefer migrating to a typed facade or adding a
+`legacy-raw-db` marker, then refresh the manifest baseline with:
+
+```bash
+python3 scripts/check_policy_db_capabilities.py --emit-baseline
+python3 scripts/check_policy_db_capabilities.py --no-silent-growth
+```
+
+The first rollout manifests are checked in for:
+
+- `policies/timeouts/active-monitor.cap.yaml`
+- `policies/review-automation.cap.yaml`
+- `policies/merge-automation.cap.yaml`
+
+`review-automation` and `merge-automation` remain in `legacy` raw SQL mode with
+pinned baselines. `timeouts/active-monitor` has been migrated to typed timeout
+facades and now uses `forbidden` raw SQL mode, so any new `agentdesk.db.*`
+callsite in that file fails the static check. This prevents silent growth in
+the highest-risk policy files while keeping the runtime guard behavior
+unchanged.
+
 ### Enforcement Plan
 
 1. Add manifests for the highest-risk policies with `db.raw_sql.mode:
-   audited`.
-2. Add a static CI check that each `agentdesk.db.*` callsite maps to a
-   manifest capability and marker.
+   legacy` and `db.raw_sql.no_silent_growth` baselines.
+2. Add a static CI check that each manifest-enabled `agentdesk.db.*` callsite
+   either has a complete `legacy-raw-db` marker or is covered by an explicit
+   legacy raw SQL baseline.
 3. Migrate hot paths to typed facades listed in `docs/policy-typed-facade.md`.
 4. Flip individual policies or slices from `audited` to `forbidden` once typed
    facades cover their required behavior.

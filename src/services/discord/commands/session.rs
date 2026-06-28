@@ -26,20 +26,7 @@ pub(in crate::services::discord) async fn cmd_start(
 
     let path_str = path.as_deref().unwrap_or("").trim();
 
-    // Existing remote session state still influences path validation; /start no longer exposes
-    // a user-facing remote selector.
-    let will_be_remote = {
-        let data = ctx.data().shared.core.lock().await;
-        data.sessions
-            .get(&ctx.channel_id())
-            .and_then(|s| s.remote_profile_name.as_ref())
-            .is_some()
-    };
-
-    let canonical_path = if path_str.is_empty() && will_be_remote {
-        // Remote + no path: keep remote-shell default expansion behavior.
-        "~".to_string()
-    } else if path_str.is_empty() {
+    let canonical_path = if path_str.is_empty() {
         // Local + no path: create random workspace directory
         let Some(workspace_dir) = workspace_root() else {
             ctx.say("Error: cannot determine workspace root.").await?;
@@ -58,14 +45,6 @@ pub(in crate::services::discord) async fn cmd_start(
             return Ok(());
         }
         new_dir.display().to_string()
-    } else if will_be_remote {
-        // Remote + path specified: expand tilde only, skip local validation
-        if path_str.starts_with("~/") || path_str == "~" {
-            // Keep tilde as-is for remote (remote shell will expand it)
-            path_str.to_string()
-        } else {
-            path_str.to_string()
-        }
     } else {
         // Local + path specified: expand ~ and validate locally
         let expanded = crate::runtime_layout::expand_user_path(path_str)
@@ -167,6 +146,7 @@ pub(in crate::services::discord) async fn cmd_start(
         session.category_name = cat_name;
         session.last_active = tokio::time::Instant::now();
         session.current_path = Some(effective_path.clone());
+        session.remote_profile_name = None;
 
         // Apply worktree info if created
         session.worktree = worktree_info.clone();
@@ -196,18 +176,15 @@ pub(in crate::services::discord) async fn cmd_start(
 
         // Persist channel → path mapping for auto-restore
         let ch_key = channel_id.get().to_string();
-        let current_remote_for_settings = data
-            .sessions
-            .get(&channel_id)
-            .and_then(|s| s.remote_profile_name.clone());
         drop(data);
 
+        // Remote SSH is disabled by policy (#2193). `/start` is always local and
+        // clears any legacy remote profile key left by older builds.
         save_last_session_runtime(
             ctx.data().shared.pg_pool.as_ref(),
             &ctx.data().shared.token_hash,
             ch_key.parse::<u64>().unwrap_or_default(),
             &canonical_path,
-            current_remote_for_settings.as_deref(),
         );
 
         // Rescan skills with project path to pick up project-level commands

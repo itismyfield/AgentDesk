@@ -1,0 +1,35 @@
+version: 1
+policy: review-automation
+trust: trusted-automation
+source_events:
+  - onReviewEnter
+  - onDispatchCompleted
+  - onReviewVerdict
+db:
+  read:
+    tables:
+      - card_review_state
+      - kanban_cards
+      - kanban_reviews
+      - pipeline_stages
+      - task_dispatches
+  write:
+    tables:
+      - kanban_cards
+  raw_sql:
+    mode: legacy
+    capabilities:
+      - review_lifecycle_legacy_raw_db
+    markers_required: false
+    rationale: broad legacy review lifecycle DB access pinned by no-silent-growth baseline
+    no_silent_growth:
+      callsites: 34
+      fingerprint: sha256:620b153dace9185681b156c6467dc62d28df609bcfa00a4039276c3fbfb7f6f9
+exec:
+  allow:
+    - gh
+    - git
+http:
+  loopback_only: true
+session:
+  kill: false

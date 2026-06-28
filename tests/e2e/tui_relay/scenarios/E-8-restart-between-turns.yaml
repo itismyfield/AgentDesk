@@ -1,5 +1,6 @@
 id: E-8
 title: 응답 완료 → dcserver dev restart → 새 프롬프트 → 새 응답만 emit
+agent_mode: real_live
 cells: [claude-pipe, claude-tui, claude-e, codex-pipe, codex-tui]
 isolation: required
 destructive: true

@@ -51,6 +51,20 @@ struct BinaryCandidate {
     priority: u8,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ParsedCliVersion {
+    major: u64,
+    minor: u64,
+    patch: u64,
+}
+
+#[derive(Clone, Debug)]
+struct SuccessfulBinaryProbe {
+    resolution: BinaryResolution,
+    version_output: String,
+    parsed_version: Option<ParsedCliVersion>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct BinaryProbeCacheKey {
     provider: String,
@@ -253,28 +267,41 @@ fn probe_provider_binary_candidates(candidates: Vec<BinaryResolution>) -> Binary
         .unwrap_or_else(|| "provider".to_string());
     let mut failed_candidates = Vec::new();
     let mut first_failed_probe = None;
+    let mut successful_candidates = Vec::new();
     for resolution in candidates {
         let Some(resolved_path) = resolution.resolved_path.clone() else {
             continue;
         };
         let (version_output, probe_failure_kind) =
             probe_resolved_binary_version(std::path::Path::new(&resolved_path), &resolution);
-        if version_output
+        if let Some(version_output) = version_output
             .as_deref()
-            .is_some_and(|output| !output.lines().next().unwrap_or("").trim().is_empty())
+            .filter(|output| !output.lines().next().unwrap_or("").trim().is_empty())
         {
-            let mut resolution = resolution;
-            for failure in &failed_candidates {
-                resolution
-                    .attempts
-                    .push(format!("skipped_candidate_failure:{failure}"));
+            if requested_binary == "codex" {
+                successful_candidates.push(SuccessfulBinaryProbe {
+                    resolution,
+                    version_output: version_output.to_string(),
+                    parsed_version: parse_cli_semver(version_output),
+                });
+                continue;
             }
-            return BinaryVersionProbe {
+
+            return selected_binary_probe(
                 resolution,
-                version_output,
-                probe_failure_kind,
-                skipped_candidate_failures: failed_candidates,
-            };
+                version_output.to_string(),
+                Vec::new(),
+                failed_candidates,
+            );
+        }
+
+        if first_failed_probe.is_none() {
+            first_failed_probe = Some(BinaryVersionProbe {
+                resolution: resolution.clone(),
+                version_output: version_output.clone(),
+                probe_failure_kind: probe_failure_kind.clone(),
+                skipped_candidate_failures: Vec::new(),
+            });
         }
 
         let failure = format!(
@@ -284,15 +311,19 @@ fn probe_provider_binary_candidates(candidates: Vec<BinaryResolution>) -> Binary
                 .clone()
                 .unwrap_or_else(|| "version_probe_empty".to_string())
         );
-        if first_failed_probe.is_none() {
-            first_failed_probe = Some(BinaryVersionProbe {
-                resolution,
-                version_output,
-                probe_failure_kind,
-                skipped_candidate_failures: Vec::new(),
-            });
-        }
         failed_candidates.push(failure);
+    }
+
+    if !successful_candidates.is_empty() {
+        let selected_index =
+            select_successful_candidate_index(&requested_binary, &successful_candidates);
+        let selected = successful_candidates.remove(selected_index);
+        return selected_binary_probe(
+            selected.resolution,
+            selected.version_output,
+            successful_candidates,
+            failed_candidates,
+        );
     }
 
     if let Some(probe) = first_failed_probe {
@@ -303,6 +334,103 @@ fn probe_provider_binary_candidates(candidates: Vec<BinaryResolution>) -> Binary
         unresolved_provider_binary(requested_binary, Vec::new()),
         Vec::new(),
     )
+}
+
+fn selected_binary_probe(
+    mut resolution: BinaryResolution,
+    version_output: String,
+    skipped_successful_candidates: Vec<SuccessfulBinaryProbe>,
+    failed_candidates: Vec<String>,
+) -> BinaryVersionProbe {
+    for failure in &failed_candidates {
+        resolution
+            .attempts
+            .push(format!("skipped_candidate_failure:{failure}"));
+    }
+    for skipped in &skipped_successful_candidates {
+        resolution.attempts.push(format!(
+            "skipped_candidate_success:{}:version={}",
+            skipped
+                .resolution
+                .resolved_path
+                .as_deref()
+                .unwrap_or("<unknown>"),
+            first_output_line(&skipped.version_output)
+        ));
+    }
+    resolution.attempts.push(format!(
+        "selected_candidate_version:{}:version={}",
+        resolution.resolved_path.as_deref().unwrap_or("<unknown>"),
+        first_output_line(&version_output)
+    ));
+
+    BinaryVersionProbe {
+        resolution,
+        version_output: Some(version_output),
+        probe_failure_kind: None,
+        skipped_candidate_failures: failed_candidates,
+    }
+}
+
+fn select_successful_candidate_index(
+    requested_binary: &str,
+    candidates: &[SuccessfulBinaryProbe],
+) -> usize {
+    if requested_binary != "codex" {
+        return 0;
+    }
+
+    let mut best: Option<(usize, ParsedCliVersion)> = None;
+    for (index, candidate) in candidates.iter().enumerate() {
+        let Some(version) = candidate.parsed_version else {
+            continue;
+        };
+        if best
+            .as_ref()
+            .is_none_or(|(_, best_version)| version > *best_version)
+        {
+            best = Some((index, version));
+        }
+    }
+    best.map(|(index, _)| index).unwrap_or(0)
+}
+
+fn parse_cli_semver(output: &str) -> Option<ParsedCliVersion> {
+    for token in output.split_whitespace() {
+        let token = token
+            .trim_matches(|ch: char| {
+                !(ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_')
+            })
+            .trim_start_matches('v');
+        let version_part = token.split('-').next().unwrap_or(token);
+        let mut parts = version_part.split('.');
+        let (Some(major), Some(minor), Some(patch)) = (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        if parts.next().is_some() {
+            continue;
+        }
+        let Ok(major) = major.parse::<u64>() else {
+            continue;
+        };
+        let Ok(minor) = minor.parse::<u64>() else {
+            continue;
+        };
+        let Ok(patch) = patch.parse::<u64>() else {
+            continue;
+        };
+        return Some(ParsedCliVersion {
+            major,
+            minor,
+            patch,
+        });
+    }
+    None
+}
+
+fn first_output_line(output: &str) -> String {
+    output.lines().next().unwrap_or(output).trim().to_string()
 }
 
 fn probe_single_provider_resolution(
@@ -538,6 +666,9 @@ pub fn candidate_priority(provider: &str, path: impl AsRef<Path>) -> u8 {
     if path.contains("/.bun/bin/") || path.contains("/bun/bin/") {
         return 90;
     }
+    if provider == "codex" && is_codex_app_bundle_resource_path(&path) {
+        return 5;
+    }
     if provider == "claude" && path.contains("/.claude/local/") {
         return 0;
     }
@@ -555,6 +686,10 @@ pub fn candidate_priority(provider: &str, path: impl AsRef<Path>) -> u8 {
         return 10;
     }
     50
+}
+
+fn is_codex_app_bundle_resource_path(path: &str) -> bool {
+    path.contains("/codex.app/contents/resources/")
 }
 
 fn normalized_path_text(path: &Path) -> String {
@@ -832,11 +967,35 @@ fn provider_fallback_dirs(provider: &str) -> Vec<PathBuf> {
     for dir in windows_provider_subdirs(provider) {
         push_unique_path(dir, &mut dirs, &mut seen);
     }
+    for dir in provider_app_bundle_dirs(provider) {
+        push_unique_path(dir, &mut dirs, &mut seen);
+    }
     for dir in standard_fallback_dirs() {
         push_unique_path(dir, &mut dirs, &mut seen);
     }
 
     dirs
+}
+
+fn provider_app_bundle_dirs(provider: &str) -> Vec<PathBuf> {
+    if normalize_name(provider) != "codex" {
+        return Vec::new();
+    }
+    codex_app_bundle_resource_dirs()
+}
+
+#[cfg(target_os = "macos")]
+fn codex_app_bundle_resource_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![PathBuf::from("/Applications/Codex.app/Contents/Resources")];
+    if let Some(home) = dirs::home_dir() {
+        dirs.push(home.join("Applications/Codex.app/Contents/Resources"));
+    }
+    dirs
+}
+
+#[cfg(not(target_os = "macos"))]
+fn codex_app_bundle_resource_dirs() -> Vec<PathBuf> {
+    Vec::new()
 }
 
 #[cfg(windows)]
@@ -1218,4 +1377,107 @@ fn record_context_launch_artifact(
     };
 
     let _ = crate::services::provider_cli::io::save_launch_artifact(&root, &artifact);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_codex_cli_semver_from_version_output() {
+        assert_eq!(
+            parse_cli_semver("codex-cli 0.142.3"),
+            Some(ParsedCliVersion {
+                major: 0,
+                minor: 142,
+                patch: 3
+            })
+        );
+        assert_eq!(
+            parse_cli_semver("codex-cli v1.2.3-beta\nextra"),
+            Some(ParsedCliVersion {
+                major: 1,
+                minor: 2,
+                patch: 3
+            })
+        );
+        assert_eq!(parse_cli_semver("codex-cli dev-build"), None);
+    }
+
+    #[test]
+    fn codex_app_bundle_candidate_gets_codex_only_priority() {
+        let app_path = "/Applications/Codex.app/Contents/Resources/codex";
+
+        assert_eq!(candidate_priority("codex", app_path), 5);
+        assert_eq!(candidate_priority("claude", app_path), 50);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn codex_fallback_dirs_include_app_bundle_resources_on_macos() {
+        let dirs = provider_fallback_dirs("codex");
+
+        assert!(
+            dirs.iter().any(|dir| {
+                dir.to_string_lossy() == "/Applications/Codex.app/Contents/Resources"
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_probe_selects_newest_successful_candidate_not_first_path_hit() {
+        let temp = tempfile::tempdir().unwrap();
+        let old_path = temp.path().join("homebrew/bin/codex");
+        let new_path = temp
+            .path()
+            .join("Applications/Codex.app/Contents/Resources/codex");
+        write_fake_version_binary(&old_path, "codex-cli 0.139.0");
+        write_fake_version_binary(&new_path, "codex-cli 0.142.3");
+
+        let old_resolution = finalize_resolution(
+            "codex".to_string(),
+            old_path.clone(),
+            "current_path".to_string(),
+            vec!["current_path=candidates:1".to_string()],
+        );
+        let new_resolution = finalize_resolution(
+            "codex".to_string(),
+            new_path.clone(),
+            "fallback_path".to_string(),
+            vec!["fallback_path=candidates:1".to_string()],
+        );
+
+        let probe = probe_provider_binary_candidates(vec![old_resolution, new_resolution]);
+
+        assert_eq!(
+            probe.resolution.resolved_path.as_deref(),
+            Some(new_path.to_string_lossy().as_ref())
+        );
+        assert_eq!(probe.version_output.as_deref(), Some("codex-cli 0.142.3"));
+        assert!(probe.resolution.attempts.iter().any(|attempt| {
+            attempt.contains("skipped_candidate_success:") && attempt.contains("codex-cli 0.139.0")
+        }));
+        assert!(probe.resolution.attempts.iter().any(|attempt| {
+            attempt.contains("selected_candidate_version:") && attempt.contains("codex-cli 0.142.3")
+        }));
+    }
+
+    #[cfg(unix)]
+    fn write_fake_version_binary(path: &Path, version_output: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '%s\\n' '{}'; exit 0; fi\nexit 1\n",
+                version_output
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
 }

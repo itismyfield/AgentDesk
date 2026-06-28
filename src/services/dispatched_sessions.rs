@@ -7,6 +7,7 @@ use crate::db::session_agent_resolution::{
 use crate::db::session_status::{
     is_live_status, is_user_wait_status, normalize_incoming_session_status,
 };
+use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::provider::ProviderKind;
 use crate::services::turn_lifecycle::{TurnLifecycleTarget, force_kill_turn};
 use axum::{
@@ -620,13 +621,14 @@ async fn force_kill_session_impl_with_reason_and_forwarding(
 ) -> (StatusCode, Json<serde_json::Value>) {
     let session_key = session_key;
 
-    // Parse tmux session name from session_key (format: "hostname:tmux_name")
-    let tmux_name = match session_key.split_once(':') {
-        Some((_, name)) => name.to_string(),
+    let tmux_name = match tmux_name_from_session_key(session_key) {
+        Some(name) => name,
         None => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(json!({"error": "invalid session_key format — expected hostname:tmux_name"})),
+                Json(
+                    json!({"error": "invalid session_key format — expected legacy host:tmux or namespaced provider/token/host:tmux"}),
+                ),
             );
         }
     };
@@ -885,8 +887,9 @@ const FORCE_KILL_RETRY_LIMIT: i64 = 5;
 ///
 /// #1067: Skill promotion for watch-agent-turn. Returns the latest N lines of
 /// the tmux pane bound to the session identified by the numeric session id
-/// (`sessions.id`). Reads the session row to derive `hostname:tmux_name` from
-/// `session_key`, then shells out via [`crate::services::platform::tmux::capture_pane`].
+/// (`sessions.id`). Reads the session row to derive the tmux name from a
+/// legacy or namespaced `session_key`, then shells out via
+/// [`crate::services::platform::tmux::capture_pane`].
 pub async fn tmux_output(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -951,15 +954,14 @@ pub async fn tmux_output(
         }
     }
 
-    // session_key format: "hostname:tmux_name"
-    let tmux_name = match session_key.split_once(':') {
-        Some((_, name)) if !name.is_empty() => name.to_string(),
+    let tmux_name = match tmux_name_from_session_key(&session_key) {
+        Some(name) => name,
         _ => {
             return (
                 StatusCode::CONFLICT,
                 Json(json!({
                     "error": format!(
-                        "session #{id} session_key does not follow hostname:tmux_name format"
+                        "session #{id} session_key does not follow legacy host:tmux or namespaced provider/token/host:tmux format"
                     ),
                     "session_id": id,
                     "session_key": session_key,
@@ -1185,12 +1187,14 @@ async fn kill_tmux_session_impl(
     reason: &str,
     minimum_idle_minutes: Option<u64>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let tmux_name = match session_key.split_once(':') {
-        Some((_, name)) => name.to_string(),
+    let tmux_name = match tmux_name_from_session_key(session_key) {
+        Some(name) => name,
         None => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(json!({"error": "invalid session_key format — expected hostname:tmux_name"})),
+                Json(
+                    json!({"error": "invalid session_key format — expected legacy host:tmux or namespaced provider/token/host:tmux"}),
+                ),
             );
         }
     };

@@ -1,5 +1,6 @@
 id: E-25
 title: Codex response_item plus task_complete replay fixture
+agent_mode: none
 cells: [codex-pipe, codex-tui]
 execution: fixture
 isolation: local

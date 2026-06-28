@@ -1,5 +1,6 @@
 id: E-20
 title: same-session near-concurrent dispatch returns both markers once
+agent_mode: real_live
 cells: [claude-pipe, claude-tui, claude-e, codex-pipe, codex-tui]
 isolation: required
 acceptance_criteria:

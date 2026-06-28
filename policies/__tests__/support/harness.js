@@ -136,6 +136,14 @@ function createAgentdeskMock(options) {
     autoQueueResumes: [],
     autoQueueSavedPhaseGates: [],
     autoQueueClearedPhaseGates: [],
+    timeoutClearFreshCounterCalls: [],
+    timeoutStaleWorkingScans: [],
+    timeoutDeadlockCandidateScans: [],
+    timeoutMarkSessionIdleCalls: [],
+    timeoutDispatchTypeLookups: [],
+    timeoutTerminationRecords: [],
+    timeoutInactiveCounterCleanups: 0,
+    timeoutHistoryCleanupCalls: [],
     retrospectiveCalls: [],
     runtimeSignals: [],
     httpPosts: [],
@@ -149,6 +157,7 @@ function createAgentdeskMock(options) {
   const dbQuery = settings.dbQuery || (() => []);
   const dbExecute = settings.dbExecute || (() => ({ changes: 1 }));
   const exec = settings.exec || (() => "");
+  const timeouts = settings.timeouts || {};
   const cards = settings.cards || {};
   const counterChannels = settings.counterChannels || {};
   const primaryChannels = settings.primaryChannels || {};
@@ -308,6 +317,67 @@ function createAgentdeskMock(options) {
         return null;
       },
       refreshInventoryDocs() {}
+    },
+    timeouts: {
+      clearDeadlockCountersForFreshSessions(staleScanMinutes) {
+        state.timeoutClearFreshCounterCalls.push({ staleScanMinutes });
+        if (typeof timeouts.clearDeadlockCountersForFreshSessions === "function") {
+          return clone(timeouts.clearDeadlockCountersForFreshSessions(staleScanMinutes, state));
+        }
+        return { ok: true, deleted: 0 };
+      },
+      listStaleWorkingSessions(graceMinutes) {
+        state.timeoutStaleWorkingScans.push({ graceMinutes });
+        if (typeof timeouts.listStaleWorkingSessions === "function") {
+          return clone(timeouts.listStaleWorkingSessions(graceMinutes, state));
+        }
+        return clone(timeouts.staleWorkingSessions || []);
+      },
+      listDeadlockCandidates(staleScanMinutes, limit) {
+        state.timeoutDeadlockCandidateScans.push({ staleScanMinutes, limit });
+        if (typeof timeouts.listDeadlockCandidates === "function") {
+          return clone(timeouts.listDeadlockCandidates(staleScanMinutes, limit, state));
+        }
+        return clone(timeouts.deadlockCandidates || []);
+      },
+      markSessionIdle(sessionKey, optionsArg) {
+        state.timeoutMarkSessionIdleCalls.push({ sessionKey, options: clone(optionsArg || {}) });
+        if (typeof timeouts.markSessionIdle === "function") {
+          return clone(timeouts.markSessionIdle(sessionKey, optionsArg || {}, state));
+        }
+        return { ok: true, rows_affected: 1 };
+      },
+      getDispatchType(dispatchId) {
+        state.timeoutDispatchTypeLookups.push({ dispatchId });
+        if (typeof timeouts.getDispatchType === "function") {
+          return timeouts.getDispatchType(dispatchId, state);
+        }
+        if (timeouts.dispatchTypes && Object.prototype.hasOwnProperty.call(timeouts.dispatchTypes, dispatchId)) {
+          return timeouts.dispatchTypes[dispatchId];
+        }
+        return null;
+      },
+      recordDeadlockTermination(payload) {
+        state.timeoutTerminationRecords.push(clone(payload || {}));
+        if (typeof timeouts.recordDeadlockTermination === "function") {
+          return clone(timeouts.recordDeadlockTermination(payload || {}, state));
+        }
+        return { ok: true, rows_affected: 1 };
+      },
+      cleanupDeadlockCountersForInactiveSessions() {
+        state.timeoutInactiveCounterCleanups += 1;
+        if (typeof timeouts.cleanupDeadlockCountersForInactiveSessions === "function") {
+          return clone(timeouts.cleanupDeadlockCountersForInactiveSessions(state));
+        }
+        return { ok: true, deleted: 0 };
+      },
+      cleanupDeadlockHistoryBefore(cutoffMs) {
+        state.timeoutHistoryCleanupCalls.push({ cutoffMs });
+        if (typeof timeouts.cleanupDeadlockHistoryBefore === "function") {
+          return clone(timeouts.cleanupDeadlockHistoryBefore(cutoffMs, state));
+        }
+        return { ok: true, deleted: 0 };
+      }
     },
     http: {
       post(url, body) {

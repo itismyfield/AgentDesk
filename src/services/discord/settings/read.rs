@@ -237,39 +237,21 @@ pub(crate) fn load_last_session_path(
     load_kv_meta_value(pg_pool, &last_session_path_key(token_hash, channel_id))
 }
 
-pub(crate) fn load_last_remote_profile(
-    pg_pool: Option<&sqlx::PgPool>,
-    token_hash: &str,
-    channel_id: u64,
-) -> Option<String> {
-    load_kv_meta_value(pg_pool, &last_remote_profile_key(token_hash, channel_id))
-}
-
 pub(crate) fn save_last_session_runtime(
     pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
     channel_id: u64,
     current_path: &str,
-    remote_profile_name: Option<&str>,
 ) {
     let session_key = last_session_path_key(token_hash, channel_id);
     let remote_key = last_remote_profile_key(token_hash, channel_id);
-    let remote_value = remote_profile_name
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string);
+    // Remote SSH is disabled by policy (#2193). Older builds may have persisted
+    // a remote profile key, but runtime saves now delete it so it cannot affect
+    // routing/path validation while the #2193 prerequisites remain unimplemented.
 
     let helper_write_ok =
         crate::services::discord::internal_api::set_kv_value(&session_key, current_path).is_ok()
-            && match remote_value.as_deref() {
-                Some(remote) => {
-                    crate::services::discord::internal_api::set_kv_value(&remote_key, remote)
-                        .is_ok()
-                }
-                None => {
-                    crate::services::discord::internal_api::delete_kv_value(&remote_key).is_ok()
-                }
-            };
+            && crate::services::discord::internal_api::delete_kv_value(&remote_key).is_ok();
     if helper_write_ok {
         return;
     }
@@ -294,27 +276,11 @@ pub(crate) fn save_last_session_runtime(
                 .await
                 .map_err(|error| format!("save {session_key}: {error}"))?;
 
-                match remote_value {
-                    Some(remote) => {
-                        sqlx::query(
-                            "INSERT INTO kv_meta (key, value)
-                             VALUES ($1, $2)
-                             ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value",
-                        )
-                        .bind(&remote_key)
-                        .bind(remote)
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(|error| format!("save {remote_key}: {error}"))?;
-                    }
-                    None => {
-                        sqlx::query("DELETE FROM kv_meta WHERE key = $1")
-                            .bind(&remote_key)
-                            .execute(&mut *tx)
-                            .await
-                            .map_err(|error| format!("delete {remote_key}: {error}"))?;
-                    }
-                }
+                sqlx::query("DELETE FROM kv_meta WHERE key = $1")
+                    .bind(&remote_key)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|error| format!("delete {remote_key}: {error}"))?;
 
                 tx.commit()
                     .await

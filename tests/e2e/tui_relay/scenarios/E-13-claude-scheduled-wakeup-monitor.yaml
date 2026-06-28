@@ -1,5 +1,6 @@
 id: E-13
 title: Claude Code scheduled wakeup/monitor 패턴이 깨어난 뒤 최종 출력 relay
+agent_mode: real_live
 cells: [claude-pipe]
 isolation: required
 notes: |

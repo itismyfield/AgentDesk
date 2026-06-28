@@ -1,8 +1,7 @@
 //! #3089 Phase B0 — durable delivery-record sidecar store (mixed-binary safe).
-//!
 //! Phase B gives turn-output delivery a **durable** authority that survives a
-//! dcserver restart (AC6). Before any of that authority can be persisted, B0
-//! resolves design §4.4's hard blocker: **mixed-binary safety**.
+//! dcserver restart (AC6). B0 resolves design §4.4's hard blocker:
+//! **mixed-binary safety**.
 //!
 //! ## Why a sidecar (not new `inflight.rs` fields)
 //!
@@ -24,17 +23,21 @@
 //! (`:800` sweep, `:2251` clear-by-tmux) apply the same `"json"` filter on the
 //! same dir.
 //!
-//! This store therefore lives in a **dedicated sibling subtree**
+//! The delivery record store therefore lives in a **dedicated sibling subtree**
 //! `runtime/discord_delivery_records/<provider>/<channel_id>.json` — a peer of
 //! `runtime/discord_inflight/`, matching the existing sidecar-root convention in
 //! `runtime_store.rs` (`discord_status_panel_orphans`,
 //! `discord_queued_placeholders`, …). Because the reaper's `read_dir` is
 //! non-recursive and only ever opens `discord_inflight/<provider>/`, it never
-//! descends into `discord_delivery_records/`. The directory — not the `.json`
-//! extension — is the isolator (`sidecar_path_is_outside_inflight_scan_set`
-//! pins this). No other component (standby heartbeat rewrites only
-//! `{channel_id}.json` via `inflight::save_inflight_state`; the sweeper /
-//! recovery read via the inflight loaders) knows this path exists.
+//! descends into `discord_delivery_records/`. The delivery-channel -> owner-channel
+//! context added by #3751 lives in a **separate** sibling subtree,
+//! `runtime/discord_delivery_owner_context/<provider>/<channel_id>.json`, because
+//! older binaries can still rewrite the known delivery-record JSON object and drop
+//! unknown fields. The directory — not the `.json` extension — is the isolator
+//! (`sidecar_path_is_outside_inflight_scan_set` pins this). No other component
+//! (standby heartbeat rewrites only `{channel_id}.json` via
+//! `inflight::save_inflight_state`; the sweeper / recovery read via the inflight
+//! loaders) knows these paths exist.
 //!
 //! ## B0 is a pure add (no production caller)
 //!
@@ -70,6 +73,7 @@ use crate::services::provider::ProviderKind;
 /// MUST NOT be `discord_inflight` (that dir is the old-binary reaper's scan
 /// target); the isolation proof test asserts this segment differs.
 const DELIVERY_RECORDS_DIR: &str = "discord_delivery_records";
+const DELIVERY_OWNER_CONTEXT_DIR: &str = "discord_delivery_owner_context";
 
 /// Durable per-turn delivery record (design §4.3). Two **independent** durable
 /// fields, deliberately not folded into one state machine: the lease is the
@@ -86,6 +90,17 @@ pub(in crate::services::discord) struct DeliveryRecord {
     /// restart in B3 (no 0-reset).
     #[serde(default)]
     pub delivered_frontier: Option<DeliveredCommit>,
+}
+
+/// The offset-authority channel for a delivery channel and tmux generation.
+///
+/// Stored under the DELIVERY channel in its own sidecar subtree, while the
+/// delivered frontier itself is stored under `watcher_owner_channel_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(in crate::services::discord) struct WatcherOwnerContext {
+    pub watcher_owner_channel_id: u64,
+    pub tmux_session_name: String,
+    pub generation_mtime_ns: i64,
 }
 
 /// The transient lease (design §4.3). `deadline_epoch_ms` is ABSOLUTE
@@ -140,6 +155,10 @@ fn delivery_records_root() -> Option<PathBuf> {
     runtime_store::runtime_root().map(|root| root.join(DELIVERY_RECORDS_DIR))
 }
 
+fn delivery_owner_context_root() -> Option<PathBuf> {
+    runtime_store::runtime_root().map(|root| root.join(DELIVERY_OWNER_CONTEXT_DIR))
+}
+
 /// `<runtime_root>/discord_delivery_records/<provider>/<channel_id>.json`.
 /// Inner form takes the `runtime/` dir explicitly so tests can target an
 /// isolated tempdir without the `AGENTDESK_ROOT_DIR` env dance.
@@ -157,6 +176,25 @@ fn delivery_record_path_in_root(
 
 fn delivery_record_path(provider: &ProviderKind, channel_id: u64) -> Option<PathBuf> {
     delivery_records_root().map(|root| {
+        root.join(provider.as_str())
+            .join(format!("{channel_id}.json"))
+    })
+}
+
+#[cfg(test)]
+fn delivery_owner_context_path_in_root(
+    runtime_root: &Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> PathBuf {
+    runtime_root
+        .join(DELIVERY_OWNER_CONTEXT_DIR)
+        .join(provider.as_str())
+        .join(format!("{channel_id}.json"))
+}
+
+fn delivery_owner_context_path(provider: &ProviderKind, channel_id: u64) -> Option<PathBuf> {
+    delivery_owner_context_root().map(|root| {
         root.join(provider.as_str())
             .join(format!("{channel_id}.json"))
     })
@@ -250,6 +288,11 @@ fn record_path_or_err(provider: &ProviderKind, channel_id: u64) -> Result<PathBu
         .ok_or_else(|| "delivery_record: runtime root unavailable".to_string())
 }
 
+fn owner_context_path_or_err(provider: &ProviderKind, channel_id: u64) -> Result<PathBuf, String> {
+    delivery_owner_context_path(provider, channel_id)
+        .ok_or_else(|| "delivery_owner_context: runtime root unavailable".to_string())
+}
+
 /// Read the durable record. `None` when the runtime root is unavailable, the
 /// file is missing, or the content is malformed (I3 conservative).
 #[allow(dead_code)] // #3089 B0: read by B1 shadow assert / B2 read-authority.
@@ -288,6 +331,88 @@ pub(in crate::services::discord) fn write_delivered_frontier(
     frontier: DeliveredCommit,
 ) -> Result<(), String> {
     write_delivered_frontier_at(&record_path_or_err(provider, channel_id)?, frontier)
+}
+
+fn write_watcher_owner_context_at(
+    path: &Path,
+    watcher_owner_channel_id: u64,
+    tmux_session_name: &str,
+    generation_mtime_ns: i64,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let _lock = lock_record_path(path)?;
+    let context = WatcherOwnerContext {
+        watcher_owner_channel_id,
+        tmux_session_name: tmux_session_name.to_string(),
+        generation_mtime_ns,
+    };
+    let data = serde_json::to_string_pretty(&context).map_err(|e| e.to_string())?;
+    runtime_store::atomic_write(path, &data)
+}
+
+/// Mixed-binary-safe owner-channel index writer for #3751.
+///
+/// `InflightTurnState` carries the same field for fast in-row reads, but an old
+/// binary can erase additive inflight fields by reserializing the row. This
+/// sidecar writer records the owner under the delivery channel in the separate
+/// `discord_delivery_owner_context` subtree that old binaries never scan and
+/// known delivery-record mutators never rewrite.
+pub(in crate::services::discord) fn record_watcher_owner_channel_context(
+    provider: &ProviderKind,
+    delivery_channel: ChannelId,
+    watcher_owner_channel: ChannelId,
+    tmux_session_name: &str,
+) -> Result<(), String> {
+    if tmux_session_name.is_empty() {
+        return Ok(());
+    }
+    write_watcher_owner_context_at(
+        &owner_context_path_or_err(provider, delivery_channel.get())?,
+        watcher_owner_channel.get(),
+        tmux_session_name,
+        current_generation_mtime_ns(tmux_session_name),
+    )
+}
+
+fn read_watcher_owner_context_at(path: &Path) -> Option<WatcherOwnerContext> {
+    let content = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+fn watcher_owner_channel_from_context_at(
+    path: &Path,
+    tmux_session_name: &str,
+    current_generation_mtime_ns: i64,
+) -> Option<u64> {
+    let context = read_watcher_owner_context_at(path)?;
+    if context.watcher_owner_channel_id == 0 || context.tmux_session_name != tmux_session_name {
+        return None;
+    }
+    if context.generation_mtime_ns == 0
+        || context.generation_mtime_ns != current_generation_mtime_ns
+    {
+        return None;
+    }
+    Some(context.watcher_owner_channel_id)
+}
+
+pub(in crate::services::discord) fn watcher_owner_channel_for_delivery_channel(
+    provider: &ProviderKind,
+    delivery_channel: ChannelId,
+    tmux_session_name: &str,
+) -> Option<ChannelId> {
+    if tmux_session_name.is_empty() {
+        return None;
+    }
+    let path = delivery_owner_context_path(provider, delivery_channel.get())?;
+    watcher_owner_channel_from_context_at(
+        &path,
+        tmux_session_name,
+        current_generation_mtime_ns(tmux_session_name),
+    )
+    .map(ChannelId::new)
 }
 
 /// Release: clear the lease ONLY. `delivered_frontier` survives (design §4.3).
@@ -362,6 +487,56 @@ pub(in crate::services::discord) fn delivery_record_authority_enabled() -> bool 
             tracing::info!("  ✓ delivery_record_authority: enabled");
         }
         on
+    })
+}
+
+pub(super) fn delivery_record_rollout_health_json() -> serde_json::Value {
+    delivery_record_rollout_health_json_for_flags(
+        delivery_record_shadow_enabled(),
+        delivery_record_authority_enabled(),
+    )
+}
+
+fn delivery_record_rollout_health_json_for_flags(
+    shadow_enabled: bool,
+    authority_enabled: bool,
+) -> serde_json::Value {
+    let mode = match (shadow_enabled, authority_enabled) {
+        (false, false) => "off",
+        (true, false) => "shadow_only",
+        (false, true) => "authority_only",
+        (true, true) => "shadow_and_authority",
+    };
+    let dedup_authority = if authority_enabled {
+        "durable_delivery_record_frontier"
+    } else {
+        "in_memory_committed_offset"
+    };
+    let same_turn_backward_write_enforcement = if authority_enabled {
+        "enforcing"
+    } else {
+        "observe_only"
+    };
+    let mut configuration_warnings = Vec::new();
+    if !authority_enabled {
+        configuration_warnings.push(serde_json::json!(
+            "delivery_record_authority_disabled: durable frontiers are not the default committed-offset authority"
+        ));
+    }
+    if authority_enabled && !shadow_enabled {
+        configuration_warnings.push(serde_json::json!(
+            "delivery_record_shadow_disabled: authority is enabled without shadow mirror telemetry"
+        ));
+    }
+    let warning_count = configuration_warnings.len();
+    serde_json::json!({
+        "shadow_enabled": shadow_enabled,
+        "authority_enabled": authority_enabled,
+        "mode": mode,
+        "dedup_authority": dedup_authority,
+        "same_turn_backward_write_enforcement": same_turn_backward_write_enforcement,
+        "warning_count": warning_count,
+        "configuration_warnings": configuration_warnings,
     })
 }
 
@@ -924,6 +1099,60 @@ mod tests {
     }
 
     #[test]
+    fn watcher_owner_context_preserves_frontier_and_resolves_current_generation_3751() {
+        let dir = tempfile::tempdir().unwrap();
+        let record_path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 123);
+        let context_path =
+            delivery_owner_context_path_in_root(dir.path(), &ProviderKind::Claude, 123);
+        write_delivered_frontier_at(&record_path, sample_frontier()).unwrap();
+        write_watcher_owner_context_at(&context_path, 456, "AgentDesk-claude-foo", 700).unwrap();
+
+        let after = read_record_at(&record_path).unwrap();
+        assert_eq!(after.delivered_frontier, Some(sample_frontier()));
+        assert_eq!(
+            watcher_owner_channel_from_context_at(&context_path, "AgentDesk-claude-foo", 700),
+            Some(456)
+        );
+    }
+
+    #[test]
+    fn watcher_owner_context_rejects_stale_or_wrong_session_3751() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_owner_context_path_in_root(dir.path(), &ProviderKind::Claude, 123);
+        write_watcher_owner_context_at(&path, 456, "AgentDesk-claude-foo", 700).unwrap();
+
+        assert_eq!(
+            watcher_owner_channel_from_context_at(&path, "AgentDesk-claude-bar", 700),
+            None
+        );
+        assert_eq!(
+            watcher_owner_channel_from_context_at(&path, "AgentDesk-claude-foo", 701),
+            None
+        );
+    }
+
+    #[test]
+    fn watcher_owner_context_survives_delivery_record_rewrite_3751() {
+        let dir = tempfile::tempdir().unwrap();
+        let record_path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 123);
+        let context_path =
+            delivery_owner_context_path_in_root(dir.path(), &ProviderKind::Claude, 123);
+        write_watcher_owner_context_at(&context_path, 456, "AgentDesk-claude-foo", 700).unwrap();
+
+        // Simulates an old binary that knows only the lease/frontier record shape:
+        // it rewrites the delivery record JSON object, but never opens the separate
+        // owner-context subtree.
+        write_delivered_frontier_at(&record_path, sample_frontier()).unwrap();
+        upsert_lease_at(&record_path, sample_lease()).unwrap();
+        clear_lease_at(&record_path).unwrap();
+
+        assert_eq!(
+            watcher_owner_channel_from_context_at(&context_path, "AgentDesk-claude-foo", 700),
+            Some(456)
+        );
+    }
+
+    #[test]
     fn only_frontier_writer_advances_frontier() {
         // I2: a lease-only sequence (acquire→release) never produces a frontier.
         // Drives the production `upsert_lease_at` / `clear_lease_at`.
@@ -955,6 +1184,7 @@ mod tests {
         let runtime_root = Path::new("/tmp/adk-test-runtime");
         let provider = ProviderKind::Claude;
         let record = delivery_record_path_in_root(runtime_root, &provider, 444);
+        let owner_context = delivery_owner_context_path_in_root(runtime_root, &provider, 444);
 
         // The reaper's scan dir (it builds this exact path; we reconstruct it).
         let inflight_provider_dir = runtime_root
@@ -971,7 +1201,11 @@ mod tests {
         // 3. The isolating segment directly under runtime/ is the dedicated
         //    sidecar dir, not the reaper's target.
         assert!(record.starts_with(runtime_root.join(DELIVERY_RECORDS_DIR)));
+        assert!(owner_context.starts_with(runtime_root.join(DELIVERY_OWNER_CONTEXT_DIR)));
+        assert_ne!(record.parent(), owner_context.parent());
         assert_ne!(DELIVERY_RECORDS_DIR, "discord_inflight");
+        assert_ne!(DELIVERY_OWNER_CONTEXT_DIR, "discord_inflight");
+        assert_ne!(DELIVERY_OWNER_CONTEXT_DIR, DELIVERY_RECORDS_DIR);
     }
 
     // ---- #3089 B1 shadow-write ----------------------------------------------
@@ -1023,6 +1257,54 @@ mod tests {
         assert!(authority_blocks_backward_inflight_write(true, false, true));
         assert!(authority_blocks_backward_inflight_write(true, true, false));
         assert!(authority_blocks_backward_inflight_write(true, false, false));
+    }
+
+    #[test]
+    fn delivery_record_rollout_health_reports_off_as_observable_warning() {
+        let json = delivery_record_rollout_health_json_for_flags(false, false);
+        assert_eq!(json["mode"], "off");
+        assert_eq!(json["shadow_enabled"], false);
+        assert_eq!(json["authority_enabled"], false);
+        assert_eq!(json["dedup_authority"], "in_memory_committed_offset");
+        assert_eq!(json["same_turn_backward_write_enforcement"], "observe_only");
+        assert_eq!(json["warning_count"], 1);
+        assert!(
+            json["configuration_warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|warning| warning
+                    .as_str()
+                    .unwrap()
+                    .starts_with("delivery_record_authority_disabled"))
+        );
+    }
+
+    #[test]
+    fn delivery_record_rollout_health_reports_enforcing_modes() {
+        let shadow_only = delivery_record_rollout_health_json_for_flags(true, false);
+        assert_eq!(shadow_only["mode"], "shadow_only");
+        assert_eq!(shadow_only["warning_count"], 1);
+
+        let authority_only = delivery_record_rollout_health_json_for_flags(false, true);
+        assert_eq!(authority_only["mode"], "authority_only");
+        assert_eq!(
+            authority_only["same_turn_backward_write_enforcement"],
+            "enforcing"
+        );
+        assert_eq!(authority_only["warning_count"], 1);
+
+        let enforcing = delivery_record_rollout_health_json_for_flags(true, true);
+        assert_eq!(enforcing["mode"], "shadow_and_authority");
+        assert_eq!(
+            enforcing["dedup_authority"],
+            "durable_delivery_record_frontier"
+        );
+        assert_eq!(
+            enforcing["same_turn_backward_write_enforcement"],
+            "enforcing"
+        );
+        assert_eq!(enforcing["warning_count"], 0);
     }
 
     #[test]

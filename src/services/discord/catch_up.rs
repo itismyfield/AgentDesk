@@ -19,6 +19,16 @@ use super::*;
 
 const CATCH_UP_RETRY_QUEUE_THRESHOLD: usize = MAX_INTERVENTIONS_PER_CHANNEL / 2;
 
+mod classification;
+mod phase2;
+
+use classification::{CatchUpClassification, CatchUpScanStats};
+use phase2::{
+    Phase2EnqueueCommit, Phase2RecoveryStats, advance_phase2_checkpoint, catch_up_enqueue_accepted,
+    catch_up_remaining_queue_capacity, classify_phase2_enqueue_commit,
+    log_catch_up_enqueue_not_accepted, phase2_retry_after_checkpoint,
+};
+
 pub(in crate::services::discord) fn should_trigger_catch_up_retry(queue_len: usize) -> bool {
     queue_len <= CATCH_UP_RETRY_QUEUE_THRESHOLD
 }
@@ -35,6 +45,19 @@ pub(in crate::services::discord) fn take_catch_up_retry_checkpoint_after_queue_d
         .catch_up_retry_pending
         .remove(&channel_id)
         .map(|(_, checkpoint)| checkpoint)
+}
+
+fn arm_catch_up_retry_pending(shared: &SharedData, channel_id: ChannelId, retry_after: u64) -> u64 {
+    let mut pending = shared
+        .catch_up_retry_pending
+        .entry(channel_id)
+        .or_insert(retry_after);
+    *pending = merge_catch_up_retry_checkpoint(Some(*pending), retry_after);
+    *pending
+}
+
+fn merge_catch_up_retry_checkpoint(existing: Option<u64>, retry_after: u64) -> u64 {
+    existing.map_or(retry_after, |checkpoint| checkpoint.min(retry_after))
 }
 
 fn catch_up_checkpoint_for_scan(
@@ -290,56 +313,6 @@ async fn catch_up_scan_pace_gap() {
     let pace = catch_up_scan_pace();
     if !pace.is_zero() {
         tokio::time::sleep(pace).await;
-    }
-}
-
-/// Filter outcome categories for the catch-up REST scan. Used both at runtime
-/// (to emit per-channel breakdown logs even when nothing was recovered) and in
-/// unit tests as a pure-function check on the buried-user-message regression.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::services::discord) enum CatchUpClassification {
-    /// Eligible user/allowed-bot message that should be enqueued.
-    Recover,
-    /// System message kind (thread-created / slash-command etc.) — silently dropped.
-    SystemKind,
-    /// Authored by this bot (self) — must not re-enqueue our own output.
-    SelfAuthored,
-    /// Already present in the live mailbox / known set — duplicate.
-    Duplicate,
-    /// Older than the catch-up max-age window — too late to safely replay.
-    TooOld,
-    /// Empty content (whitespace only).
-    Empty,
-    /// Authored by a non-allowed bot or an allowed bot without DISPATCH prefix.
-    NotAllowed,
-}
-
-/// Per-channel running tally of [`CatchUpClassification`] outcomes — fed into
-/// the always-on breakdown log. Keeping this separate from the recovery loop
-/// keeps the filter-stats accounting honest and unit-testable.
-#[derive(Debug, Default, Clone, Copy)]
-pub(in crate::services::discord) struct CatchUpScanStats {
-    pub returned: usize,
-    pub recovered: usize,
-    pub system_kind: usize,
-    pub self_authored: usize,
-    pub duplicate: usize,
-    pub too_old: usize,
-    pub empty: usize,
-    pub not_allowed: usize,
-}
-
-impl CatchUpScanStats {
-    pub(in crate::services::discord) fn record(&mut self, outcome: CatchUpClassification) {
-        match outcome {
-            CatchUpClassification::Recover => self.recovered += 1,
-            CatchUpClassification::SystemKind => self.system_kind += 1,
-            CatchUpClassification::SelfAuthored => self.self_authored += 1,
-            CatchUpClassification::Duplicate => self.duplicate += 1,
-            CatchUpClassification::TooOld => self.too_old += 1,
-            CatchUpClassification::Empty => self.empty += 1,
-            CatchUpClassification::NotAllowed => self.not_allowed += 1,
-        }
     }
 }
 
@@ -616,8 +589,7 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
             .await
             .intervention_queue
             .len();
-        let remaining_capacity = crate::services::turn_orchestrator::MAX_INTERVENTIONS_PER_CHANNEL
-            .saturating_sub(queue_initial_len);
+        let remaining_capacity = catch_up_remaining_queue_capacity(queue_initial_len);
 
         for msg in &messages {
             let text = msg.content.trim().to_string();
@@ -648,12 +620,9 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
             // the last actually-queued message — newer entries that we
             // declined are still > `after_msg` for the next pass.
             if outcome == CatchUpClassification::Recover && stats.recovered >= remaining_capacity {
-                let retry_after = max_recovered_id.or(scan_checkpoint);
-                if let Some(retry_after) = retry_after {
-                    shared
-                        .catch_up_retry_pending
-                        .insert(channel_id, retry_after);
-                }
+                let retry_after = max_recovered_id
+                    .or(scan_checkpoint)
+                    .map(|checkpoint| arm_catch_up_retry_pending(shared, channel_id, checkpoint));
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
                     "  [{ts}] 🔁 catch-up: queue cap reached for channel {}; retry armed after checkpoint {:?}",
@@ -662,13 +631,12 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
                 );
                 break;
             }
-            stats.record(outcome);
             if outcome != CatchUpClassification::Recover {
+                stats.record(outcome);
                 continue;
             }
 
-            reaction_cleanup::cleanup_recovered_catch_up_hourglass(http, channel_id, msg.id).await;
-            mailbox_enqueue_intervention(
+            let enqueue = mailbox_enqueue_intervention(
                 shared,
                 provider,
                 channel_id,
@@ -691,6 +659,13 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
                 },
             )
             .await;
+            if !catch_up_enqueue_accepted(&enqueue) {
+                log_catch_up_enqueue_not_accepted("phase1", channel_id, msg.id, &enqueue);
+                continue;
+            }
+
+            stats.record(CatchUpClassification::Recover);
+            reaction_cleanup::cleanup_recovered_catch_up_hourglass(http, channel_id, msg.id).await;
             // Track the newest actually-recovered message for checkpoint
             let mid = msg.id.get();
             if max_recovered_id.map(|m| mid > m).unwrap_or(true) {
@@ -819,30 +794,42 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
             Some(m.author.id.get()) == current_bot_user_id && !m.content.trim().is_empty()
         });
 
-        // Messages at indices 0..last_bot_idx are newer than the last bot response
-        let unanswered_slice = match last_bot_idx {
+        // Messages at indices 0..last_bot_idx are newer than the last bot response.
+        let (last_bot_response_id, unanswered_slice) = match last_bot_idx {
             Some(0) => continue, // Latest message is from bot — nothing unanswered
-            Some(idx) => &recent[..idx],
+            Some(idx) => (recent[idx].id.get(), &recent[..idx]),
             None => continue, // No bot response found — skip (new/inactive channel)
         };
 
-        // Collect existing queue IDs for dedup
-        let mut existing_ids =
-            recovery_known_message_ids(&mailbox_snapshot(shared, channel_id).await);
+        // Collect existing queue IDs for dedup from the same snapshot used for
+        // capacity so the initial phase2 claim boundary is internally coherent.
+        let mailbox = mailbox_snapshot(shared, channel_id).await;
+        let remaining_capacity =
+            catch_up_remaining_queue_capacity(mailbox.intervention_queue.len());
+        let mut existing_ids = recovery_known_message_ids(&mailbox);
         let mut phase2_checkpoint = shared.last_message_ids.get(&channel_id).map(|v| *v);
-
-        let mut channel_recovered = 0usize;
+        let phase2_checkpoint_start = phase2_checkpoint;
+        let mut max_recovered_id: Option<u64> = None;
+        let mut stats = Phase2RecoveryStats {
+            returned: recent.len(),
+            discovered: unanswered_slice.len(),
+            ..Phase2RecoveryStats::default()
+        };
+        let mut phase2_retry_after: Option<u64> = None;
 
         // Iterate in reverse (oldest first) for chronological queue order
         for msg in unanswered_slice.iter().rev() {
             if !router::should_process_turn_message(msg.kind) {
+                stats.skipped += 1;
                 continue;
             }
             if Some(msg.author.id.get()) == current_bot_user_id {
+                stats.skipped += 1;
                 continue;
             }
             let text = msg.content.trim();
             if text.is_empty() {
+                stats.skipped += 1;
                 continue;
             }
             let mid = msg.id.get();
@@ -853,6 +840,7 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
                 msg.author.bot,
                 text,
             ) {
+                stats.skipped += 1;
                 continue;
             }
             let is_allowed_bot = msg.author.bot
@@ -861,19 +849,52 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
             if !is_allowed_bot {
                 let settings = shared.settings.read().await;
                 if !discord_io::user_is_authorized(&settings, msg.author.id.get()) {
+                    stats.skipped += 1;
                     continue;
                 }
-            }
-            if !should_phase2_recover_message(mid, phase2_checkpoint, &existing_ids) {
-                continue;
             }
             // Skip messages older than 10 minutes (generous window for restart gap)
             let msg_age = chrono::Utc::now().signed_duration_since(*msg.id.created_at());
             if msg_age.num_seconds() > 600 {
+                stats.skipped += 1;
                 continue;
             }
 
-            mailbox_enqueue_intervention(
+            stats.eligible += 1;
+            if existing_ids.contains(&mid) {
+                stats.duplicate += 1;
+                phase2_checkpoint = advance_phase2_checkpoint(phase2_checkpoint, mid);
+                continue;
+            }
+            if phase2_checkpoint.is_some_and(|saved| mid <= saved) {
+                stats.skipped += 1;
+                continue;
+            }
+            debug_assert!(should_phase2_recover_message(
+                mid,
+                phase2_checkpoint,
+                &existing_ids
+            ));
+
+            if stats.enqueued >= remaining_capacity {
+                let retry_after = phase2_retry_after_checkpoint(
+                    max_recovered_id,
+                    phase2_checkpoint,
+                    last_bot_response_id,
+                );
+                let retry_after = arm_catch_up_retry_pending(shared, channel_id, retry_after);
+                phase2_retry_after = Some(retry_after);
+                stats.deferred += 1;
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] 🔁 catch-up phase2: queue cap reached for channel {}; retry armed after checkpoint {}",
+                    channel_id,
+                    retry_after
+                );
+                break;
+            }
+
+            let enqueue = mailbox_enqueue_intervention(
                 shared,
                 provider,
                 channel_id,
@@ -896,20 +917,62 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
                 },
             )
             .await;
-            existing_ids.insert(mid);
-            phase2_checkpoint = Some(phase2_checkpoint.map_or(mid, |saved| saved.max(mid)));
-            channel_recovered += 1;
+            match classify_phase2_enqueue_commit(&enqueue) {
+                Phase2EnqueueCommit::Accepted => {
+                    existing_ids.insert(mid);
+                    phase2_checkpoint = advance_phase2_checkpoint(phase2_checkpoint, mid);
+                    max_recovered_id = advance_phase2_checkpoint(max_recovered_id, mid);
+                    stats.enqueued += 1;
+                }
+                Phase2EnqueueCommit::Duplicate => {
+                    existing_ids.insert(mid);
+                    phase2_checkpoint = advance_phase2_checkpoint(phase2_checkpoint, mid);
+                    stats.duplicate += 1;
+                }
+                Phase2EnqueueCommit::Deferred => {
+                    log_catch_up_enqueue_not_accepted("phase2", channel_id, msg.id, &enqueue);
+                    let retry_after = phase2_retry_after_checkpoint(
+                        max_recovered_id,
+                        phase2_checkpoint,
+                        last_bot_response_id,
+                    );
+                    let retry_after = arm_catch_up_retry_pending(shared, channel_id, retry_after);
+                    phase2_retry_after = Some(retry_after);
+                    stats.deferred += 1;
+                    break;
+                }
+            }
         }
 
-        if channel_recovered > 0 {
-            phase2_recovered += channel_recovered;
+        if let Some(newest) = max_recovered_id {
+            advance_last_message_checkpoint(shared, provider, channel_id, MessageId::new(newest));
+            phase2_recovered += stats.enqueued;
+        }
+
+        if stats.enqueued > 0 {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] 🔍 CATCH-UP phase2: recovered {} unanswered message(s) for channel {}",
-                channel_recovered,
+                stats.enqueued,
                 channel_id
             );
         }
+
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] 🔍 catch-up phase2 scan: channel={} returned={} discovered={} eligible={} duplicate={} skipped={} enqueued={} deferred={} checkpoint_start={:?} checkpoint_final={:?} retry_after={:?}",
+            channel_id,
+            stats.returned,
+            stats.discovered,
+            stats.eligible,
+            stats.duplicate,
+            stats.skipped,
+            stats.enqueued,
+            stats.deferred,
+            phase2_checkpoint_start,
+            phase2_checkpoint,
+            phase2_retry_after,
+        );
     }
 
     if phase2_recovered > 0 {
@@ -924,11 +987,14 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
 mod catch_up_recovery_tests {
     use super::{
         CATCH_UP_RECENT_MAX_PAGES, CATCH_UP_SCAN_PACE_DEFAULT_MS, CatchUpChannelCandidate,
-        CatchUpClassification, CatchUpFetchMode, CatchUpMessageView, ChannelId, ProviderKind,
-        catch_up_fetch_mode_for_scan, classify_catch_up_message,
-        insert_configured_catch_up_candidate, parse_catch_up_scan_pace,
+        CatchUpClassification, CatchUpFetchMode, CatchUpMessageView, ChannelId,
+        Phase2EnqueueCommit, ProviderKind, advance_phase2_checkpoint, catch_up_enqueue_accepted,
+        catch_up_fetch_mode_for_scan, catch_up_remaining_queue_capacity, classify_catch_up_message,
+        classify_phase2_enqueue_commit, insert_configured_catch_up_candidate,
+        merge_catch_up_retry_checkpoint, parse_catch_up_scan_pace, phase2_retry_after_checkpoint,
         should_fetch_older_recent_page, should_pace_before_scan,
     };
+    use crate::services::turn_orchestrator::EnqueueRefusalReason;
     use std::collections::{BTreeMap, HashSet};
 
     #[test]
@@ -1166,5 +1232,127 @@ mod catch_up_recovery_tests {
             catch_up_fetch_mode_for_scan(&candidate, None, None),
             CatchUpFetchMode::After(_)
         ));
+    }
+
+    #[test]
+    fn enqueue_acceptance_requires_queue_success_without_persistence_error() {
+        let accepted = super::super::MailboxEnqueueOutcome {
+            enqueued: true,
+            merged: false,
+            refusal_reason: None,
+            persistence_error: None,
+        };
+        assert!(catch_up_enqueue_accepted(&accepted));
+
+        let refused = super::super::MailboxEnqueueOutcome {
+            enqueued: false,
+            merged: false,
+            refusal_reason: Some(
+                crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdAlreadyQueued,
+            ),
+            persistence_error: None,
+        };
+        assert!(!catch_up_enqueue_accepted(&refused));
+
+        let persistence_failed = super::super::MailboxEnqueueOutcome {
+            enqueued: true,
+            merged: false,
+            refusal_reason: None,
+            persistence_error: Some("disk unavailable".to_string()),
+        };
+        assert!(!catch_up_enqueue_accepted(&persistence_failed));
+    }
+
+    #[test]
+    fn phase2_capacity_uses_remaining_mailbox_slots() {
+        let max = crate::services::turn_orchestrator::MAX_INTERVENTIONS_PER_CHANNEL;
+
+        assert_eq!(catch_up_remaining_queue_capacity(0), max);
+        assert_eq!(catch_up_remaining_queue_capacity(max - 1), 1);
+        assert_eq!(catch_up_remaining_queue_capacity(max), 0);
+        assert_eq!(catch_up_remaining_queue_capacity(max + 10), 0);
+    }
+
+    #[test]
+    fn phase2_retry_anchor_falls_back_to_last_bot_response_without_checkpoint() {
+        assert_eq!(phase2_retry_after_checkpoint(None, None, 90), 90);
+        assert_eq!(phase2_retry_after_checkpoint(None, Some(100), 90), 100);
+        assert_eq!(phase2_retry_after_checkpoint(Some(110), Some(100), 90), 110);
+        assert_eq!(phase2_retry_after_checkpoint(Some(120), Some(150), 90), 150);
+    }
+
+    #[test]
+    fn retry_pending_preserves_oldest_unrecovered_checkpoint() {
+        assert_eq!(merge_catch_up_retry_checkpoint(None, 150), 150);
+        assert_eq!(merge_catch_up_retry_checkpoint(Some(100), 150), 100);
+        assert_eq!(merge_catch_up_retry_checkpoint(Some(200), 150), 150);
+    }
+
+    #[test]
+    fn phase2_checkpoint_advances_only_to_known_recovered_or_duplicate_ids() {
+        assert_eq!(advance_phase2_checkpoint(None, 100), Some(100));
+        assert_eq!(advance_phase2_checkpoint(Some(100), 99), Some(100));
+        assert_eq!(advance_phase2_checkpoint(Some(100), 101), Some(101));
+    }
+
+    #[test]
+    fn phase2_enqueue_commit_classifies_source_id_duplicate_without_recovery() {
+        let accepted = super::super::MailboxEnqueueOutcome {
+            enqueued: true,
+            merged: false,
+            refusal_reason: None,
+            persistence_error: None,
+        };
+        assert_eq!(
+            classify_phase2_enqueue_commit(&accepted),
+            Phase2EnqueueCommit::Accepted
+        );
+
+        let duplicate = super::super::MailboxEnqueueOutcome {
+            enqueued: false,
+            merged: false,
+            refusal_reason: Some(EnqueueRefusalReason::SourceIdAlreadyQueued),
+            persistence_error: None,
+        };
+        assert_eq!(
+            classify_phase2_enqueue_commit(&duplicate),
+            Phase2EnqueueCommit::Duplicate
+        );
+    }
+
+    #[test]
+    fn phase2_enqueue_commit_defers_retryable_actor_and_persistence_failures() {
+        let actor_unreachable = super::super::MailboxEnqueueOutcome {
+            enqueued: false,
+            merged: false,
+            refusal_reason: Some(EnqueueRefusalReason::ActorUnreachable),
+            persistence_error: None,
+        };
+        assert_eq!(
+            classify_phase2_enqueue_commit(&actor_unreachable),
+            Phase2EnqueueCommit::Deferred
+        );
+
+        let last_item_dedup = super::super::MailboxEnqueueOutcome {
+            enqueued: false,
+            merged: false,
+            refusal_reason: Some(EnqueueRefusalReason::LastItemDedup),
+            persistence_error: None,
+        };
+        assert_eq!(
+            classify_phase2_enqueue_commit(&last_item_dedup),
+            Phase2EnqueueCommit::Deferred
+        );
+
+        let persistence_failed = super::super::MailboxEnqueueOutcome {
+            enqueued: true,
+            merged: false,
+            refusal_reason: None,
+            persistence_error: Some("disk unavailable".to_string()),
+        };
+        assert_eq!(
+            classify_phase2_enqueue_commit(&persistence_failed),
+            Phase2EnqueueCommit::Deferred
+        );
     }
 }

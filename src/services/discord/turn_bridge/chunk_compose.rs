@@ -27,6 +27,14 @@ pub(super) fn streamed_text_inside_open_code_fence(full_response: &str) -> bool 
 pub(super) fn append_streamed_text_chunk(full_response: &mut String, content: &str) {
     if full_response.ends_with("\n\n") && !streamed_text_inside_open_code_fence(full_response) {
         full_response.push_str(content.trim_start_matches('\n'));
+    } else if !streamed_text_inside_open_code_fence(full_response)
+        && super::super::semantic_boundaries::semantic_chunk_separator_needed(
+            full_response,
+            content,
+        )
+    {
+        full_response.push_str("\n\n");
+        full_response.push_str(content);
     } else {
         full_response.push_str(content);
     }

@@ -144,6 +144,7 @@ src/
 │   │   ├── review_automation_ops.rs
 │   │   ├── review_ops.rs
 │   │   ├── runtime_ops.rs
+│   │   ├── timeouts_ops.rs
 │   │   └── turn_ops.rs
 │   ├── hooks.rs
 │   ├── intent.rs
@@ -204,7 +205,11 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── tuning_aggregate.rs
 │   │   │   └── verdict_route.rs
-│   │   ├── active_session_audit.rs
+│   │   ├── tests/
+│   │   │   ├── preflight_harness/
+│   │   │   │   ├── types.rs
+│   │   │   │   └── validation.rs
+│   │   │   └── auto_queue_preflight_harness_tests.rs
 │   │   ├── agents.rs
 │   │   ├── agents_crud.rs
 │   │   ├── agents_setup.rs
@@ -364,6 +369,9 @@ src/
 │   │   ├── rollout_tail.rs
 │   │   └── session.rs
 │   ├── discord/
+│   │   ├── catch_up/
+│   │   │   ├── classification.rs
+│   │   │   └── phase2.rs
 │   │   ├── commands/
 │   │   │   ├── diagnostics/
 │   │   │   │   ├── mod.rs
@@ -431,11 +439,13 @@ src/
 │   │   │   ├── message.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── policy.rs
+│   │   │   ├── reaction_control.rs
 │   │   │   ├── result.rs
 │   │   │   ├── send_api.rs
 │   │   │   ├── send_gate.rs
 │   │   │   ├── send_target.rs
 │   │   │   ├── send_to_agent.rs
+│   │   │   ├── serenity_reference.rs
 │   │   │   ├── transport.rs
 │   │   │   └── turn_output_controller.rs
 │   │   ├── placeholder_live_events/
@@ -496,6 +506,7 @@ src/
 │   │   │   ├── authorization.rs
 │   │   │   ├── dispatch_trigger.rs
 │   │   │   ├── intake_gate.rs
+│   │   │   ├── intake_queue_transaction.rs
 │   │   │   ├── message_handler.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── response_format.rs
@@ -576,6 +587,7 @@ src/
 │   │   │   ├── chunk_compose_tests.rs
 │   │   │   ├── completion_guard.rs
 │   │   │   ├── context_window.rs
+│   │   │   ├── followup_requeue.rs
 │   │   │   ├── headless_delivery.rs
 │   │   │   ├── memory_lifecycle.rs
 │   │   │   ├── mod.rs
@@ -606,14 +618,18 @@ src/
 │   │   │   ├── delivery_lease.rs
 │   │   │   └── watcher_backstop.rs
 │   │   ├── voice_barge_in/
+│   │   │   ├── tests/
+│   │   │   │   └── pcm_harness_tests.rs
 │   │   │   ├── final_result_playback.rs
 │   │   │   ├── foreground_decision.rs
 │   │   │   ├── live_cut_playback.rs
 │   │   │   ├── progress_playback.rs
+│   │   │   ├── receive_hook.rs
 │   │   │   ├── routing.rs
 │   │   │   ├── stt.rs
 │   │   │   └── tts_pipeline.rs
 │   │   ├── watchers/
+│   │   │   ├── codex_tui_restore.rs
 │   │   │   ├── lifecycle.rs
 │   │   │   └── lifecycle_decision.rs
 │   │   ├── adk_session.rs
@@ -625,6 +641,7 @@ src/
 │   │   ├── dispatch_policy.rs
 │   │   ├── formatting.rs
 │   │   ├── gateway.rs
+│   │   ├── gateway_voice_queue.rs
 │   │   ├── health.rs
 │   │   ├── http.rs
 │   │   ├── idle_detector.rs
@@ -656,6 +673,7 @@ src/
 │   │   ├── relay_health.rs
 │   │   ├── relay_owner_observability.rs
 │   │   ├── relay_recovery.rs
+│   │   ├── relay_recovery_auto_heal_attempts.rs
 │   │   ├── relay_recovery_completion_footer.rs
 │   │   ├── replace_outcome_policy.rs
 │   │   ├── response_sanitizer.rs
@@ -665,6 +683,7 @@ src/
 │   │   ├── role_map.rs
 │   │   ├── runtime_bootstrap.rs
 │   │   ├── runtime_store.rs
+│   │   ├── semantic_boundaries.rs
 │   │   ├── session_identity.rs
 │   │   ├── session_relay_sink.rs
 │   │   ├── session_runtime.rs
@@ -679,6 +698,7 @@ src/
 │   │   ├── status_panel_orphan_store.rs
 │   │   ├── steering.rs
 │   │   ├── streaming_finalizer.rs
+│   │   ├── subagent_notification_card.rs
 │   │   ├── task_supervisor.rs
 │   │   ├── terminal_ui_obligation.rs
 │   │   ├── tmux.rs
@@ -717,6 +737,7 @@ src/
 │   │   ├── outbox_queue.rs
 │   │   ├── outbox_route.rs
 │   │   ├── routing_constraint.rs
+│   │   ├── thread_reuse.rs
 │   │   └── wait_queue.rs
 │   ├── git/
 │   │   ├── branch_resolver.rs
@@ -830,9 +851,11 @@ src/
 │   ├── dispatch_watchdog.rs
 │   ├── dispatched_sessions.rs
 │   ├── dispatches_followup.rs
-│   ├── envelope_dedup.rs
 │   ├── escalation_settings.rs
 │   ├── gemini.rs
+│   ├── github_issue_creation.rs
+│   ├── health_active_session_audit.rs
+│   ├── health_diagnostics.rs
 │   ├── issue_announcements.rs
 │   ├── kanban.rs
 │   ├── kanban_cards.rs

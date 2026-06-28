@@ -1,3 +1,4 @@
+use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::process::{configure_child_process_group, wait_with_output_timeout};
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use std::ffi::OsStr;
@@ -311,11 +312,11 @@ pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
         rquickjs::Function::new(
             ctx.clone(),
             |session_key: String, command: String| -> String {
-                // session_key may be "hostname:tmux_name"
-                let tmux_name = session_key
-                    .split_once(':')
-                    .map(|(_, name)| name)
-                    .unwrap_or(&session_key);
+                // session_key may be legacy `host:tmux` or namespaced
+                // `provider/token/host:tmux`; raw tmux names remain accepted
+                // for policy compatibility.
+                let tmux_name =
+                    tmux_name_from_session_key(&session_key).unwrap_or_else(|| session_key.clone());
                 // #2378/#2404: enforce the current JS eval's bridge-op
                 // deadline for the tmux child itself. The zero-budget branch
                 // preserves the previous preflight behavior, while positive
@@ -329,12 +330,12 @@ pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
                 };
                 let send_result = match tmux_timeout {
                     Some(timeout) => crate::services::platform::tmux::send_keys_timeout(
-                        tmux_name,
+                        &tmux_name,
                         &[&command, "Enter"],
                         timeout,
                     ),
                     None => {
-                        crate::services::platform::tmux::send_keys(tmux_name, &[&command, "Enter"])
+                        crate::services::platform::tmux::send_keys(&tmux_name, &[&command, "Enter"])
                     }
                 };
                 match send_result {
@@ -361,12 +362,11 @@ pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
     session_obj.set(
         "kill",
         rquickjs::Function::new(ctx.clone(), |session_key: String| -> String {
-            // session_key is "hostname:tmux_name"; tmux interprets colon as
-            // session:window separator, so extract only the tmux_name part.
-            let tmux_name = session_key
-                .split_once(':')
-                .map(|(_, name)| name)
-                .unwrap_or(&session_key);
+            // session_key may be legacy `host:tmux` or namespaced
+            // `provider/token/host:tmux`; tmux interprets colon as a
+            // session:window separator, so extract only the tmux name.
+            let tmux_name =
+                tmux_name_from_session_key(&session_key).unwrap_or_else(|| session_key.clone());
             // #2378/#2404: keep the existing zero-deadline short-circuit, and
             // use any positive remaining deadline as the timeout for the tmux
             // kill child. The audit record stays after the preflight so it is
@@ -378,7 +378,7 @@ pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
                 }
             };
             crate::services::termination_audit::record_termination_for_tmux(
-                tmux_name,
+                &tmux_name,
                 None,
                 "policy_engine",
                 "session_kill_api",
@@ -387,12 +387,12 @@ pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
             );
             let kill_result = match tmux_timeout {
                 Some(timeout) => crate::services::platform::tmux::kill_session_output_timeout(
-                    tmux_name,
+                    &tmux_name,
                     "force-kill via agentdesk.session.kill()",
                     timeout,
                 ),
                 None => crate::services::platform::tmux::kill_session_output(
-                    tmux_name,
+                    &tmux_name,
                     "force-kill via agentdesk.session.kill()",
                 )
                 .map_err(|error| error.to_string()),

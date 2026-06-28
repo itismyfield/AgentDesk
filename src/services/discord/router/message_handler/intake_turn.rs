@@ -3332,7 +3332,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     // Pause the tmux-session owner watcher before writing to the provider
     // FIFO. In thread follow-ups, the watcher may be owned by the parent
     // channel rather than the requested thread channel.
-    let _watcher_owner_channel_id = attach_paused_turn_watcher(
+    let _ = attach_paused_turn_watcher_for_inflight(
         shared,
         http.clone(),
         &provider,
@@ -3341,6 +3341,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         watcher_output_path,
         inflight_offset,
         "turn_start_message",
+        &mut inflight_state,
     );
 
     // Auto-sync worktree before sending message to session

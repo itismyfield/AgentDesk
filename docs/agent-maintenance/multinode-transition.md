@@ -414,10 +414,19 @@
 - #3698/#3710 `/node` channel picker: Discord command registration now exposes a
   select-menu based node override for intake routing. The override is stored in
   shared bot settings and read only by the existing intake gate/hook path when
-  `ADK_INTAKE_ROUTING_MODE=enforce`; available choices are filtered from
-  `worker_nodes` nodes that advertise the active provider's intake-worker
+  the effective intake routing authority is enforce
+  (`cluster.intake_routing.enabled=true` + `mode=enforce`, or emergency
+  `ADK_INTAKE_ROUTING_MODE=enforce` override). Available choices are filtered
+  from `worker_nodes` nodes that advertise the active provider's intake-worker
   capability. This adds no gateway ownership, leader-election, or lease
   assumption; it only constrains the already-clustered intake target decision.
+
+- #3749 intake routing config authority: `cluster.intake_routing` is now the
+  YAML source of truth for disabled/observe/enforce mode, with
+  `ADK_INTAKE_ROUTING_MODE` retained as an emergency override. The leader hook,
+  `/node`, worker spawn gate, and `/api/health.intake_routing` read the same
+  effective authority. Classification: PG-lease-backed worker-local execution;
+  no new gateway owner, no extra leader election surface.
 
 - #3630 frontier mirror for cancel/stop + prompt_too_long terminal arms:
   turn_bridge now mirrors only Delivered+committed terminal-replace lease ranges

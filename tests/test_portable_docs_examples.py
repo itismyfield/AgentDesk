@@ -22,6 +22,8 @@ class PortableDocsExamplesTests(unittest.TestCase):
         self.assertNotIn("1469870512812462284", text)
         self.assertIn("example-main-node", text)
         self.assertIn("example-worker-node", text)
+        self.assertIn("intake_routing:", text)
+        self.assertIn('mode: "observe"', text)
         self.assertIn("YOUR_GUILD_ID", text)
         self.assertIn("YOUR_DEV_CATEGORY_ID", text)
         self.assertIn("YOUR_OPERATIONS_CATEGORY_ID", text)

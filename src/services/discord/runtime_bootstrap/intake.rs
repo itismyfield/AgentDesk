@@ -1,19 +1,19 @@
 use super::*;
 
 /// Phase 5.1 of intake-node-routing (issue #2007): when intake routing is in
-/// Enforce mode and a PG pool exists, spawn the REST-only intake_worker poll
-/// loop (resolves `target_instance_id` inside the task to avoid racing
-/// `cluster::bootstrap`). No-op in disabled/observe modes. Spawned after the
-/// voice workers and before the gateway lease check — order preserved.
+/// Observe/Enforce mode and a PG pool exists, spawn the REST-only intake_worker
+/// poll loop (resolves `target_instance_id` inside the task to avoid racing
+/// `cluster::bootstrap`). Observe mode keeps the consumer warm so a later
+/// observe→enforce config reload does not strand forwarded rows. Spawned after
+/// the voice workers and before the gateway lease check — order preserved.
 pub(super) fn run_bot_maybe_spawn_intake_worker(
     shared: &Arc<SharedData>,
     token: &str,
     provider: &ProviderKind,
 ) {
-    if matches!(
-        crate::services::cluster::intake_router_hook::IntakeRoutingMode::from_env(),
-        crate::services::cluster::intake_router_hook::IntakeRoutingMode::Enforce
-    ) {
+    let intake_routing =
+        crate::services::cluster::intake_router_hook::effective_intake_routing_config();
+    if intake_routing.worker_consumer_should_spawn() {
         if let Some(pool_for_intake_worker) = shared.pg_pool.clone() {
             crate::services::cluster::node_registry::register_intake_worker_provider(
                 provider.as_str(),
@@ -68,8 +68,16 @@ pub(super) fn run_bot_maybe_spawn_intake_worker(
             });
         } else {
             tracing::info!(
+                mode = intake_routing.mode.as_str(),
+                source = intake_routing.source.as_str(),
                 "[intake_worker] postgres pool unavailable — intake-node-routing worker not started"
             );
         }
+    } else {
+        tracing::debug!(
+            mode = intake_routing.mode.as_str(),
+            source = intake_routing.source.as_str(),
+            "[intake_worker] intake routing disabled — worker not started"
+        );
     }
 }

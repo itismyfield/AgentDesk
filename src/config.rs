@@ -954,6 +954,11 @@ pub struct ClusterConfig {
         skip_serializing_if = "ClusterDispatchRoutingConfig::is_default"
     )]
     pub dispatch_routing: ClusterDispatchRoutingConfig,
+    #[serde(
+        default,
+        skip_serializing_if = "ClusterIntakeRoutingConfig::is_default"
+    )]
+    pub intake_routing: ClusterIntakeRoutingConfig,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub semaphores: BTreeMap<String, ClusterSemaphoreConfig>,
     /// Epic #2285 / E3 + E4 + E5 gate. When `true` (default since E5 / #2412),
@@ -986,6 +991,7 @@ impl Default for ClusterConfig {
             nodes: BTreeMap::new(),
             blackout_windows: BTreeMap::new(),
             dispatch_routing: ClusterDispatchRoutingConfig::default(),
+            intake_routing: ClusterIntakeRoutingConfig::default(),
             semaphores: BTreeMap::new(),
             session_bound_relay_enabled: default_session_bound_relay_enabled(),
         }
@@ -1077,6 +1083,67 @@ fn is_default_dispatch_routing_wake_interval_secs(value: &u64) -> bool {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
+pub struct ClusterIntakeRoutingConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "ClusterIntakeRoutingMode::is_default")]
+    pub mode: ClusterIntakeRoutingMode,
+    #[serde(default = "default_intake_forward_pre_claim_timeout_secs")]
+    pub forward_pre_claim_timeout_secs: u64,
+    #[serde(default = "default_intake_stale_claim_recovery_secs")]
+    pub stale_claim_recovery_secs: u64,
+}
+
+impl Default for ClusterIntakeRoutingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: ClusterIntakeRoutingMode::default(),
+            forward_pre_claim_timeout_secs: default_intake_forward_pre_claim_timeout_secs(),
+            stale_claim_recovery_secs: default_intake_stale_claim_recovery_secs(),
+        }
+    }
+}
+
+impl ClusterIntakeRoutingConfig {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ClusterIntakeRoutingMode {
+    Disabled,
+    #[default]
+    Observe,
+    Enforce,
+}
+
+impl ClusterIntakeRoutingMode {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Observe => "observe",
+            Self::Enforce => "enforce",
+        }
+    }
+}
+
+fn default_intake_forward_pre_claim_timeout_secs() -> u64 {
+    12
+}
+
+fn default_intake_stale_claim_recovery_secs() -> u64 {
+    60
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct ClusterSemaphoreConfig {
     #[serde(default = "default_cluster_semaphore_capacity")]
     pub capacity: u32,
@@ -1136,7 +1203,7 @@ impl ClusterSemaphoreScope {
 
 #[cfg(test)]
 mod cluster_semaphore_config_tests {
-    use super::{ClusterConfig, ClusterSemaphoreScope};
+    use super::{ClusterConfig, ClusterIntakeRoutingMode, ClusterSemaphoreScope};
 
     #[test]
     fn cluster_semaphores_parse_kebab_scope_and_default_capacity() {
@@ -1195,6 +1262,50 @@ dispatch_routing:
             Some("maintenance")
         );
         assert_eq!(config.dispatch_routing.wait_timeout_secs, Some(600));
+    }
+
+    #[test]
+    fn cluster_intake_routing_parses_defaults_and_yaml_fields() {
+        let default_config: ClusterConfig =
+            serde_yaml::from_str("enabled: true\n").expect("cluster config parses");
+        assert!(!default_config.intake_routing.enabled);
+        assert_eq!(
+            default_config.intake_routing.mode,
+            ClusterIntakeRoutingMode::Observe
+        );
+        assert_eq!(
+            default_config.intake_routing.forward_pre_claim_timeout_secs,
+            12
+        );
+        assert_eq!(default_config.intake_routing.stale_claim_recovery_secs, 60);
+
+        let config: ClusterConfig = serde_yaml::from_str(
+            r#"
+enabled: true
+intake_routing:
+  enabled: true
+  mode: enforce
+  forward_pre_claim_timeout_secs: 13
+  stale_claim_recovery_secs: 61
+"#,
+        )
+        .expect("cluster intake routing config parses");
+
+        assert!(config.intake_routing.enabled);
+        assert_eq!(
+            config.intake_routing.mode,
+            ClusterIntakeRoutingMode::Enforce
+        );
+        assert_eq!(config.intake_routing.forward_pre_claim_timeout_secs, 13);
+        assert_eq!(config.intake_routing.stale_claim_recovery_secs, 61);
+
+        let invalid: Result<ClusterConfig, _> = serde_yaml::from_str(
+            r#"
+intake_routing:
+  mode: maybe
+"#,
+        );
+        assert!(invalid.is_err());
     }
 }
 
@@ -2823,9 +2934,13 @@ pub(crate) fn shared_test_env_lock() -> &'static std::sync::Mutex<()> {
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
-/// Compatibility shim: RCC's `config::Settings` is referenced by discord code
-/// for remote_profiles. AgentDesk doesn't have TUI settings, so this returns
-/// an empty struct.
+/// Compatibility shim for legacy provider signatures that still mention
+/// `remote_profiles`.
+///
+/// AgentDesk does not load remote profiles from operator config. `Settings`
+/// intentionally returns an empty list so those signatures cannot be mistaken
+/// for supported remote SSH behavior. Future remote SSH work must use the
+/// #2193 `providers.codex.remote_hosts` contract instead.
 pub struct Settings {
     pub remote_profiles: Vec<crate::services::remote::RemoteProfile>,
 }
@@ -2840,5 +2955,19 @@ impl Settings {
     #[allow(dead_code)]
     pub fn config_dir() -> Option<std::path::PathBuf> {
         runtime_root().map(|root| crate::runtime_layout::config_dir(&root))
+    }
+}
+
+#[cfg(test)]
+mod remote_settings_tests {
+    use super::Settings;
+
+    #[test]
+    fn settings_load_exposes_no_remote_profiles() {
+        let settings = Settings::load();
+        assert!(
+            settings.remote_profiles.is_empty(),
+            "remote profiles are not loaded from AgentDesk config; use the #2193 remote_hosts ADR"
+        );
     }
 }

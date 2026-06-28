@@ -703,6 +703,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct MockClient {
         posts: Arc<Mutex<Vec<(String, String)>>>,
+        referenced_posts: Arc<Mutex<Vec<(String, String, String, String)>>>,
         dm_resolutions: Arc<Mutex<Vec<String>>>,
         length_failures_remaining: Arc<Mutex<usize>>,
         send_failures_remaining: Arc<Mutex<usize>>,
@@ -729,6 +730,10 @@ mod tests {
 
         fn posts(&self) -> Vec<(String, String)> {
             self.posts.lock().unwrap().clone()
+        }
+
+        fn referenced_posts(&self) -> Vec<(String, String, String, String)> {
+            self.referenced_posts.lock().unwrap().clone()
         }
 
         fn dm_resolutions(&self) -> Vec<String> {
@@ -774,6 +779,25 @@ mod tests {
                 ));
             }
             Ok(format!("msg-{target_channel}-{}", content.chars().count()))
+        }
+
+        async fn post_message_with_reference(
+            &self,
+            target_channel: &str,
+            content: &str,
+            reference_channel: &str,
+            reference_message: &str,
+        ) -> Result<String, DispatchMessagePostError> {
+            self.referenced_posts.lock().unwrap().push((
+                target_channel.to_string(),
+                content.to_string(),
+                reference_channel.to_string(),
+                reference_message.to_string(),
+            ));
+            Ok(format!(
+                "msg-ref-{target_channel}-{reference_channel}-{reference_message}-{}",
+                content.chars().count()
+            ))
         }
 
         async fn resolve_dm_channel(
@@ -889,6 +913,51 @@ mod tests {
             other => panic!("expected duplicate, got {other:?}"),
         }
         assert_eq!(client.posts().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn v3_referenced_send_preserves_reference_and_dedupes() {
+        let client = MockClient::default();
+        let dedup = OutboundDeduper::new();
+        let make = || {
+            DiscordOutboundMessage::new(
+                "intake-reaction-control:123:456",
+                "intake-reaction-control:123:456:already_stopping",
+                "Already stopping...",
+                OutboundTarget::Channel(ChannelId::new(123)),
+                DiscordOutboundPolicy::preserve_inline_content(),
+            )
+            .with_reference(OutboundReferenceContext::reply_to(
+                ChannelId::new(123),
+                poise::serenity_prelude::MessageId::new(456),
+            ))
+        };
+
+        let first = deliver_outbound(&client, &dedup, make(), None).await;
+        assert!(matches!(first, DeliveryResult::Sent { .. }));
+        let second = deliver_outbound(&client, &dedup, make(), None).await;
+
+        match second {
+            DeliveryResult::Duplicate {
+                existing_messages, ..
+            } => {
+                assert_eq!(
+                    existing_messages[0].raw_message_id,
+                    "msg-ref-123-123-456-19"
+                );
+            }
+            other => panic!("expected duplicate, got {other:?}"),
+        }
+        assert!(client.posts().is_empty());
+        assert_eq!(
+            client.referenced_posts(),
+            vec![(
+                "123".to_string(),
+                "Already stopping...".to_string(),
+                "123".to_string(),
+                "456".to_string(),
+            )]
+        );
     }
 
     #[tokio::test]

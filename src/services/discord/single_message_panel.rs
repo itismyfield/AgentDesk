@@ -8,13 +8,13 @@ pub(in crate::services::discord) use completion_footer_registry::*;
 /// turn message keeps a compact task summary. The LIVE streaming panel uses the
 /// larger `SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES` below.
 pub(in crate::services::discord) const SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES: usize = 600;
-/// #3497: byte budget for the LIVE single-message footer panel BODY (🖥️ Recent
-/// terminal block + Tasks/Subagents/Context; excludes the spinner/status header).
-/// Larger than the completion budget so a terminal-heavy turn shows the full
-/// Recent block during streaming instead of a truncated/dropped one. The relay
-/// body auto-uses the remaining message space (`DISCORD_MSG_LIMIT − footer_len −
-/// margin`) and rolls over when longer, so commentary is preserved across
-/// messages rather than starving the terminal panel.
+/// #3497: byte budget for the LIVE single-message footer panel BODY (Recent +
+/// Tasks/Subagents/Context; excludes the spinner/status header). Normal Recent
+/// output is compact after #3806, but the footer clamp still handles legacy or
+/// debug-shaped fenced Recent sections as whole blocks. The relay body auto-uses
+/// the remaining message space (`DISCORD_MSG_LIMIT − footer_len − margin`) and
+/// rolls over when longer, so commentary is preserved across messages rather
+/// than starving the terminal panel.
 pub(in crate::services::discord) const SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES: usize = 1200;
 pub(in crate::services::discord) const SINGLE_MESSAGE_PANEL_SPINNER_FRAMES: &[&str] =
     &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -579,6 +579,112 @@ pub(in crate::services::discord) fn strip_streaming_footer(
     None
 }
 
+pub(in crate::services::discord) fn same_streaming_footer_except_spinner_tick(
+    previous: &str,
+    next: &str,
+) -> bool {
+    if previous == next {
+        return true;
+    }
+    let Some((previous_body, previous_footer)) = streaming_footer_split(previous) else {
+        return false;
+    };
+    let Some((next_body, next_footer)) = streaming_footer_split(next) else {
+        return false;
+    };
+    previous_body == next_body
+        && normalize_footer_spinner_header(previous_footer)
+            == normalize_footer_spinner_header(next_footer)
+}
+
+pub(in crate::services::discord) fn streaming_footer_text_changed(
+    footer_mode: bool,
+    previous: &str,
+    next: &str,
+) -> bool {
+    previous != next && !(footer_mode && same_streaming_footer_except_spinner_tick(previous, next))
+}
+
+pub(in crate::services::discord) fn streaming_footer_only_surface_was_exposed(
+    text: &str,
+    provider: &super::ProviderKind,
+) -> bool {
+    let trimmed = text.trim();
+    !trimmed.is_empty()
+        && text_has_single_message_footer_surface(trimmed)
+        && strip_streaming_footer(text, provider).is_some_and(|cleaned| cleaned.trim().is_empty())
+}
+
+pub(in crate::services::discord) fn strip_placeholder_terminal_status(
+    text: &str,
+    provider: &super::ProviderKind,
+) -> String {
+    let text = strip_streaming_footer(text, provider).unwrap_or_else(|| text.to_string());
+    strip_inprogress_indicators(&text)
+}
+
+fn strip_inprogress_indicators(body: &str) -> String {
+    let mut lines: Vec<&str> = body
+        .lines()
+        .filter(|line| !is_inprogress_indicator_line(line))
+        .collect();
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
+fn is_inprogress_indicator_line(line: &str) -> bool {
+    line.trim_start()
+        .chars()
+        .next()
+        .is_some_and(is_spinner_prefix_char)
+}
+
+fn is_spinner_prefix_char(ch: char) -> bool {
+    matches!(
+        ch,
+        '⠏' | '⠋' | '⠙' | '⠹' | '⠸' | '⠼' | '⠴' | '⠦' | '⠧' | '⠇'
+    )
+}
+
+fn text_has_single_message_footer_surface(text: &str) -> bool {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            (!line.is_empty()).then_some(line)
+        })
+        .any(|line| {
+            line.starts_with("Context   ")
+                || line == "Tasks"
+                || line == "Subagents"
+                || line.starts_with("└ ")
+                || (line.contains(" — ") && line.contains("(<t:"))
+        })
+}
+
+fn streaming_footer_split(text: &str) -> Option<(&str, &str)> {
+    if footer_starts_with_spinner(text) {
+        return Some(("", text));
+    }
+    split_footer(text)
+}
+
+fn normalize_footer_spinner_header(footer: &str) -> String {
+    let mut normalized = Vec::new();
+    let mut header_normalized = false;
+    for line in footer.lines() {
+        if !header_normalized && let Some(status) = strip_footer_braille_spinner_prefix(line.trim())
+        {
+            normalized.push(format!("⠿ {status}"));
+            header_normalized = true;
+        } else {
+            normalized.push(line.to_string());
+        }
+    }
+    normalized.join("\n")
+}
+
 fn split_footer(text: &str) -> Option<(&str, &str)> {
     let mut search_end = text.len();
     while let Some(idx) = text[..search_end].rfind("\n\n") {
@@ -881,9 +987,44 @@ mod tests {
         assert!(block.len() > super::SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES);
     }
 
-    /// #3394: the footer finalization sink must re-balance fence parity. A panel
-    /// whose fenced Recent block is chopped by the 600-byte body clamp must not
-    /// emit a dangling ``` for Discord to render as literal text.
+    #[test]
+    fn streaming_footer_semantic_compare_ignores_spinner_tick_only_3717() {
+        let previous =
+            "visible body\n\n⠋ 진행 중 — Claude (<t:1700000000:R>)\n\nSubagents\n└ review inspect";
+        let next =
+            "visible body\n\n⠙ 진행 중 — Claude (<t:1700000000:R>)\n\nSubagents\n└ review inspect";
+
+        assert!(super::same_streaming_footer_except_spinner_tick(
+            previous, next
+        ));
+    }
+
+    #[test]
+    fn streaming_footer_semantic_compare_keeps_body_and_panel_changes_3717() {
+        let previous =
+            "visible body\n\n⠋ 진행 중 — Claude (<t:1700000000:R>)\n\nSubagents\n└ review inspect";
+        let body_changed = "visible body plus output\n\n⠙ 진행 중 — Claude (<t:1700000000:R>)\n\nSubagents\n└ review inspect";
+        let panel_changed =
+            "visible body\n\n⠙ 진행 중 — Claude (<t:1700000000:R>)\n\nSubagents\n└ review done";
+        let completed =
+            "visible body\n\n✅ 진행 중 — Claude (<t:1700000000:R>)\n\nSubagents\n└ review inspect";
+
+        assert!(!super::same_streaming_footer_except_spinner_tick(
+            previous,
+            body_changed
+        ));
+        assert!(!super::same_streaming_footer_except_spinner_tick(
+            previous,
+            panel_changed
+        ));
+        assert!(!super::same_streaming_footer_except_spinner_tick(
+            previous, completed
+        ));
+    }
+
+    /// #3394: the footer finalization sink must re-balance fence parity. A
+    /// legacy/debug-shaped fenced Recent block chopped by the body clamp must
+    /// not emit a dangling ``` for Discord to render as literal text.
     #[test]
     fn footer_status_block_repairs_dangling_fence_after_clamp_3394() {
         let panel = format!(
@@ -901,10 +1042,11 @@ mod tests {
         assert!(!block.contains("```text") || fences >= 2);
     }
 
-    /// #3495: when the 600-byte panel clamp severs the fenced 🖥️ Recent block,
-    /// the WHOLE section (header + fence + body) is dropped — Discord must never
-    /// see a bare `🖥️ Recent` header with no terminal body (the intermittent
-    /// "터미널 칸이 사라짐" symptom). When the block fits, it is preserved intact.
+    /// #3495: when the panel clamp severs a legacy/debug-shaped fenced 🖥️ Recent
+    /// block, the WHOLE section (header + fence + body) is dropped — Discord
+    /// must never see a bare `🖥️ Recent` header with no terminal body (the
+    /// intermittent "터미널 칸이 사라짐" symptom). When the block fits, it is
+    /// preserved intact.
     #[test]
     fn footer_panel_clamp_drops_severed_recent_section_3495() {
         // Small leading line so the cut lands inside the Recent section: the

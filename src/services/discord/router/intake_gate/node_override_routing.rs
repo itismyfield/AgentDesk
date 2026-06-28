@@ -28,7 +28,7 @@ pub(super) async fn try_route_intake_for_message(
         return None;
     };
 
-    let mode = crate::services::cluster::intake_router_hook::IntakeRoutingMode::from_env();
+    let mode = crate::services::cluster::intake_router_hook::effective_intake_routing_mode();
     let leader_instance_id =
         crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
     let channel_id_str = channel_id.get().to_string();

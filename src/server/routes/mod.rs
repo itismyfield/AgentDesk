@@ -1,4 +1,3 @@
-pub mod active_session_audit;
 pub mod agents;
 mod agents_crud;
 mod agents_setup;
@@ -51,6 +50,10 @@ pub mod stats;
 pub mod termination_events;
 pub mod v1;
 pub mod voice_config;
+
+#[cfg(test)]
+#[path = "tests/auto_queue_preflight_harness_tests.rs"]
+mod auto_queue_preflight_harness_tests;
 
 use axum::{
     Router,

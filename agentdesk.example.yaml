@@ -19,6 +19,13 @@ cluster:
   dispatch_routing:
     wait_timeout_secs: 600
     wake_interval_secs: 30
+  # Intake routing is opt-in. Keep disabled until worker nodes advertise
+  # intake_worker capability and the operator is ready to test observe/enforce.
+  intake_routing:
+    enabled: false
+    mode: "observe"
+    forward_pre_claim_timeout_secs: 12
+    stale_claim_recovery_secs: 60
 
 discord:
   guild_id: "YOUR_GUILD_ID"

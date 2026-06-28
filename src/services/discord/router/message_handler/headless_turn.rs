@@ -1280,7 +1280,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         tracing::info!("  [{ts}]   ⚠ inflight state save failed: {error}");
     }
 
-    let _watcher_owner_channel_id = attach_paused_turn_watcher(
+    let _ = attach_paused_turn_watcher_for_inflight(
         shared,
         ctx.http.clone(),
         &provider,
@@ -1289,8 +1289,8 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         watcher_output_path,
         inflight_offset,
         "turn_start_headless",
+        &mut inflight_state,
     );
-
     let (tx, rx) = mpsc::channel();
     let session_id_clone = session_id.clone();
     let current_path_clone = current_path.clone();

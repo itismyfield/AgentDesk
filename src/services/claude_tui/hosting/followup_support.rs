@@ -8,6 +8,8 @@ use crate::services::provider::{CancelToken, cancel_requested};
 const CLAUDE_TUI_STRANDED_DRAFT_CLEAR_ATTEMPTS: usize = 2;
 #[cfg(unix)]
 const CLAUDE_TUI_BUSY_FOLLOWUP_NOTICE: &str = "⚠ Claude TUI가 아직 이전 터미널 턴을 처리 중이라 이 메시지를 주입하지 않았습니다. 현재 응답이 끝난 뒤 다시 보내 주세요.";
+#[cfg(unix)]
+const CLAUDE_TUI_BUSY_FOLLOWUP_REQUEUE_NOTICE: &str = "📬 Claude TUI가 아직 이전 터미널 턴을 처리 중이라 이 메시지를 바로 주입하지 못했습니다. 현재 응답이 끝나면 자동으로 다시 제출되도록 재시도 큐에 넣습니다.";
 
 #[cfg(unix)]
 pub(crate) fn emit_claude_tui_zero_harvest(
@@ -46,6 +48,7 @@ pub(super) fn emit_claude_tui_busy_followup_notice(
     sender: &Sender<StreamMessage>,
     tmux_session_name: &str,
     snapshot: &crate::services::claude_tui::input::PromptReadinessSnapshot,
+    requeue_for_retry: bool,
 ) {
     tracing::warn!(
         tmux_session_name,
@@ -67,13 +70,90 @@ pub(super) fn emit_claude_tui_busy_followup_notice(
         snapshot.capture_available,
         snapshot.pane_tail
     ));
+    let notice = if requeue_for_retry {
+        CLAUDE_TUI_BUSY_FOLLOWUP_REQUEUE_NOTICE
+    } else {
+        CLAUDE_TUI_BUSY_FOLLOWUP_NOTICE
+    };
     let _ = sender.send(StreamMessage::Text {
-        content: CLAUDE_TUI_BUSY_FOLLOWUP_NOTICE.to_string(),
+        content: notice.to_string(),
     });
-    let _ = sender.send(StreamMessage::Done {
-        result: String::new(),
-        session_id: None,
-    });
+    if !requeue_for_retry {
+        let _ = sender.send(StreamMessage::Done {
+            result: String::new(),
+            session_id: None,
+        });
+    }
+}
+
+#[cfg(all(test, unix))]
+mod busy_followup_notice_tests {
+    use super::*;
+
+    fn busy_snapshot() -> crate::services::claude_tui::input::PromptReadinessSnapshot {
+        crate::services::claude_tui::input::PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: false,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "Thinking...".to_string(),
+        }
+    }
+
+    fn emitted_text(requeue_for_retry: bool) -> String {
+        let (tx, rx) = std::sync::mpsc::channel();
+        emit_claude_tui_busy_followup_notice(
+            &tx,
+            "AgentDesk-claude-test",
+            &busy_snapshot(),
+            requeue_for_retry,
+        );
+        match rx.recv().expect("notice text") {
+            StreamMessage::Text { content } => content,
+            other => panic!("expected text notice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn busy_followup_notice_reports_automatic_retry_when_requeue_is_enabled() {
+        let text = emitted_text(true);
+        assert!(text.contains("자동으로 다시 제출"));
+        assert!(text.contains("재시도 큐"));
+    }
+
+    #[test]
+    fn busy_followup_notice_reports_manual_resend_when_requeue_is_disabled() {
+        let text = emitted_text(false);
+        assert!(text.contains("다시 보내 주세요"));
+    }
+
+    #[test]
+    fn busy_followup_notice_leaves_terminal_frame_to_retry_error_when_requeue_is_enabled() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        emit_claude_tui_busy_followup_notice(&tx, "AgentDesk-claude-test", &busy_snapshot(), true);
+        assert!(matches!(
+            rx.recv().expect("notice text"),
+            StreamMessage::Text { .. }
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "automatic-retry path must not emit Done before the retryable Error reaches the bridge"
+        );
+    }
+
+    #[test]
+    fn busy_followup_notice_keeps_legacy_done_when_requeue_is_disabled() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        emit_claude_tui_busy_followup_notice(&tx, "AgentDesk-claude-test", &busy_snapshot(), false);
+        assert!(matches!(
+            rx.recv().expect("notice text"),
+            StreamMessage::Text { .. }
+        ));
+        assert!(matches!(
+            rx.recv().expect("legacy done"),
+            StreamMessage::Done { .. }
+        ));
+    }
 }
 
 #[cfg(unix)]

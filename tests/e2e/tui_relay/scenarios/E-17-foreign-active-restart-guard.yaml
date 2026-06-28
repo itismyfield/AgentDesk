@@ -1,5 +1,6 @@
 id: E-17
 title: Destructive restart refuses foreign active mailbox
+agent_mode: controlled
 cells: [codex-tui]
 isolation: required
 destructive: true

@@ -10,6 +10,7 @@ use super::{
     DISCORD_MSG_LIMIT, SharedData,
     placeholder_cleanup::{PlaceholderCleanupOutcome, classify_delete_error},
     rate_limit_wait,
+    response_sanitizer::subagent_notification_card,
 };
 use crate::utils::format::tail_with_ellipsis_bytes;
 
@@ -300,6 +301,7 @@ pub(super) fn streaming_split_boundary(text: &str, max_len: usize) -> Option<usi
 
     let preferred = paragraph_split
         .or(newline_split)
+        .or_else(|| super::semantic_boundaries::semantic_sentence_split_boundary(window))
         .or(whitespace_split)
         .unwrap_or(safe_end);
     let split_at = if preferred < safe_end / 2 {
@@ -814,9 +816,7 @@ pub(super) fn format_for_discord_with_provider(
     s: &str,
     provider: &crate::services::provider::ProviderKind,
 ) -> String {
-    let sanitized = super::response_sanitizer::strip_leading_tui_response_chrome(
-        &super::response_sanitizer::sanitize_hidden_context(s),
-    );
+    let sanitized = super::response_sanitizer::sanitize_hidden_context_and_strip_chrome(s);
     let filtered;
     let input = if matches!(provider, crate::services::provider::ProviderKind::Codex) {
         filtered = filter_codex_tool_logs(&sanitized);
@@ -833,9 +833,7 @@ pub(super) fn format_for_discord_with_status_panel(
     s: &str,
     provider: &crate::services::provider::ProviderKind,
 ) -> String {
-    let sanitized = super::response_sanitizer::strip_leading_tui_response_chrome(
-        &super::response_sanitizer::sanitize_hidden_context(s),
-    );
+    let sanitized = super::response_sanitizer::sanitize_hidden_context_and_strip_chrome(s);
     let filtered;
     let input = if matches!(provider, crate::services::provider::ProviderKind::Codex) {
         filtered = strip_codex_tool_log_lines(&sanitized);
@@ -851,9 +849,10 @@ pub(super) fn format_for_discord_with_status_panel(
 mod status_panel_v2_formatter_tests {
     use super::{
         MonitorHandoffReason, MonitorHandoffStatus, build_monitor_handoff_placeholder,
-        build_monitor_handoff_placeholder_with_live_events, build_status_panel_streaming_edit_text,
-        build_streaming_placeholder_text, format_for_discord, format_for_discord_with_provider,
-        format_for_discord_with_status_panel, plan_streaming_rollover,
+        build_monitor_handoff_placeholder_with_live_events, build_placeholder_status_block,
+        build_status_panel_streaming_edit_text, build_streaming_placeholder_text,
+        format_for_discord, format_for_discord_with_provider, format_for_discord_with_status_panel,
+        plan_streaming_rollover,
     };
     use crate::services::provider::ProviderKind;
 
@@ -1021,6 +1020,105 @@ mod status_panel_v2_formatter_tests {
     }
 
     #[test]
+    fn format_for_discord_with_provider_hides_raw_subagent_notification() {
+        let input = r#"<subagent_notification>
+{"agent_path":"/tmp/private-agent","status":{"completed":"Read-only review complete.\n\n1. Check relay path."}}
+</subagent_notification>"#;
+
+        let output = format_for_discord_with_provider(input, &ProviderKind::Codex);
+
+        assert!(output.contains("Subagent completed"));
+        assert!(output.contains("Read-only review complete."));
+        assert!(output.contains("1. Check relay path."));
+        assert!(!output.contains("<subagent_notification>"));
+        assert!(!output.contains("agent_path"));
+        assert!(!output.contains("/tmp/private-agent"));
+        assert!(!output.contains("{\""));
+    }
+
+    #[test]
+    fn format_for_discord_sanitizes_subagent_after_tui_chrome_strip() {
+        let input = "No response requested.\n<subagent_notification>{\"agent_path\":\"/tmp/private-agent\",\"status\":{\"completed\":\"Read-only review complete.\"}}</subagent_notification>";
+
+        let output = format_for_discord_with_provider(input, &ProviderKind::Codex);
+        assert!(output.contains("Subagent completed"));
+        assert!(output.contains("Read-only review complete."));
+        assert!(!output.contains("No response requested."));
+        assert!(!output.contains("<subagent_notification>"));
+        assert!(!output.contains("agent_path"));
+        assert!(!output.contains("/tmp/private-agent"));
+
+        let status_panel_output = format_for_discord_with_status_panel(input, &ProviderKind::Codex);
+        assert!(status_panel_output.contains("Subagent completed"));
+        assert!(!status_panel_output.contains("<subagent_notification>"));
+        assert!(!status_panel_output.contains("agent_path"));
+    }
+
+    #[test]
+    fn format_for_discord_sanitizes_provider_reuse_user_prefixed_subagent_3777() {
+        let input = "[Provider Session Reuse]\n\
+The prior authoritative Discord, role, and tool instructions already present in this \
+Codex thread still apply. Treat only this turn's user request, reply context, uploaded \
+files, and memory recall below as new actionable input.\n\n\
+[User: 0hbujang (ID: 343742347365974026)] \
+<subagent_notification>{\"agent_path\":\"/tmp/private-agent\",\"status\":{\"completed\":\"Review complete.\"}}</subagent_notification>";
+
+        let output = format_for_discord_with_provider(input, &ProviderKind::Codex);
+        assert!(output.contains("Subagent completed"));
+        assert!(output.contains("Review complete."));
+        assert!(!output.contains("[Provider Session Reuse]"));
+        assert!(!output.contains("[User:"));
+        assert!(!output.contains("<subagent_notification>"));
+        assert!(!output.contains("agent_path"));
+        assert!(!output.contains("/tmp/private-agent"));
+    }
+
+    #[test]
+    fn format_for_discord_sanitizes_provider_reuse_chrome_then_user_subagent_3818() {
+        let input = "[Provider Session Reuse]\n\
+The prior authoritative Discord, role, and tool instructions already present in this \
+Codex thread still apply. Treat only this turn's user request, reply context, uploaded \
+files, and memory recall below as new actionable input.\n\n\
+No response requested.\n\
+[User: 0hbujang (ID: 343742347365974026)] \
+<subagent_notification>{\"agent_path\":\"/tmp/private-agent\",\"status\":{\"completed\":\"Review complete.\"}}</subagent_notification>";
+
+        let output = format_for_discord_with_provider(input, &ProviderKind::Codex);
+        assert!(output.contains("Subagent completed"));
+        assert!(output.contains("Review complete."));
+        assert!(!output.contains("[Provider Session Reuse]"));
+        assert!(!output.contains("No response requested."));
+        assert!(!output.contains("[User:"));
+        assert!(!output.contains("<subagent_notification>"));
+        assert!(!output.contains("agent_path"));
+        assert!(!output.contains("/tmp/private-agent"));
+
+        let status_panel_output = format_for_discord_with_status_panel(input, &ProviderKind::Codex);
+        assert!(status_panel_output.contains("Subagent completed"));
+        assert!(!status_panel_output.contains("<subagent_notification>"));
+        assert!(!status_panel_output.contains("[User:"));
+    }
+
+    #[test]
+    fn placeholder_status_block_summarizes_subagent_notification_3818() {
+        let input = r#"<subagent_notification>
+{"agent_path":"/tmp/private-agent","status":{"completed":"Review complete.\n\nVERDICT: CLEAN"}}
+</subagent_notification>"#;
+
+        let from_full_response = build_placeholder_status_block("⠙", None, None, input);
+        assert!(from_full_response.contains("Subagent completed"));
+        assert!(!from_full_response.contains("<subagent_notification>"));
+        assert!(!from_full_response.contains("agent_path"));
+        assert!(!from_full_response.contains("/tmp/private-agent"));
+
+        let from_current_tool = build_placeholder_status_block("⠙", None, Some(input), "");
+        assert!(from_current_tool.contains("Subagent completed"));
+        assert!(!from_current_tool.contains("<subagent_notification>"));
+        assert!(!from_current_tool.contains("agent_path"));
+        assert!(!from_current_tool.contains("/tmp/private-agent"));
+    }
+
+    #[test]
     fn format_for_discord_preserves_blank_lines_inside_code_block_3475() {
         // #3475 acceptance: the blank-line collapse must NOT touch code block
         // contents, so relayed code/tool output keeps its intentional spacing.
@@ -1178,8 +1276,12 @@ mod status_panel_v2_formatter_tests {
     // `#[cfg(test)] mod` block => ZERO production LoC under the ratchet
     // (formatting.rs baseline 2802 stays unchanged).
     mod a0_characterization_tests {
+        use super::super::super::semantic_boundaries::{
+            message_split_boundary, semantic_sentence_split_boundary,
+        };
         use super::super::{
-            DISCORD_MSG_LIMIT, plan_streaming_rollover, split_message, streaming_split_boundary,
+            DISCORD_MSG_LIMIT, long_message_reply_builders, plan_streaming_rollover, split_message,
+            streaming_split_boundary,
         };
 
         // -------------------------------------------------------------------
@@ -1245,6 +1347,22 @@ mod status_panel_v2_formatter_tests {
         }
 
         #[test]
+        fn a0_split_message_uses_semantic_sentence_boundary_when_no_newline_exists() {
+            let head = format!("{}확인합니다.", "a".repeat(1480));
+            let tail = format!("`NullRHI`{}", "b".repeat(1000));
+            let body = format!("{head}{tail}");
+            let chunks = split_message(&body);
+
+            assert_eq!(chunks.len(), 2);
+            assert_eq!(
+                chunks[0], head,
+                "newline-free prose should split at a sentence boundary before hard-splitting"
+            );
+            assert_eq!(chunks[1], tail);
+            assert_eq!(format!("{}{}", chunks[0], chunks[1]), body);
+        }
+
+        #[test]
         fn a0_split_message_leading_newline_does_not_emit_an_empty_chunk() {
             // Issue #1043 guard.
             let body = format!("\n{}", "a".repeat(2200));
@@ -1271,6 +1389,20 @@ mod status_panel_v2_formatter_tests {
                 chunks[1].starts_with("```rust\n"),
                 "next chunk re-opens the fence with the same language tag"
             );
+        }
+
+        #[test]
+        fn a0_long_message_reply_builders_add_compact_continuation_context() {
+            let body = "a".repeat(2500);
+            let replies = long_message_reply_builders(&body);
+            assert_eq!(replies.len(), 2);
+            let first = replies[0].content.as_ref().expect("first content");
+            let second = replies[1].content.as_ref().expect("second content");
+
+            assert!(first.starts_with("[1/2]\n"));
+            assert!(second.starts_with("[2/2]\n"));
+            assert!(first.len() <= DISCORD_MSG_LIMIT);
+            assert!(second.len() <= DISCORD_MSG_LIMIT);
         }
 
         // -------------------------------------------------------------------
@@ -1352,6 +1484,62 @@ mod status_panel_v2_formatter_tests {
                 streaming_split_boundary(&body, 50),
                 Some(31),
                 "single newline wins over a later space"
+            );
+        }
+
+        #[test]
+        fn a0_streaming_split_boundary_sentence_beats_a_later_space() {
+            let head = format!("{}확인합니다.", "x".repeat(20));
+            let body = format!("{}{} {}", head, "y".repeat(5), "z".repeat(100));
+            assert_eq!(
+                streaming_split_boundary(&body, 50),
+                Some(head.len()),
+                "sentence boundary wins over a later whitespace split"
+            );
+        }
+
+        #[test]
+        fn a0_semantic_sentence_split_boundary_skips_markdown_continuations_and_code_fences() {
+            assert_eq!(
+                semantic_sentence_split_boundary("확인합니다.`NullRHI`"),
+                Some("확인합니다.".len()),
+                "inline-code follow-up after Korean sentence is a readable split point"
+            );
+            assert_eq!(
+                semantic_sentence_split_boundary("Use `foo.bar` in config"),
+                None,
+                "inline code punctuation is not a sentence split point"
+            );
+            let code_window = "println!(\"done.\"); keep streaming inside fence";
+            assert_eq!(
+                message_split_boundary(code_window, code_window.len(), true),
+                (code_window.len(), "hard"),
+                "already-open code fences must not use semantic sentence splits"
+            );
+            assert_eq!(
+                semantic_sentence_split_boundary("- item. more text"),
+                None,
+                "list items keep their existing markdown continuation behavior"
+            );
+            assert_eq!(
+                semantic_sentence_split_boundary("| Col | value."),
+                None,
+                "table-like lines keep their existing markdown continuation behavior"
+            );
+            assert_eq!(
+                semantic_sentence_split_boundary("version 1.2"),
+                None,
+                "decimal points are not sentence boundaries"
+            );
+            assert_eq!(
+                semantic_sentence_split_boundary("config.yaml"),
+                None,
+                "single-token file extensions are not sentence boundaries"
+            );
+            assert_eq!(
+                semantic_sentence_split_boundary("```text\nDone.\n```"),
+                None,
+                "code-fence content must not be sentence-split"
             );
         }
 
@@ -1600,7 +1788,7 @@ pub(super) async fn send_long_message_ctx(ctx: Context<'_>, text: &str) -> Resul
         return Ok(());
     }
 
-    let chunks = split_message(text);
+    let chunks = super::semantic_boundaries::add_continuation_context(split_message(text));
     let total = chunks.len();
     for (i, chunk) in chunks.iter().enumerate() {
         tracing::debug!(
@@ -1629,7 +1817,7 @@ pub(in crate::services::discord) fn long_message_reply_builders(
         return vec![poise::CreateReply::default().content(text.to_string())];
     }
 
-    split_message(text)
+    super::semantic_boundaries::add_continuation_context(split_message(text))
         .into_iter()
         .map(|chunk| poise::CreateReply::default().content(chunk))
         .collect()
@@ -1728,7 +1916,7 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference(
         }
     }
 
-    let chunks = split_message(text);
+    let chunks = super::semantic_boundaries::add_continuation_context(split_message(text));
     let total = chunks.len();
     // #3082 part B: hold the per-channel answer-flush barrier for the whole
     // multi-chunk send so a queued-turn notice POST cannot interleave between
@@ -1808,7 +1996,7 @@ pub(super) async fn send_long_message_raw_with_rollback(
     shared: &Arc<SharedData>,
 ) -> Result<Vec<MessageId>, Error> {
     let payload_byte_len = text.len();
-    let chunks = split_message(text);
+    let chunks = super::semantic_boundaries::add_continuation_context(split_message(text));
     let total = chunks.len();
     let rollback_key = replace_continuation_rollback_key(channel_id, rollback_anchor_msg_id);
 
@@ -2093,7 +2281,7 @@ pub(super) async fn replace_long_message_raw_with_outcome(
     shared: &Arc<SharedData>,
 ) -> Result<ReplaceLongMessageOutcome, Error> {
     let payload_byte_len = text.len();
-    let chunks = split_message(text);
+    let chunks = super::semantic_boundaries::add_continuation_context(split_message(text));
     let total = chunks.len();
     let Some(first_chunk) = chunks.first() else {
         tracing::debug!(
@@ -2857,10 +3045,8 @@ pub(super) fn split_message(text: &str) -> Vec<String> {
         // back to a hard split at `safe_end` (or skip the orphan newline when
         // `safe_end` is also 0 due to a multi-byte char on the boundary).
         let safe_end = floor_char_boundary(remaining, effective_limit);
-        let (mut split_at, mut boundary_kind) = match remaining[..safe_end].rfind('\n') {
-            Some(idx) => (idx, "newline"),
-            None => (safe_end, "hard"),
-        };
+        let (mut split_at, mut boundary_kind) =
+            super::semantic_boundaries::message_split_boundary(remaining, safe_end, in_code_block);
         if split_at == 0 {
             if safe_end > 0 {
                 split_at = safe_end;
@@ -3523,8 +3709,11 @@ pub(super) fn build_placeholder_status_block(
     current_tool_line: Option<&str>,
     full_response: &str,
 ) -> String {
-    let raw_tool_status = resolve_raw_tool_status(current_tool_line, full_response);
-    let tool_status = humanize_tool_status(raw_tool_status);
+    let tool_status =
+        subagent_notification_card::status_summary_from(current_tool_line, full_response)
+            .unwrap_or_else(|| {
+                humanize_tool_status(resolve_raw_tool_status(current_tool_line, full_response))
+            });
     format!("{indicator} {tool_status}")
 }
 

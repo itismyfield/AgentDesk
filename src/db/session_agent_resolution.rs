@@ -1,6 +1,7 @@
 use sqlx::{PgPool, Row as SqlxRow};
 
 use crate::db::agents::AgentChannelBindings;
+use crate::services::discord::session_identity::SessionIdentity;
 use crate::services::provider::parse_provider_and_channel_from_tmux_name;
 
 pub(crate) fn parse_thread_channel_name(channel_name: &str) -> Option<(&str, &str)> {
@@ -14,10 +15,8 @@ pub(crate) fn parse_thread_channel_name(channel_name: &str) -> Option<(&str, &st
 }
 
 pub(crate) fn parse_channel_name_from_session_key(session_key: &str) -> Option<String> {
-    // Session keys can be plain `host:tmux-name` or namespaced
-    // `provider/token-hash/host:tmux-name`; the tmux session name is always the final segment.
-    let (_, tmux_name) = session_key.rsplit_once(':')?;
-    let (_, channel_name) = parse_provider_and_channel_from_tmux_name(tmux_name)?;
+    let identity = SessionIdentity::parse(session_key)?;
+    let (_, channel_name) = parse_provider_and_channel_from_tmux_name(&identity.tmux_name)?;
     Some(channel_name)
 }
 
@@ -275,4 +274,31 @@ pub(crate) async fn resolve_agent_id_for_session_pg(
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_channel_name_from_session_key, parse_thread_channel_id_from_session_key};
+
+    #[test]
+    fn parses_channel_name_from_namespaced_session_key() {
+        assert_eq!(
+            parse_channel_name_from_session_key(
+                "codex/hash123/mac-mini:AgentDesk-codex-adk-cdx-t1500628371829428350"
+            )
+            .as_deref(),
+            Some("adk-cdx-t1500628371829428350")
+        );
+    }
+
+    #[test]
+    fn parses_thread_channel_id_from_namespaced_session_key() {
+        assert_eq!(
+            parse_thread_channel_id_from_session_key(
+                "codex/hash123/mac-mini:AgentDesk-codex-adk-cdx-t1500628371829428350"
+            )
+            .as_deref(),
+            Some("1500628371829428350")
+        );
+    }
 }

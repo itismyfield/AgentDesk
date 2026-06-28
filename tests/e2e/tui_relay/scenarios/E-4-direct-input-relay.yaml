@@ -1,5 +1,6 @@
 id: E-4
 title: SSH/direct TUI 입력 시 프롬프트 알림 + 응답 1회 relay (#2697/#2683/#2669 positive)
+agent_mode: real_live
 cells: [claude-tui, codex-tui]  # direct keystroke relay assumes TUI host
 isolation: required
 notes: |

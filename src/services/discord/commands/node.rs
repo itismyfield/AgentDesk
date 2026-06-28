@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 use poise::CreateReply;
 use poise::serenity_prelude as serenity;
 
-use crate::services::cluster::intake_router_hook::IntakeRoutingMode;
+use crate::services::cluster::intake_router_hook::{
+    EffectiveIntakeRoutingConfig, effective_intake_routing_config,
+};
 use crate::services::cluster::node_registry::node_supports_intake_provider;
 use crate::services::provider::ProviderKind;
 
@@ -48,8 +50,18 @@ fn prune_node_picker_pending() {
     }
 }
 
-fn intake_routing_enforced() -> bool {
-    matches!(IntakeRoutingMode::from_env(), IntakeRoutingMode::Enforce)
+fn intake_routing_unavailable_message(effective: &EffectiveIntakeRoutingConfig) -> String {
+    format!(
+        "`/node`는 현재 사용할 수 없습니다. 현재 intake routing mode는 `{}` (source: `{}`)입니다. \
+         `cluster.intake_routing.enabled=true` 및 `mode=enforce`로 설정하거나 \
+         긴급 시 `ADK_INTAKE_ROUTING_MODE=enforce` override로 실행해야 노드 선택을 저장합니다.",
+        effective.mode.as_str(),
+        effective.source.as_str()
+    )
+}
+
+fn intake_routing_enforced(effective: &EffectiveIntakeRoutingConfig) -> bool {
+    effective.mode_is_enforce()
 }
 
 pub(in crate::services::discord) fn channel_node_override(
@@ -278,13 +290,10 @@ pub(in crate::services::discord) async fn cmd_node(ctx: Context<'_>) -> Result<(
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!("  [{ts}] ◀ [{user_name}] /node");
 
-    if !intake_routing_enforced() {
-        ctx.say(
-            "`/node`는 현재 사용할 수 없습니다. \
-             `ADK_INTAKE_ROUTING_MODE=enforce`에서만 worker consumer가 보장되므로, \
-             노드 선택을 저장하지 않았습니다.",
-        )
-        .await?;
+    let intake_routing = effective_intake_routing_config();
+    if !intake_routing_enforced(&intake_routing) {
+        ctx.say(intake_routing_unavailable_message(&intake_routing))
+            .await?;
         return Ok(());
     }
 
@@ -362,17 +371,15 @@ pub(in crate::services::discord) async fn handle_node_picker_interaction(
         return ephemeral_reply(ctx, component, "패널을 연 사용자만 조작할 수 있습니다.").await;
     }
 
-    if !intake_routing_enforced() {
+    let intake_routing = effective_intake_routing_config();
+    if !intake_routing_enforced(&intake_routing) {
         NODE_PICKER_PENDING.remove(&message_id);
         component
             .create_response(
                 ctx,
                 serenity::CreateInteractionResponse::UpdateMessage(
                     serenity::CreateInteractionResponseMessage::new()
-                        .content(
-                            "`/node`를 저장하지 않았습니다. \
-                             현재 intake routing이 Enforce가 아니라 worker consumer가 보장되지 않습니다.",
-                        )
+                        .content(intake_routing_unavailable_message(&intake_routing))
                         .components(Vec::new()),
                 ),
             )
@@ -440,4 +447,34 @@ pub(in crate::services::discord) async fn handle_node_picker_interaction(
         .await?;
     NODE_PICKER_PENDING.remove(&message_id);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ClusterIntakeRoutingMode;
+    use crate::services::cluster::intake_router_hook::{
+        IntakeRoutingMode, IntakeRoutingModeSource,
+    };
+
+    #[test]
+    fn node_unavailable_message_reports_effective_mode_and_source() {
+        let effective = EffectiveIntakeRoutingConfig {
+            mode: IntakeRoutingMode::Observe,
+            source: IntakeRoutingModeSource::EnvOverride,
+            yaml_enabled: true,
+            yaml_mode: ClusterIntakeRoutingMode::Enforce,
+            env_override: Some("observe"),
+            warnings: Vec::new(),
+            forward_pre_claim_timeout_secs: 12,
+            stale_claim_recovery_secs: 60,
+        };
+
+        let message = intake_routing_unavailable_message(&effective);
+        assert!(message.contains("mode는 `observe`"));
+        assert!(message.contains("source: `env_override`"));
+        assert!(message.contains("cluster.intake_routing.enabled=true"));
+        assert!(message.contains("ADK_INTAKE_ROUTING_MODE=enforce"));
+        assert!(!intake_routing_enforced(&effective));
+    }
 }

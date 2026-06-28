@@ -33,11 +33,11 @@ Measured on branch head with the command above (excludes `policies/__tests__/`):
 
 | op | count |
 |---|---|
-| `agentdesk.db.query` (read) | 132 |
-| `agentdesk.db.execute` (mutation) | 63 |
-| **total** | **195** |
+| `agentdesk.db.query` (read) | 120 |
+| `agentdesk.db.execute` (mutation) | 46 |
+| **total** | **166** |
 
-These 195 callsites are spread across 29 policy files under `policies/`. One
+These 166 callsites are spread across 29 policy files under `policies/`. One
 additional callsite lives in `policies/__tests__/` and is excluded from the
 migration debt total.
 
@@ -48,6 +48,13 @@ migration debt total.
   (`setBlockedReason`, `getCardStatus`, `getReworkCardInfo`, `listWaitingForCi`).
   The file now has zero `agentdesk.db.*` callsites and carries
   `// typed-facade-slice:start ci-recovery` / `:end` markers to flag regressions.
+- **Active-monitor slice**: `policies/timeouts/active-monitor.js` Section I
+  moved 18 raw-DB callsites (7 reads, 11 mutations) behind
+  `agentdesk.timeouts.*` and `agentdesk.kv.*`. Its adjacent capability
+  manifest now sets `db.raw_sql.mode: forbidden`.
+- **Capability-manifest first rollout**: `policies/review-automation.js` and
+  `policies/merge-automation.js` still have adjacent `*.cap.yaml` manifests in
+  `db.raw_sql.mode: legacy` with pinned `no_silent_growth` baselines.
 - **Next candidates (mutation-heavy)**: `review-automation.js`,
   `merge-automation.js`, `kanban-rules.js`, and the `auto-queue` lib modules
   (`lib/auto-queue-phase-gate.js`, `lib/auto-queue-lifecycle.js`).

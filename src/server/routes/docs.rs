@@ -541,6 +541,27 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "status": "healthy",
                 "server_up": true,
                 "fully_recovered": true,
+                "delivery_record_rollout": {
+                    "shadow_enabled": false,
+                    "authority_enabled": false,
+                    "mode": "off",
+                    "dedup_authority": "in_memory_committed_offset",
+                    "same_turn_backward_write_enforcement": "observe_only",
+                    "warning_count": 1
+                },
+                "intake_routing": {
+                    "mode": "disabled",
+                    "source": "yaml",
+                    "yaml": {
+                        "enabled": false,
+                        "mode": "observe",
+                        "forward_pre_claim_timeout_secs": 12,
+                        "stale_claim_recovery_secs": 60
+                    },
+                    "env_override": null,
+                    "warning_count": 0,
+                    "configuration_warnings": []
+                },
                 "latest_startup_doctor": {
                     "available": true,
                     "status": "warned",
@@ -580,6 +601,28 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 "status": "healthy",
                 "server_up": true,
                 "fully_recovered": true,
+                "delivery_record_rollout": {
+                    "shadow_enabled": true,
+                    "authority_enabled": true,
+                    "mode": "shadow_and_authority",
+                    "dedup_authority": "durable_delivery_record_frontier",
+                    "same_turn_backward_write_enforcement": "enforcing",
+                    "warning_count": 0,
+                    "configuration_warnings": []
+                },
+                "intake_routing": {
+                    "mode": "observe",
+                    "source": "yaml",
+                    "yaml": {
+                        "enabled": true,
+                        "mode": "observe",
+                        "forward_pre_claim_timeout_secs": 12,
+                        "stale_claim_recovery_secs": 60
+                    },
+                    "env_override": null,
+                    "warning_count": 0,
+                    "configuration_warnings": []
+                },
                 "latest_startup_doctor": {
                     "available": true,
                     "status": "failed",
@@ -1253,15 +1296,23 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             ("message", body_param("string", false, "Alias for content")),
             (
                 "source",
-                body_param("string", false, "Known agent role_id or internal source; defaults to system"),
+                body_param("string", false, "Source label allowed for the caller class: CLI uses agentdesk-cli/operator, dashboard uses dashboard or an agent role_id, and internal labels such as system/headless_turn require a loopback internal caller"),
             ),
             (
                 "bot",
                 body_param("string", false, "Delivery bot: announce (default) or notify"),
             ),
+            (
+                "X-AgentDesk-Source",
+                header_param(
+                    "string",
+                    false,
+                    "Caller class attestation: cli, dashboard, or loopback/internal",
+                ),
+            ),
         ])
         .with_example(
-            json!({"body": {"target": "channel:1473922824350601297", "content": "hello", "source": "system", "bot": "notify"}}),
+            json!({"body": {"target": "channel:1473922824350601297", "content": "hello", "source": "operator", "bot": "notify"}}),
             json!({"ok": true, "message_id": "1500000000000000000"}),
         )
         .with_error_example(
@@ -1269,7 +1320,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             json!({"body": {"target": "channel:1473922824350601297"}}),
             json!({"error": "content is required", "ok": false}),
         )
-        .with_curl("curl -X POST http://localhost:8787/api/discord/send -H 'Content-Type: application/json' -d '{\"target\":\"channel:1473922824350601297\",\"content\":\"hello\",\"source\":\"system\",\"bot\":\"notify\"}'"),
+        .with_curl("curl -X POST http://localhost:8787/api/discord/send -H 'Content-Type: application/json' -H 'X-AgentDesk-Source: cli' -d '{\"target\":\"channel:1473922824350601297\",\"content\":\"hello\",\"source\":\"operator\",\"bot\":\"notify\"}'"),
         ep(
             "POST",
             "/api/discord/bot-tokens/reload",
@@ -1301,6 +1352,32 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                     "runtime_root_available": true,
                     "any_reloaded": true,
                     "utility_bot_user_ids_invalidated": true,
+                    "scopes": {
+                        "utility_rest_clients": {
+                            "scope": "utility_rest_clients",
+                            "status": "reload_supported",
+                            "live_reload_supported": true,
+                            "restart_required": false,
+                            "token_source": "credential/announce_bot_token and credential/notify_bot_token",
+                            "detail": "POST /api/discord/bot-tokens/reload rebuilds announce/notify HealthRegistry REST clients in place."
+                        },
+                        "provider_runtime_cached_token": {
+                            "scope": "provider_runtime_cached_token",
+                            "status": "restart_required",
+                            "live_reload_supported": false,
+                            "restart_required": true,
+                            "token_source": "discord.bots.<name>.token or credential/<name>_bot_token selected at provider runtime startup",
+                            "detail": "SharedData.cached_bot_token is a OnceCell per provider runtime, so rotated provider REST fallback credentials are not adopted until dcserver restarts."
+                        },
+                        "provider_gateway_session": {
+                            "scope": "provider_gateway_session",
+                            "status": "restart_required",
+                            "live_reload_supported": false,
+                            "restart_required": true,
+                            "token_source": "discord.bots.<name>.token or credential/<name>_bot_token selected at provider runtime startup",
+                            "detail": "Discord gateway sessions are created by provider runtimes at startup; reconnecting them with a rotated token requires a dcserver restart."
+                        }
+                    },
                     "provider_cached_bot_token_scope": "announce/notify HealthRegistry clients are reloaded; provider runtime SharedData.cached_bot_token is restart-only"
                 }
             }),
@@ -3702,7 +3779,12 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "Kill only the tmux process for an idle session while preserving the session row and provider resume metadata.",
         )
         .with_params([
-            ("session_key", path_param("Session key in host:tmux_name form")),
+            (
+                "session_key",
+                path_param(
+                    "Session key in legacy host:tmux_name or namespaced provider/token/host:tmux_name form",
+                ),
+            ),
             (
                 "reason",
                 body_param(
@@ -3714,7 +3796,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ])
         .with_example(
             json!({
-                "path": {"session_key": "provider:AgentDesk-claude-adk-cc"},
+                "path": {"session_key": "claude/hash123/mac-mini:AgentDesk-claude-adk-cc"},
                 "body": {"reason": "idle 6시간 초과 — 자동 정리"}
             }),
             json!({
@@ -6606,6 +6688,7 @@ mod tests {
             "message",
             "source",
             "bot",
+            "X-AgentDesk-Source",
         ] {
             assert!(
                 send.params.contains_key(param),
@@ -6633,7 +6716,12 @@ mod tests {
             .request["body"];
         assert_eq!(example_body["target"], "channel:1473922824350601297");
         assert_eq!(example_body["content"], "hello");
-        assert_eq!(example_body["source"], "system");
+        assert_eq!(example_body["source"], "operator");
+        assert!(
+            send.curl_example
+                .expect("send docs must include a curl example")
+                .contains("X-AgentDesk-Source: cli")
+        );
     }
 
     #[test]
