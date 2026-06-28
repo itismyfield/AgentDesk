@@ -179,7 +179,6 @@ grandfathered = [
   "src/server/routes/agents.rs",
   "src/server/routes/agents_crud.rs",
   "src/server/routes/agents_setup.rs",
-  "src/server/routes/docs.rs",
   "src/server/routes/escalation.rs",
   "src/server/routes/health_api.rs",
   "src/server/routes/kanban.rs",
@@ -200,7 +199,6 @@ grandfathered = [
   "src/services/codex.rs",
   "src/services/codex_tmux_wrapper.rs",
   "src/services/codex_tui/input.rs",
-  "src/services/codex_tui/rollout_tail.rs",
   # commands/config.rs dropped to 954 prod LoC in #3038 S2 (session-override
   # bookkeeping helpers moved to discord/shared_state.rs); no longer a
   # prod-giant, so it is removed from `grandfathered` and from the baseline
@@ -219,18 +217,9 @@ grandfathered = [
   # a prod-giant, so it is removed here AND from the frozen baseline above
   # (win-locked: a re-expanded health.rs cannot be re-grandfathered). The
   # split outputs stay sub-threshold and are not ratcheted.
-  "src/services/discord/health/recovery.rs",
-  "src/services/discord/inflight.rs",
   "src/services/discord/meeting_orchestrator.rs",
   "src/services/discord/mod.rs",
-  "src/services/discord/recovery_engine.rs",
-  "src/services/discord/router/intake_gate.rs",
   "src/services/discord/router/message_handler/headless_turn.rs",
-  "src/services/discord/router/message_handler/intake_turn.rs",
-  "src/services/discord/session_runtime.rs",
-  "src/services/discord/tmux.rs",
-  "src/services/discord/tmux_watcher.rs",
-  "src/services/discord/tui_prompt_relay.rs",
   # completion_guard.rs was decomposed in #3479 (1834 prod LoC -> 872-line
   # module root + completion_guard/{completion_postgres,completion_context}.rs,
   # both sub-1000-LoC); no longer a prod-giant, so it is removed here AND from
@@ -243,7 +232,6 @@ grandfathered = [
   # and from the baseline guard above (win-locked: a re-expanded tmux_runtime
   # cannot be re-grandfathered — it would have to land as a full [[entry]] or
   # shrink). The split outputs stay sub-threshold and are not ratcheted.
-  "src/services/discord/watchers/lifecycle.rs",
   "src/services/discord_config_audit.rs",
   "src/services/dispatched_sessions.rs",
   "src/services/dispatches/discord_delivery/orchestration.rs",
@@ -272,6 +260,103 @@ grandfathered = [
 # freshness gate fails CI if the module's production LoC grows past the recorded
 # baseline (decomposition regression) or drops below the giant threshold while
 # the entry is still present (ghost registration).
+
+[[entry]]
+# #3721 first-batch promotion: largest relay hotfile by prod LoC, raw ratchet
+# pressure, and recent touch count; decompose watcher loop orchestration in
+# narrow behavior-preserving slices.
+file = "src/services/discord/tmux_watcher.rs"
+owner = "discord-relay"
+deadline = "2026-10-31"
+decompose_issue = "#3832"
+
+[[entry]]
+# #3721 first-batch promotion: external-input relay hotfile with high churn and
+# mixed synthetic-turn, bridge-tail, and idle-tail responsibilities.
+file = "src/services/discord/tui_prompt_relay.rs"
+owner = "discord-relay"
+deadline = "2026-10-31"
+decompose_issue = "#3833"
+
+[[entry]]
+# #3721 first-batch promotion: restart/runtime/manual-rebind recovery paths
+# remain in one high-risk recovery engine root.
+file = "src/services/discord/recovery_engine.rs"
+owner = "discord-relay"
+deadline = "2026-10-31"
+decompose_issue = "#3834"
+
+[[entry]]
+# #3721 first-batch promotion: canonical inflight JSON lifecycle and
+# identity-guarded owner APIs for relay/session/recovery paths.
+file = "src/services/discord/inflight.rs"
+owner = "discord-relay"
+deadline = "2026-10-31"
+decompose_issue = "#3835"
+
+[[entry]]
+# #3721 first-batch promotion: largest API-facing grandfathered file; split
+# static endpoint inventory and guide bodies from the route handlers.
+file = "src/server/routes/docs.rs"
+owner = "server-runtime"
+deadline = "2026-10-31"
+decompose_issue = "#3836"
+
+[[entry]]
+# #3721 first-batch promotion: Discord message intake execution mixes request
+# normalization, mailbox effects, and turn lifecycle wiring.
+file = "src/services/discord/router/message_handler/intake_turn.rs"
+owner = "discord-relay"
+deadline = "2026-10-31"
+decompose_issue = "#3837"
+
+[[entry]]
+# #3721 first-batch promotion: Discord admission gate owns mention/self/queue,
+# stale-turn, placeholder, reaction, and event side effects.
+file = "src/services/discord/router/intake_gate.rs"
+owner = "discord-relay"
+deadline = "2026-10-31"
+decompose_issue = "#3838"
+
+[[entry]]
+# #3721 first-batch promotion: health recovery surface combines stop/cancel,
+# rebind, stall-watchdog, queue drain, and leak-recovery behavior.
+file = "src/services/discord/health/recovery.rs"
+owner = "discord-relay"
+deadline = "2026-10-31"
+decompose_issue = "#3839"
+
+[[entry]]
+# #3721 first-batch promotion: watcher lifecycle root still mixes restore scan,
+# liveness, heartbeat, dispatch failure, and claim/reuse ownership.
+file = "src/services/discord/watchers/lifecycle.rs"
+owner = "discord-relay"
+deadline = "2026-10-31"
+decompose_issue = "#3840"
+
+[[entry]]
+# #3721 first-batch promotion: residual tmux relay helper root remains giant
+# after earlier tmux.rs extraction rounds.
+file = "src/services/discord/tmux.rs"
+owner = "discord-relay"
+deadline = "2026-10-31"
+decompose_issue = "#3841"
+
+[[entry]]
+# #3721 first-batch promotion: session restore/worktree/channel routing logic is
+# a recovery-critical session surface.
+file = "src/services/discord/session_runtime.rs"
+owner = "discord-relay"
+deadline = "2026-10-31"
+decompose_issue = "#3842"
+
+[[entry]]
+# #3721 first-batch promotion: Codex TUI rollout tailer mixes discovery,
+# marker persistence, parser, tail loop, and completion heuristics.
+file = "src/services/codex_tui/rollout_tail.rs"
+owner = "discord-relay"
+deadline = "2026-10-31"
+decompose_issue = "#3843"
 
 [[entry]]
 # Highest prod-LoC voice surface; flagship decomposition target from #3036.
