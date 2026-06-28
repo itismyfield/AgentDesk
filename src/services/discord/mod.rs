@@ -3067,7 +3067,7 @@ pub(in crate::services::discord) async fn drain_pending_queue_exit_placeholder_c
     (deleted, failed)
 }
 
-async fn enqueue_internal_followup(
+pub(in crate::services::discord) async fn enqueue_internal_followup(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,

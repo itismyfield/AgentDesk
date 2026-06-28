@@ -125,7 +125,8 @@ pub(in crate::services::discord) async fn dispose_recovery_relay_outcome(
 /// #3610 PR-2 (stale-anchor range guard, pure/testable): does the durable anchor's
 /// recorded JSONL `range` belong to THIS recovered turn?
 ///
-/// The anchor reader ([`delivery_record::current_generation_delivered_anchor`])
+/// The anchor reader
+/// ([`delivery_frontier_probe::current_generation_delivered_anchor`])
 /// already enforces the #1270 GENERATION gate — a stale prior-generation frontier
 /// (e.g. a same-named tmux respawn) is rejected before we get here. This adds the
 /// per-turn TEMPORAL check on top: the frontier is channel-scoped and holds the
@@ -209,13 +210,13 @@ fn matching_recovery_anchors(
     tmux_session_name: &str,
 ) -> Vec<(
     u64,
-    super::super::outbound::delivery_record::CurrentGenerationAnchor,
+    super::super::outbound::delivery_frontier_probe::CurrentGenerationAnchor,
 )> {
-    use super::super::outbound::delivery_record;
+    use super::super::outbound::delivery_frontier_probe;
 
     let mut anchors = Vec::with_capacity(2);
     for record_channel_id in anchor_record_lookup_channel_ids(provider, state) {
-        let Some(anchor) = delivery_record::current_generation_delivered_anchor(
+        let Some(anchor) = delivery_frontier_probe::current_generation_delivered_anchor(
             provider,
             ChannelId::new(record_channel_id),
             tmux_session_name,
@@ -264,12 +265,12 @@ fn matching_recovery_anchors(
 fn first_repost_anchor_if_all_probed_candidates_gone(
     probed_anchors: &[(
         u64,
-        super::super::outbound::delivery_record::CurrentGenerationAnchor,
+        super::super::outbound::delivery_frontier_probe::CurrentGenerationAnchor,
         super::super::placeholder_sweeper::PlaceholderProbe,
     )],
 ) -> Option<(
     u64,
-    super::super::outbound::delivery_record::CurrentGenerationAnchor,
+    super::super::outbound::delivery_frontier_probe::CurrentGenerationAnchor,
 )> {
     let mut first_gone = None;
     for (record_channel_id, anchor, probe) in probed_anchors {
@@ -614,6 +615,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::super::super::inflight::InflightTurnState;
+    use super::super::super::outbound::delivery_frontier_probe;
     use super::super::super::outbound::delivery_record;
     use super::super::super::placeholder_sweeper::PlaceholderProbe;
     use super::{
@@ -978,7 +980,7 @@ mod tests {
 
     #[test]
     fn anchor_probe_sequence_reposts_only_when_all_candidates_are_gone() {
-        let anchor = delivery_record::CurrentGenerationAnchor {
+        let anchor = delivery_frontier_probe::CurrentGenerationAnchor {
             panel_msg_id: 888,
             panel_channel_id: 200,
             range: (0, 200),

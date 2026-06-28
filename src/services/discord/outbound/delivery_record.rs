@@ -174,7 +174,10 @@ fn delivery_record_path_in_root(
         .join(format!("{channel_id}.json"))
 }
 
-fn delivery_record_path(provider: &ProviderKind, channel_id: u64) -> Option<PathBuf> {
+pub(in crate::services::discord) fn delivery_record_path(
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> Option<PathBuf> {
     delivery_records_root().map(|root| {
         root.join(provider.as_str())
             .join(format!("{channel_id}.json"))
@@ -251,7 +254,7 @@ fn lock_record_path(record_path: &Path) -> Result<DeliveryRecordLock, String> {
 
 /// I3 conservative: missing OR malformed → `None`, never an `Err` a caller might
 /// misread as "delivered". A torn/garbage record reads as not-yet-delivered.
-fn read_record_at(path: &Path) -> Option<DeliveryRecord> {
+pub(in crate::services::discord) fn read_record_at(path: &Path) -> Option<DeliveryRecord> {
     let content = fs::read_to_string(path).ok()?;
     serde_json::from_str(&content).ok()
 }
@@ -579,7 +582,10 @@ fn fuse_committed_offset(durable_end: Option<u64>, in_memory: u64) -> u64 {
 /// the coord's `confirmed_end_generation_mtime_ns`, itself set from
 /// `read_generation_file_mtime_ns` at advance time (tmux.rs), so equality holds
 /// within a generation and breaks across one.
-fn durable_frontier_generation_current(durable_mtime: i64, current_gen_mtime: i64) -> bool {
+pub(in crate::services::discord) fn durable_frontier_generation_current(
+    durable_mtime: i64,
+    current_gen_mtime: i64,
+) -> bool {
     current_gen_mtime != 0 && durable_mtime == current_gen_mtime
 }
 
@@ -599,72 +605,11 @@ fn current_generation_durable_frontier_end_at(path: &Path, current_gen_mtime: i6
         .map(|f| f.range.1)
 }
 
-/// #3610 PR-2: a recovery-time terminal delivery anchor, generation-validated.
-///
-/// `panel_msg_id` / `panel_channel_id` are the `(message, channel)` the committed
-/// terminal answer actually lives in (recorded by PR-1~1d's
-/// [`shadow_mirror_delivered_frontier`] anchor pair); `range` is the `(start, end)`
-/// JSONL slice that commit covered. All three come from the SAME
-/// `delivered_frontier`, so they are mutually consistent by construction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::services::discord) struct CurrentGenerationAnchor {
-    pub panel_msg_id: u64,
-    pub panel_channel_id: u64,
-    pub range: (u64, u64),
-}
-
-/// #3610 PR-2 (stale-anchor guard, path-based core — pure-ish, testable): the
-/// durable `delivered_frontier`'s terminal anchor, but ONLY when (a) it was
-/// written by the CURRENT wrapper generation (the SAME #1270 guard
-/// [`current_generation_durable_frontier_end_at`] uses, so a stale prior-generation
-/// frontier from a same-named respawn can NEVER be reposted) AND (b) the anchor
-/// pair is fully populated (`panel_msg_id` and `panel_channel_id` both `Some` and
-/// non-zero — a zero id is the un-anchored / TUI-direct sentinel that
-/// `MessageId::new(0)` would panic on). `None` on any miss: absent/malformed
-/// record, no frontier, prior generation, or an incomplete/zero anchor pair.
-///
-/// This is the stale-anchor structural guard for the anchor-repost fallback: by
-/// funneling through the existing generation gate it adds NO new offset reader and
-/// distrusts exactly what the rest of the dedup machinery distrusts (dedup byte-0).
-fn current_generation_delivered_anchor_at(
-    path: &Path,
-    current_gen_mtime: i64,
-) -> Option<CurrentGenerationAnchor> {
-    let frontier = read_record_at(path)
-        .and_then(|r| r.delivered_frontier)
-        .filter(|f| {
-            durable_frontier_generation_current(f.generation_mtime_ns, current_gen_mtime)
-        })?;
-    let panel_msg_id = frontier.panel_msg_id.filter(|&id| id != 0)?;
-    let panel_channel_id = frontier.panel_channel_id.filter(|&id| id != 0)?;
-    Some(CurrentGenerationAnchor {
-        panel_msg_id,
-        panel_channel_id,
-        range: frontier.range,
-    })
-}
-
-/// #3610 PR-2: env-resolved wrapper over [`current_generation_delivered_anchor_at`].
-/// Returns the current-generation terminal anchor for `(provider, channel)` keyed by
-/// the same `delivery_record_path` the dedup gates use, or `None` when there is no
-/// trustworthy, fully-populated anchor (see the core's contract). The recovery
-/// anchor-repost fallback reads ONLY this — it never writes and never resolves a new
-/// offset, so a flag-OFF caller that does not invoke it is a byte-for-byte no-op.
-pub(in crate::services::discord) fn current_generation_delivered_anchor(
-    provider: &ProviderKind,
-    channel: ChannelId,
-    tmux_session_name: &str,
-) -> Option<CurrentGenerationAnchor> {
-    let path = delivery_record_path(provider, channel.get())?;
-    let current_gen = current_generation_mtime_ns(tmux_session_name);
-    current_generation_delivered_anchor_at(&path, current_gen)
-}
-
 /// Resolve the current wrapper-generation watermark for `tmux_session_name`. The
 /// `tmux` module is `#[cfg(unix)]`; on non-unix targets (windows CI cross-compile
 /// check) there is no wrapper generation file, so the generation is absent (`0`),
 /// which [`durable_frontier_generation_current`] treats as "distrust".
-fn current_generation_mtime_ns(tmux_session_name: &str) -> i64 {
+pub(in crate::services::discord) fn current_generation_mtime_ns(tmux_session_name: &str) -> i64 {
     #[cfg(unix)]
     {
         crate::services::discord::tmux::read_generation_file_mtime_ns(tmux_session_name)
@@ -999,6 +944,9 @@ pub(in crate::services::discord) fn record_long_chunk_terminal_delivery(
 
 #[cfg(test)]
 mod tests {
+    use super::super::delivery_frontier_probe::{
+        CurrentGenerationAnchor, current_generation_delivered_anchor_at,
+    };
     use super::*;
 
     fn sample_lease() -> DurableLease {

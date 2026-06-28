@@ -7,6 +7,14 @@
 
 use super::*;
 
+const RECAP_SUGGESTED_REPLY_MAX_CHARS: usize = 180;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RecapComposerOutput {
+    pub(crate) summary: Option<String>,
+    pub(crate) suggested_reply: Option<String>,
+}
+
 /// Best-effort tail capture of the live tmux pane via `tmux capture-pane`.
 /// Returns `None` if the session is gone or the binary is unavailable —
 /// the caller treats that as "no scrollback, post header-only".
@@ -135,8 +143,9 @@ pub(super) fn parse_transcript_line_text(line: &str) -> Option<String> {
     Some(format!("[{role}] {text}"))
 }
 
-/// Ask Claude Haiku for a 1-2 sentence Korean recap. Time-bounded; returns
-/// `None` on any failure so the caller can fall back to a header-only card.
+/// Ask Claude Haiku for a 1-2 sentence Korean recap plus at most one suggested
+/// reply. Time-bounded; returns `None` on any failure so the caller can fall
+/// back to a header-only card.
 ///
 /// Previously this routed to a local `opencode serve` (Gemma 27B) build,
 /// but resident memory on the mac-book host was the bottleneck. Haiku 4.5
@@ -151,7 +160,7 @@ pub(super) fn parse_transcript_line_text(line: &str) -> Option<String> {
 /// timeout watchdog. The Claude simple-cancel watcher polls
 /// `cancel_requested` and tears down the child process tree as soon as it
 /// sees the flag.
-pub(crate) async fn summarize_with_haiku(scrollback: &str) -> Option<String> {
+pub(crate) async fn compose_with_haiku(scrollback: &str) -> Option<RecapComposerOutput> {
     if scrollback.is_empty() {
         return None;
     }
@@ -159,9 +168,12 @@ pub(crate) async fn summarize_with_haiku(scrollback: &str) -> Option<String> {
         "다음은 AI 코딩 에이전트와 사용자의 마지막 대화 ~100줄입니다. \
          사용자가 지금 다시 돌아왔을 때 \"어떤 작업을 하던 중이었는지\"를 \
          즉시 기억할 수 있도록 1-2문장으로 한국어 요약을 만드세요. \
+         이어서 보낼 만한 사용자 답변이 명확할 때만 suggested_reply를 한 개 제안하세요. \
          도구 호출 / 스크롤 / 진행 표시 같은 노이즈는 무시하고 \
          실제 작업 내용(파일·결정·다음 단계)에 집중하세요. \
-         결과만 출력하고 다른 말은 붙이지 마세요.\n\n---\n\n{scrollback}",
+         반드시 JSON 객체 하나만 출력하세요. 형식: \
+         {{\"summary\":\"...\",\"suggested_reply\":\"...\"}}. \
+         suggested_reply가 없으면 null로 두세요.\n\n---\n\n{scrollback}",
     );
 
     let cancel = std::sync::Arc::new(CancelToken::new());
@@ -189,10 +201,79 @@ pub(crate) async fn summarize_with_haiku(scrollback: &str) -> Option<String> {
         }
     };
 
-    let trimmed = result.trim();
+    parse_recap_composer_output(&result)
+}
+
+/// Backward-compatible summary-only wrapper for any local callers that still
+/// only need the recap sentence.
+#[allow(dead_code)]
+pub(crate) async fn summarize_with_haiku(scrollback: &str) -> Option<String> {
+    compose_with_haiku(scrollback)
+        .await
+        .and_then(|output| output.summary)
+}
+
+pub(crate) fn parse_recap_composer_output(raw: &str) -> Option<RecapComposerOutput> {
+    let trimmed = raw.trim();
     if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
+        return None;
+    }
+
+    if let Some(json_text) = extract_json_object(trimmed)
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(json_text)
+    {
+        let summary = value
+            .get("summary")
+            .and_then(|value| value.as_str())
+            .and_then(sanitize_recap_line);
+        let suggested_reply = value
+            .get("suggested_reply")
+            .or_else(|| value.get("suggestedReply"))
+            .or_else(|| value.get("suggested_replies"))
+            .and_then(first_suggested_reply_value)
+            .and_then(sanitize_recap_line);
+        if summary.is_some() || suggested_reply.is_some() {
+            return Some(RecapComposerOutput {
+                summary,
+                suggested_reply,
+            });
+        }
+    }
+
+    sanitize_recap_line(trimmed).map(|summary| RecapComposerOutput {
+        summary: Some(summary),
+        suggested_reply: None,
+    })
+}
+
+pub(crate) fn sanitize_recap_line(line: &str) -> Option<String> {
+    let collapsed = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed = collapsed.trim();
+    if collapsed.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    let mut chars = collapsed.chars();
+    for ch in chars.by_ref().take(RECAP_SUGGESTED_REPLY_MAX_CHARS) {
+        out.push(ch);
+    }
+    if chars.next().is_some() {
+        out.push('…');
+    }
+    Some(out)
+}
+
+fn extract_json_object(text: &str) -> Option<&str> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    (start <= end).then_some(&text[start..=end])
+}
+
+fn first_suggested_reply_value(value: &serde_json::Value) -> Option<&str> {
+    match value {
+        serde_json::Value::String(text) => Some(text.as_str()),
+        serde_json::Value::Array(items) => items.iter().find_map(|item| item.as_str()),
+        serde_json::Value::Null => None,
+        _ => None,
     }
 }
