@@ -835,7 +835,6 @@ src/
 │   ├── dispatch_watchdog.rs
 │   ├── dispatched_sessions.rs
 │   ├── dispatches_followup.rs
-│   ├── envelope_dedup.rs
 │   ├── escalation_settings.rs
 │   ├── gemini.rs
 │   ├── github_issue_creation.rs
