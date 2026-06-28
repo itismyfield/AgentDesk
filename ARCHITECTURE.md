@@ -549,6 +549,10 @@ src/
 │   │   │   └── voice.rs
 │   │   ├── session_relay_sink/
 │   │   │   └── idle_jsonl.rs
+│   │   ├── session_runtime/
+│   │   │   ├── channel_routing.rs
+│   │   │   ├── restore_cwd.rs
+│   │   │   └── worktree.rs
 │   │   ├── settings/
 │   │   │   ├── content.rs
 │   │   │   ├── memory.rs

@@ -108,7 +108,10 @@ grandfathered_baseline_paths = [
   "src/services/discord/router/intake_gate.rs",
   "src/services/discord/router/message_handler/headless_turn.rs",
   "src/services/discord/router/message_handler/intake_turn.rs",
-  "src/services/discord/session_runtime.rs",
+  # session_runtime.rs decomposed in #3842 (worktree, restore_cwd, and
+  # channel_routing child modules); no longer a prod-giant, so it is removed
+  # from `grandfathered` and the frozen baseline below (win-locked: a
+  # re-expanded session_runtime cannot be re-grandfathered).
   "src/services/discord/settings.rs",
   "src/services/discord/tmux.rs",
   "src/services/discord/tmux_watcher.rs",
@@ -332,14 +335,6 @@ file = "src/services/discord/tmux.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
 decompose_issue = "#3841"
-
-[[entry]]
-# #3721 first-batch promotion: session restore/worktree/channel routing logic is
-# a recovery-critical session surface.
-file = "src/services/discord/session_runtime.rs"
-owner = "discord-relay"
-deadline = "2026-10-31"
-decompose_issue = "#3842"
 
 [[entry]]
 # #3721 first-batch promotion: Codex TUI rollout tailer mixes discovery,

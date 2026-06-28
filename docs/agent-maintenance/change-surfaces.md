@@ -1260,7 +1260,6 @@
     `audit_maintainability_config.toml`; the root is no longer a prod giant and
     was removed from `giant_file_registry.toml`; #3038 S5 locked the final
     root ratchet at 274 production lines).
-  - `src/services/discord/session_runtime.rs` (1657 lines; -41 from #3591 dead `assistant_turn_count`/`recent_history_context` 메서드 제거 — 100턴/idle 세션 리셋 폐기 연쇄; -22 from #3736 making legacy remote-profile names non-routing/non-path-affecting while remote SSH is disabled).
   - `src/services/discord/voice_barge_in.rs` (2781 lines after #3038
     VoiceBargeInRuntime S1 moved the STT method cluster to
     `src/services/discord/voice_barge_in/stt.rs` (314 production lines) and
@@ -1638,6 +1637,7 @@ normal test growth is allowed): `src/services/analytics.rs`,
 `src/services/platform/tmux.rs`, `src/services/mcp_config.rs`,
 `src/services/process.rs`, `src/services/discord/tmux_lifecycle.rs`,
 `src/services/qwen_tmux_wrapper.rs`, `src/services/discord/session_relay_sink.rs`,
+`src/services/discord/session_runtime.rs`,
 `src/services/tui_turn_state.rs`,
 `src/voice/turn_link.rs`, `src/services/discord/commands/config.rs`
 (#3038 S2: 1054 -> 954 after the session-override bookkeeping helpers
@@ -1653,6 +1653,9 @@ LoC), and the #3344 terminal-usage adoption gate plus the analytics re-parser
 (`adopt_terminal_result_usage`, `extract_turn_analytics_from_output*`) into
 `src/services/session_backend/terminal_usage.rs` (106 prod LoC). It is no
 longer registry-tracked (the giant_file_registry.toml entry was removed).
+`src/services/discord/session_runtime.rs` joined this list in #3842 (1657 ->
+500 production lines) after the worktree, restore-cwd, and channel-routing
+clusters moved into child modules. It is no longer registry-tracked.
 
 Same rule: `bugfix` only without a split issue.
 
