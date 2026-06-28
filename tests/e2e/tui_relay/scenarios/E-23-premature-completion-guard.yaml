@@ -1,5 +1,6 @@
 id: E-23
 title: 본문 전/본문 없는 completion chrome 회귀 가드
+agent_mode: real_live
 cells: [claude-pipe, claude-tui, claude-e]
 isolation: required
 acceptance_criteria:

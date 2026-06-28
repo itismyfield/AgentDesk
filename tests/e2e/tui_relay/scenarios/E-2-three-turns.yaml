@@ -1,5 +1,6 @@
 id: E-2
 title: 연속 3턴 (각 응답 후 다음 프롬프트), 턴 헤더 분리 확인
+agent_mode: real_live
 cells: [claude-pipe, claude-tui, claude-e, codex-pipe, codex-tui]
 isolation: required
 steps:

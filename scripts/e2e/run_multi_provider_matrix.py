@@ -79,6 +79,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=float(os.environ.get("AGENTDESK_E2E_TURN_START_TIMEOUT_S", "180")),
     )
+    parser.add_argument(
+        "--required-agent-mode",
+        choices=cell_driver.AGENT_MODES,
+        default=os.environ.get("AGENTDESK_E2E_REQUIRED_AGENT_MODE"),
+        help="Fail selected scenarios whose declared agent_mode is below this gate.",
+    )
     return parser.parse_args()
 
 
@@ -124,6 +130,7 @@ def load_cross_channel_scenarios(scenarios_dir: Path) -> list[dict[str, Any]]:
         if not isinstance(data.get("cross_channel"), dict):
             raise ValueError(f"{yaml_path} declares cross_channel without config")
         data["__path__"] = str(yaml_path)
+        cell_driver.validate_scenario_agent_mode(data)
         scenarios.append(data)
     return scenarios
 
@@ -183,6 +190,8 @@ def run_cell(
         cmd.extend(["--filter", args.filter])
     if args.dry_run:
         cmd.append("--dry-run")
+    if args.required_agent_mode:
+        cmd.extend(["--required-agent-mode", str(args.required_agent_mode)])
     if args.allow_destructive:
         cmd.append("--allow-destructive")
     if not args.reset_before_each:
@@ -201,10 +210,15 @@ def run_cell(
         "kind": "cell",
         "pass_index": pass_index,
         "cell": cell,
+        "provider": cell_driver.cell_provider(cell),
+        "runtime": cell_driver.cell_runtime(cell),
         "channel_id": channel_id,
+        "provider_identity": cell_driver.provider_identity(cell, channel_id),
         "returncode": proc.returncode,
         "report": str(report_path),
         "totals": (report or {}).get("totals"),
+        "agent_mode_totals": (report or {}).get("agent_mode_totals"),
+        "real_provider_contacted": bool((report or {}).get("real_provider_contacted")),
         "ok": proc.returncode == 0 and bool(report),
     }
 
@@ -265,12 +279,14 @@ def resolve_cross_channel_participants(
                 "name": str(raw_participant.get("name") or cell),
                 "cell": cell,
                 "provider": cell_driver.cell_provider(cell),
+                "runtime": cell_driver.cell_runtime(cell),
                 "channel_id": str(channel_id),
                 "channel_kind": str(
                     raw_participant.get("channel_kind")
                     or cell_driver.cell_channel_kind(cell)
                 ),
                 "handoff_to_agent": cell_driver.cell_default_agent(cell),
+                "provider_identity": cell_driver.provider_identity(cell, str(channel_id)),
                 "workspace_substring": cell_driver.cell_workspace_substring(cell),
                 "marker": str(marker),
                 "prompt": str(prompt),
@@ -555,6 +571,7 @@ def run_cross_channel_scenario(
     pass_index: int,
 ) -> dict[str, Any]:
     scenario_id = str(scenario.get("id"))
+    declared_agent_mode = cell_driver.scenario_agent_mode(scenario)
     result: dict[str, Any] = {
         "kind": "cross_channel",
         "pass_index": pass_index,
@@ -562,20 +579,66 @@ def run_cross_channel_scenario(
         "path": scenario.get("__path__"),
         "status": "skipped",
         "reason": None,
+        "agent_mode": declared_agent_mode,
+        "agent_mode_planned": cell_driver.infer_planned_agent_mode(
+            scenario,
+            declared=declared_agent_mode,
+        ),
+        "agent_mode_actual": "none",
+        "agent_mode_contract": cell_driver._agent_mode_contract(  # noqa: SLF001
+            declared=declared_agent_mode,
+            actual="none",
+            dry_run=bool(args.dry_run),
+            real_provider_contacted=False,
+        ),
+        "real_provider_contacted": False,
+        "failure_attribution": None,
         "participants": [],
         "ok": False,
         "started_at": dt.datetime.now().isoformat(timespec="seconds"),
     }
+
+    gate_violation = cell_driver.required_agent_mode_violation(
+        declared=declared_agent_mode,
+        required=getattr(args, "required_agent_mode", None),
+        scenario_id=scenario_id,
+    )
+    if gate_violation:
+        result["status"] = "fail"
+        result["reason"] = gate_violation
+        result["failure_attribution"] = cell_driver._failure_attribution(  # noqa: SLF001
+            "agent_mode_gate",
+            gate_violation,
+        )
+        return result
 
     try:
         required_cells = _cross_participants_required_cells(scenario)
     except ValueError as error:
         result["status"] = "fail"
         result["reason"] = str(error)
+        result["failure_attribution"] = cell_driver._failure_attribution(  # noqa: SLF001
+            "config",
+            str(error),
+        )
         return result
     missing_selected = sorted(required_cells.difference(selected_cells))
     if missing_selected:
         result["reason"] = "requires selected cells: " + ", ".join(missing_selected)
+        observed_gate_violation = cell_driver.required_agent_mode_violation(
+            declared=declared_agent_mode,
+            actual=str(result["agent_mode_actual"]),
+            required=getattr(args, "required_agent_mode", None),
+            scenario_id=scenario_id,
+        )
+        if observed_gate_violation and not args.dry_run:
+            result["status"] = "fail"
+            result["reason"] = observed_gate_violation
+            result["failure_attribution"] = cell_driver._failure_attribution(  # noqa: SLF001
+                "agent_mode_gate",
+                observed_gate_violation,
+            )
+            return result
         result["ok"] = True
         return result
 
@@ -588,11 +651,19 @@ def run_cross_channel_scenario(
     except ValueError as error:
         result["status"] = "fail"
         result["reason"] = str(error)
+        result["failure_attribution"] = cell_driver._failure_attribution(  # noqa: SLF001
+            "config",
+            str(error),
+        )
         return result
     result["participants"] = [
         {
             "cell": participant["cell"],
+            "provider": participant["provider"],
+            "runtime": participant["runtime"],
             "channel_id": participant["channel_id"],
+            "worker_agent": participant["handoff_to_agent"],
+            "provider_identity": participant["provider_identity"],
             "marker": participant["marker"],
         }
         for participant in participants
@@ -680,6 +751,7 @@ def run_cross_channel_scenario(
                 "message_id": response.get("message_id") or response.get("id"),
             }
 
+        dispatch_errors: list[str] = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(participants)) as executor:
             futures = {
                 executor.submit(_dispatch, participant): participant
@@ -689,13 +761,21 @@ def run_cross_channel_scenario(
                 participant = futures[future]
                 try:
                     dispatch_results.append(future.result())
+                    cell_driver._mark_real_provider_contacted(  # noqa: SLF001
+                        result,
+                        declared_agent_mode=declared_agent_mode,
+                        dry_run=False,
+                    )
                 except Exception as error:  # noqa: BLE001
-                    raise assertions.AssertionError(
-                        "cross-channel dispatch failed "
+                    dispatch_errors.append(
                         f"cell={participant['cell']} channel={participant['channel_id']}: "
                         f"{type(error).__name__}: {error}"
-                    ) from error
+                    )
         result["dispatches"] = sorted(dispatch_results, key=lambda item: item["cell"])
+        if dispatch_errors:
+            raise assertions.AssertionError(
+                "cross-channel dispatch failed " + "; ".join(dispatch_errors)
+            )
 
         wait_timeout_s = float(
             (scenario.get("cross_channel") or {}).get("wait_timeout_s", 240)
@@ -781,7 +861,11 @@ def run_cross_channel_scenario(
             )
             channel_record = {
                 "cell": participant["cell"],
+                "provider": participant["provider"],
+                "runtime": participant["runtime"],
                 "channel_id": participant["channel_id"],
+                "provider_identity": participant["provider_identity"],
+                "real_provider_contacted": True,
                 "relay_count": len(window.messages),
                 "raw_count": len(window.raw_messages),
                 "message_updates": len(window.message_updates),
@@ -813,6 +897,10 @@ def run_cross_channel_scenario(
     except assertions.AssertionError as error:
         result["status"] = "fail"
         result["reason"] = f"assertion: {error}"
+        result["failure_attribution"] = cell_driver._failure_attribution(  # noqa: SLF001
+            "assertion",
+            str(error),
+        )
         teardown_errors = _send_cross_channel_teardown(
             clients=clients,
             participants=participants,
@@ -824,6 +912,10 @@ def run_cross_channel_scenario(
     except Exception as error:  # noqa: BLE001
         result["status"] = "fail"
         result["reason"] = f"{type(error).__name__}: {error}"
+        result["failure_attribution"] = cell_driver._failure_attribution(  # noqa: SLF001
+            "exception",
+            str(result["reason"]),
+        )
         teardown_errors = _send_cross_channel_teardown(
             clients=clients,
             participants=participants,
@@ -835,6 +927,20 @@ def run_cross_channel_scenario(
 
     result["completed_at"] = dt.datetime.now().isoformat(timespec="seconds")
     return result
+
+
+def _matrix_agent_mode_totals(results: list[dict[str, Any]]) -> dict[str, int]:
+    totals = {mode: 0 for mode in cell_driver.AGENT_MODES}
+    for result in results:
+        nested = result.get("agent_mode_totals")
+        if isinstance(nested, dict):
+            for mode in totals:
+                totals[mode] += int(nested.get(mode) or 0)
+            continue
+        mode = str(result.get("agent_mode") or "")
+        if mode in totals:
+            totals[mode] += 1
+    return totals
 
 
 def main() -> int:
@@ -891,6 +997,10 @@ def main() -> int:
         "cells": cells,
         "passes": pass_count,
         "cross_channel_scenarios": [str(scenario.get("id")) for scenario in cross_scenarios],
+        "agent_mode_totals": _matrix_agent_mode_totals(results),
+        "real_provider_contacted": any(
+            result.get("real_provider_contacted") is True for result in results
+        ),
         "results": results,
         "ok": all(result["ok"] for result in results),
     }

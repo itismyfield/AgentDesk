@@ -1,5 +1,6 @@
 id: E-10
 title: composer에 send-keys (Enter 없이) → restart → 일관된 draft 처리 (#2635)
+agent_mode: real_live
 cells: [claude-tui, codex-tui]  # composer send-keys is TUI-specific
 isolation: required
 destructive: true

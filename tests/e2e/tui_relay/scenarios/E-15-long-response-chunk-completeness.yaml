@@ -1,5 +1,6 @@
 id: E-15
 title: 2000자 초과 응답 청크 완전성 (#2838 P0-2) — head→mid→tail 순서 + 중복 0
+agent_mode: real_live
 cells: [claude-pipe, claude-tui, claude-e, codex-pipe, codex-tui]
 isolation: required
 notes: |

@@ -1,5 +1,6 @@
 id: E-14
 title: Claude TUI thread relay survives stale offset rehydrate after restart
+agent_mode: real_live
 cells: [claude-tui]
 isolation: required
 destructive: true

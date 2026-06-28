@@ -1,5 +1,6 @@
 id: E-21
 title: Direct TUI input C-u clears stale draft and strips control bytes
+agent_mode: real_live
 cells: [claude-tui, codex-tui]
 isolation: required
 acceptance_criteria:

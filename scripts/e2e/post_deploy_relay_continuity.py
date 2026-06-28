@@ -464,6 +464,9 @@ def run_self_check(
     ok = all(check["ok"] or not check["fatal"] for check in checks)
     return {
         "mode": "self-check",
+        "agent_mode": "none",
+        "agent_mode_actual": "none",
+        "real_provider_contacted": False,
         "ok": ok,
         "strict_live": strict_live,
         "checks": checks,
@@ -654,6 +657,8 @@ def validate_driver_report(report: dict[str, Any]) -> list[str]:
     totals = report.get("totals") if isinstance(report.get("totals"), dict) else {}
     if int(totals.get("fail") or 0) > 0:
         violations.append(f"driver reported failed scenario count={totals.get('fail')}")
+    if report.get("real_provider_contacted") is not True:
+        violations.append("driver report did not record real_provider_contacted=true")
 
     scenarios = _scenario_by_id(report)
     for scenario_id in REQUIRED_SCENARIO_IDS:
@@ -661,6 +666,10 @@ def validate_driver_report(report: dict[str, Any]) -> list[str]:
         if not scenario:
             violations.append(f"driver report missing required scenario {scenario_id}")
             continue
+        if scenario.get("agent_mode") != "real_live":
+            violations.append(f"{scenario_id} agent_mode={scenario.get('agent_mode')}")
+        if scenario.get("real_provider_contacted") is not True:
+            violations.append(f"{scenario_id} real_provider_contacted is not true")
         if scenario.get("status") != "pass":
             violations.append(
                 f"{scenario_id} status={scenario.get('status')} reason={scenario.get('reason')}"
@@ -696,6 +705,9 @@ def run_fixture_mode(args: argparse.Namespace) -> int:
     violations = validate_fixture_evidence(evidence)
     result = {
         "mode": "fixture",
+        "agent_mode": "none",
+        "agent_mode_actual": "none",
+        "real_provider_contacted": False,
         "fixture": args.fixture,
         "ok": not violations,
         "violations": violations,
@@ -710,6 +722,9 @@ def run_dry_run(args: argparse.Namespace) -> int:
         _json_dump(
             {
                 "mode": "dry-run",
+                "agent_mode": "real_live",
+                "agent_mode_actual": "none",
+                "real_provider_contacted": False,
                 "ok": False,
                 "self_check": checks,
                 "driver_command": None,
@@ -731,6 +746,15 @@ def run_dry_run(args: argparse.Namespace) -> int:
     )
     result = {
         "mode": "dry-run",
+        "agent_mode": "real_live",
+        "agent_mode_actual": "none",
+        "real_provider_contacted": False,
+        "agent_mode_contract": cell_driver._agent_mode_contract(  # noqa: SLF001
+            declared="real_live",
+            actual="none",
+            dry_run=True,
+            real_provider_contacted=False,
+        ),
         "ok": bool(checks["ok"] and command),
         "self_check": checks,
         "driver_command": command,
@@ -746,6 +770,9 @@ def run_live(args: argparse.Namespace) -> int:
         _json_dump(
             {
                 "mode": "live",
+                "agent_mode": "real_live",
+                "agent_mode_actual": "none",
+                "real_provider_contacted": False,
                 "ok": False,
                 "violations": ["live execution requires --confirm-live"],
             }
@@ -753,7 +780,16 @@ def run_live(args: argparse.Namespace) -> int:
         return 2
     checks = run_self_check(args, strict_live=True)
     if not checks["ok"]:
-        _json_dump({"mode": "live", "ok": False, "self_check": checks})
+        _json_dump(
+            {
+                "mode": "live",
+                "agent_mode": "real_live",
+                "agent_mode_actual": "none",
+                "real_provider_contacted": False,
+                "ok": False,
+                "self_check": checks,
+            }
+        )
         return 2
 
     output_dir = resolve_output_dir(args.output)
@@ -788,8 +824,14 @@ def run_live(args: argparse.Namespace) -> int:
 
     summary = {
         "mode": "live",
+        "agent_mode": "real_live",
+        "agent_mode_actual": "real_live" if (report or {}).get("real_provider_contacted") else "none",
+        "real_provider_contacted": bool((report or {}).get("real_provider_contacted")),
         "ok": not violations,
         "cell": args.cell,
+        "provider": cell_driver.cell_provider(args.cell),
+        "runtime": cell_driver.cell_runtime(args.cell),
+        "provider_identity": cell_driver.provider_identity(args.cell, channel_id),
         "channel_id": channel_id,
         "output": str(output_dir),
         "driver_report": str(report_path),
@@ -807,7 +849,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         if args.list_fixtures:
-            _json_dump({"fixtures": sorted(BUILTIN_FIXTURES)})
+            _json_dump(
+                {
+                    "agent_mode": "none",
+                    "real_provider_contacted": False,
+                    "fixtures": sorted(BUILTIN_FIXTURES),
+                }
+            )
             return 0
         if args.fixture:
             return run_fixture_mode(args)

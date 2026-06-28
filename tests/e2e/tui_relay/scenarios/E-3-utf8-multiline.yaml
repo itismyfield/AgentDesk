@@ -1,5 +1,6 @@
 id: E-3
 title: 멀티라인 + 이모지 / 한글 / 코드블록 입력 echo
+agent_mode: real_live
 cells: [claude-pipe, claude-tui, claude-e, codex-pipe, codex-tui]
 isolation: required
 steps:

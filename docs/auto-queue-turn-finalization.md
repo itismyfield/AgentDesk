@@ -4,6 +4,19 @@ Tracks issue #1586 and subissue #1637. This document inventories the current
 sources of truth for "a turn is finished" before the implementation PRs make
 one canonical finalizer responsible for all downstream completion effects.
 
+## E2E Agent Mode Lane
+
+Auto-queue sandbox preflight must default to a non-live lane. Use
+`agent_mode: none` for static fixture/preflight checks and `agent_mode:
+controlled` when a deterministic finalizer stub drives the transition. These
+lanes must not contact a real provider and must not mutate production cards,
+GitHub branches, Discord sessions, or live queue rows.
+
+Any future live auto-queue smoke must opt in explicitly with `agent_mode:
+real_live` and report `real_provider_contacted: true` plus provider/cell
+identity. Required gates should fail when a scenario declares `controlled` or
+`real_live` but only produces a shallower observed lane.
+
 ## Current Signal Inventory
 
 | Signal | Current producers | Current consumers | Classification |

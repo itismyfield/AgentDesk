@@ -139,16 +139,21 @@ class DriverReportValidation(unittest.TestCase):
         report = {
             "cell": "claude-tui",
             "channel_id": "222",
+            "real_provider_contacted": True,
             "totals": {"pass": 2, "fail": 0, "skipped": 0},
             "scenarios": [
                 {
                     "id": "E-9",
+                    "agent_mode": "real_live",
+                    "real_provider_contacted": True,
                     "status": "pass",
                     "relay_count": 2,
                     "post_scenario_idle": {"status": "idle"},
                 },
                 {
                     "id": "E-19",
+                    "agent_mode": "real_live",
+                    "real_provider_contacted": True,
                     "status": "pass",
                     "post_scenario_idle": {"status": "idle"},
                     "session_preserved": {
@@ -162,16 +167,21 @@ class DriverReportValidation(unittest.TestCase):
 
     def test_driver_report_fails_when_e19_lacks_session_preservation(self):
         report = {
+            "real_provider_contacted": True,
             "totals": {"pass": 2, "fail": 0, "skipped": 0},
             "scenarios": [
                 {
                     "id": "E-9",
+                    "agent_mode": "real_live",
+                    "real_provider_contacted": True,
                     "status": "pass",
                     "relay_count": 2,
                     "post_scenario_idle": {"status": "idle"},
                 },
                 {
                     "id": "E-19",
+                    "agent_mode": "real_live",
+                    "real_provider_contacted": True,
                     "status": "pass",
                     "post_scenario_idle": {"status": "idle"},
                 },
