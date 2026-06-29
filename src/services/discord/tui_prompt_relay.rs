@@ -399,6 +399,24 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             return;
         }
     };
+    // A TUI-direct prompt has now been observed for this channel. Clear any
+    // stale `📦 … idle N분` recap card immediately — independent of whether the
+    // synthetic turn-start below later succeeds, defers, or ABORTs (#3296).
+    // The active-turn clear inside `claim_tui_direct_synthetic_turn` only runs
+    // once the turn actually starts (`mailbox_try_start_turn`), so a
+    // deferred/aborted synthetic start (e.g. a prior inflight is still live)
+    // used to leave the recap card sitting over an already-engaged channel.
+    // Fire-and-forget compare-and-clear on the captured id (codex R2 P2), so it
+    // never alters this observer's lease/inflight control flow; the active-turn
+    // path keeps its own bump-then-clear for the steady-state case.
+    if let Some(pool) = shared.pg_pool.as_ref().cloned() {
+        super::idle_recap::spawn_clear_captured_idle_recap_for_channel(
+            notify_http.clone(),
+            pool,
+            channel_id.get(),
+        )
+        .await;
+    }
     // #3164 / #750 invariant: the `⏳` MUST be added by the SAME bot identity that
     // later removes it (`remove_reaction_raw` only removes `@me`'s reaction; a
     // different bot leaves the hourglass forever). The note BODY may be any bot

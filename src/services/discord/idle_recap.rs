@@ -441,25 +441,59 @@ pub(crate) fn compose_recap_text(
         .and_then(|output| output.summary.as_deref())
         .and_then(sanitize_recap_line)
     {
-        lines.push(format!("> 요약: {summary}"));
+        // Blank line separates the header block from the summary so the card
+        // reads as distinct sections instead of one cramped quote.
+        lines.push(String::new());
+        lines.push("> 📝 **요약**".to_string());
+        lines.push(format!("> {summary}"));
     }
     if let Some(suggested_reply) = composer
         .and_then(|output| output.suggested_reply.as_deref())
         .and_then(sanitize_recap_line)
     {
-        lines.push(format!("> 추천 답변: {suggested_reply}"));
+        // The suggested reply gets its own labelled block on a separate line so
+        // it is easy to read (and copy) rather than trailing the summary.
+        // `suggested_reply_from_recap_content` parses the line after this label.
+        lines.push(String::new());
+        lines.push("> 💬 **추천 답변**".to_string());
+        lines.push(format!("> {suggested_reply}"));
     }
     lines.join("\n")
 }
 
 pub(crate) fn suggested_reply_from_recap_content(content: &str) -> Option<String> {
-    content.lines().find_map(|line| {
+    // Handles both the legacy inline form (`> 추천 답변: <reply>`) and the
+    // current labelled form (`> 💬 **추천 답변**` on one line, `> <reply>` on
+    // the next). Markdown/emoji decoration around the label is tolerated so the
+    // card layout can change without breaking the `[추천 답변 보내기]` button.
+    let mut lines = content.lines();
+    while let Some(line) = lines.next() {
         let trimmed = line.trim().trim_start_matches('>').trim();
-        trimmed
-            .strip_prefix("추천 답변:")
-            .or_else(|| trimmed.strip_prefix("추천 답변 :"))
-            .and_then(sanitize_recap_line)
-    })
+        let Some(idx) = trimmed.find("추천 답변") else {
+            continue;
+        };
+        // Inline value on the same line as the label (legacy layout).
+        let inline = trimmed[idx + "추천 답변".len()..]
+            .trim_start_matches(|c: char| c == ':' || c == '*' || c.is_whitespace())
+            .trim();
+        if let Some(reply) = sanitize_recap_line(inline) {
+            return Some(reply);
+        }
+        // Label-only line: the reply lives on the next quoted line.
+        if let Some(next) = lines.next() {
+            let next_trimmed = next
+                .trim()
+                .trim_start_matches('>')
+                .trim()
+                .trim_start_matches('*')
+                .trim();
+            if let Some(reply) = sanitize_recap_line(next_trimmed) {
+                return Some(reply);
+            }
+        }
+        return None;
+    }
+    None
 }
 
 fn compose_recap_header(snapshot: &RecapSnapshot, relay_status: RelayIntegrityStatus) -> String {
@@ -1579,11 +1613,20 @@ mod tests {
         let ok = relay_probe_with(RelayIntegrityStatus::Ok);
         let content = compose_recap_text(&snapshot, Some(&composer), &ok);
         assert!(content.contains("relay OK"));
-        assert!(content.contains("> 요약: 작업 요약"));
-        assert!(content.contains("> 추천 답변: 테스트 계속 진행해줘"));
+        // Labelled blocks on their own lines for legibility (the summary and the
+        // suggested reply are separated by blank lines, not crammed together).
+        assert!(content.contains("> 📝 **요약**\n> 작업 요약"));
+        assert!(content.contains("> 💬 **추천 답변**\n> 테스트 계속 진행해줘"));
         assert_eq!(
             suggested_reply_from_recap_content(&content).as_deref(),
             Some("테스트 계속 진행해줘")
+        );
+        // Backward compatibility: the parser still reads the legacy inline form
+        // from cards posted before the layout change.
+        assert_eq!(
+            suggested_reply_from_recap_content("📦 idle\n> 추천 답변: 옛날 형식 답변")
+                .as_deref(),
+            Some("옛날 형식 답변")
         );
         assert!(!content.contains("이어서 진행"));
 
