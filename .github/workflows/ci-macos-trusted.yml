@@ -152,6 +152,12 @@ jobs:
     # ever moved under an org, switch back to the `group:`+`labels:` form and
     # set MACOS_RUNNER_GROUP.
     runs-on: ${{ fromJSON(needs.resolve_macos_runner.outputs.labels) }}
+    # Self-hosted runners do NOT inherit GitHub's auto-cancellation, so without
+    # an explicit bound a hung cargo link/deadlocked test could hold the shared
+    # production Mac mini up to the 6h hard max (see #3867, #3658). Cap the job
+    # at 45 min — comfortably above observed cold-sccache build+test durations
+    # while still freeing the host for the live control plane on a stall.
+    timeout-minutes: 45
     steps:
       - name: Trusted event / runner sanity check
         shell: bash
