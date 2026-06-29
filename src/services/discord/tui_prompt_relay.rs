@@ -32,9 +32,6 @@ use self::injected_prompt_policy::{
     slash_command_control_kind, slash_command_control_prompt_is_caveat_only,
 };
 
-// #3479 rank-10: the pure transcript/rollout prompt scanners live in a capped
-// sibling module. The scan-result enums and helpers are re-imported here so the
-// stateful idle-relay loops in this parent stay byte-identical.
 mod idle_transcript_scan;
 use self::idle_transcript_scan::{
     ClaudeIdleTranscriptScan, CodexIdleRolloutScan,
@@ -44,40 +41,19 @@ use self::idle_transcript_scan::{
     scan_codex_idle_rollout_for_latest_prompt_matching, scan_codex_idle_rollout_for_prompt,
 };
 
-// #3479 rank-10: the Discord-IO/SharedData-coupled Claude TUI binding
-// rehydration + dead/orphaned-session eviction pass lives in a capped sibling
-// module. Every dependency is reached via `use super::*;`, so the move stays
-// behavior-identical; the names are re-imported here so the parent's call sites
-// (and the test module) stay byte-identical.
 #[cfg(unix)]
 pub(in crate::services::discord) mod rehydration;
-#[cfg(unix)]
-use self::rehydration::{
-    codex_tui_rehydrated_binding_from_rollout_path, rehydrate_existing_claude_tui_bindings,
-    rehydrate_existing_codex_tui_bindings, rehydrated_claude_tui_binding_for_tmux_session,
-};
-// The dead/orphaned-session predicates and the eviction pass are driven in
-// production only transitively (via `rehydrate_existing_claude_tui_bindings`);
-// at this module's surface they are referenced only by the unit tests, so the
-// re-import is test-gated to keep the non-test lib build free of unused-import
-// warnings while leaving the test call sites byte-identical.
 #[cfg(all(unix, test))]
 use self::rehydration::{
     claude_tui_session_is_dead_orphaned, evict_dead_orphaned_claude_tui_mirrors,
     pane_is_confirmed_dead_orphaned,
 };
+#[cfg(unix)]
+use self::rehydration::{
+    codex_tui_rehydrated_binding_from_rollout_path, rehydrate_existing_claude_tui_bindings,
+    rehydrate_existing_codex_tui_bindings, rehydrated_claude_tui_binding_for_tmux_session,
+};
 
-// #3479: the live-relay TUI-direct prompt anchor COMPLETION lifecycle (`⏳ → ✅`)
-// cluster — the visibility gate, the deferred `⏳`-completion drain decision, and
-// the reaction-swap completers — moved verbatim to a capped sibling module. Every
-// dependency is reached via `use super::*;` (the moved bodies stay byte-identical,
-// only `super::formatting` becomes `super::super::formatting` from the child). The
-// three helpers reached from sibling discord modules
-// (`crate::services::discord::tui_prompt_relay::{...}` call sites in
-// `tmux_watcher.rs` and `recovery_engine.rs`) are re-exported at
-// `pub(in crate::services::discord)`; the relay-internal drain decision/enum are
-// re-imported privately so this parent's call sites (and the test module) stay
-// byte-identical.
 mod anchor_completion;
 mod bridge_completion;
 mod bridge_gateway;
@@ -92,30 +68,11 @@ pub(in crate::services::discord) use self::anchor_completion::{
 use self::bridge_completion::ensure_tui_direct_bridge_delivery_committed;
 use self::bridge_gateway::TuiDirectBridgeGateway;
 
-// #3479: the Claude TUI launch-*script* parsing cluster (`ClaudeTuiLaunchInfo`,
-// the file/content parsers, and the single-quote shell-word splitter) moved
-// verbatim to a capped sibling module. Every item is unix-only, so the module
-// decl and the re-import are `#[cfg(unix)]`-gated. Only
-// `parse_claude_tui_launch_script` is reached from outside the child (the parent
-// `claude_tui_launch_context` caller and, via this parent's `use super::*;`
-// glob, the sibling `rehydration` module), so it alone is re-imported here to
-// keep those call sites byte-identical.
 #[cfg(unix)]
 mod launch_script;
 #[cfg(unix)]
 use self::launch_script::parse_claude_tui_launch_script;
 
-// #3479: the idle-tail transcript start-offset resolution cluster (the #3154
-// timestamp-anchor choke point, its timestamp scan + stale-high fallback guard,
-// and the #3183 committed-offset clamp) moved verbatim to a capped sibling
-// module. Every item is unix-only, so the module decl and the re-imports are
-// `#[cfg(unix)]`-gated. Only `resolve_idle_tail_start_offset` and
-// `clamp_idle_tail_start_offset_to_committed` are reached from this parent's prod
-// call sites; `claude_idle_response_start_offset_after_timestamp` is referenced
-// only by the unit tests (its prod callers are now internal to the child), so it
-// is re-imported under `#[cfg(all(unix, test))]` to keep the non-test lib build
-// free of unused-import warnings. `normalize_transcript_fallback_offset` is fully
-// internal to the child and is not re-imported.
 #[cfg(unix)]
 mod idle_offset_resolution;
 #[cfg(all(unix, test))]
@@ -125,8 +82,6 @@ use self::idle_offset_resolution::{
     clamp_idle_tail_start_offset_to_committed, resolve_idle_tail_start_offset,
 };
 
-// #3715: Codex TUI idle rollout relay/tail logic lives in a sibling module so
-// this hot parent stays below both raw-LOC and production-LoC ratchets.
 #[cfg(unix)]
 mod codex_idle_rollout;
 #[cfg(unix)]
