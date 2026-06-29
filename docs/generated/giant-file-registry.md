@@ -40,7 +40,7 @@
 | --- | ---: |
 | `src/cli/client.rs` | 2378 |
 | `src/cli/dcserver.rs` | 1627 |
-| `src/cli/direct.rs` | 1809 |
+| `src/cli/direct.rs` | 1813 |
 | `src/cli/doctor/orchestrator.rs` | 4381 |
 | `src/cli/init.rs` | 1444 |
 | `src/cli/migrate/apply.rs` | 3237 |
@@ -53,9 +53,9 @@
 | `src/db/dispatched_sessions.rs` | 1627 |
 | `src/db/dispatches/mod.rs` | 1028 |
 | `src/db/postgres.rs` | 1280 |
-| `src/dispatch/dispatch_context.rs` | 2803 |
-| `src/dispatch/dispatch_create.rs` | 1385 |
-| `src/dispatch/dispatch_status.rs` | 1508 |
+| `src/dispatch/dispatch_context.rs` | 2852 |
+| `src/dispatch/dispatch_create.rs` | 1396 |
+| `src/dispatch/dispatch_status.rs` | 1529 |
 | `src/engine/loader.rs` | 1332 |
 | `src/engine/mod.rs` | 1279 |
 | `src/engine/ops/db_ops.rs` | 1244 |
@@ -88,7 +88,7 @@
 | `src/services/discord/router/message_handler/headless_turn.rs` | 1543 |
 | `src/services/discord_config_audit.rs` | 1288 |
 | `src/services/dispatched_sessions.rs` | 1550 |
-| `src/services/dispatches/discord_delivery/orchestration.rs` | 1498 |
+| `src/services/dispatches/discord_delivery/orchestration.rs` | 1538 |
 | `src/services/dispatches/outbox_route.rs` | 1182 |
 | `src/services/gemini.rs` | 1358 |
 | `src/services/memory/memento.rs` | 1893 |
