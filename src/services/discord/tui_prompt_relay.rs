@@ -327,6 +327,7 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         );
         return;
     };
+    let recap_provider = ProviderKind::from_str_or_unsupported(&prompt.provider);
     // #3178 (codex P1 lease-overwrite): run the slash-command-control dedupe BEFORE
     // recording ANY external-input lease. The #3153 double-post (raw echo + expanded
     // `<command-*>` wrapper, ~tens-of-ms apart) must not let the SECOND half record a
@@ -399,17 +400,27 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             return;
         }
     };
-    // A TUI-direct prompt has now been observed for this channel. Clear any
-    // stale `📦 … idle N분` recap card immediately — independent of whether the
-    // synthetic turn-start below later succeeds, defers, or ABORTs (#3296).
-    // The active-turn clear inside `claim_tui_direct_synthetic_turn` only runs
-    // once the turn actually starts (`mailbox_try_start_turn`), so a
-    // deferred/aborted synthetic start (e.g. a prior inflight is still live)
-    // used to leave the recap card sitting over an already-engaged channel.
-    // Fire-and-forget compare-and-clear on the captured id (codex R2 P2), so it
-    // never alters this observer's lease/inflight control flow; the active-turn
-    // path keeps its own bump-then-clear for the steady-state case.
+    // A TUI-direct prompt has now been observed for this channel. Bump idle
+    // recap generation before the pre-claim clear so an in-flight recap POST job
+    // cannot persist a stale card after a deferred/local-only/aborted synthetic
+    // start path (#3296, #3878).
     if let Some(pool) = shared.pg_pool.as_ref().cloned() {
+        if let Err(e) = super::idle_recap::bump_turn_generation(
+            &pool,
+            channel_id.get(),
+            &recap_provider,
+            lease.session_key.as_deref(),
+        )
+        .await
+        {
+            tracing::warn!(
+                error = %e,
+                channel_id = channel_id.get(),
+                provider = %recap_provider.as_str(),
+                session_key = lease.session_key.as_deref().unwrap_or(""),
+                "idle_recap: failed to bump turn generation on TUI-direct observation"
+            );
+        }
         super::idle_recap::spawn_clear_captured_idle_recap_for_channel(
             notify_http.clone(),
             pool,

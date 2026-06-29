@@ -464,20 +464,18 @@ pub(crate) fn compose_recap_text(
 pub(crate) fn suggested_reply_from_recap_content(content: &str) -> Option<String> {
     // Handles both the legacy inline form (`> 추천 답변: <reply>`) and the
     // current labelled form (`> 💬 **추천 답변**` on one line, `> <reply>` on
-    // the next). Markdown/emoji decoration around the label is tolerated so the
-    // card layout can change without breaking the `[추천 답변 보내기]` button.
+    // the next). Decorative emoji/markdown is tolerated around the label, but
+    // incidental mentions of "추천 답변" in summary text are ignored.
     let mut lines = content.lines();
     while let Some(line) = lines.next() {
         let trimmed = line.trim().trim_start_matches('>').trim();
-        let Some(idx) = trimmed.find("추천 답변") else {
-            continue;
-        };
-        // Inline value on the same line as the label (legacy layout).
-        let inline = trimmed[idx + "추천 답변".len()..]
-            .trim_start_matches(|c: char| c == ':' || c == '*' || c.is_whitespace())
-            .trim();
-        if let Some(reply) = sanitize_recap_line(inline) {
+        if let Some(inline) = suggested_reply_inline_value(trimmed)
+            && let Some(reply) = sanitize_recap_line(inline)
+        {
             return Some(reply);
+        }
+        if !suggested_reply_label_is_standalone(trimmed) {
+            continue;
         }
         // Label-only line: the reply lives on the next quoted line.
         if let Some(next) = lines.next() {
@@ -494,6 +492,25 @@ pub(crate) fn suggested_reply_from_recap_content(content: &str) -> Option<String
         return None;
     }
     None
+}
+
+fn suggested_reply_inline_value(line: &str) -> Option<&str> {
+    line.strip_prefix("추천 답변:")
+        .or_else(|| line.strip_prefix("추천 답변 :"))
+}
+
+fn suggested_reply_label_is_standalone(line: &str) -> bool {
+    let normalized = line
+        .chars()
+        .filter(|ch| {
+            !ch.is_whitespace()
+                && !matches!(
+                    ch,
+                    '>' | '*' | '_' | '`' | ':' | '：' | '💬' | '📝' | '📦' | '·' | '-' | '—'
+                )
+        })
+        .collect::<String>();
+    normalized == "추천답변"
 }
 
 fn compose_recap_header(snapshot: &RecapSnapshot, relay_status: RelayIntegrityStatus) -> String {
@@ -1624,9 +1641,21 @@ mod tests {
         // Backward compatibility: the parser still reads the legacy inline form
         // from cards posted before the layout change.
         assert_eq!(
-            suggested_reply_from_recap_content("📦 idle\n> 추천 답변: 옛날 형식 답변")
-                .as_deref(),
+            suggested_reply_from_recap_content("📦 idle\n> 추천 답변: 옛날 형식 답변").as_deref(),
             Some("옛날 형식 답변")
+        );
+        assert_eq!(
+            suggested_reply_from_recap_content(
+                "📦 idle\n> 📝 **요약**\n> 요약 안의 추천 답변 언급은 라벨이 아님\n\n> 💬 **추천 답변**\n> 진짜 답변"
+            )
+            .as_deref(),
+            Some("진짜 답변")
+        );
+        assert_eq!(
+            suggested_reply_from_recap_content(
+                "📦 idle\n> 📝 **요약**\n> 추천 답변 언급만 있고 실제 라벨은 없음"
+            ),
+            None
         );
         assert!(!content.contains("이어서 진행"));
 

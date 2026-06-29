@@ -456,7 +456,7 @@
 | `services::discord::health::watcher_respawn` | `src/services/discord/health/watcher_respawn.rs` | 1093 | 497 | 596 |  |
 | `services::discord::http` | `src/services/discord/http.rs` | 178 | 138 | 40 |  |
 | `services::discord::idle_detector` | `src/services/discord/idle_detector.rs` | 475 | 401 | 74 |  |
-| `services::discord::idle_recap` | `src/services/discord/idle_recap.rs` | 2335 | 1201 | 1134 | giant-file |
+| `services::discord::idle_recap` | `src/services/discord/idle_recap.rs` | 2407 | 1252 | 1155 | giant-file |
 | `services::discord::idle_recap::context_display` | `src/services/discord/idle_recap/context_display.rs` | 154 | 154 | 0 |  |
 | `services::discord::idle_recap::relay_integrity` | `src/services/discord/idle_recap/relay_integrity.rs` | 213 | 160 | 53 |  |
 | `services::discord::idle_recap::scrollback` | `src/services/discord/idle_recap/scrollback.rs` | 279 | 279 | 0 |  |
@@ -652,7 +652,7 @@
 | `services::discord::tui_direct_abort_marker::deferred_claim` | `src/services/discord/tui_direct_abort_marker/deferred_claim.rs` | 669 | 265 | 404 |  |
 | `services::discord::tui_direct_abort_marker::store` | `src/services/discord/tui_direct_abort_marker/store.rs` | 348 | 348 | 0 |  |
 | `services::discord::tui_direct_pending_start` | `src/services/discord/tui_direct_pending_start.rs` | 2431 | 1048 | 1383 | giant-file |
-| `services::discord::tui_prompt_relay` | `src/services/discord/tui_prompt_relay.rs` | 966 | 966 | 0 |  |
+| `services::discord::tui_prompt_relay` | `src/services/discord/tui_prompt_relay.rs` | 995 | 995 | 0 |  |
 | `services::discord::tui_prompt_relay::anchor_completion` | `src/services/discord/tui_prompt_relay/anchor_completion.rs` | 449 | 213 | 236 |  |
 | `services::discord::tui_prompt_relay::bridge_completion` | `src/services/discord/tui_prompt_relay/bridge_completion.rs` | 167 | 81 | 86 |  |
 | `services::discord::tui_prompt_relay::bridge_gateway` | `src/services/discord/tui_prompt_relay/bridge_gateway.rs` | 208 | 208 | 0 |  |
