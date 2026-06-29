@@ -156,7 +156,11 @@
 # #3607: +20 raw / +20 prod for the TimedOut+committed terminal-UI obligation
 # hook. The durable sidecar store + isolated sweeper live in
 # terminal_ui_obligation.rs; this keeps the hot-file cost to the call-site hook.
-"src/services/discord/turn_bridge/mod.rs" = 6241 # #3607 terminal-UI obligation hook
+# #3883: 6241 -> 6242 (+1 prod LoC): thread already_sent_prefix into the
+# plan_streaming_rollover call so the streaming-rollover frozen_chunk is redacted
+# of leaked tool-call wrapper markup at the source (bypassed the sanitize
+# chokepoint). Security/correctness fix at the call-site, no decomposition regression.
+"src/services/discord/turn_bridge/mod.rs" = 6242 # #3607 terminal-UI obligation hook; #3883 frozen_chunk redact
 # #3038 turn_bridge S1 child modules, frozen at landed production LoC.
 "src/services/discord/turn_bridge/headless_delivery.rs" = 415
 "src/services/discord/turn_bridge/status_panel.rs" = 437
@@ -362,7 +366,12 @@
 # check + handler delegation in the `InteractionCreate` arm of `handle_event`;
 # the handler logic itself lives in the non-giant `sidecar_interaction.rs`.
 "src/services/discord/router/intake_gate.rs" = 2986
-"src/services/discord/formatting.rs" = 2802
+# #3883: 2802 -> 2813 (+11 prod LoC): redact the streaming-rollover frozen_chunk of
+# leaked tool-call wrapper markup at the source in plan_streaming_rollover (new
+# already_sent_prefix param threaded from both streaming send sites carries
+# inside-leaked-block state across chunk boundaries). The redactor body lives in the
+# non-giant response_sanitizer.rs; closes the #3883 streaming chokepoint bypass.
+"src/services/discord/formatting.rs" = 2813
 # #3038 run_bot S0/S1: lowered 2802 -> 1918 by adding characterization tests and
 # moving restored_state, queued_placeholders, startup_doctor, orphan_recovery,
 # and session_gc into sub-700 `runtime_bootstrap/` modules.

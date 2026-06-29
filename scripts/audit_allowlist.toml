@@ -74,7 +74,11 @@ direct_discord_sends = [
   # existing pre-migration direct sends; retire with the #1436 outbound v3 extraction.
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:d77122f8dd3466ba",
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:37e09c3e1136f9b1",
-  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:96efc64ae5a0f315"
+  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:96efc64ae5a0f315",
+  # #3883: the streaming-rollover frozen_chunk edit_message — unchanged call; its
+  # context hash drifted because plan_streaming_rollover gained the
+  # already_sent_prefix arg (frozen_chunk now redacted at the source).
+  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:6d897c99aa17d289"
 ]
 
 # Manual JSON row mapping: legacy mapping callsites pending typed migration.

@@ -80,4 +80,8 @@
 # durable sidecar + sweeper body lives in terminal_ui_obligation.rs.
 # #3715: 6664 -> 6661, lock in the existing shrink reported by the raw-LOC
 # ratchet while restoring main CI script checks.
-"src/services/discord/turn_bridge/mod.rs" = 6661 # #3607 terminal-UI obligation hook
+# #3883: 6661 -> 6665 (+4 raw lines): thread already_sent_prefix into the
+# plan_streaming_rollover call + comment so the streaming-rollover frozen_chunk is
+# redacted of leaked tool-call wrapper markup at the source (security/correctness;
+# bypassed the sanitize chokepoint). Decomposition tracked separately, not in scope.
+"src/services/discord/turn_bridge/mod.rs" = 6665 # #3607 terminal-UI obligation hook; #3883 frozen_chunk redact
