@@ -1199,12 +1199,31 @@ fi
 
 # Promote the already signed staged binary atomically. In-place codesign can
 # corrupt the OS signing cache if it fails mid-write.
+#
+# #3858: back up the current good binary BEFORE overwriting it so a runtime-only
+# crash (passes compile/doctor/sign but crash-loops on boot) can be rolled back
+# instead of leaving the release down with the last-good binary already gone.
+REL_BINARY="$ADK_REL/bin/agentdesk"
+REL_BINARY_BACKUP="$ADK_REL/bin/agentdesk.prev"
+echo "▸ Backing up current release binary for rollback..."
+chflags nouchg "$REL_BINARY" 2>/dev/null || true
+# Clear any stale (possibly immutable) backup from a prior interrupted deploy.
+chflags nouchg "$REL_BINARY_BACKUP" 2>/dev/null || true
+rm -f "$REL_BINARY_BACKUP" 2>/dev/null || true
+if [ -f "$REL_BINARY" ]; then
+    # cp (not mv) so the last-good binary is never absent: both the backup and
+    # the live binary exist until the staged binary atomically replaces it —
+    # there is no window where both copies are gone. -p preserves mode/owner.
+    cp -p "$REL_BINARY" "$REL_BINARY_BACKUP"
+fi
+
 echo "▸ Promoting staged binary..."
-chflags nouchg "$ADK_REL/bin/agentdesk" 2>/dev/null || true
-mv -f "$STAGED_BINARY" "$ADK_REL/bin/agentdesk"
+mv -f "$STAGED_BINARY" "$REL_BINARY"
 STAGED_BINARY=""
-# Lock binary to prevent unsigned overwrites
-chflags uchg "$ADK_REL/bin/agentdesk"
+# NOTE: the immutable re-lock (chflags uchg) is deferred until AFTER the health
+# check passes (see below). Locking here would force the rollback path to fight
+# the uchg flag on the bad binary, and the lock's only job — blocking unsigned
+# overwrites of a serving binary — is not needed for the few seconds of deploy.
 
 if [ "$PLIST_REL" = "com.agentdesk.release" ]; then
     echo "▸ Regenerating release launchd plist..."
@@ -1394,8 +1413,46 @@ fi
 
 if [ "$REL_HEALTHY" != true ]; then
     echo "✗ Release health check failed after $DEPLOY_HEALTH_RETRIES attempts — check logs: $ADK_REL/logs/"
+    # #3858: roll back to the previous good binary so the release does not stay
+    # down with the last-good binary lost. Mirrors the dashboard/.old pattern.
+    if [ -f "$REL_BINARY_BACKUP" ]; then
+        echo "↩ Rolling back release binary to previous good version..."
+        # Stop the crash-looping new process before swapping the binary back.
+        LAUNCHD_DOMAIN="$(_launchd_domain)"
+        launchctl bootout "$LAUNCHD_DOMAIN/$PLIST_REL" 2>/dev/null || true
+        tmux kill-session -t "${AGENTDESK_RELEASE_TMUX_SESSION:-AgentDesk-dcserver-release-manual}" 2>/dev/null || true
+        # The bad binary was never locked (uchg is deferred to the success path),
+        # so nouchg here is just defensive. mv is an atomic same-dir rename: the
+        # backup replaces the bad binary in one step, no double-loss window.
+        chflags nouchg "$REL_BINARY" 2>/dev/null || true
+        if mv -f "$REL_BINARY_BACKUP" "$REL_BINARY"; then
+            # Restore the immutable lock now that the good binary is live again.
+            chflags uchg "$REL_BINARY"
+            echo "↩ Previous binary restored — restarting release..."
+            xattr -d com.apple.quarantine "$HOME/Library/LaunchAgents/$PLIST_REL.plist" 2>/dev/null || true
+            if ! launchctl bootstrap "$LAUNCHD_DOMAIN" "$HOME/Library/LaunchAgents/$PLIST_REL.plist"; then
+                echo "⚠ launchd bootstrap failed during rollback — using tmux fallback"
+                start_release_tmux_fallback
+            fi
+            if wait_for_http_service_health "$PLIST_REL" "$REL_PORT" "$DEPLOY_HEALTH_RETRIES" "$DEPLOY_HEALTH_DELAY_SECS" 1 1; then
+                echo "✓ Rollback succeeded — release healthy on :${REL_PORT} with previous binary"
+            else
+                echo "✗ Rollback restart did not reach healthy state — manual intervention required (logs: $ADK_REL/logs/)"
+            fi
+        else
+            echo "✗ Failed to restore previous binary from $REL_BINARY_BACKUP — manual intervention required"
+        fi
+    else
+        echo "⚠ No rollback backup available ($REL_BINARY_BACKUP missing) — cannot auto-rollback"
+    fi
     exit 1
 fi
+
+# #3858: health passed — the new binary is proven good. Lock it against unsigned
+# overwrites (deferred from promotion) and drop the rollback backup.
+chflags uchg "$REL_BINARY"
+chflags nouchg "$REL_BINARY_BACKUP" 2>/dev/null || true
+rm -f "$REL_BINARY_BACKUP" 2>/dev/null || true
 
 if _health_json_field_exists "${WAIT_FOR_HTTP_SERVICE_LAST_HEALTH_JSON:-}" "fully_recovered" \
   && ! _health_json_field_is_true "${WAIT_FOR_HTTP_SERVICE_LAST_HEALTH_JSON:-}" "fully_recovered"; then
