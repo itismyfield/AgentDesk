@@ -132,6 +132,8 @@ mod codex_idle_rollout;
 #[cfg(unix)]
 use self::codex_idle_rollout::spawn_codex_idle_rollout_relay;
 mod relay_ownership;
+#[cfg(test)]
+use self::relay_ownership::external_input_relay_owner_for_watchers;
 #[cfg(unix)]
 use self::relay_ownership::resolved_codex_idle_relay_binding;
 use self::relay_ownership::{
@@ -139,20 +141,29 @@ use self::relay_ownership::{
     bridge_adapter_owns_external_turn, claim_should_adopt_relay_owner,
     clear_external_input_bridge_lease_if_current, clear_observed_external_turn_lease_if_current,
     deferred_claim_requires_bridge_tail_relayer, external_input_relay_binding,
-    external_input_relay_output_path, external_input_relay_owner_for_watchers,
-    external_input_relay_start_offset, observer_should_spawn_bridge_tail,
-    parse_external_input_relay_owner, record_external_turn_lease_for_output,
-    record_observed_external_turn_lease, session_bound_discord_delivery_enabled,
+    external_input_relay_output_path, external_input_relay_start_offset,
+    observer_should_spawn_bridge_tail, parse_external_input_relay_owner,
+    record_external_turn_lease_for_output, record_observed_external_turn_lease,
+    session_bound_discord_delivery_enabled,
 };
 
 mod synthetic_start;
+#[cfg(test)]
 pub(in crate::services::discord) use self::synthetic_start::synthetic_start_offset_carry_forward;
 use self::synthetic_start::{
     build_tui_direct_synthetic_inflight_state, claim_tui_direct_synthetic_turn,
-    codex_ownerless_external_input_inflight_needs_rollout_recovery, defer_synthetic_turn_start,
-    finish_tui_direct_synthetic_pre_save_failure, finish_tui_direct_synthetic_turn_if_current,
-    pending_start_abort_cleanup_fn, restore_pending_starts, synthetic_start_prior_turn_view,
-    tui_direct_synthetic_inflight_active_for_prompt, wait_for_tui_direct_watcher_synthetic_claim,
+    defer_synthetic_turn_start, restore_pending_starts, synthetic_start_prior_turn_view,
+    tui_direct_synthetic_inflight_active_for_prompt,
+};
+#[cfg(unix)]
+#[allow(unused_imports)]
+use self::synthetic_start::{
+    codex_ownerless_external_input_inflight_needs_rollout_recovery,
+    finish_tui_direct_synthetic_turn_if_current, wait_for_tui_direct_watcher_synthetic_claim,
+};
+#[cfg(test)]
+use self::synthetic_start::{
+    finish_tui_direct_synthetic_pre_save_failure, pending_start_abort_cleanup_fn,
 };
 #[cfg(test)]
 use self::synthetic_start::{
@@ -166,15 +177,17 @@ mod claude_idle_runtime;
 #[cfg(unix)]
 mod claude_idle_tail;
 #[cfg(unix)]
-use self::claude_idle_bridge::{
-    build_tui_direct_bridge_inflight_state, idle_stream_message_is_content,
-    stream_tui_idle_response_through_bridge,
-    tui_idle_tail_stream_should_commit_runtime_binding_offset,
-};
+#[allow(unused_imports)]
+use self::claude_idle_bridge::build_tui_direct_bridge_inflight_state;
 #[cfg(all(unix, test))]
 use self::claude_idle_bridge::{
     compose_tui_idle_response, forward_idle_stream_into_bridge,
     tui_idle_tail_should_commit_runtime_binding_offset,
+};
+#[cfg(unix)]
+use self::claude_idle_bridge::{
+    idle_stream_message_is_content, stream_tui_idle_response_through_bridge,
+    tui_idle_tail_stream_should_commit_runtime_binding_offset,
 };
 #[cfg(unix)]
 pub(super) use self::claude_idle_runtime::resolve_rehydrated_claude_tmux_channel_id;
