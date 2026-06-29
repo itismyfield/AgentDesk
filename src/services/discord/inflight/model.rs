@@ -8,6 +8,7 @@
 //! re-exports every public item so existing `inflight::*` paths still resolve.
 
 use super::*;
+use crate::services::agent_protocol::TaskNotificationKind;
 
 /// Build an optional `serenity::MessageId` from a possibly-zero raw inflight id.
 ///
