@@ -47,7 +47,7 @@ fn request_suppresses_followup_outbox(headers: &HeaderMap) -> bool {
 /// segments and let the caller create/empty-truncate arbitrary files outside
 /// `runtime/review_passed/`. Rejecting `/`, `\`, `..`, NUL, uppercase, and
 /// non-hex characters keeps the resulting path a direct child of that dir.
-fn is_valid_commit_sha(commit: &str) -> bool {
+pub(crate) fn is_valid_commit_sha(commit: &str) -> bool {
     let len = commit.len();
     (7..=64).contains(&len)
         && commit

@@ -10,6 +10,9 @@ use sqlx::Row;
 use crate::services as services_layer;
 
 use super::AppState;
+// #3863: reuse the verdict route's hardened SHA guard so the recovery route
+// cannot record a forged `reviewed_commit` marker for an arbitrary commit.
+use super::review_verdict::is_valid_commit_sha;
 
 // ── Body types ─────────────────────────────────────────────────
 
@@ -43,6 +46,23 @@ struct ReviewRecoveryDispatch {
 
 fn validate_review_decision(decision: &str) -> bool {
     decision == "accept" || decision == "reject"
+}
+
+/// #3863: reject a non-SHA recovery `target_commit` before it is persisted as the
+/// `reviewed_commit` deploy-gate marker. Pure (no I/O) so the recovery route can
+/// reject as early as possible — before any Postgres transaction or marker
+/// write — and so the guard is unit-testable without a live database. Shares the
+/// `is_valid_commit_sha` predicate with the verdict route (single source of
+/// truth), keeping the same HTTP 400 error shape for an invalid commit.
+fn validate_recovery_target_commit(commit: &str) -> Result<(), (StatusCode, String)> {
+    if is_valid_commit_sha(commit) {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::BAD_REQUEST,
+            "target_commit must be a lowercase git SHA matching ^[0-9a-f]{7,64}$".to_string(),
+        ))
+    }
 }
 
 fn trimmed_optional(value: Option<String>) -> Option<String> {
@@ -210,6 +230,14 @@ async fn recover_review_target_pg(
     let reason = trimmed_optional(body.reason)
         .unwrap_or_else(|| "manual review target recovery".to_string());
 
+    // #3863: `target_commit` is attacker-influenceable (request body) and is
+    // persisted as the `reviewed_commit` deploy-gate marker below. Reject any
+    // non-SHA value with 400 before any Postgres read/write so a forged
+    // "review passed" marker can never be recorded for an arbitrary commit.
+    if let Some(commit) = requested_commit.as_deref() {
+        validate_recovery_target_commit(commit)?;
+    }
+
     let dispatch =
         load_review_recovery_dispatch_pg(pool, dispatch_id.as_deref(), card_id.as_deref())
             .await
@@ -287,6 +315,13 @@ async fn recover_review_target_pg(
             ),
         ));
     }
+
+    // #3863: defense-in-depth — re-validate the resolved `target_commit` right
+    // before it is written into the dispatch context as the `reviewed_commit`
+    // marker, regardless of source (request body, inferred worktree HEAD, or
+    // stored dispatch context). Mirrors the verdict route's belt-and-suspenders
+    // check in `stamp_review_passed_marker`.
+    validate_recovery_target_commit(&target_commit)?;
 
     let previous_context = dispatch.context.clone();
     context_obj.insert("reviewed_commit".to_string(), json!(target_commit));
@@ -620,5 +655,57 @@ pub async fn trigger_rework(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("{e}")})),
         ),
+    }
+}
+
+#[cfg(test)]
+mod recovery_commit_validation_tests {
+    //! #3863: the /api/reviews/recovery route must apply the same SHA guard the
+    //! verdict route uses, so a forged "review passed" marker cannot be recorded
+    //! for an arbitrary `target_commit`.
+    use super::{is_valid_commit_sha, validate_recovery_target_commit};
+    use axum::http::StatusCode;
+
+    #[test]
+    fn accepts_valid_lowercase_sha() {
+        // Abbreviated (7), full SHA-1 (40), and SHA-256 (64) bounds are accepted.
+        assert!(validate_recovery_target_commit("0123abc").is_ok());
+        assert!(
+            validate_recovery_target_commit("1234567890abcdef1234567890abcdef12345678").is_ok()
+        );
+        assert!(validate_recovery_target_commit(&"a".repeat(64)).is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_target_commit_with_400_and_no_marker() {
+        // Uppercase, too-short, non-hex, and path-traversal inputs must all be
+        // rejected with HTTP 400. The guard returns `Err` before the route
+        // reaches `pool.begin()`, so no `reviewed_commit` marker is ever
+        // persisted (no db/fs write happens on the rejection path).
+        for bad in [
+            "ABCDEF0",                 // uppercase hex
+            "abc123",                  // below the 7-char floor
+            "zzzzzzz",                 // non-hex letters
+            "../../etc",               // path traversal
+            "../review_passed/forged", // marker-forgery attempt
+            "/etc/passwd",             // absolute path
+        ] {
+            let err = validate_recovery_target_commit(bad)
+                .expect_err("non-SHA target_commit must be rejected");
+            assert_eq!(err.0, StatusCode::BAD_REQUEST, "input: {bad}");
+            assert!(
+                err.1.contains("^[0-9a-f]{7,64}$"),
+                "input: {bad}, msg: {}",
+                err.1
+            );
+        }
+    }
+
+    #[test]
+    fn shares_predicate_with_verdict_route() {
+        // The recovery guard is backed by the same `is_valid_commit_sha`
+        // predicate the verdict route hardened in #3863 (single source of truth).
+        assert!(is_valid_commit_sha("0123abc"));
+        assert!(!is_valid_commit_sha("../../etc"));
     }
 }
