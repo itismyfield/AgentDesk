@@ -573,7 +573,15 @@
 # so id-0 terminals that collapse onto a real registered turn keep the real turn_id and
 # JOIN correctly against the watcher event (the #3607 cases the signal exists for). Plus
 # the clarifying rationale comment. Still read-only; no decision-path change.
-"src/services/discord/turn_finalizer.rs" = 1373
+# #3866: raised 1373 -> 1521 (+148 prod LoC; test module excluded): contained
+# per-message panics on the reconcile/backstop finalize path — catch_unwind on the
+# reconcile timer arm + do_finalize guards at both call sites (handle_terminal and
+# run_backstop_finalize) so a panic can no longer kill the single never-respawned
+# finalizer actor — plus the residual-risk documentation. Deliberate, reviewable
+# baseline raise for a SAFETY fix; decomposing the file back under baseline (pure
+# move into a turn_finalizer/ child, cross-reviewed) is deferred to #3894 to avoid
+# a risky core-hotfile refactor mid-stabilization.
+"src/services/discord/turn_finalizer.rs" = 1521
 # #3557 (A) codex r2: the headless watchdog was missing the per-turn hard
 # ceiling cap that the foreground intake path already had — and it also
 # `mark_async_managed`s the token (sync watchdog stops enforcing), so this async

@@ -702,7 +702,7 @@
 | `services::discord::turn_bridge::watcher_handoff` | `src/services/discord/turn_bridge/watcher_handoff.rs` | 729 | 526 | 203 |  |
 | `services::discord::turn_bridge::watcher_orphan_cleanup` | `src/services/discord/turn_bridge/watcher_orphan_cleanup.rs` | 493 | 233 | 260 |  |
 | `services::discord::turn_end_wip_warning` | `src/services/discord/turn_end_wip_warning.rs` | 344 | 145 | 199 |  |
-| `services::discord::turn_finalizer` | `src/services/discord/turn_finalizer.rs` | 4753 | 1373 | 3380 | giant-file |
+| `services::discord::turn_finalizer` | `src/services/discord/turn_finalizer.rs` | 5153 | 1521 | 3632 | giant-file |
 | `services::discord::turn_finalizer::cleanup` | `src/services/discord/turn_finalizer/cleanup.rs` | 905 | 351 | 554 |  |
 | `services::discord::turn_finalizer::completion_signal` | `src/services/discord/turn_finalizer/completion_signal.rs` | 304 | 48 | 256 |  |
 | `services::discord::turn_finalizer::delivery_lease` | `src/services/discord/turn_finalizer/delivery_lease.rs` | 444 | 87 | 357 |  |
