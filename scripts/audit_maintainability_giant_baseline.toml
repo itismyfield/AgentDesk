@@ -156,7 +156,12 @@
 # #3607: +20 raw / +20 prod for the TimedOut+committed terminal-UI obligation
 # hook. The durable sidecar store + isolated sweeper live in
 # terminal_ui_obligation.rs; this keeps the hot-file cost to the call-site hook.
-"src/services/discord/turn_bridge/mod.rs" = 6241 # #3607 terminal-UI obligation hook
+# #3859: 6241 -> 6248 (+7 production LoC). The InflightCleanupGuard gains a
+# token_hash field so its abnormal-exit cleanup routes through
+# request_inflight_abandon_if_matches (durable abandon-request enqueue + row
+# delete) instead of a bare clear — finalizing a failure-path-stranded
+# "처리 중" placeholder without keeping the inflight row alive. Bugfix-only.
+"src/services/discord/turn_bridge/mod.rs" = 6248 # #3607 terminal-UI obligation hook
 # #3038 turn_bridge S1 child modules, frozen at landed production LoC.
 "src/services/discord/turn_bridge/headless_delivery.rs" = 415
 "src/services/discord/turn_bridge/status_panel.rs" = 437
@@ -201,7 +206,10 @@
 # new in-actor `mailbox_merge_restored_queue_items` wrapper (restore now merges
 # inside the mailbox actor instead of a racy out-of-actor snapshot->replace).
 # Net +6 prod LoC. 4147 -> 4153.
-"src/services/discord/mod.rs" = 4153
+# #3859: 4153 -> 4154 (+1 production LoC) — `mod abandon_request_store;`
+# declaration for the new durable abandon-request store (the failure-path
+# placeholder finalize handoff). Bugfix-only.
+"src/services/discord/mod.rs" = 4154
 # #3305: the local-only pass-through lifecycle-skip (kind hoist + note-only return
 # branch + idle-loop skip) is offset by comment dedup in the same root, lowering the
 # frozen baseline 5438 -> 5429 (-9). Locks in the shrink win (#3028 ratchet).
@@ -556,7 +564,10 @@
 # scripts/giant_file_registry.toml (discord-relay, decompose_issue #3405). The
 # reap-eligibility logic lives in inflight.rs; this arm is the orchestration shell.
 # Frozen here so future sweep-arm growth is reviewable.
-"src/services/discord/placeholder_sweeper.rs" = 1004
+# #3859: 1004 -> 1014 (+10 production LoC) — the sweep loop now drains the new
+# abandon_request_store each pass, finalizing failure-path-stranded placeholders
+# to "중단됨" by message id (decoupled from the inflight lifecycle). Bugfix-only.
+"src/services/discord/placeholder_sweeper.rs" = 1014
 # #3479: turn_bridge/tmux_runtime.rs decomposed into tmux_runtime/ directory
 # modules (root tmux_runtime.rs 964 prod LoC + sub-1000-LoC
 # tmux_runtime/{interrupt_policy,process_table,pid_exit}.rs) — dropped below the

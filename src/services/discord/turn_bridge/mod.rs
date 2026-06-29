@@ -1524,20 +1524,30 @@ pub(super) fn spawn_turn_bridge(
             provider: Option<ProviderKind>,
             channel_id: u64,
             user_msg_id: u64,
+            token_hash: String,
         }
         impl Drop for InflightCleanupGuard {
             fn drop(&mut self) {
                 if let Some(ref provider) = self.provider {
+                    // #3859: this Drop runs on ANY abnormal exit (panic /
+                    // early-return) while the turn may still own a live
+                    // "🔄 처리 중" placeholder. Route through the abandon-request
+                    // helper — identical ownership guards to the plain guarded
+                    // clear, but it durably records the placeholder for the
+                    // placeholder sweeper to finalize to "중단됨" BEFORE deleting
+                    // the row (which still frees the channel immediately).
                     if self.user_msg_id != 0 {
-                        super::inflight::clear_inflight_state_if_matches(
+                        super::inflight::request_inflight_abandon_if_matches(
                             provider,
                             self.channel_id,
                             self.user_msg_id,
+                            &self.token_hash,
                         );
                     } else {
-                        super::inflight::clear_inflight_state_if_matches_zero_owned(
+                        super::inflight::request_inflight_abandon_if_matches_zero_owned(
                             provider,
                             self.channel_id,
+                            &self.token_hash,
                         );
                     }
                 }
@@ -1547,6 +1557,7 @@ pub(super) fn spawn_turn_bridge(
             provider: Some(provider.clone()),
             channel_id: channel_id.get(),
             user_msg_id: user_msg_id.map(|id| id.get()).unwrap_or(0),
+            token_hash: shared_owned.token_hash.clone(),
         };
 
         let mut inflight_state = bridge.inflight_state.clone();

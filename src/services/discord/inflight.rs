@@ -1966,6 +1966,235 @@ pub(super) fn clear_inflight_state_if_matches_zero_owned_in_root(
     }
 }
 
+/// #3859: true when the row anchors a finalizable "🔄 처리 중" placeholder — a real
+/// placeholder message id (not 0, and not the placeholderless shape where the
+/// anchor mirrors the user's own message id), that is still a PURE placeholder
+/// (no streamed assistant content) or an explicitly-active long-running card.
+/// Mirrors the placeholder sweeper's abandon-eligibility gate so partial-output
+/// failure rows keep their delivered text (no "중단됨" clobber) exactly as the
+/// pre-#3859 path did.
+fn row_has_finalizable_placeholder(state: &InflightTurnState) -> bool {
+    if state.current_msg_id == 0
+        || (state.user_msg_id != 0 && state.current_msg_id == state.user_msg_id)
+    {
+        return false;
+    }
+    state.long_running_placeholder_active
+        || (state.full_response.is_empty() && state.response_sent_offset == 0)
+}
+
+/// #3859: record a durable abandon-request for `state`'s placeholder so the
+/// async `placeholder_sweeper` drain finalizes it to "중단됨" — enqueued UNDER the
+/// sidecar lock and BEFORE the caller's unlink, so the request survives even if
+/// the process dies right after the delete.
+///
+/// Returns `true` when it is SAFE for the caller to delete the inflight row:
+/// either the row anchors no finalizable placeholder (nothing to strand) OR the
+/// abandon-request was DURABLY persisted. Returns `false` ONLY when a finalizable
+/// placeholder's record FAILED to persist (#3859 r5 — codex P1); the caller MUST
+/// then keep the row so a later sweeper pass retries and the placeholder is never
+/// stranded without a record. Invariant: never `(row deleted ∧ record absent)`.
+#[must_use]
+fn enqueue_abandon_request_for_row(
+    provider: &ProviderKind,
+    channel_id: u64,
+    token_hash: &str,
+    state: &InflightTurnState,
+) -> bool {
+    if !row_has_finalizable_placeholder(state) {
+        return true;
+    }
+    match super::abandon_request_store::enqueue(
+        provider,
+        token_hash,
+        channel_id,
+        super::abandon_request_store::AbandonRecord {
+            msg_id: state.current_msg_id,
+            started_at: state.started_at.clone(),
+            current_tool_line: state.current_tool_line.clone(),
+        },
+    ) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = channel_id,
+                msg_id = state.current_msg_id,
+                error = %error,
+                "abandon-request enqueue failed; PRESERVING inflight row so the placeholder is not stranded (sweeper retries next pass)"
+            );
+            false
+        }
+    }
+}
+
+/// #3859: failure-path cleanup that drives a stranded placeholder to a TERMINAL
+/// "중단됨" card WITHOUT keeping the inflight row alive.
+///
+/// Identical ownership guards to [`clear_inflight_state_if_matches`]
+/// (planned-restart / rebind-origin preserved; `UserMsgMismatch` for a newer
+/// owner; `expected_user_msg_id == 0` refused) — so a restart/rebind/foreign row
+/// is never enqueued or deleted. When the guards pass and the row anchors a
+/// finalizable placeholder, a durable abandon-request is enqueued (so the
+/// placeholder sweeper finalizes the "🔄 처리 중" card to "중단됨" by message id),
+/// then the row is DELETED — freeing the channel immediately like the pre-#3859
+/// path. The abandon-request is decoupled from the inflight lifecycle, so a
+/// re-adopt (new row + new placeholder) never collides with it (#3859 r4).
+pub(crate) fn request_inflight_abandon_if_matches(
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected_user_msg_id: u64,
+    token_hash: &str,
+) -> GuardedClearOutcome {
+    let Some(root) = inflight_runtime_root() else {
+        return GuardedClearOutcome::Missing;
+    };
+    request_inflight_abandon_if_matches_in_root(
+        &root,
+        provider,
+        channel_id,
+        expected_user_msg_id,
+        token_hash,
+    )
+}
+
+/// Root-explicit variant for unit tests (the inflight ops use `root`; the
+/// abandon-request store is env-rooted via `discord_abandon_requests_root`, so a
+/// test must also set `AGENTDESK_ROOT_DIR`).
+pub(super) fn request_inflight_abandon_if_matches_in_root(
+    root: &std::path::Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected_user_msg_id: u64,
+    token_hash: &str,
+) -> GuardedClearOutcome {
+    let path = inflight_state_path(root, provider, channel_id);
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return GuardedClearOutcome::IoError;
+    };
+    let Ok(data) = fs::read_to_string(&path) else {
+        return GuardedClearOutcome::Missing;
+    };
+    let Ok(state) = parse_inflight_state_content(&data) else {
+        return GuardedClearOutcome::Missing;
+    };
+    if state.restart_mode.is_some() {
+        return GuardedClearOutcome::PlannedRestartSkipped;
+    }
+    if state.rebind_origin {
+        return GuardedClearOutcome::RebindOriginSkipped;
+    }
+    if !state.matches_finalizer_turn_id(expected_user_msg_id) {
+        return GuardedClearOutcome::UserMsgMismatch;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(pre) = fs::metadata(&path) else {
+            return GuardedClearOutcome::Missing;
+        };
+        let Ok(post) = fs::metadata(&path) else {
+            return GuardedClearOutcome::Missing;
+        };
+        if pre.dev() != post.dev() || pre.ino() != post.ino() {
+            return GuardedClearOutcome::UserMsgMismatch;
+        }
+        let Ok(reread) = fs::read_to_string(&path) else {
+            return GuardedClearOutcome::Missing;
+        };
+        let Ok(restate) = parse_inflight_state_content(&reread) else {
+            return GuardedClearOutcome::Missing;
+        };
+        if !restate.matches_finalizer_turn_id(expected_user_msg_id)
+            || restate.restart_mode.is_some()
+            || restate.rebind_origin
+        {
+            return GuardedClearOutcome::UserMsgMismatch;
+        }
+    }
+    // Enqueue BEFORE unlink (durable handoff). #3859 r5 (codex P1): if a
+    // FINALIZABLE placeholder's record fails to persist, DO NOT delete the row —
+    // return IoError so the sweeper retries (the row stays alive and the
+    // placeholder is finalized later). Never delete the row without its record.
+    if !enqueue_abandon_request_for_row(provider, channel_id, token_hash, &state) {
+        return GuardedClearOutcome::IoError;
+    }
+    match fs::remove_file(&path) {
+        Ok(()) => GuardedClearOutcome::Cleared,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = channel_id,
+                expected_user_msg_id = expected_user_msg_id,
+                error = %error,
+                "inflight abandon-request remove_file failed; treating as IoError so sweeper retries"
+            );
+            GuardedClearOutcome::IoError
+        }
+    }
+}
+
+/// #3859 zero-id variant — mirrors [`clear_inflight_state_if_matches_zero_owned`]
+/// guards, then enqueues an abandon-request (if the row anchors a finalizable
+/// placeholder) and deletes the row.
+pub(crate) fn request_inflight_abandon_if_matches_zero_owned(
+    provider: &ProviderKind,
+    channel_id: u64,
+    token_hash: &str,
+) -> GuardedClearOutcome {
+    let Some(root) = inflight_runtime_root() else {
+        return GuardedClearOutcome::Missing;
+    };
+    request_inflight_abandon_if_matches_zero_owned_in_root(&root, provider, channel_id, token_hash)
+}
+
+/// Root-explicit variant of [`request_inflight_abandon_if_matches_zero_owned`].
+pub(super) fn request_inflight_abandon_if_matches_zero_owned_in_root(
+    root: &std::path::Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    token_hash: &str,
+) -> GuardedClearOutcome {
+    let path = inflight_state_path(root, provider, channel_id);
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return GuardedClearOutcome::IoError;
+    };
+    let Ok(data) = fs::read_to_string(&path) else {
+        return GuardedClearOutcome::Missing;
+    };
+    let Ok(state) = serde_json::from_str::<InflightTurnState>(&data) else {
+        return GuardedClearOutcome::Missing;
+    };
+    if state.restart_mode.is_some() {
+        return GuardedClearOutcome::PlannedRestartSkipped;
+    }
+    if state.rebind_origin {
+        return GuardedClearOutcome::RebindOriginSkipped;
+    }
+    if state.user_msg_id != 0 {
+        return GuardedClearOutcome::UserMsgMismatch;
+    }
+    // #3859 r5: preserve the row if a finalizable placeholder's record fails to
+    // persist (never delete the row without its abandon-request).
+    if !enqueue_abandon_request_for_row(provider, channel_id, token_hash, &state) {
+        return GuardedClearOutcome::IoError;
+    }
+    match fs::remove_file(&path) {
+        Ok(()) => GuardedClearOutcome::Cleared,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = channel_id,
+                error = %error,
+                "inflight zero-owned abandon-request remove_file failed; treating as IoError so sweeper retries"
+            );
+            GuardedClearOutcome::IoError
+        }
+    }
+}
+
 fn clear_inflight_state_if_matches_identity_in_root(
     root: &std::path::Path,
     provider: &ProviderKind,
@@ -2817,6 +3046,8 @@ mod stall_recovery_tests {
         persist_watcher_relay_watermark_locked_in_root,
         persist_watcher_stream_progress_locked_in_root,
         refresh_inflight_last_offset_if_matches_identity_in_root,
+        request_inflight_abandon_if_matches_in_root,
+        request_inflight_abandon_if_matches_zero_owned_in_root, row_has_finalizable_placeholder,
         save_existing_inflight_rebind_adoption_if_matches_identity_in_root,
         save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_identity_in_root,
         save_inflight_state_if_matches_identity_in_root, save_inflight_state_in_root,
@@ -3138,6 +3369,244 @@ mod stall_recovery_tests {
         }
         let json = serde_json::to_string_pretty(state).expect("serialize state");
         super::atomic_write(&path, &json).expect("force write state");
+    }
+
+    // ---- #3859: failure-path abandon-request (durable handoff, row deleted) ----
+
+    fn spinner_row(channel_id: u64, user_msg_id: u64, current_msg_id: u64) -> InflightTurnState {
+        InflightTurnState::new(
+            ProviderKind::Claude,
+            channel_id,
+            Some("adk-claude".to_string()),
+            7,
+            user_msg_id,
+            current_msg_id,
+            "prompt".to_string(),
+            Some("session-3859".to_string()),
+            Some("AgentDesk-claude-adk-claude".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            0,
+        )
+    }
+
+    /// `row_has_finalizable_placeholder` gate: a pure spinner is finalizable; a
+    /// placeholderless (`current_msg_id == user_msg_id`) or partial-output row is
+    /// not (so the failure path deletes the row WITHOUT a "중단됨" clobber).
+    #[test]
+    fn finalizable_placeholder_gate_matches_pure_spinner_only() {
+        // #3859 r5 (codex P2): seed a temp runtime root — `spinner_row` builds via
+        // `InflightTurnState::new`, which loads the generation and trips the #3293
+        // "test must set AGENTDESK_ROOT_DIR" guard under an isolated run.
+        let (_lock, _temp, _env) = status_panel_test_root();
+        let mut state = spinner_row(100, 8, 9001);
+        assert!(row_has_finalizable_placeholder(&state), "pure spinner");
+
+        let placeholderless = spinner_row(100, 8, 8);
+        assert!(
+            !row_has_finalizable_placeholder(&placeholderless),
+            "anchor mirrors user msg → no separate placeholder card"
+        );
+
+        let mut zero = spinner_row(100, 0, 0);
+        zero.current_msg_id = 0;
+        assert!(!row_has_finalizable_placeholder(&zero), "no anchor");
+
+        state.full_response = "partial answer".to_string();
+        assert!(
+            !row_has_finalizable_placeholder(&state),
+            "partial output → keep delivered text, no clobber"
+        );
+        state.full_response.clear();
+        state.response_sent_offset = 5;
+        assert!(!row_has_finalizable_placeholder(&state), "streamed offset");
+        state.response_sent_offset = 0;
+        state.long_running_placeholder_active = true;
+        state.full_response = "prose then long-running card".to_string();
+        assert!(
+            row_has_finalizable_placeholder(&state),
+            "explicit long-running placeholder is finalizable even with prose"
+        );
+    }
+
+    /// The failure path on a pure-spinner row: enqueue a durable abandon-request
+    /// (so the sweeper finalizes the "🔄 처리 중" card to "중단됨" by msg id) AND
+    /// DELETE the inflight row — freeing the channel immediately (no flag-on-live-
+    /// row, no busy regression).
+    #[test]
+    fn abandon_request_enqueues_record_and_deletes_row() {
+        let (_lock, temp, _env) = status_panel_test_root();
+        let state = spinner_row(4242, 8, 9001);
+        save_inflight_state_in_root(temp.path(), &state).expect("seed inflight row");
+
+        let outcome = request_inflight_abandon_if_matches_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            4242,
+            8,
+            "tok",
+        );
+        assert_eq!(outcome, GuardedClearOutcome::Cleared);
+
+        // Row is DELETED (channel free).
+        assert!(
+            load_inflight_states_from_root(temp.path(), &ProviderKind::Claude).is_empty(),
+            "inflight row must be deleted (channel freed immediately)"
+        );
+        // Durable abandon-request carries the placeholder id + render fields.
+        let pending =
+            super::super::abandon_request_store::load_pending(&ProviderKind::Claude, "tok");
+        assert_eq!(pending.len(), 1, "one durable abandon-request");
+        assert_eq!(pending[0].0, 4242);
+        assert_eq!(pending[0].1.msg_id, 9001);
+        assert_eq!(pending[0].1.started_at, state.started_at);
+    }
+
+    /// A placeholderless row (anchor == user msg) and a partial-output row are
+    /// DELETED but NOT enqueued — no "중단됨" clobber of the user's message / the
+    /// delivered partial answer.
+    #[test]
+    fn abandon_request_deletes_without_enqueue_for_non_finalizable_rows() {
+        let (_lock, temp, _env) = status_panel_test_root();
+        // Placeholderless: current_msg_id == user_msg_id.
+        let pl = spinner_row(4243, 8, 8);
+        save_inflight_state_in_root(temp.path(), &pl).expect("seed");
+        assert_eq!(
+            request_inflight_abandon_if_matches_in_root(
+                temp.path(),
+                &ProviderKind::Claude,
+                4243,
+                8,
+                "tok"
+            ),
+            GuardedClearOutcome::Cleared
+        );
+
+        // Partial-output row.
+        let mut partial = spinner_row(4244, 9, 9100);
+        partial.full_response = "partial".to_string();
+        force_write_state(temp.path(), &partial);
+        assert_eq!(
+            request_inflight_abandon_if_matches_in_root(
+                temp.path(),
+                &ProviderKind::Claude,
+                4244,
+                9,
+                "tok"
+            ),
+            GuardedClearOutcome::Cleared
+        );
+
+        assert!(
+            load_inflight_states_from_root(temp.path(), &ProviderKind::Claude).is_empty(),
+            "both rows deleted (channels freed)"
+        );
+        assert!(
+            super::super::abandon_request_store::load_pending(&ProviderKind::Claude, "tok")
+                .is_empty(),
+            "non-finalizable rows must NOT enqueue an abandon-request"
+        );
+    }
+
+    /// Restart-mode / rebind-origin / newer-owner rows are PRESERVED: no enqueue,
+    /// no delete (recovery owns their lifecycle).
+    #[test]
+    fn abandon_request_preserves_recovery_owned_and_newer_owner_rows() {
+        let (_lock, temp, _env) = status_panel_test_root();
+
+        let mut restart = spinner_row(4245, 8, 9001);
+        restart.restart_mode = Some(InflightRestartMode::DrainRestart);
+        save_inflight_state_in_root(temp.path(), &restart).expect("seed restart");
+        assert_eq!(
+            request_inflight_abandon_if_matches_in_root(
+                temp.path(),
+                &ProviderKind::Claude,
+                4245,
+                8,
+                "tok"
+            ),
+            GuardedClearOutcome::PlannedRestartSkipped
+        );
+
+        let mut rebind = spinner_row(4246, 0, 9002);
+        rebind.rebind_origin = true;
+        save_inflight_state_in_root(temp.path(), &rebind).expect("seed rebind");
+        assert_eq!(
+            request_inflight_abandon_if_matches_zero_owned_in_root(
+                temp.path(),
+                &ProviderKind::Claude,
+                4246,
+                "tok"
+            ),
+            GuardedClearOutcome::RebindOriginSkipped
+        );
+
+        let newer = spinner_row(4247, 99, 9003);
+        save_inflight_state_in_root(temp.path(), &newer).expect("seed newer");
+        assert_eq!(
+            request_inflight_abandon_if_matches_in_root(
+                temp.path(),
+                &ProviderKind::Claude,
+                4247,
+                8, // stale signal for an older turn
+                "tok"
+            ),
+            GuardedClearOutcome::UserMsgMismatch
+        );
+
+        // All three row FILES survive on disk (the helpers returned early without
+        // deleting). Check paths directly — `load_inflight_states_from_root` GCs a
+        // generation-mismatched restart row and filters rebind-origin rows on read.
+        for ch in [4245u64, 4246, 4247] {
+            assert!(
+                inflight_state_path(temp.path(), &ProviderKind::Claude, ch).exists(),
+                "preserved row {ch} must survive on disk"
+            );
+        }
+        assert!(
+            super::super::abandon_request_store::load_pending(&ProviderKind::Claude, "tok")
+                .is_empty(),
+            "preserved rows must NOT enqueue"
+        );
+    }
+
+    /// #3859 r5 (codex P1): if the abandon-request fails to persist for a
+    /// finalizable placeholder, the inflight row MUST be PRESERVED (outcome
+    /// IoError) — never deleted without a record, which would re-strand the
+    /// placeholder forever (the original #3859 bug on the error path).
+    #[test]
+    fn abandon_request_preserves_row_when_enqueue_fails() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        // Seed the inflight row in its own temp root.
+        let inflight_temp = TempDir::new().unwrap();
+        // Point AGENTDESK_ROOT_DIR (→ abandon-requests root) at a FILE so the
+        // store's atomic_write fails → enqueue returns Err.
+        let bad = TempDir::new().unwrap();
+        let bad_root = bad.path().join("not_a_dir");
+        std::fs::write(&bad_root, b"x").expect("seed file at root path");
+        let _env = set_agentdesk_root_for_test(&bad_root);
+
+        let state = spinner_row(4248, 8, 9001);
+        save_inflight_state_in_root(inflight_temp.path(), &state).expect("seed inflight row");
+
+        let outcome = request_inflight_abandon_if_matches_in_root(
+            inflight_temp.path(),
+            &ProviderKind::Claude,
+            4248,
+            8,
+            "tok",
+        );
+        assert_eq!(
+            outcome,
+            GuardedClearOutcome::IoError,
+            "enqueue failure must NOT delete the row"
+        );
+        assert!(
+            inflight_state_path(inflight_temp.path(), &ProviderKind::Claude, 4248).exists(),
+            "inflight row must be PRESERVED so the placeholder is not stranded"
+        );
     }
 
     /// #3558 core: a streaming progress write must PRESERVE the on-disk

@@ -16,8 +16,8 @@
 | `src/services/codex_tui/rollout_tail.rs` | 1276 | discord-relay | 2026-10-31 | #3843 |
 | `src/services/discord/health/recovery.rs` | 2134 | discord-relay | 2026-10-31 | #3839 |
 | `src/services/discord/idle_recap.rs` | 1252 | discord-relay | 2026-08-31 | #3405 |
-| `src/services/discord/inflight.rs` | 2802 | discord-relay | 2026-10-31 | #3835 |
-| `src/services/discord/placeholder_sweeper.rs` | 1004 | discord-relay | 2026-08-31 | #3405 |
+| `src/services/discord/inflight.rs` | 3031 | discord-relay | 2026-10-31 | #3835 |
+| `src/services/discord/placeholder_sweeper.rs` | 1014 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/recovery_engine.rs` | 3899 | discord-relay | 2026-10-31 | #3834 |
 | `src/services/discord/router/intake_gate.rs` | 1587 | discord-relay | 2026-10-31 | #3838 |
 | `src/services/discord/router/message_handler/intake_turn.rs` | 3616 | discord-relay | 2026-10-31 | #3837 |
@@ -25,7 +25,7 @@
 | `src/services/discord/tmux.rs` | 1477 | discord-relay | 2026-10-31 | #3841 |
 | `src/services/discord/tmux_watcher.rs` | 7058 | discord-relay | 2026-10-31 | #3832 |
 | `src/services/discord/tui_direct_pending_start.rs` | 1048 | discord-relay | 2026-08-31 | #3540 |
-| `src/services/discord/turn_bridge/mod.rs` | 6237 | discord-relay | 2026-08-31 | #3038 |
+| `src/services/discord/turn_bridge/mod.rs` | 6248 | discord-relay | 2026-08-31 | #3038 |
 | `src/services/discord/turn_finalizer.rs` | 1038 | discord-finalizer | 2026-08-31 | #3016 |
 | `src/services/discord/voice_barge_in.rs` | 2781 | voice-runtime | 2026-08-31 | #3405 |
 | `src/services/discord/watchers/lifecycle.rs` | 2111 | discord-relay | 2026-10-31 | #3840 |
@@ -83,7 +83,7 @@
 | `src/services/discord/commands/text_commands.rs` | 1475 |
 | `src/services/discord/formatting.rs` | 2801 |
 | `src/services/discord/meeting_orchestrator.rs` | 3222 |
-| `src/services/discord/mod.rs` | 4153 |
+| `src/services/discord/mod.rs` | 4154 |
 | `src/services/discord/router/message_handler/headless_turn.rs` | 1543 |
 | `src/services/discord_config_audit.rs` | 1288 |
 | `src/services/dispatched_sessions.rs` | 1550 |

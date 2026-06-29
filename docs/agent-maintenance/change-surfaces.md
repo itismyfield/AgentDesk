@@ -1091,7 +1091,10 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6237 lines; production LoC; +4
+  - `src/services/discord/turn_bridge/mod.rs` (6248 lines; production LoC; +11
+    from #3859 threading `token_hash` into the `InflightCleanupGuard` so its
+    abnormal-exit cleanup routes through `request_inflight_abandon_if_matches`
+    (durable abandon-request enqueue + row delete) instead of a bare clear; +4
     from #3751 stamping the delivery-record owner channel into inflight state
     before cross-channel restart recovery reads durable anchors; the BRIDGE
     spawn/turn-lifecycle surface — `spawn_turn_bridge` and the per-channel
@@ -1315,7 +1318,15 @@
     2026-08-31, #3036)).
   - `src/services/discord/{commands/text_commands.rs,
     discord_config_audit.rs, router/intake_gate.rs}` (all 1000+ production
-    lines) and `src/services/discord/inflight.rs` (2802 lines; +116 from current
+    lines) and `src/services/discord/inflight.rs` (3031 lines; +229 from #3859
+    `request_inflight_abandon_if_matches{,_zero_owned}` — the failure-path
+    helpers that enqueue a durable abandon-request (so the placeholder sweeper
+    finalizes the stranded "🔄 처리 중" card to "중단됨" by message id) and then
+    DELETE the inflight row, freeing the channel immediately like the pre-#3859
+    path (the row is no longer kept alive, dissolving the flag-on-live-row race
+    class). r5: the enqueue surfaces durable-write failures so the row is
+    PRESERVED (outcome IoError) when a finalizable placeholder's record cannot be
+    written — never `(row deleted ∧ record absent)`; +116 from current
     inventory refresh after the relay split stack landed; #3680 relay
     recovery review hardening; #3685 exposes the inflight sidecar lock
     crate-wide for locked legacy rebind backfill; #3715 moved the #3635
@@ -1326,7 +1337,10 @@
     must not run compatibility backfills or cleanup writes; #3835 moved the
     watcher progress / terminal commit / relay-watermark locked update helpers
     into `src/services/discord/inflight/watcher_state.rs`).
-  - `src/services/discord/placeholder_sweeper.rs` (1004 lines; crossed the giant
+  - `src/services/discord/placeholder_sweeper.rs` (1014 lines; +10 from #3859
+    draining the new `abandon_request_store` each sweep pass (finalizing
+    failure-path-stranded placeholders to "중단됨" by message id, independent of
+    the inflight lifecycle); crossed the giant
     threshold in #3635 when the dead-watcher reap branch joined the async
     rebind-origin sweep arm — tracked decompose target, see `giant-file-registry.md` (owner
     `discord-relay`, deadline 2026-08-31, #3405)).

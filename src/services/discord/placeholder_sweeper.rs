@@ -977,21 +977,31 @@ pub(super) fn spawn_placeholder_sweeper(
             // owns this reclaim so an aborted anchor always converges (#3282).
             let drained_abort_markers =
                 super::tui_direct_abort_marker::sweep_expired(&shared, &provider).await;
+            // #3859: finalize placeholders stranded by a failure-path inflight
+            // eviction (turn-task Drop / heartbeat-gap sweeper). Each durable
+            // abandon-request is edited to its terminal "중단됨" card BY MESSAGE
+            // ID — decoupled from the inflight lifecycle, so a re-adopt (new row
+            // + new placeholder) never collides with it.
+            let drained_abandon_requests =
+                super::abandon_request_store::drain(&http, &shared, &provider, &shared.token_hash)
+                    .await;
             sweeps_since_heartbeat = sweeps_since_heartbeat.saturating_add(1);
             if should_log_sweep_report(report, sweeps_since_heartbeat)
                 || drained > 0
                 || drained_abort_markers > 0
+                || drained_abandon_requests > 0
             {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
-                    "  [{ts}] 🧹 placeholder sweeper ({}): scanned={} stalled={} abandoned={} reclaimed_panels={} drained_orphans={} drained_abort_markers={}",
+                    "  [{ts}] 🧹 placeholder sweeper ({}): scanned={} stalled={} abandoned={} reclaimed_panels={} drained_orphans={} drained_abort_markers={} drained_abandon_requests={}",
                     provider.as_str(),
                     report.scanned,
                     report.stalled,
                     report.abandoned,
                     report.reclaimed_panels,
                     drained,
-                    drained_abort_markers
+                    drained_abort_markers,
+                    drained_abandon_requests
                 );
                 sweeps_since_heartbeat = 0;
             }

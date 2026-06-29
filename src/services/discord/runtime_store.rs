@@ -129,6 +129,19 @@ pub(super) fn discord_status_panel_orphans_root() -> Option<PathBuf> {
     runtime_root().map(|root| root.join("discord_status_panel_orphans"))
 }
 
+/// #3859: durable abandon-request store. A SYNC failure-path site (turn-task
+/// `InflightCleanupGuard` Drop, heartbeat-gap sweeper) that evicts an inflight
+/// row with a live "🔄 처리 중" placeholder cannot drive the async Discord edit
+/// itself, and deleting the row strands the placeholder forever. Instead it
+/// records `(channel_id, placeholder_msg_id, started_at, current_tool_line)`
+/// here — independent of the inflight lifecycle — and deletes the row
+/// immediately (freeing the channel, like the pre-#3859 path). The placeholder
+/// sweeper drains this store and finalizes each placeholder to its terminal
+/// "중단됨" card BY MESSAGE ID. Mirrors `discord_status_panel_orphans`.
+pub(super) fn discord_abandon_requests_root() -> Option<PathBuf> {
+    runtime_root().map(|root| root.join("discord_abandon_requests"))
+}
+
 /// #3607: durable UI-only obligations for terminal-delivered turns whose TUI
 /// quiescence gate timed out after the answer was already committed. This store
 /// owns only status-card edits; it is intentionally separate from inflight and
