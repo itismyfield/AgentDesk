@@ -509,7 +509,12 @@ src/
 │   │   ├── router/
 │   │   │   ├── intake_gate/
 │   │   │   │   ├── busy_duplicate_notice.rs
-│   │   │   │   └── node_override_routing.rs
+│   │   │   │   ├── component_events.rs
+│   │   │   │   ├── gate.rs
+│   │   │   │   ├── node_override_routing.rs
+│   │   │   │   ├── queue_effects.rs
+│   │   │   │   ├── reaction_remove.rs
+│   │   │   │   └── stale_turn.rs
 │   │   │   ├── message_handler/
 │   │   │   │   ├── attachments.rs
 │   │   │   │   ├── control.rs
