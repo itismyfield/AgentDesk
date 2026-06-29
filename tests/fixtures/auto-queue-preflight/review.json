@@ -19,6 +19,15 @@
       "batch_phase": 0,
       "thread_group": 0,
       "phase_gate_kind": "pr-confirm"
+    },
+    {
+      "issue_number": 3800102,
+      "title": "Fixture: controlled rework loop",
+      "description": "Synthetic review fixture card that exercises review-decision accept -> rework -> review re-entry in the temporary database only.",
+      "priority": "high",
+      "batch_phase": 0,
+      "thread_group": 1,
+      "phase_gate_kind": "pr-confirm"
     }
   ]
 }

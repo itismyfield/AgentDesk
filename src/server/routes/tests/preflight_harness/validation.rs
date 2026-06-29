@@ -151,7 +151,7 @@ pub(crate) fn validate_preflight_snapshot(snapshot: &PreflightSnapshot) -> Vec<S
 fn is_entry_bound_dispatch(dispatch_type: Option<&str>) -> bool {
     matches!(
         dispatch_type,
-        None | Some("implementation") | Some("plan") | Some("plan-review")
+        None | Some("implementation") | Some("rework") | Some("plan") | Some("plan-review")
     )
 }
 

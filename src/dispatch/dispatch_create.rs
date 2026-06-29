@@ -15,6 +15,7 @@ use super::dispatch_context::{
     dispatch_type_requires_fresh_worktree, ensure_card_worktree,
     inject_review_dispatch_identifiers, json_string_field, resolve_card_target_repo_ref,
     resolve_card_worktree, resolve_parent_dispatch_context,
+    sandbox_preflight_card_disables_external_side_effects,
 };
 use super::dispatch_query::query_dispatch_row_pg;
 use super::{DispatchCreateOptions, cancel_dispatch_and_reset_auto_queue_on_pg_tx};
@@ -701,6 +702,8 @@ async fn create_dispatch_core_internal(
             .get("phase_gate")
             .and_then(|value| value.as_object())
             .is_some();
+        let sandbox_preflight_without_external_side_effects =
+            sandbox_preflight_card_disables_external_side_effects(pg_pool, kanban_card_id).await;
         let worktree_target = if let Some((wt_path, wt_branch)) =
             dispatch_context_worktree_target(&context_with_session_strategy)?
         {
@@ -708,20 +711,24 @@ async fn create_dispatch_core_internal(
         } else if phase_gate_sidecar {
             None
         } else if dispatch_type_requires_fresh_worktree(Some(dispatch_type)) {
-            let (wt_path, wt_branch, _, created) = ensure_card_worktree(
-                pg_pool,
-                kanban_card_id,
-                Some(&context_with_session_strategy),
-            )
-            .await?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Cannot create {} dispatch for card {}: fresh worktree required but card issue/repo could not be resolved",
-                    dispatch_type,
-                    kanban_card_id
+            if sandbox_preflight_without_external_side_effects {
+                None
+            } else {
+                let (wt_path, wt_branch, _, created) = ensure_card_worktree(
+                    pg_pool,
+                    kanban_card_id,
+                    Some(&context_with_session_strategy),
                 )
-            })?;
-            Some((wt_path, Some(wt_branch), created))
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Cannot create {} dispatch for card {}: fresh worktree required but card issue/repo could not be resolved",
+                        dispatch_type,
+                        kanban_card_id
+                    )
+                })?;
+                Some((wt_path, Some(wt_branch), created))
+            }
         } else {
             resolve_card_worktree(
                 pg_pool,
