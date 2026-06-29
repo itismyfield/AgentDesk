@@ -385,6 +385,11 @@
       "path": "migrations/postgres/0074_local_memory.sql",
       "sha256": "1e246fa4115fc7be5150e0f9b695501fe23061cf9be660aa986becf1ef98ee19",
       "version": 74
+    },
+    {
+      "path": "migrations/postgres/0075_turns_archive.sql",
+      "sha256": "70aabbc0dfb0242c9e19c067f6bfb2a3cd4093fbda6f4230555d2878d5120167",
+      "version": 75
     }
   ],
   "version": 1
