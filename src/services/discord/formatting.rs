@@ -1392,15 +1392,17 @@ No response requested.\n\
         }
 
         #[test]
-        fn a0_long_message_reply_builders_add_compact_continuation_context() {
+        fn a0_long_message_reply_builders_split_without_continuation_markers() {
             let body = "a".repeat(2500);
             let replies = long_message_reply_builders(&body);
             assert_eq!(replies.len(), 2);
             let first = replies[0].content.as_ref().expect("first content");
             let second = replies[1].content.as_ref().expect("second content");
 
-            assert!(first.starts_with("[1/2]\n"));
-            assert!(second.starts_with("[2/2]\n"));
+            // Continuation markers ([n/m]) were removed per operator request:
+            // the relay must not prepend chunk-index prefixes.
+            assert!(!first.starts_with('['));
+            assert!(!second.starts_with('['));
             assert!(first.len() <= DISCORD_MSG_LIMIT);
             assert!(second.len() <= DISCORD_MSG_LIMIT);
         }
@@ -1788,7 +1790,7 @@ pub(super) async fn send_long_message_ctx(ctx: Context<'_>, text: &str) -> Resul
         return Ok(());
     }
 
-    let chunks = super::semantic_boundaries::add_continuation_context(split_message(text));
+    let chunks = split_message(text);
     let total = chunks.len();
     for (i, chunk) in chunks.iter().enumerate() {
         tracing::debug!(
@@ -1817,7 +1819,7 @@ pub(in crate::services::discord) fn long_message_reply_builders(
         return vec![poise::CreateReply::default().content(text.to_string())];
     }
 
-    super::semantic_boundaries::add_continuation_context(split_message(text))
+    split_message(text)
         .into_iter()
         .map(|chunk| poise::CreateReply::default().content(chunk))
         .collect()
@@ -1916,7 +1918,7 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference(
         }
     }
 
-    let chunks = super::semantic_boundaries::add_continuation_context(split_message(text));
+    let chunks = split_message(text);
     let total = chunks.len();
     // #3082 part B: hold the per-channel answer-flush barrier for the whole
     // multi-chunk send so a queued-turn notice POST cannot interleave between
@@ -1996,7 +1998,7 @@ pub(super) async fn send_long_message_raw_with_rollback(
     shared: &Arc<SharedData>,
 ) -> Result<Vec<MessageId>, Error> {
     let payload_byte_len = text.len();
-    let chunks = super::semantic_boundaries::add_continuation_context(split_message(text));
+    let chunks = split_message(text);
     let total = chunks.len();
     let rollback_key = replace_continuation_rollback_key(channel_id, rollback_anchor_msg_id);
 
@@ -2281,7 +2283,7 @@ pub(super) async fn replace_long_message_raw_with_outcome(
     shared: &Arc<SharedData>,
 ) -> Result<ReplaceLongMessageOutcome, Error> {
     let payload_byte_len = text.len();
-    let chunks = super::semantic_boundaries::add_continuation_context(split_message(text));
+    let chunks = split_message(text);
     let total = chunks.len();
     let Some(first_chunk) = chunks.first() else {
         tracing::debug!(

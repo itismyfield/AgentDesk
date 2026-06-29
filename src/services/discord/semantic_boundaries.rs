@@ -209,35 +209,6 @@ pub(in crate::services::discord) fn message_split_boundary(
     }
 }
 
-fn continuation_context_prefix(index: usize, total: usize) -> String {
-    let full = format!("[{}/{}]\n", index + 1, total);
-    if full.len() <= 10 {
-        return full;
-    }
-    let partial = format!("[{}]\n", index + 1);
-    if partial.len() <= 10 {
-        partial
-    } else {
-        "[+]\n".to_string()
-    }
-}
-
-pub(in crate::services::discord) fn add_continuation_context(chunks: Vec<String>) -> Vec<String> {
-    if chunks.len() <= 1 {
-        return chunks;
-    }
-    let total = chunks.len();
-    chunks
-        .into_iter()
-        .enumerate()
-        .map(|(index, chunk)| {
-            let prefix = continuation_context_prefix(index, total);
-            debug_assert!(prefix.len() <= 10);
-            format!("{prefix}{chunk}")
-        })
-        .collect()
-}
-
 pub(in crate::services::discord) fn semantic_chunk_separator_needed(
     prefix: &str,
     incoming: &str,
