@@ -1282,8 +1282,18 @@ elif [ -f "$REL_BINARY" ]; then
     # binary atomically replaces it; no window where both copies are gone.
     # -p preserves mode/owner (and, since REL_BINARY was just unlocked above, the
     # copy is not immutable).
+    #
+    # #3858 (re-review finding 1): write the backup ATOMICALLY. A cp -p straight
+    # to the final .prev name leaves a truncated .prev if the copy is interrupted
+    # (SIGKILL / disk-full / power-loss); a later run's "leftover .prev =
+    # last-known-good" branch above would then preserve that corrupt backup, and a
+    # post-promotion failure could roll back onto a broken binary. Copy to a temp
+    # sibling on the same filesystem, then rename(2): .prev is only ever the
+    # complete old or complete new file, and an interrupted copy leaves only a
+    # .prev.tmp, which the `[ -f "$REL_BINARY_BACKUP" ]` guard never consumes.
     echo "▸ Backing up current release binary for rollback..."
-    cp -p "$REL_BINARY" "$REL_BINARY_BACKUP"
+    cp -p "$REL_BINARY" "$REL_BINARY_BACKUP.tmp"
+    mv -f "$REL_BINARY_BACKUP.tmp" "$REL_BINARY_BACKUP"
 fi
 
 echo "▸ Promoting staged binary..."
@@ -1507,6 +1517,9 @@ DEPLOY_OK=1
 chflags uchg "$REL_BINARY" 2>/dev/null || true
 chflags nouchg "$REL_BINARY_BACKUP" 2>/dev/null || true
 rm -f "$REL_BINARY_BACKUP" 2>/dev/null || true
+# #3858 (re-review finding 1): also drop any stray atomic-backup temp so an
+# interrupted prior backup copy never lingers in bin/.
+rm -f "$REL_BINARY_BACKUP.tmp" 2>/dev/null || true
 
 if _health_json_field_exists "${WAIT_FOR_HTTP_SERVICE_LAST_HEALTH_JSON:-}" "fully_recovered" \
   && ! _health_json_field_is_true "${WAIT_FOR_HTTP_SERVICE_LAST_HEALTH_JSON:-}" "fully_recovered"; then
