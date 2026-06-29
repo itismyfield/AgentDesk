@@ -2284,8 +2284,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         if watcher_streaming_rollover_should_skip(current_portion) {
                             break;
                         }
-                        let Some(plan) = plan_streaming_rollover(current_portion, &status_block)
-                        else {
+                        let Some(plan) = plan_streaming_rollover(
+                            current_portion,
+                            &status_block,
+                            // #3883: prefix already frozen for this message lets
+                            // the source redactor carry inside-leaked-block
+                            // state across rollover chunks.
+                            full_response.get(..response_sent_offset).unwrap_or(""),
+                        ) else {
                             break;
                         };
 

@@ -1270,7 +1270,7 @@ mod tests {
             .max(1);
         let current_portion = "x".repeat(expected_body_budget + 1);
         let plan =
-            super::super::formatting::plan_streaming_rollover(&current_portion, &status_block)
+            super::super::formatting::plan_streaming_rollover(&current_portion, &status_block, "")
                 .expect("body should roll over after reserving the bounded footer");
 
         assert!(footer.len() <= max_footer_len);
@@ -1285,7 +1285,7 @@ mod tests {
         let status_block = super::compose_footer_status_block("⠸", panel);
         let current_portion = "streamed body ".repeat(220);
         let plan =
-            super::super::formatting::plan_streaming_rollover(&current_portion, &status_block)
+            super::super::formatting::plan_streaming_rollover(&current_portion, &status_block, "")
                 .expect("body should roll over after reserving the footer");
         let seed = super::super::formatting::build_streaming_placeholder_text("", &status_block);
 

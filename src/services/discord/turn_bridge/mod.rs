@@ -3426,9 +3426,14 @@ pub(super) fn spawn_turn_bridge(
                     if bridge_streaming_rollover_should_skip(current_portion) {
                         break;
                     }
-                    let Some(plan) =
-                        super::formatting::plan_streaming_rollover(current_portion, &status_block)
-                    else {
+                    let Some(plan) = super::formatting::plan_streaming_rollover(
+                        current_portion,
+                        &status_block,
+                        // #3883: prefix already frozen for this message, so the
+                        // source redactor can carry inside-leaked-block state
+                        // across rollover chunks.
+                        full_response.get(..response_sent_offset).unwrap_or(""),
+                    ) else {
                         break;
                     };
 

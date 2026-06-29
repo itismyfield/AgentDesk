@@ -1091,7 +1091,9 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6237 lines; production LoC; +4
+  - `src/services/discord/turn_bridge/mod.rs` (6242 lines; production LoC; +5
+    from #3883 passing the already-frozen prefix into `plan_streaming_rollover`
+    so streaming relay chunks redact leaked tool-call XML statefully; +4
     from #3751 stamping the delivery-record owner channel into inflight state
     before cross-channel restart recovery reads durable anchors; the BRIDGE
     spawn/turn-lifecycle surface — `spawn_turn_bridge` and the per-channel
@@ -1236,7 +1238,10 @@
     `turn_finalizer/watcher_backstop.rs` (watcher far-backstop tunables +
     terminal-or-defer verdict pair). Bugfix only outside a
     finalizer-decomposition plan).
-  - `src/services/discord/formatting.rs` (2801 lines; #3807 wires semantic
+  - `src/services/discord/formatting.rs` (2813 lines; #3883 redacts leaked
+    tool-call XML from the streaming `frozen_chunk` at the rollover source via
+    `response_sanitizer::redact_streaming_frozen_chunk`, covering both the
+    turn_bridge and tmux_watcher send sites with one change; #3807 wires semantic
     sentence-boundary callsites while keeping the shared boundary classifier
     and compact continuation-context helper in `semantic_boundaries.rs`;
     worker-local presentation logic only, no relay ownership/lease change.

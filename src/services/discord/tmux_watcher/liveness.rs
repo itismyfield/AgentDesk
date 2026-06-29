@@ -161,6 +161,7 @@ mod tests {
         let raw_plan = crate::services::discord::formatting::plan_streaming_rollover(
             &current_portion,
             status_block,
+            "",
         )
         .expect("raw notification would otherwise roll over");
 

@@ -113,6 +113,80 @@ pub(crate) fn sanitize_hidden_context_and_strip_chrome(input: &str) -> String {
 /// would clobber legitimate prose such as `Vec<T>`, `a < b`, HTML examples, or
 /// autolinks like `<https://example>`.
 fn redact_tool_call_wrapper_markup(input: &str) -> String {
+    let WrapperWalk {
+        out, redacted_any, ..
+    } = redact_wrapper_markup_walk(input, false, false);
+    if redacted_any {
+        tracing::warn!(
+            "redacted leaked tool-call wrapper markup from outbound Discord relay (#3883)"
+        );
+    }
+    trim_blank_edges(out)
+}
+
+/// Redact leaked tool-call wrapper markup from a single STREAMING frozen chunk
+/// (#3883). The streaming rollover path freezes contiguous slices of the raw
+/// accumulated response straight to Discord, bypassing the non-streaming relay
+/// sanitizer. A `<invoke>` opener can land in chunk N while its `</invoke>`
+/// closer only arrives in chunk N+k, with all-interior chunks in between that
+/// contain no tags at all — so per-chunk redaction cannot see across chunks.
+///
+/// We close that gap statefully: `already_sent_prefix` is everything already
+/// frozen for this message (`full_response[..response_sent_offset]`). Replaying
+/// the walk over it yields the fence / leaked-block regime in force at the
+/// chunk boundary, which seeds the chunk's own walk. Thus once an unterminated
+/// opener has been seen, subsequent frozen chunks stay suppressed until the
+/// matching closer, and a normal chunk after the block resumes untouched.
+///
+/// The frozen chunk's byte length (and therefore the caller's
+/// `response_sent_offset` bookkeeping) is derived from the RAW slice, never
+/// from this redacted text — we only change what is displayed, not the
+/// streaming offsets. When nothing is redacted the raw chunk is returned
+/// byte-for-byte. When a chunk redacts down to nothing (a pure-interior leak
+/// chunk) we emit a zero-width space so the Discord edit stays non-empty while
+/// showing nothing.
+pub(crate) fn redact_streaming_frozen_chunk(chunk: &str, already_sent_prefix: &str) -> String {
+    let prefix_regime = redact_wrapper_markup_walk(already_sent_prefix, false, false);
+    let WrapperWalk {
+        out, redacted_any, ..
+    } = redact_wrapper_markup_walk(
+        chunk,
+        prefix_regime.in_code_block,
+        prefix_regime.dropping_block,
+    );
+    if !redacted_any {
+        // Common path: no leak in this chunk — preserve it exactly so the
+        // streaming bytes/whitespace are unchanged.
+        return chunk.to_string();
+    }
+    tracing::warn!("redacted leaked tool-call wrapper markup from streaming frozen chunk (#3883)");
+    let redacted = out.join("\n");
+    if redacted.trim().is_empty() {
+        // Whole chunk was interior leak: show nothing, but keep the Discord
+        // edit non-empty (an empty edit is rejected by the API).
+        "\u{200B}".to_string()
+    } else {
+        redacted
+    }
+}
+
+struct WrapperWalk {
+    out: Vec<String>,
+    in_code_block: bool,
+    dropping_block: bool,
+    redacted_any: bool,
+}
+
+/// Shared line-walk behind both the non-streaming relay redactor and the
+/// streaming frozen-chunk redactor (#3883). It starts from the given
+/// `in_code_block` / `dropping_block` regime — both `false` for a standalone
+/// message — and returns the surviving lines plus the regime at end-of-input so
+/// a streaming caller can carry state across frozen-chunk boundaries.
+fn redact_wrapper_markup_walk(
+    input: &str,
+    mut in_code_block: bool,
+    mut dropping_block: bool,
+) -> WrapperWalk {
     use regex::Regex;
     use std::sync::LazyLock;
 
@@ -130,16 +204,28 @@ fn redact_tool_call_wrapper_markup(input: &str) -> String {
     });
 
     let mut out: Vec<String> = Vec::new();
-    let mut in_code_block = false;
-    let mut dropping_block = false;
     let mut redacted_any = false;
 
     for line in input.lines() {
+        // Finding #1: while dropping a leaked block, block-drop takes
+        // precedence over fence preservation. A ```fenced``` block that lives
+        // INSIDE the leaked `<invoke>…</invoke>` must be dropped with it rather
+        // than escaping through the fence branch, so this check runs BEFORE the
+        // fence toggle. We deliberately do not toggle `in_code_block` while
+        // dropping — fences inside the leak are part of the dropped content.
+        if dropping_block {
+            // Drop lines until (and including) the one that closes the block,
+            // then resume. If no closer ever arrives we drop to EOF — this is
+            // the cross-chunk streaming tail where the opener lived earlier.
+            redacted_any = true;
+            if BLOCK_CLOSER_RE.is_match(line) {
+                dropping_block = false;
+            }
+            continue;
+        }
+
         if line.trim_start().starts_with("```") {
             in_code_block = !in_code_block;
-            // A fence line is never wrapper markup; reaching one also ends any
-            // in-progress unfenced redaction region.
-            dropping_block = false;
             out.push(line.to_string());
             continue;
         }
@@ -150,31 +236,19 @@ fn redact_tool_call_wrapper_markup(input: &str) -> String {
             continue;
         }
 
-        if dropping_block {
-            // Inside a leaked wrapper block: drop lines until (and including)
-            // the one that closes it, then resume. If no closer ever arrives
-            // we drop to EOF — this is the cross-message streaming tail where
-            // the opener lived in a previous chunk.
-            redacted_any = true;
-            if BLOCK_CLOSER_RE.is_match(line) {
-                dropping_block = false;
-            }
-            continue;
-        }
-
-        let Some(m) = WRAPPER_RE.find(line) else {
+        // Finding #3: preserve the line only if EVERY wrapper match on it sits
+        // inside a *matched* inline code span (CommonMark: a run of N backticks
+        // opens, the next run of exactly N closes). Otherwise redact from the
+        // first genuinely-leaked match. This preserves valid multi-/double-
+        // backtick spans, refuses to corrupt them, and still redacts a real
+        // leak that merely has stray/unmatched backticks before it.
+        let first_leak = WRAPPER_RE
+            .find_iter(line)
+            .find(|m| !is_inside_inline_code_span(line, m.start(), m.end()));
+        let Some(m) = first_leak else {
             out.push(line.to_string());
             continue;
         };
-
-        // Inline-backtick guard: an odd number of backticks before the match
-        // means it sits inside an inline code span, i.e. the line is
-        // legitimately quoting the tag — preserve it untouched (acceptance #2).
-        let backticks_before = line[..m.start()].bytes().filter(|&b| b == b'`').count();
-        if backticks_before % 2 == 1 {
-            out.push(line.to_string());
-            continue;
-        }
 
         redacted_any = true;
         let prefix = line[..m.start()].trim_end();
@@ -191,13 +265,57 @@ fn redact_tool_call_wrapper_markup(input: &str) -> String {
         }
     }
 
-    if redacted_any {
-        tracing::warn!(
-            "redacted leaked tool-call wrapper markup from outbound Discord relay (#3883)"
-        );
+    WrapperWalk {
+        out,
+        in_code_block,
+        dropping_block,
+        redacted_any,
+    }
+}
+
+/// CommonMark-style check: does the byte range `[start, end)` of `line` fall
+/// inside a *matched* inline code span? A code span opens with a run of N
+/// backticks and closes with the next run of exactly N backticks; an unmatched
+/// run is literal text. Used so genuinely inline-code-quoted tag mentions are
+/// preserved while stray or mismatched backticks before a real leak do not
+/// shield it from redaction (#3883 finding #3).
+fn is_inside_inline_code_span(line: &str, start: usize, end: usize) -> bool {
+    let bytes = line.as_bytes();
+
+    // Collect backtick runs as (byte_offset, run_len).
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'`' {
+            let run_start = i;
+            while i < bytes.len() && bytes[i] == b'`' {
+                i += 1;
+            }
+            runs.push((run_start, i - run_start));
+        } else {
+            i += 1;
+        }
     }
 
-    trim_blank_edges(out)
+    // Pair each opener with the next run of EXACTLY equal length; the content
+    // between them is a code span. An opener with no equal-length closer is
+    // literal, so we advance and try the next run as a potential opener.
+    let mut idx = 0;
+    while idx < runs.len() {
+        let (open_off, open_len) = runs[idx];
+        if let Some(rel) = runs[idx + 1..].iter().position(|&(_, len)| len == open_len) {
+            let closer_idx = idx + 1 + rel;
+            let content_start = open_off + open_len;
+            let content_end = runs[closer_idx].0;
+            if start >= content_start && end <= content_end {
+                return true;
+            }
+            idx = closer_idx + 1;
+        } else {
+            idx += 1;
+        }
+    }
+    false
 }
 
 /// Remove leading Claude/Codex TUI housekeeping text that can be emitted by
@@ -381,6 +499,110 @@ mod tool_call_wrapper_redaction_tests {
         assert!(
             !output.contains("secret policy text"),
             "hidden body leaked: {output:?}"
+        );
+    }
+
+    // Finding #1: a fenced code block that lives INSIDE a leaked wrapper block
+    // must be dropped with the block, not escape through fence preservation.
+    #[test]
+    fn drops_fenced_code_block_nested_inside_leaked_wrapper_block() {
+        let input = "Done.\n<invoke name=\"Agent\">\n<parameter name=\"prompt\">\n```rust\nlet secret = \"leak\";\n```\n</parameter>\n</invoke>\nVisible tail.";
+        let output = sanitize_hidden_context_and_strip_chrome(input);
+        assert!(output.contains("Done."), "prose prefix dropped: {output:?}");
+        assert!(
+            output.contains("Visible tail."),
+            "post-block tail dropped: {output:?}"
+        );
+        assert!(
+            !output.contains("secret"),
+            "fenced secret inside leaked block escaped: {output:?}"
+        );
+        assert!(
+            !output.contains("```"),
+            "fence inside leaked block escaped: {output:?}"
+        );
+        assert!(!output.contains("<invoke"), "invoke tag leaked: {output:?}");
+    }
+
+    // Finding #2: streaming frozen chunks split a `<invoke>…</invoke>` across an
+    // opener-only chunk, an all-interior chunk (no tags), and a closer chunk;
+    // none of the leak may reach output and a following normal chunk must be
+    // byte-for-byte untouched.
+    #[test]
+    fn streaming_suppresses_leak_split_across_opener_interior_closer_chunks() {
+        use super::redact_streaming_frozen_chunk;
+
+        let opener =
+            "Working on it.\n<invoke name=\"Agent\">\n<parameter name=\"prompt\">step one ";
+        let interior = "step two more leaked prompt body with no tags at all ";
+        let closer = "final words</parameter>\n</invoke>\nHere is your answer.";
+        let normal = "\nAnd a normal follow-up line.";
+
+        // Chunk 1: opener-only, no prior prefix.
+        let out1 = redact_streaming_frozen_chunk(opener, "");
+        assert!(
+            out1.contains("Working on it."),
+            "prose prefix lost: {out1:?}"
+        );
+        assert!(!out1.contains("<invoke"), "opener leaked: {out1:?}");
+        assert!(!out1.contains("<parameter"), "parameter leaked: {out1:?}");
+        assert!(
+            !out1.contains("step one"),
+            "leaked body escaped opener chunk: {out1:?}"
+        );
+
+        // Chunk 2: all-interior, no tags. Prefix = opener.
+        let out2 = redact_streaming_frozen_chunk(interior, opener);
+        assert!(
+            !out2.contains("leaked prompt body") && !out2.contains("step two"),
+            "interior chunk escaped: {out2:?}"
+        );
+
+        // Chunk 3: closer + visible tail. Prefix = opener + interior.
+        let prefix3 = format!("{opener}{interior}");
+        let out3 = redact_streaming_frozen_chunk(closer, &prefix3);
+        assert!(
+            !out3.contains("final words"),
+            "pre-closer leak escaped: {out3:?}"
+        );
+        assert!(!out3.contains("</invoke>"), "closer tag leaked: {out3:?}");
+        assert!(
+            out3.contains("Here is your answer."),
+            "post-block visible tail lost: {out3:?}"
+        );
+
+        // Chunk 4: a normal chunk fully after the block — untouched.
+        let prefix4 = format!("{opener}{interior}{closer}");
+        let out4 = redact_streaming_frozen_chunk(normal, &prefix4);
+        assert_eq!(
+            out4, normal,
+            "normal post-block chunk was altered: {out4:?}"
+        );
+    }
+
+    // Finding #3: a valid double-backtick span containing a single-backtick tag
+    // mention survives byte-for-byte, while a genuine leak that merely has a
+    // stray unmatched backtick before it is still redacted.
+    #[test]
+    fn preserves_double_backtick_span_but_redacts_leak_with_stray_backtick_prefix() {
+        let span = "``Use `<invoke name=\"x\">` literally``";
+        assert_eq!(
+            sanitize_hidden_context_and_strip_chrome(span),
+            span,
+            "valid multi-backtick span corrupted"
+        );
+
+        let leak = "Heads up: ` then <invoke name=\"Agent\">\n<parameter name=\"prompt\">do the thing</parameter>\n</invoke>";
+        let out = sanitize_hidden_context_and_strip_chrome(leak);
+        assert!(out.contains("Heads up:"), "prose prefix lost: {out:?}");
+        assert!(
+            !out.contains("<invoke"),
+            "leak with stray backtick escaped: {out:?}"
+        );
+        assert!(!out.contains("<parameter"), "parameter leaked: {out:?}");
+        assert!(
+            !out.contains("do the thing"),
+            "leaked body escaped: {out:?}"
         );
     }
 }

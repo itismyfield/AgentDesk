@@ -335,6 +335,7 @@ fn build_streaming_placeholder_snapshot(current_portion: &str, status_block: &st
 pub(super) fn plan_streaming_rollover(
     current_portion: &str,
     status_block: &str,
+    already_sent_prefix: &str,
 ) -> Option<StreamingRolloverPlan> {
     if current_portion.is_empty() {
         return None;
@@ -347,9 +348,20 @@ pub(super) fn plan_streaming_rollover(
         .max(1);
     let split_at = streaming_split_boundary(current_portion, body_budget)?;
 
+    // #3883: the frozen chunk is sent straight to Discord by the streaming
+    // callers (turn_bridge / tmux_watcher), bypassing the non-streaming relay
+    // sanitizer. Redact leaked tool-call wrapper markup here at the source so
+    // BOTH send sites are covered. `already_sent_prefix` carries the
+    // inside-leaked-block state across chunk boundaries; `split_at` stays in
+    // RAW coordinates so the callers' offset bookkeeping is unaffected.
+    let frozen_chunk = super::response_sanitizer::redact_streaming_frozen_chunk(
+        &current_portion[..split_at],
+        already_sent_prefix,
+    );
+
     Some(StreamingRolloverPlan {
         display_snapshot: build_streaming_placeholder_snapshot(current_portion, &status_block),
-        frozen_chunk: current_portion[..split_at].to_string(),
+        frozen_chunk,
         split_at,
     })
 }
@@ -866,7 +878,7 @@ mod status_panel_v2_formatter_tests {
             .max(1);
         let current_portion = "x".repeat(body_budget + 64);
 
-        let plan = plan_streaming_rollover(&current_portion, LIVENESS_FOOTER)
+        let plan = plan_streaming_rollover(&current_portion, LIVENESS_FOOTER, "")
             .expect("current portion should roll over once footer budget is reserved");
 
         assert_eq!(plan.frozen_chunk.len(), body_budget);
@@ -891,7 +903,7 @@ mod status_panel_v2_formatter_tests {
         let current_portion = "x".repeat(body_budget + 1);
         assert!(current_portion.len() < super::DISCORD_MSG_LIMIT);
 
-        let plan = plan_streaming_rollover(&current_portion, LIVENESS_FOOTER)
+        let plan = plan_streaming_rollover(&current_portion, LIVENESS_FOOTER, "")
             .expect("body fits raw Discord limit but not the reserved footer budget");
 
         assert_eq!(plan.split_at, body_budget);
@@ -904,7 +916,7 @@ mod status_panel_v2_formatter_tests {
         let current_portion = "short streamed body";
         let rendered = build_streaming_placeholder_text(current_portion, LIVENESS_FOOTER);
 
-        assert!(plan_streaming_rollover(current_portion, LIVENESS_FOOTER).is_none());
+        assert!(plan_streaming_rollover(current_portion, LIVENESS_FOOTER, "").is_none());
         assert_eq!(rendered, format!("{current_portion}\n\n{LIVENESS_FOOTER}"));
         assert!(rendered.len() < super::DISCORD_MSG_LIMIT);
     }
@@ -914,7 +926,7 @@ mod status_panel_v2_formatter_tests {
         let oversized_footer = "⠸".repeat(super::DISCORD_MSG_LIMIT);
         let rendered = build_streaming_placeholder_text("", &oversized_footer);
 
-        assert!(plan_streaming_rollover("", &oversized_footer).is_none());
+        assert!(plan_streaming_rollover("", &oversized_footer, "").is_none());
         assert!(rendered.len() <= super::DISCORD_MSG_LIMIT);
         assert!(rendered.starts_with('⠸'));
         assert!(!rendered.contains("\n\n"));
@@ -1570,7 +1582,8 @@ No response requested.\n\
             // footer "\n\nSTATUS" = 8; body_budget = 2000 - 18 = 1982.
             let status = "STATUS";
             let body = "Z".repeat(2500);
-            let plan = plan_streaming_rollover(&body, status).expect("a long body must roll over");
+            let plan =
+                plan_streaming_rollover(&body, status, "").expect("a long body must roll over");
             assert_eq!(
                 plan.split_at, 1982,
                 "rollover split point pins the footer+margin reservation"
@@ -1585,8 +1598,8 @@ No response requested.\n\
 
         #[test]
         fn a0_plan_streaming_rollover_is_none_for_empty_or_short_body() {
-            assert_eq!(plan_streaming_rollover("", "STATUS"), None);
-            assert_eq!(plan_streaming_rollover("short body", "STATUS"), None);
+            assert_eq!(plan_streaming_rollover("", "STATUS", ""), None);
+            assert_eq!(plan_streaming_rollover("short body", "STATUS", ""), None);
         }
 
         #[test]
@@ -1594,8 +1607,8 @@ No response requested.\n\
             // Identical (body, status) must yield byte-identical plans on every
             // call, so a future per-surface re-derivation is caught.
             let body = "line one\nline two\n".repeat(200); // > body_budget, newlines
-            let a = plan_streaming_rollover(&body, "STATUS").expect("rolls over");
-            let b = plan_streaming_rollover(&body, "STATUS").expect("rolls over");
+            let a = plan_streaming_rollover(&body, "STATUS", "").expect("rolls over");
+            let b = plan_streaming_rollover(&body, "STATUS", "").expect("rolls over");
             assert_eq!(a, b, "same input must produce an identical rollover plan");
             assert_eq!(a.frozen_chunk, body[..a.split_at]);
         }

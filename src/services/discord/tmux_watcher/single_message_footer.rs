@@ -564,6 +564,7 @@ mod tests {
         let plan = crate::services::discord::formatting::plan_streaming_rollover(
             &current_portion,
             &status_block,
+            "",
         )
         .expect("footer-bearing status block should force rollover");
         let seed = crate::services::discord::formatting::build_streaming_placeholder_text(

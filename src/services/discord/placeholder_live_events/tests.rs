@@ -313,7 +313,7 @@ fn characterize_rollover_seed_has_no_status_panel_content_s0() {
 
     let status_block = build_processing_status_block("⠸");
     let current_portion = "relay body ".repeat(250);
-    let plan = plan_streaming_rollover(&current_portion, &status_block)
+    let plan = plan_streaming_rollover(&current_portion, &status_block, "")
         .expect("representative relay body should roll over");
     let rollover_seed = build_streaming_placeholder_text("", &status_block);
 
