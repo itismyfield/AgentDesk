@@ -327,6 +327,7 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         );
         return;
     };
+    let recap_provider = ProviderKind::from_str_or_unsupported(&prompt.provider);
     // #3178 (codex P1 lease-overwrite): run the slash-command-control dedupe BEFORE
     // recording ANY external-input lease. The #3153 double-post (raw echo + expanded
     // `<command-*>` wrapper, ~tens-of-ms apart) must not let the SECOND half record a
@@ -399,6 +400,34 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             return;
         }
     };
+    // A TUI-direct prompt has now been observed for this channel. Bump idle
+    // recap generation before the pre-claim clear so an in-flight recap POST job
+    // cannot persist a stale card after a deferred/local-only/aborted synthetic
+    // start path (#3296, #3878).
+    if let Some(pool) = shared.pg_pool.as_ref().cloned() {
+        if let Err(e) = super::idle_recap::bump_turn_generation(
+            &pool,
+            channel_id.get(),
+            &recap_provider,
+            lease.session_key.as_deref(),
+        )
+        .await
+        {
+            tracing::warn!(
+                error = %e,
+                channel_id = channel_id.get(),
+                provider = %recap_provider.as_str(),
+                session_key = lease.session_key.as_deref().unwrap_or(""),
+                "idle_recap: failed to bump turn generation on TUI-direct observation"
+            );
+        }
+        super::idle_recap::spawn_clear_captured_idle_recap_for_channel(
+            notify_http.clone(),
+            pool,
+            channel_id.get(),
+        )
+        .await;
+    }
     // #3164 / #750 invariant: the `⏳` MUST be added by the SAME bot identity that
     // later removes it (`remove_reaction_raw` only removes `@me`'s reaction; a
     // different bot leaves the hourglass forever). The note BODY may be any bot
