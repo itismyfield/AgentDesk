@@ -765,7 +765,7 @@
 | `services::long_turn_watchdog` | `src/services/long_turn_watchdog.rs` | 321 | 233 | 88 |  |
 | `services::maintenance` | `src/services/maintenance/mod.rs` | 331 | 331 | 0 |  |
 | `services::maintenance::jobs` | `src/services/maintenance/jobs/mod.rs` | 162 | 162 | 0 |  |
-| `services::maintenance::jobs::db_retention` | `src/services/maintenance/jobs/db_retention.rs` | 806 | 577 | 229 |  |
+| `services::maintenance::jobs::db_retention` | `src/services/maintenance/jobs/db_retention.rs` | 998 | 599 | 399 |  |
 | `services::maintenance::jobs::hang_dump_cleanup` | `src/services/maintenance/jobs/hang_dump_cleanup.rs` | 125 | 125 | 0 |  |
 | `services::maintenance::jobs::memento_consolidation` | `src/services/maintenance/jobs/memento_consolidation.rs` | 301 | 301 | 0 |  |
 | `services::maintenance::jobs::target_sweep` | `src/services/maintenance/jobs/target_sweep.rs` | 200 | 200 | 0 |  |

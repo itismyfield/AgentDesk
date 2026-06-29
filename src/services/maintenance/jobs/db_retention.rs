@@ -503,9 +503,21 @@ async fn retain_skill_usage(
 // ─────────────────────────────────────────────────────────────────────────
 // 8. turns: archive-then-delete on finished_at older than 90 days. #3865
 //
-// Mirrors `retain_session_transcripts`: copy into `turns_archive` (idempotent
-// via WHERE NOT EXISTS) so historical token/cost totals stay queryable, then
-// DELETE from the hot table. `finished_at` is NOT NULL → no NULL edge cases.
+// Like `retain_session_transcripts` this copies into `turns_archive` (idempotent
+// via WHERE NOT EXISTS) before deleting, but `turns` is high-value token/cost
+// data so the two steps are hardened against an archive-less delete:
+//
+//   * Both statements run inside ONE transaction. Postgres `NOW()` resolves to
+//     `transaction_timestamp()`, which is fixed for the life of the transaction,
+//     so the archive and delete predicates share the *identical* cutoff — a row
+//     can never cross the 90-day boundary between the two steps. (This is
+//     stronger than computing the cutoff app-side, which would add DB/app clock
+//     skew.)
+//   * The DELETE carries an `EXISTS (… turns_archive …)` guard, so it can only
+//     remove rows that are already in the archive — a delete-without-archive is
+//     impossible even if the reasoning above were ever violated.
+//
+// `finished_at` is NOT NULL → no NULL edge cases.
 // ─────────────────────────────────────────────────────────────────────────
 async fn retain_turns(pool: &PgPool, dry_run: bool, report: &mut RetentionReport) -> Result<()> {
     if dry_run {
@@ -525,6 +537,8 @@ async fn retain_turns(pool: &PgPool, dry_run: bool, report: &mut RetentionReport
         return Ok(());
     }
 
+    let mut tx = pool.begin().await?;
+
     // INSERT … SELECT … WHERE NOT EXISTS keeps re-runs idempotent.
     let archived = sqlx::query(
         "INSERT INTO turns_archive \
@@ -542,7 +556,7 @@ async fn retain_turns(pool: &PgPool, dry_run: bool, report: &mut RetentionReport
            )",
     )
     .bind(TURNS_RETENTION_DAYS)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
     report.push(TableReport {
         table_name: "turns_archive",
@@ -550,18 +564,26 @@ async fn retain_turns(pool: &PgPool, dry_run: bool, report: &mut RetentionReport
         rows_affected: archived.rows_affected() as i64,
     });
 
+    // EXISTS guard: only delete rows that are already archived. Combined with the
+    // shared transaction cutoff, every old row was archived by the INSERT above,
+    // so this deletes exactly the archived set and nothing more.
     let del = sqlx::query(
-        "DELETE FROM turns \
-         WHERE finished_at < NOW() - ($1::INT || ' days')::INTERVAL",
+        "DELETE FROM turns t \
+         WHERE t.finished_at < NOW() - ($1::INT || ' days')::INTERVAL \
+           AND EXISTS ( \
+               SELECT 1 FROM turns_archive a WHERE a.turn_id = t.turn_id \
+           )",
     )
     .bind(TURNS_RETENTION_DAYS)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
     report.push(TableReport {
         table_name: "turns",
         action: "delete",
         rows_affected: del.rows_affected() as i64,
     });
+
+    tx.commit().await?;
     Ok(())
 }
 
@@ -579,6 +601,12 @@ async fn retain_turns(pool: &PgPool, dry_run: bool, report: &mut RetentionReport
 mod tests {
     use super::*;
 
+    /// Token value larger than INT32::MAX (2_147_483_647). The `turns` token
+    /// columns were widened to BIGINT in 0008; the stale row carries this so the
+    /// archive copy exercises BIGINT fidelity (an INTEGER archive column would
+    /// overflow here and fail the whole pass — guards #3865 review finding #1).
+    const BIG_TOKENS: i64 = 3_000_000_000;
+
     async fn count(pool: &PgPool, sql: &str) -> i64 {
         sqlx::query(sql)
             .fetch_one(pool)
@@ -588,9 +616,28 @@ mod tests {
             .unwrap_or(0)
     }
 
+    /// Insert one `turns` row windowed on `finished_at`, with explicit BIGINT
+    /// token/duration values so archive fidelity can be asserted.
+    async fn seed_turn(pool: &PgPool, turn_id: &str, age_days: i32, tokens: i64) {
+        sqlx::query(
+            "INSERT INTO turns \
+                 (turn_id, channel_id, started_at, finished_at, duration_ms, \
+                  input_tokens, cache_create_tokens, cache_read_tokens, output_tokens) \
+             VALUES ($1, 'chan', \
+                     NOW() - ($2::INT || ' days')::INTERVAL, \
+                     NOW() - ($2::INT || ' days')::INTERVAL, $3, $3, $3, $3, $3)",
+        )
+        .bind(turn_id)
+        .bind(age_days)
+        .bind(tokens)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|err| panic!("seed turns {turn_id}: {err}"));
+    }
+
     /// Seed one stale row (older than the policy window) and one fresh row in
     /// each of the three tables. `stale_days` puts the stale row safely past
-    /// the largest (90d) window.
+    /// the largest (90d) window. The stale `turns` row carries [`BIG_TOKENS`].
     async fn seed_fixtures(pool: &PgPool, stale_days: i32) {
         // turn_lifecycle_events: stale + fresh.
         for (turn_id, age) in [("tle-old", stale_days), ("tle-new", 0)] {
@@ -620,21 +667,9 @@ mod tests {
             .unwrap_or_else(|err| panic!("seed skill_usage {skill_id}: {err}"));
         }
 
-        // turns: stale + fresh (windowed on finished_at).
-        for (turn_id, age) in [("turn-old", stale_days), ("turn-new", 0)] {
-            sqlx::query(
-                "INSERT INTO turns \
-                     (turn_id, channel_id, started_at, finished_at, input_tokens, output_tokens) \
-                 VALUES ($1, 'chan', \
-                         NOW() - ($2::INT || ' days')::INTERVAL, \
-                         NOW() - ($2::INT || ' days')::INTERVAL, 10, 20)",
-            )
-            .bind(turn_id)
-            .bind(age)
-            .execute(pool)
-            .await
-            .unwrap_or_else(|err| panic!("seed turns {turn_id}: {err}"));
-        }
+        // turns: stale (>INT32 tokens) + fresh (windowed on finished_at).
+        seed_turn(pool, "turn-old", stale_days, BIG_TOKENS).await;
+        seed_turn(pool, "turn-new", 0, 20).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -755,6 +790,20 @@ mod tests {
             "stale turns row must be copied into turns_archive before deletion"
         );
 
+        // BIGINT fidelity: the >INT32 token/duration values survive the archive
+        // copy intact (an INTEGER archive column would have overflowed).
+        let archived_tokens: i64 =
+            sqlx::query("SELECT input_tokens AS n FROM turns_archive WHERE turn_id = 'turn-old'")
+                .fetch_one(&pool)
+                .await
+                .expect("read archived input_tokens")
+                .try_get::<i64, _>("n")
+                .expect("input_tokens is BIGINT");
+        assert_eq!(
+            archived_tokens, BIG_TOKENS,
+            "archived input_tokens must preserve the >INT32 value without overflow"
+        );
+
         // Report entries reflect the new policies.
         assert_eq!(
             report
@@ -798,6 +847,149 @@ mod tests {
             count(&pool, "SELECT COUNT(*)::BIGINT AS n FROM turns_archive").await,
             1,
             "turns_archive must hold exactly one row after a double run"
+        );
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// The `used_at IS NOT NULL` guard must keep rows whose timestamp is NULL —
+    /// a NULL `used_at` is never older-than the window, so it survives.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn db_retention_keeps_skill_usage_rows_with_null_used_at() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_db_retention_3865_nullusedat",
+            "db_retention #3865 NULL used_at survival",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+
+        // NULL used_at (must survive), stale (must delete), fresh (must keep).
+        sqlx::query("INSERT INTO skill_usage (skill_id, used_at) VALUES ('sk-null', NULL)")
+            .execute(&pool)
+            .await
+            .expect("seed NULL used_at row");
+        sqlx::query(
+            "INSERT INTO skill_usage (skill_id, used_at) \
+             VALUES ('sk-stale', NOW() - INTERVAL '120 days')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed stale row");
+        sqlx::query("INSERT INTO skill_usage (skill_id, used_at) VALUES ('sk-fresh', NOW())")
+            .execute(&pool)
+            .await
+            .expect("seed fresh row");
+
+        db_retention_job(&pool, false)
+            .await
+            .expect("retention pass");
+
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*)::BIGINT AS n FROM skill_usage WHERE skill_id = 'sk-null'"
+            )
+            .await,
+            1,
+            "NULL used_at row must never be deleted by the time-window prune"
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*)::BIGINT AS n FROM skill_usage WHERE skill_id = 'sk-stale'"
+            )
+            .await,
+            0,
+            "stale skill_usage row must be deleted"
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*)::BIGINT AS n FROM skill_usage WHERE skill_id = 'sk-fresh'"
+            )
+            .await,
+            1,
+            "fresh skill_usage row must survive"
+        );
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// The `turns` window is strict (`finished_at < cutoff`): a row just inside
+    /// the 90d window survives, a row just outside is archived then deleted, and
+    /// the archived row count always equals the deleted row count (no
+    /// delete-without-archive), including on a re-run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn db_retention_turns_window_is_strict_with_no_archive_less_delete() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_db_retention_3865_boundary",
+            "db_retention #3865 turns strict boundary + atomic archive",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+
+        // 2-hour margins absorb the ms-level drift between seed and job NOW().
+        // inside: 89d22h old → younger than 90d → kept.
+        sqlx::query(
+            "INSERT INTO turns (turn_id, channel_id, started_at, finished_at) \
+             VALUES ('turn-inside', 'chan', NOW(), NOW() - (INTERVAL '90 days' - INTERVAL '2 hours'))",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed inside-window turn");
+        // outside: 90d02h old → older than 90d → archived + deleted.
+        sqlx::query(
+            "INSERT INTO turns (turn_id, channel_id, started_at, finished_at) \
+             VALUES ('turn-outside', 'chan', NOW(), NOW() - (INTERVAL '90 days' + INTERVAL '2 hours'))",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed outside-window turn");
+
+        let report = db_retention_job(&pool, false)
+            .await
+            .expect("retention pass");
+
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*)::BIGINT AS n FROM turns WHERE turn_id = 'turn-inside'"
+            )
+            .await,
+            1,
+            "row just inside the 90d window must survive (strict `<`)"
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*)::BIGINT AS n FROM turns WHERE turn_id = 'turn-outside'"
+            )
+            .await,
+            0,
+            "row just outside the window must be deleted"
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*)::BIGINT AS n FROM turns_archive WHERE turn_id = 'turn-outside'"
+            )
+            .await,
+            1,
+            "the deleted row must have been archived first"
+        );
+
+        // Archive insert count == delete count: no delete-without-archive.
+        let archived = report
+            .get("turns_archive", "insert")
+            .map(|t| t.rows_affected);
+        let deleted = report.get("turns", "delete").map(|t| t.rows_affected);
+        assert_eq!(archived, Some(1));
+        assert_eq!(deleted, Some(1));
+        assert_eq!(
+            archived, deleted,
+            "every deleted turns row must be archived in the same pass"
         );
 
         pool.close().await;
