@@ -38,14 +38,32 @@ fn request_suppresses_followup_outbox(headers: &HeaderMap) -> bool {
     }
 }
 
+/// Validate that `commit` is a bare lowercase hex git object name
+/// (`^[0-9a-f]{7,64}$`) so it can be safely used as a marker file name.
+///
+/// #3863: `commit` is attacker-influenceable (request body / loopback reviewer
+/// agent ingesting PR/issue text = prompt-injection vector). Without this guard
+/// `Path::join` would honour an absolute path (discarding the base dir) or `..`
+/// segments and let the caller create/empty-truncate arbitrary files outside
+/// `runtime/review_passed/`. Rejecting `/`, `\`, `..`, NUL, uppercase, and
+/// non-hex characters keeps the resulting path a direct child of that dir.
+fn is_valid_commit_sha(commit: &str) -> bool {
+    let len = commit.len();
+    (7..=64).contains(&len)
+        && commit
+            .bytes()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+}
+
 /// Write a review-passed marker file for the reviewed commit.
 /// `deploy-release.sh` checks this before allowing release deploy.
 ///
 /// When `reviewed_commit` is provided, stamp that exact commit (the one that
 /// was actually reviewed). Falls back to current HEAD for backwards compat.
-/// Returns `Err` only when HOME directory cannot be resolved (environment
-/// misconfiguration).  Git or filesystem failures are logged but not fatal
-/// — the marker is best-effort when commit is not explicitly provided.
+/// Returns `Err` when HOME directory cannot be resolved (environment
+/// misconfiguration) or when the resolved commit is not a valid SHA (#3863).
+/// Git or filesystem failures are logged but not fatal — the marker is
+/// best-effort when commit is not explicitly provided.
 fn stamp_review_passed_marker(reviewed_commit: Option<&str>) -> Result<(), String> {
     let commit = if let Some(c) = reviewed_commit {
         c.to_string()
@@ -62,6 +80,14 @@ fn stamp_review_passed_marker(reviewed_commit: Option<&str>) -> Result<(), Strin
             }
         }
     };
+    // #3863: defense-in-depth — never let a non-SHA value reach `Path::join`,
+    // regardless of whether it came from the request body, the stored
+    // dispatch context, or `git rev-parse HEAD`.
+    if !is_valid_commit_sha(&commit) {
+        return Err(format!(
+            "refusing to stamp review marker for non-SHA commit (must match ^[0-9a-f]{{7,64}}$)"
+        ));
+    }
     let root = crate::config::runtime_root().ok_or_else(|| {
         "runtime root not found; set AGENTDESK_ROOT_DIR or ensure HOME exists".to_string()
     })?;
@@ -374,6 +400,23 @@ pub async fn submit_verdict(
 
         // C: Validate reviewed commit — the dispatch context stores the HEAD that was
         //    actually sent for review. Reject mismatched commits to prevent arbitrary SHA injection.
+        //
+        // #3863: `body.commit` is attacker-influenceable, so (1) reject any
+        // value that is not a bare lowercase git SHA with 400 before it can
+        // reach the filesystem, and (2) never trust it as the authoritative
+        // marker target — the server-stored `reviewed_commit` (or, when absent,
+        // server-derived HEAD) is the only source the deploy gate honours.
+        if let Some(submitted) = body.commit.as_deref()
+            && !is_valid_commit_sha(submitted)
+        {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "commit must be a lowercase git SHA matching ^[0-9a-f]{7,64}$"
+                })),
+            );
+        }
+
         let stored_reviewed_commit: Option<String> = dispatch_context
             .get("reviewed_commit")
             .and_then(|v| v.as_str())
@@ -396,8 +439,12 @@ pub async fn submit_verdict(
             }
             // body.commit is None → use stored reviewed_commit (no HEAD fallback)
             (None, stored) => stored.clone(),
-            // No stored commit (legacy dispatch) → accept body.commit as-is
-            (submitted, None) => submitted.clone(),
+            // #3863: legacy dispatch without a stored `reviewed_commit` must NOT
+            // let the caller forge the deploy-gate marker via `body.commit`.
+            // Fall back to the server-derived HEAD (None → HEAD in
+            // `stamp_review_passed_marker`) so the marker can only ever name a
+            // commit the server itself observed.
+            (_, None) => None,
         }
     };
 
@@ -590,4 +637,69 @@ pub async fn submit_verdict(
             "card_id": card_id,
         })),
     )
+}
+
+#[cfg(test)]
+mod commit_validation_tests {
+    use super::{is_valid_commit_sha, stamp_review_passed_marker};
+
+    #[test]
+    fn rejects_path_traversal() {
+        assert!(!is_valid_commit_sha("../../etc/x"));
+        assert!(!is_valid_commit_sha("../review_passed/forged"));
+        assert!(!is_valid_commit_sha("a/b"));
+        assert!(!is_valid_commit_sha("a\\b"));
+    }
+
+    #[test]
+    fn rejects_absolute_paths() {
+        assert!(!is_valid_commit_sha("/etc/passwd"));
+        assert!(!is_valid_commit_sha(
+            "/Users/x/Library/LaunchAgents/y.plist"
+        ));
+    }
+
+    #[test]
+    fn rejects_uppercase_and_non_hex() {
+        // Uppercase hex must be rejected (^[0-9a-f] is lowercase-only).
+        assert!(!is_valid_commit_sha("ABCDEF0"));
+        assert!(!is_valid_commit_sha("DEADBEEF"));
+        // Non-hex letters / metacharacters.
+        assert!(!is_valid_commit_sha("zzzzzzz"));
+        assert!(!is_valid_commit_sha("abc123g"));
+        assert!(!is_valid_commit_sha("abcdef0\0"));
+        assert!(!is_valid_commit_sha("abc def"));
+    }
+
+    #[test]
+    fn rejects_empty_and_out_of_range_lengths() {
+        assert!(!is_valid_commit_sha(""));
+        // Below the 7-char minimum (abbreviated SHA floor).
+        assert!(!is_valid_commit_sha("abc123"));
+        // Above the 64-char maximum (SHA-256 ceiling).
+        assert!(!is_valid_commit_sha(&"a".repeat(65)));
+    }
+
+    #[test]
+    fn accepts_valid_lowercase_sha() {
+        // Abbreviated (7) and full SHA-1 (40) and SHA-256 (64) bounds.
+        assert!(is_valid_commit_sha("0123abc"));
+        assert!(is_valid_commit_sha(
+            "1234567890abcdef1234567890abcdef12345678"
+        ));
+        assert!(is_valid_commit_sha(&"a".repeat(64)));
+    }
+
+    #[test]
+    fn stamp_marker_refuses_non_sha_commit() {
+        // Defense-in-depth: even if a bad value bypasses the route guard, the
+        // stamping helper must never hand it to `Path::join`.
+        let err = stamp_review_passed_marker(Some("../../etc/x"))
+            .expect_err("non-SHA commit must be rejected");
+        assert!(err.contains("non-SHA"), "unexpected error: {err}");
+
+        let err = stamp_review_passed_marker(Some("/etc/passwd"))
+            .expect_err("absolute path must be rejected");
+        assert!(err.contains("non-SHA"), "unexpected error: {err}");
+    }
 }
