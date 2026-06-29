@@ -142,7 +142,8 @@
     `watchers/codex_tui_restore.rs` while adding the restore branch; -207 from
     #3840 moving heartbeat/activity helpers into
     `watchers/lifecycle/activity.rs`).
-  - `src/services/discord/tmux.rs` (1463 lines after #2558 dead-code sweep;
+  - `src/services/discord/tmux.rs` (1477 lines; +14 from current inventory
+    refresh after the relay split stack landed; after #2558 dead-code sweep;
     +6 from #3818 sanitizing restored/orphan subagent-notification placeholders;
     +1 from #3384 restored-seed undelivered-body discard guard;
     +38 for suppressed-label noise, user report 2026-06-12: provider-aware
@@ -947,7 +948,8 @@
     marker suppression for stop-control transcript envelopes; +62 from #3304:
     slash-command canonical prompt keys for `<command-*>` XML vs
     `/command args` dedupe, plus focused loop skill-expansion regressions).
-  - `src/services/discord/recovery_engine.rs` (3424 lines; -5 net from #3711/#3712 extracting rebind runtime/output-path resolution to
+  - `src/services/discord/recovery_engine.rs` (3899 lines; +475 from current
+    inventory refresh after the relay split stack landed; -5 net from #3711/#3712 extracting rebind runtime/output-path resolution to
     `recovery_engine/rebind_runtime.rs` while adding direct Codex TUI detection
     so rebind can rebuild rollout bindings when possible and return 409 instead
     of synthesizing inert legacy-wrapper inflight rows; +2 from #3668 re-exporting `success_result_end_offset_after_offset` (pub(in discord)) so the relay_recovery F2 tail-answer guard can require terminal success evidence; +24 from f12b09366 backstop missed turn intake (drain-restart ownerless-inflight recovery: phase_policy/relay_recovery/relay_health predicates); +15 from #3610 PR-2 codex r2 Issue-2 storm-guard comment at the committed-branch anchor-repost dispose (passes `tmux_alive = false` so a transient send-new is budget-bounded, not pane-preserved forever; the now-unused liveness probe is dropped); +33 from #3610 PR-2 anchor-repost fallback (flag-gated, default OFF); +26 from #3680 relay recovery review hardening; +9 from #3582 stamping
@@ -1312,7 +1314,8 @@
     2026-08-31, #3036)).
   - `src/services/discord/{commands/text_commands.rs,
     discord_config_audit.rs, router/intake_gate.rs}` (all 1000+ production
-    lines) and `src/services/discord/inflight.rs` (2686 lines; #3680 relay
+    lines) and `src/services/discord/inflight.rs` (2802 lines; +116 from current
+    inventory refresh after the relay split stack landed; #3680 relay
     recovery review hardening; #3685 exposes the inflight sidecar lock
     crate-wide for locked legacy rebind backfill; #3715 moved the #3635
     dead-watcher rebind-origin reap helpers into
@@ -1558,7 +1561,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   fresh-fork dev-role dedup stubs from provider.rs, leaving only the live Codex
   resumed-session compaction path. #3823 adds Codex launch binary/version
   diagnostics so skills/list failures caused by CLI/app skew are traceable.)
-- `src/services/codex_tui/rollout_tail.rs` (1270) — Codex TUI rollout tail
+- `src/services/codex_tui/rollout_tail.rs` (1276) — Codex TUI rollout tail
   parsing and resume identity surface; split before adding non-bugfix behavior
   beyond the #2169 session identity fix and the #3343 message-boundary
   separator unified across the streamed `StreamMessage::Text` surface and the
