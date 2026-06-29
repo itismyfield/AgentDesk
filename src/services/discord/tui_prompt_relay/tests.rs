@@ -2135,11 +2135,11 @@ fn claude_bridge_lease_clears_when_tail_dedup_skips_spawn() {
 #[cfg(unix)]
 #[tokio::test]
 async fn claude_bridge_lease_guard_cleans_no_binding_precondition_skip() {
-    let temp = tempfile::tempdir().expect("temp runtime root");
-    let _env = EnvRootGuard::set(temp.path());
     let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
         .lock()
         .unwrap();
+    let temp = tempfile::tempdir().expect("temp runtime root");
+    let _env = EnvRootGuard::set(temp.path());
     let tmux = "AgentDesk-claude-bridge-no-binding";
     let channel_id = ChannelId::new(940_000_000_000_005);
     let prompt = ObservedTuiPrompt {
