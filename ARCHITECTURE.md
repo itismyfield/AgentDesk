@@ -427,6 +427,9 @@ src/
 │   │   │   ├── tui_passthrough.rs
 │   │   │   └── voice.rs
 │   │   ├── health/
+│   │   │   ├── recovery/
+│   │   │   │   ├── leak_recovery_ledger.rs
+│   │   │   │   └── watchdog_decisions.rs
 │   │   │   ├── headless_turn.rs
 │   │   │   ├── mailbox.rs
 │   │   │   ├── provider_probe.rs

@@ -1022,7 +1022,10 @@
     children (`send_target`, `send_gate`, `send_api`, `manual_delivery`) to
     `outbound/` while preserving the `health::` re-export API; #1879
     snapshot/mailbox extraction, and #3082 answer-flush-barrier field).
-  - `src/services/discord/health/recovery.rs` (2731 lines; +2 from #3807 applying
+  - `src/services/discord/health/recovery.rs` (2133 lines; -598 from #3839 moving
+    pure stall-watchdog decisions to `health/recovery/watchdog_decisions.rs`
+    and completed-stale leak range/render/ledger helpers to
+    `health/recovery/leak_recovery_ledger.rs`; +2 from #3807 applying
     compact continuation context to stale-leak recovery split delivery; -3 from #3795
     routing session-key tail fallback through `SessionIdentity`; +2 from #3711/#3712 mapping direct TUI runtime-binding-unavailable rebind failures to 409 Conflict; #3676 moved
     `tmux_alive_relay_dead` watchdog reattach logic into sibling

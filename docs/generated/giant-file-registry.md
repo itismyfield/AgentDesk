@@ -14,12 +14,12 @@
 | `src/db/automation_candidates.rs` | 1003 | automation-pipeline | 2026-08-31 | #3405 |
 | `src/server/worker_registry.rs` | 1256 | server-runtime | 2026-08-31 | #3739 |
 | `src/services/codex_tui/rollout_tail.rs` | 1270 | discord-relay | 2026-10-31 | #3843 |
-| `src/services/discord/health/recovery.rs` | 2731 | discord-relay | 2026-10-31 | #3839 |
+| `src/services/discord/health/recovery.rs` | 2133 | discord-relay | 2026-10-31 | #3839 |
 | `src/services/discord/idle_recap.rs` | 1201 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/inflight.rs` | 3016 | discord-relay | 2026-10-31 | #3835 |
 | `src/services/discord/placeholder_sweeper.rs` | 1004 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/recovery_engine.rs` | 3424 | discord-relay | 2026-10-31 | #3834 |
-| `src/services/discord/router/intake_gate.rs` | 2860 | discord-relay | 2026-10-31 | #3838 |
+| `src/services/discord/router/intake_gate.rs` | 1587 | discord-relay | 2026-10-31 | #3838 |
 | `src/services/discord/router/message_handler/intake_turn.rs` | 3616 | discord-relay | 2026-10-31 | #3837 |
 | `src/services/discord/session_relay_sink.rs` | 1631 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/tmux.rs` | 1463 | discord-relay | 2026-10-31 | #3841 |
