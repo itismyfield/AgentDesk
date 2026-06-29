@@ -271,6 +271,17 @@ async fn recover_review_target_pg(
             )
         })?;
 
+    // #3863 (codex re-review): validate the RESOLVED `target_commit` from EVERY
+    // source — request body, inferred worktree HEAD, or stored dispatch context
+    // (`reviewed_commit`) — immediately after resolution and BEFORE any git/shell
+    // use. The early body-check above only covers a body-supplied value; when the
+    // body omits `target_commit`, a poisoned stored/HEAD value (e.g.
+    // `--output=/tmp/x`) would otherwise reach `commit_belongs_to_card_issue_pg`
+    // below and be passed to `git log` as an argument (argument injection →
+    // filesystem write) before the later re-validation runs. This guard closes
+    // the resolved-before-git-log window for all sources.
+    validate_recovery_target_commit(&target_commit)?;
+
     if let Some(path) = worktree_path.as_deref() {
         let head = worktree_head(path).map_err(|error| (StatusCode::BAD_REQUEST, error))?;
         if head != target_commit {
@@ -707,5 +718,43 @@ mod recovery_commit_validation_tests {
         // predicate the verdict route hardened in #3863 (single source of truth).
         assert!(is_valid_commit_sha("0123abc"));
         assert!(!is_valid_commit_sha("../../etc"));
+    }
+
+    #[test]
+    fn rejects_resolved_commit_from_stored_context_or_head_before_git() {
+        // #3863 (codex re-review): when `body.target_commit` is ABSENT, the
+        // recovery handler resolves `target_commit` from the inferred worktree
+        // HEAD or the stored dispatch context (`reviewed_commit`) — sources the
+        // early body-check does NOT cover. `recover_review_target_pg` applies
+        // `validate_recovery_target_commit(&target_commit)?` to that RESOLVED
+        // value immediately after the
+        // `requested_commit.or(inferred_worktree_commit).or(existing_commit)`
+        // binding and BEFORE the first git/shell use,
+        // `commit_belongs_to_card_issue_pg`, which runs `git log <commit>`
+        // (commit passed as a positional argument with no `--` separator).
+        //
+        // Structural guarantee: because the guard returns `Err((400, _))` first,
+        // a poisoned stored/HEAD value never reaches that `git log` call, so the
+        // argument-injection vector (e.g. `git log … --output=/tmp/x` writing an
+        // arbitrary file) cannot fire. The full handler needs a live PgPool, so
+        // — like the existing recovery tests — we assert the guard predicate on
+        // the exact poisoned values an attacker could plant in a stored context
+        // or have a worktree HEAD resolve to.
+        for poisoned in [
+            "--output=/tmp/x",            // git log --output= → arbitrary file write
+            "--upload-pack=/tmp/evil.sh", // option/command injection
+            "--no-such-flag",             // any leading-dash option is rejected
+            "../../etc",                  // path traversal
+            "../review_passed/forged",    // marker-forgery attempt
+        ] {
+            let err = validate_recovery_target_commit(poisoned)
+                .expect_err("poisoned resolved target_commit must be rejected pre-git");
+            assert_eq!(err.0, StatusCode::BAD_REQUEST, "input: {poisoned}");
+            assert!(
+                err.1.contains("^[0-9a-f]{7,64}$"),
+                "input: {poisoned}, msg: {}",
+                err.1
+            );
+        }
     }
 }

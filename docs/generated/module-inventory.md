@@ -279,11 +279,11 @@
 | `server::routes::queue_api` | `src/server/routes/queue_api.rs` | 439 | 390 | 49 |  |
 | `server::routes::receipt` | `src/server/routes/receipt.rs` | 815 | 502 | 313 |  |
 | `server::routes::resume` | `src/server/routes/resume.rs` | 1260 | 1260 | 0 | giant-file |
-| `server::routes::review_verdict` | `src/server/routes/review_verdict/mod.rs` | 11 | 11 | 0 |  |
+| `server::routes::review_verdict` | `src/server/routes/review_verdict/mod.rs` | 14 | 14 | 0 |  |
 | `server::routes::review_verdict::decision_route` | `src/server/routes/review_verdict/decision_route.rs` | 26 | 26 | 0 |  |
 | `server::routes::review_verdict::tuning_aggregate` | `src/server/routes/review_verdict/tuning_aggregate.rs` | 14 | 14 | 0 |  |
-| `server::routes::review_verdict::verdict_route` | `src/server/routes/review_verdict/verdict_route.rs` | 593 | 593 | 0 |  |
-| `server::routes::reviews` | `src/server/routes/reviews.rs` | 624 | 624 | 0 |  |
+| `server::routes::review_verdict::verdict_route` | `src/server/routes/review_verdict/verdict_route.rs` | 705 | 641 | 64 |  |
+| `server::routes::reviews` | `src/server/routes/reviews.rs` | 760 | 671 | 89 |  |
 | `server::routes::routines` | `src/server/routes/routines.rs` | 1039 | 854 | 185 |  |
 | `server::routes::session_activity` | `src/server/routes/session_activity.rs` | 13 | 13 | 0 |  |
 | `server::routes::settings` | `src/server/routes/settings.rs` | 93 | 93 | 0 |  |
