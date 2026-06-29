@@ -829,7 +829,7 @@ async fn exercise_review_rework_loop(
                 )
             })?;
     bind_fixture_entry_to_live_dispatch(pool, entry, &rework_dispatch_id).await?;
-    clear_dispatch_outbox_for_dispatch(pool, &rework_dispatch_id).await?;
+    assert_no_dispatch_outbox_for_dispatch(pool, &rework_dispatch_id).await?;
     request_json(
         app,
         report,
@@ -899,7 +899,7 @@ async fn exercise_review_rework_loop(
         ));
     }
     for dispatch_id in &live_review_ids_after_rework {
-        clear_dispatch_outbox_for_dispatch(pool, dispatch_id).await?;
+        assert_no_dispatch_outbox_for_dispatch(pool, dispatch_id).await?;
     }
 
     record_observation(
@@ -2690,21 +2690,26 @@ async fn request_json_with_review_enter_policy(
     Ok(body_json)
 }
 
-async fn clear_dispatch_outbox_for_dispatch(
+async fn assert_no_dispatch_outbox_for_dispatch(
     pool: &sqlx::PgPool,
     dispatch_id: &str,
-) -> Result<i64, String> {
-    let deleted = sqlx::query(
-        "DELETE FROM dispatch_outbox
+) -> Result<(), String> {
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT
+         FROM dispatch_outbox
          WHERE dispatch_id = $1
            AND action IN ('notify', 'followup')",
     )
     .bind(dispatch_id)
-    .execute(pool)
+    .fetch_one(pool)
     .await
-    .map_err(|error| format!("clear sandbox dispatch outbox for {dispatch_id}: {error}"))?
-    .rows_affected() as i64;
-    Ok(deleted)
+    .map_err(|error| format!("count sandbox dispatch outbox for {dispatch_id}: {error}"))?;
+    if count != 0 {
+        return Err(format!(
+            "sandbox preflight dispatch {dispatch_id} enqueued {count} dispatch_outbox row(s)"
+        ));
+    }
+    Ok(())
 }
 
 async fn load_snapshot(

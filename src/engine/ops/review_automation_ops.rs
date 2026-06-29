@@ -480,6 +480,7 @@ async fn handoff_create_pr_pg(
             sidecar_dispatch: true,
             ..Default::default()
         },
+        false,
     )
     .await
     {

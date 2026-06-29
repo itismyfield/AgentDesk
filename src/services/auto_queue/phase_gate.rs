@@ -134,7 +134,9 @@ async fn create_activate_dispatch_pg_inner(
         .try_get("metadata")
         .map_err(|error| format!("decode metadata for {card_id}: {error}"))?;
     let sandbox_preflight_dispatch =
-        metadata_disables_preflight_external_side_effects(metadata.as_ref());
+        crate::dispatch::sandbox_preflight_metadata_disables_external_side_effects(
+            metadata.as_ref(),
+        );
 
     let agent_exists =
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM agents WHERE id = $1")
@@ -567,43 +569,37 @@ async fn create_activate_dispatch_pg_inner(
     Ok(dispatch_id)
 }
 
-fn metadata_disables_preflight_external_side_effects(metadata: Option<&serde_json::Value>) -> bool {
-    metadata.is_some_and(|metadata| {
-        metadata
-            .get("sandbox_preflight")
-            .and_then(serde_json::Value::as_bool)
-            == Some(true)
-            && metadata
-                .get("production_mutation_allowed")
-                .and_then(serde_json::Value::as_bool)
-                != Some(true)
-    })
-}
-
 #[cfg(test)]
 mod tests {
-    use super::metadata_disables_preflight_external_side_effects;
+    use crate::dispatch::sandbox_preflight_metadata_disables_external_side_effects;
 
     #[test]
     fn sandbox_preflight_metadata_disables_external_side_effects_only_when_safe() {
-        assert!(metadata_disables_preflight_external_side_effects(Some(
-            &serde_json::json!({
+        assert!(sandbox_preflight_metadata_disables_external_side_effects(
+            Some(&serde_json::json!({
                 "sandbox_preflight": true,
                 "production_mutation_allowed": false
-            })
-        )));
-        assert!(!metadata_disables_preflight_external_side_effects(Some(
-            &serde_json::json!({
+            }))
+        ));
+        assert!(!sandbox_preflight_metadata_disables_external_side_effects(
+            Some(&serde_json::json!({
                 "sandbox_preflight": true,
                 "production_mutation_allowed": true
-            })
-        )));
-        assert!(!metadata_disables_preflight_external_side_effects(Some(
-            &serde_json::json!({
+            }))
+        ));
+        assert!(!sandbox_preflight_metadata_disables_external_side_effects(
+            Some(&serde_json::json!({
+                "sandbox_preflight": true
+            }))
+        ));
+        assert!(!sandbox_preflight_metadata_disables_external_side_effects(
+            Some(&serde_json::json!({
                 "sandbox_preflight": false,
                 "production_mutation_allowed": false
-            })
-        )));
-        assert!(!metadata_disables_preflight_external_side_effects(None));
+            }))
+        ));
+        assert!(!sandbox_preflight_metadata_disables_external_side_effects(
+            None
+        ));
     }
 }

@@ -31,6 +31,7 @@ pub(crate) use dispatch_context::{
     dispatch_type_force_new_session_default, dispatch_type_requires_fresh_worktree,
     dispatch_type_session_strategy_default, dispatch_type_uses_thread_routing,
     ensure_card_worktree, inject_review_dispatch_identifiers, resolve_card_worktree,
+    sandbox_preflight_metadata_disables_external_side_effects,
 };
 #[allow(unused_imports)]
 pub(crate) use dispatch_create::{

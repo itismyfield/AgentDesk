@@ -46,6 +46,21 @@ pub(super) fn json_string_field<'a>(value: &'a serde_json::Value, key: &str) -> 
         .filter(|s| !s.is_empty())
 }
 
+pub(crate) fn sandbox_preflight_metadata_disables_external_side_effects(
+    metadata: Option<&serde_json::Value>,
+) -> bool {
+    metadata.is_some_and(|metadata| {
+        metadata
+            .get("sandbox_preflight")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+            && metadata
+                .get("production_mutation_allowed")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+    })
+}
+
 pub(crate) async fn sandbox_preflight_card_disables_external_side_effects(
     pool: &PgPool,
     card_id: &str,
@@ -61,14 +76,7 @@ pub(crate) async fn sandbox_preflight_card_disables_external_side_effects(
     let Ok(Some(Some(metadata))) = metadata else {
         return false;
     };
-    metadata
-        .get("sandbox_preflight")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false)
-        && !metadata
-            .get("production_mutation_allowed")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(true)
+    sandbox_preflight_metadata_disables_external_side_effects(Some(&metadata))
 }
 
 pub(super) fn json_map_string_field<'a>(
@@ -2714,10 +2722,18 @@ pub(super) async fn build_review_context(
                 })
                 .map(|value| value.to_string());
 
-            let pr_tracking_target = if is_rereview_dispatch {
+            let pr_tracking_target = if is_rereview_dispatch
+                && !sandbox_preflight_without_external_side_effects
+            {
                 resolve_pr_tracking_review_target_pg(pool, kanban_card_id, Some(&ctx_snapshot))
                     .await?
             } else {
+                if is_rereview_dispatch && sandbox_preflight_without_external_side_effects {
+                    tracing::info!(
+                        "[dispatch] Review dispatch for card {}: sandbox preflight suppresses pr_tracking target resolution",
+                        kanban_card_id
+                    );
+                }
                 None
             };
 
