@@ -1,0 +1,106 @@
+//! #3894 — per-submission finalize context split out of `turn_finalizer.rs`.
+//!
+//! PURE MOVE (no logic change): the `FinalizeContext` per-site knobs struct
+//! and its constructor set (`bridge` / `watcher` / `monitor` / `gate_backstop`
+//! / `delivery_lease`) lifted verbatim from the parent. Re-exported
+//! (`pub(in crate::services::discord) use self::finalize_context::FinalizeContext`)
+//! so every routed call site stays byte-identical. The private `gate_backstop`
+//! constructor is widened to `pub(super)` (the sole visibility change) so the
+//! reconcile/backstop child can still build the deadline-armed context.
+
+/// Per-submission knobs that keep each routed call-site behaviourally
+/// identical to its pre-#3016 inline sequence during the incremental window.
+/// Routed sites preserve their old side-effects; only ownership moves.
+#[derive(Clone, Copy, Debug)]
+pub(in crate::services::discord) struct FinalizeContext {
+    /// Whether `do_finalize` clears inflight as part of the finalize. Bridge
+    /// branches and the watcher clear inflight inline in their own flow before
+    /// submitting, so they pass `false`; only the deadline-armed reconcile
+    /// backstop (no caller to clear it) passes `true`.
+    pub(in crate::services::discord) clear_inflight: bool,
+    /// Whether to mark the removed token's completion-cleanup. The bridge did
+    /// this on a non-cancel terminal (still gated on `!event.is_cancel()`); the
+    /// watcher's `finish_restored_watcher_active_turn` did NOT — it only set
+    /// `cancelled`. Keeping this per-site avoids changing provider-watchdog
+    /// semantics on the watcher path.
+    pub(in crate::services::discord) allow_completion_cleanup: bool,
+    /// Whether to drain voice barge-in deferred prompts as part of finalize.
+    /// The bridge branches drain voice; the watcher path did NOT.
+    pub(in crate::services::discord) drain_voice: bool,
+    /// Whether to schedule a deferred idle-queue kickoff when the finalize
+    /// leaves a pending soft-queue (gated on `mailbox_online && has_pending`).
+    /// The watcher's `finish_restored_watcher_active_turn` did this; the bridge
+    /// branches deferred kickoff to a later site, so they pass `false`.
+    pub(in crate::services::discord) kickoff_queue: bool,
+}
+
+impl FinalizeContext {
+    /// Bridge non-delegation / missing-handoff branches: bridge owns the
+    /// inflight clear elsewhere, marks completion-cleanup on non-cancel, drains
+    /// voice, defers queue kickoff.
+    pub(in crate::services::discord) fn bridge() -> Self {
+        Self {
+            clear_inflight: false,
+            allow_completion_cleanup: true,
+            drain_voice: true,
+            kickoff_queue: false,
+        }
+    }
+
+    /// Watcher terminal via `finish_restored_watcher_active_turn`: the watcher
+    /// clears inflight inline before submitting, does NOT mark completion
+    /// cleanup, does NOT drain voice. The queue kickoff stays at the caller
+    /// because it is gated on the caller's `dispatch_ok`, which the finalizer
+    /// cannot see — so the context leaves kickoff to the submitter.
+    pub(in crate::services::discord) fn watcher() -> Self {
+        Self {
+            clear_inflight: false,
+            allow_completion_cleanup: false,
+            drain_voice: false,
+            kickoff_queue: false,
+        }
+    }
+
+    /// Monitor-auto-turn / recovery terminal (#3016 phase 4): the caller owns
+    /// the inflight clear (or there is none — synthetic monitor turn / recovery
+    /// already cleared it), does NOT mark completion-cleanup, does NOT drain
+    /// voice, but DOES kick off any queued backlog (the pre-#3016
+    /// `finish_monitor_auto_turn` / `finish_recovered_turn_mailbox` both
+    /// scheduled the deferred idle-queue kickoff on `has_pending`). This is
+    /// `watcher()` plus the queue kickoff.
+    pub(in crate::services::discord) fn monitor() -> Self {
+        Self {
+            clear_inflight: false,
+            allow_completion_cleanup: false,
+            drain_voice: false,
+            kickoff_queue: true,
+        }
+    }
+
+    /// Deadline-armed gate-timeout backstop, fired from the reconciler with no
+    /// caller to have cleared inflight: finalize fully (clear inflight here),
+    /// no completion-cleanup or voice drain (watcher semantics), kick off the
+    /// queue if backlog remains.
+    pub(super) fn gate_backstop() -> Self {
+        Self {
+            clear_inflight: true,
+            allow_completion_cleanup: false,
+            drain_voice: false,
+            kickoff_queue: true,
+        }
+    }
+
+    /// #3041 §3 P1-0 (DORMANT): context for a lease-release-driven finalize once
+    /// the watcher terminal migrates onto the delivery lease (P1-1..). Mirrors
+    /// `watcher()` today (no live caller), but kept as a distinct constructor so
+    /// wired phases can tune the lease-release knobs independently.
+    #[allow(dead_code)] // #3041 P1-0: dormant, wired in P1-1..
+    pub(in crate::services::discord) fn delivery_lease() -> Self {
+        Self {
+            clear_inflight: false,
+            allow_completion_cleanup: false,
+            drain_voice: false,
+            kickoff_queue: false,
+        }
+    }
+}

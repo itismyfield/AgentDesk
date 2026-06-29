@@ -581,7 +581,25 @@
 # baseline raise for a SAFETY fix; decomposing the file back under baseline (pure
 # move into a turn_finalizer/ child, cross-reviewed) is deferred to #3894 to avoid
 # a risky core-hotfile refactor mid-stabilization.
-"src/services/discord/turn_finalizer.rs" = 1521
+# #3894: 1521 -> 1038 (-483 prod LoC) by extracting three cohesive clusters
+# VERBATIM (pure move, zero logic change) into turn_finalizer/ child modules —
+# the per-submission finalize context (turn_finalizer/finalize_context.rs), the
+# finalize side-effect chokepoint `do_finalize` (turn_finalizer/finalize.rs),
+# and the timer-driven reconcile/backstop cluster `reconcile` +
+# `run_backstop_finalize` (turn_finalizer/reconcile.rs). The only edits to the
+# moved bodies are mechanical: re-export/re-import so call sites stay
+# byte-identical, widening `FinalizeContext::gate_backstop` to `pub(super)`, and
+# rewriting bare `super::` discord-module references to absolute
+# `crate::services::discord::` paths because the module depth changed. Each child
+# is well under the 1000-prod-LoC giant threshold (tracked below at landed LoC).
+"src/services/discord/turn_finalizer.rs" = 1038
+# #3894: the three new turn_finalizer/ child modules landed below the 1000-prod-LoC
+# giant threshold; tracked here at their landed production LoC so the decomposition
+# cannot silently re-inflate any child toward giant-hood (the ratchet only fails
+# once a file actually crosses the giant threshold, so these freeze them sub-giant).
+"src/services/discord/turn_finalizer/finalize.rs" = 208
+"src/services/discord/turn_finalizer/finalize_context.rs" = 106
+"src/services/discord/turn_finalizer/reconcile.rs" = 220
 # #3557 (A) codex r2: the headless watchdog was missing the per-turn hard
 # ceiling cap that the foreground intake path already had — and it also
 # `mark_async_managed`s the token (sync watchdog stops enforcing), so this async
