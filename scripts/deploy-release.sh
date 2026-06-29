@@ -581,8 +581,66 @@ ${summary}"
     _notify_channel "$content"
 }
 
+# #3858: restore the last-known-good release binary and restart the service.
+# Invoked from the EXIT trap (via _cleanup_on_exit) whenever the binary was
+# promoted but the deploy never reached DEPLOY_OK — i.e. ANY non-zero exit after
+# promotion, not only the explicit health-check branch (an unguarded
+# post-promotion command failing under `set -e` is covered too). Every step
+# except the restart is best-effort so a failed re-lock can NEVER skip the
+# restart (#3858 finding 3): the service must always come back up.
+_rollback_release_binary() {
+    local rel_binary="${REL_BINARY:-}"
+    local rel_backup="${REL_BINARY_BACKUP:-}"
+    local plist="${PLIST_REL:-}"
+    local rel_port="${REL_PORT:-${AGENTDESK_REL_PORT:-${ADK_DEFAULT_PORT:-8791}}}"
+    local domain
+
+    [ -n "$rel_binary" ] && [ -n "$plist" ] || return 0
+    if [ ! -f "$rel_backup" ]; then
+        echo "⚠ No rollback backup available (${rel_backup:-unset} missing) — cannot auto-rollback"
+        return 0
+    fi
+
+    echo "↩ Rolling back release binary to previous good version..."
+    domain="$(_launchd_domain)" || domain="gui/$(id -u 2>/dev/null)"
+    # Stop the crash-looping new process before swapping the binary back.
+    launchctl bootout "$domain/$plist" 2>/dev/null || true
+    tmux kill-session -t "${AGENTDESK_RELEASE_TMUX_SESSION:-AgentDesk-dcserver-release-manual}" 2>/dev/null || true
+    # The bad binary is never locked (uchg is deferred to the success path), so
+    # nouchg here is defensive. mv is an atomic same-dir rename: the backup
+    # replaces the bad binary in one step — at no instant are both copies gone.
+    chflags nouchg "$rel_binary" 2>/dev/null || true
+    if ! mv -f "$rel_backup" "$rel_binary"; then
+        echo "✗ Failed to restore previous binary from $rel_backup — manual intervention required"
+        return 0
+    fi
+    # #3858 finding 3: re-lock is best-effort and MUST NOT abort the restart
+    # below. A failed chflags can never leave the good binary restored but the
+    # service stopped.
+    chflags uchg "$rel_binary" 2>/dev/null || true
+    echo "↩ Previous binary restored — restarting release..."
+    xattr -d com.apple.quarantine "$HOME/Library/LaunchAgents/$plist.plist" 2>/dev/null || true
+    if ! launchctl bootstrap "$domain" "$HOME/Library/LaunchAgents/$plist.plist"; then
+        echo "⚠ launchd bootstrap failed during rollback — using tmux fallback"
+        start_release_tmux_fallback || true
+    fi
+    if wait_for_http_service_health "$plist" "$rel_port" "$DEPLOY_HEALTH_RETRIES" "$DEPLOY_HEALTH_DELAY_SECS" 1 1; then
+        echo "✓ Rollback succeeded — release healthy on :${rel_port} with previous binary"
+    else
+        echo "✗ Rollback restart did not reach healthy state — manual intervention required (logs: ${ADK_REL:-}/logs/)"
+    fi
+}
+
 _cleanup_on_exit() {
     local status=$?
+    # #3858: if the binary was promoted (ROLLBACK_ARMED) but the deploy never
+    # reached DEPLOY_OK, restore the last-known-good binary and restart BEFORE the
+    # staging cleanup below. This catches ANY non-zero exit after promotion — an
+    # unguarded post-promotion command under `set -e`, not only the explicit
+    # health-check branch — so a crash-on-boot binary can never stay live (#3858).
+    if [ "${ROLLBACK_ARMED:-0}" = 1 ] && [ "${DEPLOY_OK:-0}" != 1 ]; then
+        _rollback_release_binary
+    fi
     if [ -n "${STAGED_BINARY:-}" ] && [ -e "$STAGED_BINARY" ]; then
         rm -f "$STAGED_BINARY" 2>/dev/null || true
     fi
@@ -1205,21 +1263,36 @@ fi
 # instead of leaving the release down with the last-good binary already gone.
 REL_BINARY="$ADK_REL/bin/agentdesk"
 REL_BINARY_BACKUP="$ADK_REL/bin/agentdesk.prev"
-echo "▸ Backing up current release binary for rollback..."
 chflags nouchg "$REL_BINARY" 2>/dev/null || true
-# Clear any stale (possibly immutable) backup from a prior interrupted deploy.
-chflags nouchg "$REL_BINARY_BACKUP" 2>/dev/null || true
-rm -f "$REL_BINARY_BACKUP" 2>/dev/null || true
-if [ -f "$REL_BINARY" ]; then
-    # cp (not mv) so the last-good binary is never absent: both the backup and
-    # the live binary exist until the staged binary atomically replaces it —
-    # there is no window where both copies are gone. -p preserves mode/owner.
+if [ -f "$REL_BINARY_BACKUP" ]; then
+    # #3858 (re-entrancy / finding 2): treat .prev as last-KNOWN-GOOD. A leftover
+    # .prev means a PRIOR deploy failed before its success-path cleanup, so it
+    # holds that deploy's last good binary (captured when the then-live binary was
+    # still healthy). The CURRENT live binary may be the unverified/bad binary the
+    # prior deploy promoted — do NOT overwrite a good .prev with it. Preserve the
+    # existing last-known-good as the rollback target so a re-run can still recover.
+    echo "▸ Preserving existing last-known-good backup for rollback (prior deploy left one)..."
+    # Ensure it is mutable so the rollback's `mv -f` can consume it.
+    chflags nouchg "$REL_BINARY_BACKUP" 2>/dev/null || true
+elif [ -f "$REL_BINARY" ]; then
+    # No prior backup: the current live binary is the last successful deploy's
+    # health-confirmed binary (the success path drops .prev once health passes).
+    # Capture it as the rollback target. cp (not mv) so the last-good binary is
+    # never absent — both the backup and the live binary exist until the staged
+    # binary atomically replaces it; no window where both copies are gone.
+    # -p preserves mode/owner (and, since REL_BINARY was just unlocked above, the
+    # copy is not immutable).
+    echo "▸ Backing up current release binary for rollback..."
     cp -p "$REL_BINARY" "$REL_BINARY_BACKUP"
 fi
 
 echo "▸ Promoting staged binary..."
 mv -f "$STAGED_BINARY" "$REL_BINARY"
 STAGED_BINARY=""
+# #3858: arm the EXIT-trap rollback the instant the binary is live. From here,
+# ANY non-zero exit before DEPLOY_OK (set on the success path) restores the
+# last-known-good backup and restarts the service — see _rollback_release_binary.
+ROLLBACK_ARMED=1
 # NOTE: the immutable re-lock (chflags uchg) is deferred until AFTER the health
 # check passes (see below). Locking here would force the rollback path to fight
 # the uchg flag on the bad binary, and the lock's only job — blocking unsigned
@@ -1413,44 +1486,25 @@ fi
 
 if [ "$REL_HEALTHY" != true ]; then
     echo "✗ Release health check failed after $DEPLOY_HEALTH_RETRIES attempts — check logs: $ADK_REL/logs/"
-    # #3858: roll back to the previous good binary so the release does not stay
-    # down with the last-good binary lost. Mirrors the dashboard/.old pattern.
-    if [ -f "$REL_BINARY_BACKUP" ]; then
-        echo "↩ Rolling back release binary to previous good version..."
-        # Stop the crash-looping new process before swapping the binary back.
-        LAUNCHD_DOMAIN="$(_launchd_domain)"
-        launchctl bootout "$LAUNCHD_DOMAIN/$PLIST_REL" 2>/dev/null || true
-        tmux kill-session -t "${AGENTDESK_RELEASE_TMUX_SESSION:-AgentDesk-dcserver-release-manual}" 2>/dev/null || true
-        # The bad binary was never locked (uchg is deferred to the success path),
-        # so nouchg here is just defensive. mv is an atomic same-dir rename: the
-        # backup replaces the bad binary in one step, no double-loss window.
-        chflags nouchg "$REL_BINARY" 2>/dev/null || true
-        if mv -f "$REL_BINARY_BACKUP" "$REL_BINARY"; then
-            # Restore the immutable lock now that the good binary is live again.
-            chflags uchg "$REL_BINARY"
-            echo "↩ Previous binary restored — restarting release..."
-            xattr -d com.apple.quarantine "$HOME/Library/LaunchAgents/$PLIST_REL.plist" 2>/dev/null || true
-            if ! launchctl bootstrap "$LAUNCHD_DOMAIN" "$HOME/Library/LaunchAgents/$PLIST_REL.plist"; then
-                echo "⚠ launchd bootstrap failed during rollback — using tmux fallback"
-                start_release_tmux_fallback
-            fi
-            if wait_for_http_service_health "$PLIST_REL" "$REL_PORT" "$DEPLOY_HEALTH_RETRIES" "$DEPLOY_HEALTH_DELAY_SECS" 1 1; then
-                echo "✓ Rollback succeeded — release healthy on :${REL_PORT} with previous binary"
-            else
-                echo "✗ Rollback restart did not reach healthy state — manual intervention required (logs: $ADK_REL/logs/)"
-            fi
-        else
-            echo "✗ Failed to restore previous binary from $REL_BINARY_BACKUP — manual intervention required"
-        fi
-    else
-        echo "⚠ No rollback backup available ($REL_BINARY_BACKUP missing) — cannot auto-rollback"
-    fi
+    # #3858: do NOT roll back inline here. DEPLOY_OK stays unset, so the EXIT trap
+    # (_rollback_release_binary, armed at promotion) restores the previous good
+    # binary and restarts the service on this exit — the SAME path that covers any
+    # other post-promotion failure. Unifying them guarantees a single rollback (no
+    # double restore) and identical recovery whether the failure is the health
+    # check or an unguarded post-promotion command crash.
     exit 1
 fi
 
-# #3858: health passed — the new binary is proven good. Lock it against unsigned
-# overwrites (deferred from promotion) and drop the rollback backup.
-chflags uchg "$REL_BINARY"
+# #3858: health passed — the new binary is proven good and serving. Mark the
+# deploy successful FIRST so the EXIT-trap rollback is disarmed BEFORE we drop the
+# backup below — otherwise a failure between here and the backup removal would try
+# to roll back with no .prev, and a hiccup in a non-critical step (lock, manifest)
+# must never tear down a healthy, health-confirmed binary.
+DEPLOY_OK=1
+# Lock it against unsigned overwrites (deferred from promotion) and drop the
+# now-unneeded rollback backup. chflags is best-effort: failing to re-lock a
+# healthy serving binary must not fail the deploy.
+chflags uchg "$REL_BINARY" 2>/dev/null || true
 chflags nouchg "$REL_BINARY_BACKUP" 2>/dev/null || true
 rm -f "$REL_BINARY_BACKUP" 2>/dev/null || true
 
