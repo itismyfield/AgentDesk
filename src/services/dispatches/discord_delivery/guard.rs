@@ -1,10 +1,98 @@
 use super::{DispatchNotifyDeliveryResult, DispatchTransport};
 use crate::db::dispatches::delivery_events::{
     DispatchDeliveryEventFinalize, DispatchDeliveryEventStatus,
-    finalize_dispatch_delivery_event_pg, insert_reserved_dispatch_delivery_event_pg,
+    finalize_dispatch_delivery_event_conn, insert_reserved_dispatch_delivery_event_pg,
 };
 use serde_json::{Value, json};
 use sqlx::PgPool;
+use std::time::Duration;
+
+/// Backoff schedule for retrying each durable delivery-finalize write (#3861). A
+/// transient DB blip during finalize must NOT leave a delivered message without a
+/// durable dedup key, so we retry — and ultimately surface the error — instead of
+/// the original `.ok()` swallow that left it to reservation expiry.
+const DELIVERY_FINALIZE_RETRY_BACKOFFS: [Duration; 4] = [
+    Duration::from_millis(100),
+    Duration::from_millis(250),
+    Duration::from_millis(500),
+    Duration::from_millis(1000),
+];
+
+// #3861 dedup-durability invariant. The `dispatch_notified:*` anchor written below
+// is the timing-independent proof of a completed send that reconcile's
+// notified-backfill (`recover_orphan_dispatch_notified_pg`) relies on. It is
+// committed independently and BEFORE the reserving key is deleted, so after a
+// successful send there is ALWAYS either an active `dispatch_reserving:*` key (a
+// retry / outbox reclaim will converge) or a durable `dispatch_notified:*` key
+// (reconcile backfills the ledger to `sent`, no resend) — never neither.
+//
+// SCOPE — what this PR closes vs. the irreducible residual (verified against the
+// outbox worker + reconcile paths; do not overstate):
+//   * CLOSED — transient finalize failure: a transient typed-finalize /
+//     reserving-delete failure (or its swallowed `.ok()` predecessor) can no
+//     longer strand a delivered message with no dedup proof. STEP 1 commits the
+//     anchor first, independently, and reconcile backfills `sent` from it; a
+//     bookkeeping failure is self-healing.
+//   * CLOSED — slow/hanging send: a transport `send_dispatch` that ran longer
+//     than the reservation TTL used to let an outbox reclaim observe an EXPIRED
+//     reservation while the original worker was still in-flight, and re-send.
+//     `reqwest::Client::new()` carries no request timeout, so that wall-clock was
+//     unbounded. We now bound the whole send to `DISPATCH_SEND_DEADLINE_SECS`,
+//     held strictly below the reservation TTL by the static assertion below, so
+//     the original worker always settles (success or timeout-as-failure) before
+//     its reservation can expire — the reclaim either sees the durable anchor or
+//     an active reservation, never an in-flight-but-expired one.
+//   * IRREDUCIBLE: the remaining duplicate paths are (i) a process crash in the
+//     narrow window between the Discord HTTP send returning and the anchor INSERT
+//     committing, (ii) a total DB outage spanning the entire reservation TTL (so
+//     the anchor write, the outbox `mark_done`, AND reconcile all fail), and
+//     (iii) at-least-once "delivered but the ack/response was lost" — a crashed
+//     or deadline-timed-out send that actually reached Discord, which the retry /
+//     reclaim then re-sends because nothing can prove the lost-ack delivery
+//     happened. No design removes these: an external HTTP send and a local DB
+//     commit cannot be made atomic, and a lost ack is indistinguishable from a
+//     non-delivery. Anchor-FIRST ordering minimizes window (i) to one statement,
+//     and a STEP 1 permanent failure is escalated as an operator-alertable
+//     invariant breach so it is never silent.
+//   * NOT a duplicate (verified): in an ALIVE process a STEP 1 anchor failure
+//     still returns the transport's Ok, so the worker marks the outbox row `done`
+//     (mark_outbox_done_pg) and it is never reclaimed — zero re-send; the typed
+//     ledger merely settles to a cosmetic `failed` that reconcile cannot upgrade
+//     without the anchor.
+//
+// The outbox reclaim backstop holds because the delivery reservation is acquired
+// AFTER the outbox claim (reserved_until = t_deliv+TTL > t_outbox+TTL), so the
+// earliest reclaim (claimed_at + stale) observes an active reservation and
+// short-circuits as a duplicate — AS LONG AS the send itself settles before the
+// reservation expires (the `DISPATCH_SEND_DEADLINE_SECS < TTL` assertion) and the
+// outbox stale threshold is <= the reservation TTL. Both static assertions lock
+// those orderings so the constants cannot silently drift apart.
+const _: () = assert!(
+    crate::db::dispatches::outbox::DISPATCH_OUTBOX_CLAIM_STALE_SECS
+        <= DISPATCH_DELIVERY_RESERVATION_TTL_SECS,
+    "outbox stale threshold must be <= dispatch delivery reservation TTL or a reclaim \
+     could re-send before the notified dedup anchor becomes durable (#3861)"
+);
+const _: () = assert!(
+    (DISPATCH_SEND_DEADLINE_SECS as i64) < DISPATCH_DELIVERY_RESERVATION_TTL_SECS,
+    "dispatch transport send deadline must be < reservation TTL or a slow/hanging send \
+     could outlive its reservation and let an outbox reclaim re-send it (#3861)"
+);
+
+/// Reservation TTL for `dispatch_reserving:*` guard keys and the typed
+/// `reserved` ledger row (both written as `NOW() + INTERVAL '5 minutes'`).
+/// Mirrored here as a constant so the #3861 dedup-durability invariant above can
+/// be checked at compile time.
+const DISPATCH_DELIVERY_RESERVATION_TTL_SECS: i64 = 300;
+
+/// Hard wall-clock ceiling for a single `send_dispatch` transport call (#3861).
+/// `reqwest::Client::new()` sets no request timeout, so without this a hung or
+/// repeatedly rate-limited Discord HTTP send could outlive its 300s reservation
+/// and let an outbox reclaim re-send it. Held strictly below the reservation TTL
+/// (asserted above) with generous head-room over the realistic worst case (a
+/// message POST plus a few bounded 429 backoffs of <=10s each), so legitimate
+/// sends never trip it while pathological hangs are contained.
+const DISPATCH_SEND_DEADLINE_SECS: u64 = 120;
 
 pub(crate) async fn send_dispatch_with_delivery_guard<T: DispatchTransport>(
     db: Option<&crate::db::Db>,
@@ -20,18 +108,79 @@ pub(crate) async fn send_dispatch_with_delivery_guard<T: DispatchTransport>(
         return duplicate_dispatch_delivery_result(pg_pool, dispatch_id).await;
     }
 
-    let send_result = transport
-        .send_dispatch(
-            db.cloned(),
-            agent_id.to_string(),
-            title.to_string(),
-            card_id.to_string(),
-            dispatch_id.to_string(),
-        )
-        .await;
+    let send_result = send_dispatch_within_deadline(
+        transport,
+        db.cloned(),
+        agent_id.to_string(),
+        title.to_string(),
+        card_id.to_string(),
+        dispatch_id,
+        Duration::from_secs(DISPATCH_SEND_DEADLINE_SECS),
+    )
+    .await;
 
-    finalize_dispatch_delivery_guard(pg_pool, dispatch_id, send_result.as_ref()).await;
+    if let Err(finalize_error) =
+        finalize_dispatch_delivery_guard(pg_pool, dispatch_id, send_result.as_ref()).await
+    {
+        // The error is no longer swallowed: finalize already retried each durable
+        // write, and on a successful send we must NOT re-drive it from here
+        // (returning Err would make the caller re-send an already-delivered
+        // message). On a successful send the durable `notified` anchor is written
+        // and committed FIRST, before anything else, so even when the later
+        // bookkeeping fails the anchor (or, in its narrow pre-commit window, the
+        // still-active reservation) keeps reconcile / outbox reclaim from
+        // re-sending the same Discord message (#3861).
+        if send_result.is_ok() {
+            tracing::error!(
+                dispatch_id,
+                error = %finalize_error,
+                "[dispatch] delivery finalize failed after retries; message was delivered but dedup ledger is not yet durable"
+            );
+        } else {
+            tracing::warn!(
+                dispatch_id,
+                error = %finalize_error,
+                "[dispatch] delivery finalize failed after retries for a failed send"
+            );
+        }
+    }
     send_result
+}
+
+/// Run a transport `send_dispatch` under a hard wall-clock `deadline`, mapping a
+/// timeout to a transport error (#3861).
+///
+/// `reqwest::Client::new()` carries no request timeout, so a hung or repeatedly
+/// rate-limited Discord HTTP send could otherwise outlive the delivery
+/// reservation and let an outbox reclaim re-send it. Bounding the send below the
+/// reservation TTL guarantees the original worker settles before its reservation
+/// can expire. A timeout is surfaced as a normal failed send: it flows through
+/// the failed-send finalize (no anchor; reserving key released so the dispatch
+/// can be retried). The residual at-least-once exposure — a timed-out send that
+/// actually reached Discord — is irreducible (a lost ack cannot be distinguished
+/// from a non-delivery).
+async fn send_dispatch_within_deadline<T: DispatchTransport>(
+    transport: &T,
+    db: Option<crate::db::Db>,
+    agent_id: String,
+    title: String,
+    card_id: String,
+    dispatch_id: &str,
+    deadline: Duration,
+) -> Result<DispatchNotifyDeliveryResult, String> {
+    match tokio::time::timeout(
+        deadline,
+        transport.send_dispatch(db, agent_id, title, card_id, dispatch_id.to_string()),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_elapsed) => Err(format!(
+            "dispatch transport send for {dispatch_id} exceeded the {}s deadline \
+             (bounded below the reservation TTL to prevent a slow-send reclaim duplicate)",
+            deadline.as_secs()
+        )),
+    }
 }
 
 fn notified_key(dispatch_id: &str) -> String {
@@ -244,37 +393,171 @@ async fn finalize_dispatch_delivery_guard(
     pg_pool: Option<&PgPool>,
     dispatch_id: &str,
     send_result: Result<&DispatchNotifyDeliveryResult, &String>,
-) {
+) -> Result<(), String> {
     let Some(pool) = pg_pool else {
-        return;
+        return Ok(());
     };
-    let success = send_result.is_ok();
-    sqlx::query("DELETE FROM kv_meta WHERE key = $1")
-        .bind(reserving_key(dispatch_id))
-        .execute(pool)
-        .await
-        .ok();
-    if success {
-        sqlx::query(
-            "INSERT INTO kv_meta (key, value)
-             VALUES ($1, $2)
-             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-        )
-        .bind(notified_key(dispatch_id))
-        .bind(dispatch_id)
-        .execute(pool)
-        .await
-        .ok();
+
+    // STEP 1 — durable dedup ANCHOR (success only), committed on its OWN
+    // autocommit statement FIRST, before any other bookkeeping (#3861).
+    //
+    // The `dispatch_notified:*` key is the timing-independent proof of a completed
+    // send that reconcile's notified-backfill (`recover_orphan_dispatch_notified_pg`)
+    // relies on to converge the typed ledger to `sent` WITHOUT re-sending. Keeping
+    // it independent of the bookkeeping transaction below means a failure isolated
+    // to the reserving-delete or the typed-ledger finalize can never roll the
+    // anchor back — which a single all-in-one transaction would. We still retry it
+    // and surface the error instead of the original `.ok()` swallow.
+    //
+    // If the anchor STILL cannot be persisted after the bounded retries, the
+    // message was already delivered but no durable dedup proof exists — the
+    // operationally dangerous "delivered but not deduped" state. We escalate it as
+    // an operator-alertable invariant breach (ERROR log + structured analytics
+    // event) so it is never silent, then surface the error. The residual exposure
+    // here (a reclaim re-sending only after the 5-minute reservation also expires
+    // with no anchor) is the irreducible send↔durable-anchor window — see the
+    // module-level invariant comment.
+    if send_result.is_ok() {
+        let mut attempt = 0usize;
+        loop {
+            match persist_dispatch_notified_anchor(pool, dispatch_id).await {
+                Ok(()) => break,
+                Err(error) => {
+                    match delivery_finalize_backoff_or_fail(
+                        dispatch_id,
+                        "persist notified dedup anchor",
+                        attempt,
+                        error,
+                    )
+                    .await
+                    {
+                        Ok(()) => attempt += 1,
+                        Err(terminal) => {
+                            record_dispatch_notified_anchor_durability_breach(
+                                dispatch_id,
+                                &terminal,
+                            );
+                            return Err(terminal);
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    let finalize = dispatch_delivery_event_finalize_input(dispatch_id, send_result);
-    if let Err(error) = finalize_dispatch_delivery_event_pg(pool, finalize).await {
-        tracing::warn!(
-            dispatch_id,
-            error = %error,
-            "[dispatch] shadow dispatch_delivery_events finalize write failed"
-        );
+    // STEP 2 — atomic bookkeeping: delete the reserving guard key and finalize the
+    // typed ledger row together. On a successful send the anchor above already
+    // guarantees no duplicate, so a failure here is non-fatal for dedup (reconcile
+    // backfills from the anchor); on a FAILED send there is no anchor, but the
+    // reserving key is released so a retry can re-drive. Either way we retry and
+    // surface the error rather than leaving it to reservation expiry.
+    let mut attempt = 0usize;
+    loop {
+        match finalize_dispatch_delivery_bookkeeping_once(pool, dispatch_id, send_result).await {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                delivery_finalize_backoff_or_fail(
+                    dispatch_id,
+                    "finalize delivery bookkeeping",
+                    attempt,
+                    error,
+                )
+                .await?;
+                attempt += 1;
+            }
+        }
     }
+}
+
+/// Decide whether to retry a failed durable finalize write. Sleeps the next
+/// backoff and returns `Ok(())` (caller should retry), or returns the terminal
+/// error string once the bounded schedule is exhausted — never swallowing it.
+async fn delivery_finalize_backoff_or_fail(
+    dispatch_id: &str,
+    step: &str,
+    attempt: usize,
+    error: sqlx::Error,
+) -> Result<(), String> {
+    if attempt >= DELIVERY_FINALIZE_RETRY_BACKOFFS.len() {
+        return Err(format!(
+            "{step} for {dispatch_id} after {} attempts: {error}",
+            attempt + 1
+        ));
+    }
+    tracing::warn!(
+        dispatch_id,
+        step,
+        attempt = attempt + 1,
+        error = %error,
+        "[dispatch] durable delivery finalize write failed; retrying"
+    );
+    tokio::time::sleep(DELIVERY_FINALIZE_RETRY_BACKOFFS[attempt]).await;
+    Ok(())
+}
+
+/// Escalate a STEP 1 permanent failure: the transport already delivered the
+/// message, but the durable `dispatch_notified:*` dedup anchor could not be
+/// persisted after retries — "delivered but not deduped". Surface it as an
+/// operator-alertable invariant breach (ERROR-level log + structured
+/// `invariant_violation` analytics event) so the silent-but-dangerous state is
+/// visible on dashboards/alerts (#3861).
+fn record_dispatch_notified_anchor_durability_breach(dispatch_id: &str, detail: &str) {
+    crate::services::observability::record_invariant_check(
+        false,
+        crate::services::observability::InvariantViolation {
+            provider: None,
+            channel_id: None,
+            dispatch_id: Some(dispatch_id),
+            session_key: None,
+            turn_id: None,
+            invariant: "dispatch_delivery_notified_anchor_durable",
+            code_location: "src/services/dispatches/discord_delivery/guard.rs:finalize_dispatch_delivery_guard",
+            message: "delivery succeeded but the dispatch_notified dedup anchor did not persist after retries",
+            details: json!({ "dispatch_id": dispatch_id, "detail": detail }),
+        },
+    );
+}
+
+/// Commit the `dispatch_notified:*` dedup anchor on its own autocommit statement.
+/// No expiry: this key is the permanent durable proof that the send landed.
+async fn persist_dispatch_notified_anchor(
+    pool: &PgPool,
+    dispatch_id: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO kv_meta (key, value)
+         VALUES ($1, $2)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+    )
+    .bind(notified_key(dispatch_id))
+    .bind(dispatch_id)
+    .execute(pool)
+    .await
+    .map(|_| ())
+}
+
+/// One atomic attempt at the non-anchor bookkeeping: delete the reserving guard
+/// key and finalize the typed ledger row inside a single transaction so they
+/// commit together or not at all. On error the transaction rolls back, leaving
+/// the still-active reservation (and, on success, the already-durable notified
+/// anchor) untouched so a retry — or reconcile recovery — can converge without a
+/// duplicate send.
+async fn finalize_dispatch_delivery_bookkeeping_once(
+    pool: &PgPool,
+    dispatch_id: &str,
+    send_result: Result<&DispatchNotifyDeliveryResult, &String>,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    sqlx::query("DELETE FROM kv_meta WHERE key = $1")
+        .bind(reserving_key(dispatch_id))
+        .execute(&mut *tx)
+        .await?;
+
+    let finalize = dispatch_delivery_event_finalize_input(dispatch_id, send_result);
+    finalize_dispatch_delivery_event_conn(&mut *tx, finalize).await?;
+
+    tx.commit().await
 }
 
 fn dispatch_delivery_event_finalize_input<'a>(
@@ -409,6 +692,7 @@ mod tests {
         target_channel_id: String,
         message_id: String,
         assert_reserving_during_send: Option<PgPool>,
+        send_delay: Option<Duration>,
     }
 
     impl RecordingDispatchTransport {
@@ -418,11 +702,19 @@ mod tests {
                 target_channel_id: target_channel_id.to_string(),
                 message_id: message_id.to_string(),
                 assert_reserving_during_send: None,
+                send_delay: None,
             }
         }
 
         fn with_reservation_assertion(mut self, pool: PgPool) -> Self {
             self.assert_reserving_during_send = Some(pool);
+            self
+        }
+
+        /// Make `send_dispatch` sleep before returning, to exercise the #3861
+        /// send-deadline bound.
+        fn with_send_delay(mut self, delay: Duration) -> Self {
+            self.send_delay = Some(delay);
             self
         }
 
@@ -441,6 +733,9 @@ mod tests {
             dispatch_id: String,
         ) -> Result<DispatchNotifyDeliveryResult, String> {
             *self.calls.lock().unwrap() += 1;
+            if let Some(delay) = self.send_delay {
+                tokio::time::sleep(delay).await;
+            }
             if let Some(pool) = self.assert_reserving_during_send.as_ref() {
                 assert_eq!(
                     kv_meta_count(pool, &reserving_key(&dispatch_id)).await,
@@ -644,7 +939,9 @@ mod tests {
             fallback_kind: None,
             detail: Some("sent".to_string()),
         };
-        finalize_dispatch_delivery_guard(Some(&pool), dispatch_id, Ok(&result)).await;
+        finalize_dispatch_delivery_guard(Some(&pool), dispatch_id, Ok(&result))
+            .await
+            .unwrap();
 
         assert_eq!(kv_meta_count(&pool, &reserving_key(dispatch_id)).await, 0);
         assert_eq!(kv_meta_count(&pool, &notified_key(dispatch_id)).await, 1);
@@ -710,7 +1007,9 @@ mod tests {
         );
 
         let error = "discord transport failed".to_string();
-        finalize_dispatch_delivery_guard(Some(&pool), dispatch_id, Err(&error)).await;
+        finalize_dispatch_delivery_guard(Some(&pool), dispatch_id, Err(&error))
+            .await
+            .unwrap();
 
         assert_eq!(kv_meta_count(&pool, &reserving_key(dispatch_id)).await, 0);
         assert_eq!(kv_meta_count(&pool, &notified_key(dispatch_id)).await, 0);
@@ -746,7 +1045,9 @@ mod tests {
                 .unwrap()
         );
         let first_error = "first discord transport failure".to_string();
-        finalize_dispatch_delivery_guard(Some(&pool), dispatch_id, Err(&first_error)).await;
+        finalize_dispatch_delivery_guard(Some(&pool), dispatch_id, Err(&first_error))
+            .await
+            .unwrap();
 
         assert_eq!(kv_meta_count(&pool, &reserving_key(dispatch_id)).await, 0);
         assert_eq!(kv_meta_count(&pool, &notified_key(dispatch_id)).await, 0);
@@ -768,7 +1069,9 @@ mod tests {
             fallback_kind: None,
             detail: Some("sent after retry".to_string()),
         };
-        finalize_dispatch_delivery_guard(Some(&pool), dispatch_id, Ok(&result)).await;
+        finalize_dispatch_delivery_guard(Some(&pool), dispatch_id, Ok(&result))
+            .await
+            .unwrap();
 
         assert_eq!(kv_meta_count(&pool, &reserving_key(dispatch_id)).await, 0);
         assert_eq!(kv_meta_count(&pool, &notified_key(dispatch_id)).await, 1);
@@ -989,5 +1292,327 @@ mod tests {
 
         pool.close().await;
         pg_db.drop().await;
+    }
+
+    async fn delivery_event_status(pool: &PgPool, dispatch_id: &str) -> String {
+        sqlx::query_scalar::<_, String>(
+            "SELECT status
+               FROM dispatch_delivery_events
+              WHERE dispatch_id = $1
+              ORDER BY attempt DESC
+              LIMIT 1",
+        )
+        .bind(dispatch_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// Inject a mid-sequence DB failure: a CHECK constraint that rejects the
+    /// typed-ledger finalize's terminal `sent` status. BEGIN and the in-tx
+    /// reserving-key DELETE still succeed, so the finalize statement specifically
+    /// fails — exercising real transactional rollback rather than a `pool.begin()`
+    /// failure that never executes a statement.
+    async fn block_typed_sent_finalize(pool: &PgPool) {
+        sqlx::query(
+            "ALTER TABLE dispatch_delivery_events
+                 ADD CONSTRAINT block_sent_3861 CHECK (status <> 'sent')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn unblock_typed_sent_finalize(pool: &PgPool) {
+        sqlx::query("ALTER TABLE dispatch_delivery_events DROP CONSTRAINT block_sent_3861")
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    fn success_result(
+        dispatch_id: &str,
+        channel_id: &str,
+        message_id: &str,
+    ) -> DispatchNotifyDeliveryResult {
+        DispatchNotifyDeliveryResult {
+            status: "success".to_string(),
+            dispatch_id: dispatch_id.to_string(),
+            action: "notify".to_string(),
+            correlation_id: Some(format!("dispatch:{dispatch_id}")),
+            semantic_event_id: Some(format!("dispatch:{dispatch_id}:notify")),
+            target_channel_id: Some(channel_id.to_string()),
+            message_id: Some(message_id.to_string()),
+            fallback_kind: None,
+            detail: Some("sent".to_string()),
+        }
+    }
+
+    /// #3861: the durable `notified` dedup ANCHOR is committed independently
+    /// BEFORE the bookkeeping transaction, so a failure isolated to the
+    /// typed-ledger finalize (a) surfaces the error (not swallowed), (b) leaves
+    /// the bookkeeping atomic — the reserving key is NOT deleted (rolled back),
+    /// and (c) does NOT roll back the anchor. This is the property a single
+    /// all-in-one transaction would regress.
+    #[tokio::test]
+    async fn delivery_finalize_notified_anchor_survives_bookkeeping_failure() {
+        let pg_db = create_test_pg_db().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let dispatch_id = "dispatch-anchor-survives-bookkeeping-fail";
+        seed_dispatch(&pool, dispatch_id).await;
+
+        assert!(
+            claim_dispatch_delivery_guard(Some(&pool), dispatch_id)
+                .await
+                .unwrap()
+        );
+        let result = success_result(dispatch_id, "1500000000000000030", "1500000000000000031");
+
+        // The typed finalize statement (status -> 'sent') fails mid-transaction.
+        block_typed_sent_finalize(&pool).await;
+        let finalize =
+            finalize_dispatch_delivery_guard(Some(&pool), dispatch_id, Ok(&result)).await;
+        assert!(
+            finalize.is_err(),
+            "bookkeeping failure must surface the error, not swallow it"
+        );
+
+        // (a) anchor is durable despite the bookkeeping failure (independent commit).
+        assert_eq!(kv_meta_count(&pool, &notified_key(dispatch_id)).await, 1);
+        // (b) bookkeeping rolled back atomically: reserving key intact, row still reserved.
+        assert_eq!(kv_meta_count(&pool, &reserving_key(dispatch_id)).await, 1);
+        assert_eq!(delivery_event_count(&pool, dispatch_id).await, 1);
+        assert_eq!(delivery_event_status(&pool, dispatch_id).await, "reserved");
+
+        // Once the DB recovers, retrying the bookkeeping converges to `sent`.
+        unblock_typed_sent_finalize(&pool).await;
+        finalize_dispatch_delivery_guard(Some(&pool), dispatch_id, Ok(&result))
+            .await
+            .unwrap();
+        assert_eq!(kv_meta_count(&pool, &reserving_key(dispatch_id)).await, 0);
+        assert_eq!(kv_meta_count(&pool, &notified_key(dispatch_id)).await, 1);
+        assert_eq!(delivery_event_status(&pool, dispatch_id).await, "sent");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// #3861 core regression guard, driven through the real delivery entry point
+    /// (`send_dispatch_with_delivery_guard`) for BOTH the first processing and the
+    /// reclaim redrive — so the mock transport actually sends, and we assert the
+    /// total transport call count is exactly ONE (first send only, zero re-send).
+    ///
+    /// Flow: first processing sends once -> STEP 2 bookkeeping PERMANENTLY fails
+    /// (CHECK constraint) while the STEP 1 anchor stays durable -> reservation
+    /// expires -> reconcile backfills `sent` from the anchor -> stale-outbox
+    /// reclaim re-drives the same entry point -> the guard short-circuits as a
+    /// duplicate. A single all-in-one finalize transaction would have rolled the
+    /// anchor back on the bookkeeping failure and re-sent on the reclaim.
+    #[tokio::test]
+    async fn delivery_first_send_not_resent_by_reclaim_after_permanent_bookkeeping_failure() {
+        let pg_db = create_test_pg_db().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let dispatch_id = "dispatch-worker-path-no-resend";
+        seed_dispatch(&pool, dispatch_id).await;
+
+        let transport =
+            RecordingDispatchTransport::new("1500000000000000040", "1500000000000000041");
+
+        // 1. FIRST worker processing through the real entry point. The transport
+        //    sends (call #1); STEP 1 anchor commits; STEP 2 bookkeeping permanently
+        //    fails against the CHECK constraint. The guard still returns the
+        //    transport's success (it must not re-drive a delivered message).
+        block_typed_sent_finalize(&pool).await;
+        let first = send_dispatch_with_delivery_guard(
+            None,
+            Some(&pool),
+            "agent-1",
+            "Worker path first send",
+            "card-worker-path",
+            dispatch_id,
+            &transport,
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.status, "success");
+        assert_eq!(
+            transport.calls(),
+            1,
+            "first processing must send exactly once"
+        );
+        assert_eq!(
+            kv_meta_count(&pool, &notified_key(dispatch_id)).await,
+            1,
+            "notified anchor must be durable even when bookkeeping fails"
+        );
+        assert_eq!(delivery_event_status(&pool, dispatch_id).await, "reserved");
+        unblock_typed_sent_finalize(&pool).await;
+
+        // 2. The reservation expires before any retry succeeds (DB was down long
+        //    enough): age out both the kv guard key and the typed reservation.
+        sqlx::query("UPDATE kv_meta SET expires_at = NOW() - INTERVAL '1 minute' WHERE key = $1")
+            .bind(reserving_key(dispatch_id))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE dispatch_delivery_events
+                SET reserved_until = NOW() - INTERVAL '1 minute'
+              WHERE dispatch_id = $1 AND status = 'reserved'",
+        )
+        .bind(dispatch_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // 3. Reconcile recovery runs: the notified anchor lets it backfill the
+        //    typed ledger to `sent` instead of leaving a `failed` (= "not sent")
+        //    row that a reclaim would re-send.
+        crate::reconcile::reconcile_dispatch_delivery_events_pg(&pool)
+            .await
+            .unwrap();
+        assert_eq!(kv_meta_count(&pool, &notified_key(dispatch_id)).await, 1);
+        assert_eq!(delivery_event_status(&pool, dispatch_id).await, "sent");
+
+        // 4. Stale-outbox reclaim re-drives the SAME entry point. The guard must
+        //    short-circuit as a duplicate — the transport call count stays at ONE.
+        let redrive = send_dispatch_with_delivery_guard(
+            None,
+            Some(&pool),
+            "agent-1",
+            "Worker path reclaim redrive",
+            "card-worker-path",
+            dispatch_id,
+            &transport,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            transport.calls(),
+            1,
+            "reclaim redrive must NOT re-send: total transport sends stays exactly 1"
+        );
+        assert_eq!(redrive.status, "duplicate");
+        // The message_id was lost with the failed bookkeeping and the anchor stores
+        // only the dispatch_id, so recovery cannot reconstruct it — acceptable,
+        // since the invariant under test is ZERO re-sends, not metadata fidelity.
+        assert_eq!(redrive.message_id, None);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// #3861 point (b): a STEP 1 anchor permanent failure (delivered but no
+    /// durable dedup proof) must SURFACE — the guard returns `Err` rather than
+    /// swallowing it — so the operator-alert path
+    /// (`record_dispatch_notified_anchor_durability_breach`) fires. Injected by a
+    /// CHECK constraint that blocks the `dispatch_notified:*` anchor key only.
+    #[tokio::test]
+    async fn delivery_finalize_step1_anchor_permanent_failure_is_surfaced() {
+        let pg_db = create_test_pg_db().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let dispatch_id = "dispatch-step1-anchor-failure";
+        seed_dispatch(&pool, dispatch_id).await;
+
+        assert!(
+            claim_dispatch_delivery_guard(Some(&pool), dispatch_id)
+                .await
+                .unwrap()
+        );
+        let result = success_result(dispatch_id, "1500000000000000050", "1500000000000000051");
+
+        // Block ONLY the notified anchor key (the reserving key is unaffected, so
+        // STEP 1 specifically fails).
+        sqlx::query(
+            "ALTER TABLE kv_meta
+                 ADD CONSTRAINT block_notified_3861
+                 CHECK (key NOT LIKE 'dispatch\\_notified:%')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let finalize =
+            finalize_dispatch_delivery_guard(Some(&pool), dispatch_id, Ok(&result)).await;
+        assert!(
+            finalize.is_err(),
+            "STEP 1 anchor permanent failure must be surfaced, not swallowed"
+        );
+        // Operator-alert path fired: a structured `invariant_violation` event for
+        // this dispatch was emitted (the breach fn ran). Read immediately — there
+        // is no await between the breach emit inside finalize and this read, so the
+        // event cannot have been evicted by a parallel test.
+        let breach = crate::services::observability::events::recent(64)
+            .into_iter()
+            .find(|event| {
+                event.event_type == "invariant_violation"
+                    && event.payload.get("invariant").and_then(|v| v.as_str())
+                        == Some("dispatch_delivery_notified_anchor_durable")
+                    && event.payload.to_string().contains(dispatch_id)
+            });
+        assert!(
+            breach.is_some(),
+            "STEP 1 anchor failure must emit an operator-alertable invariant_violation event"
+        );
+        // STEP 1 failed before STEP 2: anchor absent, reservation still intact.
+        assert_eq!(kv_meta_count(&pool, &notified_key(dispatch_id)).await, 0);
+        assert_eq!(kv_meta_count(&pool, &reserving_key(dispatch_id)).await, 1);
+        assert_eq!(delivery_event_status(&pool, dispatch_id).await, "reserved");
+
+        sqlx::query("ALTER TABLE kv_meta DROP CONSTRAINT block_notified_3861")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// #3861 P0: a transport send that outlives its deadline must be bounded and
+    /// mapped to a failed send (so it flows through the failed-send finalize and
+    /// releases the reservation), instead of hanging past the reservation TTL and
+    /// letting an outbox reclaim re-send it. A send within the deadline passes
+    /// through unchanged.
+    #[tokio::test]
+    async fn dispatch_send_deadline_bounds_a_hanging_transport() {
+        let slow = RecordingDispatchTransport::new("1500000000000000060", "1500000000000000061")
+            .with_send_delay(Duration::from_secs(30));
+        let timed_out = send_dispatch_within_deadline(
+            &slow,
+            None,
+            "agent-1".to_string(),
+            "Slow send".to_string(),
+            "card-slow-send".to_string(),
+            "dispatch-slow-send",
+            Duration::from_millis(50),
+        )
+        .await;
+        let error = timed_out.expect_err("a send exceeding the deadline must fail, not hang");
+        assert!(
+            error.contains("deadline"),
+            "timeout error should name the deadline: {error}"
+        );
+
+        let fast = RecordingDispatchTransport::new("1500000000000000062", "1500000000000000063");
+        let ok = send_dispatch_within_deadline(
+            &fast,
+            None,
+            "agent-1".to_string(),
+            "Fast send".to_string(),
+            "card-fast-send".to_string(),
+            "dispatch-fast-send",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ok.status, "success");
+        assert_eq!(fast.calls(), 1);
+    }
+
+    /// The #3861 send-deadline constant must stay strictly below the reservation
+    /// TTL (also enforced by the module-level `const _` assertion).
+    #[test]
+    fn dispatch_send_deadline_is_below_reservation_ttl() {
+        assert!((DISPATCH_SEND_DEADLINE_SECS as i64) < DISPATCH_DELIVERY_RESERVATION_TTL_SECS);
     }
 }

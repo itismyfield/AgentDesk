@@ -98,10 +98,10 @@
 | `db::dispatch_semaphores` | `src/db/dispatch_semaphores.rs` | 331 | 298 | 33 |  |
 | `db::dispatched_sessions` | `src/db/dispatched_sessions.rs` | 2124 | 1627 | 497 | giant-file |
 | `db::dispatches` | `src/db/dispatches/mod.rs` | 1028 | 1028 | 0 | giant-file |
-| `db::dispatches::delivery_events` | `src/db/dispatches/delivery_events.rs` | 479 | 240 | 239 |  |
+| `db::dispatches::delivery_events` | `src/db/dispatches/delivery_events.rs` | 490 | 251 | 239 |  |
 | `db::dispatches::metadata` | `src/db/dispatches/metadata.rs` | 262 | 235 | 27 |  |
-| `db::dispatches::outbox` | `src/db/dispatches/outbox/mod.rs` | 40 | 40 | 0 |  |
-| `db::dispatches::outbox::claim` | `src/db/dispatches/outbox/claim.rs` | 165 | 165 | 0 |  |
+| `db::dispatches::outbox` | `src/db/dispatches/outbox/mod.rs` | 41 | 41 | 0 |  |
+| `db::dispatches::outbox::claim` | `src/db/dispatches/outbox/claim.rs` | 171 | 171 | 0 |  |
 | `db::dispatches::outbox::delivery` | `src/db/dispatches/outbox/delivery.rs` | 320 | 240 | 80 |  |
 | `db::dispatches::outbox::diagnostics` | `src/db/dispatches/outbox/diagnostics.rs` | 127 | 127 | 0 |  |
 | `db::dispatches::outbox::followup` | `src/db/dispatches/outbox/followup.rs` | 91 | 91 | 0 |  |
@@ -734,7 +734,7 @@
 | `services::dispatched_sessions` | `src/services/dispatched_sessions.rs` | 1737 | 1550 | 187 | giant-file |
 | `services::dispatches` | `src/services/dispatches/mod.rs` | 169 | 169 | 0 |  |
 | `services::dispatches::discord_delivery` | `src/services/dispatches/discord_delivery/mod.rs` | 26 | 26 | 0 |  |
-| `services::dispatches::discord_delivery::guard` | `src/services/dispatches/discord_delivery/guard.rs` | 993 | 365 | 628 |  |
+| `services::dispatches::discord_delivery::guard` | `src/services/dispatches/discord_delivery/guard.rs` | 1618 | 648 | 970 |  |
 | `services::dispatches::discord_delivery::orchestration` | `src/services/dispatches/discord_delivery/orchestration.rs` | 1559 | 1538 | 21 | giant-file |
 | `services::dispatches::discord_delivery::thread_reuse` | `src/services/dispatches/discord_delivery/thread_reuse.rs` | 775 | 775 | 0 |  |
 | `services::dispatches::discord_delivery::transport` | `src/services/dispatches/discord_delivery/transport.rs` | 1097 | 856 | 241 |  |

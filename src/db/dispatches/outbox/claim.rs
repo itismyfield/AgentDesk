@@ -4,7 +4,13 @@ use sqlx::{Postgres, Row as SqlxRow, Transaction};
 use super::diagnostics::wait_reason_from_routing_diagnostics;
 use super::model::{DispatchOutboxClaimCandidate, StaleDispatchOutboxClaimOwnerCandidate};
 
-const DISPATCH_OUTBOX_CLAIM_STALE_SECS: i64 = 300;
+/// Age (seconds) after which a claimed-but-unfinished dispatch outbox row is
+/// reclaimed by another worker and re-driven. Exposed `pub(crate)` so the #3861
+/// dedup-durability invariant in the delivery guard can assert at compile time
+/// that this threshold stays `<=` the delivery reservation TTL (a reclaim firing
+/// after the reservation expired but before the `notified` anchor lands could
+/// otherwise re-send).
+pub(crate) const DISPATCH_OUTBOX_CLAIM_STALE_SECS: i64 = 300;
 
 pub(crate) async fn select_pending_dispatch_outbox_claim_candidates_pg(
     tx: &mut Transaction<'_, Postgres>,

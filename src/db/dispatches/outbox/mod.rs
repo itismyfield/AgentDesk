@@ -19,7 +19,8 @@ mod notify;
 mod retry;
 
 pub(crate) use claim::{
-    mark_dispatch_outbox_claimed_pg, select_pending_dispatch_outbox_claim_candidates_pg,
+    DISPATCH_OUTBOX_CLAIM_STALE_SECS, mark_dispatch_outbox_claimed_pg,
+    select_pending_dispatch_outbox_claim_candidates_pg,
     select_stale_dispatch_outbox_claim_owner_candidates_pg, update_dispatch_outbox_claim_owner_pg,
 };
 pub(crate) use delivery::{
