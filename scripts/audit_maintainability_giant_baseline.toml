@@ -193,7 +193,11 @@
 # #3557 (A): per-turn hard-ceiling backstop helpers (turn_hard_ceiling_timeout,
 # codex_turn_hard_ceiling_timeout, turn_hard_ceiling_deadline_ms,
 # clamp_auto_extend_deadline_ms) + their unit tests. +55 prod LoC. 4056 -> 4111.
-"src/services/discord/mod.rs" = 4111
+# #3856/#3854 merge train: prompt-relay and inflight helper decomposition changed
+# the module inventory surface while shrinking `tui_prompt_relay.rs` below the
+# giant threshold; refresh the frozen parent-module count so script checks reflect
+# current main.
+"src/services/discord/mod.rs" = 4147
 # #3305: the local-only pass-through lifecycle-skip (kind hoist + note-only return
 # branch + idle-loop skip) is offset by comment dedup in the same root, lowering the
 # frozen baseline 5438 -> 5429 (-9). Locks in the shrink win (#3028 ratchet).
@@ -310,7 +314,9 @@
 # ownerless-inflight recovery predicates (phase_policy/relay_recovery/relay_health).
 # Hotfix was deployed via direct push to main and bypassed CI, so this baseline
 # re-inflation surfaced only when PR #3655 (which bases on it) ran the gate.
-"src/services/discord/recovery_engine.rs" = 3438
+# #3856 split moved TUI prompt relay external-input recovery support into this
+# existing tracked surface; refresh baseline to current main after the merge.
+"src/services/discord/recovery_engine.rs" = 3899
 # #3034 batch-8: lowered 3771 -> 3770 (dead-code removal).
 # #3038 S1: +1 (3770 -> 3771) for the mechanical `shared.queued_placeholders` ->
 # `shared.queued.queued_placeholders` re-wire (one extra method-chain line) forced
