@@ -294,7 +294,7 @@ pub(super) fn leak_recovery_confirmed_chunk_count<'a>(
     chunks: &[String],
 ) -> Option<usize> {
     let first_chunk = chunks.first()?;
-    if current_message_content != first_chunk {
+    if !leak_recovery_message_matches_chunk(current_message_content, first_chunk) {
         return None;
     }
 
@@ -303,11 +303,45 @@ pub(super) fn leak_recovery_confirmed_chunk_count<'a>(
         if confirmed >= chunks.len() {
             break;
         }
-        if content == chunks[confirmed] {
+        if leak_recovery_message_matches_chunk(content, &chunks[confirmed]) {
             confirmed += 1;
         }
     }
     Some(confirmed)
+}
+
+pub(super) fn leak_recovery_message_matches_chunk(content: &str, chunk: &str) -> bool {
+    content == chunk
+        || strip_legacy_continuation_context_prefix(content).is_some_and(|body| body == chunk)
+}
+
+fn strip_legacy_continuation_context_prefix(content: &str) -> Option<&str> {
+    let (prefix, body) = content.split_once('\n')?;
+    if legacy_continuation_context_prefix(prefix) {
+        Some(body)
+    } else {
+        None
+    }
+}
+
+fn legacy_continuation_context_prefix(prefix: &str) -> bool {
+    let Some(inner) = prefix
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+    else {
+        return false;
+    };
+    if inner == "+" {
+        return true;
+    }
+    if let Some((index, total)) = inner.split_once('/') {
+        return positive_decimal(index) && positive_decimal(total);
+    }
+    positive_decimal(inner)
+}
+
+fn positive_decimal(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) && value != "0"
 }
 
 pub(super) async fn leak_recovery_fetch_continuation_contents(

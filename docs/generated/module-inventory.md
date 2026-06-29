@@ -443,8 +443,8 @@
 | `services::discord::health::headless_turn` | `src/services/discord/health/headless_turn.rs` | 369 | 369 | 0 |  |
 | `services::discord::health::mailbox` | `src/services/discord/health/mailbox.rs` | 111 | 111 | 0 |  |
 | `services::discord::health::provider_probe` | `src/services/discord/health/provider_probe.rs` | 246 | 193 | 53 |  |
-| `services::discord::health::recovery` | `src/services/discord/health/recovery.rs` | 3348 | 2131 | 1217 | giant-file |
-| `services::discord::health::recovery::leak_recovery_ledger` | `src/services/discord/health/recovery/leak_recovery_ledger.rs` | 336 | 336 | 0 |  |
+| `services::discord::health::recovery` | `src/services/discord/health/recovery.rs` | 3380 | 2134 | 1246 | giant-file |
+| `services::discord::health::recovery::leak_recovery_ledger` | `src/services/discord/health/recovery/leak_recovery_ledger.rs` | 370 | 370 | 0 |  |
 | `services::discord::health::recovery::watchdog_decisions` | `src/services/discord/health/recovery/watchdog_decisions.rs` | 289 | 289 | 0 |  |
 | `services::discord::health::redaction` | `src/services/discord/health/redaction.rs` | 33 | 23 | 10 |  |
 | `services::discord::health::relay_auto_heal` | `src/services/discord/health/relay_auto_heal.rs` | 123 | 123 | 0 |  |

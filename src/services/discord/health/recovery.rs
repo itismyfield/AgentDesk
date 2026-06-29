@@ -17,8 +17,9 @@ mod watchdog_decisions;
 use leak_recovery_ledger::{
     LeakRecoveryLedgerIdentity, leak_recovery_clear_chunk_ledger,
     leak_recovery_confirmed_chunk_count, leak_recovery_confirmed_prefix_from_ledger,
-    leak_recovery_fetch_continuation_contents, leak_recovery_record_confirmed_chunk,
-    leak_recovery_unrelayed_range, render_leak_recovery_delivery,
+    leak_recovery_fetch_continuation_contents, leak_recovery_message_matches_chunk,
+    leak_recovery_record_confirmed_chunk, leak_recovery_unrelayed_range,
+    render_leak_recovery_delivery,
 };
 pub(crate) use watchdog_decisions::{
     STALL_WATCHDOG_INITIAL_DELAY_SECS, STALL_WATCHDOG_INTERVAL_SECS,
@@ -1875,7 +1876,9 @@ async fn maybe_recover_completed_stale_leak(
             return false;
         }
 
-        let continuation_messages = if chunks.len() > 1 && current_message.content == chunks[0] {
+        let continuation_messages = if chunks.len() > 1
+            && leak_recovery_message_matches_chunk(&current_message.content, &chunks[0])
+        {
             let Some(messages) = leak_recovery_fetch_continuation_contents(
                 &http,
                 channel_id,
@@ -1915,7 +1918,7 @@ async fn maybe_recover_completed_stale_leak(
                 if chunk_index >= confirmed_chunks {
                     break;
                 }
-                if content != &chunks[chunk_index] {
+                if !leak_recovery_message_matches_chunk(content, &chunks[chunk_index]) {
                     continue;
                 }
                 if let Err(error) =
@@ -2305,6 +2308,35 @@ mod stall_watchdog_pure_tests {
                 &chunks,
             ),
             Some(3)
+        );
+    }
+
+    #[test]
+    fn multi_chunk_progress_accepts_legacy_continuation_context_prefixes() {
+        let chunks = vec![
+            "chunk-0".to_string(),
+            "chunk-1".to_string(),
+            "chunk-2".to_string(),
+        ];
+        let continuation_contents = ["[2]\nchunk-1", "[+]\nchunk-2"];
+
+        assert_eq!(
+            leak_recovery_confirmed_chunk_count(
+                "[1/3]\nchunk-0",
+                continuation_contents.into_iter(),
+                &chunks,
+            ),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn multi_chunk_progress_rejects_non_prefix_marker_mentions() {
+        let chunks = vec!["chunk-0".to_string(), "chunk-1".to_string()];
+
+        assert_eq!(
+            leak_recovery_confirmed_chunk_count("note [1/2]\nchunk-0", std::iter::empty(), &chunks,),
+            None
         );
     }
 

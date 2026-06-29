@@ -1028,8 +1028,9 @@
     children (`send_target`, `send_gate`, `send_api`, `manual_delivery`) to
     `outbound/` while preserving the `health::` re-export API; #1879
     snapshot/mailbox extraction, and #3082 answer-flush-barrier field).
-  - `src/services/discord/health/recovery.rs` (2131 lines; -2 from #3872 removing
-    visible continuation markers from long-message split paths; -598 from #3839 moving
+  - `src/services/discord/health/recovery.rs` (2134 lines; #3872 removes
+    visible continuation markers from long-message split paths and adds legacy-prefix
+    recovery compatibility (+3 after review fix); -598 from #3839 moving
     pure stall-watchdog decisions to `health/recovery/watchdog_decisions.rs`
     and completed-stale leak range/render/ledger helpers to
     `health/recovery/leak_recovery_ledger.rs`; +2 from #3807 applying
