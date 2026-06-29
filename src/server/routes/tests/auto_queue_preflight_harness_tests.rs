@@ -2697,8 +2697,7 @@ async fn assert_no_dispatch_outbox_for_dispatch(
     let count = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*)::BIGINT
          FROM dispatch_outbox
-         WHERE dispatch_id = $1
-           AND action IN ('notify', 'followup')",
+         WHERE dispatch_id = $1",
     )
     .bind(dispatch_id)
     .fetch_one(pool)
@@ -2909,11 +2908,10 @@ async fn load_safety_proof(pool: &sqlx::PgPool) -> Result<SafetyProof, String> {
          LIMIT 10",
     )
     .await?;
-    let dispatch_outbox_notify_rows = load_limited_json_rows(
+    let dispatch_outbox_rows = load_limited_json_rows(
         pool,
         "SELECT id::BIGINT AS id, dispatch_id, action, status, agent_id, card_id, title
          FROM dispatch_outbox
-         WHERE action IN ('notify', 'followup')
          ORDER BY id ASC
          LIMIT 10",
     )
@@ -2947,14 +2945,13 @@ async fn load_safety_proof(pool: &sqlx::PgPool) -> Result<SafetyProof, String> {
         message_outbox_count: scalar_i64(pool, "SELECT COUNT(*)::BIGINT FROM message_outbox")
             .await?,
         message_outbox_rows,
-        dispatch_outbox_notify_count: scalar_i64(
+        dispatch_outbox_count: scalar_i64(
             pool,
             "SELECT COUNT(*)::BIGINT
-             FROM dispatch_outbox
-             WHERE action IN ('notify', 'followup')",
+             FROM dispatch_outbox",
         )
         .await?,
-        dispatch_outbox_notify_rows,
+        dispatch_outbox_rows,
         worktree_or_branch_context_count: worktree_or_branch_context_rows.len() as i64,
         worktree_or_branch_context_rows,
     })

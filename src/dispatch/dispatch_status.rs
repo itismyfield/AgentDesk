@@ -652,6 +652,27 @@ async fn set_dispatch_status_on_pg_with_sync(
             .map_err(|error| {
                 anyhow::anyhow!("decode postgres kanban_card_id for {dispatch_id}: {error}")
             })?;
+        let sandbox_preflight_without_external_side_effects = if let Some(card_id) =
+            kanban_card_id.as_deref()
+        {
+            let metadata = sqlx::query_scalar::<_, Option<serde_json::Value>>(
+                "SELECT metadata
+                     FROM kanban_cards
+                     WHERE id = $1",
+            )
+            .bind(card_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("load postgres card metadata for dispatch {dispatch_id}: {error}")
+            })?
+            .flatten();
+            super::dispatch_context::sandbox_preflight_metadata_disables_external_side_effects(
+                metadata.as_ref(),
+            )
+        } else {
+            false
+        };
         let agent_id = current
             .try_get::<Option<String>, _>("to_agent_id")
             .map_err(|error| {
@@ -706,7 +727,7 @@ async fn set_dispatch_status_on_pg_with_sync(
             result,
         );
 
-        if plan.enqueue_status_reaction {
+        if plan.enqueue_status_reaction && !sandbox_preflight_without_external_side_effects {
             sqlx::query(
                 "INSERT INTO dispatch_outbox (dispatch_id, action)
                  SELECT $1, 'status_reaction'

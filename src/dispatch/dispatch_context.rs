@@ -2659,11 +2659,12 @@ pub(super) async fn build_review_context(
         .and_then(|(issue_number, _)| *issue_number);
 
     if !is_noop_verification && !obj.contains_key("reviewed_commit") {
-        let latest_work_target =
-            latest_completed_work_dispatch_target_pg(pool, kanban_card_id).await;
-        let validated_work_target = if sandbox_preflight_without_external_side_effects {
-            latest_work_target.clone()
-        } else if let Some(target) = latest_work_target.as_ref() {
+        let latest_work_target = if sandbox_preflight_without_external_side_effects {
+            None
+        } else {
+            latest_completed_work_dispatch_target_pg(pool, kanban_card_id).await
+        };
+        let validated_work_target = if let Some(target) = latest_work_target.as_ref() {
             let valid = card_issue_number.is_none()
                 || commit_belongs_to_card_issue_pg(
                     pool,

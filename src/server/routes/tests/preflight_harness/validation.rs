@@ -132,10 +132,10 @@ pub(crate) fn validate_preflight_snapshot(snapshot: &PreflightSnapshot) -> Vec<S
             safety.message_outbox_count
         ));
     }
-    if safety.dispatch_outbox_notify_count != 0 {
+    if safety.dispatch_outbox_count != 0 {
         failures.push(format!(
-            "sandbox preflight enqueued dispatch notifications: {}",
-            safety.dispatch_outbox_notify_count
+            "sandbox preflight enqueued dispatch outbox rows: {}",
+            safety.dispatch_outbox_count
         ));
     }
     if safety.worktree_or_branch_context_count != 0 {

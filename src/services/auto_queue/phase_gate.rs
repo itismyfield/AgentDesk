@@ -244,8 +244,10 @@ async fn create_activate_dispatch_pg_inner(
                 obj.insert("managed_worktree_cleanup".to_string(), json!("terminal"));
             }
         }
-    } else if let Ok(Some((worktree_path, worktree_branch, _))) =
-        crate::dispatch::resolve_card_worktree(pool, card_id, Some(&context_with_strategy)).await
+    } else if !sandbox_preflight_dispatch
+        && let Ok(Some((worktree_path, worktree_branch, _))) =
+            crate::dispatch::resolve_card_worktree(pool, card_id, Some(&context_with_strategy))
+                .await
         && let Some(obj) = context_with_strategy.as_object_mut()
     {
         obj.entry("worktree_path".to_string())

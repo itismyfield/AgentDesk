@@ -107,9 +107,9 @@
 - canonical_modules: `src/dispatch/{mod,dispatch_context,dispatch_create,dispatch_status}.rs`.
 - legacy_modules: none.
 - do_not_edit_without_migration_plan (giant-file, awaiting split issue):
-  - `src/dispatch/dispatch_context.rs` (2851 lines).
+  - `src/dispatch/dispatch_context.rs` (2852 lines).
   - `src/dispatch/dispatch_create.rs` (1396 lines).
-  - `src/dispatch/dispatch_status.rs` (1508 lines).
+  - `src/dispatch/dispatch_status.rs` (1529 lines).
   - `src/services/dispatches/outbox_route.rs` (1182 lines; route extraction
     orchestration surface from #1722, split before adding non-bugfix behavior).
   - `src/services/dispatches/discord_delivery/orchestration.rs` (1538 lines;
