@@ -1399,9 +1399,12 @@
     2026-08-31, #3036)).
   - `src/services/discord/{commands/text_commands.rs,
     discord_config_audit.rs, router/intake_gate.rs}` (all 1000+ production
-    lines) and `src/services/discord/inflight.rs` (3069 lines; +1 from #3918
-    `mod anchor_repost` — the durable at-most-once anchor-repost idempotency
-    guards live in their own submodule, not in this giant file; +37 from #3860
+    lines) and `src/services/discord/inflight.rs` (3077 lines; +8 from #3960
+    `mod orphan_relay_reclaim` + its re-export — the producer-liveness TOCTOU
+    reclaim predicate and the locked owner-downgrade RMW live in their own
+    submodule, not this giant file; this is the mod-decl + re-export cost; +1
+    from #3918 `mod anchor_repost` — the durable at-most-once anchor-repost
+    idempotency guards live in their own submodule, not in this giant file; +37 from #3860
     `set_inflight_restart_mode_under_lock` — the per-row lock-RMW that makes the
     bulk restart-mode marker set only `restart_mode` on the FRESH on-disk row so
     a draining watcher's delivery frontier can no longer be regressed (duplicate
