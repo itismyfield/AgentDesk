@@ -82,7 +82,7 @@
 | `crate` | `src/main.rs` | 7 | 7 | 0 |  |
 | `credential` | `src/credential.rs` | 212 | 59 | 153 |  |
 | `db` | `src/db/mod.rs` | 68 | 68 | 0 |  |
-| `db::agents` | `src/db/agents.rs` | 415 | 254 | 161 |  |
+| `db::agents` | `src/db/agents.rs` | 410 | 249 | 161 |  |
 | `db::auto_queue` | `src/db/auto_queue/mod.rs` | 21 | 21 | 0 |  |
 | `db::auto_queue::claim` | `src/db/auto_queue/claim.rs` | 734 | 734 | 0 |  |
 | `db::auto_queue::consultation` | `src/db/auto_queue/consultation.rs` | 112 | 112 | 0 |  |

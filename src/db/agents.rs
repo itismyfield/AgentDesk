@@ -5,11 +5,6 @@ use sqlx::{PgPool, Row as SqlxRow};
 
 use crate::services::provider::ProviderKind;
 
-// reason: used only by the removed SQLite-only agent alias path below; the
-// production copy lives in db/postgres.rs. See #3034 / #3035.
-#[allow(dead_code)]
-const LEGACY_AGENT_PREFIX: &str = "openclaw-";
-
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AgentChannelBindings {
     pub provider: Option<String>,
