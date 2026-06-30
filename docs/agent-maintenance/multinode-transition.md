@@ -413,6 +413,26 @@
   songbird voice call the worker is already connected to; it is upstream of the
   durable-reservation/announce/dedup machinery and touches no delivery record, PG
   lease, leader gate, or cross-node routing. No DB/schema change.
+- #3976 orphan-relay reclaim durable delivered guard — prevents prior-tail
+  re-emit on /loop non-Managed turn start: the `SessionBoundRelay` TUI-direct
+  confirmed-POST route advanced only the resettable in-memory
+  `confirmed_end_offset` watermark and wrote nothing else to the inflight row, so
+  a DELIVERED-but-unmirrored row was byte-identical to a never-delivered
+  black-hole; on a watermark reset (generation change / output regression /
+  restart) below the turn body, orphan-reclaim downgraded the delivered row to
+  ownerless and recovery re-emitted the already-delivered tail. The fix stamps a
+  durable per-row `session_bound_delivered` marker ONLY after a genuinely
+  confirmed delivery (POST landed AND identity gate matched AND watermark advance
+  fired) via a single-flock identity-re-gated RMW
+  (`mark_session_bound_relay_delivered_locked`), and excludes a marked row from
+  `session_bound_relay_external_input_orphan_shape_at` (plus the symmetric
+  ownerless predicate). Classification: worker-local — a per-worker inflight-row
+  marker. The inflight row is per-node sidecar state the owning sink/watcher
+  reads/writes for its own turn; the new field is additive `#[serde(default)]`
+  (legacy rows deserialize as `false`), so it adds no leader gate, cross-node
+  routing, or PG-lease assumption and is forward/backward compatible on disk.
+  Independent of `AGENTDESK_DELIVERY_RECORD_AUTHORITY` / `_SHADOW` (it touches no
+  delivery records) and of #3933.
 
 - #3871 rollover duplicate-relay fix: `tmux_watcher.rs` records the streamed
   rollover-prefix message ids it FROZE during streaming and, on the terminal

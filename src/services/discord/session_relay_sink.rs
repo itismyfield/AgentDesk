@@ -607,6 +607,23 @@ impl SessionBoundDiscordRelaySink {
             end,
             "src/services/discord/session_relay_sink.rs:sink_confirmed_terminal_advance",
         );
+        // #3976: stamp the durable per-row delivered marker ONLY here — past the
+        // identity gate, after the `confirmed_end_offset` watermark advance fired
+        // (so a refused/identity-mismatched advance, which returned above, never
+        // marks the row). The watermark is resettable and writes nothing else to
+        // the row, so without this durable marker a delivered-but-unmirrored row is
+        // indistinguishable from a never-delivered black-hole and orphan-reclaim
+        // would re-emit its tail on a watermark reset. The flock RMW re-gates the
+        // identity under the lock, so a turn replaced during the POST is never
+        // marked. Best-effort: a residual crash between the POST and this write
+        // reverts the row to orphan shape on reboot (same at-most-once residual the
+        // #3918 marker bounds) — acceptable and no worse than today.
+        super::inflight::mark_session_bound_relay_delivered_locked(
+            provider,
+            channel_id,
+            &super::inflight::InflightTurnIdentity::from_state(inflight),
+            session_name,
+        );
         true
     }
 

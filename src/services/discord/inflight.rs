@@ -92,7 +92,7 @@ use self::ownership_ops::{
 mod orphan_relay_reclaim;
 pub(in crate::services::discord) use self::orphan_relay_reclaim::{
     OrphanRelayReclaimOutcome, downgrade_orphaned_session_bound_relay_owner_locked,
-    session_bound_relay_external_input_orphan_shape,
+    mark_session_bound_relay_delivered_locked, session_bound_relay_external_input_orphan_shape,
 };
 
 use finalizer_identity::{

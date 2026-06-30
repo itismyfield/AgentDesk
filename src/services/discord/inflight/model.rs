@@ -198,6 +198,27 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// Additive `#[serde(default)]` field; legacy rows deserialize as `0`.
     #[serde(default)]
     pub anchor_repost_attempts: u32,
+    /// #3976: durable per-row marker stamped ONLY after a genuinely confirmed
+    /// `SessionBoundRelay` TUI-direct terminal delivery (the POST landed AND the
+    /// identity gate matched AND the `confirmed_end_offset` watermark advance
+    /// fired — see `session_relay_sink::advance_offset_for_confirmed_delegated_terminal`).
+    ///
+    /// The watermark advanced by that path is the resettable, non-durable
+    /// in-memory `confirmed_end_offset`; it writes NOTHING else to the row. So a
+    /// DELIVERED-but-unmirrored row is byte-identical to a never-delivered
+    /// black-hole row, and on a watermark reset (generation change / output
+    /// regression / restart) below the prior turn body the orphan-reclaim path
+    /// could not tell them apart — it downgraded the delivered row to ownerless
+    /// and recovery re-emitted the already-delivered tail byte-for-byte when a
+    /// following non-Managed (/loop) turn started. This durable flag is the
+    /// discriminator: `session_bound_relay_external_input_orphan_shape_at`
+    /// excludes a row with it set, so a delivered row is NOT reclaimed while a
+    /// genuine never-delivered black-hole (flag still `false`) STILL is. Same
+    /// idempotency-marker pattern as `anchor_reposted` (#3918). Additive
+    /// `#[serde(default)]` field — legacy rows deserialize as `false`, no
+    /// `INFLIGHT_STATE_VERSION` bump per the #2235 compat convention.
+    #[serde(default)]
+    pub session_bound_delivered: bool,
     /// Whether any tool_use was seen during this turn (persisted for restart recovery).
     #[serde(default)]
     pub any_tool_used: bool,
@@ -761,6 +782,8 @@ impl InflightTurnState {
             // #3918: never reposted / zero send-new attempts at turn birth.
             anchor_reposted: false,
             anchor_repost_attempts: 0,
+            // #3976: never confirmed-delivered at turn birth.
+            session_bound_delivered: false,
             any_tool_used: false,
             has_post_tool_text: false,
             session_key: None,
