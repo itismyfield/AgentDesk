@@ -85,7 +85,7 @@ pub(in crate::services::discord) use status_panel::{
 pub(super) use streaming_edit_text::{
     CLAUDE_TUI_FOLLOWUP_REQUEUE_DELIVERY_NOTICE, bridge_claude_tui_followup_requeue_prompt_error,
     bridge_streaming_rollover_should_skip, bridge_tui_transport_error_should_skip_quiescence,
-    build_turn_bridge_streaming_edit_text,
+    build_turn_bridge_streaming_edit_text, claude_tui_followup_requeue_streaming_aware,
 };
 pub(super) use task_notification_lifecycle::{
     close_all_tracked_background_children, close_next_tracked_background_child,
@@ -3870,13 +3870,30 @@ pub(super) fn spawn_turn_bridge(
             tracing::warn!("  [{ts}] ⚠ invalid API_FRICTION marker: {error}");
         }
 
-        let claude_tui_followup_pre_submit_requeue_candidate =
-            crate::services::claude::claude_tui_followup_requeue_enabled()
+        let claude_tui_followup_pre_submit_requeue_candidate = {
+            let base = crate::services::claude::claude_tui_followup_requeue_enabled()
                 && bridge_claude_tui_followup_requeue_prompt_error(
                     &provider,
                     inflight_state.runtime_kind,
                     &full_response,
                 );
+            // #3885: a follow-up pre-submit readiness timeout normally requeues
+            // the inflight ("prompt never reached the pane → safe to retry").
+            // But if the SAME input was already submitted via TUI-direct, the
+            // live pane is still ACTIVELY STREAMING that turn and requeuing
+            // re-injects a DUPLICATE (dup prose relay). Probe the structured
+            // turn state ONLY on the requeue path; a genuinely silent
+            // UNSUBMITTED prompt (quiescent pane) still requeues.
+            claude_tui_followup_requeue_streaming_aware(
+                base,
+                base && super::idle_queue_blocked_by_hosted_tui_busy_pane(
+                    shared_owned.as_ref(),
+                    &provider,
+                    channel_id,
+                )
+                .await,
+            )
+        };
         if claude_tui_followup_pre_submit_requeue_candidate {
             full_response = CLAUDE_TUI_FOLLOWUP_REQUEUE_DELIVERY_NOTICE.to_string();
             inflight_state.full_response = full_response.clone();

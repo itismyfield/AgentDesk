@@ -97,6 +97,29 @@ pub(in crate::services::discord) fn bridge_claude_tui_followup_requeue_prompt_er
         && error_text.contains("follow-up prompt input readiness")
 }
 
+/// #3885: streaming-aware gate for the claude_tui follow-up pre-submit requeue.
+///
+/// A follow-up pre-submit readiness timeout normally requeues the inflight
+/// message — the pre-submit assumption is "the prompt never reached the pane, so
+/// re-injecting is safe". But when the SAME input was already submitted through
+/// the TUI-direct path, the live pane is still ACTIVELY STREAMING that turn, so a
+/// requeue re-injects a DUPLICATE (the original streaming turn and the requeued
+/// turn both produce output → duplicate prose relay). This gate suppresses the
+/// requeue candidate when the live structured turn state is busy/streaming. A
+/// genuinely silent, UNSUBMITTED prompt (quiescent / idle pane) is NOT
+/// suppressed, so the existing no-response recovery is preserved with no new
+/// duplicate-relay vector.
+///
+/// `requeue_candidate` is the base decision (feature enabled + readiness-timeout
+/// error); `live_pane_actively_streaming` is the deterministic live structured
+/// turn-state probe (`idle_queue_blocked_by_hosted_tui_busy_pane`).
+pub(in crate::services::discord) fn claude_tui_followup_requeue_streaming_aware(
+    requeue_candidate: bool,
+    live_pane_actively_streaming: bool,
+) -> bool {
+    requeue_candidate && !live_pane_actively_streaming
+}
+
 pub(in crate::services::discord) fn bridge_tui_transport_error_should_skip_quiescence(
     provider: &ProviderKind,
     runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
@@ -342,5 +365,37 @@ mod pre_submission_tui_prompt_error_tests {
             Some(RuntimeHandoffKind::ClaudeTui),
             "Error: upstream API returned 500",
         ));
+    }
+
+    // ---- #3885: streaming-aware follow-up requeue gate ----
+    //
+    // The base requeue decision (`requeue_candidate`) is UNCHANGED; the gate is
+    // layered on top of the live structured turn-state probe. These pin that an
+    // actively-streaming/already-submitted turn does NOT requeue (so the
+    // original streaming turn and a requeued turn can no longer both emit prose
+    // → no duplicate relay), while a genuinely-silent UNSUBMITTED prompt STILL
+    // requeues (the existing no-response recovery is preserved).
+
+    #[test]
+    fn actively_streaming_turn_suppresses_followup_requeue_no_dup_relay() {
+        // #3885 root cause: the same input was already submitted via TUI-direct
+        // and the live pane is still streaming that turn. Requeuing would
+        // re-inject a duplicate, so the candidate must be suppressed.
+        assert!(!claude_tui_followup_requeue_streaming_aware(true, true));
+    }
+
+    #[test]
+    fn genuinely_silent_unsubmitted_prompt_still_requeues() {
+        // Quiescent / idle pane: the prompt never reached the TUI (genuine
+        // pre-submit timeout). The existing requeue recovery must be preserved.
+        assert!(claude_tui_followup_requeue_streaming_aware(true, false));
+    }
+
+    #[test]
+    fn non_requeue_base_never_requeues_regardless_of_stream_state() {
+        // When the base decision is false (feature off / non-readiness error)
+        // the gate must never synthesize a requeue from the stream signal.
+        assert!(!claude_tui_followup_requeue_streaming_aware(false, false));
+        assert!(!claude_tui_followup_requeue_streaming_aware(false, true));
     }
 }
