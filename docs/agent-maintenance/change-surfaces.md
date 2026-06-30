@@ -1277,13 +1277,13 @@
     `audit_maintainability_config.toml`; the root is no longer a prod giant and
     was removed from `giant_file_registry.toml`; #3038 S5 locked the final
     root ratchet at 274 production lines).
-  - `src/services/discord/voice_barge_in.rs` (2781 lines after #3038
+  - `src/services/discord/voice_barge_in.rs` (2800 lines after #3038
     VoiceBargeInRuntime S1 moved the STT method cluster to
     `src/services/discord/voice_barge_in/stt.rs` (314 production lines) and
     S2 moved the progress playback method cluster to
     `src/services/discord/voice_barge_in/progress_playback.rs` (423 production
     lines), and S3 moved the final-result playback cluster to
-    `src/services/discord/voice_barge_in/final_result_playback.rs` (230
+    `src/services/discord/voice_barge_in/final_result_playback.rs` (243
     production lines), and S4 moved the routing-resolution cluster to
     `src/services/discord/voice_barge_in/routing.rs` (383 production lines),
     and S5 moved the live-cut playback cluster to
@@ -1297,7 +1297,11 @@
     production lines), and #3801 moved the real receive/barge-in hook into
     `src/services/discord/voice_barge_in/receive_hook.rs` (114 production
     lines) while adding deterministic PCM harness coverage through the real
-    receive/barge-in path;
+    receive/barge-in path, and #3911 added the shared
+    `InflightForegroundCancelGuard` drop guard (+19 prod lines) so an aborted
+    foreground `generate().await` unregisters its CancelToken instead of
+    leaking it (a leak left `has_inflight_foreground` permanently true and the
+    channel misclassified the next fresh utterance as a barge-in);
     voice STT/TTS, lobby routing, progress mirroring, and barge-in
     orchestration surface; tracked decompose target — see
     `giant-file-registry.md` (owner `voice-runtime`, deadline 2026-08-31,

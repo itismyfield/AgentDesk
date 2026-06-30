@@ -901,6 +901,53 @@ pub(in crate::services::discord) struct VoiceBargeInRuntime {
     test_state: Arc<VoiceBargeInTestState>,
 }
 
+/// #3911: RAII guard that OWNS the registration of an in-flight foreground
+/// CancelToken. Constructing the guard via [`InflightForegroundCancelGuard::register`]
+/// inserts the token into `inflight_foreground_cancels`; dropping it removes the
+/// token again.
+///
+/// The guard MUST be constructed BEFORE the foreground `generate(...).await`.
+/// The previous call sites registered the token manually before the await but
+/// only unregistered it (via a local guard or a manual call) AFTER the await
+/// returned. If the spawning task was aborted or its future dropped
+/// mid-`.await` (graceful shutdown, supervisor abort, runtime teardown), that
+/// unregister never ran and the token leaked. A leaked token keeps
+/// `has_inflight_foreground` permanently true, so the channel misclassifies the
+/// NEXT fresh utterance as a barge-in and becomes "stuck" until guild teardown.
+/// Owning the registration in a drop guard closes that race on every exit path
+/// (normal return, panic, or abort) while preserving legitimate barge-in: a
+/// real mid-playback cancel still flips the still-registered token before the
+/// guard drops.
+struct InflightForegroundCancelGuard<'a> {
+    runtime: &'a VoiceBargeInRuntime,
+    channel_id: ChannelId,
+    token: Arc<crate::services::provider::CancelToken>,
+}
+
+impl<'a> InflightForegroundCancelGuard<'a> {
+    /// Register `token` for `channel_id` and return a guard that unregisters it
+    /// on drop. Call this *before* the foreground `generate(...).await`.
+    fn register(
+        runtime: &'a VoiceBargeInRuntime,
+        channel_id: ChannelId,
+        token: Arc<crate::services::provider::CancelToken>,
+    ) -> Self {
+        runtime.register_inflight_foreground_cancel(channel_id, token.clone());
+        Self {
+            runtime,
+            channel_id,
+            token,
+        }
+    }
+}
+
+impl Drop for InflightForegroundCancelGuard<'_> {
+    fn drop(&mut self) {
+        self.runtime
+            .unregister_inflight_foreground_cancel(self.channel_id, &self.token);
+    }
+}
+
 impl VoiceBargeInRuntime {
     pub(in crate::services::discord) fn from_voice_config(config: &VoiceConfig) -> Self {
         let default_sensitivity = config.barge_in.sensitivity;
@@ -1192,35 +1239,22 @@ impl VoiceBargeInRuntime {
             .resolve_effective_foreground_config(channel_id, target_channel_id)
             .await;
         let cancel_token = Arc::new(crate::services::provider::CancelToken::new());
-        self.register_inflight_foreground_cancel(channel_id, cancel_token.clone());
+        // #3911 + #2335 (c): the guard OWNS the registration. It registers the
+        // token BEFORE the generate `.await` below and unregisters on drop, so
+        // an abort mid-`.await` (shutdown / supervisor abort) still runs the
+        // Drop and cannot leak the token in `inflight_foreground_cancels` (a
+        // leak would keep `has_inflight_foreground` true and misclassify the
+        // next fresh utterance as a barge-in). Keeping the guard alive through
+        // the `channel_id.say` HTTP call below still lets a late cancel
+        // suppress the now-stale reply.
+        let _text_reply_guard =
+            InflightForegroundCancelGuard::register(self, channel_id, cancel_token.clone());
         let reply =
             generate_voice_channel_text_reply(text, &language, &foreground, cancel_token.clone())
                 .await
                 .unwrap_or_else(|| {
                     "지금 보이스 빠른 답변 모델 응답을 만들지 못했어요.".to_string()
                 });
-
-        // Issue #2335 (c) — Codex round 2: keep the foreground cancel token
-        // registered through the `channel_id.say` HTTP call. If a cancel
-        // arrives between generation and posting (or during the HTTP
-        // round-trip), we must suppress the now-stale reply. The
-        // unregister happens via this RAII guard on every exit path.
-        struct TextReplyGuard<'a> {
-            runtime: &'a VoiceBargeInRuntime,
-            channel_id: ChannelId,
-            token: Arc<crate::services::provider::CancelToken>,
-        }
-        impl<'a> Drop for TextReplyGuard<'a> {
-            fn drop(&mut self) {
-                self.runtime
-                    .unregister_inflight_foreground_cancel(self.channel_id, &self.token);
-            }
-        }
-        let _text_reply_guard = TextReplyGuard {
-            runtime: self,
-            channel_id,
-            token: cancel_token.clone(),
-        };
 
         if cancel_token.cancelled.load(Ordering::Relaxed) {
             tracing::info!(
@@ -1588,7 +1622,17 @@ impl VoiceBargeInRuntime {
             .await;
         self.play_processing_chime(shared, source_channel_id).await;
         let cancel_token = Arc::new(crate::services::provider::CancelToken::new());
-        self.register_inflight_foreground_cancel(source_channel_id, cancel_token.clone());
+        // #3911 + #2335 (c): the guard OWNS the registration. It registers the
+        // token BEFORE the generate `.await` below and unregisters on drop, so
+        // an abort mid-`.await` (shutdown / supervisor abort) cannot leak the
+        // token in `inflight_foreground_cancels` (a leak would keep
+        // `has_inflight_foreground` permanently true and misroute the next
+        // fresh utterance as a barge-in). Keeping the guard alive through every
+        // suppressible side effect below (synth, play, background dispatch)
+        // still lets a late cancel flip this token and suppress the stale
+        // ack/handoff; we re-check the cancel flag at each awaited boundary.
+        let _inflight_guard =
+            InflightForegroundCancelGuard::register(self, source_channel_id, cancel_token.clone());
         let decision = self
             .generate_foreground_ack_text_for_runtime(
                 &announcement.transcript,
@@ -1599,31 +1643,6 @@ impl VoiceBargeInRuntime {
             .await
             .unwrap_or(VoiceForegroundDecision::Silence);
         let foreground_latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-
-        // Issue #2335 (c) — Codex round 2: keep the foreground cancel token
-        // REGISTERED through every suppressible side effect (synth, play,
-        // background dispatch). Previously the code unregistered right after
-        // `generate_foreground_ack_text` returned, so a cancel arriving between
-        // unregister and the TTS playback / handoff dispatch could not flip this
-        // token — the stale ack or handoff would still fire. We use a RAII guard
-        // so unregister always runs (panics, early returns, etc.) and re-check
-        // the cancel flag at each awaited boundary below.
-        struct InflightGuard<'a> {
-            runtime: &'a VoiceBargeInRuntime,
-            channel_id: ChannelId,
-            token: Arc<crate::services::provider::CancelToken>,
-        }
-        impl<'a> Drop for InflightGuard<'a> {
-            fn drop(&mut self) {
-                self.runtime
-                    .unregister_inflight_foreground_cancel(self.channel_id, &self.token);
-            }
-        }
-        let _inflight_guard = InflightGuard {
-            runtime: self,
-            channel_id: source_channel_id,
-            token: cancel_token.clone(),
-        };
 
         let record_cancel_suppressed = |label: &'static str| {
             let mut event = voice_flight_event_from_announcement(
@@ -3649,6 +3668,106 @@ mod tests {
         );
         assert!(!token_a.cancelled.load(Ordering::Relaxed));
         assert!(token_b.cancelled.load(Ordering::Relaxed));
+    }
+
+    /// #3911: the foreground CancelToken must be unregistered even when the
+    /// spawning task is aborted mid-`generate(...).await` (graceful shutdown,
+    /// supervisor abort). The drop guard OWNS the registration, so dropping the
+    /// in-flight future runs its Drop and drains the registry. Without this, the
+    /// token leaks, `has_inflight_foreground` stays permanently true, and the
+    /// NEXT fresh utterance on the same channel is misclassified as a barge-in
+    /// (the channel gets "stuck" until guild teardown).
+    #[tokio::test]
+    async fn aborted_foreground_future_clears_inflight_so_next_utterance_is_not_barge_in() {
+        let runtime = Arc::new(enabled_runtime());
+        let channel = ChannelId::new(3911);
+        let token = Arc::new(crate::services::provider::CancelToken::new());
+
+        let runtime_for_task = runtime.clone();
+        let token_for_task = token.clone();
+        let handle = tokio::spawn(async move {
+            // Guard OWNS the registration: it registers BEFORE the await.
+            let _guard =
+                InflightForegroundCancelGuard::register(&runtime_for_task, channel, token_for_task);
+            // Model the foreground `generate(...).await` that never completes
+            // because the task is aborted (shutdown / supervisor abort).
+            std::future::pending::<()>().await;
+        });
+
+        // Wait until the spawned task has registered the token.
+        loop {
+            if runtime
+                .inflight_foreground_cancels
+                .contains_key(&channel.get())
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        // Abort mid-`.await`: the future is dropped, so the guard's Drop runs.
+        handle.abort();
+        let _ = handle.await; // resolves once the aborted future has been dropped.
+
+        assert!(
+            !runtime
+                .inflight_foreground_cancels
+                .contains_key(&channel.get()),
+            "#3911: aborting the in-flight foreground future must unregister the \
+             cancel token via the drop guard"
+        );
+
+        // This is the exact predicate the routing decision evaluates
+        // (voice_barge_in.rs has_inflight_foreground): it must now be false, so a
+        // subsequent fresh utterance is NOT routed down the barge-in/abort path.
+        let has_inflight_foreground = runtime
+            .inflight_foreground_cancels
+            .get(&channel.get())
+            .is_some_and(|entry| !entry.value().is_empty());
+        assert!(
+            !has_inflight_foreground,
+            "#3911: after an aborted foreground future, the next fresh utterance \
+             must not be misclassified as a barge-in"
+        );
+    }
+
+    /// #3911 (no-regression): while the foreground guard is alive (i.e. the
+    /// `generate(...).await` is genuinely in flight), a real mid-playback
+    /// barge-in must still reach and flip the still-registered token. The drop
+    /// guard must NOT swallow legitimate cancellation, and dropping it after the
+    /// cancel drained the registry must be a safe no-op.
+    #[test]
+    fn live_foreground_guard_still_allows_genuine_barge_in_cancel() {
+        let runtime = enabled_runtime();
+        let channel = ChannelId::new(39_111);
+        let token = Arc::new(crate::services::provider::CancelToken::new());
+
+        // Guard alive == the foreground generate(...).await is in flight.
+        let guard = InflightForegroundCancelGuard::register(&runtime, channel, token.clone());
+        assert!(
+            runtime
+                .inflight_foreground_cancels
+                .contains_key(&channel.get()),
+            "constructing the guard must register the token"
+        );
+
+        // A genuine mid-playback barge-in must still flip the registered token.
+        let count =
+            runtime.cancel_inflight_foreground_calls(channel, "voice_barge_in_explicit_stop");
+        assert_eq!(count, 1, "the in-flight foreground token must be cancelled");
+        assert!(
+            token.cancelled.load(Ordering::Relaxed),
+            "genuine barge-in must flip the still-registered foreground token"
+        );
+
+        // Dropping the guard after the cancel drained the registry is a no-op.
+        drop(guard);
+        assert!(
+            !runtime
+                .inflight_foreground_cancels
+                .contains_key(&channel.get()),
+            "registry stays drained after a genuine barge-in followed by guard drop"
+        );
     }
 
     #[test]
