@@ -226,11 +226,21 @@ fn resolve_docs_segment(segment: &str, flat: bool) -> (StatusCode, HeaderMap, Va
         );
     }
 
-    // Emit deprecation hint pointing at the new /group/category route.
+    // #3900: emit a *docs-route* retirement hint pointing at the new
+    // /group/category route. The thing being retired is the flat
+    // `/api/docs/<category>` URL *shape* — NOT the API or its endpoints, which
+    // remain fully supported. The previous bare `"deprecated": true` flag was
+    // routinely misread (by operators and other agents) as "this category's
+    // API is deprecated", so the marker is now structured and explicitly
+    // scoped: `deprecation.kind = "docs_route"` and `api_status = "active"`
+    // make it unambiguous, and `replacement`/`sunset` carry the migration
+    // metadata a consumer needs to act on it.
     let mut headers = HeaderMap::new();
     let group_for_category = category_to_group(segment);
     let canonical_path = format!("/api/docs/{group_for_category}/{segment}");
     if let Ok(value) = HeaderValue::from_str(&canonical_path) {
+        // Standard route-migration hint header; carries the canonical docs path
+        // a caller should switch to. It signals docs-URL retirement only.
         headers.insert("X-Deprecated", value);
     }
 
@@ -242,7 +252,26 @@ fn resolve_docs_segment(segment: &str, flat: bool) -> (StatusCode, HeaderMap, Va
             "canonical_category": canonical,
             "description": category_description(segment),
             "count": matching.len(),
-            "deprecated": true,
+            // Flags ONLY the legacy flat docs URL shape, never the API.
+            "legacy_docs_path": true,
+            // Disambiguated, self-describing deprecation marker (#3900).
+            "deprecation": {
+                // What is deprecated: the docs URL shape, not the API surface.
+                "kind": "docs_route",
+                "scope": "docs_path",
+                // The underlying API/category is fully supported — read this,
+                // not `kind`, if all you care about is endpoint availability.
+                "api_status": "active",
+                // Where to go instead: the canonical group/category docs path.
+                "replacement": canonical_path.clone(),
+                // No scheduled removal of this docs route.
+                "sunset": Value::Null,
+                "note": "Only the flat /api/docs/<category> docs URL shape is \
+                         retired; the underlying API and its endpoints remain \
+                         fully supported. Use `replacement` (the canonical \
+                         group/category docs path) for docs. This is NOT an API \
+                         deprecation — no endpoint is going away.",
+            },
             "canonical_path": canonical_path,
             "subcategories": subcategory_summaries(&matching, canonical),
             "endpoints": matching,
@@ -258,7 +287,10 @@ fn resolve_docs_segment(segment: &str, flat: bool) -> (StatusCode, HeaderMap, Va
 /// Backward-compatible fallback: if the segment matches a legacy category name
 /// (e.g. `admin`, `queue`, `dispatches`, `ops`, or a fine-grained sub-category
 /// like `reviews`), returns the old category-detail shape with an
-/// `X-Deprecated` header pointing at the new route. Callers should migrate to
+/// `X-Deprecated` header pointing at the new route. The body carries a
+/// structured `deprecation` marker (`kind: "docs_route"`, `api_status:
+/// "active"`) — this signals only that the flat docs *URL shape* is retired,
+/// NOT that the category's API is deprecated (#3900). Callers should migrate to
 /// `GET /api/docs/{group}/{category}`.
 pub async fn api_docs_group_or_category(
     Path(segment): Path<String>,
@@ -528,6 +560,69 @@ mod tests {
         let (status, _headers, routed) = resolve_docs_segment("api-friction-markers", false);
         assert_eq!(status, StatusCode::OK);
         assert_eq!(routed["path"], "/api/docs/api-friction-markers");
+    }
+
+    #[test]
+    fn legacy_flat_category_marks_docs_route_retirement_not_api_deprecation() {
+        // #3900: the flat /api/docs/<category> route is a *docs URL shape*
+        // retirement, not an API deprecation. A consumer must be able to tell
+        // the two apart from the response body alone.
+        let (status, headers, body) = resolve_docs_segment("dispatches", false);
+        assert_eq!(status, StatusCode::OK);
+
+        let canonical_path = "/api/docs/runtime/dispatches";
+        // Route-migration header still points at the canonical docs path.
+        assert_eq!(
+            headers
+                .get("X-Deprecated")
+                .and_then(|value| value.to_str().ok()),
+            Some(canonical_path)
+        );
+
+        // The ambiguous bare `deprecated: true` flag (which read as "this
+        // category's API is deprecated") is gone; the marker is now scoped to
+        // the docs path only.
+        assert!(
+            body.get("deprecated").is_none(),
+            "ambiguous bare `deprecated` flag must not be served at category level"
+        );
+        assert_eq!(body["legacy_docs_path"], true);
+
+        // Structured marker lets a consumer distinguish docs-route retirement
+        // from API deprecation without guessing.
+        let deprecation = &body["deprecation"];
+        assert_eq!(deprecation["kind"], "docs_route");
+        assert_eq!(deprecation["scope"], "docs_path");
+        // The underlying API is explicitly still active — endpoints are NOT
+        // going away.
+        assert_eq!(deprecation["api_status"], "active");
+        // `replacement` (what to use instead) is present and matches the
+        // canonical docs path surfaced elsewhere in the body + header.
+        assert_eq!(deprecation["replacement"], canonical_path);
+        assert_eq!(body["canonical_path"], canonical_path);
+        // `sunset` metadata is present (null = no scheduled removal).
+        assert!(
+            deprecation
+                .as_object()
+                .is_some_and(|map| map.contains_key("sunset")),
+            "sunset metadata field must be present"
+        );
+        assert!(deprecation["sunset"].is_null());
+        assert!(
+            deprecation["note"]
+                .as_str()
+                .is_some_and(|note| note.contains("NOT an API deprecation")),
+            "note must spell out that the API itself is not deprecated"
+        );
+
+        // None of the category's actual endpoints carry an API-level
+        // deprecation flag.
+        for endpoint in body["endpoints"].as_array().expect("endpoints array") {
+            assert!(
+                endpoint.get("deprecated").is_none(),
+                "no dispatches endpoint should be advertised as API-deprecated"
+            );
+        }
     }
 
     #[test]
