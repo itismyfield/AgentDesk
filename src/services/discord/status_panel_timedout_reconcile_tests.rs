@@ -1,6 +1,12 @@
-use super::{timed_out_panel_should_reconcile_to_done, turn_jsonl_deterministically_terminal};
+use super::{
+    reconcile_same_turn_identity, register_finalized_panel_terminal_anchor,
+    timed_out_panel_should_reconcile_to_done, turn_jsonl_deterministically_terminal,
+};
 use crate::services::agent_protocol::StatusEvent;
 use crate::services::discord::inflight::InflightTurnState;
+use crate::services::discord::placeholder_cleanup::{
+    PlaceholderCleanupRegistry, committed_terminal_panel_anchor_skip,
+};
 use crate::services::discord::placeholder_live_events::PlaceholderLiveEvents;
 use crate::services::provider::ProviderKind;
 use poise::serenity_prelude as serenity;
@@ -28,12 +34,12 @@ fn warm_tui_state(tmux_session_name: &str, output_path: &str) -> InflightTurnSta
 }
 
 fn write_terminal_jsonl() -> tempfile::NamedTempFile {
+    write_jsonl(r#"{"type":"result","result":"done","session_id":"s"}"#)
+}
+
+fn write_jsonl(content: &str) -> tempfile::NamedTempFile {
     let file = tempfile::NamedTempFile::new().expect("temp jsonl");
-    std::fs::write(
-        file.path(),
-        r#"{"type":"result","result":"done","session_id":"s"}"#,
-    )
-    .expect("write jsonl");
+    std::fs::write(file.path(), content).expect("write jsonl");
     file
 }
 
@@ -137,5 +143,166 @@ fn timed_out_panel_reconciles_to_done_and_preserves_heartbeat_stability() {
     assert_ne!(
         running_a, done_a,
         "finalizing visibly changed the panel header (진행 중 → 완료)"
+    );
+}
+
+// DEFECT 1 (codex #3951): the finalize-safe turn-END-only probe must NOT treat
+// any NON-terminator Idle-class envelope as a turn end. The lenient idle-queue-
+// drain observer reads each of these as at-rest, which would FALSE-FINALIZE a
+// quiet still-running turn (the #2161 premature-completion class). None of these
+// IS the authoritative per-provider turn terminator, so the reconcile must leave
+// the turn running.
+#[test]
+fn idle_class_non_terminator_envelopes_are_not_deterministically_terminal() {
+    let cases: &[(ProviderKind, &str, &str)] = &[
+        (
+            ProviderKind::Codex,
+            "session_meta",
+            r#"{"type":"session_meta","payload":{}}"#,
+        ),
+        (
+            ProviderKind::Codex,
+            "thread.started",
+            r#"{"type":"thread.started"}"#,
+        ),
+        (
+            ProviderKind::Codex,
+            "task_complete",
+            r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#,
+        ),
+        (
+            ProviderKind::Codex,
+            "completed agent_message",
+            r#"{"type":"item.completed","item":{"type":"agent_message"}}"#,
+        ),
+        (
+            ProviderKind::Claude,
+            "system:init",
+            r#"{"type":"system","subtype":"init"}"#,
+        ),
+    ];
+    for (provider, label, jsonl) in cases {
+        let file = write_jsonl(jsonl);
+        let state = warm_tui_state("AgentDesk-warm-1", &file.path().display().to_string());
+        assert!(
+            !turn_jsonl_deterministically_terminal(provider, &state),
+            "{label}: a non-terminator Idle-class envelope must NOT finalize a quiet running turn"
+        );
+    }
+
+    // Positive control: the authoritative per-provider TURN terminator DOES
+    // finalize, so the probe is not vacuously false.
+    let codex_done = write_jsonl(r#"{"type":"turn.completed","payload":{}}"#);
+    let codex_state = warm_tui_state("AgentDesk-warm-1", &codex_done.path().display().to_string());
+    assert!(
+        turn_jsonl_deterministically_terminal(&ProviderKind::Codex, &codex_state),
+        "the Codex turn.completed terminator IS deterministically terminal"
+    );
+}
+
+// DEFECT 1 (codex #3951) fail-safe: a torn/short trailing write (the writer was
+// mid-flush when the sweep read the JSONL) that is NOT recognized post-turn
+// housekeeping keeps the turn Busy — even when a real terminator sits beneath it
+// — so the reconcile never finalizes on an ambiguous tail.
+#[test]
+fn torn_or_short_trailing_jsonl_line_is_not_deterministically_terminal() {
+    // A complete `result` terminator shadowed by an active-looking torn trailing
+    // line (a new assistant stream just started): NOT terminal.
+    let active_torn = write_jsonl(
+        "{\"type\":\"result\",\"result\":\"done\",\"session_id\":\"s\"}\n{\"type\":\"assistant\",\"message\":{",
+    );
+    let state = warm_tui_state(
+        "AgentDesk-warm-1",
+        &active_torn.path().display().to_string(),
+    );
+    assert!(
+        !turn_jsonl_deterministically_terminal(&ProviderKind::Claude, &state),
+        "an active-looking torn trailing line shadows the terminator beneath → not terminal"
+    );
+
+    // An unrecoverable short fragment (could be the start of a fresh `user`
+    // envelope) is likewise not terminal.
+    let short_torn = write_jsonl("{\"ty");
+    let short_state = warm_tui_state("AgentDesk-warm-1", &short_torn.path().display().to_string());
+    assert!(
+        !turn_jsonl_deterministically_terminal(&ProviderKind::Claude, &short_state),
+        "a too-short torn fragment cannot prove the turn ended → not terminal"
+    );
+}
+
+// DEFECT 2 (codex #3951): a stale sweep snapshot must NOT finalize a NEXT turn's
+// freshly-restarted panel. The reconcile re-reads the fresh on-disk row and only
+// finalizes when EVERY turn/panel identity field still matches the snapshot.
+#[test]
+fn reconcile_no_ops_on_stale_snapshot_vs_next_turn_identity() {
+    let file = write_terminal_jsonl();
+    let mut snapshot = warm_tui_state("AgentDesk-warm-1", &file.path().display().to_string());
+    snapshot.status_message_id = Some(555);
+
+    // Same turn still on disk → finalize is allowed.
+    let same = snapshot.clone();
+    assert!(
+        reconcile_same_turn_identity(&snapshot, &same),
+        "the unchanged on-disk row is the same turn → finalize allowed"
+    );
+
+    // NEXT turn: a fresh user message + restarted panel → NO-OP.
+    let mut next_turn = snapshot.clone();
+    next_turn.user_msg_id = snapshot.user_msg_id + 1;
+    next_turn.current_msg_id = snapshot.current_msg_id + 1;
+    next_turn.status_message_id = Some(777);
+    assert!(
+        !reconcile_same_turn_identity(&snapshot, &next_turn),
+        "a different turn / restarted panel must not be finalized off the stale snapshot"
+    );
+
+    // A session/output rebind onto the channel is likewise a different turn.
+    let mut rebound = snapshot.clone();
+    rebound.output_path = Some("/tmp/agentdesk-other-turn.jsonl".to_string());
+    assert!(
+        !reconcile_same_turn_identity(&snapshot, &rebound),
+        "an output-path rebind is a different turn → NO-OP"
+    );
+    let mut resession = snapshot.clone();
+    resession.tmux_session_name = Some("AgentDesk-warm-2".to_string());
+    assert!(
+        !reconcile_same_turn_identity(&snapshot, &resession),
+        "a tmux-session rebind is a different turn → NO-OP"
+    );
+}
+
+// DEFECT 3 (codex #3951): after the reconcile finalizes a panel to `응답 완료`,
+// the orphan-panel reclaim STILL runs in the same pass and would delete the aged
+// panel. Registering the #3607 committed-terminal anchor makes that reclaim SKIP
+// the just-finalized panel.
+#[test]
+fn finalized_panel_is_skipped_by_same_pass_orphan_reclaim() {
+    let registry = PlaceholderCleanupRegistry::default();
+    let provider = ProviderKind::Claude;
+    let channel = serenity::ChannelId::new(42);
+    let panel_msg = serenity::MessageId::new(555);
+    let file = write_terminal_jsonl();
+    let mut state = warm_tui_state("AgentDesk-warm-1", &file.path().display().to_string());
+    state.status_message_id = Some(panel_msg.get());
+
+    // Before finalize: no anchor → the orphan reclaim would DELETE the panel.
+    assert!(
+        !committed_terminal_panel_anchor_skip(&registry, &provider, channel, panel_msg, &state),
+        "with no committed-terminal anchor the orphan reclaim would delete the panel"
+    );
+
+    // The reconcile registers the anchor on a committed finalize.
+    register_finalized_panel_terminal_anchor(
+        &registry,
+        &provider,
+        channel,
+        panel_msg,
+        state.tmux_session_name.as_deref(),
+    );
+
+    // Same pass: the orphan reclaim now SKIPS the just-finalized panel.
+    assert!(
+        committed_terminal_panel_anchor_skip(&registry, &provider, channel, panel_msg, &state),
+        "the #3607 anchor makes the same-pass orphan reclaim skip the finalized panel"
     );
 }
