@@ -477,6 +477,7 @@ src/
 │   │   │   ├── common.rs
 │   │   │   ├── completion_footer.rs
 │   │   │   ├── context_panel.rs
+│   │   │   ├── freshness.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── recent_events.rs
 │   │   │   ├── session_panel.rs

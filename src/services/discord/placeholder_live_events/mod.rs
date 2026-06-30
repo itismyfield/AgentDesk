@@ -12,6 +12,7 @@ mod background_task_events;
 mod common;
 mod completion_footer;
 mod context_panel;
+mod freshness;
 mod recent_events;
 mod session_panel;
 mod slot_rehydration;
@@ -75,6 +76,12 @@ pub(in crate::services::discord) struct PlaceholderLiveEvents {
     // block visible (the completion suppression only hides STALE pre-completion
     // content, never a fresh late batch).
     last_recent_event_at: dashmap::DashMap<ChannelId, Instant>,
+    // #3812: wall-clock unix stamp of the most recent live-content arrival per
+    // channel, set once when the content lands (never recomputed at render). The
+    // status panel's live/stale confidence line anchors its `<t:UNIX:R>` relative
+    // age here, so the rendered text stays byte-identical across heartbeat ticks
+    // (no needless re-edit) while Discord shows the localized live age client-side.
+    last_recent_event_unix: dashmap::DashMap<ChannelId, i64>,
     // #3404 (codex r1): last logged live-panel compaction counts per channel —
     // the INFO line fires on count CHANGE only, not every render tick, so the
     // log stays usable as a compaction event counter for the relay scan.
@@ -101,6 +108,7 @@ impl PlaceholderLiveEvents {
         self.status_by_channel.remove(&channel_id);
         self.compaction_log_counts.remove(&channel_id);
         self.last_recent_event_at.remove(&channel_id);
+        self.last_recent_event_unix.remove(&channel_id); // #3812: drop the freshness anchor too.
     }
 
     pub(in crate::services::discord) fn clear_channel_preserving_footer_residuals(
@@ -111,6 +119,7 @@ impl PlaceholderLiveEvents {
         // #3477 item 3: the recent-event ring is gone, so its freshness stamp is
         // stale — drop it with the ring so the next turn starts un-fresh.
         self.last_recent_event_at.remove(&channel_id);
+        self.last_recent_event_unix.remove(&channel_id); // #3812: reset the freshness anchor.
         // #3404 (codex r2): a turn reset starts a new compaction episode — re-arm
         // the count-change log gate even when footer residuals survive.
         self.compaction_log_counts.remove(&channel_id);
@@ -155,6 +164,10 @@ impl PlaceholderLiveEvents {
         // `TurnCompleted` can tell a fresh late batch (keep 🖥️ Recent) from a
         // stale pre-completion block (suppress on a genuinely idle completed turn).
         self.last_recent_event_at.insert(channel_id, Instant::now());
+        // #3812: stamp the wall-clock arrival so the confidence line's `<t:UNIX:R>`
+        // age anchors to a stable point set here, not recomputed per render tick.
+        self.last_recent_event_unix
+            .insert(channel_id, chrono::Utc::now().timestamp());
     }
 
     pub(in crate::services::discord) fn push_many<I>(&self, channel_id: ChannelId, events: I)
@@ -537,6 +550,7 @@ impl PlaceholderLiveEvents {
         };
         let completed = matches!(status, TerminalUiObligationPanelStatus::Completed);
         let request_anchor_line = self.request_anchor_line(channel_id, &snapshot);
+        let confidence_line = self.panel_confidence_line(channel_id, &snapshot, started_at_unix);
         render_status_panel(
             snapshot,
             self.render_block(channel_id),
@@ -545,6 +559,7 @@ impl PlaceholderLiveEvents {
             chrono::Utc::now().timestamp(),
             !completed,
             request_anchor_line,
+            confidence_line,
         )
     }
 
@@ -608,6 +623,7 @@ impl PlaceholderLiveEvents {
             None => true,
         };
         let request_anchor_line = self.request_anchor_line(channel_id, &snapshot);
+        let confidence_line = self.panel_confidence_line(channel_id, &snapshot, started_at_unix);
         render_status_panel(
             snapshot,
             self.render_block(channel_id),
@@ -616,6 +632,7 @@ impl PlaceholderLiveEvents {
             heartbeat_at_unix,
             live_content_fresh,
             request_anchor_line,
+            confidence_line,
         )
     }
 

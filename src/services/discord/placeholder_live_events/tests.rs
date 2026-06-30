@@ -405,6 +405,64 @@ fn status_panel_turn_completed_drops_recent_live_block() {
 }
 
 #[test]
+fn status_panel_surfaces_live_final_stale_and_unknown_confidence() {
+    // #3812: every status panel carries a compact live/stale confidence line in
+    // its header block, derived from deterministic ADK status signals (never age
+    // alone). Pins the four user-facing states end-to-end through the store.
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(38120);
+
+    // Running turn with a fresh live event → `live`.
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use("Bash", &json!({"command": "cargo test"}).to_string()),
+    );
+    events.push_event(
+        channel_id,
+        RecentPlaceholderEvent::tool_use("Bash", &json!({"command": "cargo test"}).to_string())
+            .unwrap(),
+    );
+    let live = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(
+        live.contains("신뢰도: live · 마지막 업데이트"),
+        "running panel must show a live confidence line: {live:?}"
+    );
+
+    // Completion → distinct `final` confidence state (not `live`).
+    events.push_status_event(channel_id, StatusEvent::TurnCompleted { background: false });
+    let done = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(
+        done.contains("신뢰도: final"),
+        "completed panel must show a final confidence line: {done:?}"
+    );
+    assert!(!done.contains("신뢰도: live"));
+
+    // Answer relayed but session-end unconfirmed → corroborated `stale · 조사 권장`.
+    let stale = events.render_terminal_ui_obligation_panel(
+        channel_id,
+        &ProviderKind::Claude,
+        1_700_000_000,
+        TerminalUiObligationPanelStatus::Deadline,
+    );
+    assert!(
+        stale.contains("신뢰도: stale") && stale.contains("조사 권장"),
+        "unconfirmed-delivery panel must show a stale confidence line: {stale:?}"
+    );
+
+    // Delivery done, termination still confirming → ambiguous `상태 불명확`.
+    let pending = events.render_terminal_ui_obligation_panel(
+        channel_id,
+        &ProviderKind::Claude,
+        1_700_000_000,
+        TerminalUiObligationPanelStatus::Pending,
+    );
+    assert!(
+        pending.contains("신뢰도: 상태 불명확"),
+        "pending-delivery panel must show an unknown confidence line: {pending:?}"
+    );
+}
+
+#[test]
 fn status_panel_codex_active_omits_processing_tail_after_recent_block() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(175);
@@ -6360,6 +6418,7 @@ fn status_panel_free_renderer_keeps_request_anchor_first_on_overflow() {
         1_700_000_000,
         true,
         Some("요청: https://discord.com/channels/1/2/3".to_string()),
+        None,
     );
     assert!(
         out.starts_with("요청: https://discord.com/channels/1/2/3"),
