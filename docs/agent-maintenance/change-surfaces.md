@@ -959,7 +959,14 @@
     marker suppression for stop-control transcript envelopes; +62 from #3304:
     slash-command canonical prompt keys for `<command-*>` XML vs
     `/command args` dedupe, plus focused loop skill-expansion regressions).
-  - `src/services/discord/recovery_engine.rs` (3899 lines; +475 from current
+  - `src/services/discord/recovery_engine.rs` (3039 lines; -860 from #3834
+    behavior-preserving extraction of the manual-rebind recovery path
+    (`rebind_inflight_for_channel` + its private `codex_tui_*` / `Pending*`
+    support cluster and unit tests) into the leaf module
+    `recovery_engine/manual_rebind.rs` — `rebind_inflight_for_channel` re-exported
+    so `recovery_engine::rebind_inflight_for_channel` stays byte-identical, and
+    `RebindOutcome` / `RebindError` kept in root (shared with `rebind_runtime` +
+    external callers); +475 from current
     inventory refresh after the relay split stack landed; -5 net from #3711/#3712 extracting rebind runtime/output-path resolution to
     `recovery_engine/rebind_runtime.rs` while adding direct Codex TUI detection
     so rebind can rebuild rollout bindings when possible and return 409 instead
