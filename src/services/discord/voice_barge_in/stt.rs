@@ -7,6 +7,18 @@ impl VoiceBargeInRuntime {
         user_id: u64,
         samples: &[i16],
     ) {
+        // #3910: in File mode (the default) streaming STT is inactive, so skip
+        // the PCM conversion, the per-tick `tokio::spawn`, and the feed-task
+        // bucket entirely. Previously every ~20ms speaking tick allocated a
+        // `Vec<f32>`, spawned a task that immediately early-returned, and pushed
+        // its completed `JoinHandle` into a per-speaker bucket that was never
+        // drained in File mode — so memory grew monotonically and CPU was wasted
+        // for a disabled feature. The mirror is checked synchronously (no `stt`
+        // lock await), and `feed_streaming_stt_pcm` keeps its own `is_streaming`
+        // guard as defense-in-depth against a mode flip racing this gate.
+        if !self.streaming_stt_enabled() {
+            return;
+        }
         if samples.is_empty() {
             return;
         }

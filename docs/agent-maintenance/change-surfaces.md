@@ -1280,7 +1280,7 @@
     `audit_maintainability_config.toml`; the root is no longer a prod giant and
     was removed from `giant_file_registry.toml`; #3038 S5 locked the final
     root ratchet at 274 production lines).
-  - `src/services/discord/voice_barge_in.rs` (2800 lines after #3038
+  - `src/services/discord/voice_barge_in.rs` (2893 lines after #3038
     VoiceBargeInRuntime S1 moved the STT method cluster to
     `src/services/discord/voice_barge_in/stt.rs` (314 production lines) and
     S2 moved the progress playback method cluster to
@@ -1304,7 +1304,17 @@
     `InflightForegroundCancelGuard` drop guard (+19 prod lines) so an aborted
     foreground `generate().await` unregisters its CancelToken instead of
     leaking it (a leak left `has_inflight_foreground` permanently true and the
-    channel misclassified the next fresh utterance as a barge-in);
+    channel misclassified the next fresh utterance as a barge-in), and #3910
+    gated the File-mode streaming feed-task hook behind a synchronous
+    `streaming_stt_enabled` atomic mirror and made `unregister_voice_guild` async
+    so voice-channel teardown reaps per-channel feed-task buckets
+    (`StreamingSttSessions::remove_channel`) AND discards the matching inner
+    `WhisperStream` sessions (`VoiceSttRuntime::discard_stream_session`, with the
+    stt read guard hoisted to a local so it is not held across the discard
+    awaits) (+93 prod lines), closing a default-deployment memory/CPU leak where
+    every ~20ms File-mode speaking tick spawned an immediately-returning feed
+    task whose `JoinHandle` was never drained, plus a Stream-mode inner-session
+    leak on mid-utterance channel leave;
     voice STT/TTS, lobby routing, progress mirroring, and barge-in
     orchestration surface; tracked decompose target — see
     `giant-file-registry.md` (owner `voice-runtime`, deadline 2026-08-31,

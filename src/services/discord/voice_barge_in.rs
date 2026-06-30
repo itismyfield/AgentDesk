@@ -852,6 +852,48 @@ impl StreamingSttSessions {
         self.sessions.clear();
         self.feed_tasks.clear();
     }
+
+    /// #3910: Drop every session + feed-task bucket whose key belongs to
+    /// `channel_id`, aborting any still-pending feed task so a speaker who
+    /// leaves the voice channel mid-utterance does not strand streaming state.
+    /// Previously these per-(channel,user) buckets were only reaped at
+    /// utterance completion (`transcribe_completed_utterance`), so a channel
+    /// teardown left them orphaned in the maps.
+    ///
+    /// Returns the removed outer `SttSessionHandle`s so the caller can also reap
+    /// the matching inner `WhisperStream` sessions (which only `finalize()`
+    /// removes) — dropping the outer handle alone leaves the underlying stream
+    /// session leaked in Stream mode.
+    fn remove_channel(&self, channel_id: u64) -> Vec<SttSessionHandle> {
+        let mut removed = Vec::new();
+        self.sessions.retain(|key, handle| {
+            if key.channel_id == channel_id {
+                removed.push(handle.clone());
+                false
+            } else {
+                true
+            }
+        });
+        self.feed_tasks.retain(|key, bucket| {
+            if key.channel_id != channel_id {
+                return true;
+            }
+            match bucket.lock() {
+                Ok(mut tasks) => {
+                    for task in tasks.drain(..) {
+                        task.abort();
+                    }
+                }
+                Err(poisoned) => {
+                    for task in poisoned.into_inner().drain(..) {
+                        task.abort();
+                    }
+                }
+            }
+            false
+        });
+        removed
+    }
 }
 
 pub(in crate::services::discord) struct VoiceBargeInRuntime {
@@ -870,6 +912,11 @@ pub(in crate::services::discord) struct VoiceBargeInRuntime {
     // 동일한 StreamingSttKey 로 묶이며 entry/get/remove 의미와 clear 순서를
     // 그대로 보존한다.
     streaming_stt: StreamingSttSessions,
+    // #3910: 현재 STT 런타임이 streaming 모드인지 동기적으로 조회하기 위한 atomic
+    // mirror. `stt` (async RwLock) 를 await 없이 읽을 수 없으므로, stt 가 만들어지거나
+    // 교체될 때마다 이 플래그를 갱신한다. File 모드(기본값)에서는 false 이므로
+    // `observe_streaming_stt_pcm_i16` 가 PCM 변환·태스크 스폰 전에 곧바로 반환한다.
+    streaming_stt_enabled: AtomicBool,
     tts: RwLock<Option<TtsRuntime>>,
     progress_tx: broadcast::Sender<VoiceProgressEvent>,
     monitors: dashmap::DashMap<u64, Arc<std::sync::Mutex<LiveBargeInMonitor>>>,
@@ -973,6 +1020,9 @@ impl VoiceBargeInRuntime {
             voice_config_state: RwLock::new(config.clone()),
             spoken_result_language: RwLock::new(config.stt.language.clone()),
             verbose_progress: AtomicBool::new(config.verbose_progress),
+            streaming_stt_enabled: AtomicBool::new(
+                stt.as_ref().is_some_and(VoiceSttRuntime::is_streaming),
+            ),
             stt: RwLock::new(stt),
             streaming_stt: StreamingSttSessions::new(),
             tts: RwLock::new(tts),
@@ -1006,6 +1056,7 @@ impl VoiceBargeInRuntime {
             verbose_progress: AtomicBool::new(false),
             stt: RwLock::new(None),
             streaming_stt: StreamingSttSessions::new(),
+            streaming_stt_enabled: AtomicBool::new(false),
             tts: RwLock::new(None),
             progress_tx,
             monitors: dashmap::DashMap::new(),
@@ -1172,6 +1223,14 @@ impl VoiceBargeInRuntime {
         }
         self.inflight_foreground_cancels
             .remove_if(&channel_id.get(), |_, value| value.is_empty());
+    }
+
+    /// #3910: whether the live STT runtime is in streaming mode. Read
+    /// synchronously from an atomic mirror so the per-PCM-tick hook can gate
+    /// streaming work without awaiting the `stt` lock. Kept in sync wherever
+    /// `stt` is (re)built.
+    pub(in crate::services::discord) fn streaming_stt_enabled(&self) -> bool {
+        self.streaming_stt_enabled.load(Ordering::Relaxed)
     }
 
     /// #2250: signal cancellation on every in-flight foreground call for the
@@ -1367,7 +1426,12 @@ impl VoiceBargeInRuntime {
         *self.spoken_result_language.write().await = language;
         if self.enabled {
             self.streaming_stt.clear();
-            *self.stt.write().await = Some(VoiceSttRuntime::from_voice_config(&config));
+            let runtime = VoiceSttRuntime::from_voice_config(&config);
+            // #3910: keep the synchronous streaming mirror aligned with the
+            // freshly rebuilt runtime before publishing it.
+            self.streaming_stt_enabled
+                .store(runtime.is_streaming(), Ordering::Relaxed);
+            *self.stt.write().await = Some(runtime);
         }
     }
 
@@ -1403,7 +1467,7 @@ impl VoiceBargeInRuntime {
         }
     }
 
-    pub(in crate::services::discord) fn unregister_voice_guild(&self, guild_id: GuildId) {
+    pub(in crate::services::discord) async fn unregister_voice_guild(&self, guild_id: GuildId) {
         // F7 (#2046): voice_guilds 만 지우면 channel_id 키로 적재된 monitors /
         // playbacks / spoken_result_playbacks / active_voice_routes /
         // deferred_buffers 가 남아 join/leave 반복 시 누수. 같은 guild 의 모든
@@ -1421,6 +1485,9 @@ impl VoiceBargeInRuntime {
             .collect();
         self.voice_guilds
             .retain(|_, registered_guild_id| *registered_guild_id != guild_id);
+        // #3910: outer handles for the leaving channels, collected so the inner
+        // WhisperStream sessions can be discarded after the sync teardown loop.
+        let mut stranded_stream_sessions: Vec<SttSessionHandle> = Vec::new();
         for channel_id in stale_channels {
             self.monitors.remove(&channel_id);
             if let Some((_, session)) = self.playbacks.remove(&channel_id) {
@@ -1437,6 +1504,32 @@ impl VoiceBargeInRuntime {
             );
             self.active_voice_routes.remove(&channel_id);
             self.deferred_buffers.remove(&channel_id);
+            // #3910: a speaker leaving the channel mid-utterance otherwise leaves
+            // its streaming-STT session + feed-task bucket stranded in the maps
+            // (they were only reaped at utterance completion). Drop the outer
+            // bucket + abort pending feed tasks here, and collect the outer
+            // handles so the inner stream session is reaped below too.
+            stranded_stream_sessions.extend(self.streaming_stt.remove_channel(channel_id));
+        }
+        // #3910: dropping the outer `SttSessionHandle` alone leaves the matching
+        // inner `WhisperStream` session (inserted by `start_session`, removed
+        // only by `finalize()`) leaked until the runtime is rebuilt. Discard
+        // those inner sessions for the leaving channels (no final decode — the
+        // speaker left, so partial-transcript loss is acceptable). File mode
+        // keeps no inner session, so this is a no-op there.
+        if !stranded_stream_sessions.is_empty() {
+            // Hoist read+clone into a local so the `RwLockReadGuard` drops at
+            // this statement's end — NOT held across the `discard_stream_session`
+            // awaits below (an `if let` scrutinee would extend the guard over the
+            // whole body, holding `self.stt` read while awaiting → deadlock risk
+            // against any `self.stt` writer / re-entrant lock). A plain `let`
+            // binding (not `let-else` + `return`) preserves the rest of the fn.
+            let stt = self.stt.read().await.clone();
+            if let Some(stt) = stt {
+                for handle in stranded_stream_sessions {
+                    stt.discard_stream_session(&handle).await;
+                }
+            }
         }
     }
 
@@ -2844,6 +2937,11 @@ mod tests {
                 .is_streaming(),
             "default STT mode must remain file"
         );
+        // #3910: the synchronous streaming mirror must agree with the runtime.
+        assert!(
+            !file_runtime.streaming_stt_enabled(),
+            "File-mode runtime mirror must report streaming disabled"
+        );
 
         let mut stream_config = VoiceConfig::default();
         stream_config.enabled = true;
@@ -2858,6 +2956,202 @@ mod tests {
                 .unwrap()
                 .is_streaming(),
             "stream STT must only activate when configured"
+        );
+        // #3910: Stream-mode runtime must drive the mirror true (gates the
+        // per-tick hook ON), contrasting the File-mode false above.
+        assert!(
+            stream_runtime.streaming_stt_enabled(),
+            "Stream-mode runtime mirror must report streaming enabled"
+        );
+
+        // #3910: rebuilding `stt` via set_runtime_language must preserve the
+        // mirror (stale-mirror regression guard) — language changes never flip
+        // the configured mode, so a Stream runtime stays mirror-true afterward.
+        stream_runtime.set_runtime_language("en".to_string()).await;
+        assert!(
+            stream_runtime
+                .stt
+                .read()
+                .await
+                .as_ref()
+                .unwrap()
+                .is_streaming(),
+            "set_runtime_language must keep the Stream runtime streaming"
+        );
+        assert!(
+            stream_runtime.streaming_stt_enabled(),
+            "set_runtime_language must keep the streaming mirror in sync"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_mode_streaming_observe_is_gated_and_does_not_leak_feed_tasks() {
+        // #3910: in File mode (default) the per-tick streaming hook must skip the
+        // PCM conversion + task spawn entirely, so the feed-task buckets stay
+        // empty across an utterance instead of accumulating one completed
+        // `JoinHandle` per ~20ms speaking tick (the leak this fix closes).
+        let mut file_config = VoiceConfig::default();
+        file_config.enabled = true;
+        let runtime = Arc::new(VoiceBargeInRuntime::from_voice_config(&file_config));
+        assert!(
+            !runtime.streaming_stt_enabled(),
+            "default File mode must report streaming disabled"
+        );
+
+        let channel = ChannelId::new(7_910_001);
+        let samples = vec![16_384i16, -16_384, 16_384, -16_384].repeat(480);
+        // Simulate ~50 of the ~20ms speaking ticks that occur during one
+        // utterance; none of them should create or grow a feed-task bucket.
+        for _ in 0..50 {
+            runtime.observe_streaming_stt_pcm_i16(channel, 4242, &samples);
+        }
+        assert_eq!(
+            runtime.streaming_stt.feed_tasks().len(),
+            0,
+            "File mode must not spawn per-tick feed tasks or accumulate JoinHandles"
+        );
+        assert_eq!(
+            runtime.streaming_stt.sessions().len(),
+            0,
+            "File mode must not start any streaming session"
+        );
+    }
+
+    #[tokio::test]
+    async fn leaving_voice_channel_drops_streaming_stt_buckets() {
+        // #3910: a speaker leaving the channel mid-utterance must not strand its
+        // streaming-STT session / feed-task bucket — channel teardown reaps it
+        // (aborting any pending feed task) while leaving sibling channels intact.
+        let mut config = VoiceConfig::default();
+        config.enabled = true;
+        let runtime = Arc::new(VoiceBargeInRuntime::from_voice_config(&config));
+
+        let channel = ChannelId::new(7_910_002);
+        let guild = GuildId::new(7_910_999);
+        runtime.register_voice_context(channel, guild);
+
+        let key = StreamingSttKey {
+            channel_id: channel.get(),
+            user_id: 99,
+        };
+        let pending = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(3_600)).await;
+        });
+        let abort_handle = pending.abort_handle();
+        runtime
+            .streaming_stt
+            .feed_tasks()
+            .insert(key, Arc::new(StdMutex::new(vec![pending])));
+        assert_eq!(runtime.streaming_stt.feed_tasks().len(), 1);
+
+        // A different channel's bucket must survive this guild teardown.
+        let sibling_key = StreamingSttKey {
+            channel_id: channel.get() + 1,
+            user_id: 99,
+        };
+        runtime
+            .streaming_stt
+            .feed_tasks()
+            .insert(sibling_key, Arc::new(StdMutex::new(Vec::new())));
+
+        runtime.unregister_voice_guild(guild).await;
+
+        assert!(
+            !runtime.streaming_stt.feed_tasks().contains_key(&key),
+            "leaving the channel must drop its streaming feed-task bucket"
+        );
+        assert!(
+            runtime
+                .streaming_stt
+                .feed_tasks()
+                .contains_key(&sibling_key),
+            "an unrelated channel's feed-task bucket must be left intact"
+        );
+        for _ in 0..200 {
+            if abort_handle.is_finished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(
+            abort_handle.is_finished(),
+            "the stranded feed task must be aborted on channel teardown"
+        );
+    }
+
+    #[tokio::test]
+    async fn leaving_voice_channel_discards_inner_stream_sessions() {
+        // #3910: in Stream mode the underlying `WhisperStream` session lives in
+        // an inner map removed only by `finalize()`. A channel leave must reap
+        // that inner session too (not just the outer handle), while preserving a
+        // sibling channel's inner session. Without the inner discard the stream
+        // session leaks until the runtime is rebuilt.
+        let mut config = VoiceConfig::default();
+        config.enabled = true;
+        config.stt.mode = crate::voice::config::VoiceSttMode::Stream;
+        let runtime = Arc::new(VoiceBargeInRuntime::from_voice_config(&config));
+        assert!(runtime.streaming_stt_enabled());
+
+        let stt = runtime
+            .stt
+            .read()
+            .await
+            .clone()
+            .expect("stream runtime stt must exist");
+
+        let channel = ChannelId::new(7_910_010);
+        let guild = GuildId::new(7_910_777);
+        runtime.register_voice_context(channel, guild);
+
+        // Leaving channel: a live inner streaming session + its outer handle.
+        let leaving_handle = stt
+            .start_session("ko")
+            .await
+            .expect("start leaving streaming session");
+        let leaving_key = StreamingSttKey {
+            channel_id: channel.get(),
+            user_id: 1,
+        };
+        runtime
+            .streaming_stt
+            .sessions()
+            .insert(leaving_key, leaving_handle.clone());
+
+        // Sibling channel (not registered to this guild) must be preserved.
+        let sibling_handle = stt
+            .start_session("ko")
+            .await
+            .expect("start sibling streaming session");
+        let sibling_key = StreamingSttKey {
+            channel_id: channel.get() + 1,
+            user_id: 1,
+        };
+        runtime
+            .streaming_stt
+            .sessions()
+            .insert(sibling_key, sibling_handle.clone());
+
+        runtime.unregister_voice_guild(guild).await;
+
+        // Outer map: leaving entry gone, sibling intact.
+        assert!(
+            !runtime.streaming_stt.sessions().contains_key(&leaving_key),
+            "leaving channel outer session handle must be removed"
+        );
+        assert!(
+            runtime.streaming_stt.sessions().contains_key(&sibling_key),
+            "sibling channel outer session handle must be preserved"
+        );
+
+        // Inner WhisperStream map: leaving session discarded (finalize on a
+        // removed handle errors), sibling session still finalizable.
+        assert!(
+            stt.finalize(leaving_handle).await.is_err(),
+            "leaving channel inner WhisperStream session must be discarded on leave"
+        );
+        assert!(
+            stt.finalize(sibling_handle).await.is_ok(),
+            "sibling channel inner WhisperStream session must survive the leave"
         );
     }
 

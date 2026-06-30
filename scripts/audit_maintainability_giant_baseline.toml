@@ -274,7 +274,17 @@
 # #3038 VoiceBargeInRuntime S8: lowered 3044 -> 2823 (-221) as the foreground
 # decision/parser cluster moved to `voice_barge_in/foreground_decision.rs` (214
 # prod LoC, below the giant threshold). Locks in the shrink win.
-"src/services/discord/voice_barge_in.rs" = 2823
+# #3910: +70 (2823 -> 2893) for the File-mode streaming feed-task leak fix — a
+# synchronous `streaming_stt_enabled` atomic mirror (field + getter + two init
+# sites + a set_runtime_language sync) that gates `observe_streaming_stt_pcm_i16`
+# so File mode (the default) skips the per-tick PCM convert / task spawn / bucket
+# growth, plus `StreamingSttSessions::remove_channel` (now returning the removed
+# handles) and an async `unregister_voice_guild` that reaps per-channel feed-task
+# buckets AND discards the matching inner `WhisperStream` sessions on
+# voice-channel teardown (Stream-mode inner-session leak, codex review; the stt
+# read guard is hoisted to a local so it is not held across the discard awaits).
+# Minimum surface for the leak fix; no decomposition opportunity in this slice.
+"src/services/discord/voice_barge_in.rs" = 2893
 # #3248: +60 for the gap-1 deploy-survivable-relay fix —
 # `reseed_watcher_owned_finalizer_ledger` + two guarded reattach call-sites that
 # re-register the watcher-owned turn in the post-restart finalizer ledger (a P1

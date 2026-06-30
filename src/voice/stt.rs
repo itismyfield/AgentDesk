@@ -381,6 +381,17 @@ impl VoiceSttRuntime {
     pub(crate) fn is_streaming(&self) -> bool {
         matches!(self, Self::Stream { .. })
     }
+
+    /// #3910: drop the inner streaming session for `session` without running a
+    /// final decode. Used when a speaker leaves the voice channel mid-utterance
+    /// so the underlying `WhisperStream` session is not stranded in the inner
+    /// map until the runtime is rebuilt/dropped. File mode keeps no inner
+    /// session, so this is a no-op there.
+    pub(crate) async fn discard_stream_session(&self, session: &SttSessionHandle) {
+        if let Self::Stream { stream, .. } = self {
+            stream.discard_session(session).await;
+        }
+    }
 }
 
 #[async_trait]
@@ -523,6 +534,15 @@ impl WhisperStream {
         cleanup_temp_file(&wav_path).await;
         cleanup_temp_file(&transcript_path).await;
         result
+    }
+
+    /// #3910: forget a session's inner state without finalizing/decoding it.
+    /// Removing the entry drops the `Arc<Mutex<WhisperStreamSession>>`; combined
+    /// with aborting the per-tick feed task, the session is freed on channel
+    /// leave instead of lingering until `finalize()` (which never runs when the
+    /// speaker simply leaves the channel).
+    pub(crate) async fn discard_session(&self, session: &SttSessionHandle) {
+        self.sessions.lock().await.remove(session);
     }
 }
 

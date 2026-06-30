@@ -844,7 +844,10 @@ async fn leave_voice_channel(
         .shared
         .voice_barge_in
         .control_channel_ids_for_guild(guild_id);
-    data.shared.voice_barge_in.unregister_voice_guild(guild_id);
+    data.shared
+        .voice_barge_in
+        .unregister_voice_guild(guild_id)
+        .await;
     let mut flushed = 0usize;
     for cc_id in control_channel_ids {
         flushed += data
