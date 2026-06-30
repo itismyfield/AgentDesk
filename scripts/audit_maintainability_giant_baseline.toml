@@ -130,7 +130,15 @@
 # the whole turn (TTL-independent), never touching the #3459/#3303 relayed-entry
 # ledger. The primitive + regression tests live in the non-giant `tui_prompt_dedupe.rs`;
 # this is the minimal call-site cost (load-bearing comment block + channel-scoped call).
-"src/services/discord/tmux_watcher.rs" = 7103
+"src/services/discord/tmux_watcher.rs" = 7106
+# #3832: 7103 -> 7106 (+3 prod LoC), reviewable admission — moved the inline
+# `#[cfg(test)] mod tests` body verbatim into the non-giant `tmux_watcher/tests.rs`
+# (in TEST_FILE_NAMES, so excluded from the production splitter). RAW lines drop
+# 10268 -> 7106 (the #3565 hot-file ratchet win); the only production delta is the
+# brace-less `#[cfg(test)] #[path] mod tests;` include-stub, which the splitter
+# counts as production because it excludes only brace-delimited test mods
+# (generate_inventory_docs.test_line_count). Same verbatim test-relocation pattern
+# as #3715 (`tui_prompt_relay/tests.rs`); zero behavior change, no visibility widening.
 # #3038 tmux_watcher S1 child modules, frozen at landed production LoC.
 "src/services/discord/tmux_watcher/commit_decisions.rs" = 140
 "src/services/discord/tmux_watcher/completion_gate.rs" = 275

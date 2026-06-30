@@ -101,7 +101,12 @@
 # anchor stays live for the whole turn, TTL-independent. The primitive + its
 # regression tests live in the NON-hot `tui_prompt_dedupe.rs`; this is the minimal
 # frozen-file cost (one load-bearing comment block + the channel-scoped call).
-"src/services/discord/tmux_watcher.rs" = 10268
+# #3832: 10268 -> 7106 by moving the inline `#[cfg(test)] mod tests` body into
+# `tmux_watcher/tests.rs` (the same verbatim test-relocation pattern #3715 used
+# for `tui_prompt_relay/tests.rs`); pure move, zero production behavior change,
+# no visibility widening — the relocated module keeps `use super::*` access to
+# the root coordinator's items.
+"src/services/discord/tmux_watcher.rs" = 7106
 # #3715: 7789 -> 4007 by moving the inline `#[cfg(test)] mod tests` body into
 # `tui_prompt_relay/tests.rs` and the Codex idle rollout tail/rebind loop into
 # `tui_prompt_relay/codex_idle_rollout.rs`; no production behavior change.
