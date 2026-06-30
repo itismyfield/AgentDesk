@@ -86,6 +86,16 @@ pub(in crate::services::discord) fn session_bound_relay_external_input_orphan_sh
         && state.full_response.trim().is_empty()
         && state.last_watcher_relayed_offset.is_none()
         && !state.terminal_delivery_committed
+        // #3976: a DELIVERED-but-unmirrored row (the NewMessage/short-replace
+        // confirmed-POST route advances only the resettable
+        // `confirmed_end_offset` watermark and writes nothing else) is byte-for-byte
+        // identical to a never-delivered black-hole row, so on a watermark reset
+        // below the turn body it would be wrongly downgraded to ownerless and the
+        // already-delivered tail re-emitted. The durable `session_bound_delivered`
+        // marker — stamped ONLY on a genuinely confirmed delivery — is the
+        // discriminator: a delivered row is NOT orphan-shaped, while a genuine
+        // black-hole (flag still `false`) STILL is.
+        && !state.session_bound_delivered
         && state.restart_mode.is_none()
         && inflight_state_is_stale(state, now_unix_secs, INFLIGHT_STALENESS_THRESHOLD_SECS)
 }
@@ -198,6 +208,92 @@ pub(super) fn downgrade_orphaned_session_bound_relay_owner_locked_in_root(
     ) {
         Ok(()) => OrphanRelayReclaimOutcome::Downgraded,
         Err(_) => OrphanRelayReclaimOutcome::IoError,
+    }
+}
+
+/// Outcome of [`mark_session_bound_relay_delivered_locked`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum MarkDeliveredOutcome {
+    /// The durable `session_bound_delivered` marker is now set on the row
+    /// (either freshly stamped this call or already set — idempotent).
+    Marked,
+    /// The in-lock reload no longer matches the caller's identity (a fresh turn
+    /// replaced the row, or the row was cleared) — the marker was NOT stamped, so
+    /// a wrong/replaced turn is never marked delivered.
+    Skipped,
+    /// Filesystem or lock acquisition failure.
+    IoError,
+}
+
+/// #3976: single-flock read-modify-write that stamps the durable
+/// `session_bound_delivered` marker on a `SessionBoundRelay` TUI-direct row AFTER
+/// a genuinely confirmed terminal delivery. Acquires the sidecar flock ONCE,
+/// reloads the on-disk row, re-checks the caller's identity against the freshly
+/// reloaded row, then sets the flag and persists via [`persist_under_lock`] —
+/// never re-entering [`super::save_inflight_state`] (which would re-acquire the
+/// same non-reentrant flock and self-deadlock).
+///
+/// The identity re-gate is the SAFETY boundary: the confirmed-POST path already
+/// matched the frame identity to the inflight it loaded UNLOCKED, but a fresh
+/// turn B could have replaced the row between that load and this flock. Re-gating
+/// under the lock guarantees the marker only ever lands on the SAME turn whose
+/// delivery was confirmed — never on a replacement turn. Idempotent: a row that
+/// already carries the marker returns `Marked` without a redundant write.
+pub(in crate::services::discord) fn mark_session_bound_relay_delivered_locked(
+    provider: &ProviderKind,
+    channel_id: u64,
+    require_identity: &InflightTurnIdentity,
+    require_tmux_session_name: &str,
+) -> MarkDeliveredOutcome {
+    let Some(root) = inflight_runtime_root() else {
+        return MarkDeliveredOutcome::IoError;
+    };
+    mark_session_bound_relay_delivered_locked_in_root(
+        &root,
+        provider,
+        channel_id,
+        require_identity,
+        require_tmux_session_name,
+    )
+}
+
+/// Root-explicit variant of [`mark_session_bound_relay_delivered_locked`] for
+/// unit tests (avoids `AGENTDESK_ROOT_DIR` env-var races).
+pub(super) fn mark_session_bound_relay_delivered_locked_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    require_identity: &InflightTurnIdentity,
+    require_tmux_session_name: &str,
+) -> MarkDeliveredOutcome {
+    let path = inflight_state_path(root, provider, channel_id);
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return MarkDeliveredOutcome::IoError;
+    };
+    let Some(mut state) = load_inflight_state_unlocked(&path) else {
+        return MarkDeliveredOutcome::Skipped;
+    };
+    // Strong identity guard (user_msg_id + started_at + tmux_session +
+    // turn_start_offset) plus the caller-supplied session: reject stamping the
+    // marker onto a fresh row B that replaced the turn whose delivery confirmed.
+    if !require_identity.matches_state(&state)
+        || state.tmux_session_name.as_deref() != Some(require_tmux_session_name)
+    {
+        return MarkDeliveredOutcome::Skipped;
+    }
+    if state.session_bound_delivered {
+        // Idempotent: already stamped, no redundant write.
+        return MarkDeliveredOutcome::Marked;
+    }
+    state.session_bound_delivered = true;
+    match persist_under_lock(
+        root,
+        &path,
+        &state,
+        "src/services/discord/inflight/orphan_relay_reclaim.rs:mark_session_bound_relay_delivered_locked_in_root",
+    ) {
+        Ok(()) => MarkDeliveredOutcome::Marked,
+        Err(_) => MarkDeliveredOutcome::IoError,
     }
 }
 
@@ -472,6 +568,147 @@ mod tests {
             reloaded.effective_relay_owner_kind(),
             RelayOwnerKind::SessionBoundRelay,
             "a downgrade keyed to turn A must not touch turn B"
+        );
+    }
+
+    /// #3976 — the EXACT uncovered case. A `SessionBoundRelay` TUI-direct row that
+    /// was genuinely DELIVERED via the confirmed-POST route carries the durable
+    /// `session_bound_delivered` marker. Even after the resettable
+    /// `confirmed_end_offset` watermark is reset to 0 below the turn body
+    /// (generation change / output regression / restart), the row is otherwise
+    /// byte-for-byte identical to a never-delivered black-hole — but the marker
+    /// makes the orphan-shape predicate return FALSE, so it is NOT reclaimed and
+    /// recovery cannot re-emit the already-delivered tail.
+    #[test]
+    fn orphan_shape_rejects_delivered_marker_row() {
+        let now_unix = 1_900_000_000;
+        let mut delivered = orphan_row(now_unix);
+        // Sanity: with the marker unset this is the genuine black-hole shape.
+        assert!(
+            session_bound_relay_external_input_orphan_shape_at(&delivered, now_unix),
+            "an unmarked stale quiescent SessionBoundRelay row is orphan-shaped (the black-hole)"
+        );
+        // The confirmed POST stamped the durable delivered marker; the watermark
+        // has since reset to 0, so every other conjunct still holds.
+        delivered.session_bound_delivered = true;
+        assert!(
+            !session_bound_relay_external_input_orphan_shape_at(&delivered, now_unix),
+            "a confirmed-delivered SessionBoundRelay row is NOT orphan-shaped — no tail re-emit"
+        );
+    }
+
+    /// #3976 — no over-suppression: a GENUINE never-delivered black-hole row
+    /// (`session_bound_delivered == false`, producer died before any confirmed
+    /// POST) is STILL orphan-shaped and STILL reclaimable.
+    #[test]
+    fn orphan_shape_still_matches_genuine_black_hole_without_delivered_marker() {
+        let now_unix = 1_900_000_000;
+        let black_hole = orphan_row(now_unix);
+        assert!(
+            !black_hole.session_bound_delivered,
+            "the genuine black-hole never confirmed a delivery"
+        );
+        assert!(
+            session_bound_relay_external_input_orphan_shape_at(&black_hole, now_unix),
+            "a never-delivered black-hole is still reclaimable (no over-suppression)"
+        );
+    }
+
+    /// #3976 — the marker writer stamps `session_bound_delivered` only when the
+    /// reloaded row matches the caller's identity, and is idempotent.
+    #[test]
+    fn mark_delivered_sets_marker_on_identity_match_and_is_idempotent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let now_unix = now_unix();
+        let state = orphan_row(now_unix);
+        let provider = ProviderKind::Claude;
+        let channel_id = state.channel_id;
+        write_row_verbatim(root, &state);
+        let identity = InflightTurnIdentity::from_state(&state);
+        let session = state.tmux_session_name.as_deref().expect("session");
+
+        let outcome = mark_session_bound_relay_delivered_locked_in_root(
+            root, &provider, channel_id, &identity, session,
+        );
+        assert_eq!(outcome, MarkDeliveredOutcome::Marked);
+
+        let path = inflight_state_path(root, &provider, channel_id);
+        let reloaded = load_inflight_state_unlocked(&path).expect("row survives mark");
+        assert!(
+            reloaded.session_bound_delivered,
+            "a confirmed delivery durably stamps the delivered marker"
+        );
+        // The marked row is no longer orphan-shaped.
+        assert!(!session_bound_relay_external_input_orphan_shape_at(
+            &reloaded, now_unix
+        ));
+
+        // Idempotent: a second stamp is a no-op success, marker stays set.
+        let again = mark_session_bound_relay_delivered_locked_in_root(
+            root, &provider, channel_id, &identity, session,
+        );
+        assert_eq!(again, MarkDeliveredOutcome::Marked);
+        let reloaded2 = load_inflight_state_unlocked(&path).expect("row intact");
+        assert!(reloaded2.session_bound_delivered);
+    }
+
+    /// #3976 — the marker writer NEVER stamps a row whose identity no longer
+    /// matches the caller (a fresh turn B replaced turn A during the POST), so a
+    /// replacement turn is never wrongly marked delivered.
+    #[test]
+    fn mark_delivered_skips_on_identity_mismatch() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let now_unix = now_unix();
+        let row_a = orphan_row(now_unix);
+        let provider = ProviderKind::Claude;
+        let channel_id = row_a.channel_id;
+        let identity_a = InflightTurnIdentity::from_state(&row_a);
+
+        // Turn B replaced the row before the (turn-A) delivery confirmation wrote.
+        let mut row_b = orphan_row(now_unix);
+        row_b.user_msg_id = row_a.user_msg_id + 500;
+        write_row_verbatim(root, &row_b);
+
+        let outcome = mark_session_bound_relay_delivered_locked_in_root(
+            root,
+            &provider,
+            channel_id,
+            &identity_a,
+            row_b.tmux_session_name.as_deref().expect("session"),
+        );
+        assert_eq!(outcome, MarkDeliveredOutcome::Skipped);
+
+        let path = inflight_state_path(root, &provider, channel_id);
+        let reloaded = load_inflight_state_unlocked(&path).expect("row B intact");
+        assert!(
+            !reloaded.session_bound_delivered,
+            "turn B must not inherit turn A's delivered marker"
+        );
+    }
+
+    /// #3976 — serde back-compat: a legacy on-disk row lacking the
+    /// `session_bound_delivered` field deserializes with the marker `false`
+    /// (orphan-shaped), and a round-trip with the field present preserves `true`.
+    #[test]
+    fn delivered_marker_serde_back_compat() {
+        let now_unix = 1_900_000_000;
+        // Legacy row: the orphan_row fixture JSON omits session_bound_delivered.
+        let legacy = orphan_row(now_unix);
+        assert!(
+            !legacy.session_bound_delivered,
+            "a legacy row missing the field deserializes the marker as false"
+        );
+
+        // Round-trip with the field set preserves it.
+        let mut marked = legacy;
+        marked.session_bound_delivered = true;
+        let json = serde_json::to_string(&marked).expect("serialize");
+        let round: InflightTurnState = serde_json::from_str(&json).expect("deserialize");
+        assert!(
+            round.session_bound_delivered,
+            "a serialized delivered marker survives a round-trip"
         );
     }
 }

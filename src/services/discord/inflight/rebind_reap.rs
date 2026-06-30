@@ -775,6 +775,11 @@ pub(in crate::services::discord) fn ownerless_external_input_inflight_is_stale_a
         && state.full_response.trim().is_empty()
         && state.last_watcher_relayed_offset.is_none()
         && !state.terminal_delivery_committed
+        // #3976 defense-in-depth (symmetry with the orphan-shape predicate): a
+        // genuinely confirmed `SessionBoundRelay` delivery sets this durable
+        // marker, so even a row that somehow reached owner `None` while carrying it
+        // must not be treated as a never-delivered black-hole and re-recovered.
+        && !state.session_bound_delivered
         && (inflight_state_is_stale(state, now_unix_secs, INFLIGHT_STALENESS_THRESHOLD_SECS)
             || (state.restart_mode.is_some()
                 && inflight_state_started_at_is_stale(
