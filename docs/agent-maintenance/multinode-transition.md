@@ -403,6 +403,17 @@
 
 ### Audited touches
 
+- #3871 rollover duplicate-relay fix: `tmux_watcher.rs` now records the streamed
+  rollover-prefix message ids it FROZE during streaming and, on the terminal
+  full-body fallback, deletes them (via `delete_watcher_rollover_frozen_prefixes`
+  in `tmux_placeholder_suppression.rs`) so the full-body re-post does not
+  duplicate the frozen prose — watcher parity with the sink's existing
+  `terminal_full_replay_cleanup_msg_ids`. Classification: worker-local relay
+  cleanup. The watcher relays its node's own TUI/tmux turn and deletes that
+  node's own Discord placeholder/prefix messages; there is no new leader gate,
+  cross-node routing, or PG-lease assumption, and the fix is independent of the
+  `AGENTDESK_DELIVERY_RECORD_AUTHORITY` flag (it touches no delivery records).
+
 - #3837 intake_turn decomposition (behavior-preserving): three cohesive
   `handle_text_message` clusters were lifted verbatim into sibling
   `router::message_handler::intake_turn::{voice_intake,race_loss,turn_watchdog}`

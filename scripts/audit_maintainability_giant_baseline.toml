@@ -98,7 +98,15 @@
 # #3646 codex review #3678: 7059 -> 7065 (+6 prod LoC): preserve the legacy
 # `relay_owner_kind` tracing field as a back-compat alias next to the new
 # `inflight_relay_owner` (owner string lifted into a `let`). Tracing fields only.
-"src/services/discord/tmux_watcher.rs" = 7065
+# #3871: 7065 -> 7077 (+12 prod LoC): fix the >2000-char rollover duplicate relay.
+# The watcher records the streamed rollover-prefix message ids it FROZE during
+# streaming (lease-scope `Vec<MessageId>` + a `push(msg_id)` in the freeze arm)
+# and, on the terminal full-body fallback, calls the new
+# `delete_watcher_rollover_frozen_prefixes` to delete them so the full-body
+# re-post does not duplicate the frozen prose (watcher parity with the sink's
+# `terminal_full_replay_cleanup_msg_ids`). The pure gate, async delete loop, and
+# regression test live in the non-giant `tmux_placeholder_suppression.rs`.
+"src/services/discord/tmux_watcher.rs" = 7077
 # #3038 tmux_watcher S1 child modules, frozen at landed production LoC.
 "src/services/discord/tmux_watcher/commit_decisions.rs" = 140
 "src/services/discord/tmux_watcher/completion_gate.rs" = 275

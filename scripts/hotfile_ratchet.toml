@@ -65,7 +65,17 @@
 # `relay_owner_kind` tracing field as a back-compat alias alongside the new
 # `inflight_relay_owner` (lifted the owner-string into a `let` so both fields can
 # emit it). Tracing fields only, no control-flow change.
-"src/services/discord/tmux_watcher.rs" = 10230
+# #3871: 10230 -> 10242 (+12), reviewable admission — fix the >2000-char rollover
+# duplicate relay. The watcher now records the streamed rollover-prefix message
+# ids it FROZE during streaming (a lease-scope `Vec<MessageId>` + a one-line
+# `push(msg_id)` in the freeze success arm) and, on the terminal full-body
+# fallback (the `watcher_should_send_ordered_new_chunks_for_terminal_fallback`
+# branch), deletes them via the new `delete_watcher_rollover_frozen_prefixes`
+# call so the frozen prose is not duplicated by the full-body re-post (watcher
+# parity with the sink's `terminal_full_replay_cleanup_msg_ids`). The pure gate
+# + async delete loop + regression test all live in the non-giant
+# `tmux_placeholder_suppression.rs`; this is the minimal frozen-file cost.
+"src/services/discord/tmux_watcher.rs" = 10242
 # #3715: 7789 -> 4007 by moving the inline `#[cfg(test)] mod tests` body into
 # `tui_prompt_relay/tests.rs` and the Codex idle rollout tail/rebind loop into
 # `tui_prompt_relay/codex_idle_rollout.rs`; no production behavior change.
