@@ -13,18 +13,36 @@
 //! bridge tail is off → the TUI-direct answer black-holes (#3960, the #3876
 //! residual deferred from PR #3953).
 //!
-//! This module closes the residual by RE-CHECKING the orphan condition AT
-//! COMMIT time UNDER THE INFLIGHT FLOCK (not just at claim time) and, when the
-//! caller has proven the live producer is gone AND the delivery authority
-//! covers nothing of this turn's body, downgrading the relay owner back to
-//! `None` — the SAME bridge-adapter backstop state #3876 stamps when no producer
-//! exists at claim. The row then rejoins the ownerless-recovery population and
-//! its uncommitted suffix is re-delivered exactly once (the committed-offset
-//! authority on the re-delivery path skips any already-relayed bytes — no
-//! double-relay). The in-lock re-check is the TOCTOU closure: if a terminal
-//! delivery commits in the window between the caller's unlocked candidate scan
-//! and this flock, the reloaded row is no longer quiescent/uncommitted and the
-//! downgrade aborts, so a delivered turn is never reclaimed.
+//! This module closes the residual by RE-CHECKING producer liveness + the
+//! delivery authority at the idle-relay tick (not just at claim time) and, when
+//! the caller has proven the live producer is gone AND the committed-offset
+//! authority covers nothing of this turn's body, downgrading the relay owner
+//! back to `None` — the SAME bridge-adapter backstop state #3876 stamps when no
+//! producer exists at claim. The row then rejoins the ownerless-recovery
+//! population and its uncommitted suffix is re-delivered.
+//!
+//! WHERE THE NO-DOUBLE-RELAY GUARANTEE LIVES — the SEND-POINT committed re-gate,
+//! NOT this in-lock shape re-check. The real `SessionBoundRelay` TUI-direct
+//! terminal route (`session_relay_sink.rs:1066-1124`, `advance_after_confirmed_post`
+//! at :1116) advances ONLY the shared `relay_coord.confirmed_end_offset`
+//! watermark and writes NOTHING to the inflight row (no
+//! `current_msg_id`/`response_sent_offset`/`full_response`/`terminal_delivery_committed`).
+//! So a delivered-but-unmirrored row STAYS orphan-shaped under the flock and the
+//! downgrade PROCEEDS — that is expected and correct. Single delivery is then
+//! guaranteed because EVERY re-delivery path re-reads `effective_committed_offset`
+//! FRESH and `idle_relay_range_action` returns `SkipAlreadyRelayed` (whole body
+//! already past the watermark) or `SendSuffixFrom(committed)` (only the
+//! uncommitted tail). The caller's unlocked `committed <= turn_floor` gate is a
+//! first-line filter for the already-advanced case; the send-point re-gate is
+//! the authority.
+//!
+//! What the in-lock re-check (and the identity/lifecycle guards) DO catch:
+//! row-MUTATING in-window commits — the watcher terminal-commit route
+//! (`commit_watcher_terminal_delivery_locked`) sets
+//! `terminal_delivery_committed`/`full_response`/`response_sent_offset` ON the
+//! row, so a watcher commit landing between the candidate scan and this flock is
+//! detected (shape no longer matches → abort) — plus a fresh turn B that
+//! replaced the orphan (identity guard) and a pinned restart/rebind lifecycle.
 
 use std::path::Path;
 
@@ -86,9 +104,12 @@ pub(in crate::services::discord) enum OrphanRelayReclaimOutcome {
     /// bridge-adapter backstop). The row now rejoins ownerless recovery.
     Downgraded,
     /// The in-lock reload no longer matches the orphan shape / caller identity —
-    /// a concurrent terminal commit landed, a fresh turn replaced the row, or a
-    /// restart/rebind lifecycle marker is pinned. The downgrade was aborted.
-    /// This is the TOCTOU/no-double-relay guard.
+    /// a row-MUTATING commit landed (the watcher terminal-commit route sets
+    /// `terminal_delivery_committed`/`full_response`/`response_sent_offset`), a
+    /// fresh turn replaced the row (identity), or a restart/rebind lifecycle
+    /// marker is pinned. The downgrade was aborted. (This does NOT fire for the
+    /// watermark-only NewMessage commit, which leaves the row orphan-shaped —
+    /// that case is covered by the send-point committed re-gate, not here.)
     Skipped,
     /// Filesystem or lock acquisition failure.
     IoError,
@@ -102,11 +123,14 @@ pub(in crate::services::discord) enum OrphanRelayReclaimOutcome {
 /// [`super::save_inflight_state`] (which would re-acquire the same non-reentrant
 /// flock and self-deadlock).
 ///
-/// The in-lock orphan re-check is the claim→commit TOCTOU closure: if a terminal
-/// delivery committed (or the row otherwise advanced) between the caller's
-/// unlocked candidate scan and this flock, the reload fails
-/// [`session_bound_relay_external_input_orphan_shape_at`] → `Skipped`, so a
-/// delivered turn is NEVER downgraded (no double-relay).
+/// The in-lock orphan re-check catches a ROW-MUTATING in-window commit (the
+/// watcher terminal-commit route writes `terminal_delivery_committed` etc. to the
+/// row → shape no longer matches → `Skipped`) plus the identity / restart-lifecycle
+/// races. It does NOT — and need not — catch the watermark-only NewMessage commit
+/// (`session_relay_sink.rs:1066-1124`), which leaves the row orphan-shaped: that
+/// row is downgraded and single delivery is guaranteed downstream by the
+/// send-point committed re-gate (`idle_relay_range_action` over a FRESH
+/// `effective_committed_offset`). See this module's header.
 pub(in crate::services::discord) fn downgrade_orphaned_session_bound_relay_owner_locked(
     provider: &ProviderKind,
     channel_id: u64,
@@ -154,10 +178,14 @@ pub(super) fn downgrade_orphaned_session_bound_relay_owner_locked_in_root(
     {
         return OrphanRelayReclaimOutcome::Skipped;
     }
-    // TOCTOU closure: re-validate the orphan shape against the in-lock reload. A
-    // terminal delivery that committed in the candidate-scan→flock window leaves
-    // the row no longer quiescent/uncommitted → abort, never reclaim a delivered
-    // turn (no double-relay).
+    // Re-validate the orphan shape against the in-lock reload. This catches a
+    // ROW-MUTATING in-window commit — the watcher terminal-commit route sets
+    // `terminal_delivery_committed`/`full_response`/`response_sent_offset` on the
+    // row, so a watcher commit landing between the caller's candidate scan and
+    // this flock leaves the row non-quiescent → abort. It does NOT catch the
+    // watermark-only NewMessage commit (which leaves the row orphan-shaped); that
+    // row IS downgraded, and the send-point committed re-gate guarantees single
+    // delivery. See this module's header.
     if !session_bound_relay_external_input_orphan_shape_at(&state, now_unix()) {
         return OrphanRelayReclaimOutcome::Skipped;
     }
@@ -325,12 +353,16 @@ mod tests {
         );
     }
 
-    /// #3960 TOCTOU race: a terminal delivery COMMITS in the window between the
-    /// caller's unlocked candidate scan and the locked downgrade. The in-lock
-    /// orphan re-check must observe the committed body and ABORT — proving a
-    /// delivered turn is never reclaimed (no double-relay).
+    /// #3960 — a ROW-MUTATING in-window commit aborts the downgrade. The watcher
+    /// terminal-commit route (`commit_watcher_terminal_delivery_locked`) writes
+    /// `terminal_delivery_committed`/`full_response`/`response_sent_offset` ONTO
+    /// the row, so a watcher commit landing between the caller's unlocked
+    /// candidate scan and the locked downgrade leaves the reload non-quiescent →
+    /// the in-lock shape re-check observes it and ABORTS. (This is what the
+    /// in-lock re-check is FOR — NOT the watermark-only NewMessage route, which is
+    /// covered by the separate test below + the send-point re-gate.)
     #[test]
-    fn locked_downgrade_aborts_when_delivery_committed_in_window() {
+    fn locked_downgrade_aborts_when_row_mutating_watcher_commit_lands_in_window() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path();
         let now_unix = now_unix();
@@ -340,8 +372,8 @@ mod tests {
         // The caller captured this identity from its unlocked orphan scan.
         let identity = InflightTurnIdentity::from_state(&candidate);
 
-        // ... then the live producer committed the terminal body before the
-        // downgrade acquired the flock. Persist the committed row to disk.
+        // ... then the WATCHER terminal-commit route mutated the row (sets the
+        // row's terminal fields) before the downgrade acquired the flock.
         let mut committed = candidate.clone();
         committed.terminal_delivery_committed = true;
         committed.current_msg_id = 9300;
@@ -359,7 +391,7 @@ mod tests {
         assert_eq!(
             outcome,
             OrphanRelayReclaimOutcome::Skipped,
-            "a terminal delivery that commits in the window must abort the reclaim"
+            "a row-mutating watcher commit in the window must abort the reclaim"
         );
 
         let path = inflight_state_path(root, &provider, channel_id);
@@ -367,7 +399,44 @@ mod tests {
         assert_eq!(
             reloaded.effective_relay_owner_kind(),
             RelayOwnerKind::SessionBoundRelay,
-            "an in-window-committed row keeps its owner — never reclaimed, never double-relayed"
+            "a row-mutating-committed row keeps its owner — never reclaimed"
+        );
+    }
+
+    /// #3960 — a WATERMARK-ONLY NewMessage commit in the window does NOT abort the
+    /// downgrade, and that is correct. The real `SessionBoundRelay` TUI-direct
+    /// terminal route (`session_relay_sink.rs:1066-1124`) advances ONLY the shared
+    /// `confirmed_end_offset` watermark and writes NOTHING to the inflight row, so
+    /// a delivered-but-unmirrored row STAYS orphan-shaped under the flock and the
+    /// in-lock shape re-check CANNOT see the delivery → the downgrade PROCEEDS.
+    /// No double-relay results: single delivery is then guaranteed by the
+    /// send-point committed re-gate (asserted in
+    /// `session_relay_sink::orphan_reclaim::tests::send_point_re_gate_*`).
+    #[test]
+    fn locked_downgrade_proceeds_for_watermark_only_newmessage_commit() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let now_unix = now_unix();
+        // The NewMessage route delivered the body but mirrored NOTHING back onto
+        // the row — it remains byte-for-byte orphan-shaped.
+        let state = orphan_row(now_unix);
+        let provider = ProviderKind::Claude;
+        let channel_id = state.channel_id;
+        write_row_verbatim(root, &state);
+
+        let identity = InflightTurnIdentity::from_state(&state);
+        let outcome = downgrade_orphaned_session_bound_relay_owner_locked_in_root(
+            root,
+            &provider,
+            channel_id,
+            &identity,
+            state.tmux_session_name.as_deref().expect("session"),
+        );
+        assert_eq!(
+            outcome,
+            OrphanRelayReclaimOutcome::Downgraded,
+            "the in-lock shape re-check cannot see a watermark-only commit — downgrade proceeds \
+             (the send-point committed re-gate is what prevents the double-relay)"
         );
     }
 

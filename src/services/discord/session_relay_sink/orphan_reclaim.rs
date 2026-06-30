@@ -10,7 +10,20 @@
 //! generation-aware committed-offset delivery authority at the idle-relay tick
 //! (not just at claim) and, when the body was provably never delivered,
 //! downgrades the orphaned owner to the bridge-adapter backstop (`None`) under
-//! the inflight flock — re-joining the row to ownerless recovery, double-relay-safe.
+//! the inflight flock — re-joining the row to ownerless recovery.
+//!
+//! NO-DOUBLE-RELAY ATTRIBUTION: the `committed_offset <= turn_floor` check here is
+//! a best-effort UNLOCKED first-line filter — it suppresses a downgrade when the
+//! watermark has ALREADY advanced past the body at scan time. It is NOT the
+//! authoritative guard, because the real `SessionBoundRelay` NewMessage route
+//! (`session_relay_sink.rs:1066-1124`) advances ONLY the shared
+//! `confirmed_end_offset` watermark and writes NOTHING to the inflight row: a
+//! delivery that lands AFTER this read still leaves the row orphan-shaped, so the
+//! downgrade proceeds. Single delivery is then guaranteed at the SEND POINT —
+//! every re-delivery path re-reads `effective_committed_offset` FRESH and
+//! `idle_relay_range_action` returns `SkipAlreadyRelayed` (body already past the
+//! watermark) or `SendSuffixFrom(committed)` (only the uncommitted tail). See the
+//! `send_point_re_gate_*` tests below.
 
 use crate::services::cluster::relay_producer_registry::RelayProducerRegistry;
 use crate::services::discord::health::HealthRegistry;
@@ -31,10 +44,13 @@ use serenity::model::id::ChannelId;
 ///      survives keeps delivering normally → `producer_gone == false` → no
 ///      reclaim (no false reclaim).
 ///   3. `committed_offset <= turn_floor` — the generation-aware committed-offset
-///      authority covers NOTHING of this turn's body, proving the terminal body
-///      was never delivered. This is the double-relay guard: a
-///      delivered-but-unmirrored row (#2415) has `committed > turn_floor` and is
-///      never reclaimed.
+///      authority covers NOTHING of this turn's body AT SCAN TIME. This is a
+///      best-effort UNLOCKED first-line filter (it suppresses a downgrade for a
+///      row whose watermark already advanced, e.g. a delivered-but-unmirrored
+///      row, #2415). It is NOT the authoritative no-double-relay guard — a
+///      NewMessage delivery landing AFTER this read advances only the watermark
+///      and leaves the row orphan-shaped, so that downgrade proceeds and the
+///      SEND-POINT committed re-gate (`idle_relay_range_action`) is what trims it.
 pub(super) fn should_reclaim_orphaned_session_bound_relay(
     orphan_shape: bool,
     producer_gone: bool,
@@ -52,8 +68,11 @@ pub(super) fn should_reclaim_orphaned_session_bound_relay(
 /// immediately without touching the producer registry or the delivery
 /// authority). Only a stale orphan-shaped row consults the (re-checked) producer
 /// liveness and the committed-offset authority, and only when both prove the
-/// body was never delivered does it perform the flock-guarded owner downgrade —
-/// whose in-lock re-check is the final claim→commit TOCTOU closure.
+/// body was never delivered does it perform the flock-guarded owner downgrade.
+/// The flock RMW's in-lock re-check rejects row-mutating in-window commits (the
+/// watcher terminal-commit route) + identity/lifecycle races; the watermark-only
+/// NewMessage commit leaves the row orphan-shaped and is trimmed downstream by
+/// the send-point committed re-gate, never here.
 pub(super) async fn reclaim_orphaned_session_bound_relay_if_dead(
     health_registry: &HealthRegistry,
     producers: &RelayProducerRegistry,
@@ -109,10 +128,12 @@ mod tests {
     }
 
     #[test]
-    fn delivered_body_is_never_reclaimed_no_double_relay() {
-        // committed offset advanced PAST the turn floor → the body was (at least
-        // partially) delivered → never reclaim, never double-relay. Covers the
-        // #2415 delivered-but-unmirrored row.
+    fn delivered_at_scan_time_suppressed_by_unlocked_first_line_filter() {
+        // committed offset ALREADY advanced PAST the turn floor at scan time → the
+        // unlocked first-line filter suppresses the downgrade. (This is best-effort
+        // only; a delivery landing AFTER the scan is handled by the send-point
+        // re-gate, asserted in `send_point_re_gate_*`.) Covers the #2415
+        // delivered-but-unmirrored row when the watermark is already visible.
         assert!(!decide(true, true, 11, 10));
         assert!(!decide(true, true, u64::MAX, 0));
     }
@@ -129,5 +150,69 @@ mod tests {
     fn non_orphan_shape_is_never_reclaimed() {
         assert!(!decide(false, true, 0, 10));
         assert!(!decide(false, false, 0, 10));
+    }
+
+    /// #3960 — the AUTHORITATIVE no-double-relay guard for the watermark-only
+    /// NewMessage commit. After the orphan is downgraded (the in-lock shape
+    /// re-check cannot see a watermark-only delivery — see
+    /// `inflight::orphan_relay_reclaim::tests::locked_downgrade_proceeds_for_watermark_only_newmessage_commit`),
+    /// the re-delivery path re-reads the FRESH `effective_committed_offset` —
+    /// already advanced past the body by `advance_after_confirmed_post` — and
+    /// `idle_relay_range_action` skips the whole, already-relayed body.
+    #[test]
+    fn send_point_re_gate_skips_a_fully_delivered_body() {
+        use super::super::idle_jsonl::{IdleRelayRangeAction, idle_relay_range_action};
+        let init = "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\"}\n";
+        let body = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]}}\n";
+        let full = format!("{init}{body}");
+        let bytes = full.as_bytes();
+        let turn_floor = 0u64;
+        let body_end = bytes.len() as u64;
+        // The NewMessage route delivered the WHOLE body and advanced the shared
+        // watermark to/past body_end (watermark-only; the row stayed orphan-shaped).
+        let committed_advanced = body_end;
+        assert_eq!(
+            idle_relay_range_action(
+                bytes,
+                turn_floor,
+                body_end,
+                committed_advanced,
+                false,
+                false
+            ),
+            IdleRelayRangeAction::SkipAlreadyRelayed,
+            "the send-point re-gate skips a body already past the watermark — no double-relay"
+        );
+    }
+
+    /// #3960 — partial watermark-only commit: the send-point re-gate delivers ONLY
+    /// the uncommitted tail `[committed, body_end)`, never re-posting the already
+    /// delivered prefix (no duplicate).
+    #[test]
+    fn send_point_re_gate_sends_only_the_uncommitted_tail() {
+        use super::super::idle_jsonl::{IdleRelayRangeAction, idle_relay_range_action};
+        let init = "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\"}\n";
+        let body = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]}}\n";
+        let full = format!("{init}{body}");
+        let bytes = full.as_bytes();
+        let turn_floor = 0u64;
+        let body_end = bytes.len() as u64;
+        // The watermark advanced PAST turn_floor but not to body_end → re-deliver
+        // ONLY the uncommitted tail.
+        let committed_advanced = init.len() as u64;
+        assert!(turn_floor < committed_advanced && committed_advanced < body_end);
+        assert_eq!(
+            idle_relay_range_action(
+                bytes,
+                turn_floor,
+                body_end,
+                committed_advanced,
+                false,
+                false
+            ),
+            IdleRelayRangeAction::SendSuffixFrom(committed_advanced),
+            "the send-point re-gate delivers only the uncommitted tail — no duplicate of the \
+             delivered prefix"
+        );
     }
 }
