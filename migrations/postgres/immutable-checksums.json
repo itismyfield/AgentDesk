@@ -390,6 +390,11 @@
       "path": "migrations/postgres/0075_turns_archive.sql",
       "sha256": "e0fe9fff7f70ef331f380f6188d7415b017720c94c827822728733131dce1759",
       "version": 75
+    },
+    {
+      "path": "migrations/postgres/0076_pipeline_stages_backoff.sql",
+      "sha256": "38275062039f5a29a8d5103cc3622e7d348d1273b0e3be780568aa44f624903f",
+      "version": 76
     }
   ],
   "version": 1

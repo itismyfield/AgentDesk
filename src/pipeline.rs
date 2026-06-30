@@ -768,9 +768,9 @@ impl Default for BackoffPolicy {
     }
 }
 
-/// `on_failure` policy for stages (#1082).
-// reason: staged-rollout policy enum retained for config compatibility; the
-// runtime mirror lives in services::pipeline_routes and is not yet wired here.
+/// `on_failure` policy for stages (#1082). DECLARATIVE-ONLY config surface.
+// reason: persisted + validated by services::pipeline_routes, but NOT enforced
+// at runtime — no executor reads on_failure/retry/backoff (follow-up #3916).
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -829,9 +829,9 @@ pub struct TimeoutConfig {
     pub condition: Option<String>,
 }
 
-// reason: #1082 timeout retry/backoff resolution surface retained for staged
-// policy rollout; currently consumed only by the #1082 DoD unit tests, pending
-// wiring into the live timeout executor.
+// reason: #1082 timeout retry/backoff resolution surface. DECLARATIVE-ONLY:
+// consumed only by the #1082 DoD unit tests; NOT wired to any live timeout
+// executor (decide_timeout reads only legacy on_exhaust). Follow-up #3916.
 #[allow(dead_code)]
 impl TimeoutConfig {
     /// Default max_retries when caller did not specify (1, per #1082 DoD).
