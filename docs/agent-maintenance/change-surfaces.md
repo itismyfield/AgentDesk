@@ -78,16 +78,16 @@
 ### `policy_engine`
 
 - canonical_modules: `src/engine/mod.rs` (driver) plus `src/engine/ops/*.rs`
-  (per-domain op handlers). `src/pipeline.rs` (1366 lines, giant-file)
+  (per-domain op handlers). `src/pipeline.rs` (1409 lines, giant-file)
   composes the policy pipeline.
 - legacy_modules: none — there is no parallel engine. The whole surface is
   pre-migration giant-file territory.
 - do_not_edit_without_migration_plan:
-  - `src/engine/mod.rs` (1279 lines, giant-file).
+  - `src/engine/mod.rs` (1280 lines, giant-file).
   - `src/engine/ops/db_ops.rs` (1244 lines, giant-file).
   - `src/engine/loader.rs` (1332 lines, giant-file) — engine loader / QuickJS
     validator surface; split before adding non-bugfix behavior.
-  - `src/pipeline.rs` (1366 lines, giant-file).
+  - `src/pipeline.rs` (1409 lines, giant-file).
 - non-giant migration-sensitive note: `src/engine/intent.rs` is below the
   giant-file threshold but remains a migration-sensitive intent surface; keep
   changes scoped to the typed-facade contract.

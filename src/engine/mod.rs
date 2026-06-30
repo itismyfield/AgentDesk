@@ -5,6 +5,7 @@ pub mod ops;
 pub mod sql_guard;
 pub mod transition;
 pub mod transition_executor_pg;
+pub(crate) mod transition_timeout;
 
 use std::sync::{
     Arc, Mutex, OnceLock, Weak,

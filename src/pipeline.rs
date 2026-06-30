@@ -768,10 +768,14 @@ impl Default for BackoffPolicy {
     }
 }
 
-/// `on_failure` policy for stages (#1082). DECLARATIVE-ONLY config surface.
-// reason: persisted + validated by services::pipeline_routes, but NOT enforced
-// at runtime — no executor reads on_failure/retry/backoff (follow-up #3916).
-#[allow(dead_code)]
+/// `on_failure` policy for stages/states (#1082).
+// reason: consumed by the `decide_timeout` reducer (src/engine/transition.rs),
+// which resolves `TimeoutConfig::effective_on_failure` into a transition
+// decision (retry-with-backoff / escalate / fallback / fail). NOTE: the live
+// timeout sweep (policies/timeouts/card-timeouts.js) does not yet emit
+// `TimeoutExpired`, so the reducer is not on the production timeout path and a
+// configured policy does not affect live cards yet — routing the live sweep
+// through the reducer is the deferred follow-up to #3916.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum OnFailurePolicy {
@@ -825,14 +829,28 @@ pub struct TimeoutConfig {
     /// Backoff policy between retries (#1082).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backoff: Option<BackoffPolicy>,
+    /// Typed failure policy (#1082). Resolved by the `decide_timeout` reducer:
+    /// `retry-with-backoff` retries up to `max_retries` honoring `backoff` then
+    /// applies the exhaust policy; `escalate` transitions to `on_exhaust`; `fail`
+    /// forces a terminal state; `fallback-stage` jumps to `on_failure_target`.
+    /// Absent (and no `max_retries`/`backoff`/`on_exhaust_policy`) ⇒ the legacy
+    /// immediate `on_exhaust` transition, so the surface stays additive. (Not yet
+    /// on the live timeout path — see the `OnFailurePolicy` note.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_failure: Option<OnFailurePolicy>,
+    /// Target state for `on_failure: fallback-stage` (#1082).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_failure_target: Option<String>,
     #[serde(default)]
     pub condition: Option<String>,
 }
 
-// reason: #1082 timeout retry/backoff resolution surface. DECLARATIVE-ONLY:
-// consumed only by the #1082 DoD unit tests; NOT wired to any live timeout
-// executor (decide_timeout reads only legacy on_exhaust). Follow-up #3916.
-#[allow(dead_code)]
+// reason: #1082 timeout retry/backoff resolution surface, consumed by the
+// `decide_timeout` reducer (src/engine/transition.rs) to resolve
+// max_retries/backoff/on_failure/on_exhaust into a transition decision. NOTE:
+// the reducer is not yet on the production timeout path (the live JS sweep does
+// not emit `TimeoutExpired`); these resolvers define the semantics the deferred
+// live-wiring follow-up to #3916 will execute.
 impl TimeoutConfig {
     /// Default max_retries when caller did not specify (1, per #1082 DoD).
     pub const DEFAULT_MAX_RETRIES: u32 = 1;
@@ -867,6 +885,31 @@ impl TimeoutConfig {
                 _ => 15 * 60,
             },
         }
+    }
+
+    /// Whether a typed retry/failure/exhaust policy is configured (#3916). When
+    /// false, `decide_timeout` keeps the legacy immediate `on_exhaust`
+    /// transition so the surface is additive — default/None pipelines are
+    /// unchanged. A standalone typed `on_exhaust_policy` (no retry fields) also
+    /// engages so notify/fail exhaust semantics are honored (#3916 P1-4).
+    pub fn retry_policy_engaged(&self) -> bool {
+        self.on_failure.is_some()
+            || self.max_retries.is_some()
+            || self.backoff.is_some()
+            || self.on_exhaust_policy.is_some()
+    }
+
+    /// Resolve the effective `OnFailurePolicy` (#3916). An explicit `on_failure`
+    /// wins; otherwise a configured `max_retries`/`backoff` implies
+    /// retry-with-backoff; absent ⇒ the backward-compatible `Fail`.
+    pub fn effective_on_failure(&self) -> OnFailurePolicy {
+        if let Some(policy) = self.on_failure {
+            return policy;
+        }
+        if self.max_retries.is_some() || self.backoff.is_some() {
+            return OnFailurePolicy::RetryWithBackoff;
+        }
+        OnFailurePolicy::Fail
     }
 }
 
