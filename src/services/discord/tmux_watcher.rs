@@ -715,6 +715,17 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // We got new data while not paused — this means terminal input triggered a response
         let data_start_offset = current_offset; // offset where this read batch started
         current_offset = new_offset;
+        // #3956: re-stamp the submit prompt anchor on this observed streaming output
+        // so a turn streaming continuously past PROMPT_ANCHOR_SUBMIT_TTL (4h) keeps a
+        // live anchor for the #3885 same-input follow-up-requeue peek (no duplicate
+        // prose). No-op unless an anchor already exists for THIS channel; the helper
+        // touches only the submit anchor and never the #3459/#3303 relayed-entry
+        // ledger (its own decoupled 30min TTL). Refresh-on-activity, not a lifecycle.
+        crate::services::tui_prompt_dedupe::touch_prompt_anchor_on_activity(
+            watcher_provider.as_str(),
+            &tmux_session_name,
+            channel_id.get(),
+        );
         // #1137: surface a single warning when output keeps arriving after a
         // terminal-success relay. The watcher will keep running (the legacy
         // single-event exit was the bug); this log makes the continuation

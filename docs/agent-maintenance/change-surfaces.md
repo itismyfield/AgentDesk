@@ -913,9 +913,17 @@
     normal long SILENT tool run (e.g. a big build) is never mistaken for an idle
     hang, with the 4h hard ceiling as the real backstop, and noted the limitation
     in the idle-kill error message + a delayed-event test).
-  - `src/services/tui_prompt_dedupe.rs` (1764 lines; shared TUI prompt
+  - `src/services/tui_prompt_dedupe.rs` (1812 lines; shared TUI prompt
     fingerprinting/dedupe state for hook and rollout relay paths, bugfix only
-    outside an extraction plan; +55 from #3885 follow-up: decouple the PROMPT
+    outside an extraction plan; +48 from #3956: add the
+    `touch_prompt_anchor_on_activity` refresh primitive (re-stamp an EXISTING
+    submit anchor's `recorded_at` on observed streaming activity, channel-scoped,
+    never creates an anchor and never touches the `relayed_entry_ids_by_tmux`
+    ledger) so a turn streaming continuously past `PROMPT_ANCHOR_SUBMIT_TTL` (4h)
+    keeps a live anchor for the #3885 same-input follow-up-requeue peek — closes
+    the deferred #3885 residual; the watcher calls it from its per-pane
+    streaming-observation path, plus two regression tests; +55 from #3885
+    follow-up: decouple the PROMPT
     ANCHOR purge into `PROMPT_ANCHOR_SUBMIT_TTL` (4h) so a routine 30-60min
     streaming build/agent turn's anchor is no longer purged mid-stream — the
     bridge same-input correlation peek (and the watcher ⏳→✅ response match) would
