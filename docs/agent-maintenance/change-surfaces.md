@@ -959,7 +959,16 @@
     marker suppression for stop-control transcript envelopes; +62 from #3304:
     slash-command canonical prompt keys for `<command-*>` XML vs
     `/command args` dedupe, plus focused loop skill-expansion regressions).
-  - `src/services/discord/recovery_engine.rs` (3039 lines; -860 from #3834
+  - `src/services/discord/recovery_engine.rs` (3020 lines; -19 net from #3918
+    round-3 (codex): the committed-branch anchor-repost call + its row-dispose +
+    storm-guard comment moved out of this file into the new
+    `recovery_paths::restart::recover_committed_anchor_repost` wrapper, leaving the
+    caller a single gated `continue` (the wrapper returns `true` when the row is
+    handled — relayed-and-disposed OR `RefusedPreserveRow`, a non-`Saved` pre-send
+    bump that PRESERVES the inflight row — so a refused send no longer falls
+    through to the unconditional committed-delivery clear that previously dropped
+    an IoError-deferred answer or deleted a newer turn's row on IdentityMismatch);
+    -860 from #3834
     behavior-preserving extraction of the manual-rebind recovery path
     (`rebind_inflight_for_channel` + its private `codex_tui_*` / `Pending*`
     support cluster and unit tests) into the leaf module

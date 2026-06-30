@@ -311,10 +311,60 @@ fn anchor_probe_should_repost(probe: super::super::placeholder_sweeper::Placehol
     )
 }
 
+/// #3918 (codex round-3): the outcome of [`try_recover_anchor_repost`], richer
+/// than the previous `Option<RecoveryRelayOutcome>` so the caller can tell apart
+/// THREE distinct on-disk-row dispositions. The old `None` conflated "no repost
+/// needed — run the committed-delivery clear" with "refused the send — PRESERVE
+/// the row", and the caller's `None` arm clears the row UNCONDITIONALLY. That
+/// clear (a) dropped a committed answer whose pre-send bump hit a transient
+/// `IoError` (the deferral the bump-gate intends is lost) and (b) could DELETE a
+/// row now owned by a NEWER turn on an `IdentityMismatch`. This enum makes the
+/// three contracts explicit so the caller never clears a row it must preserve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum AnchorRepostOutcome {
+    /// No send-new was needed/possible by the existing guards (flag OFF, blank
+    /// body, already-reposted / pre-send budget exhausted, anchor still present,
+    /// or no usable record). The committed answer is delivered or we are giving
+    /// up → the caller runs its legacy committed-delivery finish + clear.
+    NotReposted,
+    /// A send-new was attempted → the caller disposes this relay outcome via
+    /// [`dispose_recovery_relay_outcome`].
+    Relayed(RecoveryRelayOutcome),
+    /// The pre-send `anchor_repost_attempts` bump did NOT durably persist
+    /// (`IoError` / `Missing` / `IdentityMismatch`), so the send was REFUSED (the
+    /// at-most-`budget` bound cannot be guaranteed without a durable attempt
+    /// record). The on-disk row was left UNTOUCHED — the caller MUST preserve it
+    /// (do NOT clear): a transient `IoError` is re-posted by a later boot whose
+    /// bump succeeds, and a `Missing` / stranger (`IdentityMismatch`, a newer
+    /// turn now owns the row) row must never be cleared by this path.
+    RefusedPreserveRow,
+}
+
+/// Pure mapping of the pre-send `anchor_repost_attempts` bump outcome to the
+/// send decision: ONLY a durably-persisted (`Saved`) attempt may proceed to the
+/// send; every failure refuses the send AND preserves the on-disk row. Returns
+/// `None` to mean "proceed to send-new". Extracted so the bump-gate safety
+/// matrix is unit-testable without the async send path.
+fn anchor_repost_pre_send_refusal(
+    bump_outcome: inflight::GuardedSaveOutcome,
+) -> Option<AnchorRepostOutcome> {
+    match bump_outcome {
+        // Durable attempt record → the at-most-`budget` bound holds → send.
+        inflight::GuardedSaveOutcome::Saved => None,
+        // No durable attempt record → refuse and preserve the row (see the
+        // `RefusedPreserveRow` doc for the per-variant rationale).
+        inflight::GuardedSaveOutcome::IoError
+        | inflight::GuardedSaveOutcome::Missing
+        | inflight::GuardedSaveOutcome::IdentityMismatch => {
+            Some(AnchorRepostOutcome::RefusedPreserveRow)
+        }
+    }
+}
+
 /// #3610 PR-2: anchor-based recovery repost fallback (the #3607 "committed, then
 /// the message disappeared" backstop). Flag-gated DARK (default OFF) — when OFF
-/// this returns `None` BEFORE any record read / probe / relay, so the recovery
-/// loop is a byte-for-byte no-op.
+/// this returns [`AnchorRepostOutcome::NotReposted`] BEFORE any record read /
+/// probe / relay, so the recovery loop is a byte-for-byte no-op.
 ///
 /// Called ONLY from the committed branch of `restore_inflight_turns`
 /// (`recovery_terminal_delivery_already_committed(&state)` true) — the anchor is
@@ -322,8 +372,8 @@ fn anchor_probe_should_repost(probe: super::super::placeholder_sweeper::Placehol
 /// committed row's current-generation anchor is THIS turn's, never a stale one.
 ///
 /// SIX guards, each a distinct duplicate-repost defense:
-/// * **G1** — flag OFF → `None` (outermost; dark-deploy no-op).
-/// * **G2** — no trustworthy anchor → `None`. The reader enforces the #1270
+/// * **G1** — flag OFF → `NotReposted` (outermost; dark-deploy no-op).
+/// * **G2** — no trustworthy anchor → `NotReposted`. The reader enforces the #1270
 ///   generation gate AND a populated non-zero `(panel_msg_id, panel_channel_id)`;
 ///   we additionally reject an EMPTY `terminal_text` (no blank repost) and a
 ///   `range` that does not match this turn ([`anchor_range_matches_turn`]).
@@ -337,10 +387,12 @@ fn anchor_probe_should_repost(probe: super::super::placeholder_sweeper::Placehol
 /// * **G3** — probe every structurally matching anchor candidate: repost ONLY
 ///   when ALL candidates are `MessageGone` (404/403/410). A live message
 ///   (`StillPlaceholder` / `AlreadyDelivered`) or a transient `ProbeFailed` on
-///   ANY candidate → `None` (never duplicate a live or unverified message).
+///   ANY candidate → `NotReposted` (never duplicate a live or unverified message).
 /// * **G4** — relay as a NEW message: the anchor is gone so it cannot be edited;
 ///   we pass `placeholder = None`, which routes through `send_long_message_raw`
-///   (NOT an edit). Returns `Some(outcome)` for the caller to `dispose_*`.
+///   (NOT an edit). Returns `Relayed(outcome)` for the caller to `dispose_*`; a
+///   pre-send bump that does not durably persist returns `RefusedPreserveRow`
+///   (the send is refused and the row preserved for a later boot).
 /// * **G5 (passive)** — after a `Delivered` repost the caller's `dispose_*` clears
 ///   the row; the watcher cannot re-relay this range because it sits within the
 ///   committed floor (`committed_floor_for_resend_dedup` ≥ this generation's
@@ -353,17 +405,17 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
     provider: &ProviderKind,
     state: &inflight::InflightTurnState,
     terminal_text: &str,
-) -> Option<RecoveryRelayOutcome> {
+) -> AnchorRepostOutcome {
     use super::super::placeholder_sweeper;
 
     // G1: flag OFF → no-op (outermost guard; dark deploy is byte-identical).
     if !super::shared::recovery_anchor_repost_enabled() {
-        return None;
+        return AnchorRepostOutcome::NotReposted;
     }
 
     // G2a: never repost a blank body.
     if terminal_text.trim().is_empty() {
-        return None;
+        return AnchorRepostOutcome::NotReposted;
     }
 
     // #3918 G2c (idempotency): the send-new below is NOT a transaction with the
@@ -387,7 +439,7 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
             budget = inflight::RECOVERY_RELAY_RESTART_ATTEMPT_BUDGET,
             "  · recovery anchor-repost: already reposted or pre-send budget exhausted — no-op (idempotent)"
         );
-        return None;
+        return AnchorRepostOutcome::NotReposted;
     }
 
     // G2b: resolve the current-generation, fully-populated anchor (the reader is
@@ -399,7 +451,7 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
     let tmux_session_name = state.tmux_session_name.as_deref().unwrap_or("");
     let candidates = matching_recovery_anchors(provider, state, tmux_session_name);
     if candidates.is_empty() {
-        return None;
+        return AnchorRepostOutcome::NotReposted;
     }
     let mut probed_anchors = Vec::with_capacity(candidates.len());
     for (record_channel_id, anchor) in candidates {
@@ -424,8 +476,11 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
             );
         }
     }
-    let (record_channel_id, anchor) =
-        first_repost_anchor_if_all_probed_candidates_gone(&probed_anchors)?;
+    let Some((record_channel_id, anchor)) =
+        first_repost_anchor_if_all_probed_candidates_gone(&probed_anchors)
+    else {
+        return AnchorRepostOutcome::NotReposted;
+    };
 
     // G4: the anchor is gone → send a NEW message (placeholder = None → send-new,
     // NOT an edit). Repost into the channel the anchor lived in.
@@ -456,6 +511,15 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
     //     gone or now owned by a newer turn; re-posting a stale recovered answer
     //     is wrong anyway. Refuse.
     // No durable attempt record ⇒ no send. Only a `Saved` bump proceeds.
+    //
+    // On refusal we leave the on-disk row UNTOUCHED and return
+    // `RefusedPreserveRow` (NOT `NotReposted`): the caller's `NotReposted` arm
+    // force-clears the committed row, which would (a) drop a committed answer
+    // whose bump hit a transient `IoError` — defeating the deferral, the answer
+    // would be retried-then-reposted on a later boot — and (b) DELETE a row now
+    // owned by a NEWER turn on `IdentityMismatch`. `RefusedPreserveRow` tells the
+    // caller to preserve the row and move on. (`Missing` ⇒ the row is already
+    // gone, so preserving is a safe no-op.)
     let repost_identity = inflight::InflightTurnIdentity::from_state(state);
     let bump_outcome = inflight::anchor_repost::bump_anchor_repost_attempts_if_matches_identity(
         provider,
@@ -463,17 +527,18 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
         &repost_identity,
         state.turn_start_offset,
     );
-    if !matches!(bump_outcome, inflight::GuardedSaveOutcome::Saved) {
+    if let Some(refusal) = anchor_repost_pre_send_refusal(bump_outcome) {
         tracing::warn!(
             provider = %provider.as_str(),
             channel = state.channel_id,
             outcome = ?bump_outcome,
             "  ⚠ recovery anchor-repost: pre-send attempt counter NOT persisted — \
-             REFUSING the send-new (the hard bound cannot be guaranteed without a \
-             durable attempt record; a transient fault is re-posted by a later \
-             boot whose bump succeeds, and a gone/replaced row must not be reposted)"
+             REFUSING the send-new and PRESERVING the inflight row (the hard bound \
+             cannot be guaranteed without a durable attempt record; a transient \
+             fault is re-posted by a later boot whose bump succeeds, and a \
+             gone/replaced row must not be reposted nor cleared by this path)"
         );
-        return None;
+        return refusal;
     }
 
     let outcome = super::super::recovery_engine::relay_recovered_terminal_text_to_placeholder(
@@ -512,7 +577,73 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
 
     // G5 (passive): see doc — the committed floor already covers this range, so the
     // watcher will not re-relay it; the caller disposes `outcome`.
-    Some(outcome)
+    AnchorRepostOutcome::Relayed(outcome)
+}
+
+/// #3918 committed-branch entry point: run the anchor-repost send-new fallback
+/// for an already-committed-but-vanished terminal answer AND apply the resulting
+/// on-disk row disposition, returning whether the caller has fully handled the
+/// row (so the committed-branch caller stays a single gated `continue`).
+///
+/// * `true` → the caller must `continue` WITHOUT running its legacy
+///   committed-delivery clear, because EITHER the answer was relayed and disposed
+///   ([`AnchorRepostOutcome::Relayed`]) OR the pre-send attempt bump did not
+///   durably persist, so the send was REFUSED and the on-disk row deliberately
+///   PRESERVED for a later boot ([`AnchorRepostOutcome::RefusedPreserveRow`] —
+///   clearing it here would drop an `IoError`-deferred answer or delete a newer
+///   turn's row on `IdentityMismatch`).
+/// * `false` → no repost was needed/possible
+///   ([`AnchorRepostOutcome::NotReposted`]) → the caller runs its legacy
+///   committed-delivery finish + clear.
+pub(in crate::services::discord) async fn recover_committed_anchor_repost(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &inflight::InflightTurnState,
+    terminal_text: &str,
+) -> bool {
+    let outcome = try_recover_anchor_repost(http, shared, provider, state, terminal_text).await;
+    if let AnchorRepostOutcome::Relayed(relayed) = outcome {
+        // #3610 PR-2 (codex r2 Issue-2, storm guard): pass `tmux_alive = false`
+        // to the dispose so a repeatedly TransientFailure-ing send-new is
+        // BUDGET-BOUNDED. This row's terminal answer is ALREADY committed — pane
+        // liveness is irrelevant to whether the *anchor message* can be re-posted,
+        // so the normal-turn "live pane may still own the answer" preservation
+        // (`unrecoverable_relay_disposition`'s `tmux_alive == true` arm, shared.rs)
+        // must NOT apply here. Were the real probe passed, a live pane would force
+        // `PreserveAndCount` every boot and a transient send-new failure could loop
+        // FOREVER (preserve+retry each restart). `tmux_alive` reaches only (a) the
+        // disposition's budget gate and (b) the `termination_audit` `tmux_alive`
+        // column — never a kill / extra force-clear path (verified) — so `false`
+        // is the minimal, side-effect-free way to enforce the bound.
+        dispose_recovery_relay_outcome(
+            shared,
+            provider,
+            state,
+            relayed,
+            false,
+            "recovery_anchor_repost",
+            "anchor_repost",
+            terminal_text,
+            false,
+        )
+        .await;
+    }
+    committed_anchor_repost_handled(outcome)
+}
+
+/// Pure caller-interaction contract for [`recover_committed_anchor_repost`]:
+/// has the committed row been fully handled (caller `continue`s WITHOUT the
+/// legacy committed-delivery clear)? `Relayed` (answer relayed + disposed) and
+/// `RefusedPreserveRow` (send refused, row deliberately PRESERVED for a later
+/// boot) are BOTH handled; only `NotReposted` falls through to the legacy clear.
+/// Extracted so the "refused ⇒ do NOT clear" contract is unit-testable without
+/// the async send path.
+fn committed_anchor_repost_handled(outcome: AnchorRepostOutcome) -> bool {
+    match outcome {
+        AnchorRepostOutcome::Relayed(_) | AnchorRepostOutcome::RefusedPreserveRow => true,
+        AnchorRepostOutcome::NotReposted => false,
+    }
 }
 
 /// Execute a non-`Delivered` [`RowDisposition`] for a recovery branch.
@@ -726,15 +857,17 @@ mod tests {
     use poise::serenity_prelude::ChannelId;
     use tempfile::TempDir;
 
+    use super::super::super::inflight::GuardedSaveOutcome;
     use super::super::super::inflight::InflightTurnState;
     use super::super::super::outbound::delivery_frontier_probe;
     use super::super::super::outbound::delivery_record;
     use super::super::super::placeholder_sweeper::PlaceholderProbe;
     use super::{
-        RecoveryForceClearReport, anchor_panel_channel_matches_turn, anchor_probe_should_repost,
-        anchor_range_matches_turn, anchor_record_lookup_channel_ids,
-        first_repost_anchor_if_all_probed_candidates_gone, matching_recovery_anchors,
-        persist_force_clear_report_in_root,
+        AnchorRepostOutcome, RecoveryForceClearReport, RecoveryRelayOutcome,
+        anchor_panel_channel_matches_turn, anchor_probe_should_repost, anchor_range_matches_turn,
+        anchor_record_lookup_channel_ids, anchor_repost_pre_send_refusal,
+        committed_anchor_repost_handled, first_repost_anchor_if_all_probed_candidates_gone,
+        matching_recovery_anchors, persist_force_clear_report_in_root,
     };
     use crate::services::provider::ProviderKind;
     use std::path::Path;
@@ -826,6 +959,79 @@ mod tests {
             },
         )
         .expect("write delivery record anchor");
+    }
+
+    /// #3918 (codex round-3): the pre-send bump-gate's REFUSAL must surface as
+    /// `RefusedPreserveRow`, NOT `NotReposted`. The caller force-clears the
+    /// committed row on `NotReposted`; routing a non-`Saved` bump there would
+    /// (a) DROP a committed answer whose bump hit a transient `IoError` (the
+    /// deferral is lost — the answer is re-posted by a later boot) and (b) DELETE
+    /// a row now owned by a NEWER turn on `IdentityMismatch`. This pins that
+    /// EVERY non-`Saved` bump yields the PRESERVE disposition (distinct from the
+    /// clear disposition), and that ONLY `Saved` proceeds to the send.
+    #[test]
+    fn pre_send_refusal_preserves_row_for_every_non_saved_bump() {
+        // `Saved` ⇒ the durable attempt record exists ⇒ proceed to send-new
+        // (`None` == "no refusal").
+        assert_eq!(
+            anchor_repost_pre_send_refusal(GuardedSaveOutcome::Saved),
+            None
+        );
+
+        // Every non-`Saved` outcome ⇒ refuse the send AND preserve the row —
+        // never `NotReposted` (which the caller clears on).
+        for failure in [
+            GuardedSaveOutcome::IoError,
+            GuardedSaveOutcome::Missing,
+            GuardedSaveOutcome::IdentityMismatch,
+        ] {
+            assert_eq!(
+                anchor_repost_pre_send_refusal(failure),
+                Some(AnchorRepostOutcome::RefusedPreserveRow),
+                "{failure:?} must refuse the send AND preserve the row (never NotReposted/clear)"
+            );
+        }
+
+        // The preserve disposition the caller must NOT clear on is distinct from
+        // the legacy committed-delivery clear disposition.
+        assert_ne!(
+            AnchorRepostOutcome::RefusedPreserveRow,
+            AnchorRepostOutcome::NotReposted,
+            "the refuse-and-preserve disposition must be distinguishable from the clear disposition"
+        );
+    }
+
+    /// #3918 (codex round-3): the caller-interaction contract. The committed
+    /// branch clears the row ONLY when `recover_committed_anchor_repost` returns
+    /// `false`. `RefusedPreserveRow` MUST be `handled == true` (preserve the row,
+    /// do NOT clear) so a non-`Saved` pre-send bump never drops an IoError-
+    /// deferred answer nor deletes a newer turn's row; `Relayed(*)` is also
+    /// handled (already disposed); ONLY `NotReposted` falls through to the legacy
+    /// clear.
+    #[test]
+    fn refused_preserve_row_is_handled_so_the_caller_does_not_clear() {
+        // The PRESERVE case: handled ⇒ the caller `continue`s WITHOUT clearing.
+        assert!(
+            committed_anchor_repost_handled(AnchorRepostOutcome::RefusedPreserveRow),
+            "RefusedPreserveRow MUST be handled (preserve the row; the caller must NOT clear it)"
+        );
+        // Every relayed disposition is also handled (the relay was already
+        // disposed) — none falls through to the legacy clear.
+        for relayed in [
+            RecoveryRelayOutcome::Delivered,
+            RecoveryRelayOutcome::TransientFailure,
+            RecoveryRelayOutcome::PermanentFailure,
+        ] {
+            assert!(
+                committed_anchor_repost_handled(AnchorRepostOutcome::Relayed(relayed)),
+                "Relayed({relayed:?}) must be handled (already disposed; no legacy clear)"
+            );
+        }
+        // ONLY the no-repost case falls through to the legacy committed clear.
+        assert!(
+            !committed_anchor_repost_handled(AnchorRepostOutcome::NotReposted),
+            "NotReposted must fall through to the legacy committed-delivery clear"
+        );
     }
 
     #[test]

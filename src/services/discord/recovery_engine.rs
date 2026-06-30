@@ -2774,8 +2774,18 @@ pub(super) async fn restore_inflight_turns(
             // default-OFF flag, probe the recorded anchor and repost (send-new) iff
             // it is permanently gone. Flag OFF → `enabled()` is false so the whole
             // block is skipped and the legacy finish+clear below runs byte-identically.
-            if recovery_paths::shared::recovery_anchor_repost_enabled() {
-                if let Some(outcome) = recovery_paths::restart::try_recover_anchor_repost(
+            // #3918: the committed answer's anchor may have vanished — run the
+            // anchor-repost send-new fallback AND its on-disk row disposition in
+            // `recovery_paths::restart`. `true` ⇒ the row is fully handled
+            // (relayed + disposed, OR the pre-send bump did not durably persist so
+            // the send was REFUSED and the row deliberately PRESERVED for a later
+            // boot) → `continue` WITHOUT the legacy committed clear, which would
+            // otherwise drop an IoError-deferred answer or delete a newer turn's
+            // row. `false` ⇒ no repost needed/possible → fall through to the clear.
+            // Flag OFF short-circuits before the call, so the dark deploy stays a
+            // byte-for-byte no-op.
+            if recovery_paths::shared::recovery_anchor_repost_enabled()
+                && recovery_paths::restart::recover_committed_anchor_repost(
                     http,
                     shared,
                     provider,
@@ -2783,37 +2793,8 @@ pub(super) async fn restore_inflight_turns(
                     &state.full_response,
                 )
                 .await
-                {
-                    // #3610 PR-2 (codex r2 Issue-2, storm guard): pass
-                    // `tmux_alive = false` to the dispose so a repeatedly
-                    // TransientFailure-ing send-new is BUDGET-BOUNDED. This row's
-                    // terminal answer is ALREADY committed — pane liveness is
-                    // irrelevant to whether the *anchor message* can be re-posted,
-                    // so the normal-turn "live pane may still own the answer"
-                    // preservation (`unrecoverable_relay_disposition`'s
-                    // `tmux_alive == true` arm, shared.rs) must NOT apply here.
-                    // Were the real probe passed, a live pane would force
-                    // `PreserveAndCount` every boot and a transient send-new
-                    // failure could loop FOREVER (preserve+retry each restart).
-                    // `tmux_alive` reaches only (a) the disposition's budget gate
-                    // and (b) the `termination_audit` `tmux_alive` column — never a
-                    // kill / extra force-clear path (verified) — so `false` is the
-                    // minimal, side-effect-free way to enforce the bound. The probe
-                    // call is dropped because its result is intentionally unused.
-                    recovery_paths::restart::dispose_recovery_relay_outcome(
-                        shared,
-                        provider,
-                        &state,
-                        outcome,
-                        false,
-                        "recovery_anchor_repost",
-                        "anchor_repost",
-                        &state.full_response,
-                        false,
-                    )
-                    .await;
-                    continue;
-                }
+            {
+                continue;
             }
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(

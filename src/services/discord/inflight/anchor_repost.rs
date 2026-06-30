@@ -437,9 +437,10 @@ mod tests {
     }
 
     /// Codex hardening of #3918: the anchor-repost send-new is HARD-GATED on a
-    /// `Saved` pre-send bump. `restart::try_recover_anchor_repost` does
-    /// `if !matches!(bump_outcome, GuardedSaveOutcome::Saved) { return None; }`,
-    /// so EVERY non-`Saved` outcome refuses the post. Without this gate an
+    /// `Saved` pre-send bump. `restart::try_recover_anchor_repost` proceeds to
+    /// the send ONLY when the bump is `Saved`; every non-`Saved` outcome returns
+    /// `AnchorRepostOutcome::RefusedPreserveRow` (refuse the post, preserve the
+    /// row for a later boot). Without this gate an
     /// `IoError` bump (the attempt never persisted) would re-load the SAME
     /// `attempts == 0` row on every boot under a persistent write fault and send
     /// again forever → UNBOUNDED duplicate relay — the exact window the PR claims
