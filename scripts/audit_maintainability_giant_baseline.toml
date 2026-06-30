@@ -584,7 +584,7 @@
 # changed; only the warm placeholder-sweeper carries the liveness gate (never the
 # boot path) so a freshly-restarted live watcher is never false-classified as dead.
 # Tests live in the excluded `rebind_origin_reap_tests` module.
-"src/services/discord/inflight.rs" = 3138 # #3680 relay recovery review hardening / adoption guards
+"src/services/discord/inflight.rs" = 2275 # #3835: 3077 -> 2275, locked-in win — verbatim decompose moved the status-panel/current-message ownership writes to inflight/ownership_ops.rs and the staleness predicates + orphan-lock/rebind-origin reap helpers to inflight/rebind_reap.rs (zero behavior change, facade re-exports keep inflight::* paths byte-identical)
 # #3779 extracted relay-recovery auto-heal attempt accounting to a sibling
 # module, dropping relay_recovery.rs below the prod-giant threshold; the ratchet
 # entry is retired instead of raising the baseline.
