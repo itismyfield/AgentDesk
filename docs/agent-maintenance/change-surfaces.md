@@ -1101,13 +1101,19 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6265 lines; production LoC; +17
-    from #3885 gating the Claude TUI follow-up pre-submit requeue on the live
-    structured turn state (`idle_queue_blocked_by_hosted_tui_busy_pane` probe +
-    `claude_tui_followup_requeue_streaming_aware` wiring) so an already-submitted,
-    actively-streaming TUI-direct turn no longer mis-fires the no-response
-    requeue (duplicate prose relay); the pure decision lives in
-    `streaming_edit_text.rs`; +11
+  - `src/services/discord/turn_bridge/mod.rs` (6283 lines; production LoC; +35
+    from #3885 (reworked) gating the Claude TUI follow-up pre-submit requeue on
+    INPUT CORRELATION instead of the channel-scoped busy probe: suppress only
+    when the recorded prompt anchor for this pane resolves to THIS inflight's
+    `user_msg_id` (`prompt_anchor_for_response` peek +
+    `claude_tui_followup_same_input_occupies_pane` +
+    `claude_tui_followup_requeue_streaming_aware` wiring) — i.e. the SAME input
+    already landed (streaming or just-completed) so the response is covered and a
+    requeue would duplicate it; a different/absent anchor means the follow-up is
+    genuinely unsubmitted, so it still requeues and the deferred idle-queue
+    kickoff defers it behind any occupying turn rather than dropping it as a
+    transport-error failure; the pure decisions live in `streaming_edit_text.rs`;
+    +11
     from #3859 threading `token_hash` into the `InflightCleanupGuard` so its
     abnormal-exit cleanup routes through `request_inflight_abandon_if_matches`
     (durable abandon-request enqueue + row delete) instead of a bare clear; +4

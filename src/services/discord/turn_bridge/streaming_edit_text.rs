@@ -97,27 +97,68 @@ pub(in crate::services::discord) fn bridge_claude_tui_followup_requeue_prompt_er
         && error_text.contains("follow-up prompt input readiness")
 }
 
-/// #3885: streaming-aware gate for the claude_tui follow-up pre-submit requeue.
+/// #3885 (reworked): same-input-aware gate for the claude_tui follow-up
+/// pre-submit requeue.
 ///
 /// A follow-up pre-submit readiness timeout normally requeues the inflight
 /// message — the pre-submit assumption is "the prompt never reached the pane, so
-/// re-injecting is safe". But when the SAME input was already submitted through
-/// the TUI-direct path, the live pane is still ACTIVELY STREAMING that turn, so a
-/// requeue re-injects a DUPLICATE (the original streaming turn and the requeued
-/// turn both produce output → duplicate prose relay). This gate suppresses the
-/// requeue candidate when the live structured turn state is busy/streaming. A
-/// genuinely silent, UNSUBMITTED prompt (quiescent / idle pane) is NOT
-/// suppressed, so the existing no-response recovery is preserved with no new
-/// duplicate-relay vector.
+/// re-injecting is safe". The risk is a DUPLICATE: when the SAME input already
+/// landed on the pane (it is still streaming, or it just completed), the turn it
+/// drives already delivers the response, so a requeue re-injects a second copy →
+/// duplicate prose relay.
+///
+/// The first cut of #3885 gated this on a CHANNEL-SCOPED busy probe
+/// (`idle_queue_blocked_by_hosted_tui_busy_pane`): suppress whenever the pane was
+/// busy. That probe has ZERO correlation to *which* turn is streaming, so it
+/// conflated two cases:
+///   - (A) the SAME input is the streaming/just-completed turn → requeue dups
+///     (must suppress), and
+///   - (B) a DIFFERENT prior turn occupies the pane while a genuinely-unsubmitted
+///     follow-up waits behind it → suppressing DROPS the follow-up (it is
+///     finalized as a transport-error failure and never retried).
+/// It also missed the already-COMPLETED same-input case (idle pane → probe reads
+/// not-busy → requeue → dup).
+///
+/// This gate instead keys on INPUT CORRELATION. `same_input_occupies_pane` is
+/// true only when the recorded prompt anchor for this pane resolves to THIS
+/// inflight's user message id (see
+/// [`claude_tui_followup_same_input_occupies_pane`]): the same input already
+/// landed (streaming or just-completed) so the response is covered. A
+/// different/absent anchor means the follow-up is genuinely unsubmitted, so it
+/// STILL requeues — the deferred idle-queue kickoff is itself gated on pane-busy,
+/// so a case-(B) follow-up is DEFERRED behind the occupying turn (preserved in
+/// the mailbox), not dropped. This preserves the original dup-prevention for
+/// case (A) without the case-(B) drop or the already-completed dup.
 ///
 /// `requeue_candidate` is the base decision (feature enabled + readiness-timeout
-/// error); `live_pane_actively_streaming` is the deterministic live structured
-/// turn-state probe (`idle_queue_blocked_by_hosted_tui_busy_pane`).
+/// error).
 pub(in crate::services::discord) fn claude_tui_followup_requeue_streaming_aware(
     requeue_candidate: bool,
-    live_pane_actively_streaming: bool,
+    same_input_occupies_pane: bool,
 ) -> bool {
-    requeue_candidate && !live_pane_actively_streaming
+    requeue_candidate && !same_input_occupies_pane
+}
+
+/// #3885 (reworked): does the input that occupies the pane match THIS follow-up?
+///
+/// `anchor_message_id` is the message id of the prompt anchor recorded for this
+/// pane (`tui_prompt_dedupe::prompt_anchor_for_response`, a non-consuming peek);
+/// it is the user-message id of the prompt the relay last submitted to the pane,
+/// which equals the synthetic inflight's `user_msg_id`. When it matches this
+/// inflight's `inflight_user_msg_id`, the same input already landed (it is the
+/// streaming or just-completed turn) and a requeue would duplicate its prose.
+///
+/// A `None` anchor (none recorded / TTL-expired / channel mismatch) or a
+/// mismatched id means a DIFFERENT input — or none — holds the pane, so the
+/// follow-up is genuinely unsubmitted and must be preserved (requeued/deferred),
+/// not suppressed. `inflight_user_msg_id == 0` (id-0 synthetic turns) never
+/// matches: `record_prompt_anchor` rejects a zero message id, so a recorded
+/// anchor is always nonzero and the zero guard avoids a false suppression.
+pub(in crate::services::discord) fn claude_tui_followup_same_input_occupies_pane(
+    anchor_message_id: Option<u64>,
+    inflight_user_msg_id: u64,
+) -> bool {
+    inflight_user_msg_id != 0 && anchor_message_id == Some(inflight_user_msg_id)
 }
 
 pub(in crate::services::discord) fn bridge_tui_transport_error_should_skip_quiescence(
@@ -367,35 +408,113 @@ mod pre_submission_tui_prompt_error_tests {
         ));
     }
 
-    // ---- #3885: streaming-aware follow-up requeue gate ----
+    // ---- #3885 (reworked): same-input-aware follow-up requeue gate ----
     //
     // The base requeue decision (`requeue_candidate`) is UNCHANGED; the gate is
-    // layered on top of the live structured turn-state probe. These pin that an
-    // actively-streaming/already-submitted turn does NOT requeue (so the
-    // original streaming turn and a requeued turn can no longer both emit prose
-    // → no duplicate relay), while a genuinely-silent UNSUBMITTED prompt STILL
-    // requeues (the existing no-response recovery is preserved).
+    // now keyed on INPUT CORRELATION (`same_input_occupies_pane`) instead of a
+    // channel-scoped busy probe. These pin that:
+    //   - the SAME input already on the pane (streaming OR just-completed) does
+    //     NOT requeue → the covering turn delivers, no duplicate prose relay
+    //     (original dup-prevention + the already-completed dup, both closed);
+    //   - a genuinely-unsubmitted follow-up (different/absent anchor) STILL
+    //     requeues → the deferred idle-queue kickoff defers it behind any
+    //     occupying turn instead of DROPPING it as a transport-error failure.
 
     #[test]
-    fn actively_streaming_turn_suppresses_followup_requeue_no_dup_relay() {
-        // #3885 root cause: the same input was already submitted via TUI-direct
-        // and the live pane is still streaming that turn. Requeuing would
-        // re-inject a duplicate, so the candidate must be suppressed.
+    fn same_input_on_pane_suppresses_followup_requeue_no_dup_relay() {
+        // (1b) + (2): the same input already landed on the pane and is either
+        // still streaming or just completed (anchor still resolves to this
+        // inflight). Requeuing would re-inject a duplicate, so the candidate must
+        // be suppressed — the streaming/completed turn already delivers the prose.
         assert!(!claude_tui_followup_requeue_streaming_aware(true, true));
     }
 
     #[test]
-    fn genuinely_silent_unsubmitted_prompt_still_requeues() {
-        // Quiescent / idle pane: the prompt never reached the TUI (genuine
-        // pre-submit timeout). The existing requeue recovery must be preserved.
+    fn different_or_absent_pane_input_still_requeues_so_followup_is_deferred_not_dropped() {
+        // (1a): a DIFFERENT prior turn occupies the pane (or it is quiescent) and
+        // this follow-up's prompt never reached the TUI. The candidate must stay
+        // true so the follow-up is requeued — the deferred idle-queue kickoff
+        // (gated on pane-busy) defers it behind the occupying turn rather than
+        // letting the suppressed path finalize it as a transport-error drop.
         assert!(claude_tui_followup_requeue_streaming_aware(true, false));
     }
 
     #[test]
-    fn non_requeue_base_never_requeues_regardless_of_stream_state() {
+    fn non_requeue_base_never_requeues_regardless_of_pane_input() {
         // When the base decision is false (feature off / non-readiness error)
-        // the gate must never synthesize a requeue from the stream signal.
+        // the gate must never synthesize a requeue from the correlation signal.
         assert!(!claude_tui_followup_requeue_streaming_aware(false, false));
         assert!(!claude_tui_followup_requeue_streaming_aware(false, true));
+    }
+
+    #[test]
+    fn same_input_occupies_pane_matches_only_this_inflights_anchor() {
+        // Pure correlation: a recorded anchor that resolves to THIS inflight's
+        // user_msg_id means the same input already landed → suppress; a different
+        // or absent anchor means a different/unsubmitted input → requeue.
+        let this_msg = 7_001_u64;
+        let other_msg = 9_002_u64;
+        assert!(claude_tui_followup_same_input_occupies_pane(
+            Some(this_msg),
+            this_msg
+        ));
+        assert!(!claude_tui_followup_same_input_occupies_pane(
+            Some(other_msg),
+            this_msg
+        ));
+        assert!(!claude_tui_followup_same_input_occupies_pane(
+            None, this_msg
+        ));
+        // id-0 synthetic turns never match (record_prompt_anchor rejects id 0).
+        assert!(!claude_tui_followup_same_input_occupies_pane(Some(0), 0));
+        assert!(!claude_tui_followup_same_input_occupies_pane(None, 0));
+    }
+
+    #[test]
+    fn same_input_correlation_against_live_recorded_prompt_anchor() {
+        // Wiring pin: feed the gate from the REAL shared dedupe anchor state the
+        // bridge reads via `prompt_anchor_for_response` (a non-consuming peek).
+        // The relay records the anchor for the submitted input; the bridge then
+        // recognises its own input and suppresses the dup-prone requeue, while a
+        // follow-up whose id differs from the recorded anchor still requeues.
+        use crate::services::tui_prompt_dedupe::{
+            prompt_anchor_for_response, record_prompt_anchor, reset_state_for_tests,
+        };
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap();
+        reset_state_for_tests();
+
+        let tmux = "AgentDesk-claude-followup-requeue-corr";
+        let channel = 4242_u64;
+        let same_input = 5_551_u64;
+        let other_input = 6_662_u64;
+
+        // Relay submitted `same_input` to the pane → anchor recorded.
+        record_prompt_anchor("claude", tmux, channel, same_input);
+
+        let resolve =
+            || prompt_anchor_for_response("claude", tmux, channel).map(|anchor| anchor.message_id);
+
+        // Same-input follow-up: anchor resolves to it → suppress (no dup relay),
+        // and the peek must NOT consume the anchor the watcher still needs.
+        let same = claude_tui_followup_same_input_occupies_pane(resolve(), same_input);
+        assert!(same, "same-input follow-up must be recognised as on-pane");
+        assert!(
+            !claude_tui_followup_requeue_streaming_aware(true, same),
+            "same-input follow-up must NOT requeue (dup-prevention)"
+        );
+
+        // Different follow-up behind the same occupying turn: not the recorded
+        // anchor → must still requeue so it is deferred, not dropped.
+        let different = claude_tui_followup_same_input_occupies_pane(resolve(), other_input);
+        assert!(
+            !different,
+            "a different-input follow-up must not match the recorded anchor"
+        );
+        assert!(
+            claude_tui_followup_requeue_streaming_aware(true, different),
+            "different/unsubmitted follow-up must requeue (deferred, not dropped)"
+        );
     }
 }

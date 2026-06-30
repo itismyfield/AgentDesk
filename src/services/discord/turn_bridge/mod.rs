@@ -86,6 +86,7 @@ pub(super) use streaming_edit_text::{
     CLAUDE_TUI_FOLLOWUP_REQUEUE_DELIVERY_NOTICE, bridge_claude_tui_followup_requeue_prompt_error,
     bridge_streaming_rollover_should_skip, bridge_tui_transport_error_should_skip_quiescence,
     build_turn_bridge_streaming_edit_text, claude_tui_followup_requeue_streaming_aware,
+    claude_tui_followup_same_input_occupies_pane,
 };
 pub(super) use task_notification_lifecycle::{
     close_all_tracked_background_children, close_next_tracked_background_child,
@@ -3877,22 +3878,39 @@ pub(super) fn spawn_turn_bridge(
                     inflight_state.runtime_kind,
                     &full_response,
                 );
-            // #3885: a follow-up pre-submit readiness timeout normally requeues
-            // the inflight ("prompt never reached the pane → safe to retry").
-            // But if the SAME input was already submitted via TUI-direct, the
-            // live pane is still ACTIVELY STREAMING that turn and requeuing
-            // re-injects a DUPLICATE (dup prose relay). Probe the structured
-            // turn state ONLY on the requeue path; a genuinely silent
-            // UNSUBMITTED prompt (quiescent pane) still requeues.
-            claude_tui_followup_requeue_streaming_aware(
-                base,
-                base && super::idle_queue_blocked_by_hosted_tui_busy_pane(
-                    shared_owned.as_ref(),
-                    &provider,
-                    channel_id,
-                )
-                .await,
-            )
+            // #3885 (reworked): a follow-up pre-submit readiness timeout normally
+            // requeues the inflight ("prompt never reached the pane → safe to
+            // retry"). The dup risk is re-injecting an input that ALREADY landed:
+            // when the SAME input is the turn the pane is streaming (or just
+            // completed), that turn already delivers the response, so a requeue
+            // produces duplicate prose. The first cut gated on a channel-scoped
+            // busy probe, which (a) DROPPED a genuinely-unsubmitted follow-up that
+            // happened to sit behind a DIFFERENT streaming turn, and (b) missed
+            // the already-completed same-input case (idle pane). Gate instead on
+            // INPUT CORRELATION: suppress ONLY when the recorded prompt anchor for
+            // this pane resolves to THIS inflight's user_msg_id (the relay records
+            // the submitted prompt's anchor as the synthetic inflight's
+            // user_msg_id; a non-consuming peek leaves it for the watcher). A
+            // different / absent anchor means the follow-up is genuinely
+            // unsubmitted, so it STILL requeues — the deferred idle-queue kickoff
+            // is itself gated on pane-busy, so a follow-up behind a different
+            // streaming turn is DEFERRED (preserved in the mailbox), not dropped.
+            let same_input_occupies_pane = base
+                && claude_tui_followup_same_input_occupies_pane(
+                    inflight_state
+                        .tmux_session_name
+                        .as_deref()
+                        .and_then(|tmux_session_name| {
+                            crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
+                                provider.as_str(),
+                                tmux_session_name,
+                                channel_id.get(),
+                            )
+                        })
+                        .map(|anchor| anchor.message_id),
+                    inflight_state.user_msg_id,
+                );
+            claude_tui_followup_requeue_streaming_aware(base, same_input_occupies_pane)
         };
         if claude_tui_followup_pre_submit_requeue_candidate {
             full_response = CLAUDE_TUI_FOLLOWUP_REQUEUE_DELIVERY_NOTICE.to_string();
