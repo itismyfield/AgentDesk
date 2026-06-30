@@ -34,13 +34,13 @@ pub(crate) use store::lock_inflight_state_path;
 // sibling module so this hot state parent stays below the frozen production-LoC
 // baseline without changing call-site names.
 mod rebind_reap;
-#[cfg(test)]
-use self::rebind_reap::should_reap_dead_watcher_rebind_origin;
 use self::rebind_reap::{
     RuntimeWatcherLiveness, WatcherLiveness, dead_watcher_rebind_structurally_reapable,
     inflight_json_path_for_lock, is_inflight_json_lock_path, metadata_mtime_unix_secs,
     rebind_origin_age_secs, watcher_runtime_activity_recent,
 };
+#[cfg(test)]
+use self::rebind_reap::{proven_dead_from_signals, should_reap_dead_watcher_rebind_origin};
 
 mod watcher_state;
 pub(in crate::services::discord) use self::watcher_state::{
@@ -6925,11 +6925,12 @@ mod rebind_origin_reap_tests {
         DEAD_WATCHER_PROVEN_DEAD_SECS, InflightTurnState, REBIND_ORIGIN_DEADLINE_SECS_DEFAULT,
         RebindReapOutcome, RelayOwnerKind, TurnSource, WatcherLiveness,
         invalidate_stale_generation_in_root, load_inflight_states_from_root,
-        reap_abandoned_rebind_origin_locked_in_root,
+        proven_dead_from_signals, reap_abandoned_rebind_origin_locked_in_root,
         reap_dead_watcher_rebind_origin_locked_in_root, save_inflight_state_in_root,
         should_reap_abandoned_rebind_origin, should_reap_dead_watcher_rebind_origin,
     };
     use crate::services::discord::InflightRestartMode;
+    use crate::services::platform::tmux::PaneLiveness;
     use crate::services::provider::ProviderKind;
     use tempfile::TempDir;
 
@@ -7387,6 +7388,72 @@ mod rebind_origin_reap_tests {
             CURRENT_GEN,
             &DEAD
         ));
+    }
+
+    #[test]
+    fn idle_live_pane_rebind_reaped_at_deadline_3879() {
+        // (a) #3879 REGRESSION GUARD — proven-dead/idle-stuck reaped at deadline.
+        //
+        // The live evidence: a watcher with a LIVE tmux pane (an idle TUI sitting
+        // at `❯`) but NO recent runtime activity never adopted its empty
+        // rebind-origin and was never reaped, leaving the placeholder LIVE for 64
+        // min (32× the 120s deadline) and ABORTing every new TUI-direct turn.
+        // The fixed `is_proven_dead` core now classifies `(Live, !activity)` as
+        // proven dead, so the (correct) structural+deadline predicate finally
+        // fires — but ONLY past the deadline (the re-adopt window stays open until
+        // then).
+        let proven_dead =
+            proven_dead_from_signals(PaneLiveness::Live, /* activity_recent */ false);
+        assert!(
+            proven_dead,
+            "#3879: an idle live-pane watcher (no recent activity) must be proven dead"
+        );
+        let oracle = StubLiveness { proven_dead };
+        let state = watcher_owned_rebind(7201, 4096, CURRENT_GEN);
+        assert!(
+            should_reap_dead_watcher_rebind_origin(&state, PAST_DEADLINE, CURRENT_GEN, &oracle),
+            "#3879: idle live-pane rebind-origin is reaped once past the deadline"
+        );
+        assert!(
+            !should_reap_dead_watcher_rebind_origin(&state, WITHIN_DEADLINE, CURRENT_GEN, &oracle),
+            "within the deadline the re-adopt window is still open — never reaped early"
+        );
+    }
+
+    #[test]
+    fn active_or_unknown_watcher_rebind_not_reaped_readopt_preserved_3879() {
+        // (b) #3879 REGRESSION GUARD — re-adopt path preserved (#897/#3635).
+        //
+        // A watcher producing RECENT runtime activity (jsonl/.generation/rollout
+        // writes) is genuinely working / re-adoptable and is NEVER proven dead,
+        // so its rebind-origin survives even past the deadline — distinguishing
+        // "temporarily quiet but re-adoptable" from "idle-stuck/dead".
+        assert!(
+            !proven_dead_from_signals(PaneLiveness::Live, /* activity_recent */ true),
+            "live pane WITH recent activity = working/re-adoptable ⇒ preserved"
+        );
+        // A just-restarting watcher touches `.generation` before its pane
+        // re-appears: DeadOrAbsent + recent activity must still preserve.
+        assert!(
+            !proven_dead_from_signals(PaneLiveness::DeadOrAbsent, /* activity_recent */ true),
+            "restarting watcher (recent activity, pane not yet up) ⇒ preserved"
+        );
+        // An UNKNOWN probe (transient tmux hiccup) preserves regardless of activity.
+        assert!(!proven_dead_from_signals(PaneLiveness::ProbeError, false));
+        assert!(!proven_dead_from_signals(PaneLiveness::ProbeError, true));
+
+        // End-to-end: the active-watcher verdict preserves the row past deadline.
+        let oracle = StubLiveness {
+            proven_dead: proven_dead_from_signals(
+                PaneLiveness::Live,
+                /* activity_recent */ true,
+            ),
+        };
+        let state = watcher_owned_rebind(7202, 4096, CURRENT_GEN);
+        assert!(
+            !should_reap_dead_watcher_rebind_origin(&state, PAST_DEADLINE, CURRENT_GEN, &oracle),
+            "active/re-adoptable watcher is NOT reaped — #897/#3635 re-adopt preserved"
+        );
     }
 
     #[test]

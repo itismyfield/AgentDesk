@@ -464,12 +464,12 @@
 | `services::discord::idle_recap::scrollback` | `src/services/discord/idle_recap/scrollback.rs` | 279 | 279 | 0 |  |
 | `services::discord::idle_recap_interaction` | `src/services/discord/idle_recap_interaction.rs` | 458 | 424 | 34 |  |
 | `services::discord::idle_relay_drift` | `src/services/discord/idle_relay_drift.rs` | 764 | 529 | 235 |  |
-| `services::discord::inflight` | `src/services/discord/inflight.rs` | 8105 | 3069 | 5036 | giant-file |
+| `services::discord::inflight` | `src/services/discord/inflight.rs` | 8172 | 3069 | 5103 | giant-file |
 | `services::discord::inflight::anchor_repost` | `src/services/discord/inflight/anchor_repost.rs` | 549 | 188 | 361 |  |
 | `services::discord::inflight::budget` | `src/services/discord/inflight/budget.rs` | 339 | 108 | 231 |  |
 | `services::discord::inflight::finalizer_identity` | `src/services/discord/inflight/finalizer_identity.rs` | 56 | 56 | 0 |  |
 | `services::discord::inflight::model` | `src/services/discord/inflight/model.rs` | 1033 | 788 | 245 |  |
-| `services::discord::inflight::rebind_reap` | `src/services/discord/inflight/rebind_reap.rs` | 189 | 189 | 0 |  |
+| `services::discord::inflight::rebind_reap` | `src/services/discord/inflight/rebind_reap.rs` | 226 | 226 | 0 |  |
 | `services::discord::inflight::store` | `src/services/discord/inflight/store.rs` | 62 | 62 | 0 |  |
 | `services::discord::inflight::watcher_state` | `src/services/discord/inflight/watcher_state.rs` | 353 | 353 | 0 |  |
 | `services::discord::inflight_heartbeat_sweeper` | `src/services/discord/inflight_heartbeat_sweeper.rs` | 299 | 264 | 35 |  |
