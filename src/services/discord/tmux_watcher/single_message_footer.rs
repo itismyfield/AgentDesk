@@ -478,6 +478,11 @@ pub(super) async fn complete_watcher_terminal_footer_or_status_panel(
     completion_background: bool,
     status_panel_completion_user_msg_id: Option<u64>,
     turn_is_external_input_for_session: bool,
+    // #3969 root invariant: chokepoint-fresh "this turn is a non-Managed TUI
+    // mirror" (`turn_source != Managed`). Suppresses the #3089 footer for the
+    // /loop self-paced (ExternalInput) class the stale `turn_is_external_input_for_session`
+    // flag misses; never set for a Discord-origin Managed turn.
+    turn_is_non_managed_tui_mirror: bool,
 ) {
     let committed = if single_message_panel_footer_mode {
         let fallback_target =
@@ -495,6 +500,7 @@ pub(super) async fn complete_watcher_terminal_footer_or_status_panel(
             single_message_panel_footer_mode,
             turn_is_external_input_for_session,
             completion_background,
+            turn_is_non_managed_tui_mirror,
         ) {
             // #3964: watcher-relayed TUI mirror — clean prose, no chrome.
             complete_watcher_single_message_terminal_no_footer(

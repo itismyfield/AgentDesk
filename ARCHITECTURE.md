@@ -587,6 +587,7 @@ src/
 │   │   │   ├── liveness.rs
 │   │   │   ├── orphan_status_panel_cleanup.rs
 │   │   │   ├── panel_decisions.rs
+│   │   │   ├── panel_decisions_tests.rs
 │   │   │   ├── placeholder_reclaim.rs
 │   │   │   ├── prompt_observe.rs
 │   │   │   ├── provider_session_persistence.rs

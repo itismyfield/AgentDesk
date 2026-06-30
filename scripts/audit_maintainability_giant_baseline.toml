@@ -112,7 +112,16 @@
 # fallback in a later iteration / after a watcher restart still deletes prefixes
 # frozen earlier. The inflight field + patch union-merge + restore wiring live in
 # inflight/{model,watcher_state}.rs + tmux.rs (non-giant for this change).
-"src/services/discord/tmux_watcher.rs" = 7082
+# #3969: 7082 -> 7092 (+10 prod LoC), reviewable admission — close the residual
+# #3089 footer-chrome leak on the /loop ScheduleWakeup self-paced orchestrator-TUI
+# turn class (#3961/#3964/#3967 missed it). The completion chokepoint reads the
+# CHOKEPOINT-FRESH `inflight_before_relay` and threads one root-invariant bool
+# (`turn_is_non_managed_tui_mirror` = `turn_source != Managed`) into
+# `complete_watcher_terminal_footer_or_status_panel`, so EVERY non-Discord mirror
+# origin suppresses regardless of the stale `:1017` panel-eligibility flag. The
+# pure predicate, gate, and per-class tests live in the non-giant sibling
+# `tmux_watcher/{panel_decisions,single_message_footer,panel_decisions_tests}.rs`.
+"src/services/discord/tmux_watcher.rs" = 7092
 # #3038 tmux_watcher S1 child modules, frozen at landed production LoC.
 "src/services/discord/tmux_watcher/commit_decisions.rs" = 140
 "src/services/discord/tmux_watcher/completion_gate.rs" = 275

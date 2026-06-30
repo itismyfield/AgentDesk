@@ -5725,6 +5725,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     task_notification_kind,
                     Some(TaskNotificationKind::Background | TaskNotificationKind::MonitorAutoTurn)
                 );
+                // #3969 root invariant: read the CHOKEPOINT-FRESH inflight (this
+                // `inflight_before_relay` is re-loaded after the synthetic row exists,
+                // unlike the stale `:1017` flag) and suppress the #3089 footer for any
+                // non-Managed (TUI-mirror) turn — closing the /loop self-paced leak.
+                let turn_is_non_managed_tui_mirror =
+                    watcher_inflight_is_non_managed_tui_mirror_for_session(
+                        inflight_before_relay.as_ref(),
+                        &tmux_session_name,
+                    );
                 complete_watcher_terminal_footer_or_status_panel(
                     &http,
                     &shared,
@@ -5741,6 +5750,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     completion_background,
                     status_panel_completion_user_msg_id,
                     turn_is_external_input_for_session,
+                    turn_is_non_managed_tui_mirror,
                 )
                 .await;
             } // #3142: end `if !inflight_before_relay_is_stale_newer_turn` (EDIT/finalize gate)

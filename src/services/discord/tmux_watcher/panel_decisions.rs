@@ -418,6 +418,40 @@ pub(super) fn watcher_inflight_is_panel_eligible_for_session(
         })
 }
 
+/// #3969: the ROOT INVARIANT behind the #3089 footer-chrome suppression. A
+/// watcher-relayed orchestrator-TUI session emits exactly two turn classes:
+///
+///   * a genuine Discord-USER-message turn (`TurnSource::Managed`) — the user
+///     typed in Discord, so the reconstructed footer (`Context … tokens`,
+///     `Tasks`, `Subagents`) is their ONLY status surface → KEEP it; and
+///   * every OTHER origin (`ExternalInput` terminal-typed / `/loop` self-paced,
+///     `ExternalAdopted`, `MonitorTriggered`) — a MIRROR of what the user is
+///     already watching live in the terminal, so the footer is duplicate chrome
+///     → SUPPRESS it.
+///
+/// `turn_is_external_input_for_session` (the cached `:1017` panel-eligibility
+/// flag) ENUMERATES the mirror sub-cases but is read from the top-of-iteration
+/// `:1009` snapshot, so a turn whose inflight row is created LATER in the same
+/// iteration (the `/loop` ScheduleWakeup self-paced class, #3969 — created by
+/// the claude idle bridge, NOT a `<task-notification>`, so `completion_background`
+/// is also `false`) is stale-`false` and leaks. This predicate instead reads the
+/// CHOKEPOINT-FRESH `inflight_before_relay` (`tmux_watcher.rs:3857`, re-loaded
+/// AFTER the row exists) and keys on the COMPLETE complement of `Managed`
+/// (`turn_source != Managed`), so every non-Discord origin is caught and no
+/// mirror class can be missed by enumeration. The `tmux_session_name` guard
+/// ignores a stale inflight bound to a different pane. A genuine Discord turn is
+/// `Managed` → this returns `false` → the #3089 footer is KEPT (non-regression).
+pub(super) fn watcher_inflight_is_non_managed_tui_mirror_for_session(
+    inflight: Option<&InflightTurnState>,
+    tmux_session_name: &str,
+) -> bool {
+    inflight
+        .filter(|state| state.tmux_session_name.as_deref() == Some(tmux_session_name))
+        .is_some_and(|state| {
+            state.turn_source != crate::services::discord::inflight::TurnSource::Managed
+        })
+}
+
 /// #3003 single-chokepoint orphan reclaim: has the in-flight TUI-direct turn
 /// been abandoned, so a watcher-created v2 panel can never reach terminal
 /// completion?
@@ -533,111 +567,32 @@ pub(super) fn watcher_completion_footer_should_tick(
 ///    value (merged at `:1170`/`:1464`) that is correct regardless of row timing.
 ///    This catches the common fresh synthetic turn the cached flag misses.
 ///
-/// Both are `false` for a genuine Discord-origin turn (`TurnSource::Managed` is not
-/// panel-eligible; a real user message carries no `<task-notification>` marker), so
-/// its #3089 footer — the user's only status surface — is never stripped.
+/// All three are `false` for a genuine Discord-origin turn (`TurnSource::Managed`
+/// is not panel-eligible, carries no `<task-notification>` marker, and is the one
+/// origin `turn_is_non_managed_tui_mirror` excludes), so its #3089 footer — the
+/// user's only status surface — is never stripped.
+///
+/// 3. `turn_is_non_managed_tui_mirror` (#3969) — the ROOT INVARIANT disjunct:
+///    `watcher_inflight_is_non_managed_tui_mirror_for_session` over the
+///    CHOKEPOINT-FRESH `inflight_before_relay`. The cached `turn_is_external_input_for_session`
+///    enumerates the mirror sub-cases from a STALE top-of-iteration snapshot and
+///    misses the `/loop` self-paced (`ExternalInput`) class whose row is created
+///    later (#3969); `completion_background` only catches `<task-notification>`
+///    turns. This disjunct keys on the complete complement of `Managed`, so EVERY
+///    non-Discord origin suppresses regardless of row timing. Additive: it only
+///    ever fires for `turn_source != Managed`, so it can never strip a Discord turn.
 pub(super) fn watcher_external_input_completion_footer_suppressed(
     single_message_panel_footer_mode: bool,
     turn_is_external_input_for_session: bool,
     completion_background: bool,
+    turn_is_non_managed_tui_mirror: bool,
 ) -> bool {
     single_message_panel_footer_mode
-        && (turn_is_external_input_for_session || completion_background)
+        && (turn_is_external_input_for_session
+            || completion_background
+            || turn_is_non_managed_tui_mirror)
 }
 
 #[cfg(test)]
-mod completion_footer_suppression_tests {
-    use super::*;
-    use crate::services::discord::ProviderKind;
-
-    #[test]
-    fn completion_footer_tick_requires_registered_unfinished_target() {
-        let interval = std::time::Duration::from_secs(5);
-        assert!(watcher_completion_footer_should_tick(
-            true, interval, interval
-        ));
-        assert!(!watcher_completion_footer_should_tick(
-            false, interval, interval
-        ));
-        assert!(!watcher_completion_footer_should_tick(
-            true,
-            std::time::Duration::from_secs(4),
-            interval
-        ));
-    }
-
-    #[test]
-    fn gate_suppresses_for_either_mirror_signal_and_keeps_discord_origin_3964() {
-        // cached flag true (row pre-existed) → suppress.
-        assert!(watcher_external_input_completion_footer_suppressed(
-            true, true, false
-        ));
-        // cached flag FALSE but completion_background true — the #3964 fresh
-        // synthetic /loop·MonitorAutoTurn / background regression the bridge-style
-        // cached flag cannot catch at the terminal chokepoint → still suppress.
-        assert!(watcher_external_input_completion_footer_suppressed(
-            true, false, true
-        ));
-        assert!(watcher_external_input_completion_footer_suppressed(
-            true, true, true
-        ));
-        // genuine Discord-origin turn: both signals false → KEEP the #3089 footer.
-        assert!(!watcher_external_input_completion_footer_suppressed(
-            true, false, false
-        ));
-        // non-footer-mode is never the single-message footer path.
-        assert!(!watcher_external_input_completion_footer_suppressed(
-            false, true, true
-        ));
-        assert!(!watcher_external_input_completion_footer_suppressed(
-            false, false, true
-        ));
-    }
-
-    #[test]
-    fn synthetic_tui_mirror_emits_prose_without_tui_chrome_3964() {
-        // The exact #3964 corruption: assistant prose + the rendered
-        // Context/Tasks/Subagents footer. A suppressed mirror composes with a `None`
-        // block → prose ALONE; a Discord-origin turn (block present) keeps the footer.
-        let prose = "#3879 작업 완료 — 다음 이슈 대기.";
-        let chrome = "Context   📦 166.4k / 1.0M tokens (16%) · auto-compact 60%\n\nTasks\n└ TaskUpdate 4\n\nSubagents\n└ general-purpose Fix #3879";
-
-        let discord_origin =
-            crate::services::discord::single_message_panel::compose_completion_footer_text(
-                prose,
-                Some(chrome),
-            );
-        assert!(discord_origin.starts_with(prose));
-        assert!(discord_origin.contains("Context   📦"));
-        assert!(discord_origin.contains("Subagents"));
-
-        let mirror = crate::services::discord::single_message_panel::compose_completion_footer_text(
-            prose, None,
-        );
-        assert_eq!(mirror, prose);
-        assert!(!mirror.contains("Context"));
-        assert!(!mirror.contains("auto-compact"));
-        assert!(!mirror.contains("Subagents"));
-    }
-
-    #[test]
-    fn synthetic_tui_mirror_finalize_strips_live_status_footer_to_prose_3964() {
-        // The non-short-replace path: a live status footer still on the message at
-        // completion finalizes (block = None) down to prose, no chrome re-appended.
-        let panel = "🟢 진행 중 — Claude (<t:1700000000:R>)\n\nSubagents\n└ review inspect";
-        let body = format!(
-            "Final answer\n\n{}",
-            crate::services::discord::single_message_panel::compose_footer_status_block("⠸", panel)
-        );
-        let finalized =
-            crate::services::discord::single_message_panel::finalize_streaming_footer_with_completion(
-                &body,
-                &ProviderKind::Claude,
-                None,
-            )
-            .expect("a live status footer must finalize to a stripped edit");
-        assert_eq!(finalized, "Final answer");
-        assert!(!finalized.contains("Subagents"));
-        assert!(!finalized.contains("진행 중"));
-    }
-}
+#[path = "panel_decisions_tests.rs"]
+mod completion_footer_suppression_tests;
