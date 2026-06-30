@@ -53,6 +53,28 @@ fn tmux_lines_after_claude_prompt_show_completed_history(lines: &[&str]) -> bool
     })
 }
 
+/// #3924: genuine ASSISTANT RESPONSE output after a prompt line — the
+/// `⏺`/`✻ <verb>` response/thinking markers, but NOT the `Tools: N done` footer.
+///
+/// This is `..._show_completed_history` minus its `nonzero_tool_summary` clause.
+/// A STRANDED follow-up draft renders the PREVIOUS (finished) turn's idle footer
+/// directly below it — including that turn's `Tools: N done` — so the broad
+/// completed-history check (which counts `Tools: N>0 done`) would treat the idle
+/// footer as "this prompt produced output" and hide the stranded draft. Keying
+/// stranded-detection on actual response glyphs avoids that: a dropped-Enter
+/// draft has none below it; a genuinely-submitted prompt does.
+fn tmux_lines_after_claude_prompt_show_response_output(lines: &[&str]) -> bool {
+    lines.iter().any(|line| {
+        let line = trim_prompt_line(line);
+        line.starts_with('⏺')
+            || line.starts_with("✻ ")
+            || line.contains("Baked for")
+            || line.contains("Brewed for")
+            || line.contains("Crunched for")
+            || line.contains("Cogitated for")
+    })
+}
+
 fn tmux_lines_after_claude_prompt_show_idle_suggestion_chrome(lines: &[&str]) -> bool {
     // POST-FINISH idle ghost chrome ONLY (see
     // `tmux_capture_indicates_claude_tui_actively_streaming`). A `Tools: 0 done`
@@ -477,13 +499,24 @@ pub(crate) fn tmux_capture_claude_tui_prompt_draft_backspace_budget(
             if !trim_prompt_line(line).starts_with(CLAUDE_TUI_PROMPT_MARKER) {
                 return None;
             }
+            let after_prompt = &recent[index + 1..];
             if !tmux_line_is_claude_tui_prompt_draft(line) {
-                return Some(None);
+                // A `❯ [User: …] …` line is normally submitted Discord history
+                // (its Enter landed, so it is pane scrollback, not a composer
+                // draft). But #3924: the SAME shape can be a STRANDED follow-up
+                // whose submit Enter was DROPPED — it then sits in the composer
+                // below a finished-turn block under ONLY idle-suggestion chrome.
+                // Pure capture text cannot finally separate the two; recognizing
+                // the stranded SHAPE here lets the recovery net's authoritative
+                // JSONL transcript cross-check (Idle/Unknown vs running) decide.
+                return Some(claude_tui_stranded_followup_draft_backspace_budget(
+                    line,
+                    after_prompt,
+                ));
             }
             // Claude keeps submitted prompt lines in the pane history. If the
             // prompt line is followed by rendered assistant/completion output,
             // it is historical text, not an editable composer draft.
-            let after_prompt = &recent[index + 1..];
             if tmux_lines_after_claude_prompt_show_completed_history(after_prompt)
                 || tmux_lines_after_claude_prompt_show_idle_suggestion_chrome(after_prompt)
             {
@@ -492,6 +525,70 @@ pub(crate) fn tmux_capture_claude_tui_prompt_draft_backspace_budget(
             Some(claude_tui_prompt_draft_backspace_budget_from_line(line))
         })
         .unwrap_or(None)
+}
+
+/// #3924: budget to clear a STRANDED Discord follow-up draft, or `None` when the
+/// `❯ [User: …] …` line is genuine submitted history rather than a dropped-Enter
+/// draft.
+///
+/// The recovery-net false-negative this guards against: a follow-up whose submit
+/// Enter was dropped leaves `❯ [User: …] <text>` editable in the composer,
+/// directly below a finished previous-turn block, surrounded by idle-suggestion
+/// chrome — visually identical to a post-finish idle ghost. The bare `[User:]`
+/// exclusion in `tmux_line_is_claude_tui_prompt_draft` (which keeps SUBMITTED
+/// history from blocking readiness) misclassifies that stranded draft as
+/// no-draft, so the recovery net never fires and the turn is killed at 120s.
+///
+/// Capture text alone CANNOT separate a stranded draft from a freshly-submitted
+/// still-running turn: a `Tools: 0 done` footer renders for BOTH a just-started
+/// turn AND a FINISHED 0-tool turn, so it is not a usable running signal (#3924
+/// codex re-review — keying the guard on it re-introduced the false-negative for
+/// a stranded draft below a finished 0-tool turn). This is therefore a
+/// CONSERVATIVE SHAPE gate only — it fires for a `[User:]` line that
+/// (1) sits under idle-suggestion chrome (separator + idle footer), and
+/// (2) has produced NO assistant RESPONSE output (`⏺`/`✻`) below it.
+/// It deliberately does NOT decide running-vs-stranded from the footer. The
+/// recovery net (`claude_tui_followup_stranded_prompt_draft_state`) makes that
+/// call from the AUTHORITATIVE JSONL transcript turn-state: Idle/Unknown (no
+/// in-progress turn) ⇒ stranded, recover; a running/in-progress turn ⇒ NOT
+/// recovered. The submit-confirmation Enter-retry path is independently gated by
+/// `..._ready_for_input` (false on any `Tools: 0 done` pane via its own
+/// freshly-submitted guard), so promoting this shape to a draft cannot
+/// double-submit a live turn there either.
+fn claude_tui_stranded_followup_draft_backspace_budget(
+    line: &str,
+    after_prompt: &[&str],
+) -> Option<usize> {
+    let rest = trim_prompt_line(line)
+        .strip_prefix(CLAUDE_TUI_PROMPT_MARKER)?
+        .trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{00a0}');
+    // Only AgentDesk-injected `[User: …]` text is recoverable this way; an empty
+    // composer or a non-injected suggestion ghost is handled by the normal path.
+    if !rest
+        .get(..6)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("[User:"))
+    {
+        return None;
+    }
+    // A genuine stranded draft sits under ONLY idle-suggestion chrome. (That
+    // chrome detector already returns false when a live busy/spinner marker —
+    // `esc to interrupt`/processing/thinking/running — is present, so a visibly
+    // streaming turn is excluded here without depending on the tool footer.)
+    if !tmux_lines_after_claude_prompt_show_idle_suggestion_chrome(after_prompt) {
+        return None;
+    }
+    // Assistant RESPONSE output after the line means it actually submitted AND
+    // produced output (pane history), not a dropped-Enter draft. NOTE: key on
+    // response glyphs (`..._show_response_output`), NOT the broad completed-
+    // history check — the `Tools: N done` count in the idle footer below a
+    // stranded draft belongs to the PREVIOUS finished turn, and a finished
+    // 0-tool prior turn's `Tools: 0 done` must NOT hide the draft.
+    if tmux_lines_after_claude_prompt_show_response_output(after_prompt) {
+        return None;
+    }
+    // Budget covers the whole injected line (`[User: …] <text>`) plus a margin so
+    // the clear erases the entire stranded draft.
+    Some(rest.chars().count().saturating_add(4).min(512))
 }
 
 pub(crate) fn claude_tui_prompt_draft_backspace_budget_from_line(line: &str) -> Option<usize> {
@@ -1463,6 +1560,129 @@ assistant output
             None
         );
         assert!(tmux_capture_indicates_claude_tui_idle_suggestion(capture));
+    }
+
+    #[test]
+    fn claude_prompt_draft_detector_recovers_stranded_followup_below_finished_block() {
+        // #3924 (a): turn1 finished, turn2's `[User:]` follow-up Enter was
+        // DROPPED, so it sits editable in the composer below the finished block
+        // under idle-suggestion chrome. The bare `[User:]` exclusion previously
+        // misclassified this as no-draft (idle ghost), so the recovery net never
+        // fired and the turn was killed at 120s. It must now read as a DRAFT.
+        let capture = "\
+❯ [User: 0hbujang (ID: 343742347365974026)] previous prompt
+⏺ previous response
+✻ Brewed for 2s
+─────────────────────────────────────────────────────────────────────────────
+❯ [User: 0hbujang (ID: 343742347365974026)] follow-up whose Enter was dropped
+─────────────────────────────────────────────────────────────────────────────
+  🤖 Opus(H) │ █░░░░░░░░░ │ 7%
+  CLAUDE.md: 1, MCP: 2 │ Tools: 4 done
+  ⏵⏵ bypass permissions on";
+
+        assert!(tmux_capture_indicates_claude_tui_prompt_draft(capture));
+        assert!(tmux_capture_claude_tui_prompt_draft_backspace_budget(capture).is_some());
+        // A stranded draft is NOT an idle suggestion — the two readings must not
+        // both be true, or downstream readiness/recovery would contradict.
+        assert!(!tmux_capture_indicates_claude_tui_idle_suggestion(capture));
+    }
+
+    #[test]
+    fn claude_prompt_draft_detector_recovers_stranded_followup_below_zero_tool_block() {
+        // #3924 codex re-review: the previously-MISSED shape. turn1 finished
+        // having run ZERO tools — it still renders a `Tools: 0 done` footer — and
+        // turn2's `[User:]` follow-up Enter was DROPPED below it. An earlier
+        // attempt keyed the running-guard on `Tools: 0 done`, which a finished
+        // 0-tool turn ALSO prints, so the stranded draft was hidden again. The
+        // capture-side detector must now read this as a DRAFT (the recovery net's
+        // JSONL transcript check, not the footer, decides running-vs-stranded).
+        let capture = "\
+❯ [User: 0hbujang (ID: 343742347365974026)] previous prompt
+⏺ acknowledged, nothing to run
+✻ Brewed for 1s
+─────────────────────────────────────────────────────────────────────────────
+❯ [User: 0hbujang (ID: 343742347365974026)] follow-up whose Enter was dropped
+─────────────────────────────────────────────────────────────────────────────
+  🤖 Opus(H) │ █░░░░░░░░░ │ 7%
+  CLAUDE.md: 1, MCP: 2 │ Tools: 0 done
+  ⏵⏵ bypass permissions on";
+
+        assert!(tmux_capture_indicates_claude_tui_prompt_draft(capture));
+        assert!(tmux_capture_claude_tui_prompt_draft_backspace_budget(capture).is_some());
+        assert!(!tmux_capture_indicates_claude_tui_idle_suggestion(capture));
+    }
+
+    #[test]
+    fn claude_prompt_draft_detector_keeps_idle_ghost_below_finished_block_as_not_draft() {
+        // #3924 (b): the genuine idle ghost — a finished turn left a non-injected
+        // suggestion line in the composer below the finished block. It carries NO
+        // `[User:]` injection marker, so it is leftover chrome, not a recoverable
+        // dropped-Enter draft. It must stay NOT-a-draft / idle-suggestion.
+        let capture = "\
+⏺ TUI-E2E marker
+✻ Worked for 2s
+────────────────────────────────────────────────────────────────────────────
+❯\u{00a0}좋아, 잘 동작하네
+────────────────────────────────────────────────────────────────────────────
+  🤖 Opus(H) │ ░░░░░░░░░░ │ 4%
+  CLAUDE.md: 1, MCP: 2 │ Tools: 0 done
+  ⏵⏵ bypass permissions on";
+
+        assert!(!tmux_capture_indicates_claude_tui_prompt_draft(capture));
+        assert_eq!(
+            tmux_capture_claude_tui_prompt_draft_backspace_budget(capture),
+            None
+        );
+        assert!(tmux_capture_indicates_claude_tui_idle_suggestion(capture));
+    }
+
+    #[test]
+    fn claude_prompt_draft_detector_ignores_visibly_running_user_turn_with_spinner() {
+        // #3924 codex re-review: a `[User:]` turn that is VISIBLY running shows a
+        // live busy marker (`esc to interrupt`/spinner), which the idle-suggestion
+        // chrome detector's busy guard excludes — so the capture-side detector
+        // correctly reads NO draft here WITHOUT depending on the `Tools: 0 done`
+        // footer (which is ambiguous between running and finished-0-tool). The
+        // no-spinner `Tools: 0 done` running window that the pane CANNOT resolve
+        // is instead disambiguated by the JSONL transcript in the recovery net —
+        // see the claude.rs `freshly_submitted_*` recovery test.
+        let capture = "\
+⏺ previous response
+✻ Brewed for 2s
+─────────────────────────────────────────────────────────────────────────────
+❯ [User: 0hbujang (ID: 343742347365974026)] follow-up that just submitted
+─────────────────────────────────────────────────────────────────────────────
+· Actioning… (3s · esc to interrupt)
+  CLAUDE.md: 1, MCP: 2 │ Tools: 0 done
+  ⏵⏵ bypass permissions on";
+
+        assert!(!tmux_capture_indicates_claude_tui_prompt_draft(capture));
+        assert_eq!(
+            tmux_capture_claude_tui_prompt_draft_backspace_budget(capture),
+            None
+        );
+    }
+
+    #[test]
+    fn claude_prompt_draft_detector_ignores_submitted_user_history_with_completed_output() {
+        // #3924 guard: a `[User:]` turn that submitted AND produced output is pane
+        // history, not a stranded draft. Completed-history output below the line
+        // (`⏺`/`✻ Brewed`) must keep it NOT-a-draft so readiness is not blocked.
+        let capture = "\
+✻ Crunched for 32s
+─────────────────────────────────────────────────────────────────────────────
+❯ [User: 0hbujang (ID: 343742347365974026)] earlier follow-up
+⏺ handled it
+✻ Baked for 2s
+─────────────────────────────────────────────────────────────────────────────
+  CLAUDE.md: 1, MCP: 2 │ Tools: 3 done
+  ⏵⏵ bypass permissions on";
+
+        assert!(!tmux_capture_indicates_claude_tui_prompt_draft(capture));
+        assert_eq!(
+            tmux_capture_claude_tui_prompt_draft_backspace_budget(capture),
+            None
+        );
     }
 
     #[test]

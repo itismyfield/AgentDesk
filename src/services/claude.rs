@@ -3977,6 +3977,118 @@ mod claude_tui_session_resolution_tests {
     }
 
     #[test]
+    fn stranded_followup_user_draft_below_finished_block_fires_recovery() {
+        // #3924 (a, end-to-end): turn1 finished and turn2's `[User:]` follow-up
+        // Enter was dropped, leaving it editable below the finished block under
+        // idle-suggestion chrome. Previously the bare `[User:]` exclusion read
+        // this as no-draft, so the recovery net never fired and the turn was
+        // killed at the 120s transcript timeout. The recovery net must now
+        // recognize the stranded draft (transcript Idle from the finished turn1
+        // ⇒ IdleTranscript) so it can clear + resubmit instead of killing.
+        let transcript_dir = tempfile::tempdir().unwrap();
+        let transcript_path = transcript_dir.path().join("session.jsonl");
+        std::fs::write(
+            &transcript_path,
+            r#"{"type":"system","subtype":"turn_duration","session_id":"s"}"#,
+        )
+        .unwrap();
+        let snapshot = crate::services::claude_tui::input::PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "\
+⏺ previous response
+✻ Brewed for 2s
+─────────────────────────────────────────────────────────────────────────────
+❯ [User: 0hbujang (ID: 343742347365974026)] follow-up whose Enter was dropped
+─────────────────────────────────────────────────────────────────────────────
+  CLAUDE.md: 1, MCP: 2 │ Tools: 4 done
+  ⏵⏵ bypass permissions on"
+                .to_string(),
+        };
+
+        assert_eq!(
+            claude_tui_followup_stranded_prompt_draft_state(&snapshot, &transcript_path),
+            Some(ClaudeTuiStrandedPromptDraftState::IdleTranscript)
+        );
+    }
+
+    #[test]
+    fn stranded_followup_user_draft_below_zero_tool_block_fires_recovery() {
+        // #3924 codex re-review: the previously-MISSED shape. turn1 finished
+        // having run ZERO tools (idle footer shows `Tools: 0 done`) and turn2's
+        // `[User:]` follow-up Enter was DROPPED below it. The transcript is Idle
+        // (turn1 completed, no in-progress turn), so the recovery net MUST fire —
+        // the finished-0-tool `Tools: 0 done` footer must not be read as a running
+        // turn. This is the false-negative the first fix re-introduced.
+        let transcript_dir = tempfile::tempdir().unwrap();
+        let transcript_path = transcript_dir.path().join("session.jsonl");
+        std::fs::write(
+            &transcript_path,
+            r#"{"type":"system","subtype":"turn_duration","session_id":"s"}"#,
+        )
+        .unwrap();
+        let snapshot = crate::services::claude_tui::input::PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "\
+⏺ acknowledged, nothing to run
+✻ Brewed for 1s
+─────────────────────────────────────────────────────────────────────────────
+❯ [User: 0hbujang (ID: 343742347365974026)] follow-up whose Enter was dropped
+─────────────────────────────────────────────────────────────────────────────
+  CLAUDE.md: 1, MCP: 2 │ Tools: 0 done
+  ⏵⏵ bypass permissions on"
+                .to_string(),
+        };
+
+        assert_eq!(
+            claude_tui_followup_stranded_prompt_draft_state(&snapshot, &transcript_path),
+            Some(ClaudeTuiStrandedPromptDraftState::IdleTranscript)
+        );
+    }
+
+    #[test]
+    fn freshly_submitted_zero_tool_user_turn_is_not_recovered() {
+        // #3924 codex re-review (the other direction): a `[User:]` turn that DID
+        // submit and is RUNNING shares the exact pane shape (`Tools: 0 done`, no
+        // `⏺` below the draft yet) as the stranded-below-0-tool case above — the
+        // CAPTURE cannot tell them apart. The JSONL transcript is the authority:
+        // an in-progress (assistant-streaming) turn classifies as non-Idle, so the
+        // recovery net must return None and NOT clear/resubmit a live turn.
+        let transcript_dir = tempfile::tempdir().unwrap();
+        let transcript_path = transcript_dir.path().join("running.jsonl");
+        std::fs::write(
+            &transcript_path,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"streaming"}]}}"#,
+        )
+        .unwrap();
+        let snapshot = crate::services::claude_tui::input::PromptReadinessSnapshot {
+            prompt_marker_detected: false,
+            prompt_draft_detected: true,
+            tmux_pane_alive: true,
+            capture_available: true,
+            pane_tail: "\
+⏺ previous response
+✻ Brewed for 2s
+─────────────────────────────────────────────────────────────────────────────
+❯ [User: 0hbujang (ID: 343742347365974026)] follow-up that just submitted
+─────────────────────────────────────────────────────────────────────────────
+  CLAUDE.md: 1, MCP: 2 │ Tools: 0 done
+  ⏵⏵ bypass permissions on"
+                .to_string(),
+        };
+
+        assert_eq!(
+            claude_tui_followup_stranded_prompt_draft_state(&snapshot, &transcript_path),
+            None
+        );
+    }
+
+    #[test]
     fn unknown_transcript_with_prompt_marker_and_draft_reaches_recovery() {
         let snapshot = crate::services::claude_tui::input::PromptReadinessSnapshot {
             prompt_marker_detected: true,

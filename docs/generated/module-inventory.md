@@ -5,7 +5,7 @@
 
 - Production Rust modules: `875`
 - Giant-file threshold: `>= 1000` production lines
-- Giant files: `86`
+- Giant files: `87`
 
 > `Prod` excludes lines inside `#[cfg(test)] mod` blocks; the
 > giant-file flag tracks `Prod` so inline test fixtures do not freeze a
@@ -350,7 +350,7 @@
 | `services::auto_queue::view_admin_routes` | `src/services/auto_queue/view_admin_routes.rs` | 730 | 730 | 0 |  |
 | `services::automation_candidate_contract` | `src/services/automation_candidate_contract.rs` | 127 | 87 | 40 |  |
 | `services::automation_candidate_materializer` | `src/services/automation_candidate_materializer.rs` | 844 | 844 | 0 |  |
-| `services::claude` | `src/services/claude.rs` | 4099 | 2969 | 1130 | giant-file |
+| `services::claude` | `src/services/claude.rs` | 4211 | 2969 | 1242 | giant-file |
 | `services::claude_compact_trigger` | `src/services/claude_compact_trigger.rs` | 428 | 248 | 180 |  |
 | `services::claude_e` | `src/services/claude_e/mod.rs` | 18 | 18 | 0 |  |
 | `services::claude_e::cancellation` | `src/services/claude_e/cancellation.rs` | 3 | 3 | 0 |  |
@@ -878,7 +878,7 @@
 | `services::shell_guard` | `src/services/shell_guard.rs` | 419 | 419 | 0 |  |
 | `services::slo` | `src/services/slo/mod.rs` | 533 | 506 | 27 |  |
 | `services::termination_audit` | `src/services/termination_audit.rs` | 223 | 223 | 0 |  |
-| `services::tmux_common` | `src/services/tmux_common.rs` | 1720 | 991 | 729 |  |
+| `services::tmux_common` | `src/services/tmux_common.rs` | 1940 | 1088 | 852 | giant-file |
 | `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 241 | 241 | 0 |  |
 | `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 720 | 677 | 43 |  |
 | `services::tool_output_guard` | `src/services/tool_output_guard.rs` | 100 | 100 | 0 |  |
