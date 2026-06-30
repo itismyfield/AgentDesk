@@ -574,7 +574,7 @@
 | `services::discord::router::message_handler::goal_lifecycle` | `src/services/discord/router/message_handler/goal_lifecycle.rs` | 251 | 212 | 39 |  |
 | `services::discord::router::message_handler::headless_turn` | `src/services/discord/router/message_handler/headless_turn.rs` | 1687 | 1543 | 144 | giant-file |
 | `services::discord::router::message_handler::intake_turn` | `src/services/discord/router/message_handler/intake_turn.rs` | 2845 | 2797 | 48 | giant-file |
-| `services::discord::router::message_handler::intake_turn::race_loss` | `src/services/discord/router/message_handler/intake_turn/race_loss.rs` | 544 | 544 | 0 |  |
+| `services::discord::router::message_handler::intake_turn::race_loss` | `src/services/discord/router/message_handler/intake_turn/race_loss.rs` | 619 | 585 | 34 |  |
 | `services::discord::router::message_handler::intake_turn::turn_watchdog` | `src/services/discord/router/message_handler/intake_turn/turn_watchdog.rs` | 264 | 264 | 0 |  |
 | `services::discord::router::message_handler::intake_turn::voice_intake` | `src/services/discord/router/message_handler/intake_turn/voice_intake.rs` | 155 | 155 | 0 |  |
 | `services::discord::router::message_handler::provider_isolation` | `src/services/discord/router/message_handler/provider_isolation.rs` | 505 | 505 | 0 |  |
@@ -886,7 +886,7 @@
 | `services::tui_turn_state` | `src/services/tui_turn_state.rs` | 2211 | 909 | 1302 |  |
 | `services::turn_cancel_finalizer` | `src/services/turn_cancel_finalizer.rs` | 479 | 150 | 329 |  |
 | `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 564 | 436 | 128 |  |
-| `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 5484 | 3184 | 2300 | giant-file |
+| `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 5616 | 3184 | 2432 | giant-file |
 | `services::turn_orchestrator::registry_purge` | `src/services/turn_orchestrator/registry_purge.rs` | 816 | 293 | 523 |  |
 | `supervisor` | `src/supervisor/mod.rs` | 1045 | 916 | 129 |  |
 | `ui` | `src/ui/mod.rs` | 1 | 1 | 0 |  |
