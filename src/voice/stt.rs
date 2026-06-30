@@ -25,8 +25,10 @@ const STT_TIMEOUT: Duration = Duration::from_secs(120);
 const EMPTY_RETRY_DELAY: Duration = Duration::from_millis(300);
 
 // Volume gating (ffmpeg `volumedetect` thresholds, in dBFS).
-// Utterances below BOTH thresholds are treated as silence/noise and skipped.
-const LOW_VOLUME_MEAN_DB: f32 = -35.0;
+// An utterance is treated as silence/noise (and skipped before whisper) only
+// when BOTH its mean volume is below the configured mean floor
+// (`SttConfig::speech_start_db`, sourced from `voice.thresholds.speech_start_db`)
+// AND its peak volume is below `LOW_VOLUME_MAX_DB`.
 const LOW_VOLUME_MAX_DB: f32 = -12.0;
 
 // whisper-cli decoding thresholds passed via CLI flags.
@@ -38,7 +40,7 @@ const WHISPER_ENTROPY_THRESHOLD: &str = "2.2";
 /// `-lpt` log-probability threshold: decoder fallback trigger when avg logprob falls below this.
 const WHISPER_LOGPROB_THRESHOLD: &str = "-0.8";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SttConfig {
     pub(crate) ffmpeg_command: String,
     pub(crate) whisper_command: String,
@@ -46,6 +48,10 @@ pub(crate) struct SttConfig {
     pub(crate) language: String,
     pub(crate) temp_dir: PathBuf,
     pub(crate) timeout: Duration,
+    /// Mean-volume floor (dBFS) for the low-volume silence gate, sourced from
+    /// `voice.thresholds.speech_start_db` (#3912). Utterances whose mean volume
+    /// is below this (and whose peak is below `LOW_VOLUME_MAX_DB`) are skipped.
+    pub(crate) speech_start_db: f32,
     pub(crate) stream_overlap: StreamingOverlapConfig,
 }
 
@@ -58,6 +64,7 @@ impl SttConfig {
             language: config.stt.language.clone(),
             temp_dir: expand_tilde(&config.audio.temp_dir),
             timeout: STT_TIMEOUT,
+            speech_start_db: config.thresholds.speech_start_db,
             stream_overlap: StreamingOverlapConfig {
                 sample_rate_hz: WHISPER_STREAM_SAMPLE_RATE_HZ,
                 step_ms: config.stt.stream.step_ms,
@@ -218,7 +225,7 @@ impl SttRuntime {
             );
             return Ok(false);
         };
-        Ok(levels.mean_db < LOW_VOLUME_MEAN_DB && levels.max_db < LOW_VOLUME_MAX_DB)
+        Ok(levels.mean_db < self.config.speech_start_db && levels.max_db < LOW_VOLUME_MAX_DB)
     }
 
     async fn convert_for_whisper(&self, wav_path: &Path, output_path: &Path) -> Result<()> {
@@ -976,6 +983,7 @@ mod tests {
             language: "ko".to_string(),
             temp_dir,
             timeout: Duration::from_secs(5),
+            speech_start_db: -35.0,
             stream_overlap: StreamingOverlapConfig {
                 sample_rate_hz: 1_000,
                 step_ms: 4,
@@ -1051,6 +1059,59 @@ mod tests {
         assert_eq!(
             *invocations.lock().unwrap(),
             vec![SttCommandKind::VolumeDetect]
+        );
+    }
+
+    /// Regression guard for #3912: `voice.thresholds.speech_start_db` must
+    /// actually reach the low-volume gate. With the same audio levels, only the
+    /// configured threshold differs, and the gate decision must flip — proving
+    /// the config value is live rather than a no-op.
+    #[tokio::test]
+    async fn speech_start_db_threshold_is_wired_into_low_volume_gate() {
+        let temp = tempfile::tempdir().unwrap();
+        let wav = temp.path().join("clip.wav");
+        // ffmpeg volumedetect reports mean -38 dB, peak -20 dB (peak is below the
+        // -12 dB max floor, so the silence decision hinges on the mean threshold).
+        let runner: SttCommandRunner = Arc::new(move |_invocation| {
+            Box::pin(async move {
+                Ok(SttCommandOutput {
+                    stderr: b"mean_volume: -38.0 dB\nmax_volume: -20.0 dB".to_vec(),
+                    stdout: Vec::new(),
+                })
+            })
+        });
+
+        // Strict floor (-45): mean -38 is *above* -45 -> treated as speech.
+        let mut strict = test_config(temp.path().to_path_buf());
+        strict.speech_start_db = -45.0;
+        let strict_runtime = SttRuntime::with_runner(strict, runner.clone());
+        assert!(
+            !strict_runtime.is_low_volume_utterance(&wav).await.unwrap(),
+            "mean -38 dB must NOT be gated as silence when speech_start_db is -45"
+        );
+
+        // Permissive floor (-35): mean -38 is *below* -35 -> treated as silence.
+        let mut permissive = test_config(temp.path().to_path_buf());
+        permissive.speech_start_db = -35.0;
+        let permissive_runtime = SttRuntime::with_runner(permissive, runner);
+        assert!(
+            permissive_runtime
+                .is_low_volume_utterance(&wav)
+                .await
+                .unwrap(),
+            "mean -38 dB MUST be gated as silence when speech_start_db is -35"
+        );
+    }
+
+    /// #3912: the config default must equal the effective gate default so that
+    /// the documented `voice.thresholds.speech_start_db` matches real behavior.
+    #[test]
+    fn speech_start_db_default_matches_effective_low_volume_gate() {
+        assert_eq!(VoiceConfig::default().thresholds.speech_start_db, -35.0);
+        assert_eq!(
+            SttConfig::from_voice_config(&VoiceConfig::default()).speech_start_db,
+            -35.0,
+            "config default must reach the gate unchanged (config-default == gate-default)"
         );
     }
 

@@ -332,20 +332,27 @@ impl Default for VoiceBargeInConfig {
     }
 }
 
+/// dBFS thresholds for the voice STT speech-vs-silence gate.
+///
+/// `speech_start_db` is the mean-volume floor below which an incoming utterance
+/// is treated as silence/noise and skipped before whisper. It is wired into the
+/// ffmpeg `volumedetect` gate via [`SttConfig::speech_start_db`](super::stt);
+/// its default MUST stay in sync with the effective gate default so that
+/// config-default == gate-default (see the `speech_start_db_default_matches_*`
+/// test in `stt.rs`).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub(crate) struct VoiceDbThresholds {
     pub speech_start_db: f32,
-    pub speech_end_db: f32,
-    pub wake_word_db: f32,
 }
 
 impl Default for VoiceDbThresholds {
     fn default() -> Self {
         Self {
-            speech_start_db: -45.0,
-            speech_end_db: -55.0,
-            wake_word_db: -50.0,
+            // Matches the previously-effective hardcoded stt low-volume gate
+            // (`LOW_VOLUME_MEAN_DB`); reconciled from the old documented -45.0
+            // default which never reached the gate (#3912).
+            speech_start_db: -35.0,
         }
     }
 }
@@ -454,7 +461,6 @@ spoken_result:
             PathBuf::from("~/.adk/voice/transcripts")
         );
         assert_eq!(config.thresholds.speech_start_db, -42.5);
-        assert_eq!(config.thresholds.speech_end_db, -55.0);
         assert_eq!(config.stt, VoiceSttConfig::default());
         assert_eq!(config.tts.backend, VoiceTtsBackendKind::Edge);
         assert_eq!(config.tts.edge.command, DEFAULT_EDGE_TTS_COMMAND);

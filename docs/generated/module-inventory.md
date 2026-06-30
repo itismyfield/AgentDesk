@@ -900,7 +900,7 @@
 | `voice::barge_in` | `src/voice/barge_in.rs` | 937 | 592 | 345 |  |
 | `voice::cancel_tombstone` | `src/voice/cancel_tombstone.rs` | 201 | 131 | 70 |  |
 | `voice::commands` | `src/voice/commands.rs` | 839 | 541 | 298 |  |
-| `voice::config` | `src/voice/config.rs` | 595 | 372 | 223 |  |
+| `voice::config` | `src/voice/config.rs` | 601 | 379 | 222 |  |
 | `voice::flight` | `src/voice/flight.rs` | 252 | 138 | 114 |  |
 | `voice::metrics` | `src/voice/metrics.rs` | 377 | 275 | 102 |  |
 | `voice::progress` | `src/voice/progress.rs` | 448 | 353 | 95 |  |
@@ -909,7 +909,7 @@
 | `voice::runtime_boundary` | `src/voice/runtime_boundary.rs` | 281 | 212 | 69 |  |
 | `voice::runtime_process` | `src/voice/runtime_process.rs` | 217 | 158 | 59 |  |
 | `voice::sanitizer` | `src/voice/sanitizer.rs` | 328 | 247 | 81 |  |
-| `voice::stt` | `src/voice/stt.rs` | 1215 | 964 | 251 |  |
+| `voice::stt` | `src/voice/stt.rs` | 1276 | 971 | 305 |  |
 | `voice::stt_streaming` | `src/voice/stt_streaming.rs` | 293 | 185 | 108 |  |
 | `voice::tts` | `src/voice/tts/mod.rs` | 939 | 557 | 382 |  |
 | `voice::tts::chunks` | `src/voice/tts/chunks.rs` | 387 | 270 | 117 |  |
