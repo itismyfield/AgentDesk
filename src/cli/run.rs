@@ -553,10 +553,6 @@ pub(crate) fn execute(command: Commands) -> Result<()> {
         }
         Commands::Migrate { action } => exit_for_cli(match action {
             MigrateAction::Openclaw(args) => super::migrate::cmd_migrate_openclaw(args),
-            #[allow(deprecated)]
-            MigrateAction::PostgresCutover(args) => {
-                super::direct::run_async(super::migrate::cmd_migrate_postgres_cutover(args))
-            }
         }),
         Commands::ProviderCli(args) => exit_for_cli(super::provider_cli::cmd_provider_cli(args)),
         Commands::Show { action } => exit_for_cli(handle_show(action)),

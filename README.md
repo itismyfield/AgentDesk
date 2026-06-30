@@ -666,8 +666,9 @@ agentdesk api GET /api/health                    # Public safe health summary
 agentdesk api GET /api/health/detail             # Authenticated/local detailed health
 agentdesk deploy                                 # Build workspace + promote to release
 agentdesk migrate openclaw <ARGS>                # Import OpenClaw durable state
-# `migrate postgres-cutover` is retired (production cutover landed 2026-04-19); the
-# subcommand is parsed but returns an error so help/scripts don't break. Do not run it.
+# `migrate postgres-cutover` was retired (production cutover landed 2026-04-19) and the
+# subcommand has been removed. Restore src/cli/migrate/postgres_cutover.rs from history
+# for an explicitly approved emergency re-cutover.
 agentdesk provider-cli <SUBCOMMAND>              # Provider CLI safe-migration ops (status/plan/upgrade/canary/promote/rollback/cleanup/run/resume/smoke)
 
 # Process wrappers (internal — invoked by tmux session lifecycle)

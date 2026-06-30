@@ -53,7 +53,7 @@
 | `app_state` | `src/app_state.rs` | 47 | 47 | 0 |  |
 | `bootstrap` | `src/bootstrap.rs` | 93 | 93 | 0 |  |
 | `cli` | `src/cli/mod.rs` | 21 | 21 | 0 |  |
-| `cli::args` | `src/cli/args.rs` | 1047 | 979 | 68 |  |
+| `cli::args` | `src/cli/args.rs` | 1037 | 969 | 68 |  |
 | `cli::client` | `src/cli/client.rs` | 2563 | 2378 | 185 | giant-file |
 | `cli::dcserver` | `src/cli/dcserver.rs` | 1627 | 1627 | 0 | giant-file |
 | `cli::direct` | `src/cli/direct.rs` | 1813 | 1813 | 0 | giant-file |
@@ -65,14 +65,14 @@
 | `cli::doctor::orchestrator` | `src/cli/doctor/orchestrator.rs` | 4498 | 4381 | 117 | giant-file |
 | `cli::doctor::startup` | `src/cli/doctor/startup.rs` | 623 | 553 | 70 |  |
 | `cli::init` | `src/cli/init.rs` | 1520 | 1444 | 76 | giant-file |
-| `cli::migrate` | `src/cli/migrate.rs` | 346 | 346 | 0 |  |
+| `cli::migrate` | `src/cli/migrate.rs` | 317 | 317 | 0 |  |
 | `cli::migrate::apply` | `src/cli/migrate/apply.rs` | 3237 | 3237 | 0 | giant-file |
 | `cli::migrate::plan` | `src/cli/migrate/plan.rs` | 1513 | 1513 | 0 | giant-file |
 | `cli::migrate::source` | `src/cli/migrate/source.rs` | 1612 | 1612 | 0 | giant-file |
 | `cli::monitoring` | `src/cli/monitoring.rs` | 123 | 123 | 0 |  |
 | `cli::provider_cli` | `src/cli/provider_cli/mod.rs` | 1039 | 1039 | 0 | giant-file |
 | `cli::query` | `src/cli/query.rs` | 462 | 379 | 83 |  |
-| `cli::run` | `src/cli/run.rs` | 667 | 667 | 0 |  |
+| `cli::run` | `src/cli/run.rs` | 663 | 663 | 0 |  |
 | `cli::utils` | `src/cli/utils.rs` | 581 | 473 | 108 |  |
 | `compat` | `src/compat/mod.rs` | 39 | 39 | 0 |  |
 | `compat::legacy_db_paths` | `src/compat/legacy_db_paths.rs` | 12 | 12 | 0 |  |
