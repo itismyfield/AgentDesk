@@ -403,6 +403,19 @@
 
 ### Audited touches
 
+- #3870 fail-closed control-plane bind: `server::run` now resolves the HTTP
+  listener host through `routes::resolve_secure_bind_host`, which force-binds to
+  loopback when `server.host` is non-loopback AND `server.auth_token` is unset
+  (escape hatch: `server.allow_insecure_nonloopback_bind=true`). Classification:
+  control-plane, per-node startup — every node (leader or follower) runs this
+  guard at its own dcserver boot; it is NOT leader-gated and adds no cross-node
+  routing or PG-lease assumption. Multinode note: all live cross-node
+  coordination (heartbeat/leader-epoch/dispatch claims) is Postgres-based and
+  deploy is SSH-based, so force-loopback does not affect cluster comms. The only
+  cross-node HTTP path (session-forwarding to a peer's `cluster.api_base_url`)
+  is inbound-only on the receiver and already requires `auth_token`, which by
+  design exempts that node from the force-loopback downgrade.
+
 - #3739 worker-local loop-owned terminal supervision: `worker_registry` now records
   unexpected worker-local `LoopOwned` Tokio task return/panic as local runtime
   status and tracing with `auto_restart=false`. Shutdown remains worker-local:

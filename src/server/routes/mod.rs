@@ -96,6 +96,92 @@ pub const EXPLICIT_AUTH_MUTATION_ROUTES: &[&str] = &[
 /// explain why an endpoint may reject all callers on auth-less installs.
 pub const FAIL_CLOSED_OPERATOR_MUTATION_ROUTES: &[&str] = &[];
 
+/// Returns true when `host` resolves to a loopback interface (so the bound
+/// control-plane is only reachable from the same machine). Accepts:
+/// - the literal `localhost`, case-insensitively and tolerating the
+///   trailing-dot FQDN form (`localhost.`, `LOCALHOST` — DNS-equivalent);
+/// - bracketed/unbracketed IPv4 / IPv6 literals whose `is_loopback()` holds
+///   (`127.0.0.0/8`, `::1`);
+/// - IPv4-mapped IPv6 loopback (`::ffff:127.0.0.0/104`, i.e. the mapped
+///   `127.0.0.0/8`), which `Ipv6Addr::is_loopback()` alone does NOT cover.
+///
+/// Anything else — `0.0.0.0`, `::` (all-interfaces), a LAN address, or an
+/// unparseable string — is treated as non-loopback (fail-safe: unknown hosts
+/// are assumed LAN-exposed, so the guard fires). (#3870)
+pub fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim();
+    // Hostname path: tolerate case and the DNS trailing-dot (`localhost.`).
+    let hostname = host.strip_suffix('.').unwrap_or(host);
+    if hostname.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    // IP-literal path: strip optional brackets around an IPv6 literal.
+    let stripped = host
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(host);
+    match stripped.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => v4.is_loopback(),
+        // `Ipv6Addr::is_loopback()` is only `::1`; also accept an IPv4-mapped
+        // loopback (`::ffff:127.0.0.0/8`) by checking the embedded IPv4.
+        Ok(std::net::IpAddr::V6(v6)) => {
+            v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+        }
+        Err(_) => false,
+    }
+}
+
+/// Startup bind-security decision (#3870). The control-plane auth middleware is
+/// fail-open when `server.auth_token` is unset (`auth.rs` — no token means
+/// pass-through), so binding a token-less server to a non-loopback interface
+/// exposes the entire mutating control-plane (deploy gate, agent CRUD, dispatch
+/// create) to the LAN with no auth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BindSecurityDecision {
+    /// Bind to the requested host unchanged — it is either loopback, a token is
+    /// configured, or the operator explicitly opted into insecure LAN exposure.
+    BindRequested,
+    /// Requested host is non-loopback AND no auth token is configured AND the
+    /// operator did not opt in: downgrade the bind to loopback so the
+    /// unauthenticated control-plane stays off the LAN. The server still boots
+    /// and serves locally — this is graceful degradation, not a hard stop.
+    ForcedLoopback { requested_host: String },
+}
+
+/// Resolves the host the HTTP control-plane should actually bind to, applying
+/// the #3870 fail-closed guard. Returns `(effective_host, decision)`.
+///
+/// Force-loopback fires only for the precise dangerous combination
+/// `non-loopback host + auth_token unset + no opt-in`. Loopback hosts, any
+/// configured `auth_token`, or `allow_insecure_nonloopback_bind = true` all
+/// bind the requested host unchanged. Pure + side-effect free so the startup
+/// path can log/act on the decision and tests can assert it directly.
+pub fn resolve_secure_bind_host(config: &crate::config::Config) -> (String, BindSecurityDecision) {
+    let token_set = config
+        .server
+        .auth_token
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|token| !token.is_empty());
+
+    if is_loopback_host(&config.server.host)
+        || token_set
+        || config.server.allow_insecure_nonloopback_bind
+    {
+        return (
+            config.server.host.clone(),
+            BindSecurityDecision::BindRequested,
+        );
+    }
+
+    (
+        crate::config::ServerConfig::loopback(),
+        BindSecurityDecision::ForcedLoopback {
+            requested_host: config.server.host.clone(),
+        },
+    )
+}
+
 /// Emits a structured boot-time audit identifying whether the explicit-auth
 /// mutation routes will fail-open with the current configuration. Called
 /// once from `server::run` after the listener binds. Does NOT change
@@ -211,6 +297,174 @@ mod audit_explicit_auth_routes_tests {
         config.server.auth_token = Some("   ".to_string());
         config.kanban.manager_channel_id = Some("".to_string());
         audit_explicit_auth_routes_on_boot(&config);
+    }
+}
+
+#[cfg(test)]
+mod bind_security_tests {
+    //! #3870 — startup must fail closed (force-loopback) for the precise
+    //! combination of a non-loopback bind host with no `server.auth_token`,
+    //! and must NOT downgrade loopback hosts or hosts that have a token (or an
+    //! explicit insecure opt-in). Acceptance criterion: the guard fires for
+    //! `(non-loopback host, auth_token = None)` and does NOT fire for loopback
+    //! or for `non-loopback + token-set`.
+    use super::*;
+
+    fn config_with(host: &str, token: Option<&str>, allow_insecure: bool) -> crate::config::Config {
+        let mut config = crate::config::Config::default();
+        config.server.host = host.to_string();
+        config.server.port = 8791;
+        config.server.auth_token = token.map(str::to_string);
+        config.server.allow_insecure_nonloopback_bind = allow_insecure;
+        config
+    }
+
+    #[test]
+    fn loopback_host_classification() {
+        for host in [
+            "127.0.0.1",
+            "127.0.0.53",
+            "127.255.255.254", // 127.0.0.0/8 upper edge
+            "localhost",
+            "LOCALHOST",
+            "localhost.",  // trailing-dot FQDN form (DNS-equivalent)
+            "LocalHost.",  // case + trailing dot together
+            " localhost ", // surrounding whitespace
+            "::1",
+            "[::1]",
+            "::ffff:127.0.0.1", // IPv4-mapped loopback
+            "::ffff:127.1.2.3", // IPv4-mapped, still inside 127.0.0.0/8
+            "[::ffff:127.0.0.1]",
+        ] {
+            assert!(is_loopback_host(host), "{host} should be loopback");
+        }
+        for host in [
+            "0.0.0.0",
+            "::",                 // all-interfaces IPv6 — must stay non-loopback
+            "::ffff:0.0.0.0",     // IPv4-mapped all-interfaces
+            "::ffff:192.168.1.1", // IPv4-mapped LAN address
+            "192.168.1.10",
+            "10.0.0.5",
+            "example.com",
+            "localhostx", // not localhost
+            "",
+            "  ",
+        ] {
+            assert!(!is_loopback_host(host), "{host} should be non-loopback");
+        }
+    }
+
+    #[test]
+    fn nonloopback_without_token_is_forced_to_loopback() {
+        // The dangerous combination — the guard MUST fire.
+        for host in ["0.0.0.0", "::", "192.168.1.10"] {
+            let config = config_with(host, None, false);
+            let (effective, decision) = resolve_secure_bind_host(&config);
+            assert_eq!(
+                decision,
+                BindSecurityDecision::ForcedLoopback {
+                    requested_host: host.to_string(),
+                },
+                "{host} + no token must force loopback"
+            );
+            assert!(
+                is_loopback_host(&effective),
+                "{host} downgrade must bind a loopback address, got {effective}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_token_string_counts_as_unset_and_forces_loopback() {
+        // `auth_token: ""`/whitespace must NOT count as configured (mirrors the
+        // audit's empty-string handling) — still the dangerous combination.
+        let config = config_with("0.0.0.0", Some("   "), false);
+        let (effective, decision) = resolve_secure_bind_host(&config);
+        assert_eq!(
+            decision,
+            BindSecurityDecision::ForcedLoopback {
+                requested_host: "0.0.0.0".to_string(),
+            }
+        );
+        assert!(is_loopback_host(&effective));
+    }
+
+    #[test]
+    fn loopback_host_is_never_downgraded() {
+        // No token, but already loopback — guard must NOT fire (no false alarm).
+        for host in ["127.0.0.1", "localhost", "::1"] {
+            let config = config_with(host, None, false);
+            let (effective, decision) = resolve_secure_bind_host(&config);
+            assert_eq!(
+                decision,
+                BindSecurityDecision::BindRequested,
+                "{host} is loopback — guard must not fire"
+            );
+            assert_eq!(effective, host, "loopback host must bind unchanged");
+        }
+    }
+
+    #[test]
+    fn loopback_notation_edges_are_not_force_downgraded() {
+        // Codex review (#3870): non-`is_loopback()` loopback notations must not
+        // over-fire the guard onto an already-loopback config (no token set).
+        // `localhost.` (trailing-dot FQDN) and IPv4-mapped IPv6 loopback both
+        // resolve to loopback and must bind unchanged.
+        for host in [
+            "localhost.",
+            "LocalHost.",
+            "::ffff:127.0.0.1",
+            "[::ffff:127.0.0.1]",
+        ] {
+            let config = config_with(host, None, false);
+            let (effective, decision) = resolve_secure_bind_host(&config);
+            assert_eq!(
+                decision,
+                BindSecurityDecision::BindRequested,
+                "{host} is a loopback notation — guard must NOT fire"
+            );
+            assert_eq!(effective, host, "{host} must bind unchanged");
+        }
+    }
+
+    #[test]
+    fn all_interfaces_hosts_still_force_loopback() {
+        // Regression guard for the edge fix above: the IPv4/IPv6 all-interfaces
+        // wildcards and IPv4-mapped non-loopback must STILL force loopback when
+        // no token is set — the security behavior is unchanged.
+        for host in ["0.0.0.0", "::", "::ffff:192.168.1.1"] {
+            let config = config_with(host, None, false);
+            let (effective, decision) = resolve_secure_bind_host(&config);
+            assert_eq!(
+                decision,
+                BindSecurityDecision::ForcedLoopback {
+                    requested_host: host.to_string(),
+                },
+                "{host} is non-loopback — guard must still fire"
+            );
+            assert!(is_loopback_host(&effective));
+        }
+    }
+
+    #[test]
+    fn nonloopback_with_token_binds_requested_host() {
+        // A configured token closes the fail-open, so LAN exposure is allowed.
+        let config = config_with("0.0.0.0", Some("s3cret"), false);
+        let (effective, decision) = resolve_secure_bind_host(&config);
+        assert_eq!(decision, BindSecurityDecision::BindRequested);
+        assert_eq!(
+            effective, "0.0.0.0",
+            "token-set non-loopback must bind as requested"
+        );
+    }
+
+    #[test]
+    fn explicit_insecure_optin_binds_requested_host() {
+        // Escape hatch: operator knowingly exposes a token-less control-plane.
+        let config = config_with("0.0.0.0", None, true);
+        let (effective, decision) = resolve_secure_bind_host(&config);
+        assert_eq!(decision, BindSecurityDecision::BindRequested);
+        assert_eq!(effective, "0.0.0.0");
     }
 }
 

@@ -485,7 +485,27 @@ pub(crate) async fn run(
     ));
     let app = app.fallback_service(dashboard_service);
 
-    let addr = format!("{}:{}", config.server.host, config.server.port);
+    // #3870 — fail closed on the dangerous combination of a non-loopback bind
+    // host with no `server.auth_token`. The control-plane auth middleware is
+    // fail-open when no token is set, so exposing it on the LAN would hand the
+    // entire mutating control-plane (deploy gate, agent CRUD, dispatch create)
+    // to any LAN peer. Force the bind to loopback instead of refusing to boot,
+    // so the server still serves locally — graceful degradation, not a brick.
+    let (bind_host, bind_decision) = routes::resolve_secure_bind_host(&config);
+    if let routes::BindSecurityDecision::ForcedLoopback { requested_host } = &bind_decision {
+        tracing::error!(
+            requested_host = %requested_host,
+            forced_host = %bind_host,
+            port = config.server.port,
+            "SECURITY (#3870): server.host={requested_host} is non-loopback and \
+             server.auth_token is unset — the control-plane auth middleware is fail-open, so \
+             this would expose deploy-gate / agent-CRUD / dispatch endpoints to the LAN with no \
+             auth. Force-binding to loopback ({bind_host}) instead. The server still serves \
+             locally. To expose on the LAN intentionally, set server.auth_token (recommended) \
+             or server.allow_insecure_nonloopback_bind=true."
+        );
+    }
+    let addr = format!("{}:{}", bind_host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("HTTP server listening on {addr}");
     routes::audit_explicit_auth_routes_on_boot(&config);
