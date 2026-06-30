@@ -768,10 +768,10 @@ impl Default for BackoffPolicy {
     }
 }
 
-/// `on_failure` policy for stages (#1082). DECLARATIVE-ONLY config surface.
-// reason: persisted + validated by services::pipeline_routes, but NOT enforced
-// at runtime — no executor reads on_failure/retry/backoff (follow-up #3916).
-#[allow(dead_code)]
+/// `on_failure` policy for stages/states (#1082, wired by #3916).
+// reason: consumed by the live timeout executor — `decide_timeout`
+// (src/engine/transition.rs) resolves `TimeoutConfig::effective_on_failure` and
+// drives the runtime decision (retry-with-backoff / escalate / fallback / fail).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum OnFailurePolicy {
@@ -825,14 +825,24 @@ pub struct TimeoutConfig {
     /// Backoff policy between retries (#1082).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backoff: Option<BackoffPolicy>,
+    /// Typed failure policy (#1082, wired by #3916). When set it drives the live
+    /// timeout decision in `decide_timeout`: `retry-with-backoff` retries up to
+    /// `max_retries` honoring `backoff` then applies the exhaust policy;
+    /// `escalate`/`fail` act immediately; `fallback-stage` jumps to
+    /// `on_failure_target`. Absent (and no `max_retries`/`backoff`) ⇒ the legacy
+    /// immediate `on_exhaust` transition, so the wire-up stays additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_failure: Option<OnFailurePolicy>,
+    /// Target state for `on_failure: fallback-stage` (#1082).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_failure_target: Option<String>,
     #[serde(default)]
     pub condition: Option<String>,
 }
 
-// reason: #1082 timeout retry/backoff resolution surface. DECLARATIVE-ONLY:
-// consumed only by the #1082 DoD unit tests; NOT wired to any live timeout
-// executor (decide_timeout reads only legacy on_exhaust). Follow-up #3916.
-#[allow(dead_code)]
+// reason: #1082 timeout retry/backoff resolution surface, wired into the live
+// timeout executor by #3916 — `decide_timeout` (src/engine/transition.rs) reads
+// these resolvers to honor max_retries/backoff/on_failure/on_exhaust at runtime.
 impl TimeoutConfig {
     /// Default max_retries when caller did not specify (1, per #1082 DoD).
     pub const DEFAULT_MAX_RETRIES: u32 = 1;
@@ -867,6 +877,26 @@ impl TimeoutConfig {
                 _ => 15 * 60,
             },
         }
+    }
+
+    /// Whether a typed retry/failure policy is configured (#3916). When false,
+    /// `decide_timeout` keeps the legacy immediate `on_exhaust` transition so
+    /// the wire-up is additive — default/None pipelines are unchanged.
+    pub fn retry_policy_engaged(&self) -> bool {
+        self.on_failure.is_some() || self.max_retries.is_some() || self.backoff.is_some()
+    }
+
+    /// Resolve the effective `OnFailurePolicy` (#3916). An explicit `on_failure`
+    /// wins; otherwise a configured `max_retries`/`backoff` implies
+    /// retry-with-backoff; absent ⇒ the backward-compatible `Fail`.
+    pub fn effective_on_failure(&self) -> OnFailurePolicy {
+        if let Some(policy) = self.on_failure {
+            return policy;
+        }
+        if self.max_retries.is_some() || self.backoff.is_some() {
+            return OnFailurePolicy::RetryWithBackoff;
+        }
+        OnFailurePolicy::Fail
     }
 }
 

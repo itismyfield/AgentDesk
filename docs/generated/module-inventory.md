@@ -170,8 +170,8 @@
 | `engine::ops::timeouts_ops` | `src/engine/ops/timeouts_ops.rs` | 529 | 508 | 21 |  |
 | `engine::ops::turn_ops` | `src/engine/ops/turn_ops.rs` | 348 | 255 | 93 |  |
 | `engine::sql_guard` | `src/engine/sql_guard.rs` | 189 | 189 | 0 |  |
-| `engine::transition` | `src/engine/transition.rs` | 1178 | 843 | 335 |  |
-| `engine::transition_executor_pg` | `src/engine/transition_executor_pg.rs` | 255 | 255 | 0 |  |
+| `engine::transition` | `src/engine/transition.rs` | 1579 | 984 | 595 |  |
+| `engine::transition_executor_pg` | `src/engine/transition_executor_pg.rs` | 279 | 279 | 0 |  |
 | `error` | `src/error.rs` | 159 | 159 | 0 |  |
 | `eventbus` | `src/eventbus.rs` | 161 | 161 | 0 |  |
 | `github` | `src/github/mod.rs` | 727 | 727 | 0 |  |
@@ -192,7 +192,7 @@
 | `lib` | `src/lib.rs` | 161 | 161 | 0 |  |
 | `logging` | `src/logging.rs` | 427 | 373 | 54 |  |
 | `manual_intervention` | `src/manual_intervention.rs` | 35 | 35 | 0 |  |
-| `pipeline` | `src/pipeline.rs` | 1500 | 1366 | 134 | giant-file |
+| `pipeline` | `src/pipeline.rs` | 1530 | 1396 | 134 | giant-file |
 | `receipt` | `src/receipt.rs` | 1842 | 1842 | 0 | giant-file |
 | `reconcile` | `src/reconcile.rs` | 2911 | 1868 | 1043 | giant-file |
 | `runtime_layout` | `src/runtime_layout/mod.rs` | 773 | 715 | 58 |  |
@@ -807,7 +807,7 @@
 | `services::opencode` | `src/services/opencode.rs` | 3125 | 2760 | 365 | giant-file |
 | `services::operator_connectors` | `src/services/operator_connectors.rs` | 477 | 293 | 184 |  |
 | `services::pipeline_override` | `src/services/pipeline_override.rs` | 1001 | 333 | 668 |  |
-| `services::pipeline_routes` | `src/services/pipeline_routes.rs` | 861 | 670 | 191 |  |
+| `services::pipeline_routes` | `src/services/pipeline_routes.rs` | 862 | 671 | 191 |  |
 | `services::platform` | `src/services/platform/mod.rs` | 26 | 26 | 0 |  |
 | `services::platform::binary_resolver` | `src/services/platform/binary_resolver.rs` | 1483 | 1381 | 102 | giant-file |
 | `services::platform::dump_tool` | `src/services/platform/dump_tool.rs` | 97 | 97 | 0 |  |

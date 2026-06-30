@@ -60,7 +60,7 @@
 | `src/engine/mod.rs` | 1279 |
 | `src/engine/ops/db_ops.rs` | 1244 |
 | `src/github/sync.rs` | 1513 |
-| `src/pipeline.rs` | 1366 |
+| `src/pipeline.rs` | 1396 |
 | `src/receipt.rs` | 1842 |
 | `src/reconcile.rs` | 1868 |
 | `src/server/mod.rs` | 2670 |

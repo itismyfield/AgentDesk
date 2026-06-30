@@ -57,10 +57,11 @@ pub struct PipelineStageInput {
     pub on_failure_target: Option<String>,
     pub max_retries: Option<i64>,
     /// #1082 backoff policy. One of STAGE_BACKOFF_VALUES. Persisted as
-    /// declarative stage metadata (#3868) so it round-trips through GET, but it
-    /// is **stored, not enforced** — no runtime executor reads it yet (same as
-    /// `on_failure` / `max_retries`). The retry/backoff executor is tracked by
-    /// the follow-up #3916.
+    /// declarative stage metadata (#3868) so it round-trips through GET.
+    /// #3916 wired the typed policy surface (`OnFailurePolicy`/`TimeoutConfig`)
+    /// into the live timeout executor (`decide_timeout`) via the pipeline
+    /// `timeouts:` config; these per-stage-row DB columns remain a declarative
+    /// mirror until a stage-row executor reads them.
     pub backoff: Option<String>,
     pub skip_condition: Option<String>,
     pub parallel_with: Option<String>,
