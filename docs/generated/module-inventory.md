@@ -398,9 +398,9 @@
 | `services::discord::abandon_request_store` | `src/services/discord/abandon_request_store.rs` | 477 | 355 | 122 |  |
 | `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 980 | 854 | 126 |  |
 | `services::discord::agent_handoff` | `src/services/discord/agent_handoff.rs` | 929 | 575 | 354 |  |
-| `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 1058 | 957 | 101 |  |
+| `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 1083 | 982 | 101 |  |
 | `services::discord::answer_flush_barrier` | `src/services/discord/answer_flush_barrier.rs` | 511 | 209 | 302 |  |
-| `services::discord::catch_up` | `src/services/discord/catch_up.rs` | 1358 | 985 | 373 |  |
+| `services::discord::catch_up` | `src/services/discord/catch_up.rs` | 1363 | 990 | 373 |  |
 | `services::discord::catch_up::classification` | `src/services/discord/catch_up/classification.rs` | 48 | 48 | 0 |  |
 | `services::discord::catch_up::phase2` | `src/services/discord/catch_up/phase2.rs` | 87 | 87 | 0 |  |
 | `services::discord::commands` | `src/services/discord/commands/mod.rs` | 120 | 120 | 0 |  |
@@ -607,7 +607,7 @@
 | `services::discord::settings::content` | `src/services/discord/settings/content.rs` | 539 | 506 | 33 |  |
 | `services::discord::settings::memory` | `src/services/discord/settings/memory.rs` | 127 | 127 | 0 |  |
 | `services::discord::settings::read` | `src/services/discord/settings/read.rs` | 449 | 449 | 0 |  |
-| `services::discord::settings::validation` | `src/services/discord/settings/validation.rs` | 230 | 230 | 0 |  |
+| `services::discord::settings::validation` | `src/services/discord/settings/validation.rs` | 401 | 242 | 159 |  |
 | `services::discord::settings::write` | `src/services/discord/settings/write.rs` | 386 | 386 | 0 |  |
 | `services::discord::shared_memory` | `src/services/discord/shared_memory.rs` | 81 | 81 | 0 |  |
 | `services::discord::shared_state` | `src/services/discord/shared_state.rs` | 737 | 666 | 71 |  |
