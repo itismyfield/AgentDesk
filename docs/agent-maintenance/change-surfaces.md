@@ -975,7 +975,7 @@
     marker suppression for stop-control transcript envelopes; +62 from #3304:
     slash-command canonical prompt keys for `<command-*>` XML vs
     `/command args` dedupe, plus focused loop skill-expansion regressions).
-  - `src/services/discord/recovery_engine.rs` (3037 lines; +17 from #3869
+  - `src/services/discord/recovery_engine.rs` (2935 lines; +17 from #3869
     (restart routing-orphan cleanup): the three post-`validate_bot_channel_routing_with_provider_channel`
     sites no longer bare-`continue`-strand a row whose channel was re-bound to a
     different provider while dcserver was down — they delegate to the new leaf
