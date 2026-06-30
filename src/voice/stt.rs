@@ -13,6 +13,7 @@ use tracing::{debug, warn};
 
 use super::VoiceConfig;
 use super::config::VoiceSttMode;
+use super::metrics::{SttOutcome, record_stt_outcome};
 use super::stt_streaming::{
     StreamingDecodeWindow, StreamingDecodeWindowMeta, StreamingOverlapConfig,
     WHISPER_STREAM_SAMPLE_RATE_HZ, WhisperStreamOverlapSegmenter,
@@ -65,12 +66,17 @@ impl SttConfig {
             temp_dir: expand_tilde(&config.audio.temp_dir),
             timeout: STT_TIMEOUT,
             speech_start_db: config.thresholds.speech_start_db,
+            // #3914: normalize the live config so a `length_ms < keep_ms` /
+            // `keep_ms > step_ms` misconfiguration cannot reach the segmenter
+            // inverted. `step_ms = 0` still survives here but is rejected with a
+            // clear error by `WhisperStreamOverlapSegmenter::new` (`validate`).
             stream_overlap: StreamingOverlapConfig {
                 sample_rate_hz: WHISPER_STREAM_SAMPLE_RATE_HZ,
                 step_ms: config.stt.stream.step_ms,
                 length_ms: config.stt.stream.length_ms,
                 keep_ms: config.stt.stream.keep_ms,
-            },
+            }
+            .normalized(),
         }
     }
 }
@@ -168,6 +174,7 @@ impl SttRuntime {
                 path = %wav_path.display(),
                 "voice STT skipped low-volume utterance"
             );
+            record_stt_outcome(SttOutcome::LowVolumeSkipped);
             return Ok(String::new());
         }
 
@@ -214,9 +221,17 @@ impl SttRuntime {
             output_path: None,
             transcript_path: None,
         };
-        let output = (self.runner)(invocation)
-            .await
-            .with_context(|| format!("run ffmpeg volumedetect for {}", wav_path.display()))?;
+        // #3914: a `volumedetect` process failure must NOT abort the whole
+        // transcription (whisper never runs → the utterance is lost). Parse-
+        // misses were already graceful; treat a process failure the same way.
+        let output = match (self.runner)(invocation).await {
+            Ok(output) => output,
+            Err(error) => {
+                warn!(path = %wav_path.display(), %error, "ffmpeg volumedetect failed; continuing with STT (#3914)");
+                record_stt_outcome(SttOutcome::VolumeDetectFailed);
+                return Ok(false);
+            }
+        };
         let stderr = String::from_utf8_lossy(&output.stderr);
         let Some(levels) = parse_volume_levels(&stderr) else {
             warn!(
@@ -278,10 +293,15 @@ impl SttRuntime {
             let raw = read_whisper_text(transcript_path, &output).await?;
             let cleaned = clean_transcript(&raw);
             if !cleaned.is_empty() {
+                record_stt_outcome(SttOutcome::Transcribed);
                 return Ok(cleaned);
             }
         }
 
+        // #3914: an empty cleaned transcript after the retry used to return
+        // `Ok("")` with no log at all, hiding sustained whisper-empty regressions.
+        warn!("voice STT produced an empty transcript after retry (#3914)");
+        record_stt_outcome(SttOutcome::EmptyAfterRetry);
         Ok(String::new())
     }
 
@@ -1192,6 +1212,97 @@ mod tests {
         assert!(whisper.args.iter().any(|arg| arg == "-otxt"));
         assert!(whisper.args.iter().any(|arg| arg == "-sns"));
         assert!(whisper.args.iter().any(|arg| arg == "-nf"));
+    }
+
+    /// #3914 (item 3): a `volumedetect` process failure must not abort the
+    /// whole transcription — whisper still runs and the utterance is preserved.
+    /// The failure is counted via the `VolumeDetectFailed` outcome.
+    #[tokio::test]
+    async fn volumedetect_process_failure_does_not_abort_transcription() {
+        let temp = tempfile::tempdir().unwrap();
+        let before = crate::voice::metrics::stt_outcome_count(
+            crate::voice::metrics::SttOutcome::VolumeDetectFailed,
+        );
+        let runner: SttCommandRunner = Arc::new(move |invocation| {
+            Box::pin(async move {
+                match invocation.kind {
+                    SttCommandKind::VolumeDetect => {
+                        anyhow::bail!("mock ffmpeg volumedetect crash")
+                    }
+                    SttCommandKind::Convert => {
+                        fs::write(invocation.output_path.as_ref().unwrap(), b"wav").await?;
+                        Ok(SttCommandOutput::default())
+                    }
+                    SttCommandKind::Whisper => {
+                        fs::write(
+                            invocation.transcript_path.as_ref().unwrap(),
+                            "이 내용도 반영해줘",
+                        )
+                        .await?;
+                        Ok(SttCommandOutput::default())
+                    }
+                }
+            })
+        });
+        let runtime = SttRuntime::with_runner(test_config(temp.path().to_path_buf()), runner);
+
+        let transcript = runtime
+            .transcribe(temp.path().join("speech.wav"))
+            .await
+            .unwrap();
+
+        assert_eq!(transcript, "이 내용도 반영해줘");
+        assert!(
+            crate::voice::metrics::stt_outcome_count(
+                crate::voice::metrics::SttOutcome::VolumeDetectFailed
+            ) > before,
+            "a volumedetect failure must be observable via the outcome counter"
+        );
+    }
+
+    /// #3914 (item 2): an empty cleaned transcript after the retry must be
+    /// observable rather than silently returned as `Ok(\"\")`.
+    #[tokio::test]
+    async fn empty_transcript_after_retry_is_counted() {
+        let temp = tempfile::tempdir().unwrap();
+        let before = crate::voice::metrics::stt_outcome_count(
+            crate::voice::metrics::SttOutcome::EmptyAfterRetry,
+        );
+        let runner: SttCommandRunner = Arc::new(move |invocation| {
+            Box::pin(async move {
+                match invocation.kind {
+                    SttCommandKind::VolumeDetect => Ok(SttCommandOutput {
+                        stderr: b"mean_volume: -22.0 dB\nmax_volume: -4.0 dB".to_vec(),
+                        stdout: Vec::new(),
+                    }),
+                    SttCommandKind::Convert => {
+                        fs::write(invocation.output_path.as_ref().unwrap(), b"wav").await?;
+                        Ok(SttCommandOutput::default())
+                    }
+                    SttCommandKind::Whisper => {
+                        // A hallucination phrase that `clean_transcript` strips to
+                        // empty on every attempt.
+                        fs::write(invocation.transcript_path.as_ref().unwrap(), "구독 좋아요")
+                            .await?;
+                        Ok(SttCommandOutput::default())
+                    }
+                }
+            })
+        });
+        let runtime = SttRuntime::with_runner(test_config(temp.path().to_path_buf()), runner);
+
+        let transcript = runtime
+            .transcribe(temp.path().join("speech.wav"))
+            .await
+            .unwrap();
+
+        assert_eq!(transcript, "");
+        assert!(
+            crate::voice::metrics::stt_outcome_count(
+                crate::voice::metrics::SttOutcome::EmptyAfterRetry
+            ) > before,
+            "an empty-after-retry result must be observable via the outcome counter"
+        );
     }
 
     #[tokio::test]

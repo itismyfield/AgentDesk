@@ -92,6 +92,12 @@ pub(in crate::services::discord) fn is_synthetic_voice_message_id(
 const STT_TRANSCRIPT_POLL_TIMEOUT: Duration = Duration::from_secs(5);
 const STT_TRANSCRIPT_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const PROCESSING_CHIME_FILE_NAME: &str = "agentdesk-voice-processing-chime.wav";
+/// #3914: slack added to the configured foreground model timeout for the OUTER
+/// `tokio::time::timeout` guard so the model child's own watchdog fires (and
+/// flips the #2250 cancel token to kill the detached child) just before the
+/// outer guard trips. Previously this 250ms value was a magic number duplicated
+/// across the ack / channel-text / background-summary timeout sites.
+const FOREGROUND_MODEL_TIMEOUT_SLACK: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::services::discord) enum VoiceBargeInTranscriptOutcome {
@@ -411,7 +417,7 @@ async fn generate_foreground_ack_text(
     let timeout = Duration::from_millis(foreground.timeout_ms);
     let cancel_for_blocking = cancel_token.clone();
     let result = tokio::time::timeout(
-        timeout + Duration::from_millis(250),
+        timeout + FOREGROUND_MODEL_TIMEOUT_SLACK,
         tokio::task::spawn_blocking(move || {
             let provider_kind = ProviderKind::from_str_or_unsupported(&provider);
             match provider_kind {
@@ -533,7 +539,7 @@ async fn generate_voice_channel_text_reply(
     let timeout = Duration::from_millis(foreground.timeout_ms);
     let cancel_for_blocking = cancel_token.clone();
     let result = tokio::time::timeout(
-        timeout + Duration::from_millis(250),
+        timeout + FOREGROUND_MODEL_TIMEOUT_SLACK,
         tokio::task::spawn_blocking(move || {
             let provider_kind = ProviderKind::from_str_or_unsupported(&provider);
             match provider_kind {
@@ -625,7 +631,7 @@ async fn generate_voice_background_result_summary(
     let timeout = Duration::from_millis(foreground.timeout_ms);
     let cancel_for_blocking = cancel_token.clone();
     let result = tokio::time::timeout(
-        timeout + Duration::from_millis(250),
+        timeout + FOREGROUND_MODEL_TIMEOUT_SLACK,
         tokio::task::spawn_blocking(move || {
             let provider_kind = ProviderKind::from_str_or_unsupported(&provider);
             match provider_kind {
@@ -4715,12 +4721,40 @@ mod tests {
 
         let loud = [16_384, -16_384, 16_384, -16_384];
         assert!(runtime.observe_live_pcm_i16(channel_id, &loud).is_none());
-        let cut = runtime.observe_live_pcm_i16(channel_id, &loud).unwrap();
+        let (cut, owner) = runtime.observe_live_pcm_i16(channel_id, &loud).unwrap();
 
         assert_eq!(cut.candidate_frames, 2);
+        // `reset_after_playback_start` registers no owner.
+        assert_eq!(owner, None);
         assert_eq!(player.stops.load(Ordering::SeqCst), 1);
         assert!(cancellation.is_cancelled());
         assert!(runtime.observe_live_pcm_i16(channel_id, &loud).is_none());
+    }
+
+    /// #3914 (item 4): the cut must report the owner of the playback session it
+    /// stopped. The owner is snapshotted before the entry is removed, so the
+    /// F22 `playback_owner` diagnostic is no longer always `None`.
+    #[test]
+    fn live_pcm_observation_reports_owner_of_cut_playback() {
+        let runtime = enabled_runtime();
+        let channel_id = ChannelId::new(7_314);
+        let player = Arc::new(MockPlayer::default());
+        runtime.reset_after_playback_start_with_owner(
+            channel_id,
+            player.clone(),
+            CancellationToken::new(),
+            Some(99),
+        );
+
+        let loud = [16_384, -16_384, 16_384, -16_384];
+        assert!(runtime.observe_live_pcm_i16(channel_id, &loud).is_none());
+        let (_cut, owner) = runtime.observe_live_pcm_i16(channel_id, &loud).unwrap();
+
+        assert_eq!(
+            owner,
+            Some(99),
+            "the cut must carry the owner of the stopped playback session"
+        );
     }
 
     #[tokio::test]

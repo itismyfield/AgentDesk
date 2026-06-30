@@ -156,6 +156,13 @@ pub(crate) fn wake_word_decision(
     required: bool,
 ) -> WakeWordDecision {
     let transcript = transcript.trim();
+    // #3914: if the gate is "required" but there is no usable wake word to match
+    // against, gating is impossible — every utterance would fall through to
+    // `Missing` and be silently dropped. Fail open in that case.
+    let required = required
+        && wake_words
+            .iter()
+            .any(|wake_word| !wake_word.trim().is_empty());
     if !required {
         return WakeWordDecision::NotRequired(transcript.to_string());
     }
@@ -635,6 +642,20 @@ mod tests {
         assert_eq!(
             wake_word_decision("상태 알려줘", &wake_words, true),
             WakeWordDecision::Missing
+        );
+    }
+
+    /// #3914: with `required = true` but no usable wake word to match against,
+    /// the gate must fail open instead of silently dropping every utterance.
+    #[test]
+    fn wake_word_decision_fails_open_without_usable_wake_words() {
+        assert_eq!(
+            wake_word_decision("아무 말이나 해봐", &[], true),
+            WakeWordDecision::NotRequired("아무 말이나 해봐".to_string())
+        );
+        assert_eq!(
+            wake_word_decision("상태 알려줘", &["   ".to_string(), String::new()], true),
+            WakeWordDecision::NotRequired("상태 알려줘".to_string())
         );
     }
 

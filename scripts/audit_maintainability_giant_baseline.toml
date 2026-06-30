@@ -296,7 +296,11 @@
 # voice-channel teardown (Stream-mode inner-session leak, codex review; the stt
 # read guard is hoisted to a local so it is not held across the discard awaits).
 # Minimum surface for the leak fix; no decomposition opportunity in this slice.
-"src/services/discord/voice_barge_in.rs" = 2893
+# #3914: +6 (2893 -> 2899) for the `FOREGROUND_MODEL_TIMEOUT_SLACK` const that
+# de-duplicated the 250ms timeout slack previously hardcoded at three foreground
+# model timeout sites (ack / channel-text / background-summary). Net reduction in
+# magic numbers; the const + doc comment is the minimum surface.
+"src/services/discord/voice_barge_in.rs" = 2899
 # #3248: +60 for the gap-1 deploy-survivable-relay fix —
 # `reseed_watcher_owned_finalizer_ledger` + two guarded reattach call-sites that
 # re-register the watcher-owned turn in the post-restart finalizer ledger (a P1

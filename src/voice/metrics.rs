@@ -203,6 +203,67 @@ pub fn discard(channel_id: u64) {
     }
 }
 
+/// #3914: terminal outcome of a file-mode STT transcription. STT previously
+/// swallowed low-volume skips and empty-after-retry results as
+/// `Ok(String::new())` with at most a debug log, so a systemic regression
+/// (whisper returning empty, the volume gate over-skipping, or `volumedetect`
+/// failing) was invisible. These outcomes are counted process-wide and the
+/// anomalous ones are emitted as a structured `voice_stt_outcome` event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SttOutcome {
+    /// whisper produced a usable (non-empty, cleaned) transcript.
+    Transcribed,
+    /// the utterance was gated out by the low-volume silence check before whisper.
+    LowVolumeSkipped,
+    /// whisper ran (including one retry) but the cleaned transcript was empty.
+    EmptyAfterRetry,
+    /// the `volumedetect` pre-pass failed; STT continued without the gate.
+    VolumeDetectFailed,
+}
+
+impl SttOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Transcribed => "transcribed",
+            Self::LowVolumeSkipped => "low_volume_skipped",
+            Self::EmptyAfterRetry => "empty_after_retry",
+            Self::VolumeDetectFailed => "volumedetect_failed",
+        }
+    }
+}
+
+fn stt_outcome_registry() -> &'static Mutex<HashMap<&'static str, u64>> {
+    static REG: OnceLock<Mutex<HashMap<&'static str, u64>>> = OnceLock::new();
+    REG.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Record one STT outcome: bumps the process-wide counter and (for the
+/// anomalous outcomes) emits a structured `voice_stt_outcome` event. The common
+/// success path only bumps the counter so the shared event buffer is not
+/// crowded out of its `voice_latency_turn` samples.
+pub fn record_stt_outcome(outcome: SttOutcome) {
+    if let Ok(mut map) = stt_outcome_registry().lock() {
+        *map.entry(outcome.as_str()).or_insert(0) += 1;
+    }
+    if !matches!(outcome, SttOutcome::Transcribed) {
+        events::record_simple(
+            "voice_stt_outcome",
+            None,
+            Some("voice"),
+            json!({ "outcome": outcome.as_str() }),
+        );
+    }
+}
+
+#[cfg(test)]
+pub fn stt_outcome_count(outcome: SttOutcome) -> u64 {
+    stt_outcome_registry()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(outcome.as_str()).copied())
+        .unwrap_or(0)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LatencySummary {
     pub sample_count: usize,

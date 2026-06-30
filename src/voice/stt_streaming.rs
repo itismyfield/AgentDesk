@@ -211,6 +211,48 @@ mod tests {
         assert_eq!(config.context_reset_interval(), 1);
     }
 
+    /// #3914: range validation must reject the unrecoverable cases (zero step /
+    /// zero sample rate) and normalize the recoverable inversion
+    /// (`length_ms < keep_ms`) so the segmenter can never run with `keep > step`
+    /// or `length < step`.
+    #[test]
+    fn streaming_overlap_config_validation_guards_out_of_range_windows() {
+        assert!(
+            StreamingOverlapConfig {
+                sample_rate_hz: 16_000,
+                step_ms: 0,
+                length_ms: 100,
+                keep_ms: 10,
+            }
+            .validate()
+            .is_err(),
+            "step_ms = 0 must be rejected (would otherwise spin the feed loop)"
+        );
+        assert!(
+            StreamingOverlapConfig {
+                sample_rate_hz: 0,
+                step_ms: 10,
+                length_ms: 100,
+                keep_ms: 10,
+            }
+            .validate()
+            .is_err(),
+            "sample_rate_hz = 0 must be rejected"
+        );
+
+        // length_ms < keep_ms is normalized, never inverted: keep <= step <= length.
+        let normalized = StreamingOverlapConfig {
+            sample_rate_hz: 16_000,
+            step_ms: 50,
+            length_ms: 10,
+            keep_ms: 999,
+        }
+        .validate()
+        .unwrap();
+        assert!(normalized.keep_ms <= normalized.step_ms);
+        assert!(normalized.step_ms <= normalized.length_ms);
+    }
+
     #[test]
     fn streaming_overlap_segmenter_emits_step_windows_with_keep_resets() {
         let mut segmenter = WhisperStreamOverlapSegmenter::new(StreamingOverlapConfig {

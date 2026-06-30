@@ -118,7 +118,7 @@ fn is_bare_command_line(lower: &str) -> bool {
         return false;
     };
 
-    match binary {
+    let is_known_command = match binary {
         "cargo" => matches!(
             subcommand,
             "bench"
@@ -161,7 +161,58 @@ fn is_bare_command_line(lower: &str) -> bool {
                 | "switch"
         ),
         _ => false,
+    };
+    if !is_known_command {
+        return false;
     }
+
+    // #3914 (review fix): command detection above runs regardless of Hangul. The
+    // Hangul check below only disambiguates the boundary case "starts with a real
+    // command token but is actually Korean prose". A sentence that merely
+    // MENTIONS a command — e.g. "git status 명령을 실행했어요" — has standalone
+    // Hangul *words* among its operands and must be spoken, not dropped. A
+    // genuine command with a Hangul *path* operand (e.g. "git add 한글.md") has no
+    // such prose word and is still stripped. The earlier blanket
+    // `contains_hangul -> not a command` short-circuit over-corrected by letting
+    // every Hangul-argument command survive.
+    !parts.any(is_prose_hangul_token)
+}
+
+/// #3914: a whitespace-separated token that reads like a Korean prose word
+/// rather than a command operand. Flags (`-x`), paths (`src/한글`), and Hangul
+/// filenames with an extension (`한글.md`) are operands, not prose; a standalone
+/// Hangul word — even with trailing sentence punctuation like `완료.` — is prose.
+fn is_prose_hangul_token(token: &str) -> bool {
+    if !contains_hangul(token) {
+        return false;
+    }
+    if token.starts_with('-') || token.contains(['/', '\\']) {
+        return false;
+    }
+    !has_file_extension(token)
+}
+
+/// True when `token` ends in a `.<ascii-ext>` file extension (e.g. `한글.md`),
+/// as opposed to a bare trailing sentence period (`완료.`) which is not one.
+fn has_file_extension(token: &str) -> bool {
+    match token.rsplit_once('.') {
+        Some((stem, ext)) => {
+            !stem.is_empty() && !ext.is_empty() && ext.chars().all(|ch| ch.is_ascii_alphanumeric())
+        }
+        None => false,
+    }
+}
+
+/// #3914: true when `text` contains any Hangul syllable or jamo — used to
+/// distinguish Korean prose from a bare shell command line.
+fn contains_hangul(text: &str) -> bool {
+    text.chars().any(|ch| {
+        matches!(ch,
+            '\u{AC00}'..='\u{D7A3}'   // Hangul syllables
+            | '\u{1100}'..='\u{11FF}' // Hangul jamo
+            | '\u{3130}'..='\u{318F}' // Hangul compatibility jamo
+        )
+    })
 }
 
 fn strip_markdown_noise(line: &str) -> String {
@@ -290,6 +341,46 @@ mod tests {
             spoken,
             "cargo 는 러스트 빌드 도구입니다. git 이 익숙하면 작업이 빨라져요."
         );
+    }
+
+    /// #3914: a Korean sentence that embeds a real command token (where the
+    /// first two words happen to be `git status` / `cargo test`) must be spoken,
+    /// not dropped as a bare command line. Pure bare command lines are still cut.
+    #[test]
+    fn keeps_korean_prose_that_embeds_a_command_token() {
+        let spoken = spoken_result_only(
+            "git status 명령을 실행했어요.\ncargo test 를 돌려서 확인했습니다.\ngit status",
+            "ko",
+        );
+
+        assert_eq!(
+            spoken,
+            "git status 명령을 실행했어요. cargo test 를 돌려서 확인했습니다."
+        );
+    }
+
+    /// #3914 (review fix): the Hangul guard must NOT blanket-disable command
+    /// detection. A genuine bare command whose operand is a Hangul *path*
+    /// (filename with an extension) is still stripped; only the surrounding prose
+    /// survives. Regression pin for the over-correction.
+    #[test]
+    fn bare_command_with_hangul_path_arg_is_still_stripped() {
+        let spoken = spoken_result_only(
+            "작업을 마쳤어요.\ngit add 한글.md\ncargo build 산출물.log\n끝났습니다.",
+            "ko",
+        );
+
+        assert_eq!(spoken, "작업을 마쳤어요. 끝났습니다.");
+    }
+
+    /// #3914: pure Korean prose (no leading command token) is preserved — the
+    /// original item-10 intent. Mentioning a filename mid-sentence does not make
+    /// it a command line.
+    #[test]
+    fn pure_korean_prose_without_command_token_is_preserved() {
+        let spoken = spoken_result_only("오늘 결과가 좋네요. 한글.md 파일도 확인했어요.", "ko");
+
+        assert_eq!(spoken, "오늘 결과가 좋네요. 한글.md 파일도 확인했어요.");
     }
 
     #[test]

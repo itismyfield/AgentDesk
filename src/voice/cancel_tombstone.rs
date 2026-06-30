@@ -70,49 +70,65 @@ pub(crate) struct VoiceCancelTombstoneStore {
 }
 
 impl VoiceCancelTombstoneStore {
+    /// Acquire the write guard, recovering in place if the lock was poisoned.
+    ///
+    /// #3914: the prior code matched `if let Ok(..) = self.entries.write()` and
+    /// silently dropped the operation on a poisoned lock. That defeats the whole
+    /// re-fire guard with no signal — a single panic while a guard was held would
+    /// permanently stop both recording and pruning tombstones. A poisoned
+    /// `RwLock` only means a writer panicked; the `HashMap` itself is still
+    /// consistent, so we log once and recover the inner map.
+    fn write_entries(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<u64, StoredTombstone>> {
+        self.entries.write().unwrap_or_else(|poisoned| {
+            tracing::warn!(
+                "voice cancel-tombstone lock was poisoned; recovering in place so re-fire \
+                 protection keeps working (#3914)"
+            );
+            poisoned.into_inner()
+        })
+    }
+
     /// Record (or refresh) a tombstone for `handoff_message_id`. Idempotent;
     /// a later record with a different reason overwrites the prior reason
     /// (last-cancel-wins for the label, but presence-of-tombstone is what
     /// downstream consumers branch on).
     pub(crate) fn record(&self, handoff_message_id: MessageId, reason: impl Into<String>) {
-        if let Ok(mut entries) = self.entries.write() {
-            let now = Instant::now();
-            prune_expired_locked(&mut entries, now);
-            entries.insert(
-                handoff_message_id.get(),
-                StoredTombstone {
-                    reason: reason.into(),
-                    expires_at: now + TOMBSTONE_TTL,
-                },
-            );
-        }
+        let mut entries = self.write_entries();
+        let now = Instant::now();
+        prune_expired_locked(&mut entries, now);
+        entries.insert(
+            handoff_message_id.get(),
+            StoredTombstone {
+                reason: reason.into(),
+                expires_at: now + TOMBSTONE_TTL,
+            },
+        );
     }
 
     /// Return the recorded cancel reason if a non-expired tombstone exists.
     ///
     /// The tombstone is NOT consumed by lookup — multiple late callers may
-    /// each need to observe it. The TTL bounds memory growth.
+    /// each need to observe it. #3914: lookups now also prune expired entries,
+    /// so eviction no longer depends solely on a steady stream of `record`
+    /// writes (a channel that stops writing tombstones is still bounded by reads).
     pub(crate) fn lookup(&self, handoff_message_id: MessageId) -> Option<String> {
-        let entries = self.entries.read().ok()?;
-        let stored = entries.get(&handoff_message_id.get())?;
-        if Instant::now() >= stored.expires_at {
-            None
-        } else {
-            Some(stored.reason.clone())
-        }
+        let mut entries = self.write_entries();
+        let now = Instant::now();
+        prune_expired_locked(&mut entries, now);
+        entries
+            .get(&handoff_message_id.get())
+            .map(|stored| stored.reason.clone())
     }
 
     /// Explicit removal (test helper / future graceful-shutdown path).
     #[cfg(test)]
     pub(crate) fn forget(&self, handoff_message_id: MessageId) {
-        if let Ok(mut entries) = self.entries.write() {
-            entries.remove(&handoff_message_id.get());
-        }
+        self.write_entries().remove(&handoff_message_id.get());
     }
 
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
-        self.entries.read().map(|guard| guard.len()).unwrap_or(0)
+        self.write_entries().len()
     }
 }
 
@@ -190,6 +206,63 @@ mod tests {
         store.record(msg(9), "x");
         store.forget(msg(9));
         assert!(store.lookup(msg(9)).is_none());
+    }
+
+    /// #3914: a lookup must prune already-expired tombstones, so eviction no
+    /// longer depends solely on a steady stream of `record` writes.
+    #[test]
+    fn lookup_prunes_expired_entries() {
+        let store = VoiceCancelTombstoneStore::default();
+        {
+            // Bypass `record()` (which always stores a future expiry) to seed one
+            // already-expired entry and one fresh entry.
+            let mut entries = store.write_entries();
+            entries.insert(
+                1,
+                StoredTombstone {
+                    reason: "stale".to_string(),
+                    expires_at: Instant::now() - Duration::from_secs(1),
+                },
+            );
+            entries.insert(
+                2,
+                StoredTombstone {
+                    reason: "fresh".to_string(),
+                    expires_at: Instant::now() + TOMBSTONE_TTL,
+                },
+            );
+        }
+        assert_eq!(store.len(), 2);
+
+        // Querying id 2 still prunes the expired id 1.
+        assert_eq!(store.lookup(msg(2)).as_deref(), Some("fresh"));
+        assert_eq!(store.len(), 1, "expired tombstone must be pruned on lookup");
+        assert!(store.lookup(msg(1)).is_none());
+    }
+
+    /// #3914: a poisoned lock must NOT silently disable the re-fire guard — the
+    /// store recovers in place and keeps recording/looking up.
+    #[test]
+    fn recovers_from_a_poisoned_lock() {
+        let store = std::sync::Arc::new(VoiceCancelTombstoneStore::default());
+        store.record(msg(1), "before");
+
+        // Poison the RwLock by panicking while holding the write guard.
+        let poison_store = store.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poison_store.write_entries();
+            panic!("intentional poison for test");
+        })
+        .join();
+
+        // Recovery: subsequent operations still work (not silent no-ops).
+        store.record(msg(2), "after");
+        assert_eq!(store.lookup(msg(2)).as_deref(), Some("after"));
+        assert_eq!(
+            store.lookup(msg(1)).as_deref(),
+            Some("before"),
+            "pre-poison tombstones must survive lock recovery"
+        );
     }
 
     #[test]

@@ -89,11 +89,16 @@ impl VoiceBargeInRuntime {
         true
     }
 
+    /// Returns the detected cut alongside the `owner` of the playback session
+    /// that was actually cut. F22 (#2046) diagnostics log `playback_owner`, but
+    /// the caller used to read it from `self.playbacks` AFTER this method had
+    /// already removed the entry on a cut, so it was always `None` (#3914). The
+    /// owner is therefore snapshotted here, from the very session being stopped.
     pub(in crate::services::discord) fn observe_live_pcm_i16(
         &self,
         channel_id: ChannelId,
         samples: &[i16],
-    ) -> Option<LiveBargeInCut> {
+    ) -> Option<(LiveBargeInCut, Option<u64>)> {
         if !self.barge_in_enabled || samples.is_empty() {
             return None;
         }
@@ -102,6 +107,7 @@ impl VoiceBargeInRuntime {
             .playbacks
             .get(&channel_id.get())
             .map(|entry| entry.value().clone())?;
+        let playback_owner = playback.owner;
         let sensitivity = self.current_sensitivity();
         let monitor = self.monitor_for_channel(channel_id, sensitivity);
         let mut monitor = lock_monitor(&monitor);
@@ -111,7 +117,7 @@ impl VoiceBargeInRuntime {
         match monitor.observe_pcm(&pcm, playback.player.as_ref(), &playback.cancellation) {
             Ok(Some(cut)) => {
                 self.playbacks.remove(&channel_id.get());
-                Some(cut)
+                Some((cut, playback_owner))
             }
             Ok(None) => None,
             Err(error) => {

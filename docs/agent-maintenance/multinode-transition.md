@@ -994,3 +994,22 @@
     `voice.tts.progress_cache_dir` / `voice.audio.temp_dir` are swept, not the
     defaults. Pool-less, no new lease, durable queue, leader-election surface, or
     singleton assumption.
+- #3914 voice P3 cleanup bundle (observability / leak / validation) — **all
+  Worker-local**: every state surface touched is process-global on the node that
+  holds the live voice session, with no cross-node coordination introduced.
+  - `src/voice/receiver.rs`: the songbird `ClientDisconnect` handler prunes the
+    leaver's SSRC→user entries from the in-process `ssrc_users` map. The map is
+    pinned to the node running that voice connection (songbird driver is
+    node-local), so disconnect cleanup is purely worker-local.
+  - `src/voice/metrics.rs`: the new STT outcome counters and `voice_stt_outcome`
+    structured events are process-local telemetry (same class as the existing
+    `voice_latency_turn` registry), flowing through the node-local observability
+    event sink. No leader/standby ownership.
+  - `src/voice/cancel_tombstone.rs`: the re-fire guard remains an explicitly
+    process-local `OnceLock<RwLock<HashMap>>` (documented in its module header) —
+    the poison-recovery + read-path prune changes do not alter that boundary; a
+    dcserver restart between the two cancel attempts is still covered by the
+    background turn's own cancel-on-restart recovery.
+  - `src/voice/tts/edge.rs` keeps the edge-tts subprocess timeout a worker-local
+    constant; making it configurable + adding TTS synth/cache hit-miss metrics is
+    explicitly deferred (informational sub-item) and would also be worker-local.

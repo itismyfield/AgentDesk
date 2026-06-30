@@ -1314,7 +1314,9 @@
     `audit_maintainability_config.toml`; the root is no longer a prod giant and
     was removed from `giant_file_registry.toml`; #3038 S5 locked the final
     root ratchet at 274 production lines).
-  - `src/services/discord/voice_barge_in.rs` (2893 lines after #3038
+  - `src/services/discord/voice_barge_in.rs` (2899 lines after #3914 added the
+    `FOREGROUND_MODEL_TIMEOUT_SLACK` const that de-duplicated the triplicated
+    250ms timeout slack; #3038
     VoiceBargeInRuntime S1 moved the STT method cluster to
     `src/services/discord/voice_barge_in/stt.rs` (314 production lines) and
     S2 moved the progress playback method cluster to
@@ -1353,9 +1355,11 @@
     orchestration surface; tracked decompose target — see
     `giant-file-registry.md` (owner `voice-runtime`, deadline 2026-08-31,
     #3036)).
-  - `src/voice/receiver.rs` (1052 lines; voice receive pipeline, utterance
-    segmentation, artifact cleanup, and retention policy surface; split before
-    adding non-bugfix behavior).
+  - `src/voice/receiver.rs` (1108 lines after #3914 added the songbird
+    `ClientDisconnect` handler that drops a leaver's SSRC→user mapping to stop
+    monotonic `ssrc_users` growth under channel churn; voice receive pipeline,
+    utterance segmentation, artifact cleanup, and retention policy surface;
+    split before adding non-bugfix behavior).
   - `src/voice/announce_meta.rs` (1001 lines; voice announcement durability /
     handoff metadata surface; crossed the giant threshold when #3034 restored
     per-item dead_code reasoning on the runtime-gated durable helpers; tracked

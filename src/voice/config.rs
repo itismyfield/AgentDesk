@@ -27,6 +27,11 @@ pub(crate) const DEFAULT_FOREGROUND_PROVIDER: &str = "claude";
 pub(crate) const DEFAULT_FOREGROUND_MODEL: &str = "sonnet";
 pub(crate) const DEFAULT_FOREGROUND_MAX_CHARS: usize = 220;
 pub(crate) const DEFAULT_FOREGROUND_TIMEOUT_MS: u64 = 3_000;
+/// #3914: lower bound for the foreground model timeout. A small misconfigured
+/// value (e.g. `timeout_ms: 50`) would otherwise make every foreground call time
+/// out and degrade to Silence on each utterance. Values below this are clamped
+/// up so a typo cannot silently mute the assistant.
+pub(crate) const MIN_FOREGROUND_TIMEOUT_MS: u64 = 500;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
@@ -86,14 +91,22 @@ impl VoiceConfig {
     }
 
     pub(crate) fn wake_word_required(&self) -> bool {
+        // #3914: you cannot gate on a wake word that is not configured. A live
+        // yaml with `wake_words: []` plus `REQUIRE_WAKE_WORD=1` would otherwise
+        // make EVERY utterance fail the (impossible-to-satisfy) gate and be
+        // silently dropped. Fail open: require a wake word only when at least one
+        // usable wake word exists, regardless of the env override.
+        let has_usable_wake_word = self
+            .wake_words
+            .iter()
+            .any(|wake_word| !wake_word.trim().is_empty());
+        if !has_usable_wake_word {
+            return false;
+        }
         std::env::var("REQUIRE_WAKE_WORD")
             .ok()
             .and_then(|value| parse_bool_env(&value))
-            .unwrap_or_else(|| {
-                self.wake_words
-                    .iter()
-                    .any(|wake_word| !wake_word.trim().is_empty())
-            })
+            .unwrap_or(has_usable_wake_word)
     }
 
     pub(crate) fn lobby_channel_id_u64(&self) -> Option<u64> {
@@ -416,6 +429,19 @@ mod tests {
             DEFAULT_BARGE_IN_TTL_SECS
         );
         assert!(config.barge_in.acknowledgement_enabled);
+    }
+
+    #[test]
+    fn wake_word_not_required_when_no_usable_wake_words() {
+        // #3914: blank / empty wake words can never be matched, so the gate must
+        // fail open. This early return wins before the REQUIRE_WAKE_WORD env is
+        // even consulted, so it holds regardless of the ambient env.
+        let mut config = VoiceConfig::default();
+        config.wake_words = Vec::new();
+        assert!(!config.wake_word_required());
+
+        config.wake_words = vec!["   ".to_string(), String::new()];
+        assert!(!config.wake_word_required());
     }
 
     #[test]
