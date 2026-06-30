@@ -175,6 +175,29 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// no `INFLIGHT_STATE_VERSION` bump per the #2235 compat convention.
     #[serde(default)]
     pub recovery_relay_attempts: u32,
+    /// #3918: durable per-turn idempotency marker for the committed-then-gone
+    /// anchor-repost fallback (#3607/#3610). Set to `true` immediately AFTER a
+    /// `Delivered` send-new repost and BEFORE the row is cleared, so that if the
+    /// subsequent `clear_inflight_state` fails (returns `false`) or the process
+    /// crashes after this write, the next boot re-loads this row with the marker
+    /// set and `try_recover_anchor_repost` short-circuits to `None` instead of
+    /// re-posting the same answer a SECOND time. This is the primary
+    /// at-most-once guard for the realistic unbounded loop (a silently failing
+    /// clear). Additive `#[serde(default)]` field — legacy rows deserialize as
+    /// `false`, no `INFLIGHT_STATE_VERSION` bump per the #2235 compat convention.
+    #[serde(default)]
+    pub anchor_reposted: bool,
+    /// #3918: count of committed-then-gone anchor-repost send-new ATTEMPTS for
+    /// this turn, bumped durably BEFORE each send. Hard-bounds the residual
+    /// Discord-accept→marker-write crash window (where `anchor_reposted` was not
+    /// yet recorded) to at most `RECOVERY_RELAY_RESTART_ATTEMPT_BUDGET` posts so
+    /// duplication can never be unbounded. Deliberately DISTINCT from
+    /// `recovery_relay_attempts` (the transient-failure retry budget) so the
+    /// pre-send count never double-counts against the `PreserveAndCount` bump —
+    /// a premature force-clear there would re-introduce the #3607 data loss.
+    /// Additive `#[serde(default)]` field; legacy rows deserialize as `0`.
+    #[serde(default)]
+    pub anchor_repost_attempts: u32,
     /// Whether any tool_use was seen during this turn (persisted for restart recovery).
     #[serde(default)]
     pub any_tool_used: bool,
@@ -719,6 +742,9 @@ impl InflightTurnState {
             updated_at: now,
             born_generation,
             recovery_relay_attempts: 0,
+            // #3918: never reposted / zero send-new attempts at turn birth.
+            anchor_reposted: false,
+            anchor_repost_attempts: 0,
             any_tool_used: false,
             has_post_tool_text: false,
             session_key: None,

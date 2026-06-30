@@ -5,6 +5,7 @@
 //! `docs/relay-state-contract.md` (#1222 / #1224). Any change that touches
 //! relay producers/consumers must keep the invariants there satisfied.
 
+pub(in crate::services::discord) mod anchor_repost;
 pub(in crate::services::discord) mod budget;
 mod finalizer_identity;
 mod model;

@@ -959,7 +959,16 @@
     marker suppression for stop-control transcript envelopes; +62 from #3304:
     slash-command canonical prompt keys for `<command-*>` XML vs
     `/command args` dedupe, plus focused loop skill-expansion regressions).
-  - `src/services/discord/recovery_engine.rs` (3039 lines; -860 from #3834
+  - `src/services/discord/recovery_engine.rs` (3020 lines; -19 net from #3918
+    round-3 (codex): the committed-branch anchor-repost call + its row-dispose +
+    storm-guard comment moved out of this file into the new
+    `recovery_paths::restart::recover_committed_anchor_repost` wrapper, leaving the
+    caller a single gated `continue` (the wrapper returns `true` when the row is
+    handled — relayed-and-disposed OR `RefusedPreserveRow`, a non-`Saved` pre-send
+    bump that PRESERVES the inflight row — so a refused send no longer falls
+    through to the unconditional committed-delivery clear that previously dropped
+    an IoError-deferred answer or deleted a newer turn's row on IdentityMismatch);
+    -860 from #3834
     behavior-preserving extraction of the manual-rebind recovery path
     (`rebind_inflight_for_channel` + its private `codex_tui_*` / `Pending*`
     support cluster and unit tests) into the leaf module
@@ -1373,7 +1382,9 @@
     2026-08-31, #3036)).
   - `src/services/discord/{commands/text_commands.rs,
     discord_config_audit.rs, router/intake_gate.rs}` (all 1000+ production
-    lines) and `src/services/discord/inflight.rs` (3068 lines; +37 from #3860
+    lines) and `src/services/discord/inflight.rs` (3069 lines; +1 from #3918
+    `mod anchor_repost` — the durable at-most-once anchor-repost idempotency
+    guards live in their own submodule, not in this giant file; +37 from #3860
     `set_inflight_restart_mode_under_lock` — the per-row lock-RMW that makes the
     bulk restart-mode marker set only `restart_mode` on the FRESH on-disk row so
     a draining watcher's delivery frontier can no longer be regressed (duplicate
