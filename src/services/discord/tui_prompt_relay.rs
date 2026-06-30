@@ -327,6 +327,9 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         );
         return;
     };
+    // #3811: TUI-direct is an id-0 synthetic turn — clear any stale interactive 요청 anchor.
+    let live_events = &shared.ui.placeholder_live_events;
+    live_events.set_turn_request_anchor(channel_id, None);
     let recap_provider = ProviderKind::from_str_or_unsupported(&prompt.provider);
     // #3178 (codex P1 lease-overwrite): run the slash-command-control dedupe BEFORE
     // recording ANY external-input lease. The #3153 double-post (raw echo + expanded
