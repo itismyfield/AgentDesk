@@ -1409,7 +1409,7 @@
     2026-08-31, #3036)).
   - `src/services/discord/{commands/text_commands.rs,
     discord_config_audit.rs, router/intake_gate.rs}` (all 1000+ production
-    lines) and `src/services/discord/inflight.rs` (3077 lines; +8 from #3960
+    lines) and `src/services/discord/inflight.rs` (2275 lines; +8 from #3960
     `mod orphan_relay_reclaim` + its re-export — the producer-liveness TOCTOU
     reclaim predicate and the locked owner-downgrade RMW live in their own
     submodule, not this giant file; this is the mod-decl + re-export cost; +1
@@ -1436,7 +1436,13 @@
     read-only single-row loader for deterministic idle-recap diagnostics that
     must not run compatibility backfills or cleanup writes; #3835 moved the
     watcher progress / terminal commit / relay-watermark locked update helpers
-    into `src/services/discord/inflight/watcher_state.rs`).
+    into `src/services/discord/inflight/watcher_state.rs`, then completed the
+    decompose by relocating the typed status-panel / current-message ownership
+    writes into `src/services/discord/inflight/ownership_ops.rs` and the
+    staleness predicates + orphan-lock / rebind-origin reap helpers into the
+    existing `src/services/discord/inflight/rebind_reap.rs` — pure verbatim move
+    (zero behavior change), every externally-referenced symbol re-exported from
+    the facade so `inflight::*` call-site paths stay byte-identical).
   - `src/services/discord/placeholder_sweeper.rs` (1019 lines; +5 from #3886
     calling the deterministic TimedOut-completion-gate status-panel reconcile
     (`super::tmux::reconcile_timed_out_tui_status_panel`) before the age-based
