@@ -187,7 +187,22 @@ pub(in crate::services::discord) fn disposition_reason_code(
 
 /// #3610 PR-2: gate for the recovery anchor-repost fallback (`AGENTDESK_RECOVERY_ANCHOR_REPOST`).
 ///
-/// DEFAULT OFF — a dark deploy. When OFF this is the outermost guard of
+/// DEFAULT OFF — intentionally gated, with a tracked rollout plan (#3862 / #3918).
+/// The #3607/#3610 committed-then-gone fallback is fully wired and storm-guarded
+/// (G1–G5 + the transient send-new budget bound in `unrecoverable_relay_disposition`),
+/// but a naked default-ON flip is BLOCKED on two send-new idempotency gaps that only
+/// surface once this path is live (tracked in #3918):
+///   1. a successful send-new is not durably idempotent — a crash (or a silently
+///      failing `inflight::clear_inflight_state`, whose `bool` is ignored) after
+///      Discord accepts the new message lets the next restart re-post the same
+///      answer, and `Delivered` is not budget-counted, so the duplicate is unbounded;
+///   2. a multi-chunk send-new partial failure leaves earlier chunks posted with no
+///      rollback (`formatting::send_long_message_raw`, not the existing
+///      `send_long_message_raw_with_rollback`), so the budget-bounded retry re-sends
+///      the whole body and duplicates them.
+/// Activation criteria + rollout live in #3918; until they are met this stays OFF.
+/// The env var remains a staging opt-in ("1"/"true") for verification under those
+/// guards. When OFF this is the outermost guard of
 /// [`super::restart::try_recover_anchor_repost`], which short-circuits to `None`
 /// before reading any record / probing / relaying, so the recovery loop is a
 /// byte-for-byte no-op (the committed-branch call site is skipped entirely).
