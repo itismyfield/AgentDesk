@@ -155,14 +155,6 @@ pub(super) fn finalize_watcher_streaming_footer(
     }
 }
 
-pub(super) fn watcher_completion_footer_should_tick(
-    has_registered_target: bool,
-    elapsed: std::time::Duration,
-    interval: std::time::Duration,
-) -> bool {
-    has_registered_target && elapsed >= interval
-}
-
 pub(super) struct WatcherCompletionFooterIdleState {
     tick_at: tokio::time::Instant,
     spin_idx: usize,
@@ -226,44 +218,12 @@ pub(super) async fn refresh_watcher_completion_footer_if_due(
     refresh_watcher_registered_completion_footer(http, shared, channel_id, indicator).await;
 }
 
-/// #3964: should the #3089 single-message-panel completion footer
-/// (`Context … tokens`, `Tasks`, `Subagents`) be SUPPRESSED for this
-/// WATCHER-relayed terminal mirror?
-///
-/// This is the tmux-watcher analogue of the turn-bridge gate
-/// `tui_direct_completion_footer_suppressed` (#3959/#3961). #3961 stripped the
-/// chrome only on the turn-bridge relay path (`is_external_input_tui_direct`),
-/// but a TUI session's SYNTHETIC / system-injected turns (background
-/// task-notifications, `/loop`·ScheduleWakeup) are relayed by the live tmux
-/// WATCHER, not the idle bridge — so they reached
-/// `complete_watcher_single_message_completion_footer`, which re-appended the
-/// reconstructed footer (#3964). For a watcher-relayed mirror the user is
-/// already watching the very same Context/Tasks/Subagents chrome in their
-/// Claude Code TUI pane, so the relayed body must carry the assistant prose
-/// ALONE.
-///
-/// Pure + mutation-pinned: the `turn_is_external_input_for_session &&` scoping
-/// keeps Discord-origin (`TurnSource::Managed`) #3089 footers untouched — that
-/// flag is `true` ONLY for external-input/adopted/monitor-triggered turns owned
-/// by the watcher relay (`watcher_inflight_is_panel_eligible_for_session`), so a
-/// genuine Discord-origin turn (whose Discord message is the user's only status
-/// surface) can never be misclassified as a mirror.
-pub(super) fn watcher_external_input_completion_footer_suppressed(
-    single_message_panel_footer_mode: bool,
-    turn_is_external_input_for_session: bool,
-) -> bool {
-    single_message_panel_footer_mode && turn_is_external_input_for_session
-}
-
-/// #3964: deliver the watcher-relayed TUI mirror as clean assistant prose with
-/// NO completion footer appended (and no footer-refresh target left registered).
-///
-/// Mirrors the turn-bridge `complete_bridge_single_message_terminal_no_footer`:
-/// run the shared finalize with a `None` completion block so any residual live
-/// status footer is stripped but nothing is re-appended; an already-clean body
-/// short-circuits to no edit. The registry target is forgotten first so the
-/// background `refresh_watcher_completion_footer_if_due` loop never re-adds the
-/// chrome onto this mirror.
+/// #3964: deliver the watcher-relayed TUI mirror as clean assistant prose with NO
+/// completion footer (mirror of the bridge's
+/// `complete_bridge_single_message_terminal_no_footer`). Forgets the registry
+/// target first so `refresh_watcher_completion_footer_if_due` can't re-add chrome,
+/// then finalizes with a `None` block (strips any residual live footer; an
+/// already-clean body short-circuits to no edit).
 async fn complete_watcher_single_message_terminal_no_footer(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -286,25 +246,21 @@ async fn complete_watcher_single_message_terminal_no_footer(
             None,
         )
     else {
-        // Already clean (short-replace rewrote the message to this prose) — the
-        // mirror carries the assistant turn with no chrome, nothing to edit.
-        return true;
+        return true; // already clean prose (short-replace) — nothing to edit.
     };
     rate_limit_wait(shared, channel_id).await;
-    match crate::services::discord::http::edit_channel_message(http, channel_id, msg_id, &finalized)
-        .await
+    if let Err(error) =
+        crate::services::discord::http::edit_channel_message(http, channel_id, msg_id, &finalized)
+            .await
     {
-        Ok(_) => true,
-        Err(error) => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!(
-                "  [{ts}] ⚠ watcher: #3964 TUI-mirror footer strip failed for channel {} msg {}: {error}",
-                channel_id.get(),
-                msg_id.get()
-            );
-            false
-        }
+        tracing::warn!(
+            "  ⚠ watcher: #3964 TUI-mirror footer strip failed for channel {} msg {}: {error}",
+            channel_id.get(),
+            msg_id.get()
+        );
+        return false;
     }
+    true
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -530,21 +486,24 @@ pub(super) async fn complete_watcher_terminal_footer_or_status_panel(
                 text: last_edit_text.to_string(),
             });
         let target = terminal_target.or(fallback_target);
+        let target_msg_id = target.as_ref().map(|target| target.msg_id);
+        let target_text = target
+            .as_ref()
+            .map(|target| target.text.as_str())
+            .unwrap_or("");
         if watcher_external_input_completion_footer_suppressed(
             single_message_panel_footer_mode,
             turn_is_external_input_for_session,
+            completion_background,
         ) {
-            // #3964: watcher-relayed TUI mirror — deliver clean prose, no chrome.
+            // #3964: watcher-relayed TUI mirror — clean prose, no chrome.
             complete_watcher_single_message_terminal_no_footer(
                 http,
                 shared,
                 channel_id,
-                target.as_ref().map(|target| target.msg_id),
+                target_msg_id,
                 provider,
-                target
-                    .as_ref()
-                    .map(|target| target.text.as_str())
-                    .unwrap_or(""),
+                target_text,
             )
             .await
         } else {
@@ -561,14 +520,11 @@ pub(super) async fn complete_watcher_terminal_footer_or_status_panel(
                 http,
                 shared,
                 channel_id,
-                target.as_ref().map(|target| target.msg_id),
+                target_msg_id,
                 owner,
                 provider,
                 started_at_unix,
-                target
-                    .as_ref()
-                    .map(|target| target.text.as_str())
-                    .unwrap_or(""),
+                target_text,
                 indicator,
                 completion_background,
             )
@@ -724,107 +680,5 @@ mod tests {
 
         assert!(rendered.len() <= DISCORD_MSG_LIMIT);
         assert!(rendered.contains("\n\n"));
-    }
-
-    #[test]
-    fn completion_footer_tick_requires_registered_unfinished_target() {
-        let interval = std::time::Duration::from_secs(5);
-
-        assert!(watcher_completion_footer_should_tick(
-            true, interval, interval
-        ));
-        assert!(!watcher_completion_footer_should_tick(
-            false, interval, interval
-        ));
-        assert!(!watcher_completion_footer_should_tick(
-            true,
-            std::time::Duration::from_secs(4),
-            interval
-        ));
-    }
-
-    // ---- #3964: watcher-relayed synthetic/system-injected TUI mirror suppresses
-    // the #3089 chrome footer ----
-    //
-    // #3961 stripped the `Context … tokens · auto-compact` / `Tasks` / `Subagents`
-    // chrome only on the turn-bridge relay path. A TUI session's SYNTHETIC turns
-    // (background task-notifications, `/loop`·ScheduleWakeup) are relayed by the
-    // live tmux WATCHER instead, so they reached this module's completion footer
-    // and leaked the chrome again (#3964). The watcher gate must suppress the same
-    // chrome for any watcher-owned mirror turn while leaving a genuine
-    // Discord-origin turn's footer (the user's only status surface) intact.
-
-    #[test]
-    fn watcher_external_input_completion_footer_suppression_gate_3964() {
-        // Scoped: suppressed ONLY for a watcher-owned external-input / synthetic
-        // mirror turn in footer mode. A Discord-origin (`TurnSource::Managed`)
-        // footer-mode turn — for which `turn_is_external_input_for_session` is
-        // false — keeps the #3089 footer; non-footer-mode is unaffected.
-        assert!(watcher_external_input_completion_footer_suppressed(
-            true, true
-        ));
-        assert!(!watcher_external_input_completion_footer_suppressed(
-            true, false
-        ));
-        assert!(!watcher_external_input_completion_footer_suppressed(
-            false, true
-        ));
-        assert!(!watcher_external_input_completion_footer_suppressed(
-            false, false
-        ));
-    }
-
-    #[test]
-    fn synthetic_tui_mirror_emits_prose_without_tui_chrome_3964() {
-        // The exact #3964 corruption observed on synthetic / system-injected turns:
-        // assistant prose followed by the rendered Context/Tasks/Subagents
-        // completion footer. The watcher mirror suppresses the completion block
-        // (None), so the relayed body is the assistant turn ALONE — no chrome; while
-        // a Discord-origin turn (block present) still carries the footer.
-        let prose = "#3879 작업 완료 — 다음 이슈 대기.";
-        let chrome_block = "Context   📦 166.4k / 1.0M tokens (16%) · auto-compact 60%\n\nTasks\n└ TaskUpdate 4 · 머지 완료\n\nSubagents\n└ general-purpose Fix #3879 — Agent \"Implement #3886\"";
-
-        let discord_origin =
-            crate::services::discord::single_message_panel::compose_completion_footer_text(
-                prose,
-                Some(chrome_block),
-            );
-        assert!(discord_origin.starts_with(prose));
-        assert!(discord_origin.contains("Context   📦"));
-        assert!(discord_origin.contains("Subagents"));
-        assert!(discord_origin.contains("auto-compact"));
-
-        let synthetic_tui_mirror =
-            crate::services::discord::single_message_panel::compose_completion_footer_text(
-                prose, None,
-            );
-        assert_eq!(synthetic_tui_mirror, prose);
-        assert!(!synthetic_tui_mirror.contains("Context"));
-        assert!(!synthetic_tui_mirror.contains("tokens"));
-        assert!(!synthetic_tui_mirror.contains("auto-compact"));
-        assert!(!synthetic_tui_mirror.contains("Tasks"));
-        assert!(!synthetic_tui_mirror.contains("Subagents"));
-    }
-
-    #[test]
-    fn synthetic_tui_mirror_finalize_strips_live_status_footer_to_prose_3964() {
-        // If the streaming placeholder still carries the LIVE status footer at
-        // completion (the non-short-replace watcher path), the mirror finalize
-        // (block = None) strips it down to the assistant prose with no chrome
-        // re-appended.
-        let body_with_footer = format!(
-            "Final answer\n\n{}",
-            compose_single_message_footer_status_block("⠸", PANEL)
-        );
-        let finalized =
-            crate::services::discord::single_message_panel::finalize_streaming_footer_with_completion(
-                &body_with_footer,
-                &ProviderKind::Claude,
-                None,
-            )
-            .expect("a live status footer must finalize to a stripped edit");
-        assert_eq!(finalized, "Final answer");
-        assert!(!finalized.contains("Subagents"));
-        assert!(!finalized.contains("진행 중"));
     }
 }
