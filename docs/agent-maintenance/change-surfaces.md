@@ -962,7 +962,13 @@
     marker suppression for stop-control transcript envelopes; +62 from #3304:
     slash-command canonical prompt keys for `<command-*>` XML vs
     `/command args` dedupe, plus focused loop skill-expansion regressions).
-  - `src/services/discord/recovery_engine.rs` (3020 lines; -19 net from #3918
+  - `src/services/discord/recovery_engine.rs` (3101 lines; +81 from #3869
+    (restart routing-orphan cleanup): the three post-`validate_bot_channel_routing_with_provider_channel`
+    sites no longer bare-`continue`-strand a row whose channel was re-bound to a
+    different provider while dcserver was down — they finalize + notify it via the
+    new `cleanup_routing_orphaned_inflight` helper (interrupted terminal notice +
+    `dispose_recovery_relay_outcome`), gated on `orphans_inflight_on_restart` so a
+    cross-bot-skip row stays PRESERVED for the owning sibling bot; -19 net from #3918
     round-3 (codex): the committed-branch anchor-repost call + its row-dispose +
     storm-guard comment moved out of this file into the new
     `recovery_paths::restart::recover_committed_anchor_repost` wrapper, leaving the
