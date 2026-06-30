@@ -145,7 +145,10 @@
     "session ended … start a new session" tmux-death notice and its
     `should_send_session_ended_notice`/`session_ended_notice`/
     `TmuxDeathLifecycleDecision` plumbing).
-  - `src/services/discord/tmux.rs` (1485 lines; +8 from #3886 hosting the
+  - `src/services/discord/tmux.rs` (1507 lines; +22 from #3871 persisting the
+    streamed rollover-prefix ids through the watcher seed/restore + persist path
+    so a terminal full-body fallback in a later iteration / after a restart still
+    deletes them (cross-iteration durability of the dup-relay fix); +8 from #3886 hosting the
     `status_panel_timedout_reconcile` module decl + re-export so the placeholder
     sweeper can finalize a panel stuck at "진행 중" after a TimedOut completion
     gate (reconcile body lives in the new non-hot file); +14 from current inventory

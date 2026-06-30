@@ -403,6 +403,24 @@
 
 ### Audited touches
 
+- #3871 rollover duplicate-relay fix: `tmux_watcher.rs` records the streamed
+  rollover-prefix message ids it FROZE during streaming and, on the terminal
+  full-body fallback, deletes them (via `delete_watcher_rollover_frozen_prefixes`
+  in `tmux_placeholder_suppression.rs`) so the full-body re-post does not
+  duplicate the frozen prose — watcher parity with the sink's existing
+  `terminal_full_replay_cleanup_msg_ids`. For durability across `'watcher_loop`
+  iterations and watcher restarts the id set is PERSISTED on the inflight row
+  (new additive `#[serde(default)] streaming_rollover_frozen_msg_ids` on
+  `InflightTurnState`, union-merged via the streaming-progress patch and restored
+  through the watcher seed), so a fallback in a later iteration / after a restart
+  still deletes every accumulated prefix. Classification: worker-local relay
+  cleanup + node-local inflight state. The inflight row is per-node sidecar state
+  the owning watcher reads/writes for its own turn; the new field is additive
+  `#[serde(default)]` (legacy rows deserialize as empty), so it adds no leader
+  gate, cross-node routing, or PG-lease assumption and is forward/backward
+  compatible on disk. Independent of the `AGENTDESK_DELIVERY_RECORD_AUTHORITY`
+  flag (it touches no delivery records).
+
 - #3837 intake_turn decomposition (behavior-preserving): three cohesive
   `handle_text_message` clusters were lifted verbatim into sibling
   `router::message_handler::intake_turn::{voice_intake,race_loss,turn_watchdog}`

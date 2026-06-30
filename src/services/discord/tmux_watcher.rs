@@ -1062,6 +1062,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let mut last_status_panel_text = String::new();
         let mut last_edit_text = stream_seed.last_edit_text;
         let mut response_sent_offset = stream_seed.response_sent_offset;
+        // #3871: ids of streamed rollover prefixes frozen for this turn; deleted on a
+        // terminal full-body fallback so the frozen prose is not duplicated (sink parity).
+        // SEEDED from the persisted row so prefixes frozen in an earlier `'watcher_loop`
+        // iteration / before a watcher restart survive to the fallback (no residual dup).
+        let mut watcher_streaming_rollover_frozen_msg_ids: Vec<serenity::MessageId> =
+            stream_seed.streaming_rollover_frozen_msg_ids.clone();
         let finish_mailbox_on_completion = stream_seed.finish_mailbox_on_completion;
         let mut monitor_auto_turn_claimed = false;
         let mut monitor_auto_turn_deferred = false;
@@ -2308,6 +2314,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 .await
                                 {
                                     Ok(message) => {
+                                        // #3871: `msg_id` is now a FROZEN prefix — record it for terminal full-body dedup.
+                                        watcher_streaming_rollover_frozen_msg_ids.push(msg_id);
                                         placeholder_msg_id = Some(message.id);
                                         placeholder_from_restored_inflight = false;
                                         response_sent_offset += plan.split_at;
@@ -2325,6 +2333,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                             task_notification_kind,
                                             tool_state.any_tool_used,
                                             tool_state.has_post_tool_text,
+                                            &watcher_streaming_rollover_frozen_msg_ids,
                                         );
                                     }
                                     Err(error) => {
@@ -2428,6 +2437,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 task_notification_kind,
                                 tool_state.any_tool_used,
                                 tool_state.has_post_tool_text,
+                                &watcher_streaming_rollover_frozen_msg_ids,
                             );
                         }
                     }
@@ -4916,6 +4926,20 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                             msg_id,
                                         );
                                     }
+                                    // #3871: the full body was just re-posted as ordered chunks, so the
+                                    // frozen rollover prefixes are now duplicates — delete them.
+                                    delete_watcher_rollover_frozen_prefixes(
+                                        &http,
+                                        channel_id,
+                                        &shared,
+                                        &watcher_provider,
+                                        &tmux_session_name,
+                                        session_bound_fallback_uses_full_body,
+                                        std::mem::take(
+                                            &mut watcher_streaming_rollover_frozen_msg_ids,
+                                        ),
+                                    )
+                                    .await;
                                     let ts = chrono::Local::now().format("%H:%M:%S");
                                     tracing::info!(
                                         "  [{ts}] 👁 ✓ relayed full terminal response after session-bound fallback (ordered chunks) channel {} msg {} ({} chars)",

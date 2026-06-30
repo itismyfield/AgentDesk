@@ -345,6 +345,14 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// non-voice turns / legacy rows.
     #[serde(default)]
     pub followup_voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
+    /// #3871: Discord message ids of the streamed rollover PREFIXES this turn
+    /// froze (a `>DISCORD_MSG_LIMIT` answer that rolled over mid-stream). Persisted
+    /// alongside `response_sent_offset` so a terminal full-body fallback that runs
+    /// in a LATER `'watcher_loop` iteration or after a watcher restart still deletes
+    /// every accumulated frozen prefix (no residual duplicate). Empty for legacy
+    /// rows / turns that never rolled over.
+    #[serde(default)]
+    pub streaming_rollover_frozen_msg_ids: Vec<u64>,
 }
 
 /// Origin of a turn whose state is captured in [`InflightTurnState`]. Pure
@@ -770,6 +778,7 @@ impl InflightTurnState {
             followup_merge_consecutive: false,
             followup_pending_uploads: Vec::new(),
             followup_voice_announcement: None,
+            streaming_rollover_frozen_msg_ids: Vec::new(),
         }
     }
 

@@ -26,6 +26,11 @@ pub(in crate::services::discord) struct WatcherStreamProgressPatch {
     pub task_notification_kind: Option<TaskNotificationKind>,
     pub any_tool_used: bool,
     pub has_post_tool_text: bool,
+    /// #3871: the frozen streamed rollover-prefix Discord message ids accumulated
+    /// so far this turn. Union-merged into the reloaded row so the set only ever
+    /// grows (a terminal full-body fallback in a later iteration / after restart
+    /// can delete every accumulated prefix).
+    pub streaming_rollover_frozen_msg_ids: Vec<u64>,
 }
 
 /// #3558: outcome of [`persist_watcher_stream_progress_locked_in_root`].
@@ -127,6 +132,13 @@ pub(super) fn persist_watcher_stream_progress_locked_in_root(
     state.has_post_tool_text = patch.has_post_tool_text;
     if patch.task_notification_kind.is_some() {
         state.task_notification_kind = patch.task_notification_kind;
+    }
+    // #3871: union-merge the frozen rollover-prefix ids into the reloaded row so
+    // the set is monotonic (never drops an id another iteration already froze).
+    for frozen_id in patch.streaming_rollover_frozen_msg_ids {
+        if !state.streaming_rollover_frozen_msg_ids.contains(&frozen_id) {
+            state.streaming_rollover_frozen_msg_ids.push(frozen_id);
+        }
     }
     // `last_offset` intentionally untouched — preserved from the in-lock reload.
 
