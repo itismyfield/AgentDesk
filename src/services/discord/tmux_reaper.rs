@@ -177,6 +177,14 @@ pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
 
     let mut reaped = 0u32;
 
+    // #3877: completion teardown can miss a `fresh` routine's DISTINCT tmux
+    // session (e.g. a thread-less migrated-launchd run), leaving a dead-pane
+    // orphan with no channel mapping that the loop below skips ("orphan —
+    // handled by cleanup_orphan_tmux_sessions", which only runs at boot). Build
+    // the set of reapable fresh-routine sessions (fresh + no in-flight run) so
+    // the orphan branch can collect them here instead of waiting for a restart.
+    let reapable_fresh_sessions = build_reapable_fresh_routine_sessions(shared, &provider).await;
+
     for session_name in output.iter().map(|s| s.trim()) {
         let Some((session_provider, _)) = parse_provider_and_channel_from_tmux_name(session_name)
         else {
@@ -209,7 +217,19 @@ pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
         };
 
         let Some((channel_id, channel_name)) = channel_id_for_session else {
-            continue; // orphan — handled by cleanup_orphan_tmux_sessions
+            // orphan — no channel mapping. #3877: if this dead session is a
+            // completed `fresh` routine's distinct session that escaped
+            // completion teardown, reap it now (backstop) instead of leaving it
+            // for the boot-only `cleanup_orphan_tmux_sessions`. The snapshot is
+            // only ever non-empty when a PG pool exists, so the pool guard here
+            // is a no-op in non-PG deployments and feeds the kill-time re-read.
+            if let Some(pool) = shared.pg_pool.as_ref()
+                && let Some(routine_id) = reapable_fresh_sessions.get(session_name)
+                && reap_fresh_routine_orphan(pool, session_name, routine_id).await
+            {
+                reaped += 1;
+            }
+            continue;
         };
 
         // If a watcher is attached, tmux liveness is the termination authority:
@@ -350,6 +370,130 @@ pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
     process_unified_thread_kill_signals(shared).await;
 
     reap_orphan_tmux_wrapper_processes().await;
+}
+
+/// (#3877) Builds the lookup the periodic reaper uses to collect a completed
+/// `fresh` routine's orphaned dead-pane session (no channel mapping). Maps each
+/// deterministic owned tmux session name to its routine id (for log context).
+/// Empty when there is no PG pool, so non-PG deployments are a no-op. All routine
+/// scoping/safety lives in
+/// `fresh_session_reaper::reapable_fresh_routine_sessions` (fresh-only, no
+/// in-flight run, DM-safe).
+async fn build_reapable_fresh_routine_sessions(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+) -> std::collections::HashMap<String, String> {
+    let Some(pool) = shared.pg_pool.as_ref() else {
+        return std::collections::HashMap::new();
+    };
+    match crate::services::routines::fresh_session_reaper::reapable_fresh_routine_sessions(
+        pool, provider,
+    )
+    .await
+    {
+        Ok(sessions) => sessions
+            .into_iter()
+            .map(|session| (session.tmux_session, session.routine.id))
+            .collect(),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "tmux reaper: failed to list reapable fresh routine sessions (#3877)"
+            );
+            std::collections::HashMap::new()
+        }
+    }
+}
+
+/// (#3877) Reaps one completed fresh-routine orphan by directly killing its
+/// dead-pane tmux session — exactly like `cleanup_orphan_tmux_sessions`, NOT via
+/// the routine teardown path. The teardown path force-kills the owning provider
+/// CHANNEL runtime, which for a thread-less routine that ran in the agent's
+/// primary channel would cancel an unrelated live primary-agent turn. The
+/// backstop only ever fires for a session the caller already proved DEAD (no
+/// live pane) and matched to a `fresh` routine with no in-flight run, so killing
+/// the session and cleaning its temp files is sufficient and side-effect free.
+/// Returns `true` when the kill succeeded so the caller can count it.
+///
+/// TOCTOU close (#3877, codex P1): the matched set is a SNAPSHOT taken once
+/// before the loop, and the loop's pane-liveness check ran earlier in this
+/// iteration. Between that snapshot/check and this kill, a new claim can set
+/// `in_flight_run_id` and re-launch a fresh pane under the SAME deterministic
+/// tmux name — killing then would tear down a just-re-triggered LIVE routine. So
+/// immediately before the kill we RE-VALIDATE against fresh state: re-read the
+/// routine row (must still be a `fresh`, agent-bound, no-in-flight orphan) AND
+/// re-probe pane liveness (must still be definitively dead). Only when BOTH still
+/// hold do we kill; otherwise we log the skip reason and preserve the session.
+async fn reap_fresh_routine_orphan(
+    pool: &sqlx::PgPool,
+    session_name: &str,
+    routine_id: &str,
+) -> bool {
+    let routine = match crate::services::routines::fresh_session_reaper::reread_routine(
+        pool, routine_id,
+    )
+    .await
+    {
+        Ok(routine) => routine,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "tmux reaper backstop: re-read of routine {routine_id} failed — skipping kill of {session_name} (#3877)"
+            );
+            return false;
+        }
+    };
+
+    // Re-probe pane liveness as a three-state answer: a transient probe failure
+    // must NOT be mistaken for death (treated as "unknown ⇒ preserve").
+    let pane = {
+        let name = session_name.to_string();
+        tokio::task::spawn_blocking(move || {
+            crate::services::tmux_diagnostics::tmux_session_pane_liveness(&name)
+        })
+        .await
+        .unwrap_or(crate::services::platform::tmux::PaneLiveness::ProbeError)
+    };
+
+    if let Err(reason) =
+        crate::services::routines::fresh_session_reaper::revalidate_fresh_orphan_before_kill(
+            routine.as_ref(),
+            pane,
+        )
+    {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] ♻ reaper backstop: preserving fresh routine session {session_name} (routine {routine_id}) — {reason} (#3877)"
+        );
+        return false;
+    }
+
+    let name = session_name.to_string();
+    let killed = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || {
+            record_tmux_exit_reason(
+                &name,
+                "tmux reaper backstop: completed fresh routine orphan (#3877)",
+            );
+            crate::services::platform::tmux::kill_session(
+                &name,
+                "tmux reaper backstop: completed fresh routine orphan (#3877)",
+            )
+        }),
+    )
+    .await
+    .unwrap_or(Ok(false))
+    .unwrap_or(false);
+
+    if killed {
+        crate::services::tmux_common::cleanup_session_temp_files(session_name);
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] 🪦 reaper backstop: reaped completed fresh routine orphan {session_name} (routine {routine_id}) (#3877)"
+        );
+    }
+    killed
 }
 
 #[cfg(unix)]

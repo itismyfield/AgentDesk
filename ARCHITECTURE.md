@@ -868,6 +868,7 @@ src/
 │   │   ├── action.rs
 │   │   ├── agent_executor.rs
 │   │   ├── discord_log.rs
+│   │   ├── fresh_session_reaper.rs
 │   │   ├── loader.rs
 │   │   ├── migrated.rs
 │   │   ├── mod.rs
