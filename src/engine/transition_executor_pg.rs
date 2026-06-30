@@ -140,9 +140,11 @@ pub(crate) async fn execute_pg_transition_intent(
             attempt,
             delay_seconds,
         } => {
-            // #3916: record the backoff-aware retry in the audit trail so it is
-            // observable and the timeout sweep can re-issue dispatch after the
-            // delay. The card stays in `state` (no status change).
+            // #3916: record the reducer's backoff-aware retry decision in the
+            // audit trail (observable). The card stays in `state` (no status
+            // change). NOTE: actually re-issuing dispatch after `delay_seconds`,
+            // persisting the due-time, re-arming the timeout clock, and idempotent
+            // suppression of stale retries is the deferred live-wiring follow-up.
             sqlx::query(
                 "INSERT INTO kanban_audit_logs (
                     card_id, from_status, to_status, source, result

@@ -57,10 +57,10 @@
 | `src/dispatch/dispatch_create.rs` | 1396 |
 | `src/dispatch/dispatch_status.rs` | 1529 |
 | `src/engine/loader.rs` | 1332 |
-| `src/engine/mod.rs` | 1279 |
+| `src/engine/mod.rs` | 1280 |
 | `src/engine/ops/db_ops.rs` | 1244 |
 | `src/github/sync.rs` | 1513 |
-| `src/pipeline.rs` | 1396 |
+| `src/pipeline.rs` | 1409 |
 | `src/receipt.rs` | 1842 |
 | `src/reconcile.rs` | 1868 |
 | `src/server/mod.rs` | 2670 |

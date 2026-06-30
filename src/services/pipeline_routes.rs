@@ -58,10 +58,11 @@ pub struct PipelineStageInput {
     pub max_retries: Option<i64>,
     /// #1082 backoff policy. One of STAGE_BACKOFF_VALUES. Persisted as
     /// declarative stage metadata (#3868) so it round-trips through GET.
-    /// #3916 wired the typed policy surface (`OnFailurePolicy`/`TimeoutConfig`)
-    /// into the live timeout executor (`decide_timeout`) via the pipeline
-    /// `timeouts:` config; these per-stage-row DB columns remain a declarative
-    /// mirror until a stage-row executor reads them.
+    /// #3916 added the typed policy *resolver* (`OnFailurePolicy`/`TimeoutConfig`
+    /// in `decide_timeout`), but it is NOT yet on the live timeout path — the
+    /// live sweep (policies/timeouts) does not route through the reducer, and
+    /// these per-stage-row DB columns are still read by no executor. Both remain
+    /// declarative pending the deferred live-wiring follow-up to #3916.
     pub backoff: Option<String>,
     pub skip_condition: Option<String>,
     pub parallel_with: Option<String>,

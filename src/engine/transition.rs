@@ -174,11 +174,13 @@ pub enum TransitionIntent {
     },
     /// Cancel a dispatch (set status='cancelled').
     CancelDispatch { dispatch_id: String },
-    /// Schedule a backoff-aware stage retry instead of transitioning (#3916).
+    /// Backoff-aware stage retry decision instead of a transition (#3916).
     /// Emitted by `decide_timeout` when `OnFailurePolicy::RetryWithBackoff`
-    /// still has attempts remaining: the executor records the attempt in the
-    /// audit trail and the timeout sweep re-issues dispatch after
-    /// `delay_seconds` of `BackoffPolicy` backoff. The card stays in `state`.
+    /// still has attempts remaining; the card stays in `state`. The current
+    /// executor records the decision in the audit trail. NOTE: the actual
+    /// re-dispatch + due-time persistence + timeout-clock re-arm + idempotent
+    /// suppression of stale retries is the deferred live-wiring follow-up to
+    /// #3916 — this intent captures the reducer-level decision it will execute.
     ScheduleStageRetry {
         card_id: String,
         state: String,
@@ -334,7 +336,9 @@ pub fn decide_transition(ctx: &TransitionContext, event: &TransitionEvent) -> Tr
         TransitionEvent::DispatchCompleted { dispatch_id } => {
             decide_dispatch_completed(ctx, dispatch_id)
         }
-        TransitionEvent::TimeoutExpired { state, attempt } => decide_timeout(ctx, state, *attempt),
+        TransitionEvent::TimeoutExpired { state, attempt } => {
+            super::transition_timeout::decide_timeout(ctx, state, *attempt)
+        }
     }
 }
 
@@ -410,7 +414,7 @@ fn decide_operator_override(ctx: &TransitionContext, target: &str) -> Transition
 
 /// Standard status transition triggered by pipeline rules.
 /// This is the core path used by `transition_status_with_opts`.
-fn decide_pipeline_transition(
+pub(crate) fn decide_pipeline_transition(
     ctx: &TransitionContext,
     target: &str,
     source: &str,
@@ -770,159 +774,6 @@ fn decide_dispatch_completed(ctx: &TransitionContext, _dispatch_id: &str) -> Tra
     TransitionDecision {
         outcome: TransitionOutcome::NoOp,
         intents: vec![],
-    }
-}
-
-/// Terminal action once a timeout can no longer be retried (#3916).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TimeoutExhaustAction {
-    /// Transition to the `on_exhaust` target (or no-op when unset).
-    Escalate,
-    /// Record the exhaustion without changing card state.
-    Notify,
-    /// Fail: transition to the `on_exhaust` target (or no-op when unset).
-    Fail,
-}
-
-/// Timeout reducer (#3916).
-///
-/// `attempt` is the number of retries already performed for `state`. Honors the
-/// typed `TimeoutConfig` policy (`max_retries` / `backoff` / `on_failure` /
-/// `on_exhaust_policy`) when one is configured, and otherwise preserves the
-/// legacy immediate `on_exhaust` transition (additive — default/None unchanged).
-fn decide_timeout(ctx: &TransitionContext, state: &str, attempt: u32) -> TransitionDecision {
-    use crate::pipeline::{OnExhaustPolicy, OnFailurePolicy};
-
-    let card = &ctx.card;
-    // Stale event guard: the card already moved on.
-    if card.status != state {
-        return TransitionDecision {
-            outcome: TransitionOutcome::NoOp,
-            intents: vec![],
-        };
-    }
-
-    let Some(timeout) = ctx.pipeline.timeouts.get(state) else {
-        return TransitionDecision {
-            outcome: TransitionOutcome::NoOp,
-            intents: vec![],
-        };
-    };
-
-    // Additive guard: with no typed retry/failure policy, keep the legacy
-    // behavior of transitioning immediately to the `on_exhaust` target.
-    if !timeout.retry_policy_engaged() {
-        return legacy_timeout_transition(ctx, timeout);
-    }
-
-    match timeout.effective_on_failure() {
-        OnFailurePolicy::RetryWithBackoff => {
-            let max_retries = timeout.effective_max_retries();
-            if attempt < max_retries {
-                // Re-issue dispatch after the configured backoff instead of
-                // transitioning. `backoff_delay_seconds` is 1-indexed.
-                let next_attempt = attempt + 1;
-                let delay_seconds = timeout.backoff_delay_seconds(next_attempt);
-                return TransitionDecision {
-                    outcome: TransitionOutcome::Allowed,
-                    intents: vec![TransitionIntent::ScheduleStageRetry {
-                        card_id: card.id.clone(),
-                        state: state.to_string(),
-                        attempt: next_attempt,
-                        delay_seconds,
-                    }],
-                };
-            }
-            // Retries exhausted → apply the typed exhaust policy.
-            let action = match timeout.effective_on_exhaust_policy() {
-                OnExhaustPolicy::Escalate => TimeoutExhaustAction::Escalate,
-                OnExhaustPolicy::Notify => TimeoutExhaustAction::Notify,
-                OnExhaustPolicy::Fail => TimeoutExhaustAction::Fail,
-            };
-            apply_timeout_exhaust(ctx, timeout, action, max_retries)
-        }
-        OnFailurePolicy::FallbackStage => match timeout.on_failure_target.as_deref() {
-            Some(target) => {
-                decide_pipeline_transition(ctx, target, "timeout", ForceIntent::None, "timeout")
-            }
-            // Misconfigured fallback (no target) → escalate via on_exhaust.
-            None => apply_timeout_exhaust(ctx, timeout, TimeoutExhaustAction::Escalate, 0),
-        },
-        // No retries requested — act on the failure immediately.
-        OnFailurePolicy::Escalate => {
-            apply_timeout_exhaust(ctx, timeout, TimeoutExhaustAction::Escalate, 0)
-        }
-        OnFailurePolicy::Fail => apply_timeout_exhaust(ctx, timeout, TimeoutExhaustAction::Fail, 0),
-    }
-}
-
-/// Legacy timeout behavior: transition to the `on_exhaust` target if present,
-/// else no-op. Preserved verbatim for configs without a typed policy (#3916).
-fn legacy_timeout_transition(
-    ctx: &TransitionContext,
-    timeout: &crate::pipeline::TimeoutConfig,
-) -> TransitionDecision {
-    match timeout.on_exhaust.as_deref() {
-        Some(target) => {
-            decide_pipeline_transition(ctx, target, "timeout", ForceIntent::None, "timeout")
-        }
-        None => TransitionDecision {
-            outcome: TransitionOutcome::NoOp,
-            intents: vec![],
-        },
-    }
-}
-
-/// Apply the terminal timeout action once retries are exhausted or skipped.
-fn apply_timeout_exhaust(
-    ctx: &TransitionContext,
-    timeout: &crate::pipeline::TimeoutConfig,
-    action: TimeoutExhaustAction,
-    max_retries: u32,
-) -> TransitionDecision {
-    let card = &ctx.card;
-    match action {
-        // Notify: observe the exhaustion, leave card state untouched.
-        TimeoutExhaustAction::Notify => TransitionDecision {
-            outcome: TransitionOutcome::Allowed,
-            intents: vec![TransitionIntent::AuditLog {
-                card_id: card.id.clone(),
-                from: card.status.clone(),
-                to: card.status.clone(),
-                source: "timeout".to_string(),
-                message: format!(
-                    "timeout exhausted after {max_retries} retr{} — notify (no state change)",
-                    if max_retries == 1 { "y" } else { "ies" }
-                ),
-            }],
-        },
-        // Escalate / Fail: transition to the configured `on_exhaust` target.
-        TimeoutExhaustAction::Escalate | TimeoutExhaustAction::Fail => {
-            match timeout.on_exhaust.as_deref() {
-                Some(target) => {
-                    decide_pipeline_transition(ctx, target, "timeout", ForceIntent::None, "timeout")
-                }
-                None => {
-                    let label = if action == TimeoutExhaustAction::Fail {
-                        "fail"
-                    } else {
-                        "escalate"
-                    };
-                    TransitionDecision {
-                        outcome: TransitionOutcome::Allowed,
-                        intents: vec![TransitionIntent::AuditLog {
-                            card_id: card.id.clone(),
-                            from: card.status.clone(),
-                            to: card.status.clone(),
-                            source: "timeout".to_string(),
-                            message: format!(
-                                "timeout exhausted — {label} (no on_exhaust target configured)"
-                            ),
-                        }],
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -1319,14 +1170,21 @@ mod dispatch_attached_tests {
 
 #[cfg(test)]
 mod timeout_policy_tests {
-    //! #3916: `decide_timeout` honors the typed `TimeoutConfig` retry/backoff +
-    //! `OnFailurePolicy`, and preserves the legacy immediate `on_exhaust`
-    //! transition when no typed policy is configured (additive — default/None
-    //! unchanged). Pins the three DoD behaviors the issue requires:
+    //! #3916: `decide_timeout` (the REDUCER) honors the typed `TimeoutConfig`
+    //! retry/backoff + `OnFailurePolicy`, and preserves the legacy immediate
+    //! `on_exhaust` transition when no typed policy is configured (additive —
+    //! default/None unchanged). Pins the reducer-level DoD behaviors:
     //!   (i)   retry-with-backoff schedules retries with the correct attempt
     //!         count + backoff and only transitions once exhausted,
     //!   (ii)  a stage exceeding `TimeoutConfig` (retries exhausted) is aborted,
-    //!   (iii) default/None policy = no retry/no timeout effect (unchanged).
+    //!   (iii) default/None policy = no retry/no timeout effect (unchanged),
+    //!   plus escalate / fallback-stage / fail(→terminal) / notify and the
+    //!   standalone `on_exhaust_policy` engagement (P1-3 / P1-4).
+    //!
+    //! These exercise `decide_transition`/`decide_timeout` directly. They do NOT
+    //! prove a live-path effect: the production timeout sweep
+    //! (policies/timeouts/card-timeouts.js) does not yet emit `TimeoutExpired`,
+    //! so routing it through this reducer is the deferred follow-up to #3916.
     use super::*;
     use crate::pipeline::{
         BackoffPolicy, OnExhaustPolicy, OnFailurePolicy, PhaseGateConfig, PipelineConfig,
@@ -1353,7 +1211,8 @@ mod timeout_policy_tests {
 
     /// Pipeline whose `in_progress` state carries the supplied timeout config,
     /// with Free transitions to `escalated` (the `on_exhaust` target) and
-    /// `fallback` so exhaust/fallback decisions resolve to observable moves.
+    /// `fallback`, plus a terminal `done` state (the `fail` target — reached via
+    /// a forced transition, so no explicit rule is needed).
     fn pipeline_with_timeout(timeout: TimeoutConfig) -> PipelineConfig {
         let mut timeouts = HashMap::new();
         timeouts.insert("in_progress".to_string(), timeout);
@@ -1364,6 +1223,7 @@ mod timeout_policy_tests {
                 state("in_progress", false),
                 state("escalated", false),
                 state("fallback", false),
+                state("done", true),
             ],
             transitions: vec![
                 free("in_progress", "escalated"),
@@ -1535,10 +1395,56 @@ mod timeout_policy_tests {
         );
     }
 
+    // P1-3: explicit `on_failure: fail` TERMINATES the card to a terminal
+    // state, not the nonterminal `on_exhaust` target.
     #[test]
-    fn on_failure_fail_transitions_to_on_exhaust_target() {
+    fn on_failure_fail_terminates_to_terminal_state() {
         let timeout = TimeoutConfig {
             on_failure: Some(OnFailurePolicy::Fail),
+            ..base_timeout()
+        };
+        let d = decide(timeout, 0);
+        assert_eq!(
+            transitioned_to(&d).as_deref(),
+            Some("done"),
+            "fail must move the card to the terminal state, not on_exhaust"
+        );
+    }
+
+    // P1-4: a standalone typed `on_exhaust_policy` (no retry fields) engages and
+    // applies the exhaust semantics directly — it must NOT fall back to legacy.
+    #[test]
+    fn standalone_on_exhaust_policy_notify_audits_without_transition() {
+        let timeout = TimeoutConfig {
+            on_exhaust_policy: Some(OnExhaustPolicy::Notify),
+            ..base_timeout()
+        };
+        let d = decide(timeout, 0);
+        assert_eq!(retry(&d), None);
+        assert_eq!(
+            transitioned_to(&d),
+            None,
+            "notify must not transition (P1-4 regression: legacy fallback would move to on_exhaust)"
+        );
+        assert!(matches!(d.outcome, TransitionOutcome::Allowed));
+    }
+
+    #[test]
+    fn standalone_on_exhaust_policy_fail_terminates() {
+        let timeout = TimeoutConfig {
+            on_exhaust_policy: Some(OnExhaustPolicy::Fail),
+            ..base_timeout()
+        };
+        assert_eq!(
+            transitioned_to(&decide(timeout, 0)).as_deref(),
+            Some("done")
+        );
+    }
+
+    #[test]
+    fn standalone_on_exhaust_policy_escalate_transitions_to_on_exhaust() {
+        let timeout = TimeoutConfig {
+            on_exhaust_policy: Some(OnExhaustPolicy::Escalate),
             ..base_timeout()
         };
         assert_eq!(
