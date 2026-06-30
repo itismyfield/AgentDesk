@@ -165,25 +165,39 @@ impl StatusPanelState {
                 tool_use_id,
                 background,
             } => {
-                let desc = desc
-                    .filter(|value| !value.trim().is_empty())
-                    .unwrap_or_else(|| "subagent".to_string());
-                let subagent_type = subagent_type
-                    .filter(|value| !value.trim().is_empty())
-                    .unwrap_or_else(|| "Task".to_string());
+                // #3920: keep "was a real value provided?" BEFORE defaulting, so a
+                // background-promotion re-affirmation (an async launch ack carries
+                // no desc/type) never overwrites the launching slot's real
+                // description with the `subagent`/`Task` placeholders.
+                let provided_desc = desc.filter(|value| !value.trim().is_empty());
+                let provided_type = subagent_type.filter(|value| !value.trim().is_empty());
+                // A background `SubagentStart` re-affirms (and #3920: PROMOTES) the
+                // still-running slot for this tool-use id. Matching ANY unfinished
+                // slot — not only an already-background one — lets an async/
+                // `run_in_background` Agent launch (whose async-ness is known only
+                // from the launch-ack `toolUseResult`, not the tool INPUT) flip its
+                // foreground-looking slot to a background subagent. That keeps it
+                // alive across turn-boundary resets like a Bash `run_in_background`
+                // task, instead of being dropped a turn later (#3920).
                 if background
                     && let Some(id) = tool_use_id.as_deref().filter(|id| !id.trim().is_empty())
                     && let Some(slot) = self.subagents.iter_mut().rev().find(|slot| {
-                        slot.background
-                            && slot.finished.is_none()
-                            && slot.tool_use_id.as_deref() == Some(id)
+                        slot.finished.is_none() && slot.tool_use_id.as_deref() == Some(id)
                     })
                 {
-                    slot.subagent_type = subagent_type;
-                    slot.desc = desc.clone();
-                    self.status = DerivedStatus::SubagentRunning { desc };
+                    slot.background = true;
+                    if let Some(subagent_type) = provided_type {
+                        slot.subagent_type = subagent_type;
+                    }
+                    if let Some(desc) = provided_desc {
+                        slot.desc = desc;
+                    }
+                    let running_desc = slot.desc.clone();
+                    self.status = DerivedStatus::SubagentRunning { desc: running_desc };
                     return;
                 }
+                let desc = provided_desc.unwrap_or_else(|| "subagent".to_string());
+                let subagent_type = provided_type.unwrap_or_else(|| "Task".to_string());
                 let ordinal = take_slot_ordinal(&mut self.next_slot_ordinal);
                 self.subagents.push(SubagentSlot {
                     subagent_type,

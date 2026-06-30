@@ -539,6 +539,13 @@ fn user_status_events(value: &Value) -> Vec<StatusEvent> {
                 .get("is_error")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            // #3920: a successful async Agent launch ack keeps its slot alive as a
+            // background subagent across turns (it is NOT a completion).
+            if let Some(events) =
+                super::subagent_rollout::async_launch_promote_events(value, blocks, idx, is_error)
+            {
+                return events;
+            }
 
             // This block's OWN aggregate (batched case), keyed by THIS block's
             // tool_use_id; else the legacy record-level aggregate on the first
