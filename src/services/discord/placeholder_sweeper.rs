@@ -395,6 +395,11 @@ async fn run_placeholder_sweep_pass(
         // restart/hot-swap rows are left for recovery (matching the placeholder
         // restart_mode guard).
         if state.restart_mode.is_none() {
+            // #3886/#3951: deterministic reconcile for a panel stuck at `진행 중`
+            // after a TimedOut gate. MUST run before the age-based orphan reclaim
+            // below — a committed finalize registers the #3607 terminal anchor the
+            // reclaim then skips (DEFECT 3). Self-guards via a fresh same-turn re-read.
+            super::tmux::reconcile_timed_out_tui_status_panel(http, shared, provider, &state).await;
             sweep_orphan_status_panel(
                 http,
                 shared,

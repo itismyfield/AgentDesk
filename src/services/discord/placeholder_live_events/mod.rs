@@ -249,6 +249,21 @@ impl PlaceholderLiveEvents {
         }
     }
 
+    /// #3886: `true` iff this channel's live panel still holds a non-terminal
+    /// (`진행 중`) state. The TimedOut-completion-gate reconcile gates on this to
+    /// finalize a stuck panel AT MOST ONCE (preserves #3477/#3812 byte-stability).
+    pub(in crate::services::discord) fn status_panel_is_unfinished(
+        &self,
+        channel_id: ChannelId,
+    ) -> bool {
+        self.status_by_channel
+            .get(&channel_id)
+            .is_some_and(|entry| {
+                let guard = entry.lock().unwrap_or_else(|p| p.into_inner());
+                !matches!(guard.status, DerivedStatus::Completed { .. })
+            })
+    }
+
     /// #3393: bridge an observed `<task-notification>` XML user-record into the
     /// live-panel terminal StatusEvents for `channel_id`.
     pub(in crate::services::discord) fn bridge_task_notification_xml(
