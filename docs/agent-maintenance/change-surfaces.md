@@ -1594,7 +1594,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   detector and prompt delivery surface (#2399 hardened the post-turn
   handoff deadline). Treat as giant-file territory; split before adding
   non-bugfix behavior beyond the readiness/cancel contract.
-- `src/services/claude_tui/input.rs` (1656) — Claude TUI input readiness
+- `src/services/claude_tui/input.rs` (1765) — Claude TUI input readiness
   detector, prompt delivery, and cancellation/offset handoff surface. Treat as
   giant-file territory; split before adding non-bugfix behavior beyond the
   readiness/cancel contract. (+191 from the #685/#720 reliability fixes:
