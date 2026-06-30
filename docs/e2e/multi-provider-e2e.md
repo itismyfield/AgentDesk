@@ -41,8 +41,8 @@ Every scenario must declare `agent_mode`:
 | `agent_mode` | Use when | Relay example |
 | --- | --- | --- |
 | `none` | No AgentDesk agent/provider is contacted; the harness checks local state-machine or replay fixtures only. | `E-24`/`E-25` local fixture replay. These can prove parser/finalization contracts, but cannot satisfy live relay gates. |
-| `controlled` | A deterministic test agent, fake provider, scripted responder, or controlled runtime hook owns completion. | Future hook-backed relay gaps such as forced quiescence timeout or synthetic foreign-active state. |
-| `real_live` | The scenario sends work through a real provider/cell and live Discord/runtime boundary. | Normal relay matrix prompts, direct TUI input, cross-channel `E-11`, and post-deploy relay continuity smoke. |
+| `controlled` | A deterministic test agent, fake provider, scripted responder, or controlled runtime hook owns completion. | Future fake-provider / production-parser injection. A deterministic forced quiescence timeout would also land here once a runtime hook exists. |
+| `real_live` | The scenario sends work through a real provider/cell and live Discord/runtime boundary. | Normal relay matrix prompts, direct TUI input, cross-channel `E-11`, restart-guard `E-17`, the `E-16` completion-quiescence release window, and post-deploy relay continuity smoke. |
 
 Every scenario must also declare `coverage_class`:
 
@@ -76,10 +76,29 @@ scheduled wakeup/monitor path: the first turn must call `ScheduleWakeup`, and
 the automatic wake turn must relay `[E2E:E13:WAKE]` to Discord. It intentionally
 runs only on `claude-pipe`; `claude-tui` and `claude-e` keep normal relay
 coverage because this matrix does not create a persistent Claude Code wake
-session for those cells. `E-16` and `E-17` are #2935 regression stubs: they are
-loaded by the relevant cells but skipped until the runtime/orchestrator exposes
-hooks to force Claude TUI completion-quiescence timeout and to hold a foreign
-active mailbox during a destructive restart attempt. `E-18` is an executable
+session for those cells. `E-16` and `E-17` close the #2935 live regression gap
+(#3797). `E-16` is an executable `claude-tui` `real_live`/`live` scenario: it
+delivers a first response and then sends a second prompt immediately at the
+first response marker — the completion-quiescence release window after delivery
+(`TUI_COMPLETION_QUIESCENCE_TIMEOUT`, the 3s const in
+`src/services/discord/tmux.rs`) — and proves the second prompt starts and replies
+without an indefinite queued placeholder. Deterministically *forcing* the 3s gate
+would need a production hook, so `E-16` exercises the natural release window on
+the live relay path; the always-on post-scenario idle invariant
+(`assert_cell_idle` → `post_scenario_idle.mailbox_idle_evidence`) captures the
+`/api/health/detail` proof that the tested mailbox returned to idle
+(`agent_turn_status=idle`, `queue_depth=0`, no cancel token, no inflight state, no
+active user message, no stale queued placeholder/pending callback). `E-17` is an
+orchestrator-owned restart-guard scenario (`cells: []`,
+`orchestration: foreign_active_restart_guard`, run by
+`run_multi_provider_matrix.py`): it holds a foreign `claude-tui` turn active via
+the provider-hold witness, waits until `/api/health/detail` surfaces that mailbox
+busy, then attempts a `codex-tui` destructive restart and proves the harness
+refuses before restart while naming the foreign mailbox evidence. SAFETY: `E-17`
+drives only the restart-refusal guard (`_guard_no_foreign_active_turns`) and never
+invokes the real restart/kickstart, so even a regressed guard cannot harm
+unrelated active production work; the foreign hold is released (`cancel_turn`) and
+both channels asserted idle on teardown. `E-18` is an executable
 but destructive-gated `cancel_turn` stop-mid-turn scenario for relay-backed
 pipe/TUI cells; it uses the provider hold witness primitive and omits
 `claude-e` because the stop/cancel path under test is relay-backed lifecycle.
@@ -90,7 +109,8 @@ serialization while asserting both markers arrive once. `E-21` covers TUI
 direct input with an actual `C-u` key sequence: a stale draft marker is typed,
 cleared, and then the real prompt must relay with a complete head-to-tail body
 while the stale marker and terminal controls stay absent. `E-11`
-(cross-cell concurrency) is `cells: []` — the orchestrator owns that scenario.
+(cross-cell concurrency) and `E-17` (foreign-active restart guard) are both
+`cells: []` — the orchestrator owns those scenarios.
 `E-22` covers tool-use to text completeness for Claude relay-backed pipe/TUI
 cells by waiting for a current-turn provider hold witness after a real tool call
 and then asserting the post-tool body remains complete. `E-23` is the dedicated
@@ -122,6 +142,11 @@ Covered P0/P1 backlog items:
 - `direct-input body_complete + control-byte strip`: `E-21`, TUI cells.
 - `codex modern schema turn completeness + follow-up readiness`: `E-25`,
   deterministic local fixture replay for Codex cells.
+- `completion-quiescence release after delivery` (#2935): `E-16`, `claude-tui`,
+  immediate follow-up after the first response marker plus the idle invariant.
+- `foreign-active destructive restart refusal` (#2935): `E-17`, orchestrator-owned
+  hold of a foreign `claude-tui` mailbox while a `codex-tui` restart is attempted
+  (guard-only, no real restart).
 
 Remaining exact gaps:
 

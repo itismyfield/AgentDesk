@@ -107,8 +107,12 @@ class ScenarioFilter(unittest.TestCase):
         self.assertIn("E-10", ids)
         self.assertIn("E-12", ids)
         e16 = next(s for s in scenarios if s.get("id") == "E-16")
-        self.assertIn("skip_reason", e16)
+        # #3797: E-16 is now an executable live scenario, not a #2935 stub.
+        self.assertNotIn("skip_reason", e16)
         self.assertIn("acceptance_criteria", e16)
+        self.assertEqual(driver.scenario_agent_mode(e16), "real_live")
+        self.assertEqual(driver.scenario_coverage_class(e16), "live")
+        self.assertTrue(e16.get("steps"))
         self.assertNotIn("E-7", ids)
 
     def test_claude_e_scenarios(self):
@@ -141,7 +145,11 @@ class ScenarioFilter(unittest.TestCase):
         ids = {str(s.get("id")) for s in scenarios}
         self.assertIn("E-7", ids)
         self.assertIn("E-4", ids)
-        self.assertIn("E-17", ids)
+        # #3797: E-17 is now an orchestrator-owned restart-guard scenario
+        # (cells: []), so the single-cell codex-tui driver no longer loads it
+        # — same convention as the E-11 cross-channel scenario.
+        self.assertNotIn("E-17", ids)
+        self.assertNotIn("E-11", ids)
         self.assertIn("E-18", ids)
         self.assertIn("E-19", ids)
         self.assertIn("E-20", ids)
@@ -149,9 +157,6 @@ class ScenarioFilter(unittest.TestCase):
         self.assertIn("E-25", ids)
         self.assertNotIn("E-22", ids)
         self.assertNotIn("E-23", ids)
-        e17 = next(s for s in scenarios if s.get("id") == "E-17")
-        self.assertIn("skip_reason", e17)
-        self.assertIn("acceptance_criteria", e17)
         e18 = next(s for s in scenarios if s.get("id") == "E-18")
         self.assertNotIn("skip_reason", e18)
         self.assertIn("acceptance_criteria", e18)

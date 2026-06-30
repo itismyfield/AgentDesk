@@ -1,19 +1,43 @@
 id: E-17
-title: Destructive restart refuses foreign active mailbox
-agent_mode: controlled
-coverage_class: unsupported-known-gap
-cells: [codex-tui]
+title: Destructive restart refuses while a foreign mailbox is active
+agent_mode: real_live
+coverage_class: live
+cells: []  # orchestrator-owned restart-guard scenario (run_multi_provider_matrix.py)
+orchestration: foreign_active_restart_guard
 isolation: required
 destructive: true
-skip_reason: >
-  Stub for #2935. The destructive guard is implemented and unit-tested against
-  synthetic /api/health/detail mailbox evidence. A full live scenario needs the
-  orchestrator to hold a separate claude-tui turn active while this codex-tui
-  cell attempts restart.
 acceptance_criteria:
-  - Start or hold a claude-tui turn on a different channel.
-  - Verify /api/health/detail mailboxes reports foreign active/cancel/inflight/queue or relay stall state.
-  - Attempt a codex-tui destructive restart scenario.
-  - Assert the harness refuses before restart and names the foreign mailbox evidence.
-steps: []
-assertions: []
+  - Hold a foreign claude-tui turn active on a different channel/provider via the
+    deterministic provider-hold witness primitive.
+  - Verify /api/health/detail reports the foreign mailbox active/cancel/inflight/
+    queue or relay-stall state.
+  - Attempt a codex-tui destructive restart and prove the harness refuses before
+    restart, naming the foreign mailbox evidence from /api/health/detail.
+  - Release the foreign hold on teardown and verify both mailboxes return idle.
+notes: |
+  #2935 coverage. SAFETY BOUNDARY: this orchestration NEVER restarts dcserver. It
+  drives only the harness restart-refusal guard
+  (run_tui_relay._guard_no_foreign_active_turns) — the "refuses before restart"
+  half of restart_dcserver_for_e2e — and asserts it raises while a foreign
+  claude-tui turn is held active. Because the actual restart/kickstart is never
+  invoked, the destructive scenario cannot kill panes or harm unrelated active
+  production work even if the guard regressed. The foreign hold is created with
+  the deterministic provider-hold witness (send_provider_hold_prompt /
+  wait_for_provider_hold_state — no sleeps), the matrix then waits until
+  /api/health/detail surfaces the foreign mailbox as busy, runs the codex-tui
+  restart guard expecting a refusal that names the foreign mailbox, then releases
+  the hold (cancel_turn) and asserts both channels idle. It uses claude-tui (not
+  claude-e) for the foreign hold because the restart guard inspects a
+  relay-backed foreground mailbox.
+restart_guard:
+  foreign_hold:
+    cell: claude-tui
+    ok_marker: "[E2E:E17:HOLD-OK]"
+    late_marker: "[E2E:E17:HOLD-LATE]"
+    hold_seconds: 90
+    witness_timeout_s: 180
+    witness_poll_interval_s: 1
+    busy_timeout_s: 45
+    busy_poll_interval_s: 2
+  restart_attempt:
+    cell: codex-tui
