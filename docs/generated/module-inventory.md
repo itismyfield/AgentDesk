@@ -728,7 +728,7 @@
 | `services::discord::voice_routing` | `src/services/discord/voice_routing.rs` | 163 | 138 | 25 |  |
 | `services::discord::voice_sensitivity` | `src/services/discord/voice_sensitivity.rs` | 113 | 113 | 0 |  |
 | `services::discord::watchers::codex_tui_restore` | `src/services/discord/watchers/codex_tui_restore.rs` | 178 | 146 | 32 |  |
-| `services::discord::watchers::lifecycle` | `src/services/discord/watchers/lifecycle.rs` | 2834 | 2111 | 723 | giant-file |
+| `services::discord::watchers::lifecycle` | `src/services/discord/watchers/lifecycle.rs` | 2869 | 2079 | 790 | giant-file |
 | `services::discord::watchers::lifecycle::activity` | `src/services/discord/watchers/lifecycle/activity.rs` | 219 | 219 | 0 |  |
 | `services::discord::watchers::lifecycle_decision` | `src/services/discord/watchers/lifecycle_decision.rs` | 363 | 212 | 151 |  |
 | `services::discord_config_audit` | `src/services/discord_config_audit.rs` | 1600 | 1288 | 312 | giant-file |

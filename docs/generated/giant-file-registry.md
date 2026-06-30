@@ -29,7 +29,7 @@
 | `src/services/discord/turn_bridge/mod.rs` | 6248 | discord-relay | 2026-08-31 | #3038 |
 | `src/services/discord/turn_finalizer.rs` | 1038 | discord-finalizer | 2026-08-31 | #3016 |
 | `src/services/discord/voice_barge_in.rs` | 2800 | voice-runtime | 2026-08-31 | #3405 |
-| `src/services/discord/watchers/lifecycle.rs` | 2111 | discord-relay | 2026-10-31 | #3840 |
+| `src/services/discord/watchers/lifecycle.rs` | 2079 | discord-relay | 2026-10-31 | #3840 |
 | `src/voice/announce_meta.rs` | 1001 | voice-runtime | 2026-08-31 | #3405 |
 
 ## Grandfathered

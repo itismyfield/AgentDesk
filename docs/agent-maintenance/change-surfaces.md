@@ -131,7 +131,7 @@
   parsing), `src/services/discord/inflight.rs` (state file contract).
 - legacy_modules: none — relay routes are being consolidated, not replaced.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/services/discord/watchers/lifecycle.rs` (2111 lines — canonical
+  - `src/services/discord/watchers/lifecycle.rs` (2079 lines — canonical
     lifecycle extraction surface from #1435; split further before adding new
     lifecycle behavior; #3016 phase-5b2 dropped the `mailbox_finalize_owed`
     construction from the watcher-spawn handle; #3718 moved runtime mtime
@@ -141,7 +141,10 @@
     #3815 moving direct Codex TUI resume restore helpers into
     `watchers/codex_tui_restore.rs` while adding the restore branch; -207 from
     #3840 moving heartbeat/activity helpers into
-    `watchers/lifecycle/activity.rs`).
+    `watchers/lifecycle/activity.rs`; -32 from #3898 removing the false-positive
+    "session ended … start a new session" tmux-death notice and its
+    `should_send_session_ended_notice`/`session_ended_notice`/
+    `TmuxDeathLifecycleDecision` plumbing).
   - `src/services/discord/tmux.rs` (1477 lines; +14 from current inventory
     refresh after the relay split stack landed; after #2558 dead-code sweep;
     +6 from #3818 sanitizing restored/orphan subagent-notification placeholders;

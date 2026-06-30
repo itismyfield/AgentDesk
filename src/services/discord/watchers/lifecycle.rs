@@ -501,7 +501,25 @@ pub(super) fn cancel_suppression_applies_to_watcher_death(
     cancel_induced_candidate && !terminal_delivery_observed
 }
 
-pub(super) fn should_send_session_ended_notice(
+/// #3898 — whether a watcher-observed tmux death should attempt the
+/// resume-aborted restart handoff (`resume_aborted_restart_turn`). This is the
+/// ONLY user-facing lifecycle signal for a genuinely abnormal mid-turn pane
+/// crash: the turn was aborted *before* terminal delivery and the pane did not
+/// exit through a normal-completion path (`turn completed` / `exit:0` /
+/// `routine fresh`).
+///
+/// The legacy "session ended: tmux pane exited. Send a new message to start a
+/// new session." Discord notice (removed in #3898) is intentionally NOT
+/// reinstated here. It was both noise and factually wrong:
+/// - It required `terminal_delivery_observed`, so it never covered a genuine
+///   mid-turn crash — that case routes to the restart handoff below, not to a
+///   notice. The only deaths it actually fired on were delivered-then-idle /
+///   cleanup / force-kill teardowns that left no normal-completion marker,
+///   i.e. normal idle exits (false positive).
+/// - A pane death does NOT start a fresh session: the DB `claude_session_id`
+///   persists and the next message resumes the conversation with `--resume`,
+///   so "start a new session" was incorrect for every death that reached it.
+pub(super) fn tmux_death_should_attempt_restart_handoff(
     cancel_induced: bool,
     prompt_too_long_killed: bool,
     terminal_delivery_observed: bool,
@@ -509,39 +527,8 @@ pub(super) fn should_send_session_ended_notice(
 ) -> bool {
     !cancel_induced
         && !prompt_too_long_killed
-        && terminal_delivery_observed
+        && !terminal_delivery_observed
         && !is_normal_completion
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct TmuxDeathLifecycleDecision {
-    pub(super) cancel_induced: bool,
-    pub(super) send_session_ended_notice: bool,
-}
-
-pub(super) fn tmux_death_lifecycle_decision(
-    cancel_induced_candidate: bool,
-    prompt_too_long_killed: bool,
-    terminal_delivery_observed: bool,
-    is_normal_completion: bool,
-) -> TmuxDeathLifecycleDecision {
-    let cancel_induced = cancel_suppression_applies_to_watcher_death(
-        cancel_induced_candidate,
-        terminal_delivery_observed,
-    );
-    TmuxDeathLifecycleDecision {
-        cancel_induced,
-        send_session_ended_notice: should_send_session_ended_notice(
-            cancel_induced,
-            prompt_too_long_killed,
-            terminal_delivery_observed,
-            is_normal_completion,
-        ),
-    }
-}
-
-pub(super) fn session_ended_notice() -> &'static str {
-    "session ended: tmux pane exited. Send a new message to start a new session."
 }
 
 pub(super) async fn handle_tmux_watcher_observed_death(
@@ -593,14 +580,25 @@ pub(super) async fn handle_tmux_watcher_observed_death(
         shared.pg_pool.as_ref(),
     )
     .await;
-    let decision = tmux_death_lifecycle_decision(
+    let cancel_induced = cancel_suppression_applies_to_watcher_death(
         cancel_induced_candidate,
+        terminal_delivery_observed,
+    );
+    // #3898 — the legacy "session ended … start a new session" Discord notice was
+    // removed. It false-fired on normal idle / cleanup / force-kill teardown
+    // (no `turn completed` / `exit:0` / `routine fresh` marker → classified
+    // abnormal) and was factually wrong (a pane death resumes via `--resume`, it
+    // does not start a fresh session). The genuine mid-turn crash signal is the
+    // restart handoff below; cancel suppression is still computed because it
+    // gates that handoff. `is_normal_completion` already folds in the exit-reason
+    // normal-completion check (`tmux_death_is_normal_completion`), so it is the
+    // single source of truth for the restart-handoff suppression.
+    let attempt_restart_handoff = tmux_death_should_attempt_restart_handoff(
+        cancel_induced,
         prompt_too_long_killed,
         terminal_delivery_observed,
         is_normal_completion,
     );
-    let cancel_induced = decision.cancel_induced;
-    let send_session_ended_notice = decision.send_session_ended_notice;
     if cancel_induced {
         tracing::info!(
             "  [{ts}] 👁 tmux session {tmux_session_name} ended after recent cancel/turn-stop, skipping lifecycle notification + restart handoff"
@@ -608,10 +606,6 @@ pub(super) async fn handle_tmux_watcher_observed_death(
     } else if cancel_induced_candidate {
         tracing::info!(
             "  [{ts}] 👁 tmux session {tmux_session_name} ended after a relayed terminal turn; ignoring stale cancel/turn-stop suppression"
-        );
-    } else if send_session_ended_notice {
-        tracing::info!(
-            "  [{ts}] 👁 tmux session {tmux_session_name} ended without normal completion, sending session-ended notice"
         );
     } else if !is_normal_completion {
         tracing::info!(
@@ -622,36 +616,10 @@ pub(super) async fn handle_tmux_watcher_observed_death(
             "  [{ts}] 👁 tmux session {tmux_session_name} ended after normal completion, skipping lifecycle notification"
         );
     }
-    if !cancel_induced && !prompt_too_long_killed && !terminal_delivery_observed {
-        // Suppress warning for normal dispatch completion — not an error.
-        let suppress_restart = is_normal_completion
-            || reason_short
-                .as_deref()
-                .is_some_and(tmux_exit_reason_is_normal_completion);
-        if !suppress_restart {
-            let _ = resume_aborted_restart_turn(
-                channel_id,
-                http,
-                shared,
-                tmux_session_name,
-                output_path,
-            )
-            .await;
-        }
-    }
-    if send_session_ended_notice {
-        rate_limit_wait(shared, channel_id).await;
-        if let Err(error) = crate::services::discord::http::send_channel_message(
-            http,
-            channel_id,
-            session_ended_notice(),
-        )
-        .await
-        {
-            tracing::warn!(
-                "  [{ts}] ⚠ tmux session {tmux_session_name} ended but session-ended notice send failed: {error}"
-            );
-        }
+    if attempt_restart_handoff {
+        let _ =
+            resume_aborted_restart_turn(channel_id, http, shared, tmux_session_name, output_path)
+                .await;
     }
 }
 
@@ -866,6 +834,73 @@ mod tests {
             turn_delivered: Arc::new(AtomicBool::new(false)),
             last_heartbeat_ts_ms: Arc::new(AtomicI64::new(tmux_watcher_now_ms())),
         }
+    }
+
+    // #3898 — cancel suppression is the surviving gate that protects the restart
+    // handoff (and previously gated the now-removed "session ended" notice).
+    #[test]
+    fn cancel_suppression_only_applies_before_terminal_delivery() {
+        // A cancel/turn-stop candidate that died before delivering its turn is
+        // suppressed (no restart handoff; historically no notice either).
+        assert!(cancel_suppression_applies_to_watcher_death(true, false));
+        // Once a terminal turn was delivered, a later pane death is a real
+        // lifecycle event for that turn — stale cancel suppression must NOT apply.
+        assert!(!cancel_suppression_applies_to_watcher_death(true, true));
+        // No cancel candidate → never suppressed.
+        assert!(!cancel_suppression_applies_to_watcher_death(false, false));
+        assert!(!cancel_suppression_applies_to_watcher_death(false, true));
+    }
+
+    // #3898 — the false-positive fix. A tmux pane that exits *after* delivering
+    // its turn (normal idle / cleanup / force-kill, which leave no
+    // normal-completion marker → `is_normal_completion == false`) must NOT
+    // surface any lifecycle signal: the removed notice never fires, and the
+    // restart handoff is gated off by `terminal_delivery_observed`. This is the
+    // noise the issue reported — a normal idle exit emitting a spurious notice.
+    #[test]
+    fn delivered_then_idle_death_surfaces_no_lifecycle_signal() {
+        let cancel_induced = cancel_suppression_applies_to_watcher_death(false, true);
+        assert!(!cancel_induced);
+        // Even with an "abnormal" exit reason (no normal-completion marker), a
+        // delivered turn means this is a normal idle/cleanup/force-kill teardown.
+        assert!(!tmux_death_should_attempt_restart_handoff(
+            cancel_induced,
+            /* prompt_too_long_killed */ false,
+            /* terminal_delivery_observed */ true,
+            /* is_normal_completion */ false,
+        ));
+        // The same holds when the pane DID exit through a normal-completion path.
+        assert!(!tmux_death_should_attempt_restart_handoff(
+            cancel_induced,
+            false,
+            true,
+            true,
+        ));
+    }
+
+    // #3898 — a genuinely abnormal mid-turn pane crash (turn aborted BEFORE
+    // terminal delivery, no normal-completion marker) STILL surfaces a signal:
+    // the resume-aborted restart handoff fires. This is the case the removed
+    // notice never covered (it required `terminal_delivery_observed`), so
+    // removing the notice does not lose any genuine-crash signal.
+    #[test]
+    fn genuine_mid_turn_crash_triggers_restart_handoff() {
+        assert!(tmux_death_should_attempt_restart_handoff(
+            /* cancel_induced */ false, /* prompt_too_long_killed */ false,
+            /* terminal_delivery_observed */ false, /* is_normal_completion */ false,
+        ));
+        // Suppressed when the user canceled the turn themselves …
+        assert!(!tmux_death_should_attempt_restart_handoff(
+            true, false, false, false
+        ));
+        // … when the prompt-too-long teardown already handled it …
+        assert!(!tmux_death_should_attempt_restart_handoff(
+            false, true, false, false
+        ));
+        // … or when the pane exited through a normal-completion path.
+        assert!(!tmux_death_should_attempt_restart_handoff(
+            false, false, false, true
+        ));
     }
 
     #[test]
