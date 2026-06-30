@@ -18,6 +18,25 @@ const PENDING_PROMPT_TTL: Duration = Duration::from_secs(10);
 const RECENT_OBSERVED_TTL: Duration = Duration::from_secs(30);
 const SESSION_MAPPING_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const PROMPT_ANCHOR_TTL: Duration = Duration::from_secs(30 * 60);
+// #3885 follow-up: the per-`(provider, tmux)` PROMPT ANCHOR must outlive the
+// LONGEST realistic in-progress streaming turn. The anchor is stamped ONCE at
+// `record_prompt_anchor` (submit time) and is NOT re-stamped while the turn
+// streams; it is cleared on completion (`take`/`clear_prompt_anchor_for_response`)
+// and overwritten by the next submit (one entry per pane). Under the previous
+// 30min purge a build/agent turn that streams 30-60min (routine in the
+// issue-pipeline workflow) had its anchor purged MID-STREAM, after which the
+// bridge same-input correlation peek (and the watcher ⏳→✅ response match)
+// resolved `None` → the #3885 no-response requeue re-fired a duplicate, and a
+// long turn's ⏳ could strand. 4h is a generous ceiling over realistic turn
+// durations (no hard max-turn-duration constant exists to derive from). This is
+// DECOUPLED from `PROMPT_ANCHOR_TTL` on purpose: the `relayed_entry_ids_by_tmux`
+// ledger below keeps the 30min window its #3459/#3303 rationale documents, so
+// raising the anchor lifetime cannot perturb that missed-prompt dedup. The
+// anchor is one-per-pane and overwritten on the next submit, so the longer TTL
+// only bounds an idle pane's last (uncleared) anchor — bounded memory, and a
+// stale anchor with a DIFFERENT message id can never shadow a new prompt (lookups
+// match on `message_id`).
+const PROMPT_ANCHOR_SUBMIT_TTL: Duration = Duration::from_secs(4 * 60 * 60);
 // Short window matching how long a Discord notify await + transcript flush
 // can plausibly take before `record_prompt_anchor` lands. 60s is generous;
 // the marker is also cleared explicitly when an anchor is consumed.
@@ -399,6 +418,38 @@ pub fn owner_channel_for_tmux_session(tmux_session_name: &str) -> Option<u64> {
 pub(crate) fn reset_state_for_tests() {
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     *state = TuiPromptDedupeState::default();
+}
+
+/// Test-only: record a prompt anchor whose `recorded_at` is backdated by `age`,
+/// so a test can simulate an anchor stamped at submit time for a turn that has
+/// been streaming for `age`. Crate-visible so sibling modules (e.g. the
+/// `turn_bridge` same-input correlation tests) can pin that a long streaming
+/// turn's anchor still resolves past the legacy 30min purge under
+/// `PROMPT_ANCHOR_SUBMIT_TTL`.
+#[cfg(test)]
+pub(crate) fn record_prompt_anchor_aged_for_tests(
+    provider: &str,
+    tmux_session_name: &str,
+    channel_id: u64,
+    message_id: u64,
+    age: Duration,
+) {
+    let provider = normalize_provider(provider);
+    let tmux_session_name = tmux_session_name.trim();
+    if provider.is_empty() || tmux_session_name.is_empty() || channel_id == 0 || message_id == 0 {
+        return;
+    }
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.prompt_anchor_by_tmux.insert(
+        PromptKey::new(&provider, tmux_session_name),
+        TimedValue {
+            value: TuiPromptAnchor {
+                channel_id,
+                message_id,
+            },
+            recorded_at: Instant::now().checked_sub(age).unwrap_or_else(Instant::now),
+        },
+    );
 }
 
 pub(crate) fn record_prompt_anchor(
@@ -1675,8 +1726,12 @@ impl TuiPromptDedupeState {
             .retain(|_, entry| now.duration_since(entry.recorded_at) <= SESSION_MAPPING_TTL);
         self.runtime_by_tmux
             .retain(|_, entry| now.duration_since(entry.recorded_at) <= SESSION_MAPPING_TTL);
+        // #3885 follow-up: anchors live `PROMPT_ANCHOR_SUBMIT_TTL` (4h) so a long
+        // streaming turn's anchor is not purged mid-stream (see the constant). The
+        // relayed-entry ledger below intentionally keeps the 30min
+        // `PROMPT_ANCHOR_TTL`.
         self.prompt_anchor_by_tmux
-            .retain(|_, entry| now.duration_since(entry.recorded_at) <= PROMPT_ANCHOR_TTL);
+            .retain(|_, entry| now.duration_since(entry.recorded_at) <= PROMPT_ANCHOR_SUBMIT_TTL);
         self.ssh_direct_observation_by_tmux
             .retain(|_, entry| now.duration_since(entry.recorded_at) <= SSH_DIRECT_OBSERVATION_TTL);
         self.external_input_relay_lease_by_tmux.retain(|_, entry| {
@@ -3662,6 +3717,58 @@ No response requested.\n\
         assert!(
             !relayed_entry_id_already_seen("claude", "tmux-3540", "uuid-T"),
             "entry ids older than PROMPT_ANCHOR_TTL are purged (bounded growth)"
+        );
+    }
+
+    /// #3885 follow-up: a long streaming turn's prompt anchor must survive past
+    /// the legacy 30min purge so the bridge same-input correlation peek still
+    /// resolves mid-stream (and the #3885 no-response requeue does NOT re-fire a
+    /// duplicate). An anchor aged beyond the new 4h ceiling is still purged so the
+    /// idle-pane bound stays bounded. Decoupled from the relayed-entry ledger,
+    /// which keeps the 30min `PROMPT_ANCHOR_TTL`.
+    #[test]
+    fn prompt_anchor_survives_long_streaming_turn_past_legacy_30min_ttl() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        let tmux = "tmux-3885-longstream";
+        let channel = 7777_u64;
+        let streaming_msg = 8_888_u64;
+
+        // An anchor stamped at submit for a turn that has now been streaming 31min
+        // (> the legacy 30min purge, < the new 4h ceiling) must STILL resolve.
+        record_prompt_anchor_aged_for_tests(
+            "claude",
+            tmux,
+            channel,
+            streaming_msg,
+            Duration::from_secs(31 * 60),
+        );
+        assert_eq!(
+            prompt_anchor_for_response("claude", tmux, channel),
+            Some(TuiPromptAnchor {
+                channel_id: channel,
+                message_id: streaming_msg,
+            }),
+            "anchor for a 31min-streaming turn must survive the legacy 30min purge"
+        );
+        // Sanity: that age is past the OLD 30min TTL (so the win is real) but
+        // within the NEW 4h ceiling.
+        assert!(Duration::from_secs(31 * 60) > PROMPT_ANCHOR_TTL);
+        assert!(Duration::from_secs(31 * 60) < PROMPT_ANCHOR_SUBMIT_TTL);
+
+        // Beyond the 4h ceiling the anchor is purged (bounded idle-pane lifetime).
+        record_prompt_anchor_aged_for_tests(
+            "claude",
+            tmux,
+            channel,
+            streaming_msg,
+            PROMPT_ANCHOR_SUBMIT_TTL + Duration::from_secs(1),
+        );
+        assert_eq!(
+            prompt_anchor_for_response("claude", tmux, channel),
+            None,
+            "anchor older than PROMPT_ANCHOR_SUBMIT_TTL is purged"
         );
     }
 

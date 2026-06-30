@@ -517,4 +517,48 @@ mod pre_submission_tui_prompt_error_tests {
             "different/unsubmitted follow-up must requeue (deferred, not dropped)"
         );
     }
+
+    #[test]
+    fn long_streaming_same_input_still_suppresses_followup_requeue_past_legacy_ttl() {
+        // #3885 follow-up residual close: a build/agent turn that streams 30-60min
+        // is the routine issue-pipeline workflow. The anchor is stamped ONCE at
+        // submit and not re-stamped, so under the legacy 30min purge the anchor
+        // vanished mid-stream → bridge peek None → same_input=false → requeue →
+        // the original #3885 duplicate. With `PROMPT_ANCHOR_SUBMIT_TTL` (4h) the
+        // anchor survives, so a same-input follow-up arriving 31min into the
+        // stream still correlates and is suppressed (no dup).
+        use crate::services::tui_prompt_dedupe::{
+            prompt_anchor_for_response, record_prompt_anchor_aged_for_tests, reset_state_for_tests,
+        };
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap();
+        reset_state_for_tests();
+
+        let tmux = "AgentDesk-claude-longstream-corr";
+        let channel = 9393_u64;
+        let streaming_input = 1_212_u64;
+
+        // Anchor stamped at submit for a turn that has now streamed 31min
+        // (> the legacy 30min purge).
+        record_prompt_anchor_aged_for_tests(
+            "claude",
+            tmux,
+            channel,
+            streaming_input,
+            std::time::Duration::from_secs(31 * 60),
+        );
+
+        let anchor_msg_id =
+            prompt_anchor_for_response("claude", tmux, channel).map(|anchor| anchor.message_id);
+        let same = claude_tui_followup_same_input_occupies_pane(anchor_msg_id, streaming_input);
+        assert!(
+            same,
+            "a 31min-streaming same-input turn's anchor must still resolve (no mid-stream purge)"
+        );
+        assert!(
+            !claude_tui_followup_requeue_streaming_aware(true, same),
+            "long-streaming same-input follow-up must stay suppressed (no #3885 dup)"
+        );
+    }
 }

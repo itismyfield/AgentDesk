@@ -164,7 +164,14 @@
 # request_inflight_abandon_if_matches (durable abandon-request enqueue + row
 # delete) instead of a bare clear — finalizing a failure-path-stranded
 # "처리 중" placeholder without keeping the inflight row alive. Bugfix-only.
-"src/services/discord/turn_bridge/mod.rs" = 6248 # #3607 terminal-UI obligation hook
+# #3885: 6248 -> 6283 (+35 production LoC). Gate the claude_tui follow-up
+# pre-submit requeue on INPUT CORRELATION (the recorded prompt anchor for this
+# pane vs this inflight's user_msg_id) instead of the channel-scoped busy probe:
+# suppress only when the SAME input already landed (streaming/just-completed →
+# re-inject dups), else still requeue so a genuinely-unsubmitted follow-up behind
+# a DIFFERENT streaming turn is DEFERRED, not dropped. The pure decisions live in
+# streaming_edit_text.rs; this is the anchor-peek + wiring at the decision site.
+"src/services/discord/turn_bridge/mod.rs" = 6283 # #3607 terminal-UI obligation hook
 # #3038 turn_bridge S1 child modules, frozen at landed production LoC.
 "src/services/discord/turn_bridge/headless_delivery.rs" = 415
 "src/services/discord/turn_bridge/status_panel.rs" = 437
