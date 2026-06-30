@@ -52,10 +52,16 @@ impl LatencyTurn {
             tts_synth_ms,
             first_audio_out_ms,
             tts_play_ms,
+            // total_ms is the intake→first-audio wall clock: STT + agent + the
+            // TTS time-to-first-audio (`first_audio_out_ms`). `first_audio_out_ms`
+            // is measured from the start of TTS playback, so it already subsumes
+            // the first chunk's synthesis time (`tts_synth_ms`). `tts_synth_ms` is
+            // therefore retained only as a standalone observability sub-metric and
+            // must NOT be added here as well, otherwise the first-chunk synthesis
+            // would be double-counted and total_ms over-reported (#3913).
             total_ms: stt_ms
                 .saturating_add(agent_ms)
-                .saturating_add(tts_synth_ms)
-                .saturating_add(tts_play_ms),
+                .saturating_add(first_audio_out_ms),
             recorded_at_ms: now_millis(),
         }
     }
@@ -288,7 +294,9 @@ mod tests {
         assert_eq!(turn.tts_synth_ms, 300);
         assert_eq!(turn.first_audio_out_ms, 200);
         assert_eq!(turn.tts_play_ms, 200);
-        assert_eq!(turn.total_ms, 1470);
+        // total = stt(120) + agent(850) + first_audio_out(200); tts_synth_ms is a
+        // sub-metric already inside first_audio_out_ms and must not be re-added.
+        assert_eq!(turn.total_ms, 1170);
         assert_eq!(turn.utterance_id.as_deref(), Some("utt-1"));
         assert_eq!(turn.to_payload()["first_audio_out_ms"], 200);
         assert_eq!(turn.to_payload()["tts_play_ms"], 200);
@@ -302,7 +310,49 @@ mod tests {
         assert_eq!(turn.stt_ms, 0);
         assert_eq!(turn.agent_ms, 400);
         assert_eq!(turn.first_audio_out_ms, 50);
-        assert_eq!(turn.total_ms, 550);
+        // total = stt(0) + agent(400) + first_audio_out(50); synth(100) excluded.
+        assert_eq!(turn.total_ms, 450);
+    }
+
+    #[test]
+    fn total_ms_does_not_double_count_first_chunk_synthesis() {
+        // Reproduces the call-site contract from
+        // voice_barge_in/final_result_playback.rs: `first_audio_out_ms`
+        // (the second record_tts arg) is measured from the START of TTS playback,
+        // so it ALREADY contains the first chunk's synthesis time. The synth time
+        // passed as the first arg is a sub-component of it, not an additive phase.
+        let ch = fresh_channel(4);
+        record_stt(ch, Some("utt-dbl"), 100);
+        record_agent(ch, 500);
+
+        // Synthetic timing: first chunk took 300ms to synthesize, and first audio
+        // went out 360ms after playback began (300ms synth + 60ms queue/handoff).
+        let first_chunk_synthesis_ms = 300;
+        let first_audio_out_ms = 360;
+        let turn = record_tts(ch, first_chunk_synthesis_ms, first_audio_out_ms).expect("turn");
+
+        // synth is preserved as a standalone observability sub-metric.
+        assert_eq!(turn.tts_synth_ms, 300);
+        assert_eq!(turn.first_audio_out_ms, 360);
+
+        // Correct total: intake→first-audio = stt + agent + time-to-first-audio.
+        let expected = 100 + 500 + first_audio_out_ms;
+        assert_eq!(turn.total_ms, expected, "total must be intake→first-audio");
+
+        // Guard against regression to the old double-counting accounting, which
+        // would have produced stt + agent + synth + first_audio_out.
+        let old_inflated = 100 + 500 + first_chunk_synthesis_ms + first_audio_out_ms;
+        assert!(
+            turn.total_ms < old_inflated,
+            "total must not re-add first-chunk synth ({} vs inflated {})",
+            turn.total_ms,
+            old_inflated,
+        );
+        assert_eq!(
+            old_inflated - turn.total_ms,
+            first_chunk_synthesis_ms,
+            "inflation removed must equal exactly the double-counted synth time",
+        );
     }
 
     #[test]

@@ -900,7 +900,7 @@
 | `voice::commands` | `src/voice/commands.rs` | 839 | 541 | 298 |  |
 | `voice::config` | `src/voice/config.rs` | 595 | 372 | 223 |  |
 | `voice::flight` | `src/voice/flight.rs` | 252 | 138 | 114 |  |
-| `voice::metrics` | `src/voice/metrics.rs` | 327 | 269 | 58 |  |
+| `voice::metrics` | `src/voice/metrics.rs` | 377 | 275 | 102 |  |
 | `voice::progress` | `src/voice/progress.rs` | 448 | 353 | 95 |  |
 | `voice::prompt` | `src/voice/prompt.rs` | 823 | 540 | 283 |  |
 | `voice::receiver` | `src/voice/receiver.rs` | 1479 | 1052 | 427 | giant-file |
