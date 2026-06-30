@@ -951,3 +951,22 @@
   file + in-process ledger on the node that holds the live pane); the events flow
   through the existing `emit_inflight_lifecycle_event` PG/jsonl sink. No lease,
   durable queue, leader/standby ownership, or singleton assumption is introduced.
+- #3909 voice TTS cache/temp disk-exhaustion fix — two classifications:
+  - **Worker-local** (leak E): `tts/edge.rs` `EdgeTtsTempGuard` is a `Drop` guard
+    that unlinks the partially-written `agentdesk-edge-tts-*.mp3` when the synth
+    future is dropped mid-`.await` (barge-in abort) or any error returns. It runs
+    in-process on whichever node performed the synthesis, deleting only that node's
+    own temp file. No cross-node state, lease, or ownership; every node cleans up
+    after its own aborted synthesis.
+  - **Leader-only** (leak A): `server::maintenance::ProgressTtsCacheSweepJob`
+    (logic in `services::maintenance::jobs::voice_cache_sweep`) bounds the progress
+    TTS cache dir (TTL + capacity LRU) and mops up orphaned edge-tts temp mp3s. It
+    is a `MaintenanceJob` on the static registry, run through the existing
+    `worker_registry::MaintenanceScheduler` whose `WorkerExecutionScope` is
+    `LeaderOnly` — mirroring `voice.turn_link_gc`. Gated leader-only so N cluster
+    nodes do not each spin a redundant sweeper. The sweep dirs are resolved from
+    the loaded runtime `VoiceConfig` (`Config::from_voice_config`, tilde-expanded)
+    — the same source of truth the TTS write path uses — so operator overrides of
+    `voice.tts.progress_cache_dir` / `voice.audio.temp_dir` are swept, not the
+    defaults. Pool-less, no new lease, durable queue, leader-election surface, or
+    singleton assumption.

@@ -53,6 +53,7 @@ pub mod db_retention;
 pub mod hang_dump_cleanup;
 pub mod memento_consolidation;
 pub mod target_sweep;
+pub mod voice_cache_sweep;
 pub mod worktree_orphan_sweep;
 
 /// Weekly cadence for postgres-backed retention jobs. Long enough that a single
