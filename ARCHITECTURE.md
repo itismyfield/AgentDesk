@@ -502,6 +502,7 @@ src/
 │   │   ├── recovery_engine/
 │   │   │   ├── analytics_transcript.rs
 │   │   │   ├── jsonl_extract.rs
+│   │   │   ├── manual_rebind.rs
 │   │   │   ├── output_path_detect.rs
 │   │   │   ├── phase_policy.rs
 │   │   │   ├── rebind_runtime.rs
