@@ -1318,7 +1318,11 @@
     2026-08-31, #3036)).
   - `src/services/discord/{commands/text_commands.rs,
     discord_config_audit.rs, router/intake_gate.rs}` (all 1000+ production
-    lines) and `src/services/discord/inflight.rs` (3031 lines; +229 from #3859
+    lines) and `src/services/discord/inflight.rs` (3068 lines; +37 from #3860
+    `set_inflight_restart_mode_under_lock` — the per-row lock-RMW that makes the
+    bulk restart-mode marker set only `restart_mode` on the FRESH on-disk row so
+    a draining watcher's delivery frontier can no longer be regressed (duplicate
+    relay root cause); +229 from #3859
     `request_inflight_abandon_if_matches{,_zero_owned}` — the failure-path
     helpers that enqueue a durable abandon-request (so the placeholder sweeper
     finalizes the stranded "🔄 처리 중" card to "중단됨" by message id) and then

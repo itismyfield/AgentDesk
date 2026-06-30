@@ -2582,15 +2582,52 @@ pub(super) fn mark_all_inflight_states_restart_mode(
     let Some(root) = inflight_runtime_root() else {
         return 0;
     };
+    // #3860 — set restart_mode via a per-row lock-RMW instead of blind-saving
+    // the unlocked snapshot. `load_inflight_states_from_root` reads each row
+    // WITHOUT holding its flock; the old code then `save`d that stale whole-row
+    // snapshot back under the lock. A draining watcher that advanced the
+    // delivery frontier (`response_sent_offset` / `last_offset`) on disk in the
+    // gap therefore had its progress overwritten (frontier regression) → the
+    // replacement watcher re-relayed `full_response[response_sent_offset..]`,
+    // i.e. a duplicate Discord send (the issue's live sub-2000-char repro).
+    // The enumeration is reused only to discover the live rows (its stale-row
+    // GC side effects are preserved); the mutation re-reads the FRESH on-disk
+    // row under the flock and sets ONLY restart_mode / restart_generation,
+    // never the frontier, so it can no longer regress a concurrent writer.
     let states = load_inflight_states_from_root(&root, provider);
     let mut updated = 0usize;
-    for mut state in states {
-        state.set_restart_mode(restart_mode);
-        if save_inflight_state_in_root(&root, &state).is_ok() {
+    for state in states {
+        let path = inflight_state_path(&root, provider, state.channel_id);
+        if set_inflight_restart_mode_under_lock(&path, restart_mode) {
             updated += 1;
         }
     }
     updated
+}
+
+/// #3860 — RMW the restart-mode marker on one inflight row under its flock.
+///
+/// Re-reads the CURRENT on-disk state (so a delivery frontier that a concurrent
+/// draining watcher advanced between the unlocked enumeration and this write is
+/// preserved) and persists it with only `restart_mode` / `restart_generation`
+/// changed. Mirrors the lock-then-read pattern of `clear_inflight_by_tmux_name`.
+/// Returns whether the row was rewritten. Deliberately does NOT route through
+/// `save_inflight_state_in_root` (which writes the *caller's* snapshot): the
+/// whole point is to keep the on-disk frontier rather than carry a stale one.
+fn set_inflight_restart_mode_under_lock(path: &Path, restart_mode: InflightRestartMode) -> bool {
+    let Ok(_lock) = lock_inflight_state_path(path) else {
+        return false;
+    };
+    let Some(mut state) = read_inflight_state_content(path) else {
+        return false;
+    };
+    state.set_restart_mode(restart_mode);
+    state.ensure_finalizer_turn_id();
+    state.updated_at = now_string();
+    match serde_json::to_string_pretty(&state) {
+        Ok(json) => atomic_write(path, &json).is_ok(),
+        Err(_) => false,
+    }
 }
 
 /// #2437 (#2427 C wire) boot-time bulk invalidate. Removes inflight
@@ -5686,6 +5723,38 @@ mod stall_recovery_tests {
     }
 
     #[test]
+    fn authority_guard_would_suppress_same_turn_frontier_reset_3860() {
+        // #3860 SAFETY rationale (why the compiled monotonic-guard default stays
+        // OFF and is NOT flipped to enforce-ON in this PR): when ON,
+        // `authority_blocks_backward_inflight_write` blocks ANY same-turn backward
+        // `response_sent_offset` write — including the LEGITIMATE Gemini/Qwen
+        // RetryBoundary reset (turn_bridge/retry_state.rs clears `full_response`
+        // and rewinds rso→0 for the SAME identity to re-stream the turn). Blocking
+        // it drops the re-streamed body (a real, observed danger — the live
+        // AGENTDESK_DELIVERY_RECORD_AUTHORITY=1 config enforce-skips that reset).
+        // The root-cause fix (the per-row RMW restart-mode marker) avoids the
+        // frontier regression WITHOUT this collateral suppression, so the risky
+        // default flip is deferred, not taken here.
+        use crate::services::discord::outbound::delivery_record as dr;
+        // authority ON + same-turn backward rso (monotonic == false) → blocked
+        // (this is the legitimate retry reset that would be wrongly suppressed).
+        assert!(dr::authority_blocks_backward_inflight_write(
+            true, false, true
+        ));
+        assert!(dr::authority_blocks_backward_inflight_write(
+            true, true, false
+        ));
+        // authority OFF (compiled default) → never blocks → reset persists.
+        assert!(!dr::authority_blocks_backward_inflight_write(
+            false, false, true
+        ));
+        // authority ON but fully monotonic → not blocked (forward writes pass).
+        assert!(!dr::authority_blocks_backward_inflight_write(
+            true, true, true
+        ));
+    }
+
+    #[test]
     fn delivery_response_sent_offset_stays_on_utf8_boundary() {
         let response = "안녕";
         let first_char_middle = 1;
@@ -7622,6 +7691,43 @@ mod recovery_relay_attempts_tests {
         )
     }
 
+    /// RAII guard that points `AGENTDESK_ROOT_DIR` at an isolated tempdir under
+    /// the shared env lock and restores the previous value on drop.
+    struct IsolatedRootEnv {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        previous: Option<String>,
+    }
+
+    impl Drop for IsolatedRootEnv {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
+
+    /// #3860/#3293: isolate the process-global runtime root for a test. Any test
+    /// whose path reaches `InflightTurnState::new` (via `make_state`) or
+    /// `set_restart_mode` must hold one of these: both call
+    /// `runtime_store::load_generation`, which resolves `AGENTDESK_ROOT_DIR` and
+    /// trips the live-release safety assert when it is unset (→ `~/.adk/release`)
+    /// or already points at the live store. Holding the shared env lock also
+    /// makes such tests order-independent (the prior failure mode: these tests
+    /// passed only when a sibling env-touching test happened to have a tempdir
+    /// root set at the same moment).
+    fn isolated_root_env(temp: &TempDir) -> IsolatedRootEnv {
+        let lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var("AGENTDESK_ROOT_DIR").ok();
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        IsolatedRootEnv {
+            _lock: lock,
+            previous,
+        }
+    }
+
     #[test]
     fn budget_is_three_restarts() {
         assert_eq!(RECOVERY_RELAY_RESTART_ATTEMPT_BUDGET, 3);
@@ -7781,6 +7887,196 @@ mod recovery_relay_attempts_tests {
         assert_eq!(
             loaded[0].recovery_relay_attempts, 2,
             "re-marking must not reset the restart-relay budget counter"
+        );
+    }
+
+    /// #3860: model the shutdown bulk restart-mode mark racing a draining
+    /// watcher. The marker conceptually observed the row at rso=10; the watcher
+    /// then advanced the durable delivery frontier to rso=40 before the marker
+    /// wrote. The RMW marker must re-read the FRESH frontier (40) under the
+    /// flock and never rewind it to 10 — otherwise the replacement watcher
+    /// re-relays `full_response[10..40]`, a duplicate Discord send.
+    #[test]
+    fn restart_marker_rmw_preserves_concurrently_advanced_frontier_3860() {
+        let temp = TempDir::new().unwrap();
+        // `set_restart_mode`/`make_state` resolve the global runtime root; isolate
+        // it so the test is order-independent and never touches the live store.
+        let _env = isolated_root_env(&temp);
+        let provider = ProviderKind::Codex;
+
+        // The marker's stale view (rso=10) — what `load_inflight_states_from_root`
+        // returned at shutdown before the watcher advanced.
+        let mut early = make_state(555);
+        early.full_response = "Y".repeat(10);
+        early.response_sent_offset = 10;
+        early.last_offset = 10;
+        save_inflight_state_in_root(temp.path(), &early).unwrap();
+        let path = inflight_state_path(temp.path(), &provider, 555);
+
+        // The draining watcher advances the durable frontier (forward, same
+        // identity) to rso=40 before the marker writes.
+        let mut advanced = early.clone();
+        advanced.full_response = "Y".repeat(40);
+        advanced.response_sent_offset = 40;
+        advanced.last_offset = 40;
+        save_inflight_state_in_root(temp.path(), &advanced).unwrap();
+
+        // The marker writes LAST (the regression-prone ordering). RMW re-reads
+        // the on-disk frontier (40) rather than carrying the stale rso=10.
+        assert!(super::set_inflight_restart_mode_under_lock(
+            &path,
+            InflightRestartMode::DrainRestart
+        ));
+
+        let loaded = load_inflight_states_from_root(temp.path(), &provider);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].response_sent_offset, 40,
+            "RMW marker must keep the watcher's advanced frontier, not the stale rso=10"
+        );
+        assert_eq!(loaded[0].last_offset, 40, "last_offset must not regress");
+        assert_eq!(loaded[0].full_response.len(), 40);
+        assert_eq!(
+            loaded[0].restart_mode,
+            Some(InflightRestartMode::DrainRestart),
+            "the marker still records the restart mode"
+        );
+    }
+
+    /// #3860 end-to-end: `mark_all_inflight_states_restart_mode` (the boot/
+    /// shutdown bulk marker) must preserve a frontier a draining watcher
+    /// advanced and still set restart_mode on every live row.
+    #[test]
+    fn mark_all_restart_mode_preserves_advanced_frontier_3860() {
+        let temp = TempDir::new().unwrap();
+        let _env = isolated_root_env(&temp);
+
+        let inflight_root = super::inflight_runtime_root().expect("env root must resolve");
+        let mut state = make_state(932_940);
+        state.full_response = "Z".repeat(40);
+        state.response_sent_offset = 40;
+        state.last_offset = 40;
+        save_inflight_state_in_root(&inflight_root, &state).expect("seed advanced frontier");
+
+        let updated = super::mark_all_inflight_states_restart_mode(
+            &ProviderKind::Codex,
+            InflightRestartMode::DrainRestart,
+        );
+        assert_eq!(updated, 1, "the seeded row must be re-marked");
+
+        let loaded = load_inflight_states_from_root(&inflight_root, &ProviderKind::Codex);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].response_sent_offset, 40,
+            "bulk restart-mode mark must not regress the delivery frontier"
+        );
+        assert_eq!(loaded[0].last_offset, 40);
+        assert_eq!(
+            loaded[0].restart_mode,
+            Some(InflightRestartMode::DrainRestart)
+        );
+    }
+
+    /// #3860 SAFETY: the bulk restart-mode marker must NOT undo a legitimate
+    /// same-turn frontier reset. A Gemini/Qwen RetryBoundary clears
+    /// `full_response` and rewinds `response_sent_offset` to 0 for the SAME
+    /// identity (turn_bridge/retry_state.rs) to re-stream the turn. If the marker
+    /// then resurrected an older frontier the re-streamed body would be
+    /// suppressed (or double-relayed). The RMW marker re-reads the FRESH on-disk
+    /// row, so the legitimate rso=0 reset is preserved verbatim — independent of
+    /// the AGENTDESK_DELIVERY_RECORD_AUTHORITY guard (this path bypasses it).
+    #[test]
+    fn restart_marker_preserves_legitimate_frontier_reset_3860() {
+        let temp = TempDir::new().unwrap();
+        let _env = isolated_root_env(&temp);
+        let provider = ProviderKind::Codex;
+
+        // The turn_bridge persisted the retry reset: body cleared, frontier at 0.
+        let mut reset = make_state(556);
+        reset.full_response.clear();
+        reset.response_sent_offset = 0;
+        reset.last_offset = 0;
+        save_inflight_state_in_root(temp.path(), &reset).unwrap();
+        let path = inflight_state_path(temp.path(), &provider, 556);
+
+        assert!(super::set_inflight_restart_mode_under_lock(
+            &path,
+            InflightRestartMode::DrainRestart
+        ));
+
+        let loaded = load_inflight_states_from_root(temp.path(), &provider);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].response_sent_offset, 0,
+            "the marker must preserve the legitimate retry reset, not resurrect an old frontier"
+        );
+        assert!(
+            loaded[0].full_response.is_empty(),
+            "the cleared body must survive the restart-mode mark for the re-stream"
+        );
+        assert_eq!(
+            loaded[0].restart_mode,
+            Some(InflightRestartMode::DrainRestart)
+        );
+    }
+
+    /// #3860 edge: a row removed between the unlocked enumeration and the RMW
+    /// (e.g. a concurrent clear/finalize) must be skipped gracefully — the RMW
+    /// re-read returns `None`, so the marker reports no write and never
+    /// resurrects a stale row at the vacated path.
+    #[test]
+    fn restart_marker_skips_deleted_row_3860() {
+        let temp = TempDir::new().unwrap();
+        let _env = isolated_root_env(&temp);
+        let provider = ProviderKind::Codex;
+
+        let state = make_state(557);
+        save_inflight_state_in_root(temp.path(), &state).unwrap();
+        let path = inflight_state_path(temp.path(), &provider, 557);
+        assert!(path.exists());
+
+        // The row vanishes after enumeration, before the RMW write.
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(
+            !super::set_inflight_restart_mode_under_lock(&path, InflightRestartMode::DrainRestart),
+            "a deleted row must report no write"
+        );
+        assert!(
+            !path.exists(),
+            "the marker must not resurrect a stale row for a path that was cleared"
+        );
+        assert!(
+            load_inflight_states_from_root(temp.path(), &provider).is_empty(),
+            "no inflight row should exist after the skip"
+        );
+    }
+
+    /// #3860 edge: if the on-disk row is unparseable when the RMW re-reads it,
+    /// the marker must skip it gracefully (no panic) and leave the bytes
+    /// untouched rather than clobbering them with a regenerated state.
+    #[test]
+    fn restart_marker_skips_corrupt_row_3860() {
+        let temp = TempDir::new().unwrap();
+        let _env = isolated_root_env(&temp);
+        let provider = ProviderKind::Codex;
+
+        let state = make_state(558);
+        save_inflight_state_in_root(temp.path(), &state).unwrap();
+        let path = inflight_state_path(temp.path(), &provider, 558);
+
+        // Corrupt the row to an unparseable blob.
+        let corrupt: &[u8] = b"{ this is not valid inflight json";
+        std::fs::write(&path, corrupt).unwrap();
+
+        assert!(
+            !super::set_inflight_restart_mode_under_lock(&path, InflightRestartMode::DrainRestart),
+            "an unparseable row must report no write (graceful skip, no panic)"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            corrupt,
+            "the marker must not overwrite an unparseable row with a regenerated state"
         );
     }
 
