@@ -362,7 +362,13 @@
 # clamp + the init-time ceiling-cap block landed together, the latter undercounted
 # in the prior bump). No new code lands here this round; this only corrects the
 # frozen value to the file's true LoC so the ratchet gate passes. 3699 -> 3722.
-"src/services/discord/router/message_handler/intake_turn.rs" = 3722
+# #3837: behavior-preserving decomposition lowered 3722 -> 2797 by lifting three
+# cohesive `handle_text_message` clusters verbatim into sibling `intake_turn/`
+# submodules — voice_intake (voice-announcement resolution), race_loss (the
+# `if !started` mailbox enqueue + queued-placeholder render + reaction lifecycle),
+# and turn_watchdog (the per-turn watchdog spawn). Pure code movement; the new
+# child modules live under the `intake_turn/**` 700-line namespace cap.
+"src/services/discord/router/message_handler/intake_turn.rs" = 2797
 "src/services/discord/meeting_orchestrator.rs" = 3227
 # #3293: +3 for the `registry_purge` child-module declaration (peek +
 # operator-gated idle-entry purge live outside the frozen root); lowered

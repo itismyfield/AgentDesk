@@ -403,6 +403,17 @@
 
 ### Audited touches
 
+- #3837 intake_turn decomposition (behavior-preserving): three cohesive
+  `handle_text_message` clusters were lifted verbatim into sibling
+  `router::message_handler::intake_turn::{voice_intake,race_loss,turn_watchdog}`
+  submodules — voice-announcement resolution, the `if !started` race-loss
+  mailbox enqueue + queued-placeholder render + reaction lifecycle, and the
+  per-turn watchdog spawn. Classification: UNCHANGED. Intake/turn-execution
+  stays worker-local — workers invoke the unchanged `execute_intake_turn_core`
+  facade after claiming a PG-lease-backed `intake_outbox` row, and the leader
+  runs the same in-process `handle_text_message`; this is pure code movement
+  with no new leader gate, cross-node routing, or PG-lease assumption.
+
 - #3870 fail-closed control-plane bind: `server::run` now resolves the HTTP
   listener host through `routes::resolve_secure_bind_host`, which force-binds to
   loopback when `server.host` is non-loopback AND `server.auth_token` is unset
