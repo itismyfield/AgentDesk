@@ -512,9 +512,9 @@
 | `services::discord::placeholder_live_events::recent_events` | `src/services/discord/placeholder_live_events/recent_events.rs` | 321 | 321 | 0 |  |
 | `services::discord::placeholder_live_events::session_panel` | `src/services/discord/placeholder_live_events/session_panel.rs` | 262 | 262 | 0 |  |
 | `services::discord::placeholder_live_events::slot_rehydration` | `src/services/discord/placeholder_live_events/slot_rehydration.rs` | 525 | 447 | 78 |  |
-| `services::discord::placeholder_live_events::status_events` | `src/services/discord/placeholder_live_events/status_events.rs` | 693 | 693 | 0 |  |
-| `services::discord::placeholder_live_events::status_panel` | `src/services/discord/placeholder_live_events/status_panel.rs` | 674 | 674 | 0 |  |
-| `services::discord::placeholder_live_events::subagent_rollout` | `src/services/discord/placeholder_live_events/subagent_rollout.rs` | 370 | 195 | 175 |  |
+| `services::discord::placeholder_live_events::status_events` | `src/services/discord/placeholder_live_events/status_events.rs` | 700 | 700 | 0 |  |
+| `services::discord::placeholder_live_events::status_panel` | `src/services/discord/placeholder_live_events/status_panel.rs` | 688 | 688 | 0 |  |
+| `services::discord::placeholder_live_events::subagent_rollout` | `src/services/discord/placeholder_live_events/subagent_rollout.rs` | 445 | 270 | 175 |  |
 | `services::discord::placeholder_live_events::subagent_summary` | `src/services/discord/placeholder_live_events/subagent_summary.rs` | 69 | 69 | 0 |  |
 | `services::discord::placeholder_live_events::task_panel` | `src/services/discord/placeholder_live_events/task_panel.rs` | 348 | 348 | 0 |  |
 | `services::discord::placeholder_live_events::turn_anchor` | `src/services/discord/placeholder_live_events/turn_anchor.rs` | 207 | 112 | 95 |  |

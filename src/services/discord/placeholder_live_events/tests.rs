@@ -3720,6 +3720,141 @@ fn status_events_json_async_launch_ack_does_not_close_background_subagent() {
     );
 }
 
+// #3920: a modern async `Agent` launch carries NO `run_in_background` in the
+// tool INPUT — its async-ness is known only from the launch-ack `toolUseResult`
+// (`isAsync`/`status: async_launched`). The slot therefore starts foreground
+// (`background: false`); before #3920 it was dropped at the very next turn
+// boundary, so a long-running background Agent subagent spawned in a prior turn
+// never showed on the status panel (only Bash `run_in_background` tasks did).
+// The launch-ack must PROMOTE the slot to a background subagent so it SURVIVES
+// turn-boundary resets and stays observable for parallel-work monitoring.
+#[test]
+fn status_panel_async_agent_subagent_survives_turn_boundary_after_launch_ack() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_920_001);
+
+    // Spawning turn: Agent tool_use WITHOUT `run_in_background` → foreground slot.
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Agent",
+            &json!({
+                "subagent_type": "general-purpose",
+                "description": "Implement #3897 r4"
+            })
+            .to_string(),
+            Some("toolu_agent_3897"),
+        ),
+    );
+
+    // The async launch-ack (record-level `isAsync`/`async_launched`, no
+    // accounting) arrives as a `user` record on the watcher/json path.
+    events.push_status_events(
+        channel_id,
+        status_events_from_json(&json!({
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_agent_3897",
+                    "is_error": false
+                }]
+            },
+            "toolUseResult": {
+                "isAsync": true,
+                "status": "async_launched",
+                "agentId": "aee5241a0000000",
+                "description": "Implement #3897 r4",
+                "prompt": "...",
+                "outputFile": "...",
+                "canReadOutputFile": true
+            }
+        })),
+    );
+
+    let spawning = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(spawning.contains("Subagents"));
+    assert!(
+        spawning.contains("general-purpose Implement #3897 r4"),
+        "async Agent subagent should render during the spawning turn: {spawning}"
+    );
+
+    // Turn boundary: the next turn resets per-turn content, preserving only
+    // unfinished BACKGROUND residuals (#3386). The promoted slot must survive.
+    events.clear_channel_preserving_footer_residuals(channel_id);
+
+    let next_turn = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_300);
+    let line = next_turn
+        .lines()
+        .find(|line| line.contains("general-purpose Implement #3897 r4"))
+        .unwrap_or_else(|| {
+            panic!("background Agent subagent must survive the turn boundary: {next_turn}")
+        });
+    assert!(
+        next_turn.contains("Subagents"),
+        "the carried background subagent must still render under Subagents: {next_turn}"
+    );
+    assert!(
+        !line.contains('✓') && !line.contains('✗') && !line.contains("Done ("),
+        "the carried background subagent is still running (no terminal marker): {line}"
+    );
+}
+
+// #3920: surfacing the carried background subagent must NOT introduce
+// per-render nondeterminism — the panel text stays byte-identical across
+// heartbeat ticks when no status change occurred (#3477/#3812 invariant).
+#[test]
+fn status_panel_carried_background_subagent_is_heartbeat_stable() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_920_002);
+
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Agent",
+            &json!({ "subagent_type": "Explore", "description": "Audit #3864" }).to_string(),
+            Some("toolu_agent_3864"),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_json(&json!({
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_agent_3864",
+                    "is_error": false
+                }]
+            },
+            "toolUseResult": { "isAsync": true, "status": "async_launched", "agentId": "a106f023" }
+        })),
+    );
+    events.clear_channel_preserving_footer_residuals(channel_id);
+
+    let first = events.render_status_panel_with_heartbeat(
+        channel_id,
+        &ProviderKind::Claude,
+        1_700_000_000,
+        1_700_000_005,
+    );
+    let second = events.render_status_panel_with_heartbeat(
+        channel_id,
+        &ProviderKind::Claude,
+        1_700_000_000,
+        1_700_000_090,
+    );
+
+    assert!(
+        first.contains("Explore Audit #3864"),
+        "carried background subagent should render: {first}"
+    );
+    assert_eq!(
+        first, second,
+        "panel text must be byte-identical across heartbeat ticks with no status change"
+    );
+}
+
 #[test]
 fn status_panel_async_completion_with_accounting_still_finalizes_subagent() {
     let events = PlaceholderLiveEvents::default();
