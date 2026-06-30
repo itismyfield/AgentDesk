@@ -5874,9 +5874,8 @@ pub(super) fn spawn_turn_bridge(
                     );
                 }
             }
-            let indicator = super::single_message_panel::single_message_panel_spinner_frame(
-                spin_idx,
-            );
+            let indicator =
+                super::single_message_panel::single_message_panel_spinner_frame(spin_idx);
             status_panel_completion_committed =
                 complete_bridge_terminal_footer_or_status_panel(
                     shared_owned.as_ref(),
@@ -5889,6 +5888,7 @@ pub(super) fn spawn_turn_bridge(
                     status_panel_started_at,
                     &mut last_status_panel_text,
                     single_message_panel_footer_mode,
+                    is_external_input_tui_direct, // #3959: suppress mirror chrome footer
                     completion_footer_terminal_text.as_deref(),
                     indicator,
                 )
