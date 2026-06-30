@@ -884,7 +884,7 @@
 | `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 241 | 241 | 0 |  |
 | `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 720 | 677 | 43 |  |
 | `services::tool_output_guard` | `src/services/tool_output_guard.rs` | 100 | 100 | 0 |  |
-| `services::tui_prompt_dedupe` | `src/services/tui_prompt_dedupe.rs` | 4066 | 1812 | 2254 | giant-file |
+| `services::tui_prompt_dedupe` | `src/services/tui_prompt_dedupe.rs` | 4119 | 1824 | 2295 | giant-file |
 | `services::tui_prompt_dedupe::synthetic_prompt` | `src/services/tui_prompt_dedupe/synthetic_prompt.rs` | 34 | 34 | 0 |  |
 | `services::tui_turn_state` | `src/services/tui_turn_state.rs` | 2211 | 909 | 1302 |  |
 | `services::turn_cancel_finalizer` | `src/services/turn_cancel_finalizer.rs` | 479 | 150 | 329 |  |
