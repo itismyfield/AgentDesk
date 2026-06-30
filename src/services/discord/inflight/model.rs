@@ -356,9 +356,17 @@ pub(in crate::services::discord) struct InflightTurnState {
 }
 
 /// Origin of a turn whose state is captured in [`InflightTurnState`]. Pure
-/// audit metadata for #2285 / #2161 — callers must not branch relay or
-/// completion semantics on this value; the session-bound relay (epic #2285
-/// E1–E5) treats every matched session uniformly.
+/// audit metadata for #2285 / #2161 — callers must not branch RELAY routing on
+/// this value; the session-bound relay (epic #2285 E1–E5) treats every matched
+/// session uniformly.
+///
+/// EXCEPTION (#3969, behavioral dependency — do not silently regress): the
+/// watcher's completion-footer suppression for #3089 footer chrome DOES key on
+/// `turn_source == Managed`. The #3089 footer is kept only for Discord-origin
+/// (`Managed`) turns; every non-`Managed` mirror origin (e.g. `/loop`
+/// self-paced / monitor / external-input TUI mirrors) suppresses the footer. So
+/// the `Managed` discriminant is now load-bearing for that footer decision —
+/// preserve this carve-out when changing how `turn_source` is assigned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub(in crate::services::discord) enum TurnSource {

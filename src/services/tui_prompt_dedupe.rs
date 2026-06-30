@@ -540,6 +540,66 @@ pub(crate) fn clear_prompt_anchor_for_response(
     removed
 }
 
+/// #3956: re-stamp an EXISTING submit prompt anchor's `recorded_at` to "now" on
+/// observed streaming activity for `(provider, tmux, channel)`. A turn that
+/// streams continuously longer than [`PROMPT_ANCHOR_SUBMIT_TTL`] (4h) would
+/// otherwise have its anchor expire mid-stream, so the #3885 same-input
+/// follow-up-requeue correlation peek ([`prompt_anchor_for_response`]) resolves
+/// `None`, `same_input` reads false, and the no-response requeue re-fires
+/// duplicate prose. The tmux watcher's per-pane streaming-observation path calls
+/// this on every observed output chunk so the anchor stays live for the whole
+/// turn, making the correlation TTL-independent (the issue #3956 full fix).
+///
+/// This is a REFRESH-on-activity, NOT a new lifecycle, and a SINGLE-MAP op:
+///   * it only advances an anchor that ALREADY exists for the MATCHING channel —
+///     it never resurrects a different channel's anchor and never CREATES one, so
+///     a genuinely-unsubmitted pane stays anchor-less and the bridge still
+///     requeues it;
+///   * it reads/writes ONLY `prompt_anchor_by_tmux`. Crucially it does NOT call
+///     [`TuiPromptDedupeState::purge_expired`]: this fires on EVERY watcher
+///     chunk-drain (a #3016 hot path), so a global multi-map purge under the lock
+///     would scan/mutate the #3459/#3303 `relayed_entry_ids_by_tmux` ledger and
+///     every other dedupe map on each chunk. Leaving the ledger entirely untouched
+///     is what makes the #3459/#3303 non-regression REAL, not merely benign — and
+///     keeps the hot-path op cheap.
+///
+/// No-resurrection WITHOUT the global purge: the matching anchor's age is checked
+/// INLINE against the 4h ceiling. A still-live anchor (< 4h) is re-stamped; a
+/// matching anchor already past 4h belongs to a long-dead turn, so it is NOT
+/// refreshed (and is evicted from this one map so it cannot linger). The peek path
+/// [`prompt_anchor_for_response`] runs its OWN `purge_expired`, so anchor expiry is
+/// still enforced there independently of this path.
+/// Returns `true` iff a live matching-channel anchor was present and re-stamped.
+pub(crate) fn touch_prompt_anchor_on_activity(
+    provider: &str,
+    tmux_session_name: &str,
+    channel_id: u64,
+) -> bool {
+    let provider = normalize_provider(provider);
+    let tmux_session_name = tmux_session_name.trim();
+    if provider.is_empty() || tmux_session_name.is_empty() || channel_id == 0 {
+        return false;
+    }
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    let key = PromptKey::new(&provider, tmux_session_name);
+    let Some(entry) = state.prompt_anchor_by_tmux.get_mut(&key) else {
+        return false;
+    };
+    if entry.value.channel_id != channel_id {
+        return false;
+    }
+    if entry.recorded_at.elapsed() < PROMPT_ANCHOR_SUBMIT_TTL {
+        // Live turn: re-stamp this one entry so the stream's anchor stays fresh.
+        entry.recorded_at = Instant::now();
+        return true;
+    }
+    // The matching anchor is already past the 4h ceiling — a long-dead turn's
+    // anchor. Do NOT refresh it (no-resurrection guarantee); evict just this one
+    // entry so it cannot linger, without scanning or mutating any other map.
+    state.prompt_anchor_by_tmux.remove(&key);
+    false
+}
+
 /// #3174: record a deferred ⏳-completion marker for `(provider, tmux, channel)`,
 /// stamped with the TURN IDENTITY `turn_lease_generation`.
 ///
@@ -3769,6 +3829,221 @@ No response requested.\n\
             prompt_anchor_for_response("claude", tmux, channel),
             None,
             "anchor older than PROMPT_ANCHOR_SUBMIT_TTL is purged"
+        );
+    }
+
+    /// #3956: re-stamp-on-activity. A turn that streams continuously LONGER than
+    /// `PROMPT_ANCHOR_SUBMIT_TTL` (4h) must keep a live submit anchor — the watcher
+    /// calls `touch_prompt_anchor_on_activity` on every observed streamed chunk,
+    /// advancing `recorded_at` so the anchor never reaches the 4h purge mid-stream.
+    /// This keeps the #3885 same-input correlation peek resolving for the whole
+    /// turn (no duplicate-prose requeue), making the correlation TTL-independent.
+    #[test]
+    fn streaming_activity_restamps_anchor_so_long_turn_never_loses_it() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        let provider = "claude";
+        let tmux = "tmux-3956-restamp";
+        let channel = 4444_u64;
+        let msg = 5_555_u64;
+
+        // The turn has streamed for nearly the whole 4h ceiling.
+        record_prompt_anchor_aged_for_tests(
+            provider,
+            tmux,
+            channel,
+            msg,
+            PROMPT_ANCHOR_SUBMIT_TTL - Duration::from_secs(60),
+        );
+        // Control: WITHOUT a refresh, a turn that has streamed past the 4h ceiling
+        // already loses its anchor (the #3885 residual this fix closes). Pinned on
+        // a SEPARATE key so the refreshed-path assertions below are uncontaminated.
+        record_prompt_anchor_aged_for_tests(
+            provider,
+            "tmux-3956-norefresh",
+            channel,
+            msg,
+            PROMPT_ANCHOR_SUBMIT_TTL + Duration::from_secs(1),
+        );
+        assert_eq!(
+            prompt_anchor_for_response(provider, "tmux-3956-norefresh", channel),
+            None,
+            "without re-stamp, a >4h stream's anchor is purged (the #3885 residual)"
+        );
+
+        // Observed streaming activity re-stamps `recorded_at` to ~now.
+        assert!(
+            touch_prompt_anchor_on_activity(provider, tmux, channel),
+            "an existing anchor for this channel is re-stamped on activity"
+        );
+
+        // Simulate ANOTHER (4h - 60s) of continuous streaming elapsing AFTER that
+        // re-stamp by backdating the refreshed stamp. Because the re-stamp reset the
+        // clock, the effective age is now (4h - 60s) < 4h, so the anchor STILL
+        // resolves — whereas the un-refreshed control above (~8h wall-age) was purged.
+        {
+            let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+            state
+                .prompt_anchor_by_tmux
+                .get_mut(&PromptKey::new(provider, tmux))
+                .expect("anchor present after touch")
+                .recorded_at =
+                Instant::now() - (PROMPT_ANCHOR_SUBMIT_TTL - Duration::from_secs(60));
+        }
+        assert_eq!(
+            prompt_anchor_for_response(provider, tmux, channel),
+            Some(TuiPromptAnchor {
+                channel_id: channel,
+                message_id: msg,
+            }),
+            "re-stamped anchor survives well past the wall-clock 4h a single stamp would not"
+        );
+
+        // Channel-scoped: a touch for a DIFFERENT channel must not refresh this anchor.
+        assert!(
+            !touch_prompt_anchor_on_activity(provider, tmux, channel + 1),
+            "touch is a no-op when the stored anchor's channel does not match"
+        );
+        // Refresh-only: a touch with no anchor recorded must NOT create one.
+        assert!(
+            !touch_prompt_anchor_on_activity(provider, "tmux-3956-absent", channel),
+            "touch never CREATES an anchor — refresh-on-activity only"
+        );
+    }
+
+    /// #3956 codex re-review regression guard: `touch_prompt_anchor_on_activity`
+    /// is a SINGLE-MAP op — it must NOT run the global `purge_expired`, so it can
+    /// neither scan nor mutate the #3459/#3303 `relayed_entry_ids_by_tmux` ledger
+    /// (nor any other dedupe map) on the per-chunk hot path. Proven by leaving a
+    /// ledger entry that a full purge WOULD drop in place ACROSS a touch: it
+    /// survives the touch byte-for-byte, demonstrating the touch did not trigger
+    /// the ledger-purging code at all. The ledger still purges on its OWN 30min
+    /// `PROMPT_ANCHOR_TTL` via the normal (purge-running) paths.
+    #[test]
+    fn touch_anchor_on_activity_does_not_run_global_purge_or_touch_ledger() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        let provider = "claude";
+        let tmux = "tmux-3956-ledger";
+        let channel = 5555_u64;
+        let msg = 6_666_u64;
+
+        record_relayed_entry_id(provider, tmux, "uuid-LEDGER");
+        record_prompt_anchor(provider, tmux, channel, msg);
+
+        // Age the ledger entry PAST its 30min TTL so a full `purge_expired` WOULD
+        // drop it; the anchor stays fresh (well within 4h). Done via direct state
+        // access so no purge-calling helper runs between here and the touch below.
+        // Capture the ledger stamp to prove `touch` leaves it byte-for-byte intact.
+        let ledger_stamp_before = {
+            let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+            let aged = Instant::now() - (PROMPT_ANCHOR_TTL + Duration::from_secs(60));
+            state
+                .relayed_entry_ids_by_tmux
+                .get_mut(&PromptKey::new(provider, tmux))
+                .and_then(|queue| queue.front_mut())
+                .expect("ledger entry present")
+                .recorded_at = aged;
+            aged
+        };
+
+        // Streaming activity re-stamps the SUBMIT anchor (single-map op).
+        assert!(touch_prompt_anchor_on_activity(provider, tmux, channel));
+
+        {
+            let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+            // The anchor was refreshed to ~now...
+            let anchor_age = state
+                .prompt_anchor_by_tmux
+                .get(&PromptKey::new(provider, tmux))
+                .map(|entry| entry.recorded_at.elapsed())
+                .expect("anchor present");
+            assert!(
+                anchor_age < Duration::from_secs(60),
+                "anchor was re-stamped on activity"
+            );
+            // ...but the OVER-TTL ledger entry is STILL present with its original
+            // stamp: `touch` did not run the global purge, so the ledger was never
+            // scanned or mutated (the #3459/#3303 non-regression is REAL, not just
+            // benign). A full `purge_expired` would have dropped this entry.
+            let seen = state
+                .relayed_entry_ids_by_tmux
+                .get(&PromptKey::new(provider, tmux))
+                .and_then(|queue| queue.front())
+                .expect("ledger entry still present (touch did not purge it)");
+            assert_eq!(seen.value, "uuid-LEDGER");
+            assert_eq!(
+                seen.recorded_at, ledger_stamp_before,
+                "touch left the over-TTL ledger entry byte-for-byte untouched"
+            );
+        }
+
+        // The ledger DOES purge on its own 30min TTL via the normal purge-running
+        // path — `touch` simply is not that path. `relayed_entry_id_already_seen`
+        // runs `purge_expired`, dropping the over-TTL entry; the freshly-touched
+        // anchor (well within 4h) survives that same purge.
+        assert!(
+            !relayed_entry_id_already_seen(provider, tmux, "uuid-LEDGER"),
+            "over-TTL ledger entry is dropped by the normal (purge-running) path"
+        );
+        assert_eq!(
+            prompt_anchor_for_response(provider, tmux, channel),
+            Some(TuiPromptAnchor {
+                channel_id: channel,
+                message_id: msg,
+            }),
+            "freshly-touched anchor survives the ledger's independent 30min purge"
+        );
+    }
+
+    /// #3956 codex re-review: the no-resurrection guarantee must hold WITHOUT the
+    /// global purge — a matching anchor already past the 4h ceiling is never
+    /// refreshed by `touch` (it is evicted from the single anchor map instead), so
+    /// a pane idle 4h+ that suddenly streams cannot revive a long-dead turn's
+    /// anchor. The eviction touches only `prompt_anchor_by_tmux`.
+    #[test]
+    fn touch_anchor_on_activity_evicts_expired_anchor_without_resurrecting_it() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        let provider = "claude";
+        let tmux = "tmux-3956-expired";
+        let channel = 9999_u64;
+        let msg = 1_234_u64;
+
+        // An anchor already past the 4h ceiling (a long-dead turn). Recorded via
+        // the aged helper, which does NOT purge, so it is still in the map when the
+        // first streaming activity arrives.
+        record_prompt_anchor_aged_for_tests(
+            provider,
+            tmux,
+            channel,
+            msg,
+            PROMPT_ANCHOR_SUBMIT_TTL + Duration::from_secs(1),
+        );
+
+        // Activity must NOT refresh the dead anchor...
+        assert!(
+            !touch_prompt_anchor_on_activity(provider, tmux, channel),
+            "an anchor past the 4h ceiling is never re-stamped (no resurrection)"
+        );
+        // ...and the dead anchor is evicted from the single anchor map.
+        {
+            let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+            assert!(
+                state
+                    .prompt_anchor_by_tmux
+                    .get(&PromptKey::new(provider, tmux))
+                    .is_none(),
+                "the over-ceiling anchor was evicted, not resurrected"
+            );
+        }
+        assert_eq!(
+            prompt_anchor_for_response(provider, tmux, channel),
+            None,
+            "no live anchor remains for the dead turn"
         );
     }
 

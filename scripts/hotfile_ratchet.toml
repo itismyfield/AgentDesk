@@ -92,7 +92,16 @@
 # pure predicate + gate + per-class tests live in the non-frozen sibling
 # `tmux_watcher/{panel_decisions,single_message_footer,panel_decisions_tests}.rs`;
 # this is the minimal frozen-file (load-bearing comment + let-binding + arg) cost.
-"src/services/discord/tmux_watcher.rs" = 10257
+# #3956: 10257 -> 10268 (+11), reviewable admission — close the deferred #3885
+# residual where a turn streaming continuously past PROMPT_ANCHOR_SUBMIT_TTL (4h)
+# loses its submit prompt anchor mid-stream (the same-input follow-up-requeue peek
+# then resolves None and re-fires duplicate prose). The watcher's per-pane
+# streaming-observation site (the "got new data" read point) now calls the new
+# `tui_prompt_dedupe::touch_prompt_anchor_on_activity` refresh primitive so the
+# anchor stays live for the whole turn, TTL-independent. The primitive + its
+# regression tests live in the NON-hot `tui_prompt_dedupe.rs`; this is the minimal
+# frozen-file cost (one load-bearing comment block + the channel-scoped call).
+"src/services/discord/tmux_watcher.rs" = 10268
 # #3715: 7789 -> 4007 by moving the inline `#[cfg(test)] mod tests` body into
 # `tui_prompt_relay/tests.rs` and the Codex idle rollout tail/rebind loop into
 # `tui_prompt_relay/codex_idle_rollout.rs`; no production behavior change.

@@ -468,7 +468,7 @@
 | `services::discord::inflight::anchor_repost` | `src/services/discord/inflight/anchor_repost.rs` | 549 | 188 | 361 |  |
 | `services::discord::inflight::budget` | `src/services/discord/inflight/budget.rs` | 339 | 108 | 231 |  |
 | `services::discord::inflight::finalizer_identity` | `src/services/discord/inflight/finalizer_identity.rs` | 56 | 56 | 0 |  |
-| `services::discord::inflight::model` | `src/services/discord/inflight/model.rs` | 1042 | 797 | 245 |  |
+| `services::discord::inflight::model` | `src/services/discord/inflight/model.rs` | 1050 | 805 | 245 |  |
 | `services::discord::inflight::orphan_relay_reclaim` | `src/services/discord/inflight/orphan_relay_reclaim.rs` | 477 | 203 | 274 |  |
 | `services::discord::inflight::rebind_reap` | `src/services/discord/inflight/rebind_reap.rs` | 226 | 226 | 0 |  |
 | `services::discord::inflight::store` | `src/services/discord/inflight/store.rs` | 62 | 62 | 0 |  |
@@ -645,7 +645,7 @@
 | `services::discord::tmux_reattach_offsets` | `src/services/discord/tmux_reattach_offsets.rs` | 82 | 82 | 0 |  |
 | `services::discord::tmux_restart_handoff` | `src/services/discord/tmux_restart_handoff.rs` | 596 | 479 | 117 |  |
 | `services::discord::tmux_session_files` | `src/services/discord/tmux_session_files.rs` | 586 | 554 | 32 |  |
-| `services::discord::tmux_watcher` | `src/services/discord/tmux_watcher.rs` | 10257 | 7092 | 3165 | giant-file |
+| `services::discord::tmux_watcher` | `src/services/discord/tmux_watcher.rs` | 10268 | 7103 | 3165 | giant-file |
 | `services::discord::tmux_watcher::commit_decisions` | `src/services/discord/tmux_watcher/commit_decisions.rs` | 287 | 165 | 122 |  |
 | `services::discord::tmux_watcher::completion_gate` | `src/services/discord/tmux_watcher/completion_gate.rs` | 287 | 287 | 0 |  |
 | `services::discord::tmux_watcher::liveness` | `src/services/discord/tmux_watcher/liveness.rs` | 403 | 321 | 82 |  |
@@ -884,7 +884,7 @@
 | `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 241 | 241 | 0 |  |
 | `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 720 | 677 | 43 |  |
 | `services::tool_output_guard` | `src/services/tool_output_guard.rs` | 100 | 100 | 0 |  |
-| `services::tui_prompt_dedupe` | `src/services/tui_prompt_dedupe.rs` | 3844 | 1764 | 2080 | giant-file |
+| `services::tui_prompt_dedupe` | `src/services/tui_prompt_dedupe.rs` | 4119 | 1824 | 2295 | giant-file |
 | `services::tui_prompt_dedupe::synthetic_prompt` | `src/services/tui_prompt_dedupe/synthetic_prompt.rs` | 34 | 34 | 0 |  |
 | `services::tui_turn_state` | `src/services/tui_turn_state.rs` | 2211 | 909 | 1302 |  |
 | `services::turn_cancel_finalizer` | `src/services/turn_cancel_finalizer.rs` | 479 | 150 | 329 |  |
