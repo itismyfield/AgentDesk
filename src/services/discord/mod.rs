@@ -3664,19 +3664,25 @@ async fn mailbox_clear_channel(
     result
 }
 
-async fn mailbox_replace_queue(
+/// #3864: in-actor merge of SIGTERM-restored disk queue items into the live
+/// mailbox queue. Replaces the out-of-actor snapshot→build→`replace_queue`
+/// read-modify-write the startup restore path used, which silently lost any
+/// live reconcile-window `Enqueue` landing between its snapshot and its
+/// replace. The actor reads, dedups, front-inserts and persists in one
+/// serialized step (cf. `mailbox_hydrate_pending_queue_from_disk`, #1683).
+async fn mailbox_merge_restored_queue_items(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: ChannelId,
-    queue: Vec<Intervention>,
-) {
+    items: Vec<Intervention>,
+) -> HydratePendingQueueResult {
     shared
         .mailbox(channel_id)
-        .replace_queue(
-            queue,
+        .merge_restored_queue_items(
+            items,
             queue_persistence_context(shared, provider, channel_id),
         )
-        .await;
+        .await
 }
 
 /// #1683: actor-local disk -> in-memory hydration helper. The mailbox

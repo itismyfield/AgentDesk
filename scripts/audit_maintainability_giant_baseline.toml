@@ -197,7 +197,11 @@
 # the module inventory surface while shrinking `tui_prompt_relay.rs` below the
 # giant threshold; refresh the frozen parent-module count so script checks reflect
 # current main.
-"src/services/discord/mod.rs" = 4147
+# #3864 (P1 data-loss): swap the now-dead `mailbox_replace_queue` wrapper for the
+# new in-actor `mailbox_merge_restored_queue_items` wrapper (restore now merges
+# inside the mailbox actor instead of a racy out-of-actor snapshot->replace).
+# Net +6 prod LoC. 4147 -> 4153.
+"src/services/discord/mod.rs" = 4153
 # #3305: the local-only pass-through lifecycle-skip (kind hoist + note-only return
 # branch + idle-loop skip) is offset by comment dedup in the same root, lowering the
 # frozen baseline 5438 -> 5429 (-9). Locks in the shrink win (#3028 ratchet).
@@ -342,7 +346,15 @@
 # `TryStartTurn` guard — the enum/state/loop can only live in the root)
 # are offset by #2374 actor-arm comment dedup in the same root, so the
 # frozen baseline stays at 3089 (no raise; #3028 ratchet).
-"src/services/turn_orchestrator.rs" = 3089
+# #3864 (P1 data-loss): move the SIGTERM queue-restore merge INSIDE the mailbox
+# actor so a live reconcile-window enqueue can no longer be overwritten. Adds the
+# `intervention_dedup_ids` helper + thorough (source_message_ids) dedup in
+# `hydrate_pending_queue_into_state`, plus the `MergeRestoredQueueItems` actor
+# message (variant + handle method + handler arm) with race-explanation comments.
+# Also gates the now-test-only `ReplaceQueue` blind-overwrite path behind
+# `#[cfg(test)]` (+ justification comments). Test functions are excluded from the
+# count. +95 prod LoC. 3089 -> 3184.
+"src/services/turn_orchestrator.rs" = 3184
 # #3034 batch-8: +1 for a test-only `#[allow(dead_code)]` on
 # `thread_guard_inflight_is_stale` (#1446 Layer-2 classifier, pinned by tests).
 # #3038 S1: +2 (2958 -> 2960) for the two mechanical `.queued_placeholders` ->

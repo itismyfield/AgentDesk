@@ -91,34 +91,3 @@ pub(super) fn bootstrap_session_reset_pending_channels(
     }
     set
 }
-
-pub(super) fn restored_intervention_message_ids(item: &Intervention) -> Vec<u64> {
-    let mut item_ids: Vec<u64> = item.source_message_ids.iter().map(|id| id.get()).collect();
-    if item_ids.is_empty() {
-        item_ids.push(item.message_id.get());
-    } else if !item_ids.contains(&item.message_id.get()) {
-        item_ids.push(item.message_id.get());
-    }
-    item_ids
-}
-
-pub(super) fn enqueue_restored_intervention(
-    existing_ids: &mut std::collections::HashSet<u64>,
-    queue: &mut Vec<Intervention>,
-    item: Intervention,
-) -> bool {
-    let item_ids = restored_intervention_message_ids(&item);
-    // Persisted merged queue items may represent multiple source messages. If startup
-    // catch-up already recovered only some of them, dropping the whole item would lose
-    // the unseen messages because the merged text is no longer separable.
-    if item_ids
-        .iter()
-        .all(|message_id| existing_ids.contains(message_id))
-    {
-        return false;
-    }
-
-    existing_ids.extend(item_ids);
-    queue.push(item);
-    true
-}
