@@ -438,31 +438,42 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
         "  ↻ recovery anchor-repost: committed terminal message is GONE — reposting (send-new)"
     );
 
-    // #3918: persist the send-new ATTEMPT BEFORE the send. The durable
-    // `anchor_reposted` marker recorded after a Delivered send is the primary
-    // at-most-once guard, but it cannot cover the narrow window between
-    // "Discord accepted the message" and "marker written". Counting the attempt
-    // up-front (identity-guarded so a row now owned by a newer turn is never
-    // touched) bounds that window: the G2c guard above refuses once the budget
-    // is reached, so even a pathological crash-before-marker loop is bounded.
-    // A failed bump WARNs but does not block the repost.
+    // #3918: persist the send-new ATTEMPT BEFORE the send, and HARD-GATE the
+    // send on that attempt being durably recorded. The durable `anchor_reposted`
+    // marker recorded after a Delivered send is the primary at-most-once guard,
+    // but it cannot cover the narrow window between "Discord accepted the
+    // message" and "marker written". Counting the attempt up-front
+    // (identity-guarded so a row now owned by a newer turn is never touched)
+    // bounds that window: the G2c guard above refuses once the budget is reached.
+    // But that bound ONLY holds when the attempt actually PERSISTS. If the bump
+    // is not `Saved` we MUST NOT send:
+    //   * `IoError` — the attempt did not persist. Sending anyway would escape
+    //     the budget: under a persistent write fault every boot re-loads the SAME
+    //     `attempts == 0` row and would send again → UNBOUNDED duplicate relay.
+    //     Refusing is strictly safer; if the fault is transient a later boot's
+    //     bump succeeds and the answer is re-posted then (deferred, not dropped).
+    //   * `Missing` / `IdentityMismatch` — the row this answer belonged to is
+    //     gone or now owned by a newer turn; re-posting a stale recovered answer
+    //     is wrong anyway. Refuse.
+    // No durable attempt record ⇒ no send. Only a `Saved` bump proceeds.
     let repost_identity = inflight::InflightTurnIdentity::from_state(state);
-    if !matches!(
-        inflight::anchor_repost::bump_anchor_repost_attempts_if_matches_identity(
-            provider,
-            state.channel_id,
-            &repost_identity,
-            state.turn_start_offset,
-        ),
-        inflight::GuardedSaveOutcome::Saved
-    ) {
+    let bump_outcome = inflight::anchor_repost::bump_anchor_repost_attempts_if_matches_identity(
+        provider,
+        state.channel_id,
+        &repost_identity,
+        state.turn_start_offset,
+    );
+    if !matches!(bump_outcome, inflight::GuardedSaveOutcome::Saved) {
         tracing::warn!(
             provider = %provider.as_str(),
             channel = state.channel_id,
+            outcome = ?bump_outcome,
             "  ⚠ recovery anchor-repost: pre-send attempt counter NOT persisted — \
-             the crash-window bound is degraded (the post-delivery marker still \
-             blocks a re-run once it lands)"
+             REFUSING the send-new (the hard bound cannot be guaranteed without a \
+             durable attempt record; a transient fault is re-posted by a later \
+             boot whose bump succeeds, and a gone/replaced row must not be reposted)"
         );
+        return None;
     }
 
     let outcome = super::super::recovery_engine::relay_recovered_terminal_text_to_placeholder(

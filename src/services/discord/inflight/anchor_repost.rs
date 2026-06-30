@@ -435,4 +435,114 @@ mod tests {
             "mutators must not create a row"
         );
     }
+
+    /// Codex hardening of #3918: the anchor-repost send-new is HARD-GATED on a
+    /// `Saved` pre-send bump. `restart::try_recover_anchor_repost` does
+    /// `if !matches!(bump_outcome, GuardedSaveOutcome::Saved) { return None; }`,
+    /// so EVERY non-`Saved` outcome refuses the post. Without this gate an
+    /// `IoError` bump (the attempt never persisted) would re-load the SAME
+    /// `attempts == 0` row on every boot under a persistent write fault and send
+    /// again forever → UNBOUNDED duplicate relay — the exact window the PR claims
+    /// to hard-bound. This pins all three failure modes: the send is refused, and
+    /// the row is left correctly for a later boot (IoError → deferred re-post) or
+    /// untouched (Missing / IdentityMismatch → the gone/replaced turn never reposts).
+    #[test]
+    fn non_saved_pre_send_bump_blocks_the_send() {
+        // Mirror the exact restart.rs send gate: post iff the bump is `Saved`.
+        fn send_permitted(outcome: GuardedSaveOutcome) -> bool {
+            matches!(outcome, GuardedSaveOutcome::Saved)
+        }
+
+        // (a) IoError — the attempt did NOT persist. Force a real, deterministic
+        // IoError by rooting at a regular FILE: `create_dir_all(<file>/codex)`
+        // fails with ENOTDIR (root-bypass-proof, unlike a chmod). The send MUST
+        // be refused; this is the unbounded-dup case the fix closes.
+        let temp = TempDir::new().unwrap();
+        let root_file = temp.path().join("inflight-root-is-a-file");
+        std::fs::write(&root_file, b"x").unwrap();
+        let committed = make_state(391_806);
+        let committed_identity = InflightTurnIdentity::from_state(&committed);
+        let io = bump_anchor_repost_attempts_if_matches_identity_in_root(
+            &root_file,
+            &ProviderKind::Codex,
+            committed.channel_id,
+            &committed_identity,
+            committed.turn_start_offset,
+        );
+        assert_eq!(io, GuardedSaveOutcome::IoError);
+        assert!(
+            !send_permitted(io),
+            "an IoError pre-send bump (attempt not persisted) MUST refuse the send-new"
+        );
+
+        // An IoError leaves the on-disk row verbatim (attempts unchanged), so a
+        // LATER boot whose bump succeeds re-posts the answer (deferred, not
+        // dropped). A freshly committed, un-bumped row is the state a transient
+        // IoError leaves behind — still permitted under budget.
+        let temp = TempDir::new().unwrap();
+        let deferred = make_state(391_807);
+        save_inflight_state_in_root(temp.path(), &deferred).expect("seed committed row");
+        let later =
+            read_row(temp.path(), deferred.channel_id).expect("row persists for a later boot");
+        assert_eq!(later.anchor_repost_attempts, 0);
+        assert!(
+            anchor_repost_send_new_permitted(
+                later.anchor_reposted,
+                later.anchor_repost_attempts,
+                BUDGET
+            ),
+            "an IoError-blocked send leaves the row, so a later boot can still re-post (deferred)"
+        );
+
+        // (b) Missing — the row was cleared / never existed. The send MUST be
+        // refused AND the mutator MUST NOT resurrect the row.
+        let temp = TempDir::new().unwrap();
+        let gone = make_state(391_808);
+        let gone_identity = InflightTurnIdentity::from_state(&gone);
+        let missing = bump_anchor_repost_attempts_if_matches_identity_in_root(
+            temp.path(),
+            &ProviderKind::Codex,
+            gone.channel_id,
+            &gone_identity,
+            gone.turn_start_offset,
+        );
+        assert_eq!(missing, GuardedSaveOutcome::Missing);
+        assert!(
+            !send_permitted(missing),
+            "a Missing row MUST refuse the send-new (the turn is gone)"
+        );
+        assert!(
+            read_row(temp.path(), gone.channel_id).is_none(),
+            "a blocked (Missing) send must not resurrect the row"
+        );
+
+        // (c) IdentityMismatch — the row is now owned by a NEWER turn. The send
+        // MUST be refused and the stranger row left untouched (the stale answer
+        // never reposts nor consumes the live turn's budget).
+        let temp = TempDir::new().unwrap();
+        let mut newer = make_state(391_809);
+        newer.user_msg_id = 999;
+        save_inflight_state_in_root(temp.path(), &newer).expect("seed newer turn");
+        let mut older = make_state(391_809);
+        older.user_msg_id = 777;
+        let older_identity = InflightTurnIdentity::from_state(&older);
+        let mismatch = bump_anchor_repost_attempts_if_matches_identity_in_root(
+            temp.path(),
+            &ProviderKind::Codex,
+            older.channel_id,
+            &older_identity,
+            older.turn_start_offset,
+        );
+        assert_eq!(mismatch, GuardedSaveOutcome::IdentityMismatch);
+        assert!(
+            !send_permitted(mismatch),
+            "a stranger-owned (IdentityMismatch) row MUST refuse the send-new"
+        );
+        let stranger = read_row(temp.path(), older.channel_id).expect("newer row persists");
+        assert_eq!(stranger.user_msg_id, 999, "newer turn's row untouched");
+        assert_eq!(
+            stranger.anchor_repost_attempts, 0,
+            "a blocked (mismatched) send must not consume the live turn's budget"
+        );
+    }
 }
