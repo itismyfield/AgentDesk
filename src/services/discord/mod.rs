@@ -3939,6 +3939,8 @@ pub(super) async fn kickoff_idle_queues(
             // Foreground keeps legacy behavior.
             router::TurnKind::Foreground,
             intervention.pending_uploads.clone(),
+            // #3905: queued kickoff uses the accepted-replay store reinsert above, not gate carry-forward.
+            None,
         )
         .await
         {

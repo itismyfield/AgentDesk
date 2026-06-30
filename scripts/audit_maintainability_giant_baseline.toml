@@ -212,7 +212,12 @@
 # #3859: 4153 -> 4154 (+1 production LoC) — `mod abandon_request_store;`
 # declaration for the new durable abandon-request store (the failure-path
 # placeholder finalize handoff). Bugfix-only.
-"src/services/discord/mod.rs" = 4154
+# #3905: 4154 -> 4156 (+2 production LoC) — the `kickoff_idle_queues` queued-dispatch
+# call site threads the new `handle_text_message` gate-resolved-voice-announcement
+# carry-forward parameter (`None` here; queued kickoff carries the voice payload via
+# the accepted-replay store reinsert above) plus its one-line rationale comment.
+# Bugfix-only (#3905 direct-dispatch carry-forward).
+"src/services/discord/mod.rs" = 4156
 # #3305: the local-only pass-through lifecycle-skip (kind hoist + note-only return
 # branch + idle-loop skip) is offset by comment dedup in the same root, lowering the
 # frozen baseline 5438 -> 5429 (-9). Locks in the shrink win (#3028 ratchet).

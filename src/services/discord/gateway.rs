@@ -826,6 +826,9 @@ impl TurnGateway for DiscordGateway {
                 // this dispatch is not racing the placeholder-delete path.
                 router::TurnKind::Foreground,
                 Vec::new(),
+                // #3905: queued dispatch carries the voice payload via the
+                // accepted-replay store reinsert above, not the gate carry-forward.
+                None,
             )
             .await
             .map_err(|e| e.to_string())

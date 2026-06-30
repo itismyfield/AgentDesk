@@ -109,6 +109,9 @@ pub(crate) async fn execute_intake_turn_core(
         request.dm_hint,
         request.turn_kind,
         Vec::new(),
+        // Worker dispatch has no in-process gate carry-forward; it re-resolves
+        // the durable announcement row for its `user_msg_id` (#3905).
+        None,
     )
     .await
 }
@@ -129,6 +132,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     dm_hint: Option<bool>,
     turn_kind: TurnKind,
     preloaded_uploads: Vec<String>,
+    gate_resolved_voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> Result<(), Error> {
     let IntakeDeps {
         http,
@@ -159,7 +163,24 @@ pub(in crate::services::discord) async fn handle_text_message(
         None
     };
     let mut voice_announcement_already_accepted = false;
-    let voice_announcement = if announce_bot_id == Some(request_owner.get()) {
+    let voice_announcement = if let Some(resolved) = gate_resolved_voice_announcement {
+        // #3905: the intake gate already resolved + authorized this voice
+        // announcement (non-consuming) at `intake_gate::resolve_voice_transcript_announcement_for_intake`
+        // before choosing direct dispatch. Trust that carry-forward instead of
+        // re-deriving from scratch here — independent re-derivation re-checks the
+        // LIVE durable row (`consumed_at IS NULL`) and loses to a sibling gateway
+        // (one process hosts many agent-bot gateways) that consumed the row
+        // between gate resolution and here, spuriously dropping a message the
+        // gate already authorized (queued dispatch is immune because it carries
+        // the payload via `Intervention.voice_announcement` accepted-replay;
+        // only the direct path was exposed). `voice_announcement_already_accepted`
+        // deliberately stays `false` so the per-message durable claim in
+        // `route_voice_transcript_announcement_once` still runs: the claim winner
+        // dispatches and racing siblings get `DuplicateSuppressed` (clean, no
+        // warn), so the #3464 single-dispatch dedup is preserved — never a double
+        // answer.
+        Some(resolved)
+    } else if announce_bot_id == Some(request_owner.get()) {
         if let Some((announcement, accepted_replay)) = stored_voice_announcement {
             if let Some(pool) = shared.pg_pool.as_ref() {
                 match crate::voice::announce_meta::load_voice_announcement_durable(
