@@ -92,6 +92,8 @@ pub(in crate::services::discord) fn is_synthetic_voice_message_id(
 const STT_TRANSCRIPT_POLL_TIMEOUT: Duration = Duration::from_secs(5);
 const STT_TRANSCRIPT_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const PROCESSING_CHIME_FILE_NAME: &str = "agentdesk-voice-processing-chime.wav";
+// #3906 (P4): distinct DESCENDING done tone (see `ensure_done_chime_file`).
+const DONE_CHIME_FILE_NAME: &str = "agentdesk-voice-done-chime.wav";
 /// #3914: slack added to the configured foreground model timeout for the OUTER
 /// `tokio::time::timeout` guard so the model child's own watchdog fires (and
 /// flips the #2250 cancel token to kill the detached child) just before the
@@ -1720,7 +1722,8 @@ impl VoiceBargeInRuntime {
         let foreground = self
             .resolve_effective_foreground_config(source_channel_id, target_channel_id)
             .await;
-        self.play_processing_chime(shared, source_channel_id).await;
+        // #3906 (P1): redundant foreground-start chime removed — superseded by the
+        // deterministic Phase-1 intake chime in process_completed_utterance.
         let cancel_token = Arc::new(crate::services::provider::CancelToken::new());
         // #3911 + #2335 (c): the guard OWNS the registration. It registers the
         // token BEFORE the generate `.await` below and unregisters on drop, so
@@ -2751,6 +2754,9 @@ impl VoiceBargeInRuntime {
             }
         };
 
+        // #3906 (P1): deterministic intake ack — Phase-1 chime BEFORE
+        // start_voice_turn, so it survives every VoiceTurnStartFailed/#3905 drop.
+        self.play_processing_chime(shared, source_channel_id).await;
         self.start_voice_turn(
             shared,
             source_channel_id,

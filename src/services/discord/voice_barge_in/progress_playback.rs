@@ -95,7 +95,11 @@ impl VoiceBargeInRuntime {
             if let Some(state) = states.get_mut(&event.channel_id) {
                 state.mark_done();
             }
-            self.play_processing_chime(
+            // #3906 (P4): the turn-DONE branch plays the distinct DESCENDING done
+            // chime so it is audibly different from the rising processing/intake
+            // chime emitted at turn start. Previously both played the SAME
+            // PROCESSING_CHIME_FILE_NAME, making start and done indistinguishable.
+            self.play_done_chime(
                 shared,
                 ChannelId::new(progress_feedback_channel_id(
                     event.channel_id,
@@ -323,6 +327,43 @@ impl VoiceBargeInRuntime {
         }
     }
 
+    // #3906 (P4): mirror of `play_processing_chime` for the turn-DONE signal so the
+    // descending done chime plays through the same songbird path as every other
+    // progress playback.
+    pub(super) async fn play_done_chime(
+        self: &Arc<Self>,
+        shared: &Arc<SharedData>,
+        channel_id: ChannelId,
+    ) {
+        let Some(path) = self.done_chime_path().await else {
+            return;
+        };
+        self.play_progress_audio(shared, channel_id, path, "voice done chime")
+            .await;
+    }
+
+    pub(super) async fn done_chime_path(&self) -> Option<PathBuf> {
+        let config = self.cached_config().await;
+        let path = crate::voice::utils::expand_tilde(&config.voice.audio.temp_dir)
+            .join(DONE_CHIME_FILE_NAME);
+        let path_for_task = path.clone();
+        match tokio::task::spawn_blocking(move || {
+            ensure_done_chime_file(&path_for_task).map(|_| path_for_task)
+        })
+        .await
+        {
+            Ok(Ok(path)) => Some(path),
+            Ok(Err(error)) => {
+                tracing::warn!(error = %error, "voice done chime generation failed");
+                None
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "voice done chime generation task failed");
+                None
+            }
+        }
+    }
+
     pub(super) async fn play_acknowledgement(
         self: &Arc<Self>,
         shared: &Arc<SharedData>,
@@ -419,4 +460,47 @@ impl VoiceBargeInRuntime {
             "voice progress playback started"
         );
     }
+}
+
+// #3906 (P4): generate the turn-DONE chime as a DESCENDING two-tone, mirroring
+// `ensure_processing_chime_file` but with the tones reversed (a higher 660Hz tone
+// falling under a 440Hz floor, vs the rising 880/1320Hz processing chime) so the
+// "done" signal is audibly distinct from "processing started". Generated at
+// runtime so no audio asset ships. Lives in this submodule (not voice_barge_in.rs)
+// to keep the frozen giant file's production LoC flat (#3036 ratchet).
+fn ensure_done_chime_file(path: &Path) -> Result<(), String> {
+    if path.metadata().map(|meta| meta.len() > 0).unwrap_or(false) {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create done chime dir {}: {error}", parent.display()))?;
+    }
+
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: 48_000,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::create(path, spec)
+        .map_err(|error| format!("create done chime {}: {error}", path.display()))?;
+    let sample_rate = spec.sample_rate as f32;
+    let total_samples = (sample_rate * 0.18) as usize;
+    for i in 0..total_samples {
+        let t = i as f32 / sample_rate;
+        let progress = i as f32 / total_samples.max(1) as f32;
+        let fade_in = (progress / 0.12).clamp(0.0, 1.0);
+        let fade_out = ((1.0 - progress) / 0.22).clamp(0.0, 1.0);
+        let envelope = fade_in.min(fade_out);
+        let tone = (2.0 * std::f32::consts::PI * 660.0 * t).sin() * 0.55
+            + (2.0 * std::f32::consts::PI * 440.0 * t).sin() * 0.25;
+        let sample = (tone * envelope * i16::MAX as f32 * 0.28) as i16;
+        writer
+            .write_sample(sample)
+            .map_err(|error| format!("write done chime {}: {error}", path.display()))?;
+    }
+    writer
+        .finalize()
+        .map_err(|error| format!("finalize done chime {}: {error}", path.display()))
 }

@@ -332,7 +332,15 @@
 # de-duplicated the 250ms timeout slack previously hardcoded at three foreground
 # model timeout sites (ack / channel-text / background-summary). Net reduction in
 # magic numbers; the const + doc comment is the minimum surface.
-"src/services/discord/voice_barge_in.rs" = 2899
+# #3906: +6 (2899 -> 2905) for the deterministic voice intake feedback (P1) — the
+# Phase-1 intake `play_processing_chime` call emitted right before
+# `start_voice_turn` (replacing the redundant, non-deterministic foreground-start
+# chime that was removed) plus the `DONE_CHIME_FILE_NAME` const for the distinct
+# P4 done tone. The bulk (the ~50-line `ensure_done_chime_file` descending-tone
+# generator + `play_done_chime`/`done_chime_path`) was kept OUT of this giant and
+# lives in the `voice_barge_in/progress_playback.rs` submodule; this is the
+# minimum residual surface in the root file.
+"src/services/discord/voice_barge_in.rs" = 2905
 # #3248: +60 for the gap-1 deploy-survivable-relay fix —
 # `reseed_watcher_owned_finalizer_ledger` + two guarded reattach call-sites that
 # re-register the watcher-owned turn in the post-restart finalizer ledger (a P1

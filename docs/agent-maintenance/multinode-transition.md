@@ -403,6 +403,17 @@
 
 ### Audited touches
 
+- #3906 voice intake feedback P1+P4: `process_completed_utterance` now plays the
+  deterministic Phase-1 intake chime into the active songbird call right before
+  `start_voice_turn` (and the redundant non-deterministic foreground-start chime
+  in `try_handle_voice_transcript_announcement` was removed), while the turn-done
+  branch in `progress_playback.rs` plays a new distinct descending done chime
+  (`DONE_CHIME_FILE_NAME` + `ensure_done_chime_file` / `play_done_chime`).
+  Classification: worker-local. The chime is audio emitted into the per-node
+  songbird voice call the worker is already connected to; it is upstream of the
+  durable-reservation/announce/dedup machinery and touches no delivery record, PG
+  lease, leader gate, or cross-node routing. No DB/schema change.
+
 - #3871 rollover duplicate-relay fix: `tmux_watcher.rs` records the streamed
   rollover-prefix message ids it FROZE during streaming and, on the terminal
   full-body fallback, deletes them (via `delete_watcher_rollover_frozen_prefixes`
