@@ -16,6 +16,34 @@ pub(super) fn foreground_ack_text(transcript: &str, language: &str) -> String {
     }
 }
 
+/// #3908: decide whether a foreground-ack cancellation must SUPPRESS the spoken
+/// fallback. A genuine interruption (user barge-in / explicit stop / session
+/// teardown) suppresses and keeps the channel silent; a self-inflicted
+/// foreground-ack timeout does NOT — the timeout flips the shared cancel token
+/// only so #2250 can terminate the detached model child, yet the user is still
+/// owed an audible fallback acknowledgement.
+///
+/// A user barge-in must always DOMINATE the timeout regardless of ordering. On
+/// the shared token the cancel KIND is first-wins while the free-form LABEL is
+/// last-wins (`provider::CancelToken::set_cancel_source`), so a barge-in racing
+/// the self-timeout leaves its trace in exactly one of the two fields: the kind
+/// if it cancelled first, the label if it cancelled last. Keep the fallback
+/// only when BOTH signals are still the `voice_foreground_ack_timeout` self-
+/// cancel (no barge-in ever touched this token); otherwise suppress.
+pub(super) fn ack_cancel_suppresses_fallback(
+    cancel_token: &crate::services::provider::CancelToken,
+) -> bool {
+    use crate::services::provider::CancelSource;
+    if !cancel_token.cancelled.load(Ordering::Relaxed) {
+        return false;
+    }
+    let kind_is_timeout = cancel_token.cancel_source_kind() == Some(CancelSource::WatchdogTimeout);
+    let label_is_timeout = cancel_token
+        .cancel_source()
+        .is_some_and(|label| CancelSource::classify(&label) == CancelSource::WatchdogTimeout);
+    !(kind_is_timeout && label_is_timeout)
+}
+
 pub(super) fn parse_voice_foreground_decision(
     text: &str,
     transcript: &str,

@@ -399,18 +399,17 @@ impl VoiceBargeInRuntime {
         // 30s 만료 타이머는 `clear_playback_if_owner` 로 동일 owner 일 때만 정리.
         // 후속 progress/spoken_result playback 이 entry 를 덮어쓰면 mismatch 로
         // no-op → 후속 playback 의 barge-in 이 깨지지 않는다.
+        // #3908: skip the handle registration entirely while a final-result
+        // playback owns the channel so a queued progress/chime flush cannot
+        // steal the final answer's barge-in handle.
         let playback_id = self.id_sequences.next_progress_playback_id();
-        self.reset_after_playback_start_with_owner(
-            channel_id,
-            Arc::new(track),
-            CancellationToken::new(),
-            Some(playback_id),
-        );
-        let runtime = self.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            runtime.clear_playback_if_owner(channel_id, playback_id);
-        });
+        if self.register_progress_barge_in_handle(channel_id, Arc::new(track), playback_id) {
+            let runtime = self.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                runtime.clear_playback_if_owner(channel_id, playback_id);
+            });
+        }
         tracing::info!(
             channel_id = channel_id.get(),
             guild_id = guild_id.get(),

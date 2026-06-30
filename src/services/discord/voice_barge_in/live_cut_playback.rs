@@ -55,6 +55,40 @@ impl VoiceBargeInRuntime {
             .remove_if(&channel_id.get(), |_, session| session.owner == Some(owner));
     }
 
+    /// #3908: register a progress/chime playback as the live barge-in handle,
+    /// but ONLY when no final-result playback owns the channel. A queued
+    /// progress flush that lands AFTER the final answer started must not steal
+    /// the final-result barge-in handle — otherwise a user barge-in would stop
+    /// only this progress track and leave the (nested) final answer playing.
+    /// The progress audio still mixes via songbird `play_input`; we only skip
+    /// the handle bookkeeping. Returns `true` when the handle was registered
+    /// (caller arms the expiry timer), `false` when skipped.
+    pub(super) fn register_progress_barge_in_handle<P>(
+        &self,
+        channel_id: ChannelId,
+        player: Arc<P>,
+        playback_id: u64,
+    ) -> bool
+    where
+        P: BargeInPlayerStop + 'static,
+    {
+        if self.spoken_result_playbacks.contains_key(&channel_id.get()) {
+            tracing::debug!(
+                channel_id = channel_id.get(),
+                playback_id,
+                "voice progress playback left unregistered: final-result playback owns the barge-in handle (#3908)"
+            );
+            return false;
+        }
+        self.reset_after_playback_start_with_owner(
+            channel_id,
+            player,
+            CancellationToken::new(),
+            Some(playback_id),
+        );
+        true
+    }
+
     pub(in crate::services::discord) fn observe_live_pcm_i16(
         &self,
         channel_id: ChannelId,

@@ -401,7 +401,8 @@ async fn generate_foreground_ack_text(
     foreground: &EffectiveVoiceForegroundConfig,
     cancel_token: Arc<crate::services::provider::CancelToken>,
 ) -> Option<VoiceForegroundDecision> {
-    let _fallback_for_tests_and_docs = foreground_ack_text(transcript, language);
+    // #3908: spoken on model failure/timeout instead of discarding to silence.
+    let fallback = || VoiceForegroundDecision::Speak(foreground_ack_text(transcript, language));
     let prompt =
         crate::voice::prompt::voice_foreground_prompt(transcript, language, foreground.max_chars);
     let provider = foreground.provider.clone();
@@ -447,18 +448,18 @@ async fn generate_foreground_ack_text(
                 error = %error,
                 foreground_provider = %foreground.provider,
                 foreground_model = %foreground.model,
-                "voice foreground model call failed; skipping spoken fallback"
+                "voice foreground model call failed; speaking fallback ack (#3908)"
             );
-            return None;
+            return Some(fallback());
         }
         Ok(Err(error)) => {
             tracing::warn!(
                 error = %error,
                 foreground_provider = %foreground.provider,
                 foreground_model = %foreground.model,
-                "voice foreground model task failed; skipping spoken fallback"
+                "voice foreground model task failed; speaking fallback ack (#3908)"
             );
-            return None;
+            return Some(fallback());
         }
         Err(_) => {
             // #2250: on timeout, flip the shared CancelToken so the
@@ -474,9 +475,9 @@ async fn generate_foreground_ack_text(
                 timeout_ms = foreground.timeout_ms,
                 foreground_provider = %foreground.provider,
                 foreground_model = %foreground.model,
-                "voice foreground model timed out; skipping spoken fallback (#2250: token cancelled)"
+                "voice foreground model timed out; speaking fallback ack (#3908; #2250 token cancelled to kill child)"
             );
-            return None;
+            return Some(fallback());
         }
     };
 
@@ -1771,8 +1772,7 @@ impl VoiceBargeInRuntime {
             );
         };
 
-        // First gate: cancel that arrived during ack generation.
-        if cancel_token.cancelled.load(Ordering::Relaxed) {
+        if foreground_decision::ack_cancel_suppresses_fallback(&cancel_token) {
             record_cancel_suppressed("post_generation");
             log_cancel_suppressed("post_generation");
             return true;
@@ -1804,7 +1804,7 @@ impl VoiceBargeInRuntime {
                 );
             }
             VoiceForegroundDecision::Speak(spoken) => {
-                if cancel_token.cancelled.load(Ordering::Relaxed) {
+                if foreground_decision::ack_cancel_suppresses_fallback(&cancel_token) {
                     record_cancel_suppressed("pre_speak_synth");
                     log_cancel_suppressed("pre_speak_synth");
                     return true;
@@ -1813,7 +1813,7 @@ impl VoiceBargeInRuntime {
                     .synthesize_acknowledgement(&spoken, source_channel_id)
                     .await
                 {
-                    if cancel_token.cancelled.load(Ordering::Relaxed) {
+                    if foreground_decision::ack_cancel_suppresses_fallback(&cancel_token) {
                         record_cancel_suppressed("post_speak_synth");
                         log_cancel_suppressed("post_speak_synth");
                         return true;
@@ -4076,6 +4076,101 @@ mod tests {
         );
     }
 
+    // #3908 (bug A): a foreground model/synth failure must SPEAK the fallback
+    // ack instead of being discarded to silence. Drive the real
+    // `generate_foreground_ack_text` against an unsupported provider so the
+    // model-call-error branch fires deterministically (no live CLI).
+    #[tokio::test]
+    async fn foreground_model_failure_speaks_fallback_instead_of_silence() {
+        let foreground = EffectiveVoiceForegroundConfig {
+            provider: "adk_unsupported_provider_for_tests".to_string(),
+            model: "none".to_string(),
+            max_chars: 200,
+            timeout_ms: 1_000,
+        };
+        let cancel = Arc::new(crate::services::provider::CancelToken::new());
+        let decision =
+            generate_foreground_ack_text("로그 확인해줘", "ko", &foreground, cancel.clone()).await;
+        assert_eq!(
+            decision,
+            Some(VoiceForegroundDecision::Speak(foreground_ack_text(
+                "로그 확인해줘",
+                "ko"
+            ))),
+            "model/synth failure must speak the fallback ack, not fall through to silence"
+        );
+        assert!(
+            !cancel.cancelled.load(Ordering::Relaxed),
+            "a model failure (not a barge-in) must not flag the shared cancel token"
+        );
+    }
+
+    // #3908 (bug A): the self-inflicted foreground-ack timeout flips the shared
+    // cancel token only to kill the detached model child, so it must NOT
+    // suppress the spoken fallback; a genuine user barge-in must keep silence.
+    #[test]
+    fn foreground_ack_timeout_keeps_fallback_but_barge_in_suppresses() {
+        use crate::services::provider::CancelToken;
+
+        let idle = CancelToken::new();
+        assert!(
+            !foreground_decision::ack_cancel_suppresses_fallback(&idle),
+            "an un-cancelled token never suppresses"
+        );
+
+        let timed_out = CancelToken::new();
+        timed_out.set_cancel_source("voice_foreground_ack_timeout");
+        timed_out.cancelled.store(true, Ordering::Relaxed);
+        assert!(
+            !foreground_decision::ack_cancel_suppresses_fallback(&timed_out),
+            "a foreground-ack timeout (model failure) must still speak the fallback ack"
+        );
+
+        let barged_in = CancelToken::new();
+        barged_in.set_cancel_source("voice_barge_in_explicit_stop");
+        barged_in.cancelled.store(true, Ordering::Relaxed);
+        assert!(
+            foreground_decision::ack_cancel_suppresses_fallback(&barged_in),
+            "a genuine user barge-in must keep the channel silent"
+        );
+    }
+
+    // #3908 (review): a user barge-in must DOMINATE a self-timeout on the SAME
+    // shared token in EITHER race order. The cancel KIND is first-wins and the
+    // free-form LABEL is last-wins, so each ordering leaves the barge-in trace
+    // in a different field; both must suppress the fallback (no fallback spoken
+    // over a user who interrupted).
+    #[test]
+    fn foreground_ack_user_barge_in_dominates_self_timeout_on_shared_token() {
+        use crate::services::provider::CancelToken;
+
+        // Timeout recorded first (kind=WatchdogTimeout), barge-in lands after
+        // (overwrites the label only). Must suppress.
+        let timeout_then_barge_in = CancelToken::new();
+        timeout_then_barge_in.set_cancel_source("voice_foreground_ack_timeout");
+        timeout_then_barge_in
+            .cancelled
+            .store(true, Ordering::Relaxed);
+        timeout_then_barge_in.set_cancel_source("voice_barge_in_explicit_stop");
+        assert!(
+            foreground_decision::ack_cancel_suppresses_fallback(&timeout_then_barge_in),
+            "a barge-in after a self-timeout must suppress the fallback (kind stays WatchdogTimeout)"
+        );
+
+        // Barge-in recorded first (kind=UserBargeIn, sticky), self-timeout
+        // overwrites the label afterwards. Must still suppress.
+        let barge_in_then_timeout = CancelToken::new();
+        barge_in_then_timeout.set_cancel_source("voice_barge_in_live_cut");
+        barge_in_then_timeout
+            .cancelled
+            .store(true, Ordering::Relaxed);
+        barge_in_then_timeout.set_cancel_source("voice_foreground_ack_timeout");
+        assert!(
+            foreground_decision::ack_cancel_suppresses_fallback(&barge_in_then_timeout),
+            "a self-timeout that lands after a barge-in must not revive the fallback"
+        );
+    }
+
     #[test]
     fn foreground_decision_parses_silence_handoff_and_spoken_text() {
         assert_eq!(
@@ -4788,6 +4883,64 @@ mod tests {
         runtime.clear_playback_if_owner(channel_id, 1);
 
         assert_eq!(runtime.playbacks.get(&42).unwrap().owner, Some(2));
+    }
+
+    // #3908 (bug B): a queued progress/chime flush must NOT steal the barge-in
+    // handle while a final-result playback owns the channel, otherwise a user
+    // barge-in would stop only the progress track and leave the nested final
+    // answer playing.
+    #[test]
+    fn progress_playback_does_not_steal_active_final_result_handle() {
+        let runtime = enabled_runtime();
+        let channel_id = ChannelId::new(77);
+
+        // Final-result playback owns the channel: session + barge-in handle.
+        let (final_id, _cancel) = runtime.start_spoken_result_playback(channel_id);
+        runtime.reset_after_playback_start_with_owner(
+            channel_id,
+            Arc::new(MockPlayer::default()),
+            CancellationToken::new(),
+            Some(final_id),
+        );
+
+        let registered = runtime.register_progress_barge_in_handle(
+            channel_id,
+            Arc::new(MockPlayer::default()),
+            9_999,
+        );
+
+        assert!(
+            !registered,
+            "progress must not register while a final-result playback owns the handle"
+        );
+        assert_eq!(
+            runtime.playbacks.get(&channel_id.get()).unwrap().owner,
+            Some(final_id),
+            "final-result playback must keep owning the barge-in handle so barge-in stops it"
+        );
+    }
+
+    // #3908 (bug B): when no final-result playback is active, progress keeps its
+    // own barge-in handle so it can still be stopped by a user barge-in.
+    #[test]
+    fn progress_playback_registers_handle_when_no_final_result_active() {
+        let runtime = enabled_runtime();
+        let channel_id = ChannelId::new(78);
+
+        let registered = runtime.register_progress_barge_in_handle(
+            channel_id,
+            Arc::new(MockPlayer::default()),
+            555,
+        );
+
+        assert!(
+            registered,
+            "progress owns the barge-in handle when no final-result playback is active"
+        );
+        assert_eq!(
+            runtime.playbacks.get(&channel_id.get()).unwrap().owner,
+            Some(555)
+        );
     }
 
     #[tokio::test]
