@@ -1858,6 +1858,14 @@ pub(in crate::services::discord) use self::tmux_output_stream::{
     force_next_watcher_status_update, process_watcher_lines,
 };
 
+// #3886: TimedOut-completion-gate status-panel reconcile. Hosted here (not in the
+// hot `tmux_watcher`/`turn_bridge` files) so the placeholder sweeper can finalize
+// a panel stuck at `진행 중` once the turn's JSONL deterministically confirms it
+// is terminal — see the module docs.
+#[path = "status_panel_timedout_reconcile.rs"]
+mod status_panel_timedout_reconcile;
+pub(in crate::services::discord) use self::status_panel_timedout_reconcile::reconcile_timed_out_tui_status_panel;
+
 #[cfg(test)]
 mod buffer_offset_tests {
     use super::advance_buffer_start_offset;

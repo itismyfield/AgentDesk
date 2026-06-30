@@ -395,6 +395,11 @@ async fn run_placeholder_sweep_pass(
         // restart/hot-swap rows are left for recovery (matching the placeholder
         // restart_mode guard).
         if state.restart_mode.is_none() {
+            // #3886: deterministic reconcile for a panel stuck at `진행 중` after
+            // a TimedOut completion gate — finalize it the moment the turn's JSONL
+            // confirms terminal, NOT on the 600s age backstop (runs before the
+            // age-based orphan-panel reclaim below).
+            super::tmux::reconcile_timed_out_tui_status_panel(http, shared, provider, &state).await;
             sweep_orphan_status_panel(
                 http,
                 shared,

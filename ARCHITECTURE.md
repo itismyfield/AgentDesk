@@ -749,6 +749,8 @@ src/
 │   │   ├── standby_relay.rs
 │   │   ├── startup_reclaim.rs
 │   │   ├── status_panel_orphan_store.rs
+│   │   ├── status_panel_timedout_reconcile.rs
+│   │   ├── status_panel_timedout_reconcile_tests.rs
 │   │   ├── steering.rs
 │   │   ├── streaming_finalizer.rs
 │   │   ├── subagent_notification_card.rs

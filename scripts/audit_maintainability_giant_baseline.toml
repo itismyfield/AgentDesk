@@ -610,7 +610,14 @@
 # #3859: 1004 -> 1014 (+10 production LoC) — the sweep loop now drains the new
 # abandon_request_store each pass, finalizing failure-path-stranded placeholders
 # to "중단됨" by message id (decoupled from the inflight lifecycle). Bugfix-only.
-"src/services/discord/placeholder_sweeper.rs" = 1014
+# #3886: 1014 -> 1019 (+5 production LoC), reviewable admission — the sweep loop
+# now calls the deterministic TimedOut-completion-gate status-panel reconcile
+# (super::tmux::reconcile_timed_out_tui_status_panel) before the age-based
+# orphan-panel reclaim, so a panel stuck at "진행 중" after the gate suppressed
+# TurnCompleted is finalized the moment the turn's JSONL confirms terminal. The
+# reconcile body lives in the new (non-hot) status_panel_timedout_reconcile.rs;
+# this is the minimal sweep-loop call + comment. Bugfix-only.
+"src/services/discord/placeholder_sweeper.rs" = 1019
 # #3479: turn_bridge/tmux_runtime.rs decomposed into tmux_runtime/ directory
 # modules (root tmux_runtime.rs 964 prod LoC + sub-1000-LoC
 # tmux_runtime/{interrupt_policy,process_table,pid_exit}.rs) — dropped below the

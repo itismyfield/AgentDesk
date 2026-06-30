@@ -145,7 +145,10 @@
     "session ended … start a new session" tmux-death notice and its
     `should_send_session_ended_notice`/`session_ended_notice`/
     `TmuxDeathLifecycleDecision` plumbing).
-  - `src/services/discord/tmux.rs` (1477 lines; +14 from current inventory
+  - `src/services/discord/tmux.rs` (1485 lines; +8 from #3886 hosting the
+    `status_panel_timedout_reconcile` module decl + re-export so the placeholder
+    sweeper can finalize a panel stuck at "진행 중" after a TimedOut completion
+    gate (reconcile body lives in the new non-hot file); +14 from current inventory
     refresh after the relay split stack landed; after #2558 dead-code sweep;
     +6 from #3818 sanitizing restored/orphan subagent-notification placeholders;
     +1 from #3384 restored-seed undelivered-body discard guard;
@@ -1407,7 +1410,10 @@
     must not run compatibility backfills or cleanup writes; #3835 moved the
     watcher progress / terminal commit / relay-watermark locked update helpers
     into `src/services/discord/inflight/watcher_state.rs`).
-  - `src/services/discord/placeholder_sweeper.rs` (1014 lines; +10 from #3859
+  - `src/services/discord/placeholder_sweeper.rs` (1019 lines; +5 from #3886
+    calling the deterministic TimedOut-completion-gate status-panel reconcile
+    (`super::tmux::reconcile_timed_out_tui_status_panel`) before the age-based
+    orphan-panel reclaim; +10 from #3859
     draining the new `abandon_request_store` each sweep pass (finalizing
     failure-path-stranded placeholders to "중단됨" by message id, independent of
     the inflight lifecycle); crossed the giant
