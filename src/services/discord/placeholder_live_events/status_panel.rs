@@ -4,8 +4,8 @@ use crate::services::provider::ProviderKind;
 use super::common::{
     EVENT_LINE_MAX_CHARS, STATUS_PANEL_MAX_CHARS, STATUS_PANEL_SUBAGENT_LIMIT,
     STATUS_PANEL_TASK_LIMIT, STATUS_PANEL_TODO_LIMIT, STATUS_PANEL_WORKFLOW_LIMIT,
-    escape_status_panel_markdown, normalize_summary, sanitized_tool_name, tool_prefix,
-    truncate_chars, truncate_chars_with_marker,
+    escape_status_panel_markdown, normalize_summary, sanitized_tool_name, truncate_chars,
+    truncate_chars_with_marker,
 };
 use super::completion_footer::compact_live_panel_terminal_lines;
 use super::context_panel::{ContextPanelSnapshot, render_context_panel_line};
@@ -452,6 +452,7 @@ pub(super) fn render_status_panel(
     // keeps 🖥️ Recent (late batch not blanked; stale idle block still dropped).
     live_content_fresh: bool,
     request_anchor_line: Option<String>, // #3811: precomputed `요청:` line, or `None`
+    confidence_line: Option<String>,     // #3812: precomputed live/stale confidence line
 ) -> String {
     let header_status = if matches!(provider, ProviderKind::Codex)
         && matches!(snapshot.status, DerivedStatus::SubagentRunning { .. })
@@ -460,10 +461,13 @@ pub(super) fn render_status_panel(
     } else {
         snapshot.status.clone()
     };
-    let mut sections = vec![format!(
-        "{} — {} (<t:{started_at_unix}:R>)",
-        render_derived_status(&header_status),
-        provider.as_str()
+    // #3812: header + freshness confidence line built in the colocated `freshness`
+    // module (status_panel.rs is at the namespace cap — keep it to the call site).
+    let mut sections = vec![super::freshness::render_status_header(
+        &header_status,
+        provider,
+        started_at_unix,
+        confidence_line.as_deref(),
     )];
     super::turn_anchor::prepend_request_anchor(&mut sections, request_anchor_line); // #3811
 
@@ -599,39 +603,6 @@ pub(super) fn render_recent_section_header(
     match owner {
         Some(owner) => format!("🖥️ Recent ({})", escape_status_panel_markdown(owner)),
         None => "🖥️ Recent".to_string(),
-    }
-}
-
-fn render_derived_status(status: &DerivedStatus) -> String {
-    match status {
-        DerivedStatus::Running => "🟢 진행 중".to_string(),
-        DerivedStatus::MonitorWait => "💤 monitor 대기".to_string(),
-        DerivedStatus::ScheduleWakeup(Some(eta_secs)) => {
-            format!("⏰ scheduled wakeup ({eta_secs}s 후)")
-        }
-        DerivedStatus::ScheduleWakeup(None) => "⏰ scheduled wakeup".to_string(),
-        DerivedStatus::TerminalDeliveryPending => "↻ 응답 전달됨 · 세션 종료 확인 중".to_string(),
-        DerivedStatus::TerminalDeliveryUnconfirmed => {
-            "⚠ 응답 전달됨 · 세션 종료 미확인".to_string()
-        }
-        DerivedStatus::Completed {
-            kind: CompletedKind::Background,
-        } => "✅ **백그라운드 완료**".to_string(),
-        DerivedStatus::Completed {
-            kind: CompletedKind::Foreground,
-        } => "✅ **응답 완료**".to_string(),
-        DerivedStatus::ToolRunning { name, summary: _ } => {
-            let rendered = tool_prefix(name);
-            format!("🔧 도구 실행 중 ({})", truncate_chars(&rendered, 140))
-        }
-        DerivedStatus::SubagentRunning { desc } => {
-            let desc = escape_status_panel_markdown(desc);
-            format!("🧵 subagent 실행 중 ({})", truncate_chars(&desc, 120))
-        }
-        DerivedStatus::WorkflowRunning { label } => {
-            let label = escape_status_panel_markdown(label);
-            format!("🧬 workflow 실행 중 ({})", truncate_chars(&label, 120))
-        }
     }
 }
 
