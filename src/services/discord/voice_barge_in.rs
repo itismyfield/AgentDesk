@@ -92,6 +92,12 @@ pub(in crate::services::discord) fn is_synthetic_voice_message_id(
 const STT_TRANSCRIPT_POLL_TIMEOUT: Duration = Duration::from_secs(5);
 const STT_TRANSCRIPT_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const PROCESSING_CHIME_FILE_NAME: &str = "agentdesk-voice-processing-chime.wav";
+/// #3914: slack added to the configured foreground model timeout for the OUTER
+/// `tokio::time::timeout` guard so the model child's own watchdog fires (and
+/// flips the #2250 cancel token to kill the detached child) just before the
+/// outer guard trips. Previously this 250ms value was a magic number duplicated
+/// across the ack / channel-text / background-summary timeout sites.
+const FOREGROUND_MODEL_TIMEOUT_SLACK: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::services::discord) enum VoiceBargeInTranscriptOutcome {
@@ -401,7 +407,8 @@ async fn generate_foreground_ack_text(
     foreground: &EffectiveVoiceForegroundConfig,
     cancel_token: Arc<crate::services::provider::CancelToken>,
 ) -> Option<VoiceForegroundDecision> {
-    let _fallback_for_tests_and_docs = foreground_ack_text(transcript, language);
+    // #3908: spoken on model failure/timeout instead of discarding to silence.
+    let fallback = || VoiceForegroundDecision::Speak(foreground_ack_text(transcript, language));
     let prompt =
         crate::voice::prompt::voice_foreground_prompt(transcript, language, foreground.max_chars);
     let provider = foreground.provider.clone();
@@ -410,7 +417,7 @@ async fn generate_foreground_ack_text(
     let timeout = Duration::from_millis(foreground.timeout_ms);
     let cancel_for_blocking = cancel_token.clone();
     let result = tokio::time::timeout(
-        timeout + Duration::from_millis(250),
+        timeout + FOREGROUND_MODEL_TIMEOUT_SLACK,
         tokio::task::spawn_blocking(move || {
             let provider_kind = ProviderKind::from_str_or_unsupported(&provider);
             match provider_kind {
@@ -447,18 +454,18 @@ async fn generate_foreground_ack_text(
                 error = %error,
                 foreground_provider = %foreground.provider,
                 foreground_model = %foreground.model,
-                "voice foreground model call failed; skipping spoken fallback"
+                "voice foreground model call failed; speaking fallback ack (#3908)"
             );
-            return None;
+            return Some(fallback());
         }
         Ok(Err(error)) => {
             tracing::warn!(
                 error = %error,
                 foreground_provider = %foreground.provider,
                 foreground_model = %foreground.model,
-                "voice foreground model task failed; skipping spoken fallback"
+                "voice foreground model task failed; speaking fallback ack (#3908)"
             );
-            return None;
+            return Some(fallback());
         }
         Err(_) => {
             // #2250: on timeout, flip the shared CancelToken so the
@@ -474,9 +481,9 @@ async fn generate_foreground_ack_text(
                 timeout_ms = foreground.timeout_ms,
                 foreground_provider = %foreground.provider,
                 foreground_model = %foreground.model,
-                "voice foreground model timed out; skipping spoken fallback (#2250: token cancelled)"
+                "voice foreground model timed out; speaking fallback ack (#3908; #2250 token cancelled to kill child)"
             );
-            return None;
+            return Some(fallback());
         }
     };
 
@@ -532,7 +539,7 @@ async fn generate_voice_channel_text_reply(
     let timeout = Duration::from_millis(foreground.timeout_ms);
     let cancel_for_blocking = cancel_token.clone();
     let result = tokio::time::timeout(
-        timeout + Duration::from_millis(250),
+        timeout + FOREGROUND_MODEL_TIMEOUT_SLACK,
         tokio::task::spawn_blocking(move || {
             let provider_kind = ProviderKind::from_str_or_unsupported(&provider);
             match provider_kind {
@@ -624,7 +631,7 @@ async fn generate_voice_background_result_summary(
     let timeout = Duration::from_millis(foreground.timeout_ms);
     let cancel_for_blocking = cancel_token.clone();
     let result = tokio::time::timeout(
-        timeout + Duration::from_millis(250),
+        timeout + FOREGROUND_MODEL_TIMEOUT_SLACK,
         tokio::task::spawn_blocking(move || {
             let provider_kind = ProviderKind::from_str_or_unsupported(&provider);
             match provider_kind {
@@ -852,6 +859,48 @@ impl StreamingSttSessions {
         self.sessions.clear();
         self.feed_tasks.clear();
     }
+
+    /// #3910: Drop every session + feed-task bucket whose key belongs to
+    /// `channel_id`, aborting any still-pending feed task so a speaker who
+    /// leaves the voice channel mid-utterance does not strand streaming state.
+    /// Previously these per-(channel,user) buckets were only reaped at
+    /// utterance completion (`transcribe_completed_utterance`), so a channel
+    /// teardown left them orphaned in the maps.
+    ///
+    /// Returns the removed outer `SttSessionHandle`s so the caller can also reap
+    /// the matching inner `WhisperStream` sessions (which only `finalize()`
+    /// removes) — dropping the outer handle alone leaves the underlying stream
+    /// session leaked in Stream mode.
+    fn remove_channel(&self, channel_id: u64) -> Vec<SttSessionHandle> {
+        let mut removed = Vec::new();
+        self.sessions.retain(|key, handle| {
+            if key.channel_id == channel_id {
+                removed.push(handle.clone());
+                false
+            } else {
+                true
+            }
+        });
+        self.feed_tasks.retain(|key, bucket| {
+            if key.channel_id != channel_id {
+                return true;
+            }
+            match bucket.lock() {
+                Ok(mut tasks) => {
+                    for task in tasks.drain(..) {
+                        task.abort();
+                    }
+                }
+                Err(poisoned) => {
+                    for task in poisoned.into_inner().drain(..) {
+                        task.abort();
+                    }
+                }
+            }
+            false
+        });
+        removed
+    }
 }
 
 pub(in crate::services::discord) struct VoiceBargeInRuntime {
@@ -870,6 +919,11 @@ pub(in crate::services::discord) struct VoiceBargeInRuntime {
     // 동일한 StreamingSttKey 로 묶이며 entry/get/remove 의미와 clear 순서를
     // 그대로 보존한다.
     streaming_stt: StreamingSttSessions,
+    // #3910: 현재 STT 런타임이 streaming 모드인지 동기적으로 조회하기 위한 atomic
+    // mirror. `stt` (async RwLock) 를 await 없이 읽을 수 없으므로, stt 가 만들어지거나
+    // 교체될 때마다 이 플래그를 갱신한다. File 모드(기본값)에서는 false 이므로
+    // `observe_streaming_stt_pcm_i16` 가 PCM 변환·태스크 스폰 전에 곧바로 반환한다.
+    streaming_stt_enabled: AtomicBool,
     tts: RwLock<Option<TtsRuntime>>,
     progress_tx: broadcast::Sender<VoiceProgressEvent>,
     monitors: dashmap::DashMap<u64, Arc<std::sync::Mutex<LiveBargeInMonitor>>>,
@@ -901,6 +955,53 @@ pub(in crate::services::discord) struct VoiceBargeInRuntime {
     test_state: Arc<VoiceBargeInTestState>,
 }
 
+/// #3911: RAII guard that OWNS the registration of an in-flight foreground
+/// CancelToken. Constructing the guard via [`InflightForegroundCancelGuard::register`]
+/// inserts the token into `inflight_foreground_cancels`; dropping it removes the
+/// token again.
+///
+/// The guard MUST be constructed BEFORE the foreground `generate(...).await`.
+/// The previous call sites registered the token manually before the await but
+/// only unregistered it (via a local guard or a manual call) AFTER the await
+/// returned. If the spawning task was aborted or its future dropped
+/// mid-`.await` (graceful shutdown, supervisor abort, runtime teardown), that
+/// unregister never ran and the token leaked. A leaked token keeps
+/// `has_inflight_foreground` permanently true, so the channel misclassifies the
+/// NEXT fresh utterance as a barge-in and becomes "stuck" until guild teardown.
+/// Owning the registration in a drop guard closes that race on every exit path
+/// (normal return, panic, or abort) while preserving legitimate barge-in: a
+/// real mid-playback cancel still flips the still-registered token before the
+/// guard drops.
+struct InflightForegroundCancelGuard<'a> {
+    runtime: &'a VoiceBargeInRuntime,
+    channel_id: ChannelId,
+    token: Arc<crate::services::provider::CancelToken>,
+}
+
+impl<'a> InflightForegroundCancelGuard<'a> {
+    /// Register `token` for `channel_id` and return a guard that unregisters it
+    /// on drop. Call this *before* the foreground `generate(...).await`.
+    fn register(
+        runtime: &'a VoiceBargeInRuntime,
+        channel_id: ChannelId,
+        token: Arc<crate::services::provider::CancelToken>,
+    ) -> Self {
+        runtime.register_inflight_foreground_cancel(channel_id, token.clone());
+        Self {
+            runtime,
+            channel_id,
+            token,
+        }
+    }
+}
+
+impl Drop for InflightForegroundCancelGuard<'_> {
+    fn drop(&mut self) {
+        self.runtime
+            .unregister_inflight_foreground_cancel(self.channel_id, &self.token);
+    }
+}
+
 impl VoiceBargeInRuntime {
     pub(in crate::services::discord) fn from_voice_config(config: &VoiceConfig) -> Self {
         let default_sensitivity = config.barge_in.sensitivity;
@@ -926,6 +1027,9 @@ impl VoiceBargeInRuntime {
             voice_config_state: RwLock::new(config.clone()),
             spoken_result_language: RwLock::new(config.stt.language.clone()),
             verbose_progress: AtomicBool::new(config.verbose_progress),
+            streaming_stt_enabled: AtomicBool::new(
+                stt.as_ref().is_some_and(VoiceSttRuntime::is_streaming),
+            ),
             stt: RwLock::new(stt),
             streaming_stt: StreamingSttSessions::new(),
             tts: RwLock::new(tts),
@@ -959,6 +1063,7 @@ impl VoiceBargeInRuntime {
             verbose_progress: AtomicBool::new(false),
             stt: RwLock::new(None),
             streaming_stt: StreamingSttSessions::new(),
+            streaming_stt_enabled: AtomicBool::new(false),
             tts: RwLock::new(None),
             progress_tx,
             monitors: dashmap::DashMap::new(),
@@ -1127,6 +1232,14 @@ impl VoiceBargeInRuntime {
             .remove_if(&channel_id.get(), |_, value| value.is_empty());
     }
 
+    /// #3910: whether the live STT runtime is in streaming mode. Read
+    /// synchronously from an atomic mirror so the per-PCM-tick hook can gate
+    /// streaming work without awaiting the `stt` lock. Kept in sync wherever
+    /// `stt` is (re)built.
+    pub(in crate::services::discord) fn streaming_stt_enabled(&self) -> bool {
+        self.streaming_stt_enabled.load(Ordering::Relaxed)
+    }
+
     /// #2250: signal cancellation on every in-flight foreground call for the
     /// given channel. Called by explicit-stop barge-in and supersession
     /// paths so the spawned Codex/Claude child is killed instead of running
@@ -1192,35 +1305,22 @@ impl VoiceBargeInRuntime {
             .resolve_effective_foreground_config(channel_id, target_channel_id)
             .await;
         let cancel_token = Arc::new(crate::services::provider::CancelToken::new());
-        self.register_inflight_foreground_cancel(channel_id, cancel_token.clone());
+        // #3911 + #2335 (c): the guard OWNS the registration. It registers the
+        // token BEFORE the generate `.await` below and unregisters on drop, so
+        // an abort mid-`.await` (shutdown / supervisor abort) still runs the
+        // Drop and cannot leak the token in `inflight_foreground_cancels` (a
+        // leak would keep `has_inflight_foreground` true and misclassify the
+        // next fresh utterance as a barge-in). Keeping the guard alive through
+        // the `channel_id.say` HTTP call below still lets a late cancel
+        // suppress the now-stale reply.
+        let _text_reply_guard =
+            InflightForegroundCancelGuard::register(self, channel_id, cancel_token.clone());
         let reply =
             generate_voice_channel_text_reply(text, &language, &foreground, cancel_token.clone())
                 .await
                 .unwrap_or_else(|| {
                     "지금 보이스 빠른 답변 모델 응답을 만들지 못했어요.".to_string()
                 });
-
-        // Issue #2335 (c) — Codex round 2: keep the foreground cancel token
-        // registered through the `channel_id.say` HTTP call. If a cancel
-        // arrives between generation and posting (or during the HTTP
-        // round-trip), we must suppress the now-stale reply. The
-        // unregister happens via this RAII guard on every exit path.
-        struct TextReplyGuard<'a> {
-            runtime: &'a VoiceBargeInRuntime,
-            channel_id: ChannelId,
-            token: Arc<crate::services::provider::CancelToken>,
-        }
-        impl<'a> Drop for TextReplyGuard<'a> {
-            fn drop(&mut self) {
-                self.runtime
-                    .unregister_inflight_foreground_cancel(self.channel_id, &self.token);
-            }
-        }
-        let _text_reply_guard = TextReplyGuard {
-            runtime: self,
-            channel_id,
-            token: cancel_token.clone(),
-        };
 
         if cancel_token.cancelled.load(Ordering::Relaxed) {
             tracing::info!(
@@ -1333,7 +1433,12 @@ impl VoiceBargeInRuntime {
         *self.spoken_result_language.write().await = language;
         if self.enabled {
             self.streaming_stt.clear();
-            *self.stt.write().await = Some(VoiceSttRuntime::from_voice_config(&config));
+            let runtime = VoiceSttRuntime::from_voice_config(&config);
+            // #3910: keep the synchronous streaming mirror aligned with the
+            // freshly rebuilt runtime before publishing it.
+            self.streaming_stt_enabled
+                .store(runtime.is_streaming(), Ordering::Relaxed);
+            *self.stt.write().await = Some(runtime);
         }
     }
 
@@ -1369,7 +1474,7 @@ impl VoiceBargeInRuntime {
         }
     }
 
-    pub(in crate::services::discord) fn unregister_voice_guild(&self, guild_id: GuildId) {
+    pub(in crate::services::discord) async fn unregister_voice_guild(&self, guild_id: GuildId) {
         // F7 (#2046): voice_guilds 만 지우면 channel_id 키로 적재된 monitors /
         // playbacks / spoken_result_playbacks / active_voice_routes /
         // deferred_buffers 가 남아 join/leave 반복 시 누수. 같은 guild 의 모든
@@ -1387,6 +1492,9 @@ impl VoiceBargeInRuntime {
             .collect();
         self.voice_guilds
             .retain(|_, registered_guild_id| *registered_guild_id != guild_id);
+        // #3910: outer handles for the leaving channels, collected so the inner
+        // WhisperStream sessions can be discarded after the sync teardown loop.
+        let mut stranded_stream_sessions: Vec<SttSessionHandle> = Vec::new();
         for channel_id in stale_channels {
             self.monitors.remove(&channel_id);
             if let Some((_, session)) = self.playbacks.remove(&channel_id) {
@@ -1403,6 +1511,32 @@ impl VoiceBargeInRuntime {
             );
             self.active_voice_routes.remove(&channel_id);
             self.deferred_buffers.remove(&channel_id);
+            // #3910: a speaker leaving the channel mid-utterance otherwise leaves
+            // its streaming-STT session + feed-task bucket stranded in the maps
+            // (they were only reaped at utterance completion). Drop the outer
+            // bucket + abort pending feed tasks here, and collect the outer
+            // handles so the inner stream session is reaped below too.
+            stranded_stream_sessions.extend(self.streaming_stt.remove_channel(channel_id));
+        }
+        // #3910: dropping the outer `SttSessionHandle` alone leaves the matching
+        // inner `WhisperStream` session (inserted by `start_session`, removed
+        // only by `finalize()`) leaked until the runtime is rebuilt. Discard
+        // those inner sessions for the leaving channels (no final decode — the
+        // speaker left, so partial-transcript loss is acceptable). File mode
+        // keeps no inner session, so this is a no-op there.
+        if !stranded_stream_sessions.is_empty() {
+            // Hoist read+clone into a local so the `RwLockReadGuard` drops at
+            // this statement's end — NOT held across the `discard_stream_session`
+            // awaits below (an `if let` scrutinee would extend the guard over the
+            // whole body, holding `self.stt` read while awaiting → deadlock risk
+            // against any `self.stt` writer / re-entrant lock). A plain `let`
+            // binding (not `let-else` + `return`) preserves the rest of the fn.
+            let stt = self.stt.read().await.clone();
+            if let Some(stt) = stt {
+                for handle in stranded_stream_sessions {
+                    stt.discard_stream_session(&handle).await;
+                }
+            }
         }
     }
 
@@ -1588,7 +1722,17 @@ impl VoiceBargeInRuntime {
             .await;
         self.play_processing_chime(shared, source_channel_id).await;
         let cancel_token = Arc::new(crate::services::provider::CancelToken::new());
-        self.register_inflight_foreground_cancel(source_channel_id, cancel_token.clone());
+        // #3911 + #2335 (c): the guard OWNS the registration. It registers the
+        // token BEFORE the generate `.await` below and unregisters on drop, so
+        // an abort mid-`.await` (shutdown / supervisor abort) cannot leak the
+        // token in `inflight_foreground_cancels` (a leak would keep
+        // `has_inflight_foreground` permanently true and misroute the next
+        // fresh utterance as a barge-in). Keeping the guard alive through every
+        // suppressible side effect below (synth, play, background dispatch)
+        // still lets a late cancel flip this token and suppress the stale
+        // ack/handoff; we re-check the cancel flag at each awaited boundary.
+        let _inflight_guard =
+            InflightForegroundCancelGuard::register(self, source_channel_id, cancel_token.clone());
         let decision = self
             .generate_foreground_ack_text_for_runtime(
                 &announcement.transcript,
@@ -1599,31 +1743,6 @@ impl VoiceBargeInRuntime {
             .await
             .unwrap_or(VoiceForegroundDecision::Silence);
         let foreground_latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-
-        // Issue #2335 (c) — Codex round 2: keep the foreground cancel token
-        // REGISTERED through every suppressible side effect (synth, play,
-        // background dispatch). Previously the code unregistered right after
-        // `generate_foreground_ack_text` returned, so a cancel arriving between
-        // unregister and the TTS playback / handoff dispatch could not flip this
-        // token — the stale ack or handoff would still fire. We use a RAII guard
-        // so unregister always runs (panics, early returns, etc.) and re-check
-        // the cancel flag at each awaited boundary below.
-        struct InflightGuard<'a> {
-            runtime: &'a VoiceBargeInRuntime,
-            channel_id: ChannelId,
-            token: Arc<crate::services::provider::CancelToken>,
-        }
-        impl<'a> Drop for InflightGuard<'a> {
-            fn drop(&mut self) {
-                self.runtime
-                    .unregister_inflight_foreground_cancel(self.channel_id, &self.token);
-            }
-        }
-        let _inflight_guard = InflightGuard {
-            runtime: self,
-            channel_id: source_channel_id,
-            token: cancel_token.clone(),
-        };
 
         let record_cancel_suppressed = |label: &'static str| {
             let mut event = voice_flight_event_from_announcement(
@@ -1659,8 +1778,7 @@ impl VoiceBargeInRuntime {
             );
         };
 
-        // First gate: cancel that arrived during ack generation.
-        if cancel_token.cancelled.load(Ordering::Relaxed) {
+        if foreground_decision::ack_cancel_suppresses_fallback(&cancel_token) {
             record_cancel_suppressed("post_generation");
             log_cancel_suppressed("post_generation");
             return true;
@@ -1692,7 +1810,7 @@ impl VoiceBargeInRuntime {
                 );
             }
             VoiceForegroundDecision::Speak(spoken) => {
-                if cancel_token.cancelled.load(Ordering::Relaxed) {
+                if foreground_decision::ack_cancel_suppresses_fallback(&cancel_token) {
                     record_cancel_suppressed("pre_speak_synth");
                     log_cancel_suppressed("pre_speak_synth");
                     return true;
@@ -1701,7 +1819,7 @@ impl VoiceBargeInRuntime {
                     .synthesize_acknowledgement(&spoken, source_channel_id)
                     .await
                 {
-                    if cancel_token.cancelled.load(Ordering::Relaxed) {
+                    if foreground_decision::ack_cancel_suppresses_fallback(&cancel_token) {
                         record_cancel_suppressed("post_speak_synth");
                         log_cancel_suppressed("post_speak_synth");
                         return true;
@@ -2825,6 +2943,11 @@ mod tests {
                 .is_streaming(),
             "default STT mode must remain file"
         );
+        // #3910: the synchronous streaming mirror must agree with the runtime.
+        assert!(
+            !file_runtime.streaming_stt_enabled(),
+            "File-mode runtime mirror must report streaming disabled"
+        );
 
         let mut stream_config = VoiceConfig::default();
         stream_config.enabled = true;
@@ -2839,6 +2962,202 @@ mod tests {
                 .unwrap()
                 .is_streaming(),
             "stream STT must only activate when configured"
+        );
+        // #3910: Stream-mode runtime must drive the mirror true (gates the
+        // per-tick hook ON), contrasting the File-mode false above.
+        assert!(
+            stream_runtime.streaming_stt_enabled(),
+            "Stream-mode runtime mirror must report streaming enabled"
+        );
+
+        // #3910: rebuilding `stt` via set_runtime_language must preserve the
+        // mirror (stale-mirror regression guard) — language changes never flip
+        // the configured mode, so a Stream runtime stays mirror-true afterward.
+        stream_runtime.set_runtime_language("en".to_string()).await;
+        assert!(
+            stream_runtime
+                .stt
+                .read()
+                .await
+                .as_ref()
+                .unwrap()
+                .is_streaming(),
+            "set_runtime_language must keep the Stream runtime streaming"
+        );
+        assert!(
+            stream_runtime.streaming_stt_enabled(),
+            "set_runtime_language must keep the streaming mirror in sync"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_mode_streaming_observe_is_gated_and_does_not_leak_feed_tasks() {
+        // #3910: in File mode (default) the per-tick streaming hook must skip the
+        // PCM conversion + task spawn entirely, so the feed-task buckets stay
+        // empty across an utterance instead of accumulating one completed
+        // `JoinHandle` per ~20ms speaking tick (the leak this fix closes).
+        let mut file_config = VoiceConfig::default();
+        file_config.enabled = true;
+        let runtime = Arc::new(VoiceBargeInRuntime::from_voice_config(&file_config));
+        assert!(
+            !runtime.streaming_stt_enabled(),
+            "default File mode must report streaming disabled"
+        );
+
+        let channel = ChannelId::new(7_910_001);
+        let samples = vec![16_384i16, -16_384, 16_384, -16_384].repeat(480);
+        // Simulate ~50 of the ~20ms speaking ticks that occur during one
+        // utterance; none of them should create or grow a feed-task bucket.
+        for _ in 0..50 {
+            runtime.observe_streaming_stt_pcm_i16(channel, 4242, &samples);
+        }
+        assert_eq!(
+            runtime.streaming_stt.feed_tasks().len(),
+            0,
+            "File mode must not spawn per-tick feed tasks or accumulate JoinHandles"
+        );
+        assert_eq!(
+            runtime.streaming_stt.sessions().len(),
+            0,
+            "File mode must not start any streaming session"
+        );
+    }
+
+    #[tokio::test]
+    async fn leaving_voice_channel_drops_streaming_stt_buckets() {
+        // #3910: a speaker leaving the channel mid-utterance must not strand its
+        // streaming-STT session / feed-task bucket — channel teardown reaps it
+        // (aborting any pending feed task) while leaving sibling channels intact.
+        let mut config = VoiceConfig::default();
+        config.enabled = true;
+        let runtime = Arc::new(VoiceBargeInRuntime::from_voice_config(&config));
+
+        let channel = ChannelId::new(7_910_002);
+        let guild = GuildId::new(7_910_999);
+        runtime.register_voice_context(channel, guild);
+
+        let key = StreamingSttKey {
+            channel_id: channel.get(),
+            user_id: 99,
+        };
+        let pending = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(3_600)).await;
+        });
+        let abort_handle = pending.abort_handle();
+        runtime
+            .streaming_stt
+            .feed_tasks()
+            .insert(key, Arc::new(StdMutex::new(vec![pending])));
+        assert_eq!(runtime.streaming_stt.feed_tasks().len(), 1);
+
+        // A different channel's bucket must survive this guild teardown.
+        let sibling_key = StreamingSttKey {
+            channel_id: channel.get() + 1,
+            user_id: 99,
+        };
+        runtime
+            .streaming_stt
+            .feed_tasks()
+            .insert(sibling_key, Arc::new(StdMutex::new(Vec::new())));
+
+        runtime.unregister_voice_guild(guild).await;
+
+        assert!(
+            !runtime.streaming_stt.feed_tasks().contains_key(&key),
+            "leaving the channel must drop its streaming feed-task bucket"
+        );
+        assert!(
+            runtime
+                .streaming_stt
+                .feed_tasks()
+                .contains_key(&sibling_key),
+            "an unrelated channel's feed-task bucket must be left intact"
+        );
+        for _ in 0..200 {
+            if abort_handle.is_finished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(
+            abort_handle.is_finished(),
+            "the stranded feed task must be aborted on channel teardown"
+        );
+    }
+
+    #[tokio::test]
+    async fn leaving_voice_channel_discards_inner_stream_sessions() {
+        // #3910: in Stream mode the underlying `WhisperStream` session lives in
+        // an inner map removed only by `finalize()`. A channel leave must reap
+        // that inner session too (not just the outer handle), while preserving a
+        // sibling channel's inner session. Without the inner discard the stream
+        // session leaks until the runtime is rebuilt.
+        let mut config = VoiceConfig::default();
+        config.enabled = true;
+        config.stt.mode = crate::voice::config::VoiceSttMode::Stream;
+        let runtime = Arc::new(VoiceBargeInRuntime::from_voice_config(&config));
+        assert!(runtime.streaming_stt_enabled());
+
+        let stt = runtime
+            .stt
+            .read()
+            .await
+            .clone()
+            .expect("stream runtime stt must exist");
+
+        let channel = ChannelId::new(7_910_010);
+        let guild = GuildId::new(7_910_777);
+        runtime.register_voice_context(channel, guild);
+
+        // Leaving channel: a live inner streaming session + its outer handle.
+        let leaving_handle = stt
+            .start_session("ko")
+            .await
+            .expect("start leaving streaming session");
+        let leaving_key = StreamingSttKey {
+            channel_id: channel.get(),
+            user_id: 1,
+        };
+        runtime
+            .streaming_stt
+            .sessions()
+            .insert(leaving_key, leaving_handle.clone());
+
+        // Sibling channel (not registered to this guild) must be preserved.
+        let sibling_handle = stt
+            .start_session("ko")
+            .await
+            .expect("start sibling streaming session");
+        let sibling_key = StreamingSttKey {
+            channel_id: channel.get() + 1,
+            user_id: 1,
+        };
+        runtime
+            .streaming_stt
+            .sessions()
+            .insert(sibling_key, sibling_handle.clone());
+
+        runtime.unregister_voice_guild(guild).await;
+
+        // Outer map: leaving entry gone, sibling intact.
+        assert!(
+            !runtime.streaming_stt.sessions().contains_key(&leaving_key),
+            "leaving channel outer session handle must be removed"
+        );
+        assert!(
+            runtime.streaming_stt.sessions().contains_key(&sibling_key),
+            "sibling channel outer session handle must be preserved"
+        );
+
+        // Inner WhisperStream map: leaving session discarded (finalize on a
+        // removed handle errors), sibling session still finalizable.
+        assert!(
+            stt.finalize(leaving_handle).await.is_err(),
+            "leaving channel inner WhisperStream session must be discarded on leave"
+        );
+        assert!(
+            stt.finalize(sibling_handle).await.is_ok(),
+            "sibling channel inner WhisperStream session must survive the leave"
         );
     }
 
@@ -3651,6 +3970,106 @@ mod tests {
         assert!(token_b.cancelled.load(Ordering::Relaxed));
     }
 
+    /// #3911: the foreground CancelToken must be unregistered even when the
+    /// spawning task is aborted mid-`generate(...).await` (graceful shutdown,
+    /// supervisor abort). The drop guard OWNS the registration, so dropping the
+    /// in-flight future runs its Drop and drains the registry. Without this, the
+    /// token leaks, `has_inflight_foreground` stays permanently true, and the
+    /// NEXT fresh utterance on the same channel is misclassified as a barge-in
+    /// (the channel gets "stuck" until guild teardown).
+    #[tokio::test]
+    async fn aborted_foreground_future_clears_inflight_so_next_utterance_is_not_barge_in() {
+        let runtime = Arc::new(enabled_runtime());
+        let channel = ChannelId::new(3911);
+        let token = Arc::new(crate::services::provider::CancelToken::new());
+
+        let runtime_for_task = runtime.clone();
+        let token_for_task = token.clone();
+        let handle = tokio::spawn(async move {
+            // Guard OWNS the registration: it registers BEFORE the await.
+            let _guard =
+                InflightForegroundCancelGuard::register(&runtime_for_task, channel, token_for_task);
+            // Model the foreground `generate(...).await` that never completes
+            // because the task is aborted (shutdown / supervisor abort).
+            std::future::pending::<()>().await;
+        });
+
+        // Wait until the spawned task has registered the token.
+        loop {
+            if runtime
+                .inflight_foreground_cancels
+                .contains_key(&channel.get())
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        // Abort mid-`.await`: the future is dropped, so the guard's Drop runs.
+        handle.abort();
+        let _ = handle.await; // resolves once the aborted future has been dropped.
+
+        assert!(
+            !runtime
+                .inflight_foreground_cancels
+                .contains_key(&channel.get()),
+            "#3911: aborting the in-flight foreground future must unregister the \
+             cancel token via the drop guard"
+        );
+
+        // This is the exact predicate the routing decision evaluates
+        // (voice_barge_in.rs has_inflight_foreground): it must now be false, so a
+        // subsequent fresh utterance is NOT routed down the barge-in/abort path.
+        let has_inflight_foreground = runtime
+            .inflight_foreground_cancels
+            .get(&channel.get())
+            .is_some_and(|entry| !entry.value().is_empty());
+        assert!(
+            !has_inflight_foreground,
+            "#3911: after an aborted foreground future, the next fresh utterance \
+             must not be misclassified as a barge-in"
+        );
+    }
+
+    /// #3911 (no-regression): while the foreground guard is alive (i.e. the
+    /// `generate(...).await` is genuinely in flight), a real mid-playback
+    /// barge-in must still reach and flip the still-registered token. The drop
+    /// guard must NOT swallow legitimate cancellation, and dropping it after the
+    /// cancel drained the registry must be a safe no-op.
+    #[test]
+    fn live_foreground_guard_still_allows_genuine_barge_in_cancel() {
+        let runtime = enabled_runtime();
+        let channel = ChannelId::new(39_111);
+        let token = Arc::new(crate::services::provider::CancelToken::new());
+
+        // Guard alive == the foreground generate(...).await is in flight.
+        let guard = InflightForegroundCancelGuard::register(&runtime, channel, token.clone());
+        assert!(
+            runtime
+                .inflight_foreground_cancels
+                .contains_key(&channel.get()),
+            "constructing the guard must register the token"
+        );
+
+        // A genuine mid-playback barge-in must still flip the registered token.
+        let count =
+            runtime.cancel_inflight_foreground_calls(channel, "voice_barge_in_explicit_stop");
+        assert_eq!(count, 1, "the in-flight foreground token must be cancelled");
+        assert!(
+            token.cancelled.load(Ordering::Relaxed),
+            "genuine barge-in must flip the still-registered foreground token"
+        );
+
+        // Dropping the guard after the cancel drained the registry is a no-op.
+        drop(guard);
+        assert!(
+            !runtime
+                .inflight_foreground_cancels
+                .contains_key(&channel.get()),
+            "registry stays drained after a genuine barge-in followed by guard drop"
+        );
+    }
+
     #[test]
     fn foreground_ack_text_stays_short_and_routes_work_to_background() {
         assert_eq!(
@@ -3660,6 +4079,101 @@ mod tests {
         assert_eq!(
             foreground_ack_text("what time is it?", "en-US"),
             "Got it. I am checking that now."
+        );
+    }
+
+    // #3908 (bug A): a foreground model/synth failure must SPEAK the fallback
+    // ack instead of being discarded to silence. Drive the real
+    // `generate_foreground_ack_text` against an unsupported provider so the
+    // model-call-error branch fires deterministically (no live CLI).
+    #[tokio::test]
+    async fn foreground_model_failure_speaks_fallback_instead_of_silence() {
+        let foreground = EffectiveVoiceForegroundConfig {
+            provider: "adk_unsupported_provider_for_tests".to_string(),
+            model: "none".to_string(),
+            max_chars: 200,
+            timeout_ms: 1_000,
+        };
+        let cancel = Arc::new(crate::services::provider::CancelToken::new());
+        let decision =
+            generate_foreground_ack_text("로그 확인해줘", "ko", &foreground, cancel.clone()).await;
+        assert_eq!(
+            decision,
+            Some(VoiceForegroundDecision::Speak(foreground_ack_text(
+                "로그 확인해줘",
+                "ko"
+            ))),
+            "model/synth failure must speak the fallback ack, not fall through to silence"
+        );
+        assert!(
+            !cancel.cancelled.load(Ordering::Relaxed),
+            "a model failure (not a barge-in) must not flag the shared cancel token"
+        );
+    }
+
+    // #3908 (bug A): the self-inflicted foreground-ack timeout flips the shared
+    // cancel token only to kill the detached model child, so it must NOT
+    // suppress the spoken fallback; a genuine user barge-in must keep silence.
+    #[test]
+    fn foreground_ack_timeout_keeps_fallback_but_barge_in_suppresses() {
+        use crate::services::provider::CancelToken;
+
+        let idle = CancelToken::new();
+        assert!(
+            !foreground_decision::ack_cancel_suppresses_fallback(&idle),
+            "an un-cancelled token never suppresses"
+        );
+
+        let timed_out = CancelToken::new();
+        timed_out.set_cancel_source("voice_foreground_ack_timeout");
+        timed_out.cancelled.store(true, Ordering::Relaxed);
+        assert!(
+            !foreground_decision::ack_cancel_suppresses_fallback(&timed_out),
+            "a foreground-ack timeout (model failure) must still speak the fallback ack"
+        );
+
+        let barged_in = CancelToken::new();
+        barged_in.set_cancel_source("voice_barge_in_explicit_stop");
+        barged_in.cancelled.store(true, Ordering::Relaxed);
+        assert!(
+            foreground_decision::ack_cancel_suppresses_fallback(&barged_in),
+            "a genuine user barge-in must keep the channel silent"
+        );
+    }
+
+    // #3908 (review): a user barge-in must DOMINATE a self-timeout on the SAME
+    // shared token in EITHER race order. The cancel KIND is first-wins and the
+    // free-form LABEL is last-wins, so each ordering leaves the barge-in trace
+    // in a different field; both must suppress the fallback (no fallback spoken
+    // over a user who interrupted).
+    #[test]
+    fn foreground_ack_user_barge_in_dominates_self_timeout_on_shared_token() {
+        use crate::services::provider::CancelToken;
+
+        // Timeout recorded first (kind=WatchdogTimeout), barge-in lands after
+        // (overwrites the label only). Must suppress.
+        let timeout_then_barge_in = CancelToken::new();
+        timeout_then_barge_in.set_cancel_source("voice_foreground_ack_timeout");
+        timeout_then_barge_in
+            .cancelled
+            .store(true, Ordering::Relaxed);
+        timeout_then_barge_in.set_cancel_source("voice_barge_in_explicit_stop");
+        assert!(
+            foreground_decision::ack_cancel_suppresses_fallback(&timeout_then_barge_in),
+            "a barge-in after a self-timeout must suppress the fallback (kind stays WatchdogTimeout)"
+        );
+
+        // Barge-in recorded first (kind=UserBargeIn, sticky), self-timeout
+        // overwrites the label afterwards. Must still suppress.
+        let barge_in_then_timeout = CancelToken::new();
+        barge_in_then_timeout.set_cancel_source("voice_barge_in_live_cut");
+        barge_in_then_timeout
+            .cancelled
+            .store(true, Ordering::Relaxed);
+        barge_in_then_timeout.set_cancel_source("voice_foreground_ack_timeout");
+        assert!(
+            foreground_decision::ack_cancel_suppresses_fallback(&barge_in_then_timeout),
+            "a self-timeout that lands after a barge-in must not revive the fallback"
         );
     }
 
@@ -4207,12 +4721,40 @@ mod tests {
 
         let loud = [16_384, -16_384, 16_384, -16_384];
         assert!(runtime.observe_live_pcm_i16(channel_id, &loud).is_none());
-        let cut = runtime.observe_live_pcm_i16(channel_id, &loud).unwrap();
+        let (cut, owner) = runtime.observe_live_pcm_i16(channel_id, &loud).unwrap();
 
         assert_eq!(cut.candidate_frames, 2);
+        // `reset_after_playback_start` registers no owner.
+        assert_eq!(owner, None);
         assert_eq!(player.stops.load(Ordering::SeqCst), 1);
         assert!(cancellation.is_cancelled());
         assert!(runtime.observe_live_pcm_i16(channel_id, &loud).is_none());
+    }
+
+    /// #3914 (item 4): the cut must report the owner of the playback session it
+    /// stopped. The owner is snapshotted before the entry is removed, so the
+    /// F22 `playback_owner` diagnostic is no longer always `None`.
+    #[test]
+    fn live_pcm_observation_reports_owner_of_cut_playback() {
+        let runtime = enabled_runtime();
+        let channel_id = ChannelId::new(7_314);
+        let player = Arc::new(MockPlayer::default());
+        runtime.reset_after_playback_start_with_owner(
+            channel_id,
+            player.clone(),
+            CancellationToken::new(),
+            Some(99),
+        );
+
+        let loud = [16_384, -16_384, 16_384, -16_384];
+        assert!(runtime.observe_live_pcm_i16(channel_id, &loud).is_none());
+        let (_cut, owner) = runtime.observe_live_pcm_i16(channel_id, &loud).unwrap();
+
+        assert_eq!(
+            owner,
+            Some(99),
+            "the cut must carry the owner of the stopped playback session"
+        );
     }
 
     #[tokio::test]
@@ -4375,6 +4917,64 @@ mod tests {
         runtime.clear_playback_if_owner(channel_id, 1);
 
         assert_eq!(runtime.playbacks.get(&42).unwrap().owner, Some(2));
+    }
+
+    // #3908 (bug B): a queued progress/chime flush must NOT steal the barge-in
+    // handle while a final-result playback owns the channel, otherwise a user
+    // barge-in would stop only the progress track and leave the nested final
+    // answer playing.
+    #[test]
+    fn progress_playback_does_not_steal_active_final_result_handle() {
+        let runtime = enabled_runtime();
+        let channel_id = ChannelId::new(77);
+
+        // Final-result playback owns the channel: session + barge-in handle.
+        let (final_id, _cancel) = runtime.start_spoken_result_playback(channel_id);
+        runtime.reset_after_playback_start_with_owner(
+            channel_id,
+            Arc::new(MockPlayer::default()),
+            CancellationToken::new(),
+            Some(final_id),
+        );
+
+        let registered = runtime.register_progress_barge_in_handle(
+            channel_id,
+            Arc::new(MockPlayer::default()),
+            9_999,
+        );
+
+        assert!(
+            !registered,
+            "progress must not register while a final-result playback owns the handle"
+        );
+        assert_eq!(
+            runtime.playbacks.get(&channel_id.get()).unwrap().owner,
+            Some(final_id),
+            "final-result playback must keep owning the barge-in handle so barge-in stops it"
+        );
+    }
+
+    // #3908 (bug B): when no final-result playback is active, progress keeps its
+    // own barge-in handle so it can still be stopped by a user barge-in.
+    #[test]
+    fn progress_playback_registers_handle_when_no_final_result_active() {
+        let runtime = enabled_runtime();
+        let channel_id = ChannelId::new(78);
+
+        let registered = runtime.register_progress_barge_in_handle(
+            channel_id,
+            Arc::new(MockPlayer::default()),
+            555,
+        );
+
+        assert!(
+            registered,
+            "progress owns the barge-in handle when no final-result playback is active"
+        );
+        assert_eq!(
+            runtime.playbacks.get(&channel_id.get()).unwrap().owner,
+            Some(555)
+        );
     }
 
     #[tokio::test]

@@ -14,11 +14,17 @@ on:
   workflow_dispatch:
 
 concurrency:
-  # Collapse rapid re-pushes to the same PR head branch into one run. Only
-  # pull_request/workflow_dispatch events reach here now, so `github.head_ref`
-  # is set for PRs; fall back to `github.ref` for manual dispatch.
+  # Group runs by PR head branch. Only pull_request/workflow_dispatch events
+  # reach here now, so `github.head_ref` is set for PRs; fall back to
+  # `github.ref` for manual dispatch.
   group: ci-pr-${{ github.head_ref || github.ref }}
-  cancel-in-progress: true
+  # cancel-in-progress=false: superseded runs finish instead of being
+  # cancelled. Cancelling them makes the `*_required_context` mirrors below
+  # (which run `if: always()` and FAIL CLOSED on a `cancelled` upstream)
+  # surface spurious `terminated by signal 15` / exit-143 required-check
+  # failures, forcing constant re-runs (#3927). Trade-off: extra runner
+  # minutes on rapid re-pushes; branch protection still gates the HEAD commit.
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always

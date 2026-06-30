@@ -1,18 +1,56 @@
 id: E-16
-title: Claude TUI quiescence timeout still releases mailbox
-agent_mode: controlled
-coverage_class: unsupported-known-gap
+title: Claude TUI completion-quiescence release accepts an immediate follow-up
+agent_mode: real_live
+coverage_class: live
 cells: [claude-tui]
 isolation: required
-skip_reason: >
-  Stub for #2935. Full live simulation needs a runtime hook that forces the
-  TUI completion-quiescence gate to time out after response delivery. The
-  harness pieces are in place: every executed scenario now asserts the tested
-  mailbox returns idle with queue/inflight/cancel/pending-callback state clear.
 acceptance_criteria:
-  - Force or simulate tui_completion_quiescence timeout after a delivered Claude TUI response.
-  - Send a second prompt immediately after the first response marker arrives.
-  - Assert the second prompt starts and replies without an indefinite queued placeholder.
-  - Assert /api/health/detail mailboxes shows idle, queue_depth=0, inflight_state_present=false, has_cancel_token=false.
-steps: []
-assertions: []
+  - Deliver a first Claude TUI response, then send a second prompt immediately
+    after the first response marker arrives (no inter-step idle wait), exercising
+    the completion-quiescence release window after response delivery.
+  - Assert the second prompt starts and replies without an indefinite queued
+    placeholder (the second marker relays within the budget).
+  - Assert /api/health/detail shows the tested mailbox idle — agent_turn_status
+    idle, queue_depth=0, has_cancel_token=false, inflight_state_present=false, no
+    active user message, and no stale queued placeholder/pending-callback state.
+notes: |
+  #2935 regression coverage. After a delivered Claude TUI response the
+  completion-quiescence gate (TUI_COMPLETION_QUIESCENCE_TIMEOUT, a 3s const in
+  src/services/discord/tmux.rs) must release the mailbox so the next prompt is
+  not stranded as an indefinite queued placeholder. The 3s gate fires naturally
+  at the turn boundary; deterministically *forcing* the timeout would require a
+  production-source hook, so this scenario instead exercises the live relay path
+  (agent_mode=real_live) by sending the second prompt immediately at the first
+  response marker — the exact post-delivery window #2935 stranded. The
+  always-on post-scenario idle invariant (assert_cell_idle ->
+  post_scenario_idle.mailbox_idle_evidence) captures the /api/health/detail proof
+  that the tested mailbox returned to idle with queue/inflight/cancel/pending
+  callback state clear and no on-disk queued placeholder.
+steps:
+  - send_prompt: "응답에 정확히 한 줄로 [E2E:E16:ONE] 만 출력해줘."
+  - wait_for_discord_text: "[E2E:E16:ONE]"
+    timeout_s: 240
+  # Second prompt immediately after the first marker (no wait_idle_s): this is
+  # the completion-quiescence release window #2935 stranded. If the mailbox does
+  # not release, this prompt never starts and the next wait times out.
+  - send_prompt: "응답에 정확히 한 줄로 [E2E:E16:TWO] 만 출력해줘."
+  - wait_for_discord_text: "[E2E:E16:TWO]"
+    timeout_s: 240
+  - wait_idle_s: 5
+  - assert_health:
+      timeout_s: 45
+      poll_interval_s: 2
+      forbid_degraded_reasons:
+        - global_active_counter_out_of_bounds
+      global_active_max: 0
+      global_finalizing_max: 0
+assertions:
+  - text_present: "[E2E:E16:ONE]"
+  - text_present: "[E2E:E16:TWO]"
+  - ordered_text_present:
+      - "[E2E:E16:ONE]"
+      - "[E2E:E16:TWO]"
+  - no_duplicate_marker: "[E2E:E16:ONE]"
+  - no_duplicate_marker: "[E2E:E16:TWO]"
+  - no_duplicate_content: true
+  - no_resume_prompt_chrome: true

@@ -876,8 +876,6 @@ pub(crate) struct DispatchArgs {
 pub(crate) enum MigrateAction {
     /// Import OpenClaw durable state into AgentDesk
     Openclaw(super::migrate::OpenClawMigrateArgs),
-    /// Cut over SQLite history into PostgreSQL and verify live state is drained
-    PostgresCutover(super::migrate::PostgresCutoverArgs),
 }
 
 #[derive(Subcommand)]
@@ -936,14 +934,6 @@ pub(crate) enum ParseOutcome {
 }
 
 fn rewrite_legacy_args(mut args: Vec<String>) -> Vec<String> {
-    if args.get(1).map(String::as_str) == Some("--cutover-pg") {
-        let mut rewritten = Vec::with_capacity(args.len() + 1);
-        rewritten.push(args.remove(0));
-        rewritten.push("migrate".to_string());
-        rewritten.push("postgres-cutover".to_string());
-        rewritten.extend(args.into_iter().skip(1));
-        return rewritten;
-    }
     if args.get(1).map(String::as_str) == Some("--emit-launchd-plist") {
         let mut rewritten = Vec::with_capacity(args.len() + 1);
         rewritten.push(args.remove(0));

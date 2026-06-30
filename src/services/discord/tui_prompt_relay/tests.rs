@@ -2849,6 +2849,138 @@ fn synthetic_watcher_claim_requires_live_watcher_covering_output() {
     ));
 }
 
+/// #3876 (codex rework): the birth-site relay-owner decision for a TUI-direct /
+/// warm-followup synthetic inflight is gated on a LIVE per-session producer, NOT
+/// the global session-bound flag. `SessionBoundRelay` (sink commits) only when
+/// the watcher cannot own AND session-bound delivery is enabled AND a live
+/// producer exists; otherwise `BridgeAdapter` so the watcher-independent
+/// transcript-direct bridge tail stays the deliverer (regression guard against
+/// the producer-starve answer-loss).
+#[test]
+fn synthetic_relay_owner_gates_session_bound_on_live_producer() {
+    use super::synthetic_start::tui_direct_synthetic_relay_owner;
+
+    // (c) Live watcher owns the output → watcher relays the body (unchanged),
+    // regardless of session-bound / producer signals.
+    assert_eq!(
+        tui_direct_synthetic_relay_owner(true, true, true),
+        ExternalInputRelayOwner::TmuxWatcher,
+    );
+    assert_eq!(
+        tui_direct_synthetic_relay_owner(true, true, false),
+        ExternalInputRelayOwner::TmuxWatcher,
+    );
+    assert_eq!(
+        tui_direct_synthetic_relay_owner(true, false, false),
+        ExternalInputRelayOwner::TmuxWatcher,
+    );
+    // (b) THE FIX (demoed watcher-alive-path-mismatch case): watcher cannot own +
+    // session-bound enabled + a LIVE producer exists (the sink can actually
+    // commit) → SessionBoundRelay.
+    assert_eq!(
+        tui_direct_synthetic_relay_owner(false, true, true),
+        ExternalInputRelayOwner::SessionBoundRelay,
+    );
+    // (a) REGRESSION GUARD (watcher-detached / STALL-WATCHDOG force-clean): watcher
+    // cannot own + NO live producer → BridgeAdapter, so the watcher-independent
+    // transcript-direct bridge tail still delivers (a SessionBoundRelay stamp here
+    // would starve the sink AND stand the tail down → answer loss).
+    assert_eq!(
+        tui_direct_synthetic_relay_owner(false, true, false),
+        ExternalInputRelayOwner::BridgeAdapter,
+    );
+    // Session-bound delivery disabled → legacy bridge-tail path regardless of producer.
+    assert_eq!(
+        tui_direct_synthetic_relay_owner(false, false, true),
+        ExternalInputRelayOwner::BridgeAdapter,
+    );
+    assert_eq!(
+        tui_direct_synthetic_relay_owner(false, false, false),
+        ExternalInputRelayOwner::BridgeAdapter,
+    );
+}
+
+/// #3876 regression pin (terminal delivery, both directions):
+/// * producer-present: the `SessionBoundRelay` synthetic owner makes the unchanged
+///   sink ownership gate ACCEPT terminal delivery (body committed, not
+///   placeholder-only) while exactly one relayer remains (bridge tail stands down).
+/// * producer-absent: the owner falls back to `BridgeAdapter`, the sink gate would
+///   REJECT the ownerless `None` shape (the data loss), and the watcher-independent
+///   bridge tail is the SOLE relayer (`observer_should_spawn_bridge_tail` true) — so
+///   the answer is still delivered (no regression).
+#[cfg(unix)]
+#[test]
+fn synthetic_owner_delivery_path_matches_producer_presence() {
+    use super::synthetic_start::tui_direct_synthetic_relay_owner;
+    use crate::services::discord::session_relay_sink::session_bound_discord_relay_can_own_terminal_delivery;
+
+    let tmux = "AgentDesk-claude-3876-no-owner";
+    let dir = tempfile::tempdir().expect("temp dir");
+    let output_path = dir.path().join("transcript.jsonl");
+    let channel_id = ChannelId::new(940_000_000_003_876);
+    let lease = ExternalInputRelayLease::unassigned(Some(channel_id.get()));
+
+    let make_row = |owner_kind| {
+        build_tui_direct_synthetic_inflight_state(
+            ProviderKind::Claude,
+            channel_id,
+            MessageId::new(940_000_000_203_876),
+            Some(MessageId::new(940_000_000_103_876)),
+            "## 등록 결과\nfull terminal answer body",
+            tmux,
+            Some(&output_path),
+            0,
+            &lease,
+            owner_kind,
+        )
+    };
+
+    // Producer present (the demoed fix case): owner = SessionBoundRelay, the sink
+    // gate ACCEPTS the row (commits the body), and the bridge tail stands down →
+    // the sink is the SOLE committer.
+    let producer_present_owner = tui_direct_synthetic_relay_owner(false, true, true);
+    assert_eq!(
+        producer_present_owner,
+        ExternalInputRelayOwner::SessionBoundRelay
+    );
+    assert!(
+        session_bound_discord_relay_can_own_terminal_delivery(
+            Some(&make_row(RelayOwnerKind::SessionBoundRelay)),
+            tmux,
+        ),
+        "#3876: a SessionBoundRelay synthetic row MUST let the sink commit the terminal body"
+    );
+    assert!(!bridge_adapter_owns_external_turn(producer_present_owner));
+    assert!(!observer_should_spawn_bridge_tail(
+        false,
+        producer_present_owner
+    ));
+
+    // The pre-fix ownerless (None) row is REJECTED by the same sink gate — the
+    // placeholder-only data-loss shape this fix eliminates.
+    assert!(
+        !session_bound_discord_relay_can_own_terminal_delivery(
+            Some(&make_row(RelayOwnerKind::None)),
+            tmux,
+        ),
+        "#3876 regression: an ownerless (None) synthetic row is rejected by the sink gate"
+    );
+
+    // Producer ABSENT (watcher-detached / force-clean): owner = BridgeAdapter, the
+    // sink cannot deliver, so the watcher-independent bridge tail MUST be the SOLE
+    // relayer — `observer_should_spawn_bridge_tail` true → the answer still ships.
+    let producer_absent_owner = tui_direct_synthetic_relay_owner(false, true, false);
+    assert_eq!(
+        producer_absent_owner,
+        ExternalInputRelayOwner::BridgeAdapter
+    );
+    assert!(bridge_adapter_owns_external_turn(producer_absent_owner));
+    assert!(observer_should_spawn_bridge_tail(
+        false,
+        producer_absent_owner
+    ));
+}
+
 #[tokio::test]
 async fn tui_direct_pre_save_cleanup_does_not_decrement_global_active() {
     let shared = super::super::make_shared_data_for_tests();

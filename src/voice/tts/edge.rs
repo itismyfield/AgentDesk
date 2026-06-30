@@ -1,4 +1,4 @@
-use super::{TtsBackend, TtsSynthesisKind};
+use super::{EDGE_TTS_TEMP_PREFIX, TtsBackend, TtsSynthesisKind};
 use crate::voice::config::VoiceConfig;
 use crate::voice::utils::expand_tilde;
 use anyhow::{Context, Result, bail};
@@ -71,7 +71,8 @@ impl EdgeTtsBackend {
 
     fn invocation_for(&self, text: &str) -> EdgeTtsInvocation {
         let output_path = self.config.temp_dir.join(format!(
-            "agentdesk-edge-tts-{}-{}.{}",
+            "{}{}-{}.{}",
+            EDGE_TTS_TEMP_PREFIX,
             std::process::id(),
             uuid::Uuid::new_v4(),
             self.output_extension()
@@ -116,33 +117,78 @@ impl TtsBackend for EdgeTtsBackend {
                 .with_context(|| format!("create edge-tts temp dir {}", parent.display()))?;
         }
 
-        if let Err(error) = (self.runner)(invocation.clone())
-            .await
-            .with_context(|| format!("run edge-tts for {} TTS", kind.as_str()))
-        {
-            cleanup_output_path(&invocation.output_path).await;
-            return Err(error);
-        }
+        // E (#3909): arm a drop guard over the temp output BEFORE running the
+        // backend. A barge-in (`barge_in.rs` token cancel → `playback.rs`
+        // `synth_task.abort()`) drops this future mid-`.await`; `kill_on_drop`
+        // kills the child process but the already-written
+        // `agentdesk-edge-tts-*.mp3` never reaches an explicit error-return
+        // path, so it would orphan on disk. The guard removes it on
+        // drop/cancellation and on every error branch below; it is disarmed
+        // only once synthesis succeeds and ownership passes to the caller.
+        let mut temp_guard = EdgeTtsTempGuard::arm(invocation.output_path.clone());
 
-        let metadata = match fs::metadata(&invocation.output_path)
+        (self.runner)(invocation.clone())
             .await
-            .with_context(|| format!("stat edge-tts output {}", invocation.output_path.display()))
-        {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                cleanup_output_path(&invocation.output_path).await;
-                return Err(error);
-            }
-        };
+            .with_context(|| format!("run edge-tts for {} TTS", kind.as_str()))?;
+
+        let metadata = fs::metadata(&invocation.output_path)
+            .await
+            .with_context(|| {
+                format!("stat edge-tts output {}", invocation.output_path.display())
+            })?;
         if !metadata.is_file() || metadata.len() == 0 {
-            cleanup_output_path(&invocation.output_path).await;
             bail!(
                 "edge-tts produced empty output: {}",
                 invocation.output_path.display()
             );
         }
 
+        temp_guard.disarm();
         Ok(invocation.output_path)
+    }
+}
+
+/// #3909 (leak E) — drop guard that removes a partially written or orphaned
+/// edge-tts temp mp3 whenever synthesis does not complete successfully. This
+/// covers both the explicit error branches AND the barge-in abort case, where
+/// the synth future is dropped mid-`.await` and never reaches any return path.
+/// Disarmed once the output is validated and ownership passes to the caller
+/// (the playback layer then owns chunk cleanup via `cleanup_synthesized_chunk`).
+struct EdgeTtsTempGuard {
+    path: Option<PathBuf>,
+}
+
+impl EdgeTtsTempGuard {
+    fn arm(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    fn disarm(&mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for EdgeTtsTempGuard {
+    fn drop(&mut self) {
+        let Some(path) = self.path.take() else {
+            return;
+        };
+        // Synchronous best-effort unlink: a `Drop` impl cannot await
+        // `tokio::fs`. A single unlink is cheap and only runs on the
+        // abort/error path. On Unix this unlinks even while the
+        // (kill_on_drop-terminated) child still holds the fd, so no bytes
+        // survive on disk.
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                warn!(
+                    path = %path.display(),
+                    %error,
+                    "failed to remove edge-tts temp output on drop/cancellation"
+                );
+            }
+        }
     }
 }
 
@@ -176,20 +222,6 @@ fn subprocess_runner(timeout: Duration) -> EdgeTtsCommandRunner {
             Ok(())
         })
     })
-}
-
-async fn cleanup_output_path(path: &PathBuf) {
-    match fs::remove_file(path).await {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            warn!(
-                path = %path.display(),
-                %error,
-                "failed to remove edge-tts temp output after synthesis failure"
-            );
-        }
-    }
 }
 
 fn preview_output(bytes: &[u8]) -> String {
@@ -354,6 +386,54 @@ mod tests {
         assert!(
             !path.exists(),
             "empty edge-tts output should be removed on validation failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn edge_backend_removes_temp_output_on_synth_abort() {
+        // E (#3909): a barge-in abort drops the synth future mid-`.await`
+        // (playback.rs `synth_task.abort()`). The temp mp3 the runner already
+        // wrote must be removed by the drop guard even though synthesis never
+        // reached an explicit error-return path.
+        let temp = tempfile::tempdir().unwrap();
+        let written = Arc::new(tokio::sync::Notify::new());
+        let seen_path = Arc::new(Mutex::new(None::<PathBuf>));
+        let written_for_runner = written.clone();
+        let seen_for_runner = seen_path.clone();
+        let runner: EdgeTtsCommandRunner = Arc::new(move |invocation| {
+            let written = written_for_runner.clone();
+            let seen = seen_for_runner.clone();
+            Box::pin(async move {
+                // Simulate edge-tts having written the output file, then a long
+                // synthesis still in flight when the barge-in abort lands.
+                fs::write(&invocation.output_path, b"partial mp3 bytes").await?;
+                *seen.lock().unwrap() = Some(invocation.output_path.clone());
+                written.notify_one();
+                // Never completes; the test aborts the task while parked here.
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+        });
+        let backend = EdgeTtsBackend::with_runner(test_config(temp.path().to_path_buf()), runner);
+
+        let handle = tokio::spawn(async move {
+            backend
+                .synthesize("안녕하세요", TtsSynthesisKind::Final)
+                .await
+        });
+
+        // Wait until the runner has written the temp file, then abort mid-await.
+        written.notified().await;
+        let path = seen_path.lock().unwrap().clone().unwrap();
+        assert!(path.exists(), "temp output should exist before the abort");
+
+        handle.abort();
+        let _ = handle.await;
+
+        assert!(
+            !path.exists(),
+            "edge-tts temp output must be removed when the synth future is \
+             aborted/dropped (barge-in), not just on explicit error returns"
         );
     }
 }

@@ -142,10 +142,17 @@ fn run_heartbeat_sweep_pass_inner(
         let was_planned_restart = state.restart_mode.is_some();
         let was_rebind_origin = state.rebind_origin;
 
-        let outcome = super::inflight::clear_inflight_state_if_matches(
+        // #3859: a stale-watcher row may still own a live "🔄 처리 중" placeholder.
+        // Deleting the row alone strands that card forever, so route through the
+        // abandon-request helper: same ownership guards as
+        // `clear_inflight_state_if_matches`, but it durably records the
+        // placeholder for the sweeper to finalize to "중단됨" BEFORE deleting the
+        // row (channel still freed immediately).
+        let outcome = super::inflight::request_inflight_abandon_if_matches(
             &candidate.provider,
             candidate.channel_id,
             user_msg_id,
+            &shared.token_hash,
         );
         match outcome {
             super::inflight::GuardedClearOutcome::Cleared => {

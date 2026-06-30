@@ -55,11 +55,16 @@ impl MaintenanceJobRegistry {
     }
 
     fn static_registry() -> Self {
-        Self::static_registry_with_config(crate::config::PromptManifestRetentionConfig::default())
+        // Status/registry-only path (never executes the sweep) → default dirs.
+        Self::static_registry_with_config(
+            crate::config::PromptManifestRetentionConfig::default(),
+            crate::services::maintenance::jobs::voice_cache_sweep::Config::default_runtime(),
+        )
     }
 
     fn static_registry_with_config(
         prompt_manifest_retention: crate::config::PromptManifestRetentionConfig,
+        voice_cache_sweep: crate::services::maintenance::jobs::voice_cache_sweep::Config,
     ) -> Self {
         Self::new(vec![
             Arc::new(NoopHeartbeatJob),
@@ -71,6 +76,10 @@ impl MaintenanceJobRegistry {
             Arc::new(VoiceTurnLinkGcJob),
             Arc::new(VoiceTranscriptAnnouncementMetaGcJob),
             Arc::new(VoiceBackgroundHandoffMetaGcJob),
+            // #3909 — leader-only voice TTS cache/temp sweep.
+            Arc::new(ProgressTtsCacheSweepJob {
+                config: voice_cache_sweep,
+            }),
             // #3231 — disk-GC / memory maintenance jobs. Implemented in
             // `services::maintenance::jobs::*` but historically never wired
             // (zero callers of `spawn_storage_maintenance_jobs`), so the
@@ -407,6 +416,33 @@ impl MaintenanceJob for VoiceBackgroundHandoffMetaGcJob {
     }
 }
 
+/// #3909 — leader-only voice TTS cache/temp sweep (pool-less thin wrapper; the
+/// sweep logic + full rationale live in
+/// `services::maintenance::jobs::voice_cache_sweep`). The `config` is resolved
+/// from the loaded runtime `VoiceConfig` (same dirs the TTS write path uses, so
+/// operator overrides are swept). 30-minute cadence; the 35s startup stagger
+/// makes the first run the startup bound.
+struct ProgressTtsCacheSweepJob {
+    config: crate::services::maintenance::jobs::voice_cache_sweep::Config,
+}
+
+impl MaintenanceJob for ProgressTtsCacheSweepJob {
+    fn name(&self) -> &'static str {
+        "voice.progress_tts_cache_sweep"
+    }
+
+    fn schedule(&self) -> MaintenanceSchedule {
+        MaintenanceSchedule::every(Duration::from_secs(30 * 60), Duration::from_secs(35))
+    }
+
+    fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
+        Box::pin(async move {
+            let _ = pool;
+            crate::services::maintenance::jobs::voice_cache_sweep::run(self.config.clone()).await
+        })
+    }
+}
+
 /// #3231 — monthly `target/` sweep. Reuses the verbatim sweep logic in
 /// `services::maintenance::jobs::target_sweep` (runs `cargo sweep --time 30`
 /// in the main workspace `target/` when disk usage exceeds the threshold or
@@ -647,8 +683,12 @@ struct MaintenanceJobState {
 pub(crate) async fn scheduler_loop(
     pg_pool: Arc<PgPool>,
     prompt_manifest_retention: crate::config::PromptManifestRetentionConfig,
+    voice_cache_sweep: crate::services::maintenance::jobs::voice_cache_sweep::Config,
 ) {
-    let registry = MaintenanceJobRegistry::static_registry_with_config(prompt_manifest_retention);
+    let registry = MaintenanceJobRegistry::static_registry_with_config(
+        prompt_manifest_retention,
+        voice_cache_sweep,
+    );
     let store: Arc<dyn MaintenanceJobStore> =
         Arc::new(PgMaintenanceJobStore::new(pg_pool.as_ref().clone()));
 
@@ -1024,6 +1064,33 @@ mod registry_membership_tests {
                  #3231 actually run on the leader scheduler. present jobs: {names:?}"
             );
         }
+    }
+
+    #[test]
+    fn static_registry_includes_progress_tts_cache_sweep() {
+        // #3909 — the leader-only voice cache/temp sweeper must be wired into
+        // the production registry so the unbounded-growth leaks are bounded.
+        let registry = MaintenanceJobRegistry::static_registry();
+        assert!(
+            registry
+                .jobs()
+                .iter()
+                .any(|job| job.name() == "voice.progress_tts_cache_sweep"),
+            "voice.progress_tts_cache_sweep must be registered on the production \
+             leader-only maintenance scheduler (#3909)"
+        );
+    }
+
+    #[test]
+    fn progress_tts_cache_sweep_schedule_matches_documented_interval() {
+        // #3909 — 30-minute cadence, 35s startup stagger (clear of the other
+        // voice GC jobs at 25/60/75s).
+        let job = ProgressTtsCacheSweepJob {
+            config: crate::services::maintenance::jobs::voice_cache_sweep::Config::default_runtime(
+            ),
+        };
+        assert_eq!(job.schedule().every_ms(), 30 * 60 * 1_000);
+        assert_eq!(job.schedule().startup_stagger_ms(), 35 * 1_000);
     }
 
     #[test]

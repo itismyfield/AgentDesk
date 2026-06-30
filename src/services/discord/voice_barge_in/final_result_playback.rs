@@ -17,16 +17,29 @@ impl VoiceBargeInRuntime {
             .resolve_effective_foreground_config(voice_channel_id, background_channel_id)
             .await;
         let cancel_token = Arc::new(crate::services::provider::CancelToken::new());
-        self.register_inflight_foreground_cancel(voice_channel_id, cancel_token.clone());
-        let summary_result = self
-            .generate_voice_background_result_summary_for_runtime(
+        // #3911: scope the foreground registration to the generate `.await` via
+        // a drop guard that OWNS it. Previously the manual `unregister` ran only
+        // AFTER the await returned, so if this task was aborted mid-`.await`
+        // (shutdown / supervisor abort) the token leaked in
+        // `inflight_foreground_cancels` — leaving `has_inflight_foreground`
+        // permanently true so the next fresh utterance was misclassified as a
+        // barge-in (the channel got "stuck"). The guard's Drop unregisters on
+        // every exit path (normal return, panic, or abort), matching the
+        // previous unregister-right-after-generate timing.
+        let summary_result = {
+            let _foreground_guard = super::InflightForegroundCancelGuard::register(
+                self,
+                voice_channel_id,
+                cancel_token.clone(),
+            );
+            self.generate_voice_background_result_summary_for_runtime(
                 background_result,
                 &language,
                 &foreground,
                 cancel_token.clone(),
             )
-            .await;
-        self.unregister_inflight_foreground_cancel(voice_channel_id, &cancel_token);
+            .await
+        };
         // #2250: if cancel won the race (e.g. user barge-in or guild
         // teardown), suppress fallback speech and skip TTS entirely.
         // Otherwise the user would still hear the completion summary

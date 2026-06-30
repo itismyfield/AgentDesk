@@ -40,8 +40,8 @@ pub(in crate::services::discord) use config::{
 };
 pub(super) use config::{cmd_adduser, cmd_allowall, cmd_allowed, cmd_allowedtools, cmd_removeuser};
 pub(in crate::services::discord) use control::{
-    SoftClearNotifyMode, clear_channel_session_state, reset_channel_provider_state,
-    reset_managed_process_session, reset_provider_session_if_pending,
+    SoftClearNotifyMode, clear_channel_session_state, clear_channel_session_state_with_session_key,
+    reset_channel_provider_state, reset_managed_process_session, reset_provider_session_if_pending,
 };
 pub(super) use control::{cmd_clear, cmd_down, cmd_shell, cmd_stop};
 pub(in crate::services::discord) use diagnostics::{

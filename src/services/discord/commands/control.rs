@@ -343,6 +343,17 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
     }
 }
 
+fn choose_clear_session_key(
+    explicit_session_key: Option<&str>,
+    resolved_session_key: Option<String>,
+) -> Option<String> {
+    explicit_session_key
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(ToOwned::to_owned)
+        .or(resolved_session_key)
+}
+
 pub(in crate::services::discord) async fn clear_channel_session_state(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -350,6 +361,27 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
     channel_id: serenity::ChannelId,
     clear_source: &str,
     notify_mode: SoftClearNotifyMode,
+) {
+    clear_channel_session_state_with_session_key(
+        http,
+        shared,
+        provider,
+        channel_id,
+        clear_source,
+        notify_mode,
+        None,
+    )
+    .await;
+}
+
+pub(in crate::services::discord) async fn clear_channel_session_state_with_session_key(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    clear_source: &str,
+    notify_mode: SoftClearNotifyMode,
+    explicit_session_key: Option<&str>,
 ) {
     let tmux_name = {
         let data = shared.core.lock().await;
@@ -368,7 +400,7 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
         let mut data = shared.core.lock().await;
         if let Some(session) = data.sessions.get_mut(&channel_id) {
             cleanup_channel_uploads(channel_id);
-            session.session_id = None;
+            session.clear_provider_session();
             session.history.clear();
             session.pending_uploads.clear();
             session.cleared = true;
@@ -400,7 +432,9 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
         .await;
     }
 
-    let session_key = resolve_session_key_for_clear(http, shared, channel_id, provider).await;
+    let resolved_session_key =
+        resolve_session_key_for_clear(http, shared, channel_id, provider).await;
+    let session_key = choose_clear_session_key(explicit_session_key, resolved_session_key);
     if let Some(session_key) = session_key.as_deref() {
         super::super::adk_session::clear_provider_session_id(session_key, shared.api_port).await;
         super::super::adk_session::post_adk_session_status(
@@ -533,7 +567,10 @@ pub(in crate::services::discord) async fn cmd_clear(ctx: Context<'_>) -> Result<
 
 #[cfg(test)]
 mod soft_clear_notify_tests {
-    use super::{SOFT_CLEAR_REASON_CODE, SoftClearNotifyMode, soft_clear_lifecycle_notify_row};
+    use super::{
+        SOFT_CLEAR_REASON_CODE, SoftClearNotifyMode, choose_clear_session_key,
+        soft_clear_lifecycle_notify_row,
+    };
 
     #[test]
     fn slash_and_text_clear_suppress_soft_clear_notify_row() {
@@ -558,6 +595,31 @@ mod soft_clear_notify_tests {
                 "🧹 세션 클리어 (idle_recap_clear)".to_string(),
             )),
             "idle recap clear has no provider reply, so it must keep the single user-visible `lifecycle.soft_clear` notify row"
+        );
+    }
+
+    #[test]
+    fn explicit_recap_session_key_wins_over_recomputed_channel_key() {
+        assert_eq!(
+            choose_clear_session_key(
+                Some("claude/token/host:AgentDesk-claude-old-channel"),
+                Some("claude/token/host:AgentDesk-claude-renamed-channel".to_string()),
+            )
+            .as_deref(),
+            Some("claude/token/host:AgentDesk-claude-old-channel"),
+            "idle recap clear must drop the exact session row that owns the recap card, even when channel-name drift changes the recomputed key"
+        );
+    }
+
+    #[test]
+    fn blank_explicit_session_key_falls_back_to_recomputed_key() {
+        assert_eq!(
+            choose_clear_session_key(
+                Some("  "),
+                Some("claude/token/host:AgentDesk-claude-channel".to_string()),
+            )
+            .as_deref(),
+            Some("claude/token/host:AgentDesk-claude-channel")
         );
     }
 }

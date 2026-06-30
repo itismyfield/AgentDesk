@@ -169,13 +169,14 @@ pub(super) async fn handle_idle_recap_clear_interaction(
 
     // Reuse `/clear` semantics, not just the provider-session-id drop. TUI
     // providers keep live tmux/process state that must be reset too.
-    crate::services::discord::commands::clear_channel_session_state(
+    crate::services::discord::commands::clear_channel_session_state_with_session_key(
         &ctx.http,
         &data.shared,
         &data.provider,
         component.channel_id,
         "idle_recap_clear",
         crate::services::discord::commands::SoftClearNotifyMode::Enqueue,
+        Some(&clear_target.session_key),
     )
     .await;
     delete_previous_card(&ctx.http, channel_id, message_id).await;

@@ -405,6 +405,64 @@ fn status_panel_turn_completed_drops_recent_live_block() {
 }
 
 #[test]
+fn status_panel_surfaces_live_final_stale_and_unknown_confidence() {
+    // #3812: every status panel carries a compact live/stale confidence line in
+    // its header block, derived from deterministic ADK status signals (never age
+    // alone). Pins the four user-facing states end-to-end through the store.
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(38120);
+
+    // Running turn with a fresh live event → `live`.
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use("Bash", &json!({"command": "cargo test"}).to_string()),
+    );
+    events.push_event(
+        channel_id,
+        RecentPlaceholderEvent::tool_use("Bash", &json!({"command": "cargo test"}).to_string())
+            .unwrap(),
+    );
+    let live = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(
+        live.contains("신뢰도: live · 마지막 업데이트"),
+        "running panel must show a live confidence line: {live:?}"
+    );
+
+    // Completion → distinct `final` confidence state (not `live`).
+    events.push_status_event(channel_id, StatusEvent::TurnCompleted { background: false });
+    let done = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(
+        done.contains("신뢰도: final"),
+        "completed panel must show a final confidence line: {done:?}"
+    );
+    assert!(!done.contains("신뢰도: live"));
+
+    // Answer relayed but session-end unconfirmed → corroborated `stale · 조사 권장`.
+    let stale = events.render_terminal_ui_obligation_panel(
+        channel_id,
+        &ProviderKind::Claude,
+        1_700_000_000,
+        TerminalUiObligationPanelStatus::Deadline,
+    );
+    assert!(
+        stale.contains("신뢰도: stale") && stale.contains("조사 권장"),
+        "unconfirmed-delivery panel must show a stale confidence line: {stale:?}"
+    );
+
+    // Delivery done, termination still confirming → ambiguous `상태 불명확`.
+    let pending = events.render_terminal_ui_obligation_panel(
+        channel_id,
+        &ProviderKind::Claude,
+        1_700_000_000,
+        TerminalUiObligationPanelStatus::Pending,
+    );
+    assert!(
+        pending.contains("신뢰도: 상태 불명확"),
+        "pending-delivery panel must show an unknown confidence line: {pending:?}"
+    );
+}
+
+#[test]
 fn status_panel_codex_active_omits_processing_tail_after_recent_block() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(175);
@@ -3662,6 +3720,141 @@ fn status_events_json_async_launch_ack_does_not_close_background_subagent() {
     );
 }
 
+// #3920: a modern async `Agent` launch carries NO `run_in_background` in the
+// tool INPUT — its async-ness is known only from the launch-ack `toolUseResult`
+// (`isAsync`/`status: async_launched`). The slot therefore starts foreground
+// (`background: false`); before #3920 it was dropped at the very next turn
+// boundary, so a long-running background Agent subagent spawned in a prior turn
+// never showed on the status panel (only Bash `run_in_background` tasks did).
+// The launch-ack must PROMOTE the slot to a background subagent so it SURVIVES
+// turn-boundary resets and stays observable for parallel-work monitoring.
+#[test]
+fn status_panel_async_agent_subagent_survives_turn_boundary_after_launch_ack() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_920_001);
+
+    // Spawning turn: Agent tool_use WITHOUT `run_in_background` → foreground slot.
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Agent",
+            &json!({
+                "subagent_type": "general-purpose",
+                "description": "Implement #3897 r4"
+            })
+            .to_string(),
+            Some("toolu_agent_3897"),
+        ),
+    );
+
+    // The async launch-ack (record-level `isAsync`/`async_launched`, no
+    // accounting) arrives as a `user` record on the watcher/json path.
+    events.push_status_events(
+        channel_id,
+        status_events_from_json(&json!({
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_agent_3897",
+                    "is_error": false
+                }]
+            },
+            "toolUseResult": {
+                "isAsync": true,
+                "status": "async_launched",
+                "agentId": "aee5241a0000000",
+                "description": "Implement #3897 r4",
+                "prompt": "...",
+                "outputFile": "...",
+                "canReadOutputFile": true
+            }
+        })),
+    );
+
+    let spawning = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(spawning.contains("Subagents"));
+    assert!(
+        spawning.contains("general-purpose Implement #3897 r4"),
+        "async Agent subagent should render during the spawning turn: {spawning}"
+    );
+
+    // Turn boundary: the next turn resets per-turn content, preserving only
+    // unfinished BACKGROUND residuals (#3386). The promoted slot must survive.
+    events.clear_channel_preserving_footer_residuals(channel_id);
+
+    let next_turn = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_300);
+    let line = next_turn
+        .lines()
+        .find(|line| line.contains("general-purpose Implement #3897 r4"))
+        .unwrap_or_else(|| {
+            panic!("background Agent subagent must survive the turn boundary: {next_turn}")
+        });
+    assert!(
+        next_turn.contains("Subagents"),
+        "the carried background subagent must still render under Subagents: {next_turn}"
+    );
+    assert!(
+        !line.contains('✓') && !line.contains('✗') && !line.contains("Done ("),
+        "the carried background subagent is still running (no terminal marker): {line}"
+    );
+}
+
+// #3920: surfacing the carried background subagent must NOT introduce
+// per-render nondeterminism — the panel text stays byte-identical across
+// heartbeat ticks when no status change occurred (#3477/#3812 invariant).
+#[test]
+fn status_panel_carried_background_subagent_is_heartbeat_stable() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3_920_002);
+
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Agent",
+            &json!({ "subagent_type": "Explore", "description": "Audit #3864" }).to_string(),
+            Some("toolu_agent_3864"),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_json(&json!({
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_agent_3864",
+                    "is_error": false
+                }]
+            },
+            "toolUseResult": { "isAsync": true, "status": "async_launched", "agentId": "a106f023" }
+        })),
+    );
+    events.clear_channel_preserving_footer_residuals(channel_id);
+
+    let first = events.render_status_panel_with_heartbeat(
+        channel_id,
+        &ProviderKind::Claude,
+        1_700_000_000,
+        1_700_000_005,
+    );
+    let second = events.render_status_panel_with_heartbeat(
+        channel_id,
+        &ProviderKind::Claude,
+        1_700_000_000,
+        1_700_000_090,
+    );
+
+    assert!(
+        first.contains("Explore Audit #3864"),
+        "carried background subagent should render: {first}"
+    );
+    assert_eq!(
+        first, second,
+        "panel text must be byte-identical across heartbeat ticks with no status change"
+    );
+}
+
 #[test]
 fn status_panel_async_completion_with_accounting_still_finalizes_subagent() {
     let events = PlaceholderLiveEvents::default();
@@ -6236,5 +6429,239 @@ fn stuck_background_task_slot_dropped_on_turn_boundary_reconciliation() {
             .any(|slot| slot.tool_use_id.as_deref() == Some("fresh-2")),
         "fresh background slot must survive as a residual: {:?}",
         guard.tasks
+    );
+}
+
+// ===========================================================================
+// #3811: deterministic turn anchors on result/status surfaces.
+//
+// The pure `render_request_anchor_line` gating (real-id/guild → link;
+// headless/synthetic/voice/0 → no link) is unit-tested inline in
+// `turn_anchor.rs`. These tests cover the two render surfaces (target tags now
+// on the completion footer, 요청 line prepended first + surviving overflow) and
+// the snapshot lifecycle (preserve-across-turn-reset, clear-on-TUI-direct,
+// clear-on-session-reset). The store-level `render_*` wrappers read the guild id
+// from `load_graceful()`, which is config-dependent in tests, so the request
+// LINK rendering is asserted via the free renderers with an explicit anchor line.
+// ===========================================================================
+
+// A real Discord snowflake (well below the 8e18 synthetic floor).
+const ANCHOR_TEST_USER_MSG_ID: u64 = 1_520_312_799_245_504_542;
+
+#[test]
+fn completion_footer_renders_target_tags_for_dispatch_linked_turn() {
+    // #3811: the result/final surface previously carried NEITHER the request link
+    // NOR the target tags. It must now render the 대상 tags from the existing task
+    // snapshot even with no Tasks/Subagents content.
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(3811);
+    assert!(events.set_task_panel_info(
+        channel_id,
+        TaskPanelInfo {
+            dispatch_id: "bddc480d-43d1-4f1f-b3fd-e0d96b3b3d82",
+            dispatch_type: Some("review"),
+            card_title: Some("Fix CI inventory drift"),
+            github_issue_number: Some(3805),
+            ..Default::default()
+        },
+    ));
+
+    let rendered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let block = rendered
+        .block
+        .expect("dispatch-linked footer should render the target tags");
+    assert!(block.contains("gh#3805"), "missing issue tag: {block:?}");
+    assert!(
+        block.contains("dsp #bddc480d"),
+        "missing dispatch tag: {block:?}"
+    );
+}
+
+#[test]
+fn completion_footer_free_renderer_prepends_request_anchor_and_target() {
+    // Anchor leads, then the 대상 target tags — both on the result surface. The
+    // snapshot is built through the store (its fields are module-private) and
+    // cloned out so the free renderer can be exercised with an explicit anchor.
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(38114);
+    assert!(events.set_task_panel_info(
+        channel_id,
+        TaskPanelInfo {
+            dispatch_id: "d_abc12345",
+            dispatch_type: Some("review"),
+            card_title: Some("Fix CI inventory drift"),
+            github_issue_number: Some(3805),
+            ..Default::default()
+        },
+    ));
+    let snapshot = events
+        .status_by_channel
+        .get(&channel_id)
+        .expect("status panel state")
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    let render = super::completion_footer::render_completion_footer(
+        snapshot,
+        &ProviderKind::Claude,
+        "⠸",
+        Some("요청: https://discord.com/channels/1/2/3".to_string()),
+    );
+    let block = render
+        .block
+        .expect("anchor + target should render on the result surface");
+    assert!(
+        block.starts_with("요청: https://discord.com/channels/1/2/3"),
+        "request anchor must lead the footer: {block:?}"
+    );
+    assert!(
+        block.contains("gh#3805"),
+        "missing target issue tag: {block:?}"
+    );
+    assert!(
+        block.contains("dsp #d"),
+        "missing target dispatch tag: {block:?}"
+    );
+}
+
+#[test]
+fn completion_footer_free_renderer_omits_anchor_and_target_when_absent() {
+    // Missing metadata → no block at all (omitted fields, not placeholder noise).
+    let render = super::completion_footer::render_completion_footer(
+        StatusPanelState::default(),
+        &ProviderKind::Claude,
+        "⠸",
+        None,
+    );
+    assert!(
+        render.block.is_none(),
+        "absent anchor/target/content must yield no footer noise: {:?}",
+        render.block
+    );
+}
+
+#[test]
+fn status_panel_free_renderer_keeps_request_anchor_first_on_overflow() {
+    // Long-message split: the 요청 anchor is the FIRST section, so it survives the
+    // trailing-section overflow trim on the first visible status surface.
+    let huge_recent = "X".repeat(STATUS_PANEL_MAX_CHARS + 400);
+    let out = super::status_panel::render_status_panel(
+        StatusPanelState::default(),
+        Some(huge_recent.clone()),
+        &ProviderKind::Claude,
+        1_700_000_000,
+        1_700_000_000,
+        true,
+        Some("요청: https://discord.com/channels/1/2/3".to_string()),
+        None,
+    );
+    assert!(
+        out.starts_with("요청: https://discord.com/channels/1/2/3"),
+        "anchor must lead the panel: {out:?}"
+    );
+    assert!(
+        out.chars().count() <= STATUS_PANEL_MAX_CHARS,
+        "panel must respect the size cap"
+    );
+    assert!(
+        !out.contains(&huge_recent),
+        "the oversized trailing section must be trimmed, not the anchor"
+    );
+}
+
+#[test]
+fn turn_request_anchor_survives_turn_reset() {
+    // #3811 lifecycle: an intake-set anchor must survive the bridge's same-turn
+    // reset (no footer residuals), otherwise the entry+anchor would be dropped
+    // before the turn renders its request link.
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(38111);
+    events.set_turn_request_anchor(channel_id, Some(ANCHOR_TEST_USER_MSG_ID));
+    events.clear_channel_preserving_footer_residuals(channel_id);
+    assert_eq!(
+        events.request_user_msg_id_for_test(channel_id),
+        Some(ANCHOR_TEST_USER_MSG_ID),
+        "anchor must be preserved across the turn-content reset"
+    );
+}
+
+#[test]
+fn turn_request_anchor_not_bled_by_queued_message_before_promotion() {
+    // #3811 P1 regression (codex review): the intake setter is gated on
+    // `started == true` (the mailbox claim was WON). A message that merely QUEUES
+    // behind an active turn issues NO setter call, so it cannot overwrite the
+    // active turn's deeplink; it records its own anchor only when later
+    // dequeued/promoted (re-entering intake with `started == true`). This pins the
+    // store-side contract that gating relies on: the anchor changes ONLY on an
+    // explicit setter call, and survives the active turn's same-turn bridge reset.
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(38115);
+    let turn_a_msg = 1_520_000_000_000_000_001u64;
+    let turn_b_msg = 1_520_000_000_000_000_777u64;
+
+    // Turn A wins the claim (started == true) and records its anchor; the bridge
+    // then runs A's same-turn reset, which preserves it.
+    events.set_turn_request_anchor(channel_id, Some(turn_a_msg));
+    events.clear_channel_preserving_footer_residuals(channel_id);
+    assert_eq!(
+        events.request_user_msg_id_for_test(channel_id),
+        Some(turn_a_msg)
+    );
+
+    // Message B arrives while A is active and only QUEUES (started == false):
+    // intake issues NO setter call, so A's anchor stays put (no cross-turn bleed).
+    assert_eq!(
+        events.request_user_msg_id_for_test(channel_id),
+        Some(turn_a_msg),
+        "a queued message must not bleed the active turn's anchor"
+    );
+
+    // B is later dequeued/promoted (started == true) and records its own anchor.
+    events.set_turn_request_anchor(channel_id, Some(turn_b_msg));
+    assert_eq!(
+        events.request_user_msg_id_for_test(channel_id),
+        Some(turn_b_msg),
+        "promotion updates the anchor to the now-active turn"
+    );
+}
+
+#[test]
+fn turn_request_anchor_cleared_on_tui_direct() {
+    // The TUI-direct path passes `None` so a prior interactive link can never leak
+    // onto a later id-0 synthetic turn.
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(38112);
+    events.set_turn_request_anchor(channel_id, Some(ANCHOR_TEST_USER_MSG_ID));
+    events.set_turn_request_anchor(channel_id, None);
+    assert_eq!(events.request_user_msg_id_for_test(channel_id), None);
+}
+
+#[test]
+fn turn_request_anchor_cleared_on_session_reset() {
+    // A genuine provider-session boundary is a new request context → drop the
+    // prior turn's anchor.
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(38113);
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some("AgentDesk-claude-ch38113#100"),
+        "session_resumed",
+        &json!({ "provider_session_id": "session-A", "tmux_reused": true }),
+    ));
+    events.set_turn_request_anchor(channel_id, Some(ANCHOR_TEST_USER_MSG_ID));
+    assert_eq!(
+        events.request_user_msg_id_for_test(channel_id),
+        Some(ANCHOR_TEST_USER_MSG_ID)
+    );
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some("AgentDesk-claude-ch38113#200"),
+        "session_fresh",
+        &json!({ "provider_session_id": "session-B", "tmux_reused": false }),
+    ));
+    assert_eq!(
+        events.request_user_msg_id_for_test(channel_id),
+        None,
+        "anchor must be cleared on the session boundary"
     );
 }

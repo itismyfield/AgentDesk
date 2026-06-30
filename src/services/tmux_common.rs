@@ -8,6 +8,11 @@ use crate::services::tmux_diagnostics::clear_tmux_exit_reason;
 const CLAUDE_TUI_READY_SCAN_LINES: usize = 12;
 const CLAUDE_TUI_ACTIVE_SCAN_LINES: usize = 24;
 const CLAUDE_TUI_DRAFT_SCAN_LINES: usize = 36;
+/// Recent non-empty pane lines scanned for the MCP-authentication-required
+/// cold-boot banner. The warning renders just above the composer on a fresh
+/// boot, so a modest tail window captures it reliably while keeping older
+/// scrollback that merely mentions "authentication" from false-positiving.
+const CLAUDE_TUI_MCP_AUTH_SCAN_LINES: usize = 16;
 const CLAUDE_TUI_READY_BANNER: &str = "Ready for input (type message + Enter)";
 const CLAUDE_TUI_PROMPT_MARKER: &str = "\u{276f}";
 
@@ -45,6 +50,28 @@ fn tmux_lines_after_claude_prompt_show_completed_history(lines: &[&str]) -> bool
             || line.contains("Crunched for")
             || line.contains("Cogitated for")
             || nonzero_tool_summary
+    })
+}
+
+/// #3924: genuine ASSISTANT RESPONSE output after a prompt line — the
+/// `⏺`/`✻ <verb>` response/thinking markers, but NOT the `Tools: N done` footer.
+///
+/// This is `..._show_completed_history` minus its `nonzero_tool_summary` clause.
+/// A STRANDED follow-up draft renders the PREVIOUS (finished) turn's idle footer
+/// directly below it — including that turn's `Tools: N done` — so the broad
+/// completed-history check (which counts `Tools: N>0 done`) would treat the idle
+/// footer as "this prompt produced output" and hide the stranded draft. Keying
+/// stranded-detection on actual response glyphs avoids that: a dropped-Enter
+/// draft has none below it; a genuinely-submitted prompt does.
+fn tmux_lines_after_claude_prompt_show_response_output(lines: &[&str]) -> bool {
+    lines.iter().any(|line| {
+        let line = trim_prompt_line(line);
+        line.starts_with('⏺')
+            || line.starts_with("✻ ")
+            || line.contains("Baked for")
+            || line.contains("Brewed for")
+            || line.contains("Crunched for")
+            || line.contains("Cogitated for")
     })
 }
 
@@ -389,6 +416,48 @@ pub(crate) fn tmux_capture_indicates_claude_tui_idle_suggestion(capture: &str) -
         .unwrap_or(false)
 }
 
+/// True for the Claude Code cold-boot banner reporting one or more MCP servers
+/// still need authentication, e.g. `⚠ 1 MCP server needs authentication · run
+/// /mcp`. The banner paints on the post-launch welcome screen (commonly when a
+/// remote SSE server failed to authenticate), which still renders normal
+/// composer chrome — so `..._ready_for_input` reads it as READY even though
+/// Claude Code silently drops every submission until `/mcp` is run. The
+/// claude_tui readiness gate uses this to refuse that false-ready and fail fast
+/// with an actionable reason instead of blind-waiting/retrying (#3889).
+pub(crate) fn tmux_capture_indicates_claude_tui_mcp_auth_required(capture: &str) -> bool {
+    let non_empty = capture
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect::<Vec<_>>();
+    let start = non_empty
+        .len()
+        .saturating_sub(CLAUDE_TUI_MCP_AUTH_SCAN_LINES);
+    non_empty[start..]
+        .iter()
+        .any(|line| line_is_mcp_auth_required_warning(line))
+}
+
+/// One pane line is the MCP-auth-needed warning only when it is Claude Code's
+/// system warning banner — **anchored to the `⚠` glyph** (`⚠ N MCP server(s)
+/// need authentication · run /mcp`) AND naming MCP + authentication + (`need` |
+/// `run /mcp`). The `⚠` anchor is load-bearing: assistant/tool transcript output
+/// (lines beginning `⏺`/`✻`, or continuation prose) can say "The MCP server needs
+/// authentication; run /mcp ..." above a perfectly ready composer, so token
+/// presence alone must NOT match — only the chrome glyph the system banner
+/// carries does (#3889 Codex review [1]).
+fn line_is_mcp_auth_required_warning(line: &str) -> bool {
+    let trimmed = trim_prompt_line(line);
+    // Anchor to the system warning banner glyph (U+26A0). `starts_with` matches
+    // regardless of a trailing emoji variation selector (`⚠️`, U+FE0F).
+    if !trimmed.starts_with('\u{26a0}') {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    lower.contains("mcp")
+        && lower.contains("authentic")
+        && (lower.contains("need") || lower.contains("run /mcp"))
+}
+
 fn tmux_recent_lines_show_claude_tui_active_work(lines: &[&str]) -> bool {
     lines.iter().any(|line| {
         let line = trim_prompt_line(line);
@@ -430,13 +499,24 @@ pub(crate) fn tmux_capture_claude_tui_prompt_draft_backspace_budget(
             if !trim_prompt_line(line).starts_with(CLAUDE_TUI_PROMPT_MARKER) {
                 return None;
             }
+            let after_prompt = &recent[index + 1..];
             if !tmux_line_is_claude_tui_prompt_draft(line) {
-                return Some(None);
+                // A `❯ [User: …] …` line is normally submitted Discord history
+                // (its Enter landed, so it is pane scrollback, not a composer
+                // draft). But #3924: the SAME shape can be a STRANDED follow-up
+                // whose submit Enter was DROPPED — it then sits in the composer
+                // below a finished-turn block under ONLY idle-suggestion chrome.
+                // Pure capture text cannot finally separate the two; recognizing
+                // the stranded SHAPE here lets the recovery net's authoritative
+                // JSONL transcript cross-check (Idle/Unknown vs running) decide.
+                return Some(claude_tui_stranded_followup_draft_backspace_budget(
+                    line,
+                    after_prompt,
+                ));
             }
             // Claude keeps submitted prompt lines in the pane history. If the
             // prompt line is followed by rendered assistant/completion output,
             // it is historical text, not an editable composer draft.
-            let after_prompt = &recent[index + 1..];
             if tmux_lines_after_claude_prompt_show_completed_history(after_prompt)
                 || tmux_lines_after_claude_prompt_show_idle_suggestion_chrome(after_prompt)
             {
@@ -445,6 +525,70 @@ pub(crate) fn tmux_capture_claude_tui_prompt_draft_backspace_budget(
             Some(claude_tui_prompt_draft_backspace_budget_from_line(line))
         })
         .unwrap_or(None)
+}
+
+/// #3924: budget to clear a STRANDED Discord follow-up draft, or `None` when the
+/// `❯ [User: …] …` line is genuine submitted history rather than a dropped-Enter
+/// draft.
+///
+/// The recovery-net false-negative this guards against: a follow-up whose submit
+/// Enter was dropped leaves `❯ [User: …] <text>` editable in the composer,
+/// directly below a finished previous-turn block, surrounded by idle-suggestion
+/// chrome — visually identical to a post-finish idle ghost. The bare `[User:]`
+/// exclusion in `tmux_line_is_claude_tui_prompt_draft` (which keeps SUBMITTED
+/// history from blocking readiness) misclassifies that stranded draft as
+/// no-draft, so the recovery net never fires and the turn is killed at 120s.
+///
+/// Capture text alone CANNOT separate a stranded draft from a freshly-submitted
+/// still-running turn: a `Tools: 0 done` footer renders for BOTH a just-started
+/// turn AND a FINISHED 0-tool turn, so it is not a usable running signal (#3924
+/// codex re-review — keying the guard on it re-introduced the false-negative for
+/// a stranded draft below a finished 0-tool turn). This is therefore a
+/// CONSERVATIVE SHAPE gate only — it fires for a `[User:]` line that
+/// (1) sits under idle-suggestion chrome (separator + idle footer), and
+/// (2) has produced NO assistant RESPONSE output (`⏺`/`✻`) below it.
+/// It deliberately does NOT decide running-vs-stranded from the footer. The
+/// recovery net (`claude_tui_followup_stranded_prompt_draft_state`) makes that
+/// call from the AUTHORITATIVE JSONL transcript turn-state: Idle/Unknown (no
+/// in-progress turn) ⇒ stranded, recover; a running/in-progress turn ⇒ NOT
+/// recovered. The submit-confirmation Enter-retry path is independently gated by
+/// `..._ready_for_input` (false on any `Tools: 0 done` pane via its own
+/// freshly-submitted guard), so promoting this shape to a draft cannot
+/// double-submit a live turn there either.
+fn claude_tui_stranded_followup_draft_backspace_budget(
+    line: &str,
+    after_prompt: &[&str],
+) -> Option<usize> {
+    let rest = trim_prompt_line(line)
+        .strip_prefix(CLAUDE_TUI_PROMPT_MARKER)?
+        .trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{00a0}');
+    // Only AgentDesk-injected `[User: …]` text is recoverable this way; an empty
+    // composer or a non-injected suggestion ghost is handled by the normal path.
+    if !rest
+        .get(..6)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("[User:"))
+    {
+        return None;
+    }
+    // A genuine stranded draft sits under ONLY idle-suggestion chrome. (That
+    // chrome detector already returns false when a live busy/spinner marker —
+    // `esc to interrupt`/processing/thinking/running — is present, so a visibly
+    // streaming turn is excluded here without depending on the tool footer.)
+    if !tmux_lines_after_claude_prompt_show_idle_suggestion_chrome(after_prompt) {
+        return None;
+    }
+    // Assistant RESPONSE output after the line means it actually submitted AND
+    // produced output (pane history), not a dropped-Enter draft. NOTE: key on
+    // response glyphs (`..._show_response_output`), NOT the broad completed-
+    // history check — the `Tools: N done` count in the idle footer below a
+    // stranded draft belongs to the PREVIOUS finished turn, and a finished
+    // 0-tool prior turn's `Tools: 0 done` must NOT hide the draft.
+    if tmux_lines_after_claude_prompt_show_response_output(after_prompt) {
+        return None;
+    }
+    // Budget covers the whole injected line (`[User: …] <text>`) plus a margin so
+    // the clear erases the entire stranded draft.
+    Some(rest.chars().count().saturating_add(4).min(512))
 }
 
 pub(crate) fn claude_tui_prompt_draft_backspace_budget_from_line(line: &str) -> Option<usize> {
@@ -1022,6 +1166,113 @@ Claude Code v2.1.141
 }
 
 #[cfg(test)]
+mod mcp_auth_required_tests {
+    use super::*;
+
+    /// The exact fresh-boot screen from #3889: a welcome box, the
+    /// `⚠ N MCP server needs authentication · run /mcp` warning, and a composer
+    /// that paints the usual separator + bypass-permissions footer. The composer
+    /// chrome means `..._ready_for_input` reads this as READY, so the dedicated
+    /// MCP-auth detector is what keeps the readiness gate from false-submitting
+    /// into it.
+    #[test]
+    fn detects_cold_boot_mcp_auth_welcome_screen() {
+        let pane = "\
+╭─── Claude Code v2.1.195 ───────────────────────────╮
+│            Welcome back 오부장!                    │
+│   Opus 4.8 (1M context) · Claude Max               │
+│   ~/.adk/release/workspaces/ch-ad                  │
+╰────────────────────────────────────────────────────
+
+ ⚠ 1 MCP server needs authentication · run /mcp
+
+────────────────────────────────────────────────────
+❯ [Pasted text #1 +59 lines]
+────────────────────────────────────────────────────
+  🤖 Opus(H) │ 0% │ MCP: 2 │ ⏵⏵ bypass permissions on";
+
+        // The composer chrome makes the legacy readiness predicate read READY...
+        assert!(tmux_capture_indicates_claude_tui_ready_for_input(pane));
+        // ...but the MCP-auth detector flags it so the readiness gate refuses it.
+        assert!(tmux_capture_indicates_claude_tui_mcp_auth_required(pane));
+    }
+
+    /// Plural copy (`N MCP servers need authentication`) must still match.
+    #[test]
+    fn detects_plural_servers_need_authentication() {
+        let pane = "\
+ ⚠ 2 MCP servers need authentication · run /mcp
+────────────────────────────────────────────────────
+❯
+  🤖 Opus(H) │ 0% │ MCP: 3 │ ⏵⏵ bypass permissions on";
+
+        assert!(tmux_capture_indicates_claude_tui_mcp_auth_required(pane));
+    }
+
+    /// A genuinely ready, empty composer with all MCP servers connected must NOT
+    /// be flagged — the footer mentions `MCP: 2` but never "authentication".
+    #[test]
+    fn ignores_normal_ready_composer_with_connected_mcp() {
+        let pane = "\
+Claude Code v2.1.195
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  🤖 Opus(H) │ 0% │ MCP: 2 │ ⏵⏵ bypass permissions on";
+
+        assert!(tmux_capture_indicates_claude_tui_ready_for_input(pane));
+        assert!(!tmux_capture_indicates_claude_tui_mcp_auth_required(pane));
+    }
+
+    /// Prose that mentions only one of the tokens (e.g. an assistant message
+    /// talking about MCP, or about authentication generally) must not trip the
+    /// detector — all of MCP + authentication + (need | run /mcp) are required.
+    #[test]
+    fn ignores_partial_token_prose() {
+        let mcp_only = "⏺ I configured the MCP server list in settings.";
+        assert!(!tmux_capture_indicates_claude_tui_mcp_auth_required(
+            mcp_only
+        ));
+
+        let auth_only = "⏺ The API needs authentication via a bearer token.";
+        assert!(!tmux_capture_indicates_claude_tui_mcp_auth_required(
+            auth_only
+        ));
+    }
+
+    /// Codex review #3931 [1] (over-block regression): an assistant transcript
+    /// line that contains ALL the tokens (`mcp` + `authentication` + `run /mcp`)
+    /// but sits as `⏺` output above a genuinely ready composer must NOT be
+    /// classified as MCP-auth-blocked — only the system `⚠` warning banner is.
+    #[test]
+    fn ignores_assistant_prose_with_all_tokens_above_ready_composer() {
+        let pane = "\
+Claude Code v2.1.195
+⏺ The MCP server needs authentication; run /mcp to reconnect it, then retry.
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  🤖 Opus(H) │ 0% │ MCP: 2 │ ⏵⏵ bypass permissions on";
+
+        // The composer is genuinely ready...
+        assert!(tmux_capture_indicates_claude_tui_ready_for_input(pane));
+        // ...and the all-token assistant prose above it must not block it.
+        assert!(!tmux_capture_indicates_claude_tui_mcp_auth_required(pane));
+
+        // The real system banner with the same tokens IS blocked — the `⚠`
+        // chrome glyph is the only difference.
+        let banner = "\
+Claude Code v2.1.195
+ ⚠ 1 MCP server needs authentication · run /mcp
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  🤖 Opus(H) │ 0% │ MCP: 2 │ ⏵⏵ bypass permissions on";
+        assert!(tmux_capture_indicates_claude_tui_mcp_auth_required(banner));
+    }
+}
+
+#[cfg(test)]
 mod sentinel_tests {
     use super::*;
 
@@ -1309,6 +1560,129 @@ assistant output
             None
         );
         assert!(tmux_capture_indicates_claude_tui_idle_suggestion(capture));
+    }
+
+    #[test]
+    fn claude_prompt_draft_detector_recovers_stranded_followup_below_finished_block() {
+        // #3924 (a): turn1 finished, turn2's `[User:]` follow-up Enter was
+        // DROPPED, so it sits editable in the composer below the finished block
+        // under idle-suggestion chrome. The bare `[User:]` exclusion previously
+        // misclassified this as no-draft (idle ghost), so the recovery net never
+        // fired and the turn was killed at 120s. It must now read as a DRAFT.
+        let capture = "\
+❯ [User: 0hbujang (ID: 343742347365974026)] previous prompt
+⏺ previous response
+✻ Brewed for 2s
+─────────────────────────────────────────────────────────────────────────────
+❯ [User: 0hbujang (ID: 343742347365974026)] follow-up whose Enter was dropped
+─────────────────────────────────────────────────────────────────────────────
+  🤖 Opus(H) │ █░░░░░░░░░ │ 7%
+  CLAUDE.md: 1, MCP: 2 │ Tools: 4 done
+  ⏵⏵ bypass permissions on";
+
+        assert!(tmux_capture_indicates_claude_tui_prompt_draft(capture));
+        assert!(tmux_capture_claude_tui_prompt_draft_backspace_budget(capture).is_some());
+        // A stranded draft is NOT an idle suggestion — the two readings must not
+        // both be true, or downstream readiness/recovery would contradict.
+        assert!(!tmux_capture_indicates_claude_tui_idle_suggestion(capture));
+    }
+
+    #[test]
+    fn claude_prompt_draft_detector_recovers_stranded_followup_below_zero_tool_block() {
+        // #3924 codex re-review: the previously-MISSED shape. turn1 finished
+        // having run ZERO tools — it still renders a `Tools: 0 done` footer — and
+        // turn2's `[User:]` follow-up Enter was DROPPED below it. An earlier
+        // attempt keyed the running-guard on `Tools: 0 done`, which a finished
+        // 0-tool turn ALSO prints, so the stranded draft was hidden again. The
+        // capture-side detector must now read this as a DRAFT (the recovery net's
+        // JSONL transcript check, not the footer, decides running-vs-stranded).
+        let capture = "\
+❯ [User: 0hbujang (ID: 343742347365974026)] previous prompt
+⏺ acknowledged, nothing to run
+✻ Brewed for 1s
+─────────────────────────────────────────────────────────────────────────────
+❯ [User: 0hbujang (ID: 343742347365974026)] follow-up whose Enter was dropped
+─────────────────────────────────────────────────────────────────────────────
+  🤖 Opus(H) │ █░░░░░░░░░ │ 7%
+  CLAUDE.md: 1, MCP: 2 │ Tools: 0 done
+  ⏵⏵ bypass permissions on";
+
+        assert!(tmux_capture_indicates_claude_tui_prompt_draft(capture));
+        assert!(tmux_capture_claude_tui_prompt_draft_backspace_budget(capture).is_some());
+        assert!(!tmux_capture_indicates_claude_tui_idle_suggestion(capture));
+    }
+
+    #[test]
+    fn claude_prompt_draft_detector_keeps_idle_ghost_below_finished_block_as_not_draft() {
+        // #3924 (b): the genuine idle ghost — a finished turn left a non-injected
+        // suggestion line in the composer below the finished block. It carries NO
+        // `[User:]` injection marker, so it is leftover chrome, not a recoverable
+        // dropped-Enter draft. It must stay NOT-a-draft / idle-suggestion.
+        let capture = "\
+⏺ TUI-E2E marker
+✻ Worked for 2s
+────────────────────────────────────────────────────────────────────────────
+❯\u{00a0}좋아, 잘 동작하네
+────────────────────────────────────────────────────────────────────────────
+  🤖 Opus(H) │ ░░░░░░░░░░ │ 4%
+  CLAUDE.md: 1, MCP: 2 │ Tools: 0 done
+  ⏵⏵ bypass permissions on";
+
+        assert!(!tmux_capture_indicates_claude_tui_prompt_draft(capture));
+        assert_eq!(
+            tmux_capture_claude_tui_prompt_draft_backspace_budget(capture),
+            None
+        );
+        assert!(tmux_capture_indicates_claude_tui_idle_suggestion(capture));
+    }
+
+    #[test]
+    fn claude_prompt_draft_detector_ignores_visibly_running_user_turn_with_spinner() {
+        // #3924 codex re-review: a `[User:]` turn that is VISIBLY running shows a
+        // live busy marker (`esc to interrupt`/spinner), which the idle-suggestion
+        // chrome detector's busy guard excludes — so the capture-side detector
+        // correctly reads NO draft here WITHOUT depending on the `Tools: 0 done`
+        // footer (which is ambiguous between running and finished-0-tool). The
+        // no-spinner `Tools: 0 done` running window that the pane CANNOT resolve
+        // is instead disambiguated by the JSONL transcript in the recovery net —
+        // see the claude.rs `freshly_submitted_*` recovery test.
+        let capture = "\
+⏺ previous response
+✻ Brewed for 2s
+─────────────────────────────────────────────────────────────────────────────
+❯ [User: 0hbujang (ID: 343742347365974026)] follow-up that just submitted
+─────────────────────────────────────────────────────────────────────────────
+· Actioning… (3s · esc to interrupt)
+  CLAUDE.md: 1, MCP: 2 │ Tools: 0 done
+  ⏵⏵ bypass permissions on";
+
+        assert!(!tmux_capture_indicates_claude_tui_prompt_draft(capture));
+        assert_eq!(
+            tmux_capture_claude_tui_prompt_draft_backspace_budget(capture),
+            None
+        );
+    }
+
+    #[test]
+    fn claude_prompt_draft_detector_ignores_submitted_user_history_with_completed_output() {
+        // #3924 guard: a `[User:]` turn that submitted AND produced output is pane
+        // history, not a stranded draft. Completed-history output below the line
+        // (`⏺`/`✻ Brewed`) must keep it NOT-a-draft so readiness is not blocked.
+        let capture = "\
+✻ Crunched for 32s
+─────────────────────────────────────────────────────────────────────────────
+❯ [User: 0hbujang (ID: 343742347365974026)] earlier follow-up
+⏺ handled it
+✻ Baked for 2s
+─────────────────────────────────────────────────────────────────────────────
+  CLAUDE.md: 1, MCP: 2 │ Tools: 3 done
+  ⏵⏵ bypass permissions on";
+
+        assert!(!tmux_capture_indicates_claude_tui_prompt_draft(capture));
+        assert_eq!(
+            tmux_capture_claude_tui_prompt_draft_backspace_budget(capture),
+            None
+        );
     }
 
     #[test]

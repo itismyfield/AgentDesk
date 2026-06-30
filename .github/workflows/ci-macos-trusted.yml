@@ -158,6 +158,19 @@ jobs:
     # at 45 min — comfortably above observed cold-sccache build+test durations
     # while still freeing the host for the live control plane on a stall.
     timeout-minutes: 45
+    # CPU headroom for the co-located operational Postgres (see #3658). This
+    # self-hosted runner shares the Mac mini (M4 Pro, 12-14 cores) with the
+    # production Postgres + a dcserver worker node, so an unbounded parallel
+    # cargo build saturated every core and starved Postgres → cluster-wide pool
+    # acquire timeouts. Cap cargo's parallel build units at 8 to leave >=4 cores
+    # for Postgres + the control plane. This only bounds peak CPU; it cannot
+    # break the build, only slow it slightly on a cold cache. The heavy cargo
+    # steps below are additionally wrapped in `nice -n 10` so Postgres (default
+    # nice 0, or raised per the #3658 host step) always preempts CI under
+    # contention. Zero-cost mitigation (Option B); does not change any required
+    # check or correctness gate.
+    env:
+      CARGO_BUILD_JOBS: "8"
     steps:
       - name: Trusted event / runner sanity check
         shell: bash
@@ -231,22 +244,25 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-trusted-macos-
 
+      # `nice -n 10` (lower scheduling priority) on the CPU-heavy cargo steps so
+      # the co-located production Postgres preempts CI under contention (#3658,
+      # Option B). `nice` only de-prioritizes; it cannot fail the build.
       - name: cargo check
-        run: cargo check --all-targets
+        run: nice -n 10 cargo check --all-targets
 
       - name: cargo test (non-PG, targeted subset)
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --all-targets transition -- --skip _pg --skip pg_ --skip postgres --test-threads=1
-          cargo test --all-targets auto_queue -- --skip _pg --skip pg_ --skip postgres
-          cargo test --all-targets cancel -- --skip _pg --skip pg_ --skip postgres
-          cargo test --all-targets review_decision -- --skip _pg --skip pg_ --skip postgres
-          cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
+          nice -n 10 cargo test --all-targets transition -- --skip _pg --skip pg_ --skip postgres --test-threads=1
+          nice -n 10 cargo test --all-targets auto_queue -- --skip _pg --skip pg_ --skip postgres
+          nice -n 10 cargo test --all-targets cancel -- --skip _pg --skip pg_ --skip postgres
+          nice -n 10 cargo test --all-targets review_decision -- --skip _pg --skip pg_ --skip postgres
+          nice -n 10 cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
 
       - name: Fresh user portable smoke
         shell: bash
-        run: bash scripts/ci-macos-fresh-user-smoke.sh
+        run: nice -n 10 bash scripts/ci-macos-fresh-user-smoke.sh
 
       - name: sccache stats
         if: always()

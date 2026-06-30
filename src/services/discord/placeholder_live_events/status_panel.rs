@@ -4,8 +4,8 @@ use crate::services::provider::ProviderKind;
 use super::common::{
     EVENT_LINE_MAX_CHARS, STATUS_PANEL_MAX_CHARS, STATUS_PANEL_SUBAGENT_LIMIT,
     STATUS_PANEL_TASK_LIMIT, STATUS_PANEL_TODO_LIMIT, STATUS_PANEL_WORKFLOW_LIMIT,
-    escape_status_panel_markdown, normalize_summary, sanitized_tool_name, tool_prefix,
-    truncate_chars, truncate_chars_with_marker,
+    escape_status_panel_markdown, normalize_summary, sanitized_tool_name, truncate_chars,
+    truncate_chars_with_marker,
 };
 use super::completion_footer::compact_live_panel_terminal_lines;
 use super::context_panel::{ContextPanelSnapshot, render_context_panel_line};
@@ -95,6 +95,9 @@ pub(super) struct StatusPanelState {
     // #3477 item 3: instant the turn entered `Completed` (None until then); vs the
     // store's `last_recent_event_at` it gates the late-batch 🖥️ Recent freshness.
     pub(super) completed_at: Option<std::time::Instant>,
+    // #3811: intake-set original-request user_msg_id; drives the `요청:` deeplink
+    // (`None` for headless/synthetic/voice/id-0 — no real Discord message).
+    pub(super) request_user_msg_id: Option<u64>,
 }
 
 impl StatusPanelState {
@@ -108,6 +111,7 @@ impl StatusPanelState {
         self.subagents.clear();
         self.workflows.clear();
         self.completed_at = None; // #3477 item 3: drop the stale freshness gate.
+        self.request_user_msg_id = None; // #3811: new session = new request context.
     }
 
     pub(super) fn reset_turn_content_preserving_unfinished_footer_residuals(&mut self) -> bool {
@@ -133,6 +137,7 @@ impl StatusPanelState {
             subagents,
             // #3391: carry the counter so a residual ordinal is never reissued.
             next_slot_ordinal: self.next_slot_ordinal,
+            request_user_msg_id: self.request_user_msg_id, // #3811: survive turn reset
             ..StatusPanelState::default()
         };
         has_residuals
@@ -160,25 +165,39 @@ impl StatusPanelState {
                 tool_use_id,
                 background,
             } => {
-                let desc = desc
-                    .filter(|value| !value.trim().is_empty())
-                    .unwrap_or_else(|| "subagent".to_string());
-                let subagent_type = subagent_type
-                    .filter(|value| !value.trim().is_empty())
-                    .unwrap_or_else(|| "Task".to_string());
+                // #3920: keep "was a real value provided?" BEFORE defaulting, so a
+                // background-promotion re-affirmation (an async launch ack carries
+                // no desc/type) never overwrites the launching slot's real
+                // description with the `subagent`/`Task` placeholders.
+                let provided_desc = desc.filter(|value| !value.trim().is_empty());
+                let provided_type = subagent_type.filter(|value| !value.trim().is_empty());
+                // A background `SubagentStart` re-affirms (and #3920: PROMOTES) the
+                // still-running slot for this tool-use id. Matching ANY unfinished
+                // slot — not only an already-background one — lets an async/
+                // `run_in_background` Agent launch (whose async-ness is known only
+                // from the launch-ack `toolUseResult`, not the tool INPUT) flip its
+                // foreground-looking slot to a background subagent. That keeps it
+                // alive across turn-boundary resets like a Bash `run_in_background`
+                // task, instead of being dropped a turn later (#3920).
                 if background
                     && let Some(id) = tool_use_id.as_deref().filter(|id| !id.trim().is_empty())
                     && let Some(slot) = self.subagents.iter_mut().rev().find(|slot| {
-                        slot.background
-                            && slot.finished.is_none()
-                            && slot.tool_use_id.as_deref() == Some(id)
+                        slot.finished.is_none() && slot.tool_use_id.as_deref() == Some(id)
                     })
                 {
-                    slot.subagent_type = subagent_type;
-                    slot.desc = desc.clone();
-                    self.status = DerivedStatus::SubagentRunning { desc };
+                    slot.background = true;
+                    if let Some(subagent_type) = provided_type {
+                        slot.subagent_type = subagent_type;
+                    }
+                    if let Some(desc) = provided_desc {
+                        slot.desc = desc;
+                    }
+                    let running_desc = slot.desc.clone();
+                    self.status = DerivedStatus::SubagentRunning { desc: running_desc };
                     return;
                 }
+                let desc = provided_desc.unwrap_or_else(|| "subagent".to_string());
+                let subagent_type = provided_type.unwrap_or_else(|| "Task".to_string());
                 let ordinal = take_slot_ordinal(&mut self.next_slot_ordinal);
                 self.subagents.push(SubagentSlot {
                     subagent_type,
@@ -446,6 +465,8 @@ pub(super) fn render_status_panel(
     // #3477 item 3: live batch arrived AFTER `completed_at` → a Completed turn
     // keeps 🖥️ Recent (late batch not blanked; stale idle block still dropped).
     live_content_fresh: bool,
+    request_anchor_line: Option<String>, // #3811: precomputed `요청:` line, or `None`
+    confidence_line: Option<String>,     // #3812: precomputed live/stale confidence line
 ) -> String {
     let header_status = if matches!(provider, ProviderKind::Codex)
         && matches!(snapshot.status, DerivedStatus::SubagentRunning { .. })
@@ -454,11 +475,15 @@ pub(super) fn render_status_panel(
     } else {
         snapshot.status.clone()
     };
-    let mut sections = vec![format!(
-        "{} — {} (<t:{started_at_unix}:R>)",
-        render_derived_status(&header_status),
-        provider.as_str()
+    // #3812: header + freshness confidence line built in the colocated `freshness`
+    // module (status_panel.rs is at the namespace cap — keep it to the call site).
+    let mut sections = vec![super::freshness::render_status_header(
+        &header_status,
+        provider,
+        started_at_unix,
+        confidence_line.as_deref(),
     )];
+    super::turn_anchor::prepend_request_anchor(&mut sections, request_anchor_line); // #3811
 
     if let Some(session) = snapshot.session.as_ref() {
         sections.push(render_session_panel_line(session, provider));
@@ -592,39 +617,6 @@ pub(super) fn render_recent_section_header(
     match owner {
         Some(owner) => format!("🖥️ Recent ({})", escape_status_panel_markdown(owner)),
         None => "🖥️ Recent".to_string(),
-    }
-}
-
-fn render_derived_status(status: &DerivedStatus) -> String {
-    match status {
-        DerivedStatus::Running => "🟢 진행 중".to_string(),
-        DerivedStatus::MonitorWait => "💤 monitor 대기".to_string(),
-        DerivedStatus::ScheduleWakeup(Some(eta_secs)) => {
-            format!("⏰ scheduled wakeup ({eta_secs}s 후)")
-        }
-        DerivedStatus::ScheduleWakeup(None) => "⏰ scheduled wakeup".to_string(),
-        DerivedStatus::TerminalDeliveryPending => "↻ 응답 전달됨 · 세션 종료 확인 중".to_string(),
-        DerivedStatus::TerminalDeliveryUnconfirmed => {
-            "⚠ 응답 전달됨 · 세션 종료 미확인".to_string()
-        }
-        DerivedStatus::Completed {
-            kind: CompletedKind::Background,
-        } => "✅ **백그라운드 완료**".to_string(),
-        DerivedStatus::Completed {
-            kind: CompletedKind::Foreground,
-        } => "✅ **응답 완료**".to_string(),
-        DerivedStatus::ToolRunning { name, summary: _ } => {
-            let rendered = tool_prefix(name);
-            format!("🔧 도구 실행 중 ({})", truncate_chars(&rendered, 140))
-        }
-        DerivedStatus::SubagentRunning { desc } => {
-            let desc = escape_status_panel_markdown(desc);
-            format!("🧵 subagent 실행 중 ({})", truncate_chars(&desc, 120))
-        }
-        DerivedStatus::WorkflowRunning { label } => {
-            let label = escape_status_panel_markdown(label);
-            format!("🧬 workflow 실행 중 ({})", truncate_chars(&label, 120))
-        }
     }
 }
 

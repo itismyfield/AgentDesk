@@ -77,6 +77,13 @@ CONTROLLED_HARNESS_STEP_KEYS: tuple[str, ...] = (
     "kill_pane",
     "send_keys_no_enter",
 )
+# Orchestration kinds owned by run_multi_provider_matrix.py that contact a real
+# provider/cell across channels (so they plan agent_mode=real_live even though
+# the single-cell driver never sees their steps). E-11 cross-channel concurrency
+# and E-17 foreign-active restart-guard both hold/dispatch real provider turns.
+LIVE_ORCHESTRATION_KINDS: frozenset[str] = frozenset(
+    {"cross_channel", "foreign_active_restart_guard"}
+)
 
 IDLE_MAILBOX_STATUSES = {"", "idle", "none"}
 IDLE_RELAY_STALL_STATES = {"", "healthy"}
@@ -400,7 +407,7 @@ def infer_planned_agent_mode(
     for step in scenario.get("steps") or []:
         if isinstance(step, dict) and _step_contacts_real_provider(step):
             return "real_live"
-    if scenario.get("orchestration") == "cross_channel":
+    if scenario.get("orchestration") in LIVE_ORCHESTRATION_KINDS:
         return "real_live"
     if scenario_has_controlled_harness_evidence(scenario):
         return "controlled"
@@ -1952,6 +1959,37 @@ def _mailbox_busy_reasons(mailbox: dict[str, Any]) -> list[str]:
     return reasons
 
 
+def _mailbox_idle_evidence(mailbox: dict[str, Any]) -> dict[str, Any]:
+    """Capture the /api/health/detail idle fields a regression like #2935 watches.
+
+    Returned verbatim into ``post_scenario_idle`` so a scenario report carries the
+    explicit proof that the tested mailbox released — agent_turn_status idle,
+    queue_depth 0, no cancel token, no inflight state, no active user message, and
+    no stale queued placeholder / pending discord callback — instead of only the
+    derived ``status: idle`` verdict.
+    """
+
+    relay = _relay_health(mailbox)
+    return {
+        "agent_turn_status": mailbox.get("agent_turn_status"),
+        "queue_depth": mailbox.get("queue_depth"),
+        "has_cancel_token": mailbox.get("has_cancel_token"),
+        "inflight_state_present": mailbox.get("inflight_state_present"),
+        "active_user_message_id": mailbox.get("active_user_message_id"),
+        "active_dispatch_present": mailbox.get("active_dispatch_present"),
+        "relay_stall_state": mailbox.get("relay_stall_state"),
+        "relay_health": {
+            "active_turn": relay.get("active_turn"),
+            "queue_depth": relay.get("queue_depth"),
+            "mailbox_has_cancel_token": relay.get("mailbox_has_cancel_token"),
+            "pending_discord_callback_msg_id": relay.get(
+                "pending_discord_callback_msg_id"
+            ),
+            "bridge_inflight_present": relay.get("bridge_inflight_present"),
+        },
+    }
+
+
 def _runtime_payload_has_entries(payload: Any) -> bool:
     if payload in (None, False, "", [], {}):
         return False
@@ -2052,6 +2090,8 @@ def assert_cell_idle(
                 "provider": provider,
                 "mailboxes_seen": last_mailbox_count,
                 "status": "idle",
+                "queue_files_clear": True,
+                "mailbox_idle_evidence": _mailbox_idle_evidence(target_mailboxes[0]),
             }
         time.sleep(poll_interval_s)
 

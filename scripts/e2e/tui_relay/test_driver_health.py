@@ -637,6 +637,35 @@ class PostScenarioIdle(unittest.TestCase):
         self.assertEqual(result["status"], "idle")
         self.assertEqual(result["mailboxes_seen"], 1)
 
+    def test_assert_cell_idle_captures_mailbox_idle_evidence(self):
+        # #3797 (E-16): the idle invariant now carries the explicit
+        # /api/health/detail field evidence that the tested mailbox released.
+        payloads = {
+            "/api/health/detail": [
+                (200, _health_detail(_idle_mailbox("42", provider="claude")))
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("run_tui_relay.urllib.request.urlopen", _fake_urlopen_for(payloads)):
+                result = driver.assert_cell_idle(
+                    base_url="http://agentdesk.test",
+                    channel_id="42",
+                    cell="claude-tui",
+                    runtime_root=Path(tmpdir),
+                    timeout_s=1,
+                    poll_interval_s=0,
+                )
+        self.assertEqual(result["status"], "idle")
+        self.assertTrue(result["queue_files_clear"])
+        evidence = result["mailbox_idle_evidence"]
+        self.assertEqual(evidence["agent_turn_status"], "idle")
+        self.assertEqual(evidence["queue_depth"], 0)
+        self.assertFalse(evidence["has_cancel_token"])
+        self.assertFalse(evidence["inflight_state_present"])
+        self.assertIsNone(evidence["active_user_message_id"])
+        self.assertIsNone(evidence["relay_health"]["pending_discord_callback_msg_id"])
+
     def test_claude_tui_idle_draft_guard_detects_stuck_prompt(self):
         pane = "\n".join(
             [
@@ -2795,6 +2824,137 @@ class ScenarioTeardown(unittest.TestCase):
         self.assertTrue(
             any(message.startswith("### E2E TEARDOWN") for message in client.control_messages),
             client.control_messages,
+        )
+
+
+class Issue3797E16QuiescenceRelease(unittest.TestCase):
+    """#3797: E-16 is an executable live scenario, not a #2935 stub."""
+
+    def setUp(self):
+        self.scenarios_dir = ROOT / "tests" / "e2e" / "tui_relay" / "scenarios"
+        self.e16 = next(
+            scenario
+            for scenario in driver.load_scenarios(self.scenarios_dir, cell="claude-tui")
+            if scenario.get("id") == "E-16"
+        )
+
+    def test_e16_metadata_is_executable_live_real_provider(self):
+        self.assertNotIn("skip_reason", self.e16)
+        self.assertEqual(driver.scenario_agent_mode(self.e16), "real_live")
+        self.assertEqual(driver.scenario_coverage_class(self.e16), "live")
+        # The second prompt must be sent before the second marker wait, with no
+        # intervening wait_idle_s — that is the post-delivery release window.
+        step_keys = [next(iter(step)) for step in self.e16["steps"]]
+        self.assertEqual(
+            step_keys,
+            [
+                "send_prompt",
+                "wait_for_discord_text",
+                "send_prompt",
+                "wait_for_discord_text",
+                "wait_idle_s",
+                "assert_health",
+            ],
+        )
+
+    def test_e16_immediate_followup_relays_both_markers_and_returns_idle(self):
+        class FakeClient:
+            base_url = "http://agentdesk.test"
+
+            def __init__(self):
+                self.next_id = 5000
+                self.prompts: list[str] = []
+
+            def _id(self) -> str:
+                self.next_id += 1
+                return str(self.next_id)
+
+            def send_control(self, channel_id, content):  # noqa: ARG002
+                return {"id": self._id()}
+
+            def send_prompt(self, channel_id, content, *, channel_kind="cc"):  # noqa: ARG002
+                self.prompts.append(content)
+                return {"id": self._id()}
+
+            def fetch_messages(self, channel_id, *, after_id=None, limit=100):  # noqa: ARG002
+                return []
+
+        client = FakeClient()
+        idle_calls: list[dict] = []
+
+        def fake_wait(**kwargs):
+            needle = str(kwargs.get("needle"))
+            message = {
+                "id": client._id(),
+                "content": needle,
+                "author": {"id": "adk-relay-bot", "bot": True},
+                "type": 0,
+                "timestamp": "2026-05-31T00:00:00Z",
+            }
+            return message, [message]
+
+        def fake_idle(**kwargs):
+            idle_calls.append(kwargs)
+            return {
+                "status": "idle",
+                "channel_id": kwargs.get("channel_id"),
+                "mailboxes_seen": 1,
+                "queue_files_clear": True,
+                "mailbox_idle_evidence": {
+                    "agent_turn_status": "idle",
+                    "queue_depth": 0,
+                    "has_cancel_token": False,
+                    "inflight_state_present": False,
+                    "active_user_message_id": None,
+                    "relay_health": {"pending_discord_callback_msg_id": None},
+                },
+            }
+
+        args = Namespace(
+            cell="claude-tui",
+            channel_id="42",
+            thread_channel_id=None,
+            queue_runtime_root="/tmp/agentdesk-e2e-test-runtime",
+        )
+
+        with (
+            patch("run_tui_relay.time.sleep", return_value=None),
+            patch(
+                "run_tui_relay.wait_for_discord_text_with_tui_idle_draft_guard",
+                side_effect=fake_wait,
+            ),
+            patch("run_tui_relay.assert_health", return_value={"status": "healthy"}),
+            patch("run_tui_relay.assert_cell_idle", side_effect=fake_idle),
+            patch("run_tui_relay.send_teardown_marker", return_value=None),
+        ):
+            record = driver.run_one_cell(
+                scenario=self.e16,
+                cell="claude-tui",
+                channel_id="42",
+                client=client,  # type: ignore[arg-type]
+                run_id="run-1",
+                dry_run=False,
+                args=args,
+            )
+
+        # Two real prompts dispatched, both markers relayed, all scenario
+        # assertions plus the post-scenario idle invariant passed.
+        self.assertEqual(len(client.prompts), 2)
+        self.assertIn("[E2E:E16:ONE]", client.prompts[0])
+        self.assertIn("[E2E:E16:TWO]", client.prompts[1])
+        self.assertTrue(record["real_provider_contacted"])
+        self.assertEqual(record["agent_mode_actual"], "real_live")
+        self.assertEqual(record["coverage_class_actual"], "live")
+        self.assertEqual(len(idle_calls), 1)
+        idle_specs = [
+            entry
+            for entry in record["assertions"]
+            if entry.get("spec", {}).get("post_scenario_cell_idle")
+        ]
+        self.assertEqual(len(idle_specs), 1)
+        self.assertTrue(idle_specs[0]["passed"])
+        self.assertEqual(
+            idle_specs[0]["details"]["mailbox_idle_evidence"]["queue_depth"], 0
         )
 
 

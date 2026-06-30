@@ -85,7 +85,8 @@ pub(in crate::services::discord) use status_panel::{
 pub(super) use streaming_edit_text::{
     CLAUDE_TUI_FOLLOWUP_REQUEUE_DELIVERY_NOTICE, bridge_claude_tui_followup_requeue_prompt_error,
     bridge_streaming_rollover_should_skip, bridge_tui_transport_error_should_skip_quiescence,
-    build_turn_bridge_streaming_edit_text,
+    build_turn_bridge_streaming_edit_text, claude_tui_followup_requeue_streaming_aware,
+    claude_tui_followup_same_input_occupies_pane,
 };
 pub(super) use task_notification_lifecycle::{
     close_all_tracked_background_children, close_next_tracked_background_child,
@@ -1524,20 +1525,30 @@ pub(super) fn spawn_turn_bridge(
             provider: Option<ProviderKind>,
             channel_id: u64,
             user_msg_id: u64,
+            token_hash: String,
         }
         impl Drop for InflightCleanupGuard {
             fn drop(&mut self) {
                 if let Some(ref provider) = self.provider {
+                    // #3859: this Drop runs on ANY abnormal exit (panic /
+                    // early-return) while the turn may still own a live
+                    // "🔄 처리 중" placeholder. Route through the abandon-request
+                    // helper — identical ownership guards to the plain guarded
+                    // clear, but it durably records the placeholder for the
+                    // placeholder sweeper to finalize to "중단됨" BEFORE deleting
+                    // the row (which still frees the channel immediately).
                     if self.user_msg_id != 0 {
-                        super::inflight::clear_inflight_state_if_matches(
+                        super::inflight::request_inflight_abandon_if_matches(
                             provider,
                             self.channel_id,
                             self.user_msg_id,
+                            &self.token_hash,
                         );
                     } else {
-                        super::inflight::clear_inflight_state_if_matches_zero_owned(
+                        super::inflight::request_inflight_abandon_if_matches_zero_owned(
                             provider,
                             self.channel_id,
+                            &self.token_hash,
                         );
                     }
                 }
@@ -1547,6 +1558,7 @@ pub(super) fn spawn_turn_bridge(
             provider: Some(provider.clone()),
             channel_id: channel_id.get(),
             user_msg_id: user_msg_id.map(|id| id.get()).unwrap_or(0),
+            token_hash: shared_owned.token_hash.clone(),
         };
 
         let mut inflight_state = bridge.inflight_state.clone();
@@ -3859,13 +3871,47 @@ pub(super) fn spawn_turn_bridge(
             tracing::warn!("  [{ts}] ⚠ invalid API_FRICTION marker: {error}");
         }
 
-        let claude_tui_followup_pre_submit_requeue_candidate =
-            crate::services::claude::claude_tui_followup_requeue_enabled()
+        let claude_tui_followup_pre_submit_requeue_candidate = {
+            let base = crate::services::claude::claude_tui_followup_requeue_enabled()
                 && bridge_claude_tui_followup_requeue_prompt_error(
                     &provider,
                     inflight_state.runtime_kind,
                     &full_response,
                 );
+            // #3885 (reworked): a follow-up pre-submit readiness timeout normally
+            // requeues the inflight ("prompt never reached the pane → safe to
+            // retry"). The dup risk is re-injecting an input that ALREADY landed:
+            // when the SAME input is the turn the pane is streaming (or just
+            // completed), that turn already delivers the response, so a requeue
+            // produces duplicate prose. The first cut gated on a channel-scoped
+            // busy probe, which (a) DROPPED a genuinely-unsubmitted follow-up that
+            // happened to sit behind a DIFFERENT streaming turn, and (b) missed
+            // the already-completed same-input case (idle pane). Gate instead on
+            // INPUT CORRELATION: suppress ONLY when the recorded prompt anchor for
+            // this pane resolves to THIS inflight's user_msg_id (the relay records
+            // the submitted prompt's anchor as the synthetic inflight's
+            // user_msg_id; a non-consuming peek leaves it for the watcher). A
+            // different / absent anchor means the follow-up is genuinely
+            // unsubmitted, so it STILL requeues — the deferred idle-queue kickoff
+            // is itself gated on pane-busy, so a follow-up behind a different
+            // streaming turn is DEFERRED (preserved in the mailbox), not dropped.
+            let same_input_occupies_pane = base
+                && claude_tui_followup_same_input_occupies_pane(
+                    inflight_state
+                        .tmux_session_name
+                        .as_deref()
+                        .and_then(|tmux_session_name| {
+                            crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
+                                provider.as_str(),
+                                tmux_session_name,
+                                channel_id.get(),
+                            )
+                        })
+                        .map(|anchor| anchor.message_id),
+                    inflight_state.user_msg_id,
+                );
+            claude_tui_followup_requeue_streaming_aware(base, same_input_occupies_pane)
+        };
         if claude_tui_followup_pre_submit_requeue_candidate {
             full_response = CLAUDE_TUI_FOLLOWUP_REQUEUE_DELIVERY_NOTICE.to_string();
             inflight_state.full_response = full_response.clone();
@@ -5828,9 +5874,8 @@ pub(super) fn spawn_turn_bridge(
                     );
                 }
             }
-            let indicator = super::single_message_panel::single_message_panel_spinner_frame(
-                spin_idx,
-            );
+            let indicator =
+                super::single_message_panel::single_message_panel_spinner_frame(spin_idx);
             status_panel_completion_committed =
                 complete_bridge_terminal_footer_or_status_panel(
                     shared_owned.as_ref(),
@@ -5843,6 +5888,7 @@ pub(super) fn spawn_turn_bridge(
                     status_panel_started_at,
                     &mut last_status_panel_text,
                     single_message_panel_footer_mode,
+                    is_external_input_tui_direct, // #3959: suppress mirror chrome footer
                     completion_footer_terminal_text.as_deref(),
                     indicator,
                 )

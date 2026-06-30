@@ -1519,7 +1519,7 @@ fn routine_thread_title(routine_name: &str, agent_id: &str) -> String {
     base.chars().take(90).collect()
 }
 
-fn routine_agent_session_name(routine_name: &str, agent_id: &str) -> String {
+pub(crate) fn routine_agent_session_name(routine_name: &str, agent_id: &str) -> String {
     // Put the distinguishing routine name FIRST: `build_tmux_session_name`
     // truncates to 44 chars, so leading with `agent_id` made two routines on the
     // same agent collide to one tmux session (reusing provider/transcript state)

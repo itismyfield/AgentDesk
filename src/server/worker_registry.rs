@@ -837,13 +837,24 @@ impl SupervisedWorkerRegistry {
                     return Ok(None);
                 };
                 let prompt_manifest_retention = self.config.prompt_manifest_retention.clone();
+                // #3909 — resolve the voice TTS cache/temp sweep dirs from the
+                // loaded runtime VoiceConfig (the same source of truth the TTS
+                // write path uses) so operator overrides of
+                // `voice.tts.progress_cache_dir` / `voice.audio.temp_dir` are
+                // swept, not the defaults.
+                let voice_cache_sweep =
+                    crate::services::maintenance::jobs::voice_cache_sweep::Config::from_voice_config(
+                        &self.config.voice,
+                    );
                 self.register_leader_tokio(spec, move || {
                     let maintenance_pg_pool = maintenance_pg_pool.clone();
                     let prompt_manifest_retention = prompt_manifest_retention.clone();
+                    let voice_cache_sweep = voice_cache_sweep.clone();
                     async move {
                         super::maintenance::scheduler_loop(
                             maintenance_pg_pool,
                             prompt_manifest_retention,
+                            voice_cache_sweep,
                         )
                         .await;
                     }

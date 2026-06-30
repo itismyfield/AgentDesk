@@ -27,6 +27,11 @@ pub(crate) const DEFAULT_FOREGROUND_PROVIDER: &str = "claude";
 pub(crate) const DEFAULT_FOREGROUND_MODEL: &str = "sonnet";
 pub(crate) const DEFAULT_FOREGROUND_MAX_CHARS: usize = 220;
 pub(crate) const DEFAULT_FOREGROUND_TIMEOUT_MS: u64 = 3_000;
+/// #3914: lower bound for the foreground model timeout. A small misconfigured
+/// value (e.g. `timeout_ms: 50`) would otherwise make every foreground call time
+/// out and degrade to Silence on each utterance. Values below this are clamped
+/// up so a typo cannot silently mute the assistant.
+pub(crate) const MIN_FOREGROUND_TIMEOUT_MS: u64 = 500;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
@@ -86,14 +91,22 @@ impl VoiceConfig {
     }
 
     pub(crate) fn wake_word_required(&self) -> bool {
+        // #3914: you cannot gate on a wake word that is not configured. A live
+        // yaml with `wake_words: []` plus `REQUIRE_WAKE_WORD=1` would otherwise
+        // make EVERY utterance fail the (impossible-to-satisfy) gate and be
+        // silently dropped. Fail open: require a wake word only when at least one
+        // usable wake word exists, regardless of the env override.
+        let has_usable_wake_word = self
+            .wake_words
+            .iter()
+            .any(|wake_word| !wake_word.trim().is_empty());
+        if !has_usable_wake_word {
+            return false;
+        }
         std::env::var("REQUIRE_WAKE_WORD")
             .ok()
             .and_then(|value| parse_bool_env(&value))
-            .unwrap_or_else(|| {
-                self.wake_words
-                    .iter()
-                    .any(|wake_word| !wake_word.trim().is_empty())
-            })
+            .unwrap_or(has_usable_wake_word)
     }
 
     pub(crate) fn lobby_channel_id_u64(&self) -> Option<u64> {
@@ -332,20 +345,27 @@ impl Default for VoiceBargeInConfig {
     }
 }
 
+/// dBFS thresholds for the voice STT speech-vs-silence gate.
+///
+/// `speech_start_db` is the mean-volume floor below which an incoming utterance
+/// is treated as silence/noise and skipped before whisper. It is wired into the
+/// ffmpeg `volumedetect` gate via [`SttConfig::speech_start_db`](super::stt);
+/// its default MUST stay in sync with the effective gate default so that
+/// config-default == gate-default (see the `speech_start_db_default_matches_*`
+/// test in `stt.rs`).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub(crate) struct VoiceDbThresholds {
     pub speech_start_db: f32,
-    pub speech_end_db: f32,
-    pub wake_word_db: f32,
 }
 
 impl Default for VoiceDbThresholds {
     fn default() -> Self {
         Self {
-            speech_start_db: -45.0,
-            speech_end_db: -55.0,
-            wake_word_db: -50.0,
+            // Matches the previously-effective hardcoded stt low-volume gate
+            // (`LOW_VOLUME_MEAN_DB`); reconciled from the old documented -45.0
+            // default which never reached the gate (#3912).
+            speech_start_db: -35.0,
         }
     }
 }
@@ -412,6 +432,19 @@ mod tests {
     }
 
     #[test]
+    fn wake_word_not_required_when_no_usable_wake_words() {
+        // #3914: blank / empty wake words can never be matched, so the gate must
+        // fail open. This early return wins before the REQUIRE_WAKE_WORD env is
+        // even consulted, so it holds regardless of the ambient env.
+        let mut config = VoiceConfig::default();
+        config.wake_words = Vec::new();
+        assert!(!config.wake_word_required());
+
+        config.wake_words = vec!["   ".to_string(), String::new()];
+        assert!(!config.wake_word_required());
+    }
+
+    #[test]
     fn voice_config_deserializes_partial_yaml_with_defaults() {
         let config: VoiceConfig = serde_yaml::from_str(
             r#"
@@ -454,7 +487,6 @@ spoken_result:
             PathBuf::from("~/.adk/voice/transcripts")
         );
         assert_eq!(config.thresholds.speech_start_db, -42.5);
-        assert_eq!(config.thresholds.speech_end_db, -55.0);
         assert_eq!(config.stt, VoiceSttConfig::default());
         assert_eq!(config.tts.backend, VoiceTtsBackendKind::Edge);
         assert_eq!(config.tts.edge.command, DEFAULT_EDGE_TTS_COMMAND);

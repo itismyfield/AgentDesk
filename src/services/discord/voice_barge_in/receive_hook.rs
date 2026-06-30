@@ -32,18 +32,17 @@ impl VoiceReceiveHook for DiscordVoiceBargeInHook {
         let channel_id = ChannelId::new(control_channel_id);
         self.runtime
             .observe_streaming_stt_pcm_i16(channel_id, user_id, samples);
-        let Some(cut) = self.runtime.observe_live_pcm_i16(channel_id, samples) else {
+        // F22 (#2046): playback_owner 라벨 — 어떤 progress / spoken_result
+        // playback 이 cut 되었는지 사후 분석. #3914: the owner is returned by
+        // `observe_live_pcm_i16` (snapshotted from the cut session) because the
+        // cut already removed the `playbacks` entry, so a post-cut read here was
+        // always `None`.
+        let Some((cut, playback_owner)) = self.runtime.observe_live_pcm_i16(channel_id, samples)
+        else {
             return;
         };
 
         let shared = self.shared.clone();
-        // F22 (#2046): playback_owner 라벨 추가 — 어떤 progress / spoken_result
-        // playback 이 cut 되었는지 사후 분석 가능.
-        let playback_owner = self
-            .runtime
-            .playbacks
-            .get(&channel_id.get())
-            .and_then(|entry| entry.value().owner);
         // Issue #2335 (b): the live PCM cut path is a parallel termination
         // path that, prior to this fix, did NOT call
         // `cancel_inflight_foreground_calls`. As a result PCM cut would

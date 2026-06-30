@@ -185,9 +185,53 @@ pub(in crate::services::discord) fn disposition_reason_code(
     }
 }
 
+/// #3918: may the committed-then-gone anchor-repost fallback send a NEW message
+/// for this turn? The send-new path (`try_recover_anchor_repost`) is the #3607
+/// data-loss backstop, but it is NOT a transaction with the on-disk row
+/// retirement: Discord can accept the new message and the process can then crash
+/// (or `clear_inflight_state` can silently fail) before the row is cleared,
+/// which re-enters the committed branch on the next boot and would re-post the
+/// SAME answer. This pure guard makes the repost fire AT MOST ONCE per logical
+/// turn from two orthogonal durable inputs (both persisted ON the carrier row):
+///   * `already_reposted` — the `anchor_reposted` marker, written right AFTER a
+///     `Delivered` send and BEFORE the clear. `true` ⇒ refuse: this turn was
+///     already reposted, so a persisted-row re-run (failed clear / crash after
+///     the marker) must NOT post a duplicate. Bounds the realistic unbounded
+///     loop (a silently failing clear) to a single post.
+///   * `attempts >= budget` — the pre-send `anchor_repost_attempts` counter,
+///     bumped BEFORE each send. Refuse: even in the narrow crash window BEFORE
+///     the marker is recorded, the total number of send-new posts for a turn is
+///     hard-bounded, so duplication can never be UNBOUNDED.
+/// `budget` is `RECOVERY_RELAY_RESTART_ATTEMPT_BUDGET`. `anchor_repost_attempts`
+/// is deliberately DISTINCT from `recovery_relay_attempts` so this bound never
+/// double-counts against the `PreserveAndCount` bump — a premature force-clear
+/// there would re-introduce the #3607 data loss.
+pub(in crate::services::discord) fn anchor_repost_send_new_permitted(
+    already_reposted: bool,
+    attempts: u32,
+    budget: u32,
+) -> bool {
+    !already_reposted && attempts < budget
+}
+
 /// #3610 PR-2: gate for the recovery anchor-repost fallback (`AGENTDESK_RECOVERY_ANCHOR_REPOST`).
 ///
-/// DEFAULT OFF — a dark deploy. When OFF this is the outermost guard of
+/// DEFAULT OFF — intentionally gated, with a tracked rollout plan (#3862 / #3918).
+/// The #3607/#3610 committed-then-gone fallback is fully wired and storm-guarded
+/// (G1–G5 + the transient send-new budget bound in `unrecoverable_relay_disposition`),
+/// but a naked default-ON flip is BLOCKED on two send-new idempotency gaps that only
+/// surface once this path is live (tracked in #3918):
+///   1. a successful send-new is not durably idempotent — a crash (or a silently
+///      failing `inflight::clear_inflight_state`, whose `bool` is ignored) after
+///      Discord accepts the new message lets the next restart re-post the same
+///      answer, and `Delivered` is not budget-counted, so the duplicate is unbounded;
+///   2. a multi-chunk send-new partial failure leaves earlier chunks posted with no
+///      rollback (`formatting::send_long_message_raw`, not the existing
+///      `send_long_message_raw_with_rollback`), so the budget-bounded retry re-sends
+///      the whole body and duplicates them.
+/// Activation criteria + rollout live in #3918; until they are met this stays OFF.
+/// The env var remains a staging opt-in ("1"/"true") for verification under those
+/// guards. When OFF this is the outermost guard of
 /// [`super::restart::try_recover_anchor_repost`], which short-circuits to `None`
 /// before reading any record / probing / relaying, so the recovery loop is a
 /// byte-for-byte no-op (the committed-branch call site is skipped entirely).
@@ -211,7 +255,8 @@ pub(in crate::services::discord) fn recovery_anchor_repost_enabled() -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChannelProbeVerdict, RecoveryRelayOutcome, RowDisposition, classify_channel_probe_status,
+        ChannelProbeVerdict, RecoveryRelayOutcome, RowDisposition,
+        anchor_repost_send_new_permitted, classify_channel_probe_status,
         classify_recovery_relay_error, classify_recovery_relay_status, disposition_reason_code,
         escalate_transient_relay_outcome_with_probe, unrecoverable_relay_disposition,
     };
@@ -479,5 +524,47 @@ mod tests {
             disposition_reason_code(RowDisposition::PreserveAndCount),
             None
         );
+    }
+
+    /// #3918: a fresh committed-then-gone row (never reposted, 0 attempts) is
+    /// permitted to send-new exactly ONCE.
+    #[test]
+    fn fresh_row_is_permitted_to_repost_once() {
+        assert!(
+            anchor_repost_send_new_permitted(false, 0, BUDGET),
+            "a never-reposted row under budget must be permitted to repost"
+        );
+    }
+
+    /// #3918 idempotency: once the durable `anchor_reposted` marker is set, the
+    /// send-new is REFUSED regardless of the attempt count — the repost fires at
+    /// most once per turn even if a re-run still sees attempts under budget.
+    #[test]
+    fn marked_row_is_never_reposted_again() {
+        for attempts in [0, 1, BUDGET - 1, BUDGET, BUDGET + 99] {
+            assert!(
+                !anchor_repost_send_new_permitted(true, attempts, BUDGET),
+                "a row already marked reposted must never re-send (attempts={attempts})"
+            );
+        }
+    }
+
+    /// #3918 bound: even WITHOUT the marker (the narrow crash window before it is
+    /// recorded), the pre-send attempt counter caps the repost at the budget so
+    /// duplication can never be unbounded.
+    #[test]
+    fn pre_send_attempts_are_capped_at_budget() {
+        for attempts in 0..BUDGET {
+            assert!(
+                anchor_repost_send_new_permitted(false, attempts, BUDGET),
+                "attempt {attempts} is under budget and must be permitted"
+            );
+        }
+        for attempts in [BUDGET, BUDGET + 1, BUDGET + 100] {
+            assert!(
+                !anchor_repost_send_new_permitted(false, attempts, BUDGET),
+                "attempts at/over budget must be refused (attempts={attempts})"
+            );
+        }
     }
 }

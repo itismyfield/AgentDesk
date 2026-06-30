@@ -18,8 +18,9 @@
 //! `removed_token.is_some()`, a double-finalize is a harmless no-op — never an
 //! underflow, never a double Discord notice.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, panic::AssertUnwindSafe, sync::Arc, time::Duration};
 
+use futures::FutureExt;
 use serenity::model::id::ChannelId;
 // `tokio::time::Instant` (not `std::time::Instant`) so deadlines respect the
 // paused/virtual test clock and the production `interval` clock alike.
@@ -36,6 +37,9 @@ use super::{DeliveryLeaseCell, LeaseHolder, LeaseOutcome};
 mod cleanup;
 mod completion_signal;
 mod delivery_lease;
+mod finalize;
+mod finalize_context;
+mod reconcile;
 mod watcher_backstop;
 
 pub(in crate::services::discord) use cleanup::SyntheticClaimSnapshot;
@@ -57,6 +61,16 @@ use self::watcher_backstop::{
     WATCHER_BACKSTOP_TERMINAL_PROBE_INTERVAL, WATCHER_BACKSTOP_TERMINAL_STREAK,
     watcher_backstop_turn_is_terminal,
 };
+// #3894: per-submission finalize context extracted; re-exported so external
+// submit sites + the routed in-file call sites reference `FinalizeContext`
+// unqualified, byte-identical.
+pub(in crate::services::discord) use self::finalize_context::FinalizeContext;
+// #3894: the finalize side-effect chokepoint extracted; re-imported so
+// `handle_terminal` + the reconcile/backstop child call it byte-identically.
+use self::finalize::do_finalize;
+// #3894: the timer-driven reconcile/backstop cluster extracted; re-imported so
+// the actor loop's reconcile `select!` arm stays byte-identical.
+use self::reconcile::reconcile;
 
 /// How often the reconciler `Tick` fires to re-check deadline-armed
 /// gate-timeout entries and garbage-collect the ledger.
@@ -228,103 +242,6 @@ fn terminal_event_kind_str(event: &TerminalEvent) -> &'static str {
         TerminalEvent::Cancel => "cancel",
         TerminalEvent::GateTimeout { .. } => "gate_timeout",
         TerminalEvent::RelayMiss => "relay_miss",
-    }
-}
-
-/// Per-submission knobs that keep each routed call-site behaviourally
-/// identical to its pre-#3016 inline sequence during the incremental window.
-/// Routed sites preserve their old side-effects; only ownership moves.
-#[derive(Clone, Copy, Debug)]
-pub(in crate::services::discord) struct FinalizeContext {
-    /// Whether `do_finalize` clears inflight as part of the finalize. Bridge
-    /// branches and the watcher clear inflight inline in their own flow before
-    /// submitting, so they pass `false`; only the deadline-armed reconcile
-    /// backstop (no caller to clear it) passes `true`.
-    pub(in crate::services::discord) clear_inflight: bool,
-    /// Whether to mark the removed token's completion-cleanup. The bridge did
-    /// this on a non-cancel terminal (still gated on `!event.is_cancel()`); the
-    /// watcher's `finish_restored_watcher_active_turn` did NOT — it only set
-    /// `cancelled`. Keeping this per-site avoids changing provider-watchdog
-    /// semantics on the watcher path.
-    pub(in crate::services::discord) allow_completion_cleanup: bool,
-    /// Whether to drain voice barge-in deferred prompts as part of finalize.
-    /// The bridge branches drain voice; the watcher path did NOT.
-    pub(in crate::services::discord) drain_voice: bool,
-    /// Whether to schedule a deferred idle-queue kickoff when the finalize
-    /// leaves a pending soft-queue (gated on `mailbox_online && has_pending`).
-    /// The watcher's `finish_restored_watcher_active_turn` did this; the bridge
-    /// branches deferred kickoff to a later site, so they pass `false`.
-    pub(in crate::services::discord) kickoff_queue: bool,
-}
-
-impl FinalizeContext {
-    /// Bridge non-delegation / missing-handoff branches: bridge owns the
-    /// inflight clear elsewhere, marks completion-cleanup on non-cancel, drains
-    /// voice, defers queue kickoff.
-    pub(in crate::services::discord) fn bridge() -> Self {
-        Self {
-            clear_inflight: false,
-            allow_completion_cleanup: true,
-            drain_voice: true,
-            kickoff_queue: false,
-        }
-    }
-
-    /// Watcher terminal via `finish_restored_watcher_active_turn`: the watcher
-    /// clears inflight inline before submitting, does NOT mark completion
-    /// cleanup, does NOT drain voice. The queue kickoff stays at the caller
-    /// because it is gated on the caller's `dispatch_ok`, which the finalizer
-    /// cannot see — so the context leaves kickoff to the submitter.
-    pub(in crate::services::discord) fn watcher() -> Self {
-        Self {
-            clear_inflight: false,
-            allow_completion_cleanup: false,
-            drain_voice: false,
-            kickoff_queue: false,
-        }
-    }
-
-    /// Monitor-auto-turn / recovery terminal (#3016 phase 4): the caller owns
-    /// the inflight clear (or there is none — synthetic monitor turn / recovery
-    /// already cleared it), does NOT mark completion-cleanup, does NOT drain
-    /// voice, but DOES kick off any queued backlog (the pre-#3016
-    /// `finish_monitor_auto_turn` / `finish_recovered_turn_mailbox` both
-    /// scheduled the deferred idle-queue kickoff on `has_pending`). This is
-    /// `watcher()` plus the queue kickoff.
-    pub(in crate::services::discord) fn monitor() -> Self {
-        Self {
-            clear_inflight: false,
-            allow_completion_cleanup: false,
-            drain_voice: false,
-            kickoff_queue: true,
-        }
-    }
-
-    /// Deadline-armed gate-timeout backstop, fired from the reconciler with no
-    /// caller to have cleared inflight: finalize fully (clear inflight here),
-    /// no completion-cleanup or voice drain (watcher semantics), kick off the
-    /// queue if backlog remains.
-    fn gate_backstop() -> Self {
-        Self {
-            clear_inflight: true,
-            allow_completion_cleanup: false,
-            drain_voice: false,
-            kickoff_queue: true,
-        }
-    }
-
-    /// #3041 §3 P1-0 (DORMANT): context for a lease-release-driven finalize once
-    /// the watcher terminal migrates onto the delivery lease (P1-1..). Mirrors
-    /// `watcher()` today (no live caller), but kept as a distinct constructor so
-    /// wired phases can tune the lease-release knobs independently.
-    #[allow(dead_code)] // #3041 P1-0: dormant, wired in P1-1..
-    pub(in crate::services::discord) fn delivery_lease() -> Self {
-        Self {
-            clear_inflight: false,
-            allow_completion_cleanup: false,
-            drain_voice: false,
-            kickoff_queue: false,
-        }
     }
 }
 
@@ -711,6 +628,19 @@ impl TurnFinalizer {
     }
 }
 
+/// #3866: render a caught panic payload for the actor's error log without
+/// re-panicking. `catch_unwind` yields `Box<dyn Any + Send>`; the common
+/// payloads are `&'static str` and `String`.
+fn panic_payload_summary(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return (*message).to_string();
+    }
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "non-string panic payload".to_string()
+}
+
 /// The single owning task. Owns the ledger and a NON-owning cached handle to
 /// `SharedData`, and drives the reconcile timer in the same task via `select!`
 /// so the deadline-armed gate-timeout finalize fires deterministically (no
@@ -794,9 +724,38 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                         ack,
                     } => {
                         cached_shared = Some(Arc::downgrade(&shared));
-                        let outcome =
-                            handle_terminal(&mut ledger, key, provider, event, ctx, &shared)
-                                .await;
+                        // #3866: the actor is a single, never-respawned task that
+                        // owns finalize for the whole process. The crate unwinds
+                        // (not `panic = "abort"`), so without this guard ONE panic
+                        // in a finalize side-effect would silently kill the loop
+                        // and every subsequent turn would fall through to
+                        // `AlreadyFinalized` (placeholder stuck / final answer
+                        // never delivered) for the rest of the process lifetime.
+                        // Contain the per-message handler: a caught panic logs and
+                        // resolves the ack as `AlreadyFinalized` so the submitter
+                        // does not hang, and the loop survives to finalize the next
+                        // turn.
+                        let outcome = match AssertUnwindSafe(handle_terminal(
+                            &mut ledger,
+                            key,
+                            provider,
+                            event,
+                            ctx,
+                            &shared,
+                        ))
+                        .catch_unwind()
+                        .await
+                        {
+                            Ok(outcome) => outcome,
+                            Err(payload) => {
+                                tracing::error!(
+                                    panic = %panic_payload_summary(payload.as_ref()),
+                                    "TurnFinalizer handle_terminal panicked; actor loop \
+                                     contained the panic and stays alive (#3866)"
+                                );
+                                FinalizeOutcome::AlreadyFinalized
+                            }
+                        };
                         let _ = ack.send(outcome);
                     }
                     // #3041 §2-§3 P1-0 (DORMANT, UNREACHABLE today). Routing these
@@ -871,7 +830,30 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
             }
             _ = reconcile_timer.tick() => {
                 if let Some(shared) = cached_shared.as_ref().and_then(std::sync::Weak::upgrade) {
-                    reconcile(&mut ledger, &shared).await;
+                    // #3866: the reconcile arm runs the SAME finalize side-effect
+                    // surface as the Terminal arm — the gate-timeout deadline
+                    // backstop and the watcher far-backstop both drive
+                    // `run_backstop_finalize -> do_finalize`. Guarding ONLY the
+                    // Terminal arm left this path naked: a panic in a backstop
+                    // finalize (or in the proven-terminal probe / lease reclaim /
+                    // GC) would unwind the single never-respawned actor and
+                    // silently kill finalize for the rest of the process. Contain
+                    // the whole reconcile pass exactly like `handle_terminal`.
+                    // `do_finalize` is ALSO guarded inside `run_backstop_finalize`
+                    // (so a mid-finalize panic still flips the entry
+                    // Finalizing->Finalized and is never left stuck); this outer
+                    // guard additionally contains the non-finalize reconcile
+                    // surface and keeps the loop alive.
+                    if let Err(payload) = AssertUnwindSafe(reconcile(&mut ledger, &shared))
+                        .catch_unwind()
+                        .await
+                    {
+                        tracing::error!(
+                            panic = %panic_payload_summary(payload.as_ref()),
+                            "TurnFinalizer reconcile panicked; actor loop contained the panic \
+                             and stays alive (#3866)"
+                        );
+                    }
                 }
             }
         }
@@ -880,6 +862,54 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
 
 /// Exactly-once gate + immediate-finalize / deferral decision. Runs inside the
 /// actor task, so the check-and-set on `Phase` needs no synchronization.
+/// #3866: test-only one-shot panic injection. A test arms the next
+/// `handle_terminal` to panic so the live actor loop (single-threaded test
+/// runtime → same thread as the spawned actor task) exercises the real
+/// `catch_unwind` containment path.
+#[cfg(test)]
+mod test_panic_hook {
+    use std::cell::Cell;
+
+    thread_local! {
+        static ARMED: Cell<bool> = const { Cell::new(false) };
+        // #3866: a SEPARATE one-shot fired from INSIDE `do_finalize` (after the
+        // caller flipped the entry Pending->Finalizing), so a test can prove the
+        // caught-panic path resets the entry instead of leaving it stuck
+        // `Finalizing`. The top-of-`handle_terminal` arm panics BEFORE any ledger
+        // mutation and so under-proves the reset (the original #3866 test).
+        static ARMED_IN_FINALIZE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Arm the next (and only the next) `handle_terminal` to panic at the TOP,
+    /// before `resolve_ledger_key` / the phase flip — exercises only the actor
+    /// loop's outer guard (no ledger mutation runs).
+    pub(super) fn arm_once() {
+        ARMED.with(|a| a.set(true));
+    }
+
+    /// Arm the next (and only the next) `do_finalize` to panic — fired AFTER the
+    /// caller flipped the entry to `Finalizing`, so the test exercises the
+    /// reset-to-`Finalized` repair on BOTH the terminal and reconcile/backstop
+    /// paths (both run `do_finalize`).
+    pub(super) fn arm_in_finalize_once() {
+        ARMED_IN_FINALIZE.with(|a| a.set(true));
+    }
+
+    /// Consume the one-shot arm and panic if set.
+    pub(super) fn maybe_panic() {
+        if ARMED.with(|a| a.replace(false)) {
+            panic!("injected finalize side-effect panic (#3866 test)");
+        }
+    }
+
+    /// Consume the one-shot `do_finalize` arm and panic if set.
+    pub(super) fn maybe_panic_in_finalize() {
+        if ARMED_IN_FINALIZE.with(|a| a.replace(false)) {
+            panic!("injected do_finalize side-effect panic after phase flip (#3866 test)");
+        }
+    }
+}
+
 async fn handle_terminal(
     ledger: &mut HashMap<LedgerKey, LedgerEntry>,
     key: TurnKey,
@@ -888,6 +918,12 @@ async fn handle_terminal(
     ctx: FinalizeContext,
     shared: &Arc<SharedData>,
 ) -> FinalizeOutcome {
+    // #3866: test-only injection point — lets a test drive a real finalize
+    // side-effect panic through the live actor loop to prove the catch_unwind
+    // guard keeps the loop alive. No effect in production builds.
+    #[cfg(test)]
+    test_panic_hook::maybe_panic();
+
     // Resolve to the entry this terminal acts on: a real id keys exactly; a
     // channel-only id-0 collapses onto the channel's single live entry
     // (recovery/orphan). An unregistered turn (post-restart inflight, no live
@@ -1003,372 +1039,44 @@ async fn handle_terminal(
     } else {
         key
     };
-    let outcome = do_finalize(finalize_key, provider, &event, effective_ctx, shared).await;
+    // #3866: `do_finalize` is the single chokepoint for finalize side-effects
+    // (inflight clear, mailbox token release, `global_active` decrement, voice
+    // drain, queue kickoff). Contain a panic HERE rather than only at the actor
+    // loop so the Finalizing->Finalized flip below STILL runs on a caught panic.
+    // That matters: the entry was just flipped to `Finalizing`, and reconcile GC
+    // reaps only `Finalized` while every backstop/probe gates on `Pending`, so an
+    // entry left stuck in `Finalizing` after a panic would leak FOREVER and
+    // poison `ledger_has_live_watcher_pending` / `resolve_channel_only` for this
+    // channel+generation. Resetting it to `Finalized` (the normal post-finalize
+    // flip) lets GC reap it and frees the channel for the next turn.
+    let outcome = match AssertUnwindSafe(do_finalize(
+        finalize_key,
+        provider,
+        &event,
+        effective_ctx,
+        shared,
+    ))
+    .catch_unwind()
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(payload) => {
+            tracing::error!(
+                panic = %panic_payload_summary(payload.as_ref()),
+                channel = ledger_key.channel_id.get(),
+                user_msg_id = ledger_key.user_msg_id,
+                "TurnFinalizer do_finalize panicked on the terminal path; contained, the \
+                 ledger entry is reset Finalizing->Finalized below so it is never stuck (#3866)"
+            );
+            FinalizeOutcome::AlreadyFinalized
+        }
+    };
     if let Some(entry) = ledger.get_mut(&ledger_key) {
         entry.phase = Phase::Finalized;
         entry.finalized_at = Some(Instant::now());
         entry.terminal_deadline = None;
     }
     outcome
-}
-
-/// The single owner of finalize's side-effects. Reproduces today's exact
-/// `clear_inflight (per-site) + mailbox_finish_turn + counter-- + trailing
-/// terminal side-effects` sequence so each routed call-site stays
-/// behaviourally identical during the incremental landing.
-async fn do_finalize(
-    key: TurnKey,
-    provider: ProviderKind,
-    event: &TerminalEvent,
-    ctx: FinalizeContext,
-    shared: &Arc<SharedData>,
-) -> FinalizeOutcome {
-    let channel_id = key.channel_id;
-
-    // #3350 ②: ensure the #3303 DeferredClaim marker for a watcher-owned TUI-direct
-    // synthetic turn BEFORE (A) erases the row evidence. Codex r1-1: watcher
-    // submitters cleared the row pre-submit, so for them this row re-load proves
-    // nothing — their guarantee runs at submit time from the pre-clear snapshot
-    // (`submit_terminal_with_claim_snapshot`); rationale/gates: cleanup.rs.
-    cleanup::ensure_synthetic_claim_marker_before_clear(key, &provider, None);
-
-    // (A) inflight clear. Only the gate-timeout backstop and the immediate
-    //     no-owner restored-watcher path set `clear_inflight` (live bridge /
-    //     watcher sites clear inline, pass `false`). They consolidate the
-    //     pre-#3016 IDENTITY-GUARDED 1800s sweeper: a real identity clears via
-    //     `clear_inflight_state_if_matches` — never a newer turn's inflight,
-    //     preserving `PlannedRestartSkipped` / `RebindOriginSkipped`; a true
-    //     orphan (id-0, nothing to authenticate) keeps the unguarded clear.
-    if ctx.clear_inflight {
-        if key.user_msg_id != 0 {
-            let _ = super::inflight::clear_inflight_state_if_matches(
-                &provider,
-                channel_id.get(),
-                key.user_msg_id,
-            );
-        } else {
-            super::inflight::clear_inflight_state(&provider, channel_id.get());
-        }
-    }
-
-    // (B) mailbox cancel_token release — the routed sites' single, idempotent
-    //     `mailbox_finish_turn` (`removed_token = None` on a second call).
-    //     #3016 root-cause: a real identity uses the IDENTITY-GUARDED finish so
-    //     finalize only releases the token it owns — a stale channel-scoped
-    //     terminal post-finalize/ledger-GC must not release the NEWER turn's
-    //     token or decrement `global_active`. Ambiguous id-0 (recovery/orphan)
-    //     keeps the channel-scoped finish (ledger gate + id-0 no-op bound it).
-    let finish = if key.user_msg_id != 0 {
-        super::mailbox_finish_turn_if_matches(
-            shared,
-            &provider,
-            channel_id,
-            serenity::model::id::MessageId::new(key.user_msg_id),
-        )
-        .await
-    } else {
-        super::mailbox_finish_turn(shared, &provider, channel_id).await
-    };
-
-    if let Some(token) = finish.removed_token.as_ref() {
-        // A normal completion releases lingering token observers via
-        // `mark_completion_cleanup` so provider watchdogs don't treat the
-        // post-terminal `cancelled` flip as a live mid-stream cancel. A real
-        // cancel must NOT mark completion-cleanup; nor does the watcher path
-        // (it historically only set `cancelled`).
-        if ctx.allow_completion_cleanup && !matches!(event, TerminalEvent::Cancel) {
-            token.mark_completion_cleanup();
-        }
-        // Stop any lingering watchdog timer from firing on a newer turn's
-        // token.
-        token
-            .cancelled
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    // (C) #3019 active-counter — decrement ONLY here, ONLY when this submission
-    //     actually removed the active turn. Gating on `removed_token.is_some()`
-    //     is what guarantees no underflow even under a transitional
-    //     double-call.
-    if finish.removed_token.is_some() {
-        super::saturating_decrement_global_active(shared);
-    }
-
-    // The CHANNEL-SCOPED trailing side-effects (D)/(E) below mutate per-channel
-    // routing/watchdog state that belongs to whatever turn is CURRENTLY active
-    // in the channel. They are safe to run when this finalize actually finished
-    // the turn (`removed_token.is_some()`), and harmlessly idempotent on the
-    // legacy unguarded id-0 path (which always ran them). But when the
-    // IDENTITY-GUARDED finish MISSED — a real `user_msg_id` that did NOT match
-    // the live active turn, so `removed_token` is `None` — a DIFFERENT (newer)
-    // turn owns the channel. Running these would clear the newer turn's
-    // watchdog override, drop its `dispatch_thread_parents` / `dispatch_role_
-    // overrides`, and drain its voice deferrals, corrupting a turn this stale
-    // terminal does not own (Codex P2). So when the guard was used and missed,
-    // skip the channel cleanup entirely — exactly as we already skip the token
-    // release and counter decrement. (An id-0 orphan keeps today's behaviour.)
-    let guarded_finish_missed = key.user_msg_id != 0 && finish.removed_token.is_none();
-
-    let has_pending_after_voice = if guarded_finish_missed {
-        // No-op finalize on a stale terminal: leave the live newer turn's
-        // channel state untouched. Report NO backlog (Codex P2): the newer turn
-        // is still active and owns its queue. Surfacing `finish.has_pending`
-        // here would let the bridge propagate `has_queued_turns` and later drain
-        // a queued soft message behind the live turn — concurrently dispatching
-        // a follow-up this stale terminal does not own. A guarded miss is a true
-        // no-op: no queue kickoff, no backlog reporting.
-        false
-    } else {
-        // (D) trailing terminal side-effects that today follow
-        //     `mailbox_finish_turn` inline at the bridge/watcher call-sites.
-        //     Moved here so they cannot diverge between the routed paths.
-        super::clear_watchdog_deadline_override(channel_id.get()).await;
-        shared
-            .dispatch
-            .thread_parents
-            .retain(|_, thread| *thread != channel_id);
-
-        let voice_deferred_enqueued = if ctx.drain_voice {
-            shared
-                .voice_barge_in
-                .drain_deferred_after_turn(shared, &provider, channel_id)
-                .await
-        } else {
-            false
-        };
-        let has_pending_after_voice = finish.has_pending || voice_deferred_enqueued;
-        if !has_pending_after_voice {
-            shared.dispatch.role_overrides.remove(&channel_id);
-        }
-
-        // (E) optional deferred queue kickoff (watcher path), gated exactly as
-        //     `finish_restored_watcher_active_turn` did.
-        if ctx.kickoff_queue && finish.mailbox_online && has_pending_after_voice {
-            // #3005: idle has just been confirmed on this finalize, so let the
-            // first kickoff attempt run immediately (skipping the 2s pre-sleep)
-            // instead of waiting the full deferred-drain INITIAL_DELAY before a
-            // queued follow-up can start. Subsequent retries keep the existing
-            // 2s cadence (e.g. if the hosted TUI is still transiently Busy).
-            super::schedule_deferred_idle_queue_kickoff_immediate(
-                shared.clone(),
-                provider.clone(),
-                channel_id,
-                "turn_finalizer terminal completion with queued backlog",
-            );
-        }
-        has_pending_after_voice
-    };
-
-    cleanup::finalized_reaction_lifecycle(key, event, ctx, shared, "finalized");
-
-    // (F) relay-miss observability — emitted from inside the finalizer so the
-    //     signal fires exactly once per finalize regardless of submitter.
-    if matches!(event, TerminalEvent::RelayMiss) {
-        crate::services::observability::emit_inflight_lifecycle_event(
-            provider.as_str(),
-            channel_id.get(),
-            None,
-            None,
-            None,
-            "relay_miss_finalized",
-            serde_json::json!({
-                "removed_token": finish.removed_token.is_some(),
-                "has_pending": has_pending_after_voice,
-            }),
-        );
-    }
-
-    FinalizeOutcome::Finalized {
-        removed_token: finish.removed_token,
-        has_pending: has_pending_after_voice,
-        mailbox_online: finish.mailbox_online,
-    }
-}
-
-/// Run the deadline-elapsed backstop finalize for ONE entry: flip
-/// `Pending → Finalizing` (skip if a concurrent terminal already advanced it),
-/// run `do_finalize` on the backstop context, then flip `Finalized`. Shared by
-/// the gate-timeout deadline arm and the phase-5a watcher far-backstop arm so
-/// exactly-once is decided in one place. (#3016 phase-5b2: the legacy
-/// `mailbox_finalize_owed` revoke that used to run here is gone with the flag.)
-async fn run_backstop_finalize(
-    ledger: &mut HashMap<LedgerKey, LedgerEntry>,
-    ledger_key: LedgerKey,
-    turn_key: TurnKey,
-    provider: ProviderKind,
-    shared: &Arc<SharedData>,
-    now: Instant,
-) {
-    match ledger.get_mut(&ledger_key) {
-        Some(entry) if entry.phase == Phase::Pending => entry.phase = Phase::Finalizing,
-        _ => return,
-    }
-    // Backstop finalize: the deferred terminal originated from the watcher but
-    // no caller is around to clear inflight, so the backstop context clears it
-    // here — and the row, still on disk, feeds the marker-ensure row fallback.
-    let _ = do_finalize(
-        turn_key,
-        provider,
-        &TerminalEvent::GateTimeout {
-            pane_quiescent: Some(true),
-        },
-        FinalizeContext::gate_backstop(),
-        shared,
-    )
-    .await;
-    // #3016 phase-5b2: the legacy `mailbox_finalize_owed` revoke that ran here
-    // is gone — the ledger's exactly-once phase gate is the sole arbiter, so
-    // there is no stale flag a surviving watcher could swap.
-    if let Some(entry) = ledger.get_mut(&ledger_key) {
-        entry.phase = Phase::Finalized;
-        entry.finalized_at = Some(now);
-        entry.terminal_deadline = None;
-        entry.watcher_backstop_deadline = None;
-    }
-}
-
-/// The one reconciler. Finalizes deadline-armed gate-timeouts whose backstop
-/// elapsed, GUARANTEES the phase-5a watcher far-backstop for watcher-owned
-/// `register_start` Pending entries that never received a terminal (re-checking
-/// liveness so a paused-live turn is deferred, never over-finalized), and
-/// garbage-collects `Finalized` entries past their TTL so the ledger stays
-/// bounded.
-async fn reconcile(ledger: &mut HashMap<LedgerKey, LedgerEntry>, shared: &Arc<SharedData>) {
-    let now = Instant::now();
-
-    // #3041 P1-1 (B3): reclaim any delivery lease whose acquire deadline has
-    // elapsed (a dead/stuck holder), so a legitimate successor can acquire. This
-    // runs on the reconcile tick (1s) and is identity-agnostic; a `Committed`
-    // lease is never reclaimed (it awaits an explicit holder release). Uses the
-    // process-monotonic `lease_now_ms()` clock — the SAME clock the watcher's
-    // acquire deadline is computed against — so a live holder mid-send (whose
-    // ~15s deadline is kept ahead by the watcher's heartbeat-renew) is never
-    // reclaimed.
-    let _ = shared.reclaim_expired_delivery_leases(super::lease_now_ms());
-
-    // Collect deadline-elapsed gate-timeout entries to finalize. We must not
-    // hold a `&mut` borrow across the `do_finalize` await, so snapshot first.
-    // The stored `turn_key` carries the identity `do_finalize` needs.
-    let due: Vec<(LedgerKey, TurnKey, ProviderKind)> = ledger
-        .iter()
-        .filter_map(|(ledger_key, entry)| {
-            if entry.phase == Phase::Pending
-                && let Some(deadline) = entry.terminal_deadline
-                && now >= deadline
-            {
-                Some((*ledger_key, entry.turn_key, entry.provider.clone()))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    for (ledger_key, turn_key, provider) in due {
-        run_backstop_finalize(ledger, ledger_key, turn_key, provider, shared, now).await;
-    }
-
-    // #3277 (Defect C) — proven-terminal fast-path probe (no await). For
-    // watcher-owned Pending entries whose far deadline is still distant, run
-    // the STRICT (`at_deadline = false`) predicate: transcript-proven `Done`
-    // under a LIVE unpaused handle ONLY — absent/cancelled/stale handles and
-    // non-JSONL runtimes always defer here (codex r1, #3277 verify-3). After
-    // WATCHER_BACKSTOP_TERMINAL_STREAK interval-spaced terminal probes, pull
-    // the deadline in to GATE_BACKSTOP for the deadline arm's third (still
-    // strict — the entry is flagged `pulled`) confirmation within seconds
-    // instead of 1800s. Any non-terminal probe resets the streak.
-    let probe_due: Vec<(LedgerKey, ChannelId, ProviderKind)> = ledger
-        .iter()
-        .filter_map(|(ledger_key, entry)| {
-            let probe_spacing_elapsed = entry.watcher_backstop_probe_at.is_none_or(|at| {
-                now.duration_since(at) >= WATCHER_BACKSTOP_TERMINAL_PROBE_INTERVAL
-            });
-            if entry.phase == Phase::Pending
-                && entry.relay_owner == RelayOwnerKind::Watcher
-                && probe_spacing_elapsed
-                && let Some(deadline) = entry.watcher_backstop_deadline
-                && deadline > now + GATE_BACKSTOP
-            {
-                Some((
-                    *ledger_key,
-                    entry.turn_key.channel_id,
-                    entry.provider.clone(),
-                ))
-            } else {
-                None
-            }
-        })
-        .collect();
-    for (ledger_key, channel_id, provider) in probe_due {
-        let terminal = watcher_backstop_turn_is_terminal(shared, channel_id, &provider, false);
-        let Some(entry) = ledger.get_mut(&ledger_key) else {
-            continue;
-        };
-        entry.watcher_backstop_probe_at = Some(now);
-        if !terminal {
-            entry.watcher_backstop_terminal_streak = 0;
-            continue;
-        }
-        entry.watcher_backstop_terminal_streak =
-            entry.watcher_backstop_terminal_streak.saturating_add(1);
-        if entry.watcher_backstop_terminal_streak == WATCHER_BACKSTOP_TERMINAL_STREAK {
-            entry.watcher_backstop_deadline = Some(now + GATE_BACKSTOP);
-            entry.watcher_backstop_deadline_pulled = true;
-            tracing::warn!(
-                channel = channel_id.get(),
-                provider = %provider.as_str(),
-                streak = entry.watcher_backstop_terminal_streak,
-                "#3277: watcher-owned turn is provably terminal but no terminal was ever \
-                 submitted — pulling the far-backstop deadline in (finalize after a final \
-                 at-deadline liveness re-check)"
-            );
-        }
-    }
-
-    // #3016 phase-5a — the watcher-owned `register_start` FAR backstop. Collect
-    // watcher-owned Pending entries whose generous `watcher_backstop_deadline`
-    // elapsed (those the watcher fresh-idle finalize never caught — the
-    // under-finalize gap the `placeholder_sweeper` SKIPS once content was
-    // delivered). Snapshot first so no `&mut` borrow is held across the awaits.
-    let watcher_due: Vec<(LedgerKey, TurnKey, ProviderKind, bool)> = ledger
-        .iter()
-        .filter_map(|(ledger_key, entry)| {
-            if entry.phase == Phase::Pending
-                && entry.relay_owner == RelayOwnerKind::Watcher
-                && let Some(deadline) = entry.watcher_backstop_deadline
-                && now >= deadline
-            {
-                let pulled = entry.watcher_backstop_deadline_pulled;
-                Some((*ledger_key, entry.turn_key, entry.provider.clone(), pulled))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    for (ledger_key, turn_key, provider, pulled) in watcher_due {
-        // Liveness re-check: NEVER finalize a paused-live / still-busy turn at
-        // the deadline; a still-live one EXTENDS its backstop a full horizon.
-        // A fast-path-PULLED deadline stays STRICT (codex r1) so a transiently
-        // absent/stale handle cannot smuggle a busy turn past the third check.
-        if watcher_backstop_turn_is_terminal(shared, turn_key.channel_id, &provider, !pulled) {
-            run_backstop_finalize(ledger, ledger_key, turn_key, provider, shared, now).await;
-        } else if let Some(entry) = ledger.get_mut(&ledger_key) {
-            if entry.phase == Phase::Pending {
-                entry.watcher_backstop_deadline = Some(now + WATCHER_REGISTER_BACKSTOP);
-                // #3277: re-prove from scratch on the restored generous horizon.
-                entry.watcher_backstop_deadline_pulled = false;
-                entry.watcher_backstop_terminal_streak = 0;
-            }
-        }
-    }
-
-    // GC finalized entries past their TTL.
-    ledger.retain(|_, entry| {
-        !(entry.phase == Phase::Finalized
-            && entry
-                .finalized_at
-                .is_some_and(|t| now.duration_since(t) >= FINALIZED_TTL))
-    });
 }
 
 #[cfg(test)]
@@ -1462,6 +1170,215 @@ mod tests {
                 )
                 .await;
             assert!(matches!(second, FinalizeOutcome::AlreadyFinalized));
+        })
+        .await;
+    }
+
+    /// #3866: a panic inside a single `handle_terminal` must NOT kill the actor
+    /// task. The next turn must still finalize. Without the `catch_unwind`
+    /// guard in the actor loop the spawned task would unwind and die, so the
+    /// second turn below would hang on its ack `oneshot` (the actor never
+    /// replies) — the test would time out instead of observing `Finalized`.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn panic_in_handle_terminal_does_not_kill_actor_loop() {
+        with_isolated_runtime_root(|| async move {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+            let fin = TurnFinalizer::spawn();
+
+            // First turn: arm the one-shot panic so this finalize unwinds inside
+            // the actor task.
+            let k1 = key(3866);
+            fin.register_start(k1, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
+            test_panic_hook::arm_once();
+            let first = fin
+                .submit_terminal(
+                    k1,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+            // The caught panic resolves the ack as `AlreadyFinalized` (not a
+            // hang) — the submitter survives too.
+            assert!(
+                matches!(first, FinalizeOutcome::AlreadyFinalized),
+                "panicking finalize should resolve the ack as AlreadyFinalized (not hang)"
+            );
+
+            // Second, independent turn: the actor loop must still be alive and
+            // finalize it normally. If the panic had killed the task this await
+            // would hang forever (the start-paused runtime would stall).
+            shared.restart.global_active.store(1, Ordering::Relaxed);
+            let k2 = key(38661);
+            fin.register_start(k2, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
+            let second = fin
+                .submit_terminal(
+                    k2,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(
+                matches!(second, FinalizeOutcome::Finalized { .. }),
+                "actor loop must survive the earlier panic and finalize the next turn"
+            );
+        })
+        .await;
+    }
+
+    /// #3866 (Finding 2 / 3a): a panic INSIDE `do_finalize` — fired AFTER the
+    /// caller flipped the entry `Pending -> Finalizing` — must NOT leave the
+    /// ledger entry stuck in `Finalizing`. A stuck `Finalizing` entry is never
+    /// GC'd (reconcile reaps only `Finalized`) and never re-finalized (every
+    /// backstop/probe gates on `Pending`), so it would leak forever and keep
+    /// reporting the channel as a live watcher-pending turn. The earlier
+    /// top-of-`handle_terminal` panic test arms BEFORE any ledger mutation, so it
+    /// cannot prove this repair. Here the caught panic must reset the entry to
+    /// `Finalized` (observed via `has_live_watcher_pending` flipping false), the
+    /// actor loop must survive, and a same-channel follow-up turn must finalize.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn panic_inside_do_finalize_resets_stuck_finalizing_entry() {
+        with_isolated_runtime_root(|| async move {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+            let fin = TurnFinalizer::spawn();
+            let ch = ChannelId::new(38662);
+            let generation = 0;
+
+            // A live, watcher-owned turn.
+            let k1 = TurnKey::new(ch, 11, generation);
+            fin.register_start(k1, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
+            tokio::task::yield_now().await;
+            assert!(
+                fin.has_live_watcher_pending(ch, generation).await,
+                "the registered watcher turn must start out live/pending"
+            );
+
+            // Arm a panic INSIDE do_finalize (after the Finalizing flip) and submit
+            // the terminal. The actor flips Pending->Finalizing, calls do_finalize,
+            // which panics; the guard contains it and the post-call flip resets the
+            // entry to Finalized.
+            shared.restart.global_active.store(1, Ordering::Relaxed);
+            test_panic_hook::arm_in_finalize_once();
+            let first = fin
+                .submit_terminal(
+                    k1,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(
+                matches!(first, FinalizeOutcome::AlreadyFinalized),
+                "a panic inside do_finalize must resolve the ack (not hang)"
+            );
+
+            // KEY assertion (Finding 2): the entry is reset to Finalized, NOT left
+            // stuck Finalizing. A stuck entry would still be reported as a live
+            // watcher-pending turn for this channel+generation forever.
+            assert!(
+                !fin.has_live_watcher_pending(ch, generation).await,
+                "after a contained do_finalize panic the entry must be Finalized (not stuck \
+                 Finalizing, which would stay watcher-pending forever)"
+            );
+
+            // The actor loop survived AND the channel is free: a same-channel
+            // follow-up turn (new user_msg_id) still finalizes normally.
+            shared.restart.global_active.store(1, Ordering::Relaxed);
+            let k2 = TurnKey::new(ch, 22, generation);
+            fin.register_start(k2, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
+            let second = fin
+                .submit_terminal(
+                    k2,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(
+                matches!(second, FinalizeOutcome::Finalized { .. }),
+                "a same-channel follow-up turn must still finalize after the contained panic"
+            );
+        })
+        .await;
+    }
+
+    /// #3866 (Finding 1 / 3b): a panic on the RECONCILE/BACKSTOP finalize path
+    /// must be contained too. The original guard wrapped only the Terminal arm, so
+    /// a panic in a gate-timeout backstop finalize (driven by the reconcile timer,
+    /// NOT a terminal submission) would still unwind and permanently kill the
+    /// single never-respawned actor. Here a deferred gate-timeout's deadline
+    /// elapses, the reconciler runs the backstop `do_finalize` which panics; the
+    /// guard must contain it, reset the entry to Finalized, and keep the loop
+    /// alive to finalize a fresh turn.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn panic_on_reconcile_backstop_path_is_contained() {
+        with_isolated_runtime_root(|| async move {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+            let fin = TurnFinalizer::spawn();
+            let k = key(38663);
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
+
+            // Defer via a busy-pane gate-timeout (arms the backstop deadline).
+            let deferred = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::GateTimeout {
+                        pane_quiescent: Some(false),
+                    },
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(matches!(deferred, FinalizeOutcome::Deferred));
+
+            // Arm the panic so the reconciler's backstop do_finalize unwinds, then
+            // let the deadline elapse so the reconcile tick fires it. Under
+            // start_paused the runtime auto-advances once all tasks idle on timers.
+            test_panic_hook::arm_in_finalize_once();
+            tokio::time::sleep(GATE_BACKSTOP + RECONCILE_INTERVAL * 3).await;
+            tokio::task::yield_now().await;
+
+            // The contained panic reset the deferred entry to Finalized: a late
+            // terminal now sees AlreadyFinalized (the ack completing at all proves
+            // the actor loop is still alive — a dead actor would hang it forever
+            // under the paused runtime).
+            let late = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(
+                matches!(late, FinalizeOutcome::AlreadyFinalized),
+                "the backstop entry must be reset to Finalized after the contained panic"
+            );
+
+            // And the loop still finalizes a brand-new, independent turn.
+            shared.restart.global_active.store(1, Ordering::Relaxed);
+            let k2 = key(386631);
+            fin.register_start(k2, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
+            let fresh = fin
+                .submit_terminal(
+                    k2,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(
+                matches!(fresh, FinalizeOutcome::Finalized { .. }),
+                "actor loop must survive a reconcile/backstop panic and finalize the next turn"
+            );
         })
         .await;
     }

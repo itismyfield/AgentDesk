@@ -418,6 +418,40 @@ pub(super) fn watcher_inflight_is_panel_eligible_for_session(
         })
 }
 
+/// #3969: the ROOT INVARIANT behind the #3089 footer-chrome suppression. A
+/// watcher-relayed orchestrator-TUI session emits exactly two turn classes:
+///
+///   * a genuine Discord-USER-message turn (`TurnSource::Managed`) — the user
+///     typed in Discord, so the reconstructed footer (`Context … tokens`,
+///     `Tasks`, `Subagents`) is their ONLY status surface → KEEP it; and
+///   * every OTHER origin (`ExternalInput` terminal-typed / `/loop` self-paced,
+///     `ExternalAdopted`, `MonitorTriggered`) — a MIRROR of what the user is
+///     already watching live in the terminal, so the footer is duplicate chrome
+///     → SUPPRESS it.
+///
+/// `turn_is_external_input_for_session` (the cached `:1017` panel-eligibility
+/// flag) ENUMERATES the mirror sub-cases but is read from the top-of-iteration
+/// `:1009` snapshot, so a turn whose inflight row is created LATER in the same
+/// iteration (the `/loop` ScheduleWakeup self-paced class, #3969 — created by
+/// the claude idle bridge, NOT a `<task-notification>`, so `completion_background`
+/// is also `false`) is stale-`false` and leaks. This predicate instead reads the
+/// CHOKEPOINT-FRESH `inflight_before_relay` (`tmux_watcher.rs:3857`, re-loaded
+/// AFTER the row exists) and keys on the COMPLETE complement of `Managed`
+/// (`turn_source != Managed`), so every non-Discord origin is caught and no
+/// mirror class can be missed by enumeration. The `tmux_session_name` guard
+/// ignores a stale inflight bound to a different pane. A genuine Discord turn is
+/// `Managed` → this returns `false` → the #3089 footer is KEPT (non-regression).
+pub(super) fn watcher_inflight_is_non_managed_tui_mirror_for_session(
+    inflight: Option<&InflightTurnState>,
+    tmux_session_name: &str,
+) -> bool {
+    inflight
+        .filter(|state| state.tmux_session_name.as_deref() == Some(tmux_session_name))
+        .is_some_and(|state| {
+            state.turn_source != crate::services::discord::inflight::TurnSource::Managed
+        })
+}
+
 /// #3003 single-chokepoint orphan reclaim: has the in-flight TUI-direct turn
 /// been abandoned, so a watcher-created v2 panel can never reach terminal
 /// completion?
@@ -500,3 +534,65 @@ pub(super) fn watcher_should_reclaim_orphan_turn_placeholder(
 pub(super) fn watcher_inflight_absence_is_abandonment(pane_actively_streaming: bool) -> bool {
     !pane_actively_streaming
 }
+
+/// Pure decision for the watcher completion-footer idle refresh: tick only when a
+/// footer target is registered AND the refresh interval has elapsed.
+pub(super) fn watcher_completion_footer_should_tick(
+    has_registered_target: bool,
+    elapsed: std::time::Duration,
+    interval: std::time::Duration,
+) -> bool {
+    has_registered_target && elapsed >= interval
+}
+
+/// #3964: should the #3089 single-message-panel completion footer (`Context …
+/// tokens`, `Tasks`, `Subagents`) be SUPPRESSED for this WATCHER-relayed terminal
+/// mirror? The tmux-watcher analogue of the bridge gate
+/// `tui_direct_completion_footer_suppressed` (#3959/#3961): #3961 stripped the
+/// chrome only on the bridge relay path, but a TUI session's SYNTHETIC turns
+/// (background task-notifications, `/loop`·MonitorAutoTurn) are relayed by the live
+/// WATCHER, which re-appended it (#3964). Two complementary signals mark a mirror:
+///
+/// 1. `turn_is_external_input_for_session` — the cached panel-eligibility flag
+///    (`watcher_inflight_is_panel_eligible_for_session`). Computed ONCE at the top
+///    of each `'watcher_loop` iteration (`tmux_watcher.rs:1017`) from the `:1009`
+///    inflight snapshot, so it is reliable only for a turn whose row already
+///    existed. A FRESH synthetic turn's row is created LATER in the same iteration
+///    (`ensure_monitor_auto_turn_inflight`, `:1226`/`:1495`), so the cached flag is
+///    still `false` when the turn's `Done` reaches the terminal chokepoint (the
+///    `:2013` late set-true lives in the separate-panel branch, mutually exclusive
+///    with footer mode).
+/// 2. `completion_background` — computed at the chokepoint (`tmux_watcher.rs:5700`)
+///    as `task_notification_kind ∈ {Background, MonitorAutoTurn}`, a STREAM-derived
+///    value (merged at `:1170`/`:1464`) that is correct regardless of row timing.
+///    This catches the common fresh synthetic turn the cached flag misses.
+///
+/// All three are `false` for a genuine Discord-origin turn (`TurnSource::Managed`
+/// is not panel-eligible, carries no `<task-notification>` marker, and is the one
+/// origin `turn_is_non_managed_tui_mirror` excludes), so its #3089 footer — the
+/// user's only status surface — is never stripped.
+///
+/// 3. `turn_is_non_managed_tui_mirror` (#3969) — the ROOT INVARIANT disjunct:
+///    `watcher_inflight_is_non_managed_tui_mirror_for_session` over the
+///    CHOKEPOINT-FRESH `inflight_before_relay`. The cached `turn_is_external_input_for_session`
+///    enumerates the mirror sub-cases from a STALE top-of-iteration snapshot and
+///    misses the `/loop` self-paced (`ExternalInput`) class whose row is created
+///    later (#3969); `completion_background` only catches `<task-notification>`
+///    turns. This disjunct keys on the complete complement of `Managed`, so EVERY
+///    non-Discord origin suppresses regardless of row timing. Additive: it only
+///    ever fires for `turn_source != Managed`, so it can never strip a Discord turn.
+pub(super) fn watcher_external_input_completion_footer_suppressed(
+    single_message_panel_footer_mode: bool,
+    turn_is_external_input_for_session: bool,
+    completion_background: bool,
+    turn_is_non_managed_tui_mirror: bool,
+) -> bool {
+    single_message_panel_footer_mode
+        && (turn_is_external_input_for_session
+            || completion_background
+            || turn_is_non_managed_tui_mirror)
+}
+
+#[cfg(test)]
+#[path = "panel_decisions_tests.rs"]
+mod completion_footer_suppression_tests;

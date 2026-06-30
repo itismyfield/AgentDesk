@@ -403,6 +403,48 @@
 
 ### Audited touches
 
+- #3871 rollover duplicate-relay fix: `tmux_watcher.rs` records the streamed
+  rollover-prefix message ids it FROZE during streaming and, on the terminal
+  full-body fallback, deletes them (via `delete_watcher_rollover_frozen_prefixes`
+  in `tmux_placeholder_suppression.rs`) so the full-body re-post does not
+  duplicate the frozen prose — watcher parity with the sink's existing
+  `terminal_full_replay_cleanup_msg_ids`. For durability across `'watcher_loop`
+  iterations and watcher restarts the id set is PERSISTED on the inflight row
+  (new additive `#[serde(default)] streaming_rollover_frozen_msg_ids` on
+  `InflightTurnState`, union-merged via the streaming-progress patch and restored
+  through the watcher seed), so a fallback in a later iteration / after a restart
+  still deletes every accumulated prefix. Classification: worker-local relay
+  cleanup + node-local inflight state. The inflight row is per-node sidecar state
+  the owning watcher reads/writes for its own turn; the new field is additive
+  `#[serde(default)]` (legacy rows deserialize as empty), so it adds no leader
+  gate, cross-node routing, or PG-lease assumption and is forward/backward
+  compatible on disk. Independent of the `AGENTDESK_DELIVERY_RECORD_AUTHORITY`
+  flag (it touches no delivery records).
+
+- #3837 intake_turn decomposition (behavior-preserving): three cohesive
+  `handle_text_message` clusters were lifted verbatim into sibling
+  `router::message_handler::intake_turn::{voice_intake,race_loss,turn_watchdog}`
+  submodules — voice-announcement resolution, the `if !started` race-loss
+  mailbox enqueue + queued-placeholder render + reaction lifecycle, and the
+  per-turn watchdog spawn. Classification: UNCHANGED. Intake/turn-execution
+  stays worker-local — workers invoke the unchanged `execute_intake_turn_core`
+  facade after claiming a PG-lease-backed `intake_outbox` row, and the leader
+  runs the same in-process `handle_text_message`; this is pure code movement
+  with no new leader gate, cross-node routing, or PG-lease assumption.
+
+- #3870 fail-closed control-plane bind: `server::run` now resolves the HTTP
+  listener host through `routes::resolve_secure_bind_host`, which force-binds to
+  loopback when `server.host` is non-loopback AND `server.auth_token` is unset
+  (escape hatch: `server.allow_insecure_nonloopback_bind=true`). Classification:
+  control-plane, per-node startup — every node (leader or follower) runs this
+  guard at its own dcserver boot; it is NOT leader-gated and adds no cross-node
+  routing or PG-lease assumption. Multinode note: all live cross-node
+  coordination (heartbeat/leader-epoch/dispatch claims) is Postgres-based and
+  deploy is SSH-based, so force-loopback does not affect cluster comms. The only
+  cross-node HTTP path (session-forwarding to a peer's `cluster.api_base_url`)
+  is inbound-only on the receiver and already requires `auth_token`, which by
+  design exempts that node from the force-loopback downgrade.
+
 - #3739 worker-local loop-owned terminal supervision: `worker_registry` now records
   unexpected worker-local `LoopOwned` Tokio task return/panic as local runtime
   status and tracing with `auto_restart=false`. Shutdown remains worker-local:
@@ -951,3 +993,41 @@
   file + in-process ledger on the node that holds the live pane); the events flow
   through the existing `emit_inflight_lifecycle_event` PG/jsonl sink. No lease,
   durable queue, leader/standby ownership, or singleton assumption is introduced.
+- #3909 voice TTS cache/temp disk-exhaustion fix — two classifications:
+  - **Worker-local** (leak E): `tts/edge.rs` `EdgeTtsTempGuard` is a `Drop` guard
+    that unlinks the partially-written `agentdesk-edge-tts-*.mp3` when the synth
+    future is dropped mid-`.await` (barge-in abort) or any error returns. It runs
+    in-process on whichever node performed the synthesis, deleting only that node's
+    own temp file. No cross-node state, lease, or ownership; every node cleans up
+    after its own aborted synthesis.
+  - **Leader-only** (leak A): `server::maintenance::ProgressTtsCacheSweepJob`
+    (logic in `services::maintenance::jobs::voice_cache_sweep`) bounds the progress
+    TTS cache dir (TTL + capacity LRU) and mops up orphaned edge-tts temp mp3s. It
+    is a `MaintenanceJob` on the static registry, run through the existing
+    `worker_registry::MaintenanceScheduler` whose `WorkerExecutionScope` is
+    `LeaderOnly` — mirroring `voice.turn_link_gc`. Gated leader-only so N cluster
+    nodes do not each spin a redundant sweeper. The sweep dirs are resolved from
+    the loaded runtime `VoiceConfig` (`Config::from_voice_config`, tilde-expanded)
+    — the same source of truth the TTS write path uses — so operator overrides of
+    `voice.tts.progress_cache_dir` / `voice.audio.temp_dir` are swept, not the
+    defaults. Pool-less, no new lease, durable queue, leader-election surface, or
+    singleton assumption.
+- #3914 voice P3 cleanup bundle (observability / leak / validation) — **all
+  Worker-local**: every state surface touched is process-global on the node that
+  holds the live voice session, with no cross-node coordination introduced.
+  - `src/voice/receiver.rs`: the songbird `ClientDisconnect` handler prunes the
+    leaver's SSRC→user entries from the in-process `ssrc_users` map. The map is
+    pinned to the node running that voice connection (songbird driver is
+    node-local), so disconnect cleanup is purely worker-local.
+  - `src/voice/metrics.rs`: the new STT outcome counters and `voice_stt_outcome`
+    structured events are process-local telemetry (same class as the existing
+    `voice_latency_turn` registry), flowing through the node-local observability
+    event sink. No leader/standby ownership.
+  - `src/voice/cancel_tombstone.rs`: the re-fire guard remains an explicitly
+    process-local `OnceLock<RwLock<HashMap>>` (documented in its module header) —
+    the poison-recovery + read-path prune changes do not alter that boundary; a
+    dcserver restart between the two cancel attempts is still covered by the
+    background turn's own cancel-on-restart recovery.
+  - `src/voice/tts/edge.rs` keeps the edge-tts subprocess timeout a worker-local
+    constant; making it configurable + adding TTS synth/cache hit-miss metrics is
+    explicitly deferred (informational sub-item) and would also be worker-local.

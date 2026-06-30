@@ -155,14 +155,6 @@ pub(super) fn finalize_watcher_streaming_footer(
     }
 }
 
-pub(super) fn watcher_completion_footer_should_tick(
-    has_registered_target: bool,
-    elapsed: std::time::Duration,
-    interval: std::time::Duration,
-) -> bool {
-    has_registered_target && elapsed >= interval
-}
-
 pub(super) struct WatcherCompletionFooterIdleState {
     tick_at: tokio::time::Instant,
     spin_idx: usize,
@@ -224,6 +216,51 @@ pub(super) async fn refresh_watcher_completion_footer_if_due(
         );
     state.spin_idx = state.spin_idx.wrapping_add(1);
     refresh_watcher_registered_completion_footer(http, shared, channel_id, indicator).await;
+}
+
+/// #3964: deliver the watcher-relayed TUI mirror as clean assistant prose with NO
+/// completion footer (mirror of the bridge's
+/// `complete_bridge_single_message_terminal_no_footer`). Forgets the registry
+/// target first so `refresh_watcher_completion_footer_if_due` can't re-add chrome,
+/// then finalizes with a `None` block (strips any residual live footer; an
+/// already-clean body short-circuits to no edit).
+async fn complete_watcher_single_message_terminal_no_footer(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    terminal_msg_id: Option<serenity::MessageId>,
+    provider: &ProviderKind,
+    terminal_text: &str,
+) -> bool {
+    let Some(msg_id) = terminal_msg_id else {
+        return true;
+    };
+    crate::services::discord::single_message_panel::completion_footer_forget_registered_target_if_message(
+        channel_id,
+        msg_id,
+    );
+    let Some(finalized) =
+        crate::services::discord::single_message_panel::finalize_streaming_footer_with_completion(
+            terminal_text,
+            provider,
+            None,
+        )
+    else {
+        return true; // already clean prose (short-replace) — nothing to edit.
+    };
+    rate_limit_wait(shared, channel_id).await;
+    if let Err(error) =
+        crate::services::discord::http::edit_channel_message(http, channel_id, msg_id, &finalized)
+            .await
+    {
+        tracing::warn!(
+            "  ⚠ watcher: #3964 TUI-mirror footer strip failed for channel {} msg {}: {error}",
+            channel_id.get(),
+            msg_id.get()
+        );
+        return false;
+    }
+    true
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -441,6 +478,11 @@ pub(super) async fn complete_watcher_terminal_footer_or_status_panel(
     completion_background: bool,
     status_panel_completion_user_msg_id: Option<u64>,
     turn_is_external_input_for_session: bool,
+    // #3969 root invariant: chokepoint-fresh "this turn is a non-Managed TUI
+    // mirror" (`turn_source != Managed`). Suppresses the #3089 footer for the
+    // /loop self-paced (ExternalInput) class the stale `turn_is_external_input_for_session`
+    // flag misses; never set for a Discord-origin Managed turn.
+    turn_is_non_managed_tui_mirror: bool,
 ) {
     let committed = if single_message_panel_footer_mode {
         let fallback_target =
@@ -449,31 +491,51 @@ pub(super) async fn complete_watcher_terminal_footer_or_status_panel(
                 text: last_edit_text.to_string(),
             });
         let target = terminal_target.or(fallback_target);
-        let owner = crate::services::discord::single_message_panel::CompletionFooterOwner::new(
-            status_panel_completion_user_msg_id.unwrap_or(0),
-            started_at_unix,
-        );
-        let indicator =
-            crate::services::discord::single_message_panel::single_message_panel_spinner_frame(
-                *spin_idx,
-            );
-        *spin_idx = (*spin_idx).wrapping_add(1);
-        complete_watcher_single_message_completion_footer(
-            http,
-            shared,
-            channel_id,
-            target.as_ref().map(|target| target.msg_id),
-            owner,
-            provider,
-            started_at_unix,
-            target
-                .as_ref()
-                .map(|target| target.text.as_str())
-                .unwrap_or(""),
-            indicator,
+        let target_msg_id = target.as_ref().map(|target| target.msg_id);
+        let target_text = target
+            .as_ref()
+            .map(|target| target.text.as_str())
+            .unwrap_or("");
+        if watcher_external_input_completion_footer_suppressed(
+            single_message_panel_footer_mode,
+            turn_is_external_input_for_session,
             completion_background,
-        )
-        .await
+            turn_is_non_managed_tui_mirror,
+        ) {
+            // #3964: watcher-relayed TUI mirror — clean prose, no chrome.
+            complete_watcher_single_message_terminal_no_footer(
+                http,
+                shared,
+                channel_id,
+                target_msg_id,
+                provider,
+                target_text,
+            )
+            .await
+        } else {
+            let owner = crate::services::discord::single_message_panel::CompletionFooterOwner::new(
+                status_panel_completion_user_msg_id.unwrap_or(0),
+                started_at_unix,
+            );
+            let indicator =
+                crate::services::discord::single_message_panel::single_message_panel_spinner_frame(
+                    *spin_idx,
+                );
+            *spin_idx = (*spin_idx).wrapping_add(1);
+            complete_watcher_single_message_completion_footer(
+                http,
+                shared,
+                channel_id,
+                target_msg_id,
+                owner,
+                provider,
+                started_at_unix,
+                target_text,
+                indicator,
+                completion_background,
+            )
+            .await
+        }
     } else {
         complete_watcher_status_panel_v2(
             http,
@@ -624,22 +686,5 @@ mod tests {
 
         assert!(rendered.len() <= DISCORD_MSG_LIMIT);
         assert!(rendered.contains("\n\n"));
-    }
-
-    #[test]
-    fn completion_footer_tick_requires_registered_unfinished_target() {
-        let interval = std::time::Duration::from_secs(5);
-
-        assert!(watcher_completion_footer_should_tick(
-            true, interval, interval
-        ));
-        assert!(!watcher_completion_footer_should_tick(
-            false, interval, interval
-        ));
-        assert!(!watcher_completion_footer_should_tick(
-            true,
-            std::time::Duration::from_secs(4),
-            interval
-        ));
     }
 }

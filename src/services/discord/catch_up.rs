@@ -155,7 +155,12 @@ fn catch_up_candidate_allowed_for_bot(
     candidate: &CatchUpChannelCandidate,
 ) -> bool {
     if candidate.disk_checkpoint.is_some() {
-        return settings::bot_settings_allow_channel(settings, candidate.channel_id, false);
+        return settings::bot_settings_allow_channel(
+            settings,
+            provider,
+            candidate.channel_id,
+            false,
+        );
     }
 
     settings::validate_bot_channel_routing(

@@ -298,4 +298,147 @@ mod voice_route_tests {
         pool.close().await;
         pg_db.drop().await;
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn direct_dispatch_carry_forward_admits_announcement_and_still_dedups() {
+        // #3905: one process hosts many agent-bot gateways and the announce-bot
+        // message is delivered to all of them. The intake gate resolves the
+        // durable row NON-consumingly, then one gateway wins the durable claim
+        // and dispatches. A racing gateway's INDEPENDENT re-derivation inside
+        // `handle_text_message` then loads the LIVE row (`consumed_at IS NULL`),
+        // finds None, and would WARN-drop ("ignoring voice transcript
+        // announcement without authorized durable metadata") a message the gate
+        // already authorized. The fix carries the gate's resolved announcement
+        // forward into direct dispatch so it stays ADMITTED, while the
+        // per-message durable claim still dedups it (no second foreground
+        // dispatch / no multi-agent reply storm — #3464 preserved).
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let channel_id = ChannelId::new(44_004);
+        let message_id = MessageId::new(55_004);
+        let announcement = voice_announcement_fixture("긴 작업 시작해줘", "utt-carry-forward");
+        let pending_key = crate::voice::announce_meta::durable_voice_announcement_pending_key(
+            "voice:1:44004:utt-carry-forward",
+            "announce:generation:1",
+        );
+        crate::voice::announce_meta::persist_voice_announcement_reservation_durable(
+            &pool,
+            &pending_key,
+            channel_id,
+            "🎙️ \"긴 작업 시작해줘\"",
+            &announcement,
+        )
+        .await
+        .expect("persist durable voice announcement");
+        assert!(
+            crate::voice::announce_meta::bind_voice_announcement_durable_message_id(
+                &pool,
+                &pending_key,
+                message_id,
+            )
+            .await
+            .expect("bind durable announcement message id")
+        );
+
+        // The first gateway carries the gate-resolved announcement forward,
+        // wins the per-message durable claim, and dispatches: ADMITTED.
+        let winner_calls = Arc::new(AtomicUsize::new(0));
+        let winner = route_voice_transcript_announcement_once(
+            Some(&pool),
+            channel_id,
+            message_id,
+            false,
+            Some(&announcement),
+            {
+                let calls = Arc::clone(&winner_calls);
+                move |seen| {
+                    let calls = Arc::clone(&calls);
+                    async move {
+                        assert_eq!(seen.utterance_id, "utt-carry-forward");
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        true
+                    }
+                }
+            },
+        )
+        .await;
+        assert_eq!(
+            winner,
+            VoiceTranscriptAnnouncementRouteOutcome::ForegroundHandled,
+            "the carry-forward winner must be admitted and dispatched, not dropped"
+        );
+        assert_eq!(winner_calls.load(Ordering::SeqCst), 1);
+
+        // The live durable row is now consumed, so the direct path's INDEPENDENT
+        // re-derivation observes None — exactly the state that previously
+        // produced the unauthorized-metadata WARN drop.
+        assert!(
+            crate::voice::announce_meta::load_voice_announcement_durable(&pool, message_id)
+                .await
+                .expect("durable load after consume")
+                .is_none(),
+            "a consumed row leaves no LIVE durable row for independent re-derivation"
+        );
+        let announce_bot = Some(1_479_017_284_805_722_200_u64);
+        let owner = UserId::new(1_479_017_284_805_722_200);
+        assert!(
+            super::super::voice_announcement_scope::should_drop_unauthorized_voice_announcement(
+                false,
+                false,
+                true,
+                /* voice_announcement_resolved = */ false,
+                announce_bot,
+                owner,
+            ),
+            "without the carry-forward the re-derived None drops with a WARN"
+        );
+        assert!(
+            !super::super::voice_announcement_scope::should_drop_unauthorized_voice_announcement(
+                false,
+                false,
+                true,
+                /* voice_announcement_resolved = */ true,
+                announce_bot,
+                owner,
+            ),
+            "#3905: the gate carry-forward keeps the announcement admitted (no WARN drop)"
+        );
+
+        // A racing gateway also carries the gate-resolved announcement forward
+        // (already_accepted = false, so the per-message durable claim still
+        // runs). Because the row is already consumed, it is DuplicateSuppressed
+        // — the owner does NOT double-dispatch, so #3464 dedup holds.
+        let loser_calls = Arc::new(AtomicUsize::new(0));
+        let loser = route_voice_transcript_announcement_once(
+            Some(&pool),
+            channel_id,
+            message_id,
+            false,
+            Some(&announcement),
+            {
+                let calls = Arc::clone(&loser_calls);
+                move |_seen| {
+                    let calls = Arc::clone(&calls);
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        true
+                    }
+                }
+            },
+        )
+        .await;
+        assert_eq!(
+            loser,
+            VoiceTranscriptAnnouncementRouteOutcome::DuplicateSuppressed,
+            "the carry-forward must not re-dispatch an utterance another gateway already claimed"
+        );
+        assert_eq!(
+            loser_calls.load(Ordering::SeqCst),
+            0,
+            "the per-message durable claim dedups the carry-forward (no reply storm)"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
 }

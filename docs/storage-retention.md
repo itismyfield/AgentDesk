@@ -57,6 +57,9 @@ Each row is a (vector × action × job) tuple. If a vector is not in this table,
 | PG `agent_quality_event`                  | 90 days                                     | Monthly aggregate insert into summary table, then `DELETE`   | `storage.db_retention`            | Weekly   |
 | PG `session_transcripts`                  | 90 days                                     | Copy to archive table, then `DELETE`                         | `storage.db_retention`            | Weekly   |
 | PG `task_dispatches`                      | 90 days                                     | Monthly aggregate insert, then `DELETE`                      | `storage.db_retention`            | Weekly   |
+| PG `turn_lifecycle_events`                | 30 days                                     | `DELETE` (on `created_at`)                                   | `storage.db_retention`            | Weekly   |
+| PG `skill_usage`                          | 90 days                                     | `DELETE` (on `used_at`)                                      | `storage.db_retention`            | Weekly   |
+| PG `turns`                                | 90 days                                     | Copy to `turns_archive` table, then `DELETE` (on `finished_at`) | `storage.db_retention`            | Weekly   |
 | PG `prompt_manifest_layers`               | 30 days                                     | `UPDATE full_content = NULL, is_truncated = TRUE` (preserves hashes) | `storage.prompt_manifest_retention`| Daily    |
 | PG `kanban_cards`                         | **Forever**                                 | None — intentional permanent history                         | —                                 | —        |
 | `dcserver.stdout.log`                         | 100 MB × 10 files by default            | Internal dcserver tracing writer rotates before append; launchd stdout/stderr are bootstrap-only | Built into `logging.rs` startup    | Continuous |

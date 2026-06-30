@@ -492,9 +492,41 @@ fn normalized_foreground_max_chars(value: usize) -> usize {
 }
 
 fn normalized_foreground_timeout_ms(value: u64) -> u64 {
-    if value == 0 {
+    let value = if value == 0 {
         crate::voice::config::DEFAULT_FOREGROUND_TIMEOUT_MS
     } else {
         value
+    };
+    // #3914: clamp up tiny misconfigured values so a typo cannot make every
+    // foreground call time out and degrade to Silence.
+    value.max(crate::voice::config::MIN_FOREGROUND_TIMEOUT_MS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::voice::config::{DEFAULT_FOREGROUND_TIMEOUT_MS, MIN_FOREGROUND_TIMEOUT_MS};
+
+    #[test]
+    fn foreground_timeout_zero_falls_back_to_default() {
+        assert_eq!(
+            normalized_foreground_timeout_ms(0),
+            DEFAULT_FOREGROUND_TIMEOUT_MS
+        );
+    }
+
+    #[test]
+    fn foreground_timeout_below_minimum_is_clamped_up() {
+        // #3914: a 50ms misconfiguration must not make every foreground call
+        // time out (which would degrade each utterance to Silence).
+        assert_eq!(
+            normalized_foreground_timeout_ms(50),
+            MIN_FOREGROUND_TIMEOUT_MS
+        );
+    }
+
+    #[test]
+    fn foreground_timeout_above_minimum_is_preserved() {
+        assert_eq!(normalized_foreground_timeout_ms(10_000), 10_000);
     }
 }

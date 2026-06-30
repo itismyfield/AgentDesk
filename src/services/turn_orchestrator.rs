@@ -1455,6 +1455,12 @@ impl ChannelMailboxHandle {
         .await
     }
 
+    // #3864: test-only queue-seeding helper. Production startup restore moved
+    // to `merge_restored_queue_items` (the in-actor merge), so `ReplaceQueue`'s
+    // blind overwrite — the source of the lost-enqueue race — has NO production
+    // caller anymore and is gated to test builds. Test modules still use it to
+    // seed a channel queue directly.
+    #[cfg(test)]
     pub(crate) async fn replace_queue(
         &self,
         queue: Vec<Intervention>,
@@ -1478,6 +1484,29 @@ impl ChannelMailboxHandle {
     ) -> HydratePendingQueueResult {
         self.request(
             |reply| ChannelMailboxMsg::HydratePendingQueueFromDisk { persistence, reply },
+            HydratePendingQueueResult::default(),
+        )
+        .await
+    }
+
+    /// #3864: in-actor merge of SIGTERM-restored disk items into the live
+    /// queue. Mirrors `hydrate_pending_queue_from_disk`, but the caller
+    /// supplies the items it already loaded and sender-filtered (the
+    /// sender check is stateless, so it stays out-of-actor); the actor then
+    /// dedups, front-inserts and persists in one serialized step. Replaces
+    /// the out-of-actor snapshot→build→`replace_queue` RMW that silently
+    /// dropped any live `Enqueue` landing between its two round-trips.
+    pub(crate) async fn merge_restored_queue_items(
+        &self,
+        items: Vec<Intervention>,
+        persistence: QueuePersistenceContext,
+    ) -> HydratePendingQueueResult {
+        self.request(
+            |reply| ChannelMailboxMsg::MergeRestoredQueueItems {
+                items,
+                persistence,
+                reply,
+            },
             HydratePendingQueueResult::default(),
         )
         .await
@@ -1988,12 +2017,30 @@ enum ChannelMailboxMsg {
         clear_cancelled_active_anchor: bool,
         reply: oneshot::Sender<PurgeQueueResult>,
     },
+    /// #3864: blind queue overwrite. Production restore now uses
+    /// `MergeRestoredQueueItems` (in-actor, race-immune); `ReplaceQueue` has no
+    /// production caller and survives ONLY as a `#[cfg(test)]` queue-seeding
+    /// primitive used across the queue / turn_finalizer / turn_orchestrator
+    /// test modules.
+    #[cfg(test)]
     ReplaceQueue {
         queue: Vec<Intervention>,
         persistence: QueuePersistenceContext,
         reply: oneshot::Sender<()>,
     },
     HydratePendingQueueFromDisk {
+        persistence: QueuePersistenceContext,
+        reply: oneshot::Sender<HydratePendingQueueResult>,
+    },
+    /// #3864: merge SIGTERM-restored disk queue items into the LIVE queue
+    /// inside the actor, in one serialized step. Unlike `ReplaceQueue` — a
+    /// blind overwrite that loses any `Enqueue` landing between an
+    /// out-of-actor snapshot and the replace — this reads, dedups,
+    /// front-inserts and persists atomically, so a live reconcile-window
+    /// enqueue can never be dropped (same race-immunity as
+    /// `HydratePendingQueueFromDisk`, #1683).
+    MergeRestoredQueueItems {
+        items: Vec<Intervention>,
         persistence: QueuePersistenceContext,
         reply: oneshot::Sender<HydratePendingQueueResult>,
     },
@@ -2136,6 +2183,20 @@ fn persist_queue_or_restore(
     }
 }
 
+/// #3864: the full set of message ids an intervention represents — every
+/// `source_message_ids` entry (a merged queue item may carry several), plus its
+/// own `message_id` when not already among them. Dedup must treat an incoming
+/// item as a duplicate ONLY when EVERY one of these ids is already queued;
+/// otherwise a merged item whose text is no longer separable would silently
+/// drop the source messages startup catch-up has not yet recovered.
+fn intervention_dedup_ids(item: &Intervention) -> Vec<MessageId> {
+    let mut ids: Vec<MessageId> = item.source_message_ids.clone();
+    if !ids.contains(&item.message_id) {
+        ids.push(item.message_id);
+    }
+    ids
+}
+
 fn hydrate_pending_queue_into_state(
     state: &mut ChannelMailboxState,
     channel_id: ChannelId,
@@ -2145,18 +2206,29 @@ fn hydrate_pending_queue_into_state(
 ) -> HydratePendingQueueResult {
     state.last_persistence = Some(persistence.clone());
     let previous_queue = state.intervention_queue.clone();
+    // #3864: seed the seen-set with the FULL id set of every live queue item
+    // (message_id + source_message_ids), not just message_id, so a restored
+    // merged item that overlaps a live item on any source id is recognized as
+    // a duplicate. Strictly strengthens the prior message_id-only dedup; the
+    // existing disk-hydrate callers only ever pass single-source items, for
+    // which this is identical behavior.
     let mut existing_ids: HashSet<MessageId> = state
         .intervention_queue
         .iter()
-        .map(|item| item.message_id)
+        .flat_map(intervention_dedup_ids)
         .collect();
     let mut absorbed = 0usize;
     // Walk in reverse so repeated `insert(0, …)` ends up with disk
     // items in their original order.
     for item in disk_items.into_iter().rev() {
-        if !existing_ids.insert(item.message_id) {
+        let item_ids = intervention_dedup_ids(&item);
+        // Skip ONLY when every id the item represents is already queued. A
+        // merged item is dropped whole solely if all of its source messages
+        // are present; otherwise the unseen ones would be lost.
+        if item_ids.iter().all(|id| existing_ids.contains(id)) {
             continue;
         }
+        existing_ids.extend(item_ids);
         state.intervention_queue.insert(0, item);
         absorbed += 1;
     }
@@ -3060,6 +3132,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         cleared_active_anchor,
                     });
                 }
+                #[cfg(test)]
                 ChannelMailboxMsg::ReplaceQueue {
                     queue,
                     persistence,
@@ -3086,6 +3159,28 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         &mut state,
                         channel_id,
                         &persistence,
+                    );
+                    let _ = reply.send(result);
+                }
+                ChannelMailboxMsg::MergeRestoredQueueItems {
+                    items,
+                    persistence,
+                    reply,
+                } => {
+                    // #3864: merge SIGTERM-restored disk items into the live
+                    // queue in ONE serialized actor step (read + dedup-merge +
+                    // persist). Immune to the lost-enqueue race the old
+                    // out-of-actor snapshot→build→`ReplaceQueue` RMW suffered:
+                    // a live reconcile-window `Enqueue` is serialized before
+                    // or after this merge, never overwritten by it. override =
+                    // None — dispatch_role_overrides are restored separately,
+                    // before the restore loop (see recovery_flush).
+                    let result = hydrate_pending_queue_into_state(
+                        &mut state,
+                        channel_id,
+                        items,
+                        persistence,
+                        None,
                     );
                     let _ = reply.send(result);
                 }
@@ -3215,10 +3310,35 @@ mod actor_hydrate_regression_tests {
         }
     }
 
+    fn make_intervention_with_sources(
+        message_id: u64,
+        source_ids: &[u64],
+        text: &str,
+        created_at: Instant,
+    ) -> Intervention {
+        Intervention {
+            source_message_ids: source_ids.iter().copied().map(MessageId::new).collect(),
+            ..make_intervention(message_id, text, created_at)
+        }
+    }
+
     fn lock_test_env() -> MutexGuard<'static, ()> {
         TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Drive an async body to completion on a fresh current-thread runtime.
+    /// Used by the env-locked queue tests so the `lock_test_env()` guard is
+    /// held across a *synchronous* `block_on` rather than across an `.await` —
+    /// keeping the global `AGENTDESK_ROOT_DIR` env stable for the duration
+    /// WITHOUT a `#[allow(clippy::await_holding_lock)]` site (#3034 ratchet).
+    fn run_async<F: std::future::Future>(fut: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(fut)
     }
 
     #[test]
@@ -3292,6 +3412,247 @@ mod actor_hydrate_regression_tests {
         );
         assert_eq!(hydrate.queue_len_after, 0);
         assert!(handle.snapshot().await.intervention_queue.is_empty());
+    }
+
+    /// #3864 PRIMARY regression: a live reconcile-window `Enqueue` that lands
+    /// before the SIGTERM restore merge must be PRESERVED, not overwritten.
+    /// The old out-of-actor snapshot→build→`ReplaceQueue` RMW blind-replaced
+    /// the queue and silently dropped the live message from BOTH memory and
+    /// disk; the in-actor merge front-inserts the restored item ahead of the
+    /// live one and persists both atomically.
+    ///
+    /// Sync test driving the actor via `run_async`/`block_on` so the env lock
+    /// guard is not held across an `.await` (no await_holding_lock site).
+    #[test]
+    fn merge_restored_items_preserves_concurrent_live_enqueue() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        run_async(async {
+            let provider = ProviderKind::Claude;
+            let token_hash = "merge-restored-preserves-live";
+            let channel_id = ChannelId::new(3864001);
+            let registry = ChannelMailboxRegistry::default();
+            let handle = registry.handle(channel_id);
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+
+            // Live reconcile-window message B lands first (actor `Enqueue`).
+            let live = handle
+                .enqueue(
+                    make_intervention(200, "live-during-reconcile", Instant::now()),
+                    persistence.clone(),
+                )
+                .await;
+            assert!(live.enqueued, "live reconcile-window enqueue must succeed");
+
+            // SIGTERM-restored item A is merged AFTER (loaded out-of-actor,
+            // handed to the actor as items). It must NOT clobber the live B.
+            let result = handle
+                .merge_restored_queue_items(
+                    vec![make_intervention(
+                        100,
+                        "restored-from-sigterm",
+                        Instant::now(),
+                    )],
+                    persistence.clone(),
+                )
+                .await;
+            assert_eq!(result.absorbed, 1, "restored item A is absorbed");
+            assert_eq!(result.queue_len_after, 2);
+            assert!(result.persistence_error.is_none());
+
+            // In memory: [A, B] — restored (older) front-inserted ahead of live.
+            let queue = handle.snapshot().await.intervention_queue;
+            let ids: Vec<u64> = queue.iter().map(|i| i.message_id.get()).collect();
+            assert_eq!(
+                ids,
+                vec![100, 200],
+                "merge must keep the live enqueue and front-insert the restored item"
+            );
+
+            // On disk: the same [A, B] (the old ReplaceQueue would persist only [A]).
+            let (disk, _override) = load_channel_pending_queue(&provider, token_hash, channel_id);
+            let disk_ids: Vec<u64> = disk.iter().map(|i| i.message_id.get()).collect();
+            assert_eq!(
+                disk_ids,
+                vec![100, 200],
+                "both the restored and the live item must be durably persisted"
+            );
+        });
+    }
+
+    /// #3864 order: multiple restored items keep their original order and are
+    /// all front-inserted ahead of the (newer) live queue item.
+    #[test]
+    fn merge_restored_items_front_inserts_in_order_ahead_of_live() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        run_async(async {
+            let provider = ProviderKind::Claude;
+            let token_hash = "merge-restored-order";
+            let channel_id = ChannelId::new(3864002);
+            let registry = ChannelMailboxRegistry::default();
+            let handle = registry.handle(channel_id);
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+
+            handle
+                .enqueue(
+                    make_intervention(300, "live", Instant::now()),
+                    persistence.clone(),
+                )
+                .await;
+            let result = handle
+                .merge_restored_queue_items(
+                    vec![
+                        make_intervention(100, "restored-older", Instant::now()),
+                        make_intervention(200, "restored-newer", Instant::now()),
+                    ],
+                    persistence.clone(),
+                )
+                .await;
+            assert_eq!(result.absorbed, 2);
+            let ids: Vec<u64> = handle
+                .snapshot()
+                .await
+                .intervention_queue
+                .iter()
+                .map(|i| i.message_id.get())
+                .collect();
+            assert_eq!(
+                ids,
+                vec![100, 200, 300],
+                "restored items keep order and sit ahead of the live item"
+            );
+        });
+    }
+
+    /// #3864 thorough dedup: a restored item whose ids are fully covered by a
+    /// live queued item's `source_message_ids` is skipped. The old
+    /// `message_id`-only dedup would re-add it (its `message_id` is NOT a live
+    /// head `message_id`, only a live SOURCE id), creating a duplicate.
+    #[test]
+    fn merge_restored_items_skips_overlapping_source_ids() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        run_async(async {
+            let provider = ProviderKind::Claude;
+            let token_hash = "merge-restored-dedup";
+            let channel_id = ChannelId::new(3864003);
+            let registry = ChannelMailboxRegistry::default();
+            let handle = registry.handle(channel_id);
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+
+            // Live queue holds a MERGED item: head message_id 300, source {300, 301}.
+            handle
+                .replace_queue(
+                    vec![make_intervention_with_sources(
+                        300,
+                        &[300, 301],
+                        "live-merged",
+                        Instant::now(),
+                    )],
+                    persistence.clone(),
+                )
+                .await;
+
+            // Restored item carries head message_id 301 (a live SOURCE id, not a
+            // live head id) with source {301} — fully covered by the live item.
+            let result = handle
+                .merge_restored_queue_items(
+                    vec![make_intervention_with_sources(
+                        301,
+                        &[301],
+                        "restored-duplicate",
+                        Instant::now(),
+                    )],
+                    persistence.clone(),
+                )
+                .await;
+            assert_eq!(
+                result.absorbed, 0,
+                "restored item fully covered by a live item's source ids must be skipped"
+            );
+            let queue = handle.snapshot().await.intervention_queue;
+            assert_eq!(queue.len(), 1, "no duplicate must be inserted");
+            assert_eq!(queue[0].message_id.get(), 300);
+        });
+    }
+
+    /// #3864 persist-failure rollback: when the merge's durable persist fails,
+    /// the actor rolls the in-memory queue back. The live enqueue survives (it
+    /// was persisted by its own `Enqueue` and lives in the rolled-back-to
+    /// previous queue), and the failure is surfaced via `persistence_error`
+    /// instead of being silently dropped.
+    #[cfg(unix)]
+    #[test]
+    fn merge_restored_items_persist_failure_rolls_back_and_keeps_live() {
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        run_async(async {
+            let provider = ProviderKind::Claude;
+            let token_hash = "merge-restored-persist-fail";
+            let channel_id = ChannelId::new(3864004);
+            let registry = ChannelMailboxRegistry::default();
+            let handle = registry.handle(channel_id);
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+
+            // Live message B persists successfully (dir writable).
+            let live = handle
+                .enqueue(
+                    make_intervention(200, "live", Instant::now()),
+                    persistence.clone(),
+                )
+                .await;
+            assert!(live.enqueued);
+            let path = queue_file_path(tmp.path(), &provider, token_hash, channel_id);
+            assert!(path.exists());
+            let dir = path.parent().unwrap().to_path_buf();
+
+            // Make the channel's persistence dir read-only so the merge's atomic
+            // write (tmp create + rename) fails.
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+            let result = handle
+                .merge_restored_queue_items(
+                    vec![make_intervention(100, "restored", Instant::now())],
+                    persistence.clone(),
+                )
+                .await;
+            // Restore perms before any assertion can early-return (and before drop).
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+            assert!(
+                result.persistence_error.is_some(),
+                "merge persist failure must be surfaced"
+            );
+            assert_eq!(result.absorbed, 0, "rolled back → nothing absorbed");
+
+            // In memory: rolled back to just the live B (restored A dropped).
+            let ids: Vec<u64> = handle
+                .snapshot()
+                .await
+                .intervention_queue
+                .iter()
+                .map(|i| i.message_id.get())
+                .collect();
+            assert_eq!(ids, vec![200], "rollback keeps the live enqueue");
+
+            // On disk: still the live B only (atomic write never clobbered it).
+            let (disk, _override) = load_channel_pending_queue(&provider, token_hash, channel_id);
+            let disk_ids: Vec<u64> = disk.iter().map(|i| i.message_id.get()).collect();
+            assert_eq!(disk_ids, vec![200], "live enqueue stays durably persisted");
+        });
     }
 
     #[tokio::test]
@@ -4216,6 +4577,138 @@ mod active_turn_kind_tests {
             "Background still yields — now because the queue is non-empty, not the reservation"
         );
         assert!(!handle.has_active_turn().await);
+    }
+
+    // #3903 — a genuine user message queued behind a `/loop`/system-injection
+    // turn must NOT be lost. The live incident: a queued user reply lost the
+    // start-turn race to a `/loop` auto-check (a Background turn), so it was
+    // re-enqueued behind the injection. The race-loss drain-scheduling guard
+    // (`race_loss.rs`) keyed on `has_active_turn` (ANY turn) and therefore
+    // skipped scheduling the deferred drain while the Background injection held
+    // the slot — and the injection's own finalize never re-kicks the user
+    // queue, so the message stranded until an external fetch surfaced it.
+    //
+    // This test pins the two invariants the fix relies on:
+    //   1. the scheduling DISCRIMINATOR — a Background injection makes
+    //      `has_active_turn()` true (the old guard skips → bug) but
+    //      `has_blocking_active_turn()` false (the new guard schedules → fix);
+    //   2. the END-TO-END outcome — once the injection turn completes, the
+    //      queued user message is dequeued exactly once (not lost, not doubled).
+    //
+    // #3034: hold the test-env lock across a SYNCHRONOUS `block_on` (not across
+    // an `.await` inside an async fn) so the global `AGENTDESK_ROOT_DIR` stays
+    // stable for the durable-queue persistence WITHOUT an
+    // `#[allow(clippy::await_holding_lock)]` site (matches the `run_async`
+    // pattern in `actor_hydrate_regression_tests`).
+    #[test]
+    fn queued_user_message_survives_loop_injection_preemption() {
+        let _lock = lock_test_env();
+        let _env_guard = EnvGuard;
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let registry = ChannelMailboxRegistry::default();
+                let handle = registry.handle(ChannelId::new(3_903_001));
+
+                // A `/loop` auto-check is injected and claims the slot as a
+                // Background turn (mirrors `synthetic_start.rs`
+                // `try_start_turn_kinded(Background)`).
+                let loop_token = Arc::new(CancelToken::new());
+                assert!(
+                    handle
+                        .try_start_turn_kinded(
+                            loop_token.clone(),
+                            UserId::new(1),
+                            MessageId::new(7_001),
+                            ActiveTurnKind::Background,
+                        )
+                        .await,
+                    "the /loop injection claims the idle slot as a Background turn"
+                );
+
+                // The genuine user reply lost the start-turn race and is queued
+                // behind the injection.
+                let user_msg = test_intervention(7_100);
+                assert!(
+                    handle
+                        .enqueue(user_msg.clone(), test_persistence())
+                        .await
+                        .enqueued,
+                    "the genuine user message is queued behind the injection"
+                );
+
+                // Invariant 1 — the scheduling discriminator. The OLD race-loss
+                // guard (`!has_active_turn`) would be FALSE here and skip the
+                // drain (the #3903 bug); the NEW guard
+                // (`!has_blocking_active_turn`) is TRUE and schedules it.
+                assert!(
+                    handle.has_active_turn().await,
+                    "the Background injection holds the slot for has_active_turn — old guard skipped the drain"
+                );
+                assert!(
+                    !handle.has_blocking_active_turn().await,
+                    "#3903: a Background injection is non-blocking, so the new guard schedules the rescue drain"
+                );
+
+                // The deferred drain supersedes the non-blocking injection
+                // (`#3167` `cancel_active_background_turn_if_current`) and the
+                // injection's finalizer releases the slot.
+                assert!(
+                    handle.cancel_active_background_turn_if_current().await,
+                    "the drain cancels ONLY the Background injection to free the slot for the user"
+                );
+                let finish = handle.finish_turn(test_persistence()).await;
+                assert!(
+                    finish.has_pending,
+                    "the queued user message is still pending after the injection finalizes"
+                );
+                assert!(!handle.has_active_turn().await, "the slot is now free");
+
+                // Invariant 2 — exactly-once delivery. The drain dequeues the
+                // queued user message and the dispatched user turn claims the
+                // slot.
+                let taken = handle.take_next_soft(test_persistence()).await;
+                let dequeued = taken.intervention.expect(
+                    "the queued user message must be dequeued after the injection completes",
+                );
+                assert_eq!(
+                    dequeued.message_id,
+                    MessageId::new(7_100),
+                    "the genuine user message is the one delivered — not lost"
+                );
+                assert_eq!(
+                    taken.queue_len_after, 0,
+                    "no duplicate copy is left in the queue"
+                );
+                assert!(
+                    handle
+                        .try_start_turn(
+                            Arc::new(CancelToken::new()),
+                            UserId::new(2),
+                            MessageId::new(7_100),
+                        )
+                        .await,
+                    "the dispatched user turn claims the slot and clears the dequeue reservation"
+                );
+
+                // Not doubled — after the user turn finishes there is nothing
+                // left to re-deliver.
+                let finish = handle.finish_turn(test_persistence()).await;
+                assert!(
+                    !finish.has_pending,
+                    "the user message was delivered exactly once — the queue is drained"
+                );
+                let drained = handle.take_next_soft(test_persistence()).await;
+                assert!(
+                    drained.intervention.is_none(),
+                    "a second dequeue yields nothing — no double-processing"
+                );
+            });
     }
 }
 

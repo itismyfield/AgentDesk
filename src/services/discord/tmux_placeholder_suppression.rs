@@ -439,6 +439,61 @@ pub(super) async fn delete_nonterminal_placeholder(
     .await
 }
 
+/// #3871: which streamed rollover-prefix message ids the watcher MUST delete
+/// after a terminal delivery so the frozen prefixes don't duplicate the body.
+///
+/// When a `>DISCORD_MSG_LIMIT` answer rolls over mid-stream, the prefix
+/// placeholder is FROZEN as a standalone permanent message and a fresh
+/// placeholder is opened for the remainder. The terminal full-body fallback
+/// (`session_bound_fallback_uses_full_body`) re-posts the WHOLE body as ordered
+/// chunks, so every frozen prefix is now a duplicate copy of bytes already in
+/// the replay → delete them all (watcher parity with the sink's
+/// `terminal_full_replay_cleanup_msg_ids`). On the remainder-only path
+/// (`false`) the frozen prefixes carry the legit, already-delivered
+/// `[0..response_sent_offset]` prose and MUST be preserved — return nothing.
+pub(super) fn watcher_rollover_prefixes_to_delete_on_terminal(
+    session_bound_fallback_uses_full_body: bool,
+    frozen_rollover_msg_ids: &[MessageId],
+) -> Vec<MessageId> {
+    if session_bound_fallback_uses_full_body {
+        frozen_rollover_msg_ids.to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
+/// #3871: delete the streamed rollover-prefix messages the watcher froze during
+/// streaming, after a terminal full-body replay re-posted their bytes. Mirrors
+/// the sink's drain-and-delete of `terminal_full_replay_cleanup_msg_ids`; each
+/// id is a non-terminal streamed prefix so `DeleteNonterminal` is used. No-op on
+/// the remainder-only path (see [`watcher_rollover_prefixes_to_delete_on_terminal`]).
+pub(super) async fn delete_watcher_rollover_frozen_prefixes(
+    http: &Arc<serenity::Http>,
+    channel_id: ChannelId,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+    session_bound_fallback_uses_full_body: bool,
+    frozen_rollover_msg_ids: Vec<MessageId>,
+) {
+    for frozen_prefix in watcher_rollover_prefixes_to_delete_on_terminal(
+        session_bound_fallback_uses_full_body,
+        &frozen_rollover_msg_ids,
+    ) {
+        rate_limit_wait(shared, channel_id).await;
+        let _ = delete_nonterminal_placeholder(
+            http,
+            channel_id,
+            shared,
+            provider,
+            tmux_session_name,
+            frozen_prefix,
+            "watcher_terminal_rollover_prefix_dedup_3871",
+        )
+        .await;
+    }
+}
+
 async fn delete_placeholder_with_operation(
     http: &Arc<serenity::Http>,
     channel_id: ChannelId,
@@ -898,5 +953,78 @@ No response requested.\n\
             panic!("footer-only active bridge placeholder should edit, not delete");
         };
         assert_eq!(content, SUPPRESSED_INTERNAL_LABEL);
+    }
+
+    // #3871: a >DISCORD_MSG_LIMIT answer rolls over mid-stream (the prefix is
+    // FROZEN as a standalone message, a fresh placeholder opens for the
+    // remainder), then the terminal full-body fallback re-posts the WHOLE body
+    // as ordered chunks. Pin the dup-relay closure: the frozen prefix bytes ARE
+    // re-sent in the replay, so unless they are deleted the user sees the prose
+    // twice. Assert (a) the frozen prefix is scheduled for deletion, (b) the
+    // full body is chunked exactly once (the single delivery), and (c) the
+    // remainder-only path PRESERVES the prefix (no spurious delete / data loss).
+    #[test]
+    fn rollover_frozen_prefix_is_deleted_on_full_body_fallback_no_dup() {
+        use crate::services::discord::formatting::{plan_streaming_rollover, split_message};
+
+        // A genuinely-long answer that exceeds the 2000-byte limit and forces at
+        // least one streaming rollover (distinct paragraphs give the splitter a
+        // clean boundary).
+        let full_body = (0..40)
+            .map(|i| format!("Paragraph {i}: {}", "lorem ipsum dolor sit amet ".repeat(3)))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert!(
+            full_body.len() > discord::DISCORD_MSG_LIMIT,
+            "fixture must exceed DISCORD_MSG_LIMIT to trigger rollover"
+        );
+
+        // Simulate the watcher streaming rollover loop: each rollover freezes the
+        // current placeholder (a synthetic message id) and advances the offset.
+        let status_block = footer_status_block();
+        let mut response_sent_offset = 0usize;
+        let mut frozen_msg_ids: Vec<MessageId> = Vec::new();
+        let mut next_msg_id = 1u64;
+        while let Some(plan) =
+            plan_streaming_rollover(&full_body[response_sent_offset..], &status_block)
+        {
+            // The placeholder holding `current_portion[..split_at]` is frozen and
+            // becomes permanent; a new placeholder (next id) takes the remainder.
+            frozen_msg_ids.push(MessageId::new(next_msg_id));
+            next_msg_id += 1;
+            response_sent_offset += plan.split_at;
+        }
+        assert!(
+            !frozen_msg_ids.is_empty(),
+            "the >2000-byte answer must have frozen at least one rollover prefix"
+        );
+
+        // (a) Terminal FULL-BODY fallback: the re-posted body is split once into
+        // ordered chunks (the single delivery)...
+        let replay_chunks = split_message(&full_body);
+        // ...and EVERY frozen prefix is scheduled for deletion (no dup left).
+        let to_delete = watcher_rollover_prefixes_to_delete_on_terminal(true, &frozen_msg_ids);
+        assert_eq!(
+            to_delete, frozen_msg_ids,
+            "full-body fallback must delete all frozen rollover prefixes so the prose is not duplicated"
+        );
+
+        // The dup-closure: the frozen prefix bytes are genuinely re-sent in the
+        // replay, so deletion is necessary — the joined replay chunks contain the
+        // leading prefix content. (No full-body re-send is left UNDELETED.)
+        let replay_joined = replay_chunks.concat();
+        assert!(
+            replay_joined.contains(&full_body[..200.min(full_body.len())]),
+            "the full-body replay re-sends the leading prefix bytes (the duplicate source)"
+        );
+
+        // (c) Remainder-only path: the frozen prefixes carry the already-delivered
+        // `[0..offset]` prose and MUST be preserved (deleting them would lose
+        // content). The cleanup set is empty.
+        let preserved = watcher_rollover_prefixes_to_delete_on_terminal(false, &frozen_msg_ids);
+        assert!(
+            preserved.is_empty(),
+            "remainder-only delivery must preserve frozen prefixes (no spurious delete / no data loss)"
+        );
     }
 }

@@ -469,3 +469,33 @@ file = "src/services/discord/tui_direct_pending_start.rs"
 owner = "discord-relay"
 deadline = "2026-08-31"
 decompose_issue = "#3540"
+
+[[entry]]
+# Crossed the 1000-prod-LoC giant threshold in #3909: the leader-only voice
+# TTS cache/temp sweep (`ProgressTtsCacheSweepJob`) added the 15th MaintenanceJob
+# to the static registry. The file was already a razor-thin near-giant (~976
+# prod LoC) of per-job `MaintenanceJob` impls; the contained #3909 wrapper
+# tipped it over. The sweep LOGIC already lives in
+# `services::maintenance::jobs::voice_cache_sweep` (the wrapper is thin);
+# decomposition would lift the storage/voice job-impl clusters into sibling
+# modules, leaving the registry + scheduler loop in the root.
+file = "src/server/maintenance.rs"
+owner = "server-runtime"
+deadline = "2026-10-31"
+decompose_issue = "#3909"
+
+[[entry]]
+# Crossed the 1000-prod-LoC giant threshold in #3924: the recovery-net
+# false-negative fix added a STRANDED Discord follow-up draft detector
+# (`claude_tui_stranded_followup_draft_backspace_budget` +
+# `tmux_lines_after_claude_prompt_show_response_output`) on top of an already
+# razor-thin near-giant (~991 prod LoC) of Claude/Codex TUI pane-capture
+# heuristics. The file is a flat collection of independent capture detectors
+# (ready-for-input, prompt-draft vs idle-suggestion, active-work streaming,
+# MCP-auth banner, /effort selector); decomposition would lift cohesive detector
+# clusters into sibling modules, leaving the shared `trim_prompt_line`/marker
+# constants in the root.
+file = "src/services/tmux_common.rs"
+owner = "discord-relay"
+deadline = "2026-10-31"
+decompose_issue = "#3924"

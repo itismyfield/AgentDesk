@@ -134,6 +134,32 @@ pub(crate) async fn execute_pg_transition_intent(
             .await
             .map_err(|error| format!("cancel dispatch {dispatch_id}: {error}"))?;
         }
+        crate::engine::transition::TransitionIntent::ScheduleStageRetry {
+            card_id,
+            state,
+            attempt,
+            delay_seconds,
+        } => {
+            // #3916: record the reducer's backoff-aware retry decision in the
+            // audit trail (observable). The card stays in `state` (no status
+            // change). NOTE: actually re-issuing dispatch after `delay_seconds`,
+            // persisting the due-time, re-arming the timeout clock, and idempotent
+            // suppression of stale retries is the deferred live-wiring follow-up.
+            sqlx::query(
+                "INSERT INTO kanban_audit_logs (
+                    card_id, from_status, to_status, source, result
+                 )
+                 VALUES ($1, $2, $2, 'timeout', $3)",
+            )
+            .bind(card_id)
+            .bind(state)
+            .bind(format!(
+                "retry-with-backoff: attempt {attempt} scheduled after {delay_seconds}s"
+            ))
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| format!("record stage retry for {card_id}: {error}"))?;
+        }
     }
 
     Ok(())

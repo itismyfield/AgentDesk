@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::platform::tmux::PaneLiveness;
 
 /// #3635: runtime-liveness oracle for the dead-watcher rebind-origin reap path.
 ///
@@ -15,11 +16,20 @@ use super::*;
 /// never evaluated against a naive oracle that would mis-judge their synthetic
 /// session as dead).
 pub(super) trait WatcherLiveness {
-    /// True only when the watcher owning `state` is *provably* dead: its tmux
-    /// session has no live pane AND no runtime activity (jsonl/.generation
-    /// mtime) has advanced within [`DEAD_WATCHER_PROVEN_DEAD_SECS`]. Any
-    /// positive signal (or an unknown session name) yields `false` — the
-    /// conservative, live-protecting default.
+    /// True only when the watcher owning `state` is *provably* dead **or idle-
+    /// stuck**: no runtime activity (jsonl / `.generation` / rollout mtime) has
+    /// advanced within [`DEAD_WATCHER_PROVEN_DEAD_SECS`].
+    ///
+    /// #3879: a live tmux pane is NO LONGER an unconditional `false`. An idle
+    /// TUI watcher keeps its pane up indefinitely while never adopting its empty
+    /// rebind-origin placeholder; treating "pane up" as "alive forever" left the
+    /// placeholder LIVE past its deadline (observed 64 min, 32× the deadline),
+    /// wedging every new turn. The binding death/idle signal is therefore
+    /// runtime-activity quiescence, applied whether the pane reads `Live` or
+    /// `DeadOrAbsent`. A watcher producing *recent* activity (genuinely working /
+    /// re-adoptable, #897/#3635) still yields `false`, as does an unknown probe
+    /// (`ProbeError`) or a missing session name — the conservative, re-adopt-
+    /// protecting defaults.
     fn is_proven_dead(&self, state: &InflightTurnState) -> bool;
 }
 
@@ -31,7 +41,6 @@ pub(super) struct RuntimeWatcherLiveness;
 
 impl WatcherLiveness for RuntimeWatcherLiveness {
     fn is_proven_dead(&self, state: &InflightTurnState) -> bool {
-        use crate::services::platform::tmux::PaneLiveness;
         // No session name to probe => cannot prove death => never reap.
         let Some(session) = state.tmux_session_name.as_deref() else {
             return false;
@@ -42,19 +51,43 @@ impl WatcherLiveness for RuntimeWatcherLiveness {
         }
         // #3635 (codex review): use the THREE-state pane probe. A transient tmux
         // probe failure (`ProbeError`) is "unknown", NOT "dead" — it must never
-        // license reaping a live-but-idle watcher. Only a *definitive* dead/absent
-        // answer is even a candidate for reap; any live signal or unknown answer
-        // preserves the row (the #3154/#3540 live-protection invariant at its
-        // weakest point).
-        match crate::services::tmux_diagnostics::tmux_session_pane_liveness(session) {
-            PaneLiveness::Live => return false,       // hard "alive" signal
-            PaneLiveness::ProbeError => return false, // unknown ⇒ preserve
-            PaneLiveness::DeadOrAbsent => {}          // candidate — confirm via activity
+        // license reaping a row whose owner might still be alive, so we preserve
+        // before even touching the activity stat.
+        let pane = crate::services::tmux_diagnostics::tmux_session_pane_liveness(session);
+        if pane == PaneLiveness::ProbeError {
+            return false; // unknown ⇒ preserve
         }
-        // No live pane, definitively. Fresh runtime activity (jsonl / .generation
-        // mtime) within the window is still "alive" — a just-restarting watcher.
-        // Only a dead/absent session AND no recent activity is provably dead.
-        !watcher_runtime_activity_recent(session)
+        // #3879: a `Live` pane no longer short-circuits to "alive". An idle TUI
+        // keeps its pane up while never adopting the empty rebind-origin, so the
+        // pane state alone cannot tell "working" from "idle-stuck". The binding
+        // signal is runtime-activity quiescence: fresh jsonl / `.generation` /
+        // rollout writes (a just-restarting or actively-producing watcher, the
+        // #897/#3635 re-adoptable case) preserve the row; no write within the
+        // window is proven dead/idle and reapable, whatever the pane reads.
+        proven_dead_from_signals(pane, watcher_runtime_activity_recent(session))
+    }
+}
+
+/// #3879: pure proven-dead/idle-stuck decision from the two probed signals,
+/// extracted so unit tests can pin every `(pane, activity)` combination without
+/// spawning tmux or touching jsonl/`.generation` files.
+///
+/// Returns `true` (reapable) only on runtime-activity quiescence. A live tmux
+/// pane ALONE no longer preserves the row (#3879: an idle TUI pane that never
+/// adopts its empty rebind-origin past the deadline wedged the relay for 64
+/// min). Only a genuine *working* signal — recent jsonl / `.generation` /
+/// rollout write (`activity_recent == true`, the #897/#3635 re-adoptable case) —
+/// or an UNKNOWN probe (`ProbeError`) preserves it. `DeadOrAbsent` with recent
+/// activity is still preserved: a just-restarting watcher touches `.generation`
+/// before its pane re-appears.
+pub(super) fn proven_dead_from_signals(pane: PaneLiveness, activity_recent: bool) -> bool {
+    match pane {
+        // Unknown ⇒ preserve (the production caller short-circuits this before the
+        // activity stat; handled here too so the core is total and testable).
+        PaneLiveness::ProbeError => false,
+        // Live OR DeadOrAbsent: runtime-activity quiescence is the death/idle
+        // signal. Recent activity ⇒ working / re-adoptable ⇒ preserve.
+        PaneLiveness::Live | PaneLiveness::DeadOrAbsent => !activity_recent,
     }
 }
 
@@ -85,12 +118,16 @@ pub(super) fn watcher_runtime_activity_recent(session: &str) -> bool {
 /// The structural conjunction is byte-identical to
 /// [`should_reap_abandoned_rebind_origin`] EXCEPT the owner conjunct flips from
 /// `== None` to `== Watcher`, and the reap is additionally gated on
-/// `liveness.is_proven_dead(state)`. A live watcher (positive tmux pane or
-/// recent runtime activity) is `is_proven_dead == false`, so this predicate is
-/// `false` and the row is preserved — the #3154/#3540 / keystone live-
-/// protection invariant holds verbatim. Every non-owner live signal (adoption,
-/// streamed bytes, anchor, terminal commit, offset progress, planned restart)
-/// still independently blocks the reap via the shared structural conjunction.
+/// `liveness.is_proven_dead(state)`. A watcher producing recent runtime activity
+/// (jsonl / `.generation` / rollout writes — the #897/#3635 re-adoptable case)
+/// is `is_proven_dead == false`, so this predicate is `false` and the row is
+/// preserved; an unknown tmux probe (`ProbeError`) preserves it too. #3879: a
+/// merely-`Live` tmux pane no longer preserves on its own — an idle watcher with
+/// no recent activity past the deadline IS reaped (see [`is_proven_dead`]).
+/// Every non-owner live signal (adoption, streamed bytes, anchor, terminal
+/// commit, offset progress, planned restart) still independently blocks the reap
+/// via the shared structural conjunction, and the deadline/generation disjunct
+/// keeps the re-adopt window open until the deadline elapses.
 #[cfg(test)]
 pub(super) fn should_reap_dead_watcher_rebind_origin(
     state: &InflightTurnState,

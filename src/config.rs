@@ -121,6 +121,14 @@ pub struct ServerConfig {
     // the secret is stripped on the wire and replaced with `<redacted>` in Debug.
     #[serde(default, skip_serializing)]
     pub auth_token: Option<String>,
+    /// Issue #3870 — opt-in escape hatch for binding the unauthenticated
+    /// control-plane to a non-loopback interface. When `host` is non-loopback
+    /// (e.g. `0.0.0.0`) and `auth_token` is unset, startup force-binds to
+    /// loopback unless this is `true`. Operators who genuinely want LAN
+    /// exposure without a token must set this explicitly (and accept the risk);
+    /// the recommended path is to set `auth_token` instead.
+    #[serde(default)]
+    pub allow_insecure_nonloopback_bind: bool,
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -131,6 +139,10 @@ impl std::fmt::Debug for ServerConfig {
             .field(
                 "auth_token",
                 &self.auth_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "allow_insecure_nonloopback_bind",
+                &self.allow_insecure_nonloopback_bind,
             )
             .finish()
     }
@@ -2187,6 +2199,7 @@ impl Default for ServerConfig {
             port: default_port(),
             host: default_host(),
             auth_token: None,
+            allow_insecure_nonloopback_bind: false,
         }
     }
 }

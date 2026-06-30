@@ -175,6 +175,27 @@ impl VoiceReceiver {
             .await;
     }
 
+    /// #3914: drop the SSRC→user mappings for a client that left the voice
+    /// session. Songbird emits `ClientDisconnect` on leave but the receiver
+    /// previously never handled it, so `ssrc_users` grew monotonically under
+    /// long-running channel churn (every (re)join allocates a fresh SSRC).
+    pub(crate) async fn forget_disconnected_user(&self, user_id: u64) {
+        self.inner.forget_disconnected_user(None, user_id).await;
+    }
+
+    /// F2-scoped variant of [`forget_disconnected_user`]: only removes mappings
+    /// bound to `control_channel_id` so a leave in one guild/channel never drops
+    /// another channel's live SSRC mapping.
+    pub(crate) async fn forget_disconnected_user_for_control_channel(
+        &self,
+        control_channel_id: u64,
+        user_id: u64,
+    ) {
+        self.inner
+            .forget_disconnected_user(Some(control_channel_id), user_id)
+            .await;
+    }
+
     pub(crate) async fn queue_pcm(
         &self,
         ssrc: u32,
@@ -250,6 +271,9 @@ impl EventHandler for VoiceReceiver {
                     }
                 }
             }
+            EventContext::ClientDisconnect(disconnect) => {
+                self.forget_disconnected_user(disconnect.user_id.0).await;
+            }
             _ => {}
         }
 
@@ -293,6 +317,14 @@ impl EventHandler for VoiceReceiverEventHandler {
                         }
                     }
                 }
+            }
+            EventContext::ClientDisconnect(disconnect) => {
+                self.receiver
+                    .forget_disconnected_user_for_control_channel(
+                        self.control_channel_id,
+                        disconnect.user_id.0,
+                    )
+                    .await;
             }
             _ => {}
         }
@@ -357,6 +389,30 @@ impl ReceiverState {
             },
             user_id,
         );
+    }
+
+    /// #3914: remove every SSRC mapping for `user_id` (optionally scoped to a
+    /// single `control_channel_id`). Called on songbird `ClientDisconnect` so a
+    /// leaver's SSRC entries do not accumulate indefinitely.
+    async fn forget_disconnected_user(&self, control_channel_id: Option<u64>, user_id: u64) {
+        if user_id == 0 {
+            return;
+        }
+        let mut ssrc_users = self.ssrc_users.write().await;
+        let before = ssrc_users.len();
+        ssrc_users.retain(|key, mapped_user| {
+            !(*mapped_user == user_id
+                && (control_channel_id.is_none() || key.control_channel_id == control_channel_id))
+        });
+        let removed = before - ssrc_users.len();
+        if removed > 0 {
+            tracing::debug!(
+                user_id,
+                control_channel_id = ?control_channel_id,
+                removed,
+                "voice receiver dropped SSRC mappings for disconnected client (#3914)"
+            );
+        }
     }
 
     async fn queue_pcm(
@@ -1340,6 +1396,63 @@ mod tests {
         assert_eq!(flushed[0].control_channel_id, None);
         assert_eq!(flushed[0].samples_written, 960);
         assert_eq!(receiver.take_pending().await.len(), 1);
+    }
+
+    /// #3914: a songbird `ClientDisconnect` must drop the leaver's SSRC mapping
+    /// so it cannot accumulate, and must leave other speakers untouched.
+    #[tokio::test]
+    async fn client_disconnect_drops_only_the_leavers_ssrc_mapping() {
+        let temp = tempfile::tempdir().unwrap();
+        let receiver = VoiceReceiver::new(test_config(temp.path().to_path_buf()));
+        receiver.register_speaking(42, 7).await;
+        receiver.register_speaking(43, 8).await;
+
+        // User 8 leaves — user 7's mapping must survive.
+        receiver.forget_disconnected_user(8).await;
+        assert!(receiver.queue_pcm(42, &[1; 480]).await.is_ok());
+        assert!(matches!(
+            receiver.queue_pcm(43, &[1; 480]).await.unwrap_err(),
+            VoiceReceiverError::UnknownSsrc(43)
+        ));
+
+        // Now user 7 leaves — its mapping is gone too (no monotonic growth).
+        receiver.forget_disconnected_user(7).await;
+        assert!(matches!(
+            receiver.queue_pcm(42, &[1; 480]).await.unwrap_err(),
+            VoiceReceiverError::UnknownSsrc(42)
+        ));
+    }
+
+    /// #3914 / F2: a disconnect in one control channel must not drop the same
+    /// user's SSRC mapping in another control channel.
+    #[tokio::test]
+    async fn client_disconnect_is_scoped_to_control_channel() {
+        let temp = tempfile::tempdir().unwrap();
+        let receiver = VoiceReceiver::new(test_config(temp.path().to_path_buf()));
+        receiver
+            .register_speaking_for_control_channel(101, 42, 7)
+            .await;
+        receiver
+            .register_speaking_for_control_channel(202, 43, 7)
+            .await;
+
+        receiver
+            .forget_disconnected_user_for_control_channel(101, 7)
+            .await;
+
+        assert!(matches!(
+            receiver
+                .queue_pcm_for_control_channel(101, 42, &[1; 480])
+                .await
+                .unwrap_err(),
+            VoiceReceiverError::UnknownSsrc(42)
+        ));
+        assert!(
+            receiver
+                .queue_pcm_for_control_channel(202, 43, &[1; 480])
+                .await
+                .is_ok()
+        );
     }
 
     async fn wait_for_pending_io(receiver: &VoiceReceiver, key: VoiceAudioKey) -> bool {

@@ -26,7 +26,7 @@
 use chrono::DateTime;
 use serde_json::Value;
 
-use crate::services::agent_protocol::SubagentSummary;
+use crate::services::agent_protocol::{StatusEvent, SubagentSummary};
 
 /// Extracts the TUI summary from a parent-transcript `tool_result` record's
 /// top-level `toolUseResult` object. Returns `(summary, agent_id)` when the
@@ -79,6 +79,81 @@ pub(super) fn summary_from_tool_use_result(
         return None;
     }
     Some((summary, agent_id))
+}
+
+/// #3920: `true` when a parent-transcript `tool_result`/`user` record (or a
+/// batched per-block `tool_result`) is an ASYNC subagent LAUNCH acknowledgment
+/// — `toolUseResult.isAsync == true` or `toolUseResult.status == "async_launched"`.
+///
+/// A launch ack is NOT a completion: the launched Agent subagent keeps running
+/// detached and OUTLIVES the launching turn. The async-ness is only knowable
+/// from this launch-ack `toolUseResult` (modern async `Agent` launches do not
+/// carry `run_in_background` in the tool INPUT), so the status panel uses this to
+/// promote the subagent's slot to a background subagent and keep it alive across
+/// turn-boundary resets — the same lifetime a Bash `run_in_background` task gets.
+pub(super) fn tool_use_result_is_async_launch(value: &Value) -> bool {
+    value
+        .get("toolUseResult")
+        .and_then(Value::as_object)
+        .is_some_and(|result| {
+            result.get("isAsync").and_then(Value::as_bool) == Some(true)
+                || result.get("status").and_then(Value::as_str) == Some("async_launched")
+        })
+}
+
+/// #3920: background-promotion [`StatusEvent`]s for a `user`-record `tool_result`
+/// block (`blocks[idx]`) that is a SUCCESSFUL async/background Agent launch ack —
+/// either its OWN `toolUseResult` is async (batched per-block shape) or the
+/// RECORD-level `toolUseResult` is async and this is the first id-bearing block
+/// (legacy single-subagent shape). Such an ack is NOT a completion: the subagent
+/// keeps running detached and outlives the launching turn, so the panel re-affirms
+/// its slot as `background: true` (keyed by the block's tool-use id). That keeps
+/// it alive across turn-boundary resets, parity with a Bash `run_in_background`
+/// task; without it the foreground-looking slot is dropped a turn later (the
+/// #3920 root cause). A FAILED launch returns `None` — the agent never started.
+pub(super) fn async_launch_promote_events(
+    value: &Value,
+    blocks: &[Value],
+    idx: usize,
+    is_error: bool,
+) -> Option<Vec<StatusEvent>> {
+    let block = blocks.get(idx)?;
+    if is_error {
+        return None;
+    }
+    let is_async_launch = tool_use_result_is_async_launch(block)
+        || (tool_use_result_is_async_launch(value)
+            && Some(idx) == first_idful_tool_result_idx(blocks));
+    if !is_async_launch {
+        return None;
+    }
+    let tool_use_id = block
+        .get("tool_use_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string);
+    Some(vec![
+        StatusEvent::ToolEnd { success: true },
+        StatusEvent::SubagentStart {
+            subagent_type: None,
+            desc: None,
+            tool_use_id,
+            background: true,
+        },
+    ])
+}
+
+/// First id-bearing `tool_result` block — the owner of any RECORD-level
+/// `toolUseResult` aggregate (legacy single-subagent shape).
+fn first_idful_tool_result_idx(blocks: &[Value]) -> Option<usize> {
+    blocks.iter().position(|block| {
+        block.get("type").and_then(Value::as_str) == Some("tool_result")
+            && block
+                .get("tool_use_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.trim().is_empty())
+    })
 }
 
 /// Core, IO-free rollout parser. Parses a `subagents/agent-<id>.jsonl` rollout
