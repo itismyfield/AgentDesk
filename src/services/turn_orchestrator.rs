@@ -4578,6 +4578,138 @@ mod active_turn_kind_tests {
         );
         assert!(!handle.has_active_turn().await);
     }
+
+    // #3903 — a genuine user message queued behind a `/loop`/system-injection
+    // turn must NOT be lost. The live incident: a queued user reply lost the
+    // start-turn race to a `/loop` auto-check (a Background turn), so it was
+    // re-enqueued behind the injection. The race-loss drain-scheduling guard
+    // (`race_loss.rs`) keyed on `has_active_turn` (ANY turn) and therefore
+    // skipped scheduling the deferred drain while the Background injection held
+    // the slot — and the injection's own finalize never re-kicks the user
+    // queue, so the message stranded until an external fetch surfaced it.
+    //
+    // This test pins the two invariants the fix relies on:
+    //   1. the scheduling DISCRIMINATOR — a Background injection makes
+    //      `has_active_turn()` true (the old guard skips → bug) but
+    //      `has_blocking_active_turn()` false (the new guard schedules → fix);
+    //   2. the END-TO-END outcome — once the injection turn completes, the
+    //      queued user message is dequeued exactly once (not lost, not doubled).
+    //
+    // #3034: hold the test-env lock across a SYNCHRONOUS `block_on` (not across
+    // an `.await` inside an async fn) so the global `AGENTDESK_ROOT_DIR` stays
+    // stable for the durable-queue persistence WITHOUT an
+    // `#[allow(clippy::await_holding_lock)]` site (matches the `run_async`
+    // pattern in `actor_hydrate_regression_tests`).
+    #[test]
+    fn queued_user_message_survives_loop_injection_preemption() {
+        let _lock = lock_test_env();
+        let _env_guard = EnvGuard;
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let registry = ChannelMailboxRegistry::default();
+                let handle = registry.handle(ChannelId::new(3_903_001));
+
+                // A `/loop` auto-check is injected and claims the slot as a
+                // Background turn (mirrors `synthetic_start.rs`
+                // `try_start_turn_kinded(Background)`).
+                let loop_token = Arc::new(CancelToken::new());
+                assert!(
+                    handle
+                        .try_start_turn_kinded(
+                            loop_token.clone(),
+                            UserId::new(1),
+                            MessageId::new(7_001),
+                            ActiveTurnKind::Background,
+                        )
+                        .await,
+                    "the /loop injection claims the idle slot as a Background turn"
+                );
+
+                // The genuine user reply lost the start-turn race and is queued
+                // behind the injection.
+                let user_msg = test_intervention(7_100);
+                assert!(
+                    handle
+                        .enqueue(user_msg.clone(), test_persistence())
+                        .await
+                        .enqueued,
+                    "the genuine user message is queued behind the injection"
+                );
+
+                // Invariant 1 — the scheduling discriminator. The OLD race-loss
+                // guard (`!has_active_turn`) would be FALSE here and skip the
+                // drain (the #3903 bug); the NEW guard
+                // (`!has_blocking_active_turn`) is TRUE and schedules it.
+                assert!(
+                    handle.has_active_turn().await,
+                    "the Background injection holds the slot for has_active_turn — old guard skipped the drain"
+                );
+                assert!(
+                    !handle.has_blocking_active_turn().await,
+                    "#3903: a Background injection is non-blocking, so the new guard schedules the rescue drain"
+                );
+
+                // The deferred drain supersedes the non-blocking injection
+                // (`#3167` `cancel_active_background_turn_if_current`) and the
+                // injection's finalizer releases the slot.
+                assert!(
+                    handle.cancel_active_background_turn_if_current().await,
+                    "the drain cancels ONLY the Background injection to free the slot for the user"
+                );
+                let finish = handle.finish_turn(test_persistence()).await;
+                assert!(
+                    finish.has_pending,
+                    "the queued user message is still pending after the injection finalizes"
+                );
+                assert!(!handle.has_active_turn().await, "the slot is now free");
+
+                // Invariant 2 — exactly-once delivery. The drain dequeues the
+                // queued user message and the dispatched user turn claims the
+                // slot.
+                let taken = handle.take_next_soft(test_persistence()).await;
+                let dequeued = taken.intervention.expect(
+                    "the queued user message must be dequeued after the injection completes",
+                );
+                assert_eq!(
+                    dequeued.message_id,
+                    MessageId::new(7_100),
+                    "the genuine user message is the one delivered — not lost"
+                );
+                assert_eq!(
+                    taken.queue_len_after, 0,
+                    "no duplicate copy is left in the queue"
+                );
+                assert!(
+                    handle
+                        .try_start_turn(
+                            Arc::new(CancelToken::new()),
+                            UserId::new(2),
+                            MessageId::new(7_100),
+                        )
+                        .await,
+                    "the dispatched user turn claims the slot and clears the dequeue reservation"
+                );
+
+                // Not doubled — after the user turn finishes there is nothing
+                // left to re-deliver.
+                let finish = handle.finish_turn(test_persistence()).await;
+                assert!(
+                    !finish.has_pending,
+                    "the user message was delivered exactly once — the queue is drained"
+                );
+                let drained = handle.take_next_soft(test_persistence()).await;
+                assert!(
+                    drained.intervention.is_none(),
+                    "a second dequeue yields nothing — no double-processing"
+                );
+            });
+    }
 }
 
 // #2728 — verify the refusal_reason field correctly tags each of the
