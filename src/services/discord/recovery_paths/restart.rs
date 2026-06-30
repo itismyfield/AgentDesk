@@ -104,7 +104,23 @@ pub(in crate::services::discord) async fn dispose_recovery_relay_outcome(
                 finish_stop_source,
             )
             .await;
-            inflight::clear_inflight_state(provider, state.channel_id);
+            // #3918: do NOT silently ignore the clear result. A `false` here
+            // means the row is still on disk, so the next boot re-enters this
+            // branch — for the anchor-repost path that would re-probe the gone
+            // anchor and, absent a durable marker, re-post. Correctness no
+            // longer depends on this call succeeding (the `anchor_reposted`
+            // marker set BEFORE this dispose blocks a duplicate send-new), but a
+            // persistent clear failure is an operational signal worth surfacing.
+            if !inflight::clear_inflight_state(provider, state.channel_id) {
+                tracing::warn!(
+                    provider = %provider.as_str(),
+                    channel = state.channel_id,
+                    branch,
+                    "recovery: clear_inflight_state returned false (row still on disk) after a \
+                     delivered relay — next boot may re-enter this branch (an anchor-repost \
+                     re-run is blocked by the durable 'anchor_reposted' marker)"
+                );
+            }
         }
         disposition => {
             apply_undeliverable_relay_disposition(
@@ -305,12 +321,19 @@ fn anchor_probe_should_repost(probe: super::super::placeholder_sweeper::Placehol
 /// recorded ONLY on a committed delivery (PR-1~1d's `is_delivered` gate), so a
 /// committed row's current-generation anchor is THIS turn's, never a stale one.
 ///
-/// FIVE guards, each a distinct duplicate-repost defense:
+/// SIX guards, each a distinct duplicate-repost defense:
 /// * **G1** — flag OFF → `None` (outermost; dark-deploy no-op).
 /// * **G2** — no trustworthy anchor → `None`. The reader enforces the #1270
 ///   generation gate AND a populated non-zero `(panel_msg_id, panel_channel_id)`;
 ///   we additionally reject an EMPTY `terminal_text` (no blank repost) and a
 ///   `range` that does not match this turn ([`anchor_range_matches_turn`]).
+/// * **G2c (#3918 idempotency)** — the send-new is not a transaction with the
+///   row retirement, so a crash / silently-failing `clear_inflight_state` after
+///   Discord accepts the message would re-enter this branch on the next boot.
+///   Refuse when the durable `anchor_reposted` marker is already set (this turn
+///   was reposted — never duplicate) OR the pre-send `anchor_repost_attempts`
+///   budget is exhausted (hard-bounds the residual crash window). Pure decision:
+///   [`super::shared::anchor_repost_send_new_permitted`].
 /// * **G3** — probe every structurally matching anchor candidate: repost ONLY
 ///   when ALL candidates are `MessageGone` (404/403/410). A live message
 ///   (`StillPlaceholder` / `AlreadyDelivered`) or a transient `ProbeFailed` on
@@ -340,6 +363,30 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
 
     // G2a: never repost a blank body.
     if terminal_text.trim().is_empty() {
+        return None;
+    }
+
+    // #3918 G2c (idempotency): the send-new below is NOT a transaction with the
+    // row retirement — Discord can accept the new message and the process then
+    // crash (or `clear_inflight_state` can silently fail) before the row is
+    // cleared, re-entering this branch on the next boot. Refuse to fire when the
+    // durable `anchor_reposted` marker is already set (this turn was reposted —
+    // never duplicate) OR the pre-send attempt budget is exhausted (hard-bounds
+    // the residual crash window so duplication is never unbounded). Both inputs
+    // are persisted ON this row; see `shared::anchor_repost_send_new_permitted`.
+    if !super::shared::anchor_repost_send_new_permitted(
+        state.anchor_reposted,
+        state.anchor_repost_attempts,
+        inflight::RECOVERY_RELAY_RESTART_ATTEMPT_BUDGET,
+    ) {
+        tracing::info!(
+            provider = %provider.as_str(),
+            channel = state.channel_id,
+            anchor_reposted = state.anchor_reposted,
+            anchor_repost_attempts = state.anchor_repost_attempts,
+            budget = inflight::RECOVERY_RELAY_RESTART_ATTEMPT_BUDGET,
+            "  · recovery anchor-repost: already reposted or pre-send budget exhausted — no-op (idempotent)"
+        );
         return None;
     }
 
@@ -390,6 +437,34 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
         anchor_channel_id = anchor.panel_channel_id,
         "  ↻ recovery anchor-repost: committed terminal message is GONE — reposting (send-new)"
     );
+
+    // #3918: persist the send-new ATTEMPT BEFORE the send. The durable
+    // `anchor_reposted` marker recorded after a Delivered send is the primary
+    // at-most-once guard, but it cannot cover the narrow window between
+    // "Discord accepted the message" and "marker written". Counting the attempt
+    // up-front (identity-guarded so a row now owned by a newer turn is never
+    // touched) bounds that window: the G2c guard above refuses once the budget
+    // is reached, so even a pathological crash-before-marker loop is bounded.
+    // A failed bump WARNs but does not block the repost.
+    let repost_identity = inflight::InflightTurnIdentity::from_state(state);
+    if !matches!(
+        inflight::anchor_repost::bump_anchor_repost_attempts_if_matches_identity(
+            provider,
+            state.channel_id,
+            &repost_identity,
+            state.turn_start_offset,
+        ),
+        inflight::GuardedSaveOutcome::Saved
+    ) {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel = state.channel_id,
+            "  ⚠ recovery anchor-repost: pre-send attempt counter NOT persisted — \
+             the crash-window bound is degraded (the post-delivery marker still \
+             blocks a re-run once it lands)"
+        );
+    }
+
     let outcome = super::super::recovery_engine::relay_recovered_terminal_text_to_placeholder(
         http,
         shared,
@@ -398,6 +473,32 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
         terminal_text,
     )
     .await;
+
+    // #3918: the answer reached Discord — record the durable idempotency marker
+    // NOW, before the caller's `dispose_*` clears the row, so that if the clear
+    // fails (or the process crashes after this write) the next boot re-loads
+    // this row with `anchor_reposted = true` and the G2c guard refuses to post
+    // the same answer a second time. Identity-guarded; a failed marker write
+    // WARNs (the pre-send attempt counter still bounds the window).
+    if matches!(outcome, RecoveryRelayOutcome::Delivered) {
+        let marked = inflight::anchor_repost::mark_anchor_reposted_if_matches_identity(
+            provider,
+            state.channel_id,
+            &repost_identity,
+            state.turn_start_offset,
+        );
+        if !matches!(marked, inflight::GuardedSaveOutcome::Saved) {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = state.channel_id,
+                outcome = ?marked,
+                "  ⚠ recovery anchor-repost: durable 'anchor_reposted' marker NOT persisted after \
+                 a delivered send — a crash before the row clears could re-post (bounded by the \
+                 pre-send attempt budget)"
+            );
+        }
+    }
+
     // G5 (passive): see doc — the committed floor already covers this range, so the
     // watcher will not re-relay it; the caller disposes `outcome`.
     Some(outcome)

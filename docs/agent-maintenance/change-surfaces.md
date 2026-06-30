@@ -1373,7 +1373,9 @@
     2026-08-31, #3036)).
   - `src/services/discord/{commands/text_commands.rs,
     discord_config_audit.rs, router/intake_gate.rs}` (all 1000+ production
-    lines) and `src/services/discord/inflight.rs` (3068 lines; +37 from #3860
+    lines) and `src/services/discord/inflight.rs` (3069 lines; +1 from #3918
+    `mod anchor_repost` — the durable at-most-once anchor-repost idempotency
+    guards live in their own submodule, not in this giant file; +37 from #3860
     `set_inflight_restart_mode_under_lock` — the per-row lock-RMW that makes the
     bulk restart-mode marker set only `restart_mode` on the FRESH on-disk row so
     a draining watcher's delivery frontier can no longer be regressed (duplicate
