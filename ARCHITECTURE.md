@@ -452,6 +452,7 @@ src/
 │   │   │   ├── budget.rs
 │   │   │   ├── finalizer_identity.rs
 │   │   │   ├── model.rs
+│   │   │   ├── orphan_relay_reclaim.rs
 │   │   │   ├── rebind_reap.rs
 │   │   │   ├── store.rs
 │   │   │   └── watcher_state.rs
@@ -567,7 +568,8 @@ src/
 │   │   │   ├── startup_doctor.rs
 │   │   │   └── voice.rs
 │   │   ├── session_relay_sink/
-│   │   │   └── idle_jsonl.rs
+│   │   │   ├── idle_jsonl.rs
+│   │   │   └── orphan_reclaim.rs
 │   │   ├── session_runtime/
 │   │   │   ├── channel_routing.rs
 │   │   │   ├── restore_cwd.rs

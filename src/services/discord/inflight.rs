@@ -55,6 +55,14 @@ use self::watcher_state::{
     persist_watcher_relay_watermark_locked_in_root, persist_watcher_stream_progress_locked_in_root,
 };
 
+// #3960: producer-liveness TOCTOU reclaim for orphaned `SessionBoundRelay`
+// TUI-direct rows (the #3876 residual deferred from PR #3953).
+mod orphan_relay_reclaim;
+pub(in crate::services::discord) use self::orphan_relay_reclaim::{
+    OrphanRelayReclaimOutcome, downgrade_orphaned_session_bound_relay_owner_locked,
+    session_bound_relay_external_input_orphan_shape,
+};
+
 use finalizer_identity::{
     backfill_finalizer_turn_id_under_lock, parse_inflight_state_content,
     parse_inflight_state_content_with_finalizer_backfill, read_inflight_state_content,

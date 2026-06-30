@@ -33,6 +33,8 @@ use crate::services::session_backend::StreamLineState;
 use tracing::Instrument;
 
 mod idle_jsonl;
+// #3960: orphaned `SessionBoundRelay` TUI-direct reclaim (producer-liveness TOCTOU).
+mod orphan_reclaim;
 use self::idle_jsonl::{
     IdleRelayRangeAction, idle_jsonl_payload_contains_init_event,
     idle_jsonl_payload_contains_schedule_wakeup_setup, idle_jsonl_payload_contains_user_event,
@@ -1243,9 +1245,29 @@ async fn run_idle_jsonl_relay_loop(
                 *offset = 0;
             }
 
-            if let Some(inflight) =
+            if let Some(mut inflight) =
                 super::inflight::load_inflight_state(&matched.provider, channel_id)
             {
+                // #3960: a `SessionBoundRelay` TUI-direct row whose claim-time
+                // producer has since died is a black-hole — its owner is not
+                // `None`, so the ownerless reclaim below never fires. Re-check
+                // producer liveness + the committed-offset authority at THIS tick
+                // and, if the body was never delivered, downgrade the orphaned
+                // owner to the bridge backstop so the row rejoins ownerless
+                // recovery (double-relay-safe; the in-lock re-check aborts if a
+                // delivery committed in the window).
+                if orphan_reclaim::reclaim_orphaned_session_bound_relay_if_dead(
+                    &health_registry,
+                    &producers,
+                    &matched.provider,
+                    channel_id,
+                    &session_name,
+                    &inflight,
+                )
+                .await
+                {
+                    inflight.set_relay_owner_kind(super::inflight::RelayOwnerKind::None);
+                }
                 if !super::inflight::ownerless_external_input_inflight_is_stale(&inflight) {
                     last_inflight_seen_at.insert(session_name.clone(), Instant::now());
                     *offset = len;
