@@ -2143,7 +2143,238 @@ async fn maybe_recover_completed_stale_leak(
         true,
         Some(delivery_detail),
     );
+
+    // #3925: finalize the turn the SAME way normal completion does. The relay
+    // broke mid-turn, so this turn's own finalizer never ran — both the inflight
+    // row AND the in-memory mailbox active-turn token were left "in progress".
+    // We have now delivered the completed answer out-of-band (reaching here only
+    // on FULL delivery — every partial/retryable path returned earlier), so the
+    // turn is genuinely done. Previously this path only advanced
+    // `response_sent_offset` and returned, leaving the session pinned to a phantom
+    // in-progress turn: the intake gate (`mailbox_has_live_active_turn_or_cleanup_stale_proof`)
+    // kept queueing every new message with "앞선 턴 진행 중" and no completion event
+    // ever fired to dequeue them → permanent dead session (#3925).
+    //
+    // Mirror the startup recovery branches (`recovery_engine.rs`
+    // completed_during_downtime / output_completed): route the recovered terminal
+    // through the single-authority finalizer (`finish_recovered_turn_mailbox` →
+    // `mailbox_finish_turn` token release + gated `global_active` decrement +
+    // idle-queue kickoff), then clear the inflight row under its identity guard.
+    super::super::recovery_engine::finish_recovered_turn_mailbox(
+        shared,
+        provider,
+        channel_id,
+        "leak_recovery_oob_completion",
+    )
+    .await;
+    // Identity-guarded clear so a turn that started in the narrow window after the
+    // mailbox token released (the kickoff above drains the queue on a spawned task)
+    // is never clobbered — the helper re-reads the fresh on-disk row under its
+    // flock before deleting (#3860 RMW discipline).
+    let inflight_clear_outcome = clear_recovered_leak_inflight(provider, channel_id, &state);
+    crate::services::observability::emit_inflight_lifecycle_event(
+        provider.as_str(),
+        channel_id.get(),
+        state.dispatch_id.as_deref(),
+        state.session_key.as_deref(),
+        turn_id.as_deref(),
+        "leak_recovery_finalized_inflight",
+        serde_json::json!({
+            "guarded_clear_outcome": format!("{inflight_clear_outcome:?}"),
+            "user_msg_id": state.user_msg_id,
+            "byte_end": end,
+        }),
+    );
     true
+}
+
+/// #3925: finalize the inflight turn-state for a turn whose completed answer was
+/// just delivered out-of-band by [`maybe_recover_completed_stale_leak`]. Mirrors
+/// the identity-guarded clear the normal turn-completion path uses
+/// (`turn_finalizer::do_finalize` step A / the startup recovery branches): a real
+/// `user_msg_id` clears via `clear_inflight_state_if_matches` (a newer turn's row
+/// yields `UserMsgMismatch` and is preserved); a zero-id-owned recovery /
+/// TUI-direct turn clears its own zero-id row via the zero-owned guard.
+fn clear_recovered_leak_inflight(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    state: &discord::inflight::InflightTurnState,
+) -> discord::inflight::GuardedClearOutcome {
+    let Some(root) = discord::inflight::inflight_runtime_root() else {
+        return discord::inflight::GuardedClearOutcome::Missing;
+    };
+    clear_recovered_leak_inflight_in_root(&root, provider, channel_id, state)
+}
+
+/// Root-explicit variant of [`clear_recovered_leak_inflight`] for hermetic unit
+/// tests (mirrors inflight.rs's own `_in_root` test convention).
+fn clear_recovered_leak_inflight_in_root(
+    root: &std::path::Path,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    state: &discord::inflight::InflightTurnState,
+) -> discord::inflight::GuardedClearOutcome {
+    if state.user_msg_id != 0 {
+        discord::inflight::clear_inflight_state_if_matches_in_root(
+            root,
+            provider,
+            channel_id.get(),
+            state.user_msg_id,
+        )
+    } else {
+        discord::inflight::clear_inflight_state_if_matches_zero_owned_in_root(
+            root,
+            provider,
+            channel_id.get(),
+        )
+    }
+}
+
+/// #3925 — hermetic tests pinning that the OOB deadlock-manager leak recovery
+/// finalizes the inflight turn-state after delivering the completed answer, so an
+/// idle session stops queueing new messages forever. Uses TempDir + the `_in_root`
+/// clear path (no env / SharedData), mirroring inflight.rs's own test convention.
+#[cfg(test)]
+mod leak_recovery_inflight_finalize_tests {
+    use super::clear_recovered_leak_inflight_in_root;
+    use crate::services::discord::inflight::{GuardedClearOutcome, InflightTurnState};
+    use crate::services::provider::ProviderKind;
+    use poise::serenity_prelude::ChannelId;
+
+    fn leak_inflight_state(
+        provider: &ProviderKind,
+        channel_id: u64,
+        user_msg_id: u64,
+    ) -> InflightTurnState {
+        serde_json::from_value(serde_json::json!({
+            "version": 9,
+            "provider": provider.as_str(),
+            "channel_id": channel_id,
+            "channel_name": "adk-cc",
+            "request_owner_user_id": 7,
+            "user_msg_id": user_msg_id,
+            "current_msg_id": user_msg_id + 1,
+            "current_msg_len": 0,
+            "user_text": "prompt",
+            "source": "text",
+            "session_id": "session",
+            "tmux_session_name": "AgentDesk-claude-adk-cc",
+            "output_path": "/tmp/claude-transcript.jsonl",
+            "input_fifo_path": null,
+            "last_offset": 0,
+            "full_response": "recovered answer body",
+            "response_sent_offset": 0,
+            "relay_owner_kind": "watcher",
+            "started_at": "2026-01-01 00:00:00",
+            "updated_at": "2026-01-01 00:00:00"
+        }))
+        .expect("leak inflight state")
+    }
+
+    fn seed_leak_inflight(
+        root: &std::path::Path,
+        provider: &ProviderKind,
+        channel_id: u64,
+        user_msg_id: u64,
+    ) -> InflightTurnState {
+        let state = leak_inflight_state(provider, channel_id, user_msg_id);
+        let provider_dir = root.join(provider.as_str());
+        std::fs::create_dir_all(&provider_dir).expect("create provider dir");
+        let path = provider_dir.join(format!("{channel_id}.json"));
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&state).expect("serialize"),
+        )
+        .expect("seed inflight row");
+        state
+    }
+
+    fn row_path(
+        root: &std::path::Path,
+        provider: &ProviderKind,
+        channel_id: u64,
+    ) -> std::path::PathBuf {
+        root.join(provider.as_str())
+            .join(format!("{channel_id}.json"))
+    }
+
+    /// The fix: after the OOB recovery delivers the completed answer, the inflight
+    /// row that pinned the phantom in-progress turn is cleared, so the intake gate
+    /// stops queueing new messages and the deferred kickoff can dequeue.
+    #[test]
+    fn oob_leak_recovery_clears_inflight_so_queue_can_drain() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let provider = ProviderKind::Claude;
+        let channel_id = 4242u64;
+        let state = seed_leak_inflight(temp.path(), &provider, channel_id, 9001);
+        assert!(
+            row_path(temp.path(), &provider, channel_id).exists(),
+            "precondition: the inflight row exists and would gate intake-queueing"
+        );
+
+        let outcome = clear_recovered_leak_inflight_in_root(
+            temp.path(),
+            &provider,
+            ChannelId::new(channel_id),
+            &state,
+        );
+
+        assert_eq!(
+            outcome,
+            GuardedClearOutcome::Cleared,
+            "OOB recovery must finalize (clear) the inflight turn-state (#3925)"
+        );
+        assert!(
+            !row_path(temp.path(), &provider, channel_id).exists(),
+            "the phantom in-progress inflight row must be removed so the session returns to idle"
+        );
+    }
+
+    /// #3860: the guarded clear must NOT clobber a NEWER turn that wrote this
+    /// channel's row in the window after the mailbox token released.
+    #[test]
+    fn oob_leak_recovery_preserves_a_newer_turns_inflight() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let provider = ProviderKind::Claude;
+        let channel_id = 4242u64;
+        // On disk: a NEWER turn's row.
+        seed_leak_inflight(temp.path(), &provider, channel_id, 12345);
+        // The recovered (older) turn carries a different user_msg_id.
+        let recovered = leak_inflight_state(&provider, channel_id, 9001);
+
+        let outcome = clear_recovered_leak_inflight_in_root(
+            temp.path(),
+            &provider,
+            ChannelId::new(channel_id),
+            &recovered,
+        );
+
+        assert_eq!(outcome, GuardedClearOutcome::UserMsgMismatch);
+        assert!(
+            row_path(temp.path(), &provider, channel_id).exists(),
+            "a newer turn's inflight row must be preserved (#3860)"
+        );
+    }
+
+    /// A zero-id-owned recovery / TUI-direct turn (its on-disk `user_msg_id` is 0)
+    /// must still finalize its own row via the zero-owned guard.
+    #[test]
+    fn oob_leak_recovery_clears_zero_id_owned_inflight() {
+        let temp = tempfile::tempdir().expect("temp root");
+        let provider = ProviderKind::Claude;
+        let channel_id = 7007u64;
+        let state = seed_leak_inflight(temp.path(), &provider, channel_id, 0);
+
+        let outcome = clear_recovered_leak_inflight_in_root(
+            temp.path(),
+            &provider,
+            ChannelId::new(channel_id),
+            &state,
+        );
+
+        assert_eq!(outcome, GuardedClearOutcome::Cleared);
+        assert!(!row_path(temp.path(), &provider, channel_id).exists());
+    }
 }
 
 /// #1446 — pure-helper tests for the stall-watchdog decision logic.

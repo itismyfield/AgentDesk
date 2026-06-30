@@ -1031,7 +1031,14 @@
     children (`send_target`, `send_gate`, `send_api`, `manual_delivery`) to
     `outbound/` while preserving the `health::` re-export API; #1879
     snapshot/mailbox extraction, and #3082 answer-flush-barrier field).
-  - `src/services/discord/health/recovery.rs` (2134 lines; #3872 removes
+  - `src/services/discord/health/recovery.rs` (2223 lines; +89 from #3925
+    finalizing the inflight turn-state after the out-of-band deadlock-manager leak
+    recovery (`maybe_recover_completed_stale_leak`) delivers a completed answer —
+    routing the recovered terminal through `finish_recovered_turn_mailbox` (mailbox
+    token release + gated `global_active` decrement + idle-queue kickoff) and an
+    identity-guarded inflight clear (`clear_recovered_leak_inflight`), so a
+    relay-broken turn no longer pins the session to a phantom in-progress turn that
+    queues new messages forever; #3872 removes
     visible continuation markers from long-message split paths and adds legacy-prefix
     recovery compatibility (+3 after review fix); -598 from #3839 moving
     pure stall-watchdog decisions to `health/recovery/watchdog_decisions.rs`
