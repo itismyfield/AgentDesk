@@ -962,13 +962,18 @@
     marker suppression for stop-control transcript envelopes; +62 from #3304:
     slash-command canonical prompt keys for `<command-*>` XML vs
     `/command args` dedupe, plus focused loop skill-expansion regressions).
-  - `src/services/discord/recovery_engine.rs` (3101 lines; +81 from #3869
+  - `src/services/discord/recovery_engine.rs` (3037 lines; +17 from #3869
     (restart routing-orphan cleanup): the three post-`validate_bot_channel_routing_with_provider_channel`
     sites no longer bare-`continue`-strand a row whose channel was re-bound to a
-    different provider while dcserver was down — they finalize + notify it via the
-    new `cleanup_routing_orphaned_inflight` helper (interrupted terminal notice +
-    `dispose_recovery_relay_outcome`), gated on `orphans_inflight_on_restart` so a
-    cross-bot-skip row stays PRESERVED for the owning sibling bot; -19 net from #3918
+    different provider while dcserver was down — they delegate to the new leaf
+    module `recovery_engine/routing_orphan.rs` (declared here; the finalize logic,
+    three-state pane-liveness disposition guard, and tests live there to keep this
+    frozen giant under its baseline). The leaf finalizes orphaned rows via
+    `dispose_recovery_relay_outcome` gated on `orphans_inflight_on_restart`, so a
+    cross-bot-skip row stays PRESERVED for the owning sibling bot, and derives the
+    DESTRUCTIVE `tmux_alive` guard from `tmux_session_pane_liveness` so a transient
+    `ProbeError` preserves a live re-bound pane instead of budget-clearing it;
+    -19 net from #3918
     round-3 (codex): the committed-branch anchor-repost call + its row-dispose +
     storm-guard comment moved out of this file into the new
     `recovery_paths::restart::recover_committed_anchor_repost` wrapper, leaving the

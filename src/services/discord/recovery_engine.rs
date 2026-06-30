@@ -3,7 +3,7 @@ use super::inflight::optional_message_id;
 use super::recovery_paths::restart::dispose_recovery_relay_outcome;
 use super::recovery_paths::shared::RecoveryRelayOutcome;
 use super::settings::{
-    BotChannelRoutingGuardFailure, load_last_session_path, resolve_role_binding,
+    load_last_session_path, resolve_role_binding,
     validate_bot_channel_routing_with_provider_channel,
 };
 use super::single_message_panel as smp;
@@ -56,6 +56,8 @@ mod state_extractors;
 // point is re-exported below so external call sites stay byte-identical.
 #[path = "recovery_engine/manual_rebind.rs"]
 mod manual_rebind;
+#[path = "recovery_engine/routing_orphan.rs"] // #3869 routing-orphan finalize
+mod routing_orphan;
 
 // Re-import moved items so existing call sites stay byte-identical.
 use self::jsonl_extract::extract_response_from_output;
@@ -347,54 +349,6 @@ async fn relay_recovery_terminal_notice(
         text,
     )
     .await
-}
-
-/// #3869: finalize a restart-time inflight row whose bot/channel routing CHANGED
-/// while dcserver was down (e.g. the channel was re-bound to a different
-/// provider). Such a row is genuinely orphaned — no same-provider sibling bot
-/// will adopt it (an `is_expected_cross_bot_skip` failure, by contrast, IS
-/// re-routable and is left untouched by the caller). The old behavior was a bare
-/// `continue` that stranded the placeholder/row until the ~1800s sweeper reaped
-/// it, so the user's in-flight turn was silently lost in the meantime.
-///
-/// Finalize it the way every other non-recoverable recovery row is handled:
-/// deliver the interrupted terminal notice to the placeholder and then finish +
-/// clear the durable inflight state via the shared disposition matrix
-/// ([`dispose_recovery_relay_outcome`]) — which preserves-and-retries on a
-/// transient relay failure (so the user notice is not itself dropped) and
-/// force-clears on a permanent failure / exhausted budget.
-async fn cleanup_routing_orphaned_inflight(
-    http: &Arc<serenity::Http>,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    state: &super::inflight::InflightTurnState,
-    tmux_alive: bool,
-    reason: BotChannelRoutingGuardFailure,
-) {
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    tracing::warn!(
-        "  [{ts}] 🧹 recovery: inflight routing changed for channel {} ({reason}) — finalizing orphaned turn instead of stranding it for the sweeper (#3869)",
-        state.channel_id,
-    );
-    // A restart report (the restart-report recovery sites) is no longer
-    // actionable once the row is being finalized — clear it so a later boot does
-    // not re-enter the restart path for a channel this bot no longer routes.
-    // Idempotent when none exists.
-    super::restart_report::clear_restart_report(provider, state.channel_id);
-    let text = interrupted_recovery_message(state, &state.full_response);
-    let outcome = relay_recovery_terminal_notice(http, shared, state, &text).await;
-    dispose_recovery_relay_outcome(
-        shared,
-        provider,
-        state,
-        outcome,
-        tmux_alive,
-        "recovery_routing_orphaned",
-        "routing_orphaned",
-        &state.full_response,
-        false,
-    )
-    .await;
 }
 
 /// Deliver the recovered terminal text to Discord: edit the placeholder in
@@ -1768,21 +1722,17 @@ pub(super) async fn restore_inflight_turns(
                 provider_channel_name.as_deref(),
                 is_dm,
             ) {
-                if reason.orphans_inflight_on_restart() {
-                    // #3869: routing was re-bound to another provider while down
-                    // — finalize the orphaned row instead of stranding it.
-                    cleanup_routing_orphaned_inflight(
-                        http,
-                        shared,
-                        provider,
-                        &state,
-                        session_alive,
-                        reason,
-                    )
-                    .await;
-                }
-                // else: expected cross-bot skip — a same-provider sibling bot
-                // owns/recovers this row; preserve it (the original behavior).
+                // #3869: orphan→finalize, else preserve (`false` ⇒ suppress expected-skip logs).
+                routing_orphan::route_recovery_skip(
+                    http,
+                    shared,
+                    provider,
+                    &state,
+                    tmux_name.as_deref(),
+                    reason,
+                    false,
+                )
+                .await;
                 continue;
             }
 
@@ -1818,21 +1768,17 @@ pub(super) async fn restore_inflight_turns(
                     provider_channel_name.as_deref(),
                     is_dm,
                 ) {
-                    if reason.orphans_inflight_on_restart() {
-                        // #3869: tmux is alive but routing changed providers —
-                        // its output can no longer be delivered to this bot, so
-                        // finalize the orphaned row rather than strand it.
-                        cleanup_routing_orphaned_inflight(
-                            http, shared, provider, &state, true, reason,
-                        )
-                        .await;
-                    } else {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::info!(
-                            "  [{ts}] ⏭ inflight recovery skip for channel {} — {reason}",
-                            state.channel_id,
-                        );
-                    }
+                    // #3869: orphan→finalize, else preserve (`true` ⇒ log skips).
+                    routing_orphan::route_recovery_skip(
+                        http,
+                        shared,
+                        provider,
+                        &state,
+                        tmux_name.as_deref(),
+                        reason,
+                        true,
+                    )
+                    .await;
                     continue;
                 }
                 {
@@ -2022,26 +1968,16 @@ pub(super) async fn restore_inflight_turns(
             provider_channel_name.as_deref(),
             is_dm,
         ) {
-            if reason.orphans_inflight_on_restart() {
-                // #3869: the channel was re-bound to a different provider while
-                // dcserver was down — no same-provider sibling bot can adopt
-                // this row. Probe the pane so the disposition matrix never
-                // budget-clears a still-live session, then finalize + notify
-                // instead of leaving the placeholder/row for the sweeper.
-                let tmux_alive = tmux_session_name
-                    .as_deref()
-                    .map_or(false, tmux_session_alive_with_retry);
-                cleanup_routing_orphaned_inflight(
-                    http, shared, provider, &state, tmux_alive, reason,
-                )
-                .await;
-            } else {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] ⏭ inflight recovery skip for channel {} — {reason}",
-                    state.channel_id,
-                );
-            }
+            routing_orphan::route_recovery_skip(
+                http,
+                shared,
+                provider,
+                &state,
+                tmux_session_name.as_deref(),
+                reason,
+                true,
+            )
+            .await;
             continue;
         }
         let (fallback_output, fallback_input) = tmux_session_name
