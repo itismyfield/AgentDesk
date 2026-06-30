@@ -349,7 +349,7 @@
 | `services::auto_queue::view_admin_routes` | `src/services/auto_queue/view_admin_routes.rs` | 730 | 730 | 0 |  |
 | `services::automation_candidate_contract` | `src/services/automation_candidate_contract.rs` | 127 | 87 | 40 |  |
 | `services::automation_candidate_materializer` | `src/services/automation_candidate_materializer.rs` | 844 | 844 | 0 |  |
-| `services::claude` | `src/services/claude.rs` | 4087 | 2963 | 1124 | giant-file |
+| `services::claude` | `src/services/claude.rs` | 4099 | 2969 | 1130 | giant-file |
 | `services::claude_compact_trigger` | `src/services/claude_compact_trigger.rs` | 428 | 248 | 180 |  |
 | `services::claude_e` | `src/services/claude_e/mod.rs` | 18 | 18 | 0 |  |
 | `services::claude_e::cancellation` | `src/services/claude_e/cancellation.rs` | 3 | 3 | 0 |  |
@@ -364,7 +364,7 @@
 | `services::claude_tui::hosting` | `src/services/claude_tui/hosting/mod.rs` | 13 | 13 | 0 |  |
 | `services::claude_tui::hosting::followup_support` | `src/services/claude_tui/hosting/followup_support.rs` | 524 | 409 | 115 |  |
 | `services::claude_tui::hosting::warm_followup` | `src/services/claude_tui/hosting/warm_followup.rs` | 750 | 693 | 57 |  |
-| `services::claude_tui::input` | `src/services/claude_tui/input.rs` | 3048 | 1765 | 1283 | giant-file |
+| `services::claude_tui::input` | `src/services/claude_tui/input.rs` | 3356 | 1930 | 1426 | giant-file |
 | `services::claude_tui::memento_feedback` | `src/services/claude_tui/memento_feedback.rs` | 576 | 446 | 130 |  |
 | `services::claude_tui::session` | `src/services/claude_tui/session.rs` | 431 | 180 | 251 |  |
 | `services::claude_tui::startup_dialog` | `src/services/claude_tui/startup_dialog.rs` | 276 | 121 | 155 |  |
@@ -868,7 +868,7 @@
 | `services::shell_guard` | `src/services/shell_guard.rs` | 419 | 419 | 0 |  |
 | `services::slo` | `src/services/slo/mod.rs` | 533 | 506 | 27 |  |
 | `services::termination_audit` | `src/services/termination_audit.rs` | 223 | 223 | 0 |  |
-| `services::tmux_common` | `src/services/tmux_common.rs` | 1566 | 943 | 623 |  |
+| `services::tmux_common` | `src/services/tmux_common.rs` | 1720 | 991 | 729 |  |
 | `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 241 | 241 | 0 |  |
 | `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 720 | 677 | 43 |  |
 | `services::tool_output_guard` | `src/services/tool_output_guard.rs` | 100 | 100 | 0 |  |

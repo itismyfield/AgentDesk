@@ -76,8 +76,8 @@
 | `src/services/auto_queue.rs` | 1546 |
 | `src/services/auto_queue/activate_command.rs` | 1506 |
 | `src/services/auto_queue/cancel_run.rs` | 1032 |
-| `src/services/claude.rs` | 2963 |
-| `src/services/claude_tui/input.rs` | 1765 |
+| `src/services/claude.rs` | 2969 |
+| `src/services/claude_tui/input.rs` | 1930 |
 | `src/services/codex.rs` | 3049 |
 | `src/services/codex_tmux_wrapper.rs` | 1403 |
 | `src/services/codex_tui/input.rs` | 1366 |

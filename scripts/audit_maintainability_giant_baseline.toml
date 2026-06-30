@@ -20,7 +20,10 @@
 # #3038 execute_streaming S3: lowered claude.rs 3989 -> 2950 by moving the
 # TUI warm/follow-up hosting helpers into claude_tui/hosting/ child modules.
 # #3262 turn-lock acquisition/state/tests intentionally remain in claude.rs root.
-"src/services/claude.rs" = 2963
+# #3889 +6 (2963 -> 2969): the fresh-prompt retry guard explicitly never retries
+# the terminal MCP-auth cold-boot error (1 LoC) plus its rationale comment; this
+# bounds the retry storm and is the live consumer of `is_mcp_auth_required_error`.
+"src/services/claude.rs" = 2969
 # #3034 batch-8: the dead_code lint went live for the discord tree; the two
 # test-only `#[allow(dead_code)]` attributes on
 # `watcher_inflight_is_external_input_for_session` / the lease alias add +2 and

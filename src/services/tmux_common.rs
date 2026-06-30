@@ -8,6 +8,11 @@ use crate::services::tmux_diagnostics::clear_tmux_exit_reason;
 const CLAUDE_TUI_READY_SCAN_LINES: usize = 12;
 const CLAUDE_TUI_ACTIVE_SCAN_LINES: usize = 24;
 const CLAUDE_TUI_DRAFT_SCAN_LINES: usize = 36;
+/// Recent non-empty pane lines scanned for the MCP-authentication-required
+/// cold-boot banner. The warning renders just above the composer on a fresh
+/// boot, so a modest tail window captures it reliably while keeping older
+/// scrollback that merely mentions "authentication" from false-positiving.
+const CLAUDE_TUI_MCP_AUTH_SCAN_LINES: usize = 16;
 const CLAUDE_TUI_READY_BANNER: &str = "Ready for input (type message + Enter)";
 const CLAUDE_TUI_PROMPT_MARKER: &str = "\u{276f}";
 
@@ -387,6 +392,48 @@ pub(crate) fn tmux_capture_indicates_claude_tui_idle_suggestion(capture: &str) -
             ))
         })
         .unwrap_or(false)
+}
+
+/// True for the Claude Code cold-boot banner reporting one or more MCP servers
+/// still need authentication, e.g. `⚠ 1 MCP server needs authentication · run
+/// /mcp`. The banner paints on the post-launch welcome screen (commonly when a
+/// remote SSE server failed to authenticate), which still renders normal
+/// composer chrome — so `..._ready_for_input` reads it as READY even though
+/// Claude Code silently drops every submission until `/mcp` is run. The
+/// claude_tui readiness gate uses this to refuse that false-ready and fail fast
+/// with an actionable reason instead of blind-waiting/retrying (#3889).
+pub(crate) fn tmux_capture_indicates_claude_tui_mcp_auth_required(capture: &str) -> bool {
+    let non_empty = capture
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect::<Vec<_>>();
+    let start = non_empty
+        .len()
+        .saturating_sub(CLAUDE_TUI_MCP_AUTH_SCAN_LINES);
+    non_empty[start..]
+        .iter()
+        .any(|line| line_is_mcp_auth_required_warning(line))
+}
+
+/// One pane line is the MCP-auth-needed warning only when it is Claude Code's
+/// system warning banner — **anchored to the `⚠` glyph** (`⚠ N MCP server(s)
+/// need authentication · run /mcp`) AND naming MCP + authentication + (`need` |
+/// `run /mcp`). The `⚠` anchor is load-bearing: assistant/tool transcript output
+/// (lines beginning `⏺`/`✻`, or continuation prose) can say "The MCP server needs
+/// authentication; run /mcp ..." above a perfectly ready composer, so token
+/// presence alone must NOT match — only the chrome glyph the system banner
+/// carries does (#3889 Codex review [1]).
+fn line_is_mcp_auth_required_warning(line: &str) -> bool {
+    let trimmed = trim_prompt_line(line);
+    // Anchor to the system warning banner glyph (U+26A0). `starts_with` matches
+    // regardless of a trailing emoji variation selector (`⚠️`, U+FE0F).
+    if !trimmed.starts_with('\u{26a0}') {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    lower.contains("mcp")
+        && lower.contains("authentic")
+        && (lower.contains("need") || lower.contains("run /mcp"))
 }
 
 fn tmux_recent_lines_show_claude_tui_active_work(lines: &[&str]) -> bool {
@@ -1018,6 +1065,113 @@ Claude Code v2.1.141
   CLAUDE.md: 1, MCP: 2 │ Tools: 0 done";
 
         assert!(!tmux_capture_indicates_claude_tui_selector_open(pane));
+    }
+}
+
+#[cfg(test)]
+mod mcp_auth_required_tests {
+    use super::*;
+
+    /// The exact fresh-boot screen from #3889: a welcome box, the
+    /// `⚠ N MCP server needs authentication · run /mcp` warning, and a composer
+    /// that paints the usual separator + bypass-permissions footer. The composer
+    /// chrome means `..._ready_for_input` reads this as READY, so the dedicated
+    /// MCP-auth detector is what keeps the readiness gate from false-submitting
+    /// into it.
+    #[test]
+    fn detects_cold_boot_mcp_auth_welcome_screen() {
+        let pane = "\
+╭─── Claude Code v2.1.195 ───────────────────────────╮
+│            Welcome back 오부장!                    │
+│   Opus 4.8 (1M context) · Claude Max               │
+│   ~/.adk/release/workspaces/ch-ad                  │
+╰────────────────────────────────────────────────────
+
+ ⚠ 1 MCP server needs authentication · run /mcp
+
+────────────────────────────────────────────────────
+❯ [Pasted text #1 +59 lines]
+────────────────────────────────────────────────────
+  🤖 Opus(H) │ 0% │ MCP: 2 │ ⏵⏵ bypass permissions on";
+
+        // The composer chrome makes the legacy readiness predicate read READY...
+        assert!(tmux_capture_indicates_claude_tui_ready_for_input(pane));
+        // ...but the MCP-auth detector flags it so the readiness gate refuses it.
+        assert!(tmux_capture_indicates_claude_tui_mcp_auth_required(pane));
+    }
+
+    /// Plural copy (`N MCP servers need authentication`) must still match.
+    #[test]
+    fn detects_plural_servers_need_authentication() {
+        let pane = "\
+ ⚠ 2 MCP servers need authentication · run /mcp
+────────────────────────────────────────────────────
+❯
+  🤖 Opus(H) │ 0% │ MCP: 3 │ ⏵⏵ bypass permissions on";
+
+        assert!(tmux_capture_indicates_claude_tui_mcp_auth_required(pane));
+    }
+
+    /// A genuinely ready, empty composer with all MCP servers connected must NOT
+    /// be flagged — the footer mentions `MCP: 2` but never "authentication".
+    #[test]
+    fn ignores_normal_ready_composer_with_connected_mcp() {
+        let pane = "\
+Claude Code v2.1.195
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  🤖 Opus(H) │ 0% │ MCP: 2 │ ⏵⏵ bypass permissions on";
+
+        assert!(tmux_capture_indicates_claude_tui_ready_for_input(pane));
+        assert!(!tmux_capture_indicates_claude_tui_mcp_auth_required(pane));
+    }
+
+    /// Prose that mentions only one of the tokens (e.g. an assistant message
+    /// talking about MCP, or about authentication generally) must not trip the
+    /// detector — all of MCP + authentication + (need | run /mcp) are required.
+    #[test]
+    fn ignores_partial_token_prose() {
+        let mcp_only = "⏺ I configured the MCP server list in settings.";
+        assert!(!tmux_capture_indicates_claude_tui_mcp_auth_required(
+            mcp_only
+        ));
+
+        let auth_only = "⏺ The API needs authentication via a bearer token.";
+        assert!(!tmux_capture_indicates_claude_tui_mcp_auth_required(
+            auth_only
+        ));
+    }
+
+    /// Codex review #3931 [1] (over-block regression): an assistant transcript
+    /// line that contains ALL the tokens (`mcp` + `authentication` + `run /mcp`)
+    /// but sits as `⏺` output above a genuinely ready composer must NOT be
+    /// classified as MCP-auth-blocked — only the system `⚠` warning banner is.
+    #[test]
+    fn ignores_assistant_prose_with_all_tokens_above_ready_composer() {
+        let pane = "\
+Claude Code v2.1.195
+⏺ The MCP server needs authentication; run /mcp to reconnect it, then retry.
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  🤖 Opus(H) │ 0% │ MCP: 2 │ ⏵⏵ bypass permissions on";
+
+        // The composer is genuinely ready...
+        assert!(tmux_capture_indicates_claude_tui_ready_for_input(pane));
+        // ...and the all-token assistant prose above it must not block it.
+        assert!(!tmux_capture_indicates_claude_tui_mcp_auth_required(pane));
+
+        // The real system banner with the same tokens IS blocked — the `⚠`
+        // chrome glyph is the only difference.
+        let banner = "\
+Claude Code v2.1.195
+ ⚠ 1 MCP server needs authentication · run /mcp
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  🤖 Opus(H) │ 0% │ MCP: 2 │ ⏵⏵ bypass permissions on";
+        assert!(tmux_capture_indicates_claude_tui_mcp_auth_required(banner));
     }
 }
 
