@@ -1704,6 +1704,22 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   fast with an actionable, non-timeout reason instead of false-submitting then
   blind-waiting/retrying the full timeout; gate every ready-return path —
   including the recorded-turn idle-transcript fallbacks — on the MCP-auth check.)
+- `src/services/tmux_common.rs` (~1090 prod LoC) — Claude/Codex TUI pane-capture
+  heuristics: ready-for-input, prompt-draft vs idle-suggestion-ghost, active-work
+  streaming, MCP-auth banner, and `/effort` selector detection, plus session
+  temp-file paths. Treat as giant-file territory; split focused detector helpers
+  before adding non-bugfix behavior. (+ #3924 recognizing a STRANDED Discord
+  follow-up draft — `❯ [User: …] <text>` whose submit Enter was dropped, sitting
+  below a finished-turn block under idle chrome — as a recoverable draft so the
+  recovery net's JSONL transcript cross-check fires instead of a 120s TUI kill,
+  while keeping submitted history and non-injected idle ghosts classified as
+  not-a-draft. The capture-side stranded gate keys ONLY on shape — `[User:]`
+  composer line under idle chrome with NO response glyph (`⏺`/`✻`) below it; it
+  deliberately does NOT use the `Tools: 0 done` footer as a running signal,
+  because a FINISHED 0-tool turn prints it too (#3924 codex re-review). Whether
+  such a shape is genuinely stranded vs a live just-submitted turn is decided by
+  the AUTHORITATIVE transcript turn-state in `claude_tui_followup_stranded_prompt_
+  draft_state`, not by the pane.)
 - `src/services/memory/memento.rs` (1893).
 - `src/services/dispatched_sessions.rs` (1550) — dispatched session domain
   service. This is the post-#1515 SRP extraction target for route/database
