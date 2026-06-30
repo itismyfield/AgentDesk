@@ -1577,6 +1577,10 @@ pub(in crate::services::discord) async fn handle_event(
                 Some(is_dm),
                 turn_kind,
                 preloaded_uploads,
+                // #3905: carry the gate's already-authorized, non-consuming voice
+                // resolution into direct dispatch so intake trusts it instead of
+                // racily re-deriving (and losing to a sibling-gateway consume).
+                resolved_voice_announcement,
             )
             .await?;
         }
