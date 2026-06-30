@@ -1182,3 +1182,276 @@ fn write_report(report: &VoicePcmHarnessReport) {
     serde_json::to_writer_pretty(file, report)
         .unwrap_or_else(|error| panic!("write report {}: {error}", path.display()));
 }
+
+// ---------------------------------------------------------------------------
+// #3906 — deterministic voice intake feedback (P1 ack signal + P4 done signal)
+// ---------------------------------------------------------------------------
+
+const PROCESSING_CHIME_CONTEXT: &str = "voice processing chime";
+const DONE_CHIME_CONTEXT: &str = "voice done chime";
+
+fn play_request_contexts(harness: &VoicePcmHarness) -> Vec<(u64, &'static str)> {
+    harness
+        .runtime
+        .test_state
+        .play_requests
+        .lock()
+        .expect("voice PCM harness play requests lock")
+        .clone()
+}
+
+fn count_play_context(harness: &VoicePcmHarness, channel_id: u64, context: &str) -> usize {
+    play_request_contexts(harness)
+        .into_iter()
+        .filter(|(seen_channel, seen_context)| {
+            *seen_channel == channel_id && *seen_context == context
+        })
+        .count()
+}
+
+fn assert_no_play_context(harness: &VoicePcmHarness, context: &str) {
+    let plays = play_request_contexts(harness);
+    assert!(
+        !plays
+            .iter()
+            .any(|(_, seen_context)| *seen_context == context),
+        "did not expect any `{context}` playback, saw: {plays:?}"
+    );
+}
+
+// P1: an utterance that resolves to a real Target emits the deterministic
+// Phase-1 intake chime BEFORE start_voice_turn runs.
+#[cfg(unix)]
+#[tokio::test]
+async fn voice_intake_chime_fires_before_turn_start() {
+    let _guard = observability::test_runtime_lock();
+    observability::reset_for_tests();
+    observability::init_observability(None);
+
+    let harness = VoicePcmHarness::new(&["오늘 일정 알려줘"]).await;
+    harness.clear_play_requests();
+    let message_id = harness.next_message_id();
+    harness.queue_turn_start(message_id);
+    harness.queue_foreground_decision(VoiceForegroundDecision::Speak(
+        "오늘 일정 확인했어요.".to_string(),
+    ));
+
+    let (utterance, _timings) = harness.feed_pcm_turn(false).await;
+    let start = wait_for_turn_start(&harness, &utterance.utterance_id).await;
+    assert!(
+        start.is_some(),
+        "utterance must resolve to a Target and reach start_voice_turn"
+    );
+
+    assert_eq!(
+        count_play_context(&harness, SOURCE_CHANNEL_ID, PROCESSING_CHIME_CONTEXT),
+        1,
+        "exactly one deterministic intake chime must fire on the source voice channel"
+    );
+}
+
+// P1 / #3905-proof: even when start_voice_turn fails (publish Err), the Phase-1
+// intake chime is still recorded because it fires upstream of every
+// VoiceTurnStartFailed exit and the DuplicateSuppressed drop.
+#[cfg(unix)]
+#[tokio::test]
+async fn voice_intake_chime_fires_even_when_turn_start_fails() {
+    let _guard = observability::test_runtime_lock();
+    observability::reset_for_tests();
+    observability::init_observability(None);
+
+    let harness = VoicePcmHarness::new(&["로그 확인해줘"]).await;
+    harness.clear_play_requests();
+    // Stub start_voice_turn's publish to fail; take_test_turn_start_outcome still
+    // records the turn_start, so wait_for_turn_start remains a valid barrier.
+    harness
+        .runtime
+        .test_state
+        .turn_start_outcomes
+        .lock()
+        .expect("voice PCM harness turn start outcomes lock")
+        .push_back(Err("voice publish failed for #3906 test".to_string()));
+
+    let (utterance, _timings) = harness.feed_pcm_turn(false).await;
+    let start = wait_for_turn_start(&harness, &utterance.utterance_id).await;
+    assert!(
+        start.is_some(),
+        "start_voice_turn must be reached even when publish fails"
+    );
+
+    assert_eq!(
+        count_play_context(&harness, SOURCE_CHANNEL_ID, PROCESSING_CHIME_CONTEXT),
+        1,
+        "intake chime must fire deterministically even when the turn-start publish fails"
+    );
+}
+
+// P1 negative: an empty / whitespace-only transcript is dropped before the
+// Target resolution, so NO intake chime is emitted.
+#[cfg(unix)]
+#[tokio::test]
+async fn voice_intake_chime_absent_on_empty_transcript() {
+    let _guard = observability::test_runtime_lock();
+    observability::reset_for_tests();
+    observability::init_observability(None);
+
+    let harness = VoicePcmHarness::new(&["   "]).await;
+    harness.clear_play_requests();
+
+    let (utterance, _timings) = harness.feed_pcm_turn(false).await;
+    // ignored_noise (reason=empty_transcript) is the terminal barrier for this path.
+    let ignored = wait_for_flight_route(&utterance.utterance_id, "ignored_noise").await;
+    assert!(
+        ignored.is_some(),
+        "empty transcript must be recorded as ignored_noise"
+    );
+
+    assert_no_play_context(&harness, PROCESSING_CHIME_CONTEXT);
+}
+
+// P1 negative: a barge-in routed to handle_processing_transcript returns before
+// the Target resolution, so NO intake chime is emitted.
+#[cfg(unix)]
+#[tokio::test]
+async fn voice_intake_chime_absent_on_active_turn_barge_in() {
+    let _guard = observability::test_runtime_lock();
+    observability::reset_for_tests();
+    observability::init_observability(None);
+
+    let harness = VoicePcmHarness::new(&["멈춰"]).await;
+    harness.clear_play_requests();
+    install_active_voice_route(
+        &harness.runtime,
+        harness.source_channel,
+        harness.target_channel,
+    );
+    let player = Arc::new(MockPlayer::default());
+    let playback_cancel = CancellationToken::new();
+    harness.runtime.reset_after_playback_start(
+        harness.source_channel,
+        player.clone(),
+        playback_cancel.clone(),
+    );
+    let active_token = Arc::new(crate::services::provider::CancelToken::new());
+    assert!(
+        harness
+            .shared
+            .mailbox(harness.target_channel)
+            .try_start_turn(
+                active_token.clone(),
+                serenity::UserId::new(USER_ID),
+                MessageId::new(3_801_900),
+            )
+            .await
+    );
+
+    let (utterance, _timings) = harness.feed_pcm_turn(true).await;
+    let stop_event = wait_for_flight_route(&utterance.utterance_id, "explicit_stop").await;
+    assert!(
+        stop_event.is_some(),
+        "barge-in stop must route through handle_processing_transcript"
+    );
+
+    assert_no_play_context(&harness, PROCESSING_CHIME_CONTEXT);
+    harness.reset_scenario_state().await;
+}
+
+// Regression: the foreground announcement path no longer emits its own chime, so
+// a normal successful turn yields exactly ONE intake chime (not two).
+#[cfg(unix)]
+#[tokio::test]
+async fn voice_foreground_path_does_not_double_chime() {
+    let _guard = observability::test_runtime_lock();
+    observability::reset_for_tests();
+    observability::init_observability(None);
+
+    let harness = VoicePcmHarness::new(&["오늘 일정 알려줘"]).await;
+    harness.clear_play_requests();
+    let message_id = harness.next_message_id();
+    harness.queue_turn_start(message_id);
+    harness.queue_foreground_decision(VoiceForegroundDecision::Speak(
+        "오늘 일정 확인했어요.".to_string(),
+    ));
+
+    let (utterance, _timings) = harness.feed_pcm_turn(false).await;
+    wait_for_turn_start(&harness, &utterance.utterance_id).await;
+    let announcement = wait_for_announcement(message_id).await;
+    if let Some(announcement) = announcement.as_ref() {
+        assert!(
+            harness
+                .runtime
+                .try_handle_voice_transcript_announcement(
+                    &harness.shared,
+                    harness.source_channel,
+                    announcement,
+                )
+                .await,
+            "foreground handler must consume the announcement"
+        );
+    } else {
+        panic!("canonical voice announcement metadata was not cached");
+    }
+
+    assert_eq!(
+        count_play_context(&harness, SOURCE_CHANNEL_ID, PROCESSING_CHIME_CONTEXT),
+        1,
+        "a normal turn must emit exactly one intake chime (foreground path adds none)"
+    );
+}
+
+// P4: the turn-DONE branch plays the distinct descending done chime, not the
+// rising processing chime.
+#[cfg(unix)]
+#[tokio::test]
+async fn voice_turn_done_plays_distinct_done_chime() {
+    let harness = VoicePcmHarness::new(&[]).await;
+    let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    harness
+        .runtime
+        .spawn_progress_worker(harness.shared.clone(), shutdown.clone());
+    harness.clear_play_requests();
+
+    harness
+        .runtime
+        .publish_progress(harness.source_channel, "agent:done");
+
+    let recorded = wait_until(|| {
+        play_request_contexts(&harness)
+            .into_iter()
+            .find(|(channel, context)| {
+                *channel == SOURCE_CHANNEL_ID && *context == DONE_CHIME_CONTEXT
+            })
+    })
+    .await;
+    assert!(
+        recorded.is_some(),
+        "turn-done must play the distinct done chime"
+    );
+    assert_no_play_context(&harness, PROCESSING_CHIME_CONTEXT);
+    shutdown.store(true, Ordering::Relaxed);
+}
+
+// P4: done_chime_path resolves to a non-empty WAV at a file name distinct from
+// the processing chime.
+#[cfg(unix)]
+#[tokio::test]
+async fn done_chime_path_is_a_distinct_nonempty_wav() {
+    assert_ne!(
+        DONE_CHIME_FILE_NAME, PROCESSING_CHIME_FILE_NAME,
+        "done and processing chimes must use distinct asset file names"
+    );
+
+    let harness = VoicePcmHarness::new(&[]).await;
+    let done_path = harness
+        .runtime
+        .done_chime_path()
+        .await
+        .expect("done chime path must resolve");
+    assert!(
+        done_path.ends_with(DONE_CHIME_FILE_NAME),
+        "done chime path must point at the done-chime asset: {}",
+        done_path.display()
+    );
+    let meta = fs::metadata(&done_path).expect("done chime WAV must exist on disk");
+    assert!(meta.len() > 0, "done chime WAV must be non-empty");
+}

@@ -1350,7 +1350,13 @@
     `audit_maintainability_config.toml`; the root is no longer a prod giant and
     was removed from `giant_file_registry.toml`; #3038 S5 locked the final
     root ratchet at 274 production lines).
-  - `src/services/discord/voice_barge_in.rs` (2899 lines after #3914 added the
+  - `src/services/discord/voice_barge_in.rs` (2905 lines after #3906 added the
+    deterministic voice intake feedback (P1 Phase-1 intake chime emitted right
+    before `start_voice_turn` plus removal of the redundant foreground-start
+    chime, and the P4 `DONE_CHIME_FILE_NAME` const; the bulky
+    `ensure_done_chime_file` descending-tone generator + `play_done_chime` were
+    kept in the `progress_playback.rs` submodule to hold the giant flat); #3914
+    added the
     `FOREGROUND_MODEL_TIMEOUT_SLACK` const that de-duplicated the triplicated
     250ms timeout slack; #3038
     VoiceBargeInRuntime S1 moved the STT method cluster to
