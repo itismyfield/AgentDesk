@@ -1062,9 +1062,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let mut last_status_panel_text = String::new();
         let mut last_edit_text = stream_seed.last_edit_text;
         let mut response_sent_offset = stream_seed.response_sent_offset;
-        // #3871: ids of streamed rollover prefixes frozen this invocation; deleted on a
+        // #3871: ids of streamed rollover prefixes frozen for this turn; deleted on a
         // terminal full-body fallback so the frozen prose is not duplicated (sink parity).
-        let mut watcher_streaming_rollover_frozen_msg_ids: Vec<serenity::MessageId> = Vec::new();
+        // SEEDED from the persisted row so prefixes frozen in an earlier `'watcher_loop`
+        // iteration / before a watcher restart survive to the fallback (no residual dup).
+        let mut watcher_streaming_rollover_frozen_msg_ids: Vec<serenity::MessageId> =
+            stream_seed.streaming_rollover_frozen_msg_ids.clone();
         let finish_mailbox_on_completion = stream_seed.finish_mailbox_on_completion;
         let mut monitor_auto_turn_claimed = false;
         let mut monitor_auto_turn_deferred = false;
@@ -2330,6 +2333,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                             task_notification_kind,
                                             tool_state.any_tool_used,
                                             tool_state.has_post_tool_text,
+                                            &watcher_streaming_rollover_frozen_msg_ids,
                                         );
                                     }
                                     Err(error) => {
@@ -2433,6 +2437,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 task_notification_kind,
                                 tool_state.any_tool_used,
                                 tool_state.has_post_tool_text,
+                                &watcher_streaming_rollover_frozen_msg_ids,
                             );
                         }
                     }

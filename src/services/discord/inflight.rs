@@ -3689,6 +3689,7 @@ mod stall_recovery_tests {
                 task_notification_kind: None,
                 any_tool_used: false,
                 has_post_tool_text: false,
+                streaming_rollover_frozen_msg_ids: Vec::new(),
             },
         );
         assert_eq!(outcome, WatcherProgressOutcome::Saved);
@@ -3738,6 +3739,7 @@ mod stall_recovery_tests {
                 task_notification_kind: None,
                 any_tool_used: false,
                 has_post_tool_text: false,
+                streaming_rollover_frozen_msg_ids: Vec::new(),
             },
         );
         assert_eq!(outcome, WatcherProgressOutcome::Skipped);
@@ -4006,6 +4008,7 @@ mod stall_recovery_tests {
                 task_notification_kind: None,
                 any_tool_used: false,
                 has_post_tool_text: false,
+                streaming_rollover_frozen_msg_ids: Vec::new(),
             },
         );
         assert_eq!(outcome, WatcherProgressOutcome::Saved);

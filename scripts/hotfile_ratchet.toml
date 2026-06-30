@@ -75,7 +75,14 @@
 # parity with the sink's `terminal_full_replay_cleanup_msg_ids`). The pure gate
 # + async delete loop + regression test all live in the non-giant
 # `tmux_placeholder_suppression.rs`; this is the minimal frozen-file cost.
-"src/services/discord/tmux_watcher.rs" = 10242
+# #3871 follow-up (cross-iteration/restart durability): 10242 -> 10247 (+5),
+# reviewable admission — the frozen-prefix accumulator is now SEEDED from the
+# persisted row (so a fallback in a later `'watcher_loop` iteration / after a
+# watcher restart still deletes prefixes frozen earlier) and threaded into the
+# two `persist_watcher_stream_progress` call sites. The inflight field + patch
+# union-merge + restore wiring live in inflight/{model,watcher_state}.rs +
+# tmux.rs (non-frozen); this is the minimal frozen-file call-site cost.
+"src/services/discord/tmux_watcher.rs" = 10247
 # #3715: 7789 -> 4007 by moving the inline `#[cfg(test)] mod tests` body into
 # `tui_prompt_relay/tests.rs` and the Codex idle rollout tail/rebind loop into
 # `tui_prompt_relay/codex_idle_rollout.rs`; no production behavior change.

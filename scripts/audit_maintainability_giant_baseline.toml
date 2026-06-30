@@ -106,7 +106,13 @@
 # re-post does not duplicate the frozen prose (watcher parity with the sink's
 # `terminal_full_replay_cleanup_msg_ids`). The pure gate, async delete loop, and
 # regression test live in the non-giant `tmux_placeholder_suppression.rs`.
-"src/services/discord/tmux_watcher.rs" = 7077
+# #3871 follow-up (cross-iteration/restart durability): 7077 -> 7082 (+5 prod
+# LoC): the frozen-prefix accumulator is SEEDED from the persisted row and
+# threaded into the two `persist_watcher_stream_progress` call sites so a
+# fallback in a later iteration / after a watcher restart still deletes prefixes
+# frozen earlier. The inflight field + patch union-merge + restore wiring live in
+# inflight/{model,watcher_state}.rs + tmux.rs (non-giant for this change).
+"src/services/discord/tmux_watcher.rs" = 7082
 # #3038 tmux_watcher S1 child modules, frozen at landed production LoC.
 "src/services/discord/tmux_watcher/commit_decisions.rs" = 140
 "src/services/discord/tmux_watcher/completion_gate.rs" = 275

@@ -142,6 +142,10 @@ pub(super) struct RestoredWatcherTurn {
     /// restored inflight, carried so a watcher-owned re-acquire (after the row
     /// is cleared mid-turn) can re-pin it instead of orphaning the `⏳`.
     pub(super) injected_prompt_message_id: Option<u64>,
+    /// #3871: frozen streamed rollover-prefix message ids restored from the
+    /// persisted row so a terminal full-body fallback in a later iteration / after
+    /// a restart still deletes every accumulated prefix (no residual duplicate).
+    streaming_rollover_frozen_msg_ids: Vec<MessageId>,
 }
 
 #[derive(Debug)]
@@ -153,6 +157,8 @@ struct WatcherStreamSeed {
     last_edit_text: String,
     task_notification_kind: Option<TaskNotificationKind>,
     finish_mailbox_on_completion: bool,
+    /// #3871: see [`RestoredWatcherTurn::streaming_rollover_frozen_msg_ids`].
+    streaming_rollover_frozen_msg_ids: Vec<MessageId>,
 }
 
 fn normalize_response_sent_offset(full_response: &str, response_sent_offset: usize) -> usize {
@@ -215,6 +221,12 @@ pub(super) fn restored_watcher_turn_from_inflight(
         task_notification_kind: state.task_notification_kind,
         finish_mailbox_on_completion,
         injected_prompt_message_id: state.injected_prompt_message_id,
+        streaming_rollover_frozen_msg_ids: state
+            .streaming_rollover_frozen_msg_ids
+            .iter()
+            .copied()
+            .map(MessageId::new)
+            .collect(),
     })
 }
 
@@ -228,6 +240,7 @@ fn watcher_stream_seed(restored_turn: Option<RestoredWatcherTurn>) -> WatcherStr
             last_edit_text: restored.last_edit_text,
             task_notification_kind: restored.task_notification_kind,
             finish_mailbox_on_completion: restored.finish_mailbox_on_completion,
+            streaming_rollover_frozen_msg_ids: restored.streaming_rollover_frozen_msg_ids,
         },
         None => WatcherStreamSeed {
             placeholder_msg_id: None,
@@ -237,6 +250,7 @@ fn watcher_stream_seed(restored_turn: Option<RestoredWatcherTurn>) -> WatcherStr
             last_edit_text: String::new(),
             task_notification_kind: None,
             finish_mailbox_on_completion: false,
+            streaming_rollover_frozen_msg_ids: Vec::new(),
         },
     }
 }
@@ -1686,6 +1700,9 @@ fn persist_watcher_stream_progress(
     task_notification_kind: Option<TaskNotificationKind>,
     any_tool_used: bool,
     has_post_tool_text: bool,
+    // #3871: the frozen streamed rollover-prefix ids accumulated this invocation,
+    // persisted so a later-iteration / post-restart terminal fallback can delete them.
+    streaming_rollover_frozen_msg_ids: &[MessageId],
 ) {
     // #3558: pre-emit the in-bounds telemetry against the caller's snapshot for
     // continuity; the helper re-clamps `response_sent_offset` against the
@@ -1731,6 +1748,10 @@ fn persist_watcher_stream_progress(
             task_notification_kind,
             any_tool_used,
             has_post_tool_text,
+            streaming_rollover_frozen_msg_ids: streaming_rollover_frozen_msg_ids
+                .iter()
+                .map(|id| id.get())
+                .collect(),
         },
     );
 }
@@ -1963,6 +1984,7 @@ mod watcher_stream_progress_tests {
             None,
             true,
             false,
+            &[],
         );
 
         let persisted = super::super::inflight::load_inflight_state(&provider, channel_id.get())
@@ -2029,5 +2051,119 @@ mod restored_turn_injected_anchor_tests {
             "the restored turn must carry the #3099 hourglass anchor so the \
              streaming-interval re-acquire can re-pin it (F3 regression)"
         );
+    }
+}
+
+#[cfg(test)]
+mod streaming_rollover_frozen_prefix_persistence_tests {
+    use super::{
+        persist_watcher_stream_progress, restored_watcher_turn_from_inflight, watcher_stream_seed,
+    };
+    use crate::services::discord::inflight::InflightTurnState;
+    use crate::services::provider::ProviderKind;
+    use poise::serenity_prelude::{ChannelId, MessageId};
+
+    // #3871: the frozen rollover-prefix ids must survive ACROSS `'watcher_loop`
+    // iterations / a watcher restart. The local accumulator is `Vec::new()`'d each
+    // iteration, so a terminal full-body fallback that runs in a LATER iteration
+    // than the rollover-freeze (idle-split where the result JSONL lags, or a
+    // watcher restart mid-turn) would — without persistence — start with an empty
+    // set and leave the earlier frozen prefix UNDELETED (residual duplicate). This
+    // pins the persist→restore round-trip + the monotonic union-merge so iteration
+    // B still deletes the prefix iteration A froze.
+    #[test]
+    fn frozen_prefix_persists_across_iteration_and_restore_for_terminal_delete() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(1_521_269_012_347_097_158);
+        let tmux_session_name = "AgentDesk-claude-adk-3871-persist";
+        let state = InflightTurnState::new(
+            provider.clone(),
+            channel_id.get(),
+            Some("claude-pipe".to_string()),
+            42,
+            7_001,
+            7_002, // current_msg_id non-zero => restorable
+            "long answer".to_string(),
+            Some("session-3871".to_string()),
+            Some(tmux_session_name.to_string()),
+            Some("/tmp/agentdesk-3871.jsonl".to_string()),
+            None,
+            0,
+        );
+        super::super::inflight::save_inflight_state(&state).expect("save inflight");
+
+        // Iteration A froze prefix F1 mid-stream and persisted progress.
+        let f1 = MessageId::new(9_001);
+        persist_watcher_stream_progress(
+            &provider,
+            channel_id,
+            tmux_session_name,
+            None,
+            Some(MessageId::new(9_100)),
+            "first chunk frozen…",
+            0,
+            None,
+            None,
+            None,
+            false,
+            false,
+            &[f1],
+        );
+
+        // Iteration B / a watcher restart re-enters with an EMPTY local vec and
+        // SEEDS from the persisted row: the frozen prefix must come back so the
+        // terminal full-body fallback can still delete it.
+        let reloaded = super::super::inflight::load_inflight_state(&provider, channel_id.get())
+            .expect("reload row A");
+        let restored = restored_watcher_turn_from_inflight(&reloaded, tmux_session_name, false)
+            .expect("a non-rebind inflight with a real current_msg_id restores");
+        let seed = watcher_stream_seed(Some(restored));
+        assert_eq!(
+            seed.streaming_rollover_frozen_msg_ids,
+            vec![f1],
+            "iteration B / restart must restore the prefix frozen in iteration A"
+        );
+        assert_eq!(
+            super::placeholder_suppression::watcher_rollover_prefixes_to_delete_on_terminal(
+                true,
+                &seed.streaming_rollover_frozen_msg_ids,
+            ),
+            vec![f1],
+            "the restored frozen prefix is deleted on iteration B's full-body fallback (no residual dup)"
+        );
+
+        // A SECOND freeze (F2) in iteration B union-merges monotonically — F1 is
+        // never dropped and no id is duplicated.
+        let f2 = MessageId::new(9_002);
+        persist_watcher_stream_progress(
+            &provider,
+            channel_id,
+            tmux_session_name,
+            None,
+            Some(MessageId::new(9_101)),
+            "first chunk frozen…second chunk frozen…",
+            0,
+            None,
+            None,
+            None,
+            false,
+            false,
+            &[f1, f2],
+        );
+        let reloaded2 = super::super::inflight::load_inflight_state(&provider, channel_id.get())
+            .expect("reload row B");
+        assert_eq!(
+            reloaded2.streaming_rollover_frozen_msg_ids,
+            vec![f1.get(), f2.get()],
+            "the persisted frozen-prefix set is monotonic (union, no dup)"
+        );
+
+        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
     }
 }
