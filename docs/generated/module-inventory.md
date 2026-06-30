@@ -364,7 +364,7 @@
 | `services::claude_tui::hosting` | `src/services/claude_tui/hosting/mod.rs` | 13 | 13 | 0 |  |
 | `services::claude_tui::hosting::followup_support` | `src/services/claude_tui/hosting/followup_support.rs` | 524 | 409 | 115 |  |
 | `services::claude_tui::hosting::warm_followup` | `src/services/claude_tui/hosting/warm_followup.rs` | 750 | 693 | 57 |  |
-| `services::claude_tui::input` | `src/services/claude_tui/input.rs` | 2807 | 1656 | 1151 | giant-file |
+| `services::claude_tui::input` | `src/services/claude_tui/input.rs` | 3048 | 1765 | 1283 | giant-file |
 | `services::claude_tui::memento_feedback` | `src/services/claude_tui/memento_feedback.rs` | 576 | 446 | 130 |  |
 | `services::claude_tui::session` | `src/services/claude_tui/session.rs` | 431 | 180 | 251 |  |
 | `services::claude_tui::startup_dialog` | `src/services/claude_tui/startup_dialog.rs` | 276 | 121 | 155 |  |

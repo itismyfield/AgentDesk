@@ -619,12 +619,39 @@ fn log_selector_never_opened(
 /// turn.
 const POST_PASTE_BUFFER_SETTLE: Duration = Duration::from_millis(200);
 
+/// #3880 (A1): settle delay between the last single-line `Literal` and the
+/// `Enter` that submits it. A single-line prompt plans as `Literal…(Enter)` with
+/// NO `PasteBuffer`, so — unlike the multi-line paste path that already settles
+/// `POST_PASTE_BUFFER_SETTLE` — the Enter previously fired with a 0 ms gap. On a
+/// cold / `/clear` composer that is still re-mounting, that Enter races the
+/// composer remount and is swallowed, leaving the typed text as a stranded
+/// draft (the submit never lands → 120s transcript timeout → tmux kill). A short
+/// settle before the Enter closes the race; the cost is one settle per
+/// single-line submit. Mirrors POST_PASTE_BUFFER_SETTLE in spirit and duration.
+const POST_LITERAL_SETTLE: Duration = Duration::from_millis(200);
+
+/// #3880 (A1): true when `current` is a `Literal` that is immediately followed
+/// by `Enter` — the exact single-line submit transition that needs the
+/// POST_LITERAL_SETTLE window. Consecutive `Literal` chunks (a long single line
+/// split for `send-keys`) do NOT settle between themselves; only the final
+/// `Literal → Enter` boundary does. Pure and lookahead-only so the settle wiring
+/// is unit-testable without a live tmux pane.
+fn literal_action_needs_post_settle(
+    current: &TuiInputAction,
+    next: Option<&TuiInputAction>,
+) -> bool {
+    matches!(
+        (current, next),
+        (TuiInputAction::Literal(_), Some(TuiInputAction::Enter))
+    )
+}
+
 fn run_actions(
     session_name: &str,
     actions: &[TuiInputAction],
     cancel_token: Option<&CancelToken>,
 ) -> Result<(), String> {
-    for action in actions {
+    for (index, action) in actions.iter().enumerate() {
         check_prompt_cancel(cancel_token)?;
         let output = match action {
             TuiInputAction::Literal(text) => {
@@ -674,6 +701,14 @@ fn run_actions(
             }
         };
         ensure_tmux_success(output, action)?;
+        // #3880 (A1): close the single-line Literal→Enter race on a re-mounting
+        // composer. Only the final `Literal` before an `Enter` settles (see
+        // literal_action_needs_post_settle); the PasteBuffer/Backspace arms
+        // `continue` above and never reach here.
+        if literal_action_needs_post_settle(action, actions.get(index + 1)) {
+            check_prompt_cancel(cancel_token)?;
+            std::thread::sleep(POST_LITERAL_SETTLE);
+        }
     }
     Ok(())
 }
@@ -1488,6 +1523,69 @@ fn prompt_ready_timeout_should_clear_followup_draft(
         && claude_prompt_draft_backspace_budget_from_tail(&snapshot.pane_tail).is_some()
 }
 
+/// #3880 (A2): distinguish a transcript that is `Idle` because a turn FINISHED
+/// from one that is `Idle` only because the session just STARTED (or has no
+/// turns yet). The global turn-state classifier (`observe_claude_jsonl_turn_state`)
+/// collapses BOTH an empty transcript AND a `system{init}`-only transcript — the
+/// freshly-rotated session after a Claude-native `/clear` — to `Idle`: an empty
+/// file is `Idle` by definition and `system{init}` is an Idle-CLASS session-start
+/// marker (`tui_turn_state.rs`, intentionally left unchanged — it also feeds the
+/// codex path and other idle consumers). So on its own that signal cannot tell
+/// the warm `/clear` first turn apart from a genuinely completed turn — and the
+/// original "first non-whitespace line" scan was fooled exactly because a
+/// `system{init}` line is non-whitespace, letting an init-only transcript take
+/// the no-capture fast-path and report ready before the `❯` composer mounts.
+///
+/// This predicate reuses the SAME per-envelope `type`/`subtype` classification
+/// the global observer applies, but counts ONLY a genuine RECORDED turn — a
+/// `user`/`assistant` message turn or an authoritative turn terminator
+/// (`result` / `system{turn_duration | stop_hook_summary}`). It EXCLUDES the
+/// `system{init}` session-start marker and every housekeeping/mode envelope, so
+/// an init-only / empty / rotated transcript reports `false` and the no-capture
+/// idle fast-path falls through to the `❯` marker polling path. The scan is
+/// bounded: it returns on the first recorded-turn line.
+fn transcript_has_recorded_turn(transcript_path: &std::path::Path) -> bool {
+    use std::io::BufRead;
+    let Ok(file) = std::fs::File::open(transcript_path) else {
+        return false;
+    };
+    for line in std::io::BufReader::new(file).lines() {
+        let Ok(line) = line else {
+            return false;
+        };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            // A malformed / partial line cannot prove a recorded turn; keep
+            // scanning the remaining lines.
+            continue;
+        };
+        if claude_jsonl_envelope_is_recorded_turn(&json) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Per-envelope predicate behind [`transcript_has_recorded_turn`]: is this JSONL
+/// envelope a genuine turn record, as opposed to session bring-up
+/// (`system{init}`) or post-turn housekeeping? Mirrors the `type`/`subtype`
+/// distinctions in `tui_turn_state::claude_envelope_turn_state`, minus the
+/// `system{init}` SESSION-start marker (which that classifier folds into the
+/// Idle family) and the `permission-mode`/`mode` housekeeping envelopes.
+fn claude_jsonl_envelope_is_recorded_turn(json: &serde_json::Value) -> bool {
+    match json.get("type").and_then(serde_json::Value::as_str) {
+        Some("user" | "assistant" | "result") => true,
+        Some("system") => matches!(
+            json.get("subtype").and_then(serde_json::Value::as_str),
+            Some("turn_duration" | "stop_hook_summary")
+        ),
+        _ => false,
+    }
+}
+
 fn transcript_idle_confirms_prompt_ready_without_capture(
     session_name: &str,
     transcript_path: Option<&std::path::Path>,
@@ -1496,6 +1594,17 @@ fn transcript_idle_confirms_prompt_ready_without_capture(
         return false;
     };
     if !crate::services::tmux_diagnostics::tmux_session_has_live_pane(session_name) {
+        return false;
+    }
+    // #3880 (A2): an init-only / empty / freshly-rotated transcript also
+    // classifies as `Idle` (`system{init}` is an Idle-class session-start
+    // marker), but after a warm `/clear` the composer is still re-mounting — so
+    // declaring ready here injects before the `❯` marker exists and the Enter is
+    // dropped. Require a genuine RECORDED turn before trusting this no-capture
+    // idle fast-path; the init-only / empty case falls through to the Notify +
+    // marker polling path that confirms the composer marker via a pane snapshot.
+    // A genuine completed-turn idle still fast-paths with no added latency.
+    if !transcript_has_recorded_turn(transcript_path) {
         return false;
     }
     crate::services::claude_tui::transcript_tail::observe_transcript_turn_state(transcript_path)
@@ -1718,6 +1827,138 @@ mod tests {
                 TuiInputAction::Enter
             ]
         );
+    }
+
+    #[test]
+    fn single_line_literal_settles_before_enter() {
+        // #3880 (A1): a single-line prompt plans as Literal…(Enter). The final
+        // Literal must carry POST_LITERAL_SETTLE before the Enter so the submit
+        // does not race a re-mounting `/clear` composer. Assert the settle wiring
+        // and that the plan still terminates in Enter.
+        let actions = plan_prompt_submit("abc").unwrap();
+        assert_eq!(actions.last(), Some(&TuiInputAction::Enter));
+        assert!(literal_action_needs_post_settle(
+            &actions[actions.len() - 2],
+            actions.last(),
+        ));
+        assert!(POST_LITERAL_SETTLE > Duration::ZERO);
+    }
+
+    #[test]
+    fn literal_settle_applies_only_on_literal_then_enter() {
+        // Consecutive Literals (a long single line split for send-keys) do NOT
+        // settle between themselves; only the final Literal → Enter boundary
+        // does. A non-Literal current action never settles here.
+        assert!(literal_action_needs_post_settle(
+            &TuiInputAction::Literal("a".to_string()),
+            Some(&TuiInputAction::Enter),
+        ));
+        assert!(!literal_action_needs_post_settle(
+            &TuiInputAction::Literal("a".to_string()),
+            Some(&TuiInputAction::Literal("b".to_string())),
+        ));
+        assert!(!literal_action_needs_post_settle(
+            &TuiInputAction::Literal("a".to_string()),
+            None,
+        ));
+        assert!(!literal_action_needs_post_settle(
+            &TuiInputAction::Enter,
+            Some(&TuiInputAction::Enter),
+        ));
+    }
+
+    #[test]
+    fn empty_transcript_has_no_recorded_turn() {
+        // #3880 (A2): an empty / whitespace-only transcript (the warm `/clear`
+        // rotation) must NOT count as a recorded turn, so the no-capture idle
+        // fast-path falls through to the pane `❯` marker confirmation instead of
+        // declaring ready before the composer re-mounts. A genuine turn record
+        // (user/assistant/result/turn-end) counts; a session-start `system{init}`
+        // marker and a missing file do NOT.
+        let dir = tempfile::tempdir().unwrap();
+
+        let empty = dir.path().join("empty.jsonl");
+        std::fs::write(&empty, "").unwrap();
+        assert!(!transcript_has_recorded_turn(&empty));
+
+        let whitespace = dir.path().join("whitespace.jsonl");
+        std::fs::write(&whitespace, "\n  \n\t\n").unwrap();
+        assert!(!transcript_has_recorded_turn(&whitespace));
+
+        let missing = dir.path().join("missing.jsonl");
+        assert!(!transcript_has_recorded_turn(&missing));
+
+        // #3880 (A2): a `system{init}`-only transcript is non-whitespace (the old
+        // naive scan was fooled) but is a SESSION-start marker, not a turn — it
+        // must NOT count as a recorded turn.
+        let init_only = dir.path().join("init.jsonl");
+        std::fs::write(
+            &init_only,
+            "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-1\"}\n",
+        )
+        .unwrap();
+        assert!(!transcript_has_recorded_turn(&init_only));
+
+        let with_turn = dir.path().join("turn.jsonl");
+        std::fs::write(&with_turn, "{\"type\":\"user\"}\n").unwrap();
+        assert!(transcript_has_recorded_turn(&with_turn));
+
+        // A turn terminator alone (`result` / `system{turn_duration}`) is also a
+        // recorded turn; a housekeeping `permission-mode` envelope is not.
+        let result_only = dir.path().join("result.jsonl");
+        std::fs::write(&result_only, "{\"type\":\"result\"}\n").unwrap();
+        assert!(transcript_has_recorded_turn(&result_only));
+
+        let housekeeping_only = dir.path().join("mode.jsonl");
+        std::fs::write(&housekeeping_only, "{\"type\":\"permission-mode\"}\n").unwrap();
+        assert!(!transcript_has_recorded_turn(&housekeeping_only));
+    }
+
+    #[test]
+    fn init_only_transcript_falls_through_recorded_turn_idle_fast_paths() {
+        // #3880 (A2): the no-capture idle fast-path
+        // (`transcript_idle_confirms_prompt_ready_without_capture`) is gated on
+        // BOTH a genuine recorded turn AND the lenient `Idle` classification.
+        // This pins the discriminator: an init-only (freshly-rotated `/clear`)
+        // transcript classifies as lenient-`Idle` — which on its own WOULD take
+        // the fast-path and report ready before the `❯` composer mounts — yet
+        // has NO recorded turn, so the gate rejects it and it falls through to
+        // marker polling. A genuine completed-turn transcript is BOTH Idle and a
+        // recorded turn, so it still fast-paths (no new latency on the common
+        // case).
+        use crate::services::tui_turn_state::TuiTurnState;
+        let dir = tempfile::tempdir().unwrap();
+
+        let init_only = dir.path().join("init.jsonl");
+        std::fs::write(
+            &init_only,
+            "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-1\"}\n",
+        )
+        .unwrap();
+        // Lenient classifier says Idle (the trap)…
+        assert_eq!(
+            crate::services::claude_tui::transcript_tail::observe_transcript_turn_state(&init_only),
+            TuiTurnState::Idle
+        );
+        // …but the recorded-turn gate falls through, so no fast-path.
+        assert!(!transcript_has_recorded_turn(&init_only));
+
+        let recorded_idle = dir.path().join("recorded.jsonl");
+        std::fs::write(
+            &recorded_idle,
+            "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-1\"}\n\
+             {\"type\":\"user\"}\n\
+             {\"type\":\"assistant\"}\n\
+             {\"type\":\"result\"}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            crate::services::claude_tui::transcript_tail::observe_transcript_turn_state(
+                &recorded_idle
+            ),
+            TuiTurnState::Idle
+        );
+        assert!(transcript_has_recorded_turn(&recorded_idle));
     }
 
     #[test]
