@@ -6,6 +6,10 @@
 [namespace_size_caps]
 "src/services/discord/commands/inspect/**" = 700
 "src/db/prompt_manifests/**" = 700
+# #3837: child modules carved out of the intake_turn.rs giant via behavior-
+# preserving decomposition (voice_intake / race_loss / turn_watchdog). Cap holds
+# the new surface under the 700-line namespace ceiling.
+"src/services/discord/router/message_handler/intake_turn/**" = 700
 # #3811: status_panel.rs was already at 696/700 (effectively full). The turn-anchor
 # feature needs the irreducible minimum on this surface — the `request_user_msg_id`
 # snapshot field, its preserve/clear reset hooks, and the `render_status_panel`
