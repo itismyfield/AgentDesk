@@ -34,10 +34,19 @@
 //!   * DEFECT 3 — on a committed finalize it registers the #3607 committed-
 //!     terminal panel anchor, so the SAME-pass orphan-panel reclaim skips the
 //!     panel it just finalized instead of deleting it.
+//!   * DEFECT 1b (round-2) — the terminal verdict is OFFSET-SCOPED to the current
+//!     turn: the unbounded `jsonl_turn_end_terminator_idle` reverse scan can walk
+//!     PAST the current turn's non-terminator Idle-class envelopes and latch a
+//!     PRIOR turn's terminator below `turn_start_offset`, false-finalizing a turn
+//!     that is still running. The reconcile additionally requires the CURRENT
+//!     turn's byte slice `[turn_start_offset, EOF)` to contain its OWN turn-end
+//!     terminator, so a prior terminator can never confirm this turn's completion.
 //!
 //! Lives OUTSIDE the #3016 hot files (declared from the non-hot `tmux.rs`); it
 //! never re-runs the gate and never touches relay/cleanup bookkeeping.
 
+use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
 use std::sync::Arc;
 
 use poise::serenity_prelude as serenity;
@@ -84,6 +93,20 @@ use crate::services::tui_turn_state::jsonl_turn_end_terminator_idle;
 /// (→ `false` here) for a torn/active/unparseable trailing line — so this never
 /// finalizes a pane that could still be producing output. No lenient fallback.
 ///
+/// DEFECT 1b (codex #3951 round-2): the `advanced` guard
+/// (`last_offset > turn_start_offset`) proves the current turn wrote SOMETHING
+/// but does NOT bind the (unbounded) `jsonl_turn_end_terminator_idle` scan to the
+/// current turn. When the current turn has so far written ONLY non-terminator
+/// Idle-class envelopes (Codex `item.completed`/`agent_message`; Claude
+/// `system{init}`), the scan walks past them and latches a PRIOR turn's
+/// terminator below `turn_start_offset` — false-finalizing a still-running turn.
+/// The finalizer avoids the same false-bind by pinning the finalize identity at
+/// the watcher call site (`pinned_finalize_user_msg_id`'s `< current_offset`
+/// test); the reconcile has no such call site, so it OFFSET-SCOPES at the probe
+/// level via [`current_turn_wrote_turn_end_terminator`] — additionally requiring
+/// the CURRENT turn's byte slice `[turn_start_offset, EOF)` to contain its OWN
+/// terminator.
+///
 /// Any other shape returns `false` (the row is left for the existing age-based
 /// safety nets).
 fn turn_jsonl_deterministically_terminal(
@@ -110,23 +133,109 @@ fn turn_jsonl_deterministically_terminal(
     {
         return false;
     }
-    let advanced = state
-        .turn_start_offset
-        .map(|start| state.last_offset > start)
-        .unwrap_or(false);
-    if !advanced {
+    // The CURRENT turn must have advanced its own output past the turn-start
+    // anchor; a missing anchor is treated as not-advanced (conservative). The
+    // anchor is then reused below to offset-scope the terminator search (1b).
+    let Some(turn_start_offset) = state.turn_start_offset else {
+        return false;
+    };
+    if state.last_offset <= turn_start_offset {
         return false;
     }
     // Mirror the gate's `matched_session_jsonl_turn_state` file guard: a missing
     // or empty JSONL cannot confirm completion. `jsonl_turn_end_terminator_idle`
     // already reports Busy on a read error, but we keep the explicit metadata
     // guard so an absent / zero-byte transcript is rejected before any scan.
-    let path = std::path::Path::new(output_path);
+    let path = Path::new(output_path);
     match std::fs::metadata(path) {
         Ok(metadata) if metadata.is_file() && metadata.len() > 0 => {}
         _ => return false,
     }
+    // The shared probe owns the Idle-semantics conservatism (no streaming after
+    // the terminator, torn-write skip, housekeeping walk-back); the offset-scoped
+    // probe binds that verdict to the CURRENT turn so a PRIOR turn's terminator
+    // below `turn_start_offset` cannot confirm completion (DEFECT 1b).
     jsonl_turn_end_terminator_idle(provider, path)
+        && current_turn_wrote_turn_end_terminator(provider, path, turn_start_offset)
+}
+
+/// DEFECT 1b (codex #3951 round-2): does the CURRENT turn's byte slice
+/// `[turn_start_offset, EOF)` contain its OWN authoritative turn-END terminator?
+///
+/// This binds the unbounded [`jsonl_turn_end_terminator_idle`] verdict to the
+/// current turn: only a terminator the current turn actually wrote (at or after
+/// its start anchor) can confirm completion, so a PRIOR turn's terminator still
+/// present below `turn_start_offset` can never finalize a turn that has only
+/// written non-terminator Idle-class envelopes so far.
+///
+/// It scans ONLY `[turn_start_offset, EOF)`. A leading partial line (when the
+/// anchor lands mid-envelope) and a torn trailing line both fail JSON parsing
+/// and are simply not counted — never a false terminator. The shared probe still
+/// owns "is the turn at rest?"; this answers only "did THIS turn write a
+/// terminator?", and the two together are the offset-bound finalize signal.
+fn current_turn_wrote_turn_end_terminator(
+    provider: &ProviderKind,
+    path: &Path,
+    turn_start_offset: u64,
+) -> bool {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(metadata) = file.metadata() else {
+        return false;
+    };
+    if turn_start_offset >= metadata.len() {
+        // The current turn has written nothing past its anchor → no own terminator.
+        return false;
+    }
+    if file.seek(SeekFrom::Start(turn_start_offset)).is_err() {
+        return false;
+    }
+    let mut slice = String::new();
+    if file.read_to_string(&mut slice).is_err() {
+        // Non-UTF-8 / read error cannot prove the current turn ended → conservative.
+        return false;
+    }
+    slice
+        .lines()
+        .any(|line| line_is_turn_end_terminator(provider, line))
+}
+
+/// Positive structural match for the authoritative per-provider TURN-END
+/// terminator envelope, mirroring
+/// `tui_turn_state::envelope_is_turn_end_terminator` for the STRUCTURAL
+/// terminators:
+///   * Codex: `type == "turn.completed"`.
+///   * Claude: `type == "result"` or `system{turn_duration | stop_hook_summary}`.
+///
+/// The niche `[Request interrupted by user]` marker is intentionally NOT matched
+/// here — an interrupt-only current turn is left to the interrupt/stop finalizer.
+/// Fail-safe: an unrecognized terminator only makes the reconcile WAIT (the panel
+/// is handled by another safety net), never false-finalize a running turn. A
+/// malformed / partial line fails to parse and is treated as "not a terminator".
+fn line_is_turn_end_terminator(provider: &ProviderKind, line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+        return false;
+    };
+    let Some(type_str) = json.get("type").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    match provider {
+        ProviderKind::Codex => type_str == "turn.completed",
+        ProviderKind::Claude => match type_str {
+            "result" => true,
+            "system" => matches!(
+                json.get("subtype").and_then(serde_json::Value::as_str),
+                Some("turn_duration" | "stop_hook_summary")
+            ),
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// DEFECT 2 (codex #3951): same-turn identity re-verification.

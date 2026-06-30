@@ -625,7 +625,7 @@
 | `services::discord::standby_relay` | `src/services/discord/standby_relay.rs` | 1642 | 912 | 730 |  |
 | `services::discord::startup_reclaim` | `src/services/discord/startup_reclaim.rs` | 541 | 324 | 217 |  |
 | `services::discord::status_panel_orphan_store` | `src/services/discord/status_panel_orphan_store.rs` | 499 | 383 | 116 |  |
-| `services::discord::status_panel_timedout_reconcile` | `src/services/discord/status_panel_timedout_reconcile.rs` | 296 | 296 | 0 |  |
+| `services::discord::status_panel_timedout_reconcile` | `src/services/discord/status_panel_timedout_reconcile.rs` | 405 | 405 | 0 |  |
 | `services::discord::steering` | `src/services/discord/steering.rs` | 443 | 328 | 115 |  |
 | `services::discord::streaming_finalizer` | `src/services/discord/streaming_finalizer.rs` | 251 | 187 | 64 |  |
 | `services::discord::subagent_notification_card` | `src/services/discord/subagent_notification_card.rs` | 363 | 264 | 99 |  |

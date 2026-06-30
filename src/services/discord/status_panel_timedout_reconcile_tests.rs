@@ -26,8 +26,12 @@ fn warm_tui_state(tmux_session_name: &str, output_path: &str) -> InflightTurnSta
         None,
         50,
     );
-    // The current turn advanced its own output past the turn-start anchor.
-    state.turn_start_offset = Some(10);
+    // The current turn advanced its own output past the turn-start anchor. The
+    // single-line fixtures these warm states point at ARE the current turn, so the
+    // anchor is at the file start (offset 0) and the terminator the slice scan
+    // looks for is within `[turn_start_offset, EOF)`. Multi-turn fixtures (a PRIOR
+    // terminator below the anchor) set their own offsets explicitly.
+    state.turn_start_offset = Some(0);
     state.last_offset = 50;
     state.rebind_origin = false;
     state
@@ -304,5 +308,66 @@ fn finalized_panel_is_skipped_by_same_pass_orphan_reclaim() {
     assert!(
         committed_terminal_panel_anchor_skip(&registry, &provider, channel, panel_msg, &state),
         "the #3607 anchor makes the same-pass orphan reclaim skip the finalized panel"
+    );
+}
+
+// DEFECT 1b (codex #3951 round-2): a PRIOR Codex turn's `turn.completed` sits
+// BELOW turn_start_offset; the CURRENT turn has only written a non-terminator
+// completed `agent_message` (item.completed) so far. The unbounded turn-END scan
+// would walk past the current turn's non-terminator and latch the prior
+// terminator — the offset-scoped guard must reject it (turn still running).
+#[test]
+fn prior_turn_terminator_below_offset_does_not_finalize_running_codex_turn() {
+    let prior = "{\"type\":\"turn.completed\",\"payload\":{}}\n";
+    let current = "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\"}}";
+    let file = write_jsonl(&format!("{prior}{current}"));
+    let mut state = warm_tui_state("AgentDesk-warm-1", &file.path().display().to_string());
+    state.turn_start_offset = Some(prior.len() as u64);
+    state.last_offset = (prior.len() + current.len()) as u64;
+    assert!(
+        !turn_jsonl_deterministically_terminal(&ProviderKind::Codex, &state),
+        "a prior turn.completed below the anchor must not finalize the running current turn"
+    );
+
+    // Control: once the CURRENT turn writes its OWN turn.completed (after the
+    // anchor) the reconcile may finalize.
+    let current_done = format!("{current}\n{{\"type\":\"turn.completed\",\"payload\":{{}}}}");
+    let file2 = write_jsonl(&format!("{prior}{current_done}"));
+    let mut done = warm_tui_state("AgentDesk-warm-1", &file2.path().display().to_string());
+    done.turn_start_offset = Some(prior.len() as u64);
+    done.last_offset = (prior.len() + current_done.len()) as u64;
+    assert!(
+        turn_jsonl_deterministically_terminal(&ProviderKind::Codex, &done),
+        "the current turn's own turn.completed (after the anchor) IS deterministically terminal"
+    );
+}
+
+// DEFECT 1b (codex #3951 round-2): a PRIOR Claude turn's `result` sits BELOW
+// turn_start_offset; the CURRENT turn has only written a `system{init}`
+// (session-start, NON-terminator) so far. The offset-scoped guard must reject
+// finalize even though the unbounded scan would walk past system:init to the
+// prior result.
+#[test]
+fn prior_turn_terminator_below_offset_does_not_finalize_running_claude_turn() {
+    let prior = "{\"type\":\"result\",\"result\":\"prior\",\"session_id\":\"s\"}\n";
+    let current = "{\"type\":\"system\",\"subtype\":\"init\"}";
+    let file = write_jsonl(&format!("{prior}{current}"));
+    let mut state = warm_tui_state("AgentDesk-warm-1", &file.path().display().to_string());
+    state.turn_start_offset = Some(prior.len() as u64);
+    state.last_offset = (prior.len() + current.len()) as u64;
+    assert!(
+        !turn_jsonl_deterministically_terminal(&ProviderKind::Claude, &state),
+        "a prior result below the anchor must not finalize the running current turn (system:init is not a terminator)"
+    );
+
+    // Control: the CURRENT turn's own result (after the anchor) IS terminal.
+    let current_done = "{\"type\":\"system\",\"subtype\":\"init\"}\n{\"type\":\"result\",\"result\":\"now\",\"session_id\":\"s\"}";
+    let file2 = write_jsonl(&format!("{prior}{current_done}"));
+    let mut done = warm_tui_state("AgentDesk-warm-1", &file2.path().display().to_string());
+    done.turn_start_offset = Some(prior.len() as u64);
+    done.last_offset = (prior.len() + current_done.len()) as u64;
+    assert!(
+        turn_jsonl_deterministically_terminal(&ProviderKind::Claude, &done),
+        "the current turn's own result (after the anchor) IS deterministically terminal"
     );
 }
