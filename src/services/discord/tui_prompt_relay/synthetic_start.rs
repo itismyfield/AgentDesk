@@ -89,15 +89,23 @@ pub(super) async fn claim_tui_direct_synthetic_turn(
             "#3358 synthetic inflight offset-authority handover: carried committed relay frontier forward"
         );
     }
-    let relay_owner = if tui_direct_watcher_can_own_output(
-        &shared.tmux_watchers,
-        tmux_session_name,
-        output_path.as_deref(),
-    ) {
-        ExternalInputRelayOwner::TmuxWatcher
-    } else {
-        ExternalInputRelayOwner::BridgeAdapter
-    };
+    // #3876 (codex rework): gate the SessionBoundRelay stamp on a LIVE per-session
+    // producer — NOT the global session-bound flag. The sink only commits when a
+    // production tmux watcher is feeding the supervisor-owned StreamRelay for this
+    // session; with no registered producer the bridge tail must stay the deliverer.
+    let live_producer_present =
+        crate::services::cluster::relay_producer_registry::global_relay_producer_registry()
+            .get_producer(tmux_session_name)
+            .is_some();
+    let relay_owner = tui_direct_synthetic_relay_owner(
+        tui_direct_watcher_can_own_output(
+            &shared.tmux_watchers,
+            tmux_session_name,
+            output_path.as_deref(),
+        ),
+        session_bound_discord_delivery_enabled(),
+        live_producer_present,
+    );
     let relay_owner_kind = match relay_owner {
         ExternalInputRelayOwner::TmuxWatcher => RelayOwnerKind::Watcher,
         ExternalInputRelayOwner::SessionBoundRelay => RelayOwnerKind::SessionBoundRelay,
@@ -774,6 +782,48 @@ pub(super) fn tui_direct_watcher_can_own_output(
             .watcher_output_path(tmux_session_name)
             .is_some_and(|watcher_path| Path::new(&watcher_path) == output_path),
         None => true,
+    }
+}
+
+/// #3876: resolve the relay owner stamped on a freshly-created TUI-direct /
+/// warm-followup synthetic inflight. PURE so the birth-site decision is
+/// unit-testable; the call site supplies the three signals.
+///
+/// * `watcher_can_own` (from [`tui_direct_watcher_can_own_output`]) → the live
+///   watcher relays this turn's output → `TmuxWatcher` (unchanged).
+/// * else, when session-bound Discord delivery is enabled AND a LIVE
+///   session-bound StreamRelay producer exists for this tmux session
+///   (`live_producer_present`) → `SessionBoundRelay`. The synthetic inflight IS
+///   being created here, so the session-bound relay sink can legitimately be its
+///   terminal owner (the `relay_ownership` observer restriction that keeps
+///   `BridgeAdapter` only applies BEFORE any inflight exists). The sink gate
+///   `session_bound_discord_relay_can_own_terminal_delivery` then ACCEPTS the
+///   row and commits the harvested body — fixing the prior `RelayOwnerKind::None`
+///   drop (`route="none"`, `terminal_commit_ack=false`) that left a
+///   placeholder-only delivery to be swept (data loss). Single-relayer invariant
+///   holds: the bridge tail stands down (`bridge_adapter_owns_external_turn`
+///   → false) and the watcher yields (`tmux::watcher_should_yield_to_inflight_state`
+///   yields for a `SessionBoundRelay` owner), so the sink is the sole committer.
+/// * else (no live producer, or session-bound delivery disabled) →
+///   `BridgeAdapter`. CRITICAL regression guard (codex review): the session-bound
+///   StreamRelay is a PASSIVE MPSC consumer fed ONLY by a live production
+///   tmux watcher (`tmux_watcher::forward_chunk_to_supervisor_relay`); with no
+///   live producer registered (`relay_producer_registry::get_producer` → `None`,
+///   e.g. a STALL-WATCHDOG force-clean detached the watcher) a `SessionBoundRelay`
+///   stamp would STARVE the sink AND stand the bridge tail down → answer loss.
+///   `BridgeAdapter` keeps the watcher-INDEPENDENT transcript-direct bridge tail
+///   (`claude_idle_tail.rs`, gated only on owner-kind) as the backstop deliverer.
+pub(super) fn tui_direct_synthetic_relay_owner(
+    watcher_can_own: bool,
+    session_bound_discord_delivery_enabled: bool,
+    live_producer_present: bool,
+) -> ExternalInputRelayOwner {
+    if watcher_can_own {
+        ExternalInputRelayOwner::TmuxWatcher
+    } else if session_bound_discord_delivery_enabled && live_producer_present {
+        ExternalInputRelayOwner::SessionBoundRelay
+    } else {
+        ExternalInputRelayOwner::BridgeAdapter
     }
 }
 
