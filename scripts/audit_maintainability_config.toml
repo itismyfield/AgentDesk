@@ -6,6 +6,13 @@
 [namespace_size_caps]
 "src/services/discord/commands/inspect/**" = 700
 "src/db/prompt_manifests/**" = 700
+# #3811: status_panel.rs was already at 696/700 (effectively full). The turn-anchor
+# feature needs the irreducible minimum on this surface — the `request_user_msg_id`
+# snapshot field, its preserve/clear reset hooks, and the `render_status_panel`
+# anchor-prepend param (the heavier setter/line-builder/store helpers live in the
+# new turn_anchor.rs). More specific than the `**` glob below, so it must precede it
+# for fnmatch first-match precedence.
+"src/services/discord/placeholder_live_events/status_panel.rs" = 703
 "src/services/discord/placeholder_live_events/**" = 700
 "src/services/discord/prompt_builder/**" = 700
 "src/services/discord/runtime_bootstrap/**" = 700

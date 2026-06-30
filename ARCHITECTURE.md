@@ -487,6 +487,7 @@ src/
 │   │   │   ├── subagent_summary.rs
 │   │   │   ├── task_panel.rs
 │   │   │   ├── tests.rs
+│   │   │   ├── turn_anchor.rs
 │   │   │   └── workflow_panel.rs
 │   │   ├── prompt_builder/
 │   │   │   ├── dispatch_contract.rs

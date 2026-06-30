@@ -20,6 +20,7 @@ mod status_panel;
 mod subagent_rollout;
 mod subagent_summary;
 mod task_panel;
+mod turn_anchor;
 mod workflow_panel;
 
 #[cfg(test)]
@@ -113,16 +114,22 @@ impl PlaceholderLiveEvents {
         // #3404 (codex r2): a turn reset starts a new compaction episode — re-arm
         // the count-change log gate even when footer residuals survive.
         self.compaction_log_counts.remove(&channel_id);
-        let has_residuals = self
+        let keep_entry = self
             .status_by_channel
             .get(&channel_id)
             .is_some_and(|entry| {
-                entry
+                let mut guard = entry
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .reset_turn_content_preserving_unfinished_footer_residuals()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let has_residuals =
+                    guard.reset_turn_content_preserving_unfinished_footer_residuals();
+                // #3811: the reset preserves an intake-set 요청 anchor; keep the
+                // entry alive when it carries one even with no footer residuals,
+                // otherwise the whole entry (and the anchor) would be dropped here
+                // before the turn renders its request link.
+                has_residuals || guard.request_user_msg_id.is_some()
             });
-        if !has_residuals {
+        if !keep_entry {
             self.status_by_channel.remove(&channel_id);
         }
     }
@@ -529,6 +536,7 @@ impl PlaceholderLiveEvents {
             TerminalUiObligationPanelStatus::Deadline => DerivedStatus::TerminalDeliveryUnconfirmed,
         };
         let completed = matches!(status, TerminalUiObligationPanelStatus::Completed);
+        let request_anchor_line = self.request_anchor_line(channel_id, &snapshot);
         render_status_panel(
             snapshot,
             self.render_block(channel_id),
@@ -536,6 +544,7 @@ impl PlaceholderLiveEvents {
             started_at_unix,
             chrono::Utc::now().timestamp(),
             !completed,
+            request_anchor_line,
         )
     }
 
@@ -598,6 +607,7 @@ impl PlaceholderLiveEvents {
                 .is_some_and(|stamp| *stamp.value() > completed_at),
             None => true,
         };
+        let request_anchor_line = self.request_anchor_line(channel_id, &snapshot);
         render_status_panel(
             snapshot,
             self.render_block(channel_id),
@@ -605,6 +615,7 @@ impl PlaceholderLiveEvents {
             started_at_unix,
             heartbeat_at_unix,
             live_content_fresh,
+            request_anchor_line,
         )
     }
 
@@ -624,7 +635,8 @@ impl PlaceholderLiveEvents {
                     .clone()
             })
             .unwrap_or_default();
-        render_completion_footer(snapshot, provider, indicator)
+        let request_anchor_line = self.request_anchor_line(channel_id, &snapshot);
+        render_completion_footer(snapshot, provider, indicator, request_anchor_line)
     }
 }
 

@@ -95,6 +95,9 @@ pub(super) struct StatusPanelState {
     // #3477 item 3: instant the turn entered `Completed` (None until then); vs the
     // store's `last_recent_event_at` it gates the late-batch 🖥️ Recent freshness.
     pub(super) completed_at: Option<std::time::Instant>,
+    // #3811: intake-set original-request user_msg_id; drives the `요청:` deeplink
+    // (`None` for headless/synthetic/voice/id-0 — no real Discord message).
+    pub(super) request_user_msg_id: Option<u64>,
 }
 
 impl StatusPanelState {
@@ -108,6 +111,7 @@ impl StatusPanelState {
         self.subagents.clear();
         self.workflows.clear();
         self.completed_at = None; // #3477 item 3: drop the stale freshness gate.
+        self.request_user_msg_id = None; // #3811: new session = new request context.
     }
 
     pub(super) fn reset_turn_content_preserving_unfinished_footer_residuals(&mut self) -> bool {
@@ -133,6 +137,7 @@ impl StatusPanelState {
             subagents,
             // #3391: carry the counter so a residual ordinal is never reissued.
             next_slot_ordinal: self.next_slot_ordinal,
+            request_user_msg_id: self.request_user_msg_id, // #3811: survive turn reset
             ..StatusPanelState::default()
         };
         has_residuals
@@ -446,6 +451,7 @@ pub(super) fn render_status_panel(
     // #3477 item 3: live batch arrived AFTER `completed_at` → a Completed turn
     // keeps 🖥️ Recent (late batch not blanked; stale idle block still dropped).
     live_content_fresh: bool,
+    request_anchor_line: Option<String>, // #3811: precomputed `요청:` line, or `None`
 ) -> String {
     let header_status = if matches!(provider, ProviderKind::Codex)
         && matches!(snapshot.status, DerivedStatus::SubagentRunning { .. })
@@ -459,6 +465,7 @@ pub(super) fn render_status_panel(
         render_derived_status(&header_status),
         provider.as_str()
     )];
+    super::turn_anchor::prepend_request_anchor(&mut sections, request_anchor_line); // #3811
 
     if let Some(session) = snapshot.session.as_ref() {
         sections.push(render_session_panel_line(session, provider));

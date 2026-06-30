@@ -1451,6 +1451,22 @@ pub(in crate::services::discord) async fn handle_text_message(
         return Ok(());
     }
 
+    // #3811: record the original-request anchor (the real Discord user_msg_id)
+    // ONLY once THIS message won the mailbox claim (`started == true`) and the
+    // stale-dispatch guard passed. A message that merely QUEUES behind an active
+    // turn (`started == false`, enqueued + returned in the `if !started` block
+    // below) must NOT touch the active turn's anchor — it records its own anchor
+    // when later dequeued/promoted and re-enters here with `started == true`.
+    // Synthetic voice ids back no real Discord message → `None` (no fake link);
+    // headless turns never reach this interactive intake path.
+    if started {
+        shared.ui.placeholder_live_events.set_turn_request_anchor(
+            channel_id,
+            (!super::super::super::voice_barge_in::is_synthetic_voice_message_id(user_msg_id))
+                .then(|| user_msg_id.get()),
+        );
+    }
+
     // #3148: relocated idle-recap clear (Window 2 fix). The clear (and the
     // per-channel turn-generation bump) used to run in `intake_gate` at
     // message-accept time, BEFORE this mailbox claim — so it was not truly
