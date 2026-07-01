@@ -22,6 +22,7 @@ pub(super) async fn do_finalize(
     provider: ProviderKind,
     event: &TerminalEvent,
     ctx: FinalizeContext,
+    submit_snapshot: Option<&super::cleanup::SyntheticClaimSnapshot>,
     shared: &Arc<SharedData>,
 ) -> FinalizeOutcome {
     let channel_id = key.channel_id;
@@ -52,7 +53,9 @@ pub(super) async fn do_finalize(
     // submitters cleared the row pre-submit, so for them this row re-load proves
     // nothing — their guarantee runs at submit time from the pre-clear snapshot
     // (`submit_terminal_with_claim_snapshot`); rationale/gates: cleanup.rs.
-    super::cleanup::ensure_synthetic_claim_marker_before_clear(key, &provider, None);
+    super::cleanup::ensure_synthetic_claim_marker_before_clear(key, &provider, submit_snapshot);
+    let skip_completion_reaction =
+        super::cleanup::relay_ownership_only_for_finalize(key, &provider, submit_snapshot);
 
     // (A) inflight clear. Only the gate-timeout backstop and the immediate
     //     no-owner restored-watcher path set `clear_inflight` (live bridge /
@@ -135,14 +138,27 @@ pub(super) async fn do_finalize(
             .await
             .active_user_message_id
             .map(|id| id.get());
-        tracing::warn!(
-            provider = %provider.as_str(),
-            channel_id = channel_id.get(),
-            expected_user_msg_id = key.user_msg_id,
-            active_user_message_id = active_user_message_id.unwrap_or(0),
-            generation = key.generation,
-            "TurnFinalizer identity-guarded mailbox release skipped; active mailbox owner did not match finalizer turn identity"
-        );
+        if ctx.is_backstop_reconcile_path() {
+            tracing::debug!(
+                provider = %provider.as_str(),
+                channel_id = channel_id.get(),
+                expected_user_msg_id = key.user_msg_id,
+                active_user_message_id = active_user_message_id.unwrap_or(0),
+                generation = key.generation,
+                expected_idempotent = true,
+                "TurnFinalizer identity-guarded mailbox release skipped; active mailbox owner did not match finalizer turn identity"
+            );
+        } else {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel_id = channel_id.get(),
+                expected_user_msg_id = key.user_msg_id,
+                active_user_message_id = active_user_message_id.unwrap_or(0),
+                generation = key.generation,
+                expected_idempotent = false,
+                "TurnFinalizer identity-guarded mailbox release skipped; active mailbox owner did not match finalizer turn identity"
+            );
+        }
     }
 
     let has_pending_after_voice = if guarded_finish_missed {
@@ -195,7 +211,14 @@ pub(super) async fn do_finalize(
         has_pending_after_voice
     };
 
-    super::cleanup::finalized_reaction_lifecycle(key, event, ctx, shared, "finalized");
+    super::cleanup::finalized_reaction_lifecycle(
+        key,
+        event,
+        ctx,
+        shared,
+        "finalized",
+        skip_completion_reaction,
+    );
 
     // (F) relay-miss observability — emitted from inside the finalizer so the
     //     signal fires exactly once per finalize regardless of submitter.
@@ -315,6 +338,7 @@ mod tests {
             ProviderKind::Claude,
             &TerminalEvent::Complete,
             FinalizeContext::bridge(),
+            None,
             &shared,
         )
         .await;

@@ -666,15 +666,15 @@ async fn start_monitor_auto_turn_when_available(
 
         let token = Arc::new(crate::services::provider::CancelToken::new());
         // #3167 — the monitor auto-turn is a low-priority background relay; mark
-        // it `Background` so a queued external USER intervention is not starved
-        // behind a continuously-cycling monitor turn.
+        // it with the distinct monitor kind so queued external USER intervention
+        // is not starved and synthetic stale-reclaim never preempts it.
         let started = super::mailbox_try_start_turn_kinded(
             shared,
             channel_id,
             token,
             UserId::new(1),
             synthetic_message_id,
-            crate::services::turn_orchestrator::ActiveTurnKind::Background,
+            crate::services::turn_orchestrator::ActiveTurnKind::MonitorAutoTurn,
         )
         .await;
         if started {

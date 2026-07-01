@@ -8,7 +8,7 @@
 > [`docs/generated/giant-file-registry.md`](../generated/giant-file-registry.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-06-29 (against #3833 tui_prompt_relay external-input relay decomposition — root dropped below the production giant threshold; promoted giant registry entry removed).
+> Last refreshed: 2026-07-02 (against #4018 round-2 compact-mailbox reclaim fix — positive-staleness gate, monitor-auto-turn exclusion, and finalizer-routed stale release).
 >
 > PR #3456 dcserver-robustness: freeze counts re-synced after the reconcile
 > row-allocation churn reduction (`src/reconcile.rs` now 1816 prod lines) and the
@@ -153,6 +153,9 @@
     sweeper can finalize a panel stuck at "진행 중" after a TimedOut completion
     gate (reconcile body lives in the new non-hot file); +14 from current inventory
     refresh after the relay split stack landed; after #2558 dead-code sweep;
+    +0 from #4018 round-2 switching monitor auto-turn mailbox claims to the
+    distinct `ActiveTurnKind::MonitorAutoTurn` marker so stale synthetic reclaim
+    excludes live monitor relays while preserving background queue-yield behavior;
     +6 from #3818 sanitizing restored/orphan subagent-notification placeholders;
     +1 from #3384 restored-seed undelivered-body discard guard;
     +38 for suppressed-label noise, user report 2026-06-12: provider-aware
@@ -598,8 +601,8 @@
     tail/runtime/bridge glue moved into `tui_prompt_relay/` child modules while
     the #4018 compact-resume stale-mailbox follow-up stayed in those child
     modules: `tui_prompt_relay/claude_idle_bridge.rs` (662 prod LoC),
-    `tui_prompt_relay/synthetic_start.rs` (983 prod LoC), and
-    `tui_prompt_relay/synthetic_start/stale_reclaim.rs` (133 prod LoC);
+    `tui_prompt_relay/synthetic_start.rs` (985 prod LoC), and
+    `tui_prompt_relay/synthetic_start/stale_reclaim.rs` (225 prod LoC);
     worker-local relay lifecycle only, no PG lease/schema. The parent
     spawn/provider wiring surface stays preserved. Historical context:
     #3296
@@ -1395,7 +1398,7 @@
     giant-file-registry [[entry]] was removed. #3038 turn_bridge S1 moved
     `advance_tmux_relay_confirmed_end` here; split the remaining lease wiring
     vs delivery helpers before adding behavior).
-  - `src/services/discord/turn_finalizer.rs` (1337 prod lines; single-authority
+  - `src/services/discord/turn_finalizer.rs` (1044 prod lines; single-authority
     turn-finalize state machine — ledger/actor-loop/reconciler. Crossed the
     giant-file threshold when #3041 P1-0 added the dormant `DeliveryLeaseCell`
     finalizer messages/handlers on top of #3143's `FinalizeContext::monitor()` +
@@ -1407,9 +1410,14 @@
     (dormant `DeliveryLeaseCell` handlers), and
     `turn_finalizer/watcher_backstop.rs` (watcher far-backstop tunables +
     terminal-or-defer verdict pair). Bugfix only outside a
-    finalizer-decomposition plan). #4018's identity-release diagnostic WARN is
-    confined to `turn_finalizer/finalize.rs` (223 prod LoC), preserving the
-    actor authority surface and adding no PG lease/schema.
+    finalizer-decomposition plan). #4018 round-2 carries synthetic claim
+    snapshots through terminal submissions so relay-ownership-only passive notes
+    skip the backstop reaction fallback, routes stale synthetic release through
+    the finalizer, and demotes expected backstop/reconcile guarded misses while
+    preserving WARN for ordinary submitter misses; `turn_finalizer/finalize.rs`
+    is now 246 prod LoC, `turn_finalizer/finalize_context.rs` 113 prod LoC,
+    `turn_finalizer/reconcile.rs` 221 prod LoC, and
+    `turn_finalizer/cleanup.rs` 376 prod LoC. No PG lease/schema change.
   - `src/services/discord/formatting.rs` (2860 lines; #3805 P1 adds the watcher
     completion-footer re-anchor machinery here — the `ReplaceLastChunkAnchor`
     struct, the `&mut Option<..>` last-chunk out-param on
@@ -1867,10 +1875,13 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   `shared_state::RestartLifecycle`, leaving a single `restart: RestartLifecycle`
   group field on `SharedData` with the type re-exported for surface freeze),
   `src/services/discord_config_audit.rs` (1288; +15 from #3692 leader-ownership gate on the config-audit agent sync path).
-- `src/services/turn_orchestrator.rs` (3089; +3 from #3293 declaring the
+- `src/services/turn_orchestrator.rs` (3194; +3 from #3293 declaring the
   `registry_purge` child module — the non-creating `peek` lookup and the
   operator-gated `remove_idle_entry` purge live in
-  `turn_orchestrator/registry_purge.rs`, outside the frozen module root).
+  `turn_orchestrator/registry_purge.rs`, outside the frozen module root; +95
+  from #3864 moving SIGTERM queue-restore merge inside the mailbox actor; +10
+  from #4018 round-2 adding the distinct `MonitorAutoTurn` active-turn marker
+  while keeping monitor turns background for queue-yield/cancel semantics).
 
 Decomposed below the giant-file threshold (no longer frozen; bugfix-scoped but
 normal test growth is allowed): `src/services/analytics.rs`,

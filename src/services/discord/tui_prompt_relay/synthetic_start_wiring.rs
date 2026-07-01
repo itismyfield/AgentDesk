@@ -84,6 +84,11 @@ pub(super) async fn wire_tui_direct_synthetic_turn_start(
                 "deferred TUI-direct synthetic turn-start off the observer loop; prior turn not yet finalized (durable record persisted, detached per-channel worker spawned)"
             );
         } else {
+            let lock = super::super::tui_direct_pending_start::channel_lock(
+                provider.as_str(),
+                channel_id.get(),
+            );
+            let _inline_claim_guard = lock.lock().await;
             let claim = super::synthetic_start::claim_tui_direct_synthetic_turn(
                 shared,
                 &provider,

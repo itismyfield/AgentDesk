@@ -325,6 +325,7 @@ enum FinalizeMsg {
         provider: ProviderKind,
         event: TerminalEvent,
         ctx: FinalizeContext,
+        claim_snapshot: Option<SyntheticClaimSnapshot>,
         shared: Arc<SharedData>,
         ack: oneshot::Sender<FinalizeOutcome>,
     },
@@ -471,6 +472,7 @@ impl TurnFinalizer {
                 provider: provider.clone(),
                 event: event.clone(),
                 ctx,
+                claim_snapshot,
                 shared: shared.clone(),
                 ack,
             })
@@ -720,6 +722,7 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                         provider,
                         event,
                         ctx,
+                        claim_snapshot,
                         shared,
                         ack,
                     } => {
@@ -741,6 +744,7 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                             provider,
                             event,
                             ctx,
+                            claim_snapshot,
                             &shared,
                         ))
                         .catch_unwind()
@@ -916,6 +920,7 @@ async fn handle_terminal(
     provider: ProviderKind,
     event: TerminalEvent,
     ctx: FinalizeContext,
+    claim_snapshot: Option<SyntheticClaimSnapshot>,
     shared: &Arc<SharedData>,
 ) -> FinalizeOutcome {
     // #3866: test-only injection point — lets a test drive a real finalize
@@ -1054,6 +1059,7 @@ async fn handle_terminal(
         provider,
         &event,
         effective_ctx,
+        claim_snapshot.as_ref(),
         shared,
     ))
     .catch_unwind()

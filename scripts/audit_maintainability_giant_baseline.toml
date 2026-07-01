@@ -482,7 +482,11 @@
 # Also gates the now-test-only `ReplaceQueue` blind-overwrite path behind
 # `#[cfg(test)]` (+ justification comments). Test functions are excluded from the
 # count. +95 prod LoC. 3089 -> 3184.
-"src/services/turn_orchestrator.rs" = 3184
+# #4018 round-2: 3184 -> 3194 (+10), reviewable admission — mailbox active-turn
+# kind gains the distinct `MonitorAutoTurn` marker while preserving background
+# queue-yield semantics, so synthetic stale-owner reclaim can exclude live
+# monitor relays without conflating them with the self-paced TUI loop.
+"src/services/turn_orchestrator.rs" = 3194
 # #3034 batch-8: +1 for a test-only `#[allow(dead_code)]` on
 # `thread_guard_inflight_is_stale` (#1446 Layer-2 classifier, pinned by tests).
 # #3038 S1: +2 (2958 -> 2960) for the two mechanical `.queued_placeholders` ->
@@ -659,14 +663,14 @@
 # rewriting bare `super::` discord-module references to absolute
 # `crate::services::discord::` paths because the module depth changed. Each child
 # is well under the 1000-prod-LoC giant threshold (tracked below at landed LoC).
-"src/services/discord/turn_finalizer.rs" = 1038
+"src/services/discord/turn_finalizer.rs" = 1044 # 2026-07-02 #4018 round-2: +6 prod LoC, reviewable admission — terminal submissions carry the existing synthetic claim snapshot through the actor so relay-ownership-only passive notes can suppress the backstop reaction fallback without changing the finalizer side-effect authority.
 # #3894: the three new turn_finalizer/ child modules landed below the 1000-prod-LoC
 # giant threshold; tracked here at their landed production LoC so the decomposition
 # cannot silently re-inflate any child toward giant-hood (the ratchet only fails
 # once a file actually crosses the giant threshold, so these freeze them sub-giant).
-"src/services/discord/turn_finalizer/finalize.rs" = 223 # 2026-07-02 #4018: 208 -> 223 (+15 prod LoC), reviewable admission — finalizer emits a WARN when the mailbox identity guard rejects release, exposing stale-owner mismatches while preserving exact-match release authority; regression coverage lives in the module test.
-"src/services/discord/turn_finalizer/finalize_context.rs" = 106
-"src/services/discord/turn_finalizer/reconcile.rs" = 220
+"src/services/discord/turn_finalizer/finalize.rs" = 246 # 2026-07-02 #4018 round-2: 223 -> 246 (+23 prod LoC), reviewable admission — do_finalize consumes the submit snapshot for relay-ownership-only reaction suppression and demotes expected backstop/reconcile guarded misses to DEBUG while keeping ordinary misses WARN.
+"src/services/discord/turn_finalizer/finalize_context.rs" = 113 # 2026-07-02 #4018 round-2: +7 prod LoC for the backstop/reconcile context classifier used by guarded-miss log demotion.
+"src/services/discord/turn_finalizer/reconcile.rs" = 221 # 2026-07-02 #4018 round-2: +1 prod LoC to pass an absent submit snapshot on reconcile-driven backstop finalization.
 # #3557 (A) codex r2: the headless watchdog was missing the per-turn hard
 # ceiling cap that the foreground intake path already had — and it also
 # `mark_async_managed`s the token (sync watchdog stops enforcing), so this async

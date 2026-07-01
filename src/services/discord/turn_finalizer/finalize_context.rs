@@ -103,4 +103,11 @@ impl FinalizeContext {
             kickoff_queue: false,
         }
     }
+
+    pub(in crate::services::discord) fn is_backstop_reconcile_path(self) -> bool {
+        self.clear_inflight
+            && self.kickoff_queue
+            && !self.allow_completion_cleanup
+            && !self.drain_voice
+    }
 }

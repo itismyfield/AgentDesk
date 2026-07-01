@@ -34,12 +34,14 @@ pub(super) fn finalized_reaction_lifecycle(
     ctx: FinalizeContext,
     shared: &Arc<SharedData>,
     source: &'static str,
+    skip_completion_reaction: bool,
 ) {
     if !ctx.clear_inflight
         || !ctx.kickoff_queue
         || ctx.allow_completion_cleanup
         || ctx.drain_voice
         || key.user_msg_id == 0
+        || skip_completion_reaction
     {
         return;
     }
@@ -99,6 +101,7 @@ pub(in crate::services::discord) struct SyntheticClaimSnapshot {
     pub(in crate::services::discord) injected_prompt_message_id: Option<u64>,
     pub(in crate::services::discord) tmux_session_name: Option<String>,
     pub(in crate::services::discord) started_at: String,
+    pub(in crate::services::discord) relay_ownership_only: bool,
 }
 
 impl SyntheticClaimSnapshot {
@@ -113,8 +116,30 @@ impl SyntheticClaimSnapshot {
             injected_prompt_message_id: row.injected_prompt_message_id,
             tmux_session_name: row.tmux_session_name.clone(),
             started_at: row.started_at.clone(),
+            relay_ownership_only: row.relay_ownership_only,
         }
     }
+}
+
+pub(super) fn relay_ownership_only_for_finalize(
+    key: TurnKey,
+    provider: &ProviderKind,
+    submit_snapshot: Option<&SyntheticClaimSnapshot>,
+) -> bool {
+    if key.user_msg_id == 0 {
+        return false;
+    }
+    if let Some(snapshot) = submit_snapshot
+        && snapshot.user_msg_id == key.user_msg_id
+    {
+        return snapshot.relay_ownership_only;
+    }
+    let Some(row) =
+        crate::services::discord::inflight::load_inflight_state(provider, key.channel_id.get())
+    else {
+        return false;
+    };
+    row.user_msg_id == key.user_msg_id && row.relay_ownership_only
 }
 
 /// #3350 ②: `do_finalize` entry hook — whatever submitter (watcher / bridge /
@@ -356,7 +381,9 @@ mod tests {
         TurnFinalizer, TurnKey,
     };
     use super::*;
-    use crate::services::discord::inflight::RelayOwnerKind;
+    use crate::services::discord::inflight::{
+        InflightTurnState, RelayOwnerKind, TurnSource, clear_inflight_state, save_inflight_state,
+    };
     use crate::services::provider::{CancelToken, ProviderKind};
     use serenity::model::id::{ChannelId, MessageId, UserId};
 
@@ -759,6 +786,65 @@ mod tests {
                     vec![(ch.get(), tid, '⏳', false), (ch.get(), tid, '✅', true)]
                 );
                 assert!(records.iter().all(|record| record.source == "finalized"));
+            });
+        });
+    }
+
+    #[test]
+    fn relay_ownership_only_snapshot_skips_backstop_reaction_cleanup() {
+        with_isolated_runtime_root(|| {
+            test_rt().block_on(async {
+                let shared =
+                    super::super::super::make_shared_data_for_tests_with_storage(None, None);
+                let ch = ChannelId::new(3_334_150);
+                let tid = 3_334_151_u64;
+                shared
+                    .restart
+                    .global_active
+                    .store(1, std::sync::atomic::Ordering::Relaxed);
+                let _token = seed_active_turn(&shared, ch, tid).await;
+                let fin = TurnFinalizer::spawn();
+                let key = TurnKey::new(ch, tid, 0);
+                fin.register_start(key, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
+
+                let mut row = InflightTurnState::new(
+                    ProviderKind::Claude,
+                    ch.get(),
+                    None,
+                    0,
+                    tid,
+                    0,
+                    "This session is being continued from a previous conversation".to_string(),
+                    None,
+                    Some("tmux-3334-relay-only".to_string()),
+                    None,
+                    None,
+                    0,
+                );
+                row.turn_source = TurnSource::ExternalInput;
+                row.set_relay_owner_kind(RelayOwnerKind::Watcher);
+                row.injected_prompt_message_id = Some(tid);
+                row.relay_ownership_only = true;
+                save_inflight_state(&row).expect("persist relay-only synthetic row");
+                let snapshot = SyntheticClaimSnapshot::from_row(&row);
+                clear_inflight_state(&ProviderKind::Claude, ch.get());
+
+                begin_reaction_cleanup_recording();
+                let outcome = fin
+                    .submit_terminal_with_claim_snapshot(
+                        key,
+                        ProviderKind::Claude,
+                        TerminalEvent::Complete,
+                        FinalizeContext::gate_backstop(),
+                        Some(snapshot),
+                        shared.clone(),
+                    )
+                    .await;
+                assert!(matches!(outcome, FinalizeOutcome::Finalized { .. }));
+                assert!(
+                    take_reaction_cleanup_records().is_empty(),
+                    "relay_ownership_only compact-note anchors must not receive the backstop ⏳ removal / ✅ add reaction lifecycle"
+                );
             });
         });
     }

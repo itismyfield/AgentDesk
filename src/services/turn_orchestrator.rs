@@ -790,9 +790,10 @@ pub(crate) struct ChannelMailboxSnapshot {
     pub(crate) active_request_owner: Option<UserId>,
     pub(crate) active_user_message_id: Option<MessageId>,
     /// #3167 — priority class of the active-turn slot. `UserOrAgent` (default)
-    /// when idle or carrying a real user/agent turn; `Background` while a
-    /// monitor relay / self-paced TUI loop owns the slot. Lets the kickoff
-    /// snapshot gate treat a background turn as non-blocking.
+    /// when idle or carrying a real user/agent turn; background variants cover
+    /// monitor relay / self-paced TUI loop ownership. Lets the kickoff snapshot
+    /// gate treat a background turn as non-blocking while preserving a distinct
+    /// monitor marker for reclaim policy.
     pub(crate) active_turn_kind: ActiveTurnKind,
     pub(crate) intervention_queue: Vec<Intervention>,
     pub(crate) recovery_started_at: Option<Instant>,
@@ -1130,9 +1131,9 @@ impl ChannelMailboxHandle {
     }
 
     /// #3167 — kinded variant of [`Self::try_start_turn`]. The monitor
-    /// auto-turn and the self-paced TUI loop pass `ActiveTurnKind::Background`
-    /// so a queued external USER intervention is not perpetually deferred
-    /// behind the continuously-cycling background turn.
+    /// auto-turn and the self-paced TUI loop pass background kinds so a queued
+    /// external USER intervention is not perpetually deferred behind the
+    /// continuously-cycling background turn.
     pub(crate) async fn try_start_turn_kinded(
         &self,
         cancel_token: Arc<CancelToken>,
@@ -2067,18 +2068,27 @@ enum ChannelMailboxMsg {
 }
 
 /// #3167 — priority class of the mailbox active-turn slot. Lets the external-input
-/// dequeue distinguish a low-priority background relay (monitor terminal-output relay,
-/// self-paced TUI loop) from a real user/agent turn, so a queued external USER
-/// intervention is not perpetually deferred behind a continuously-cycling background turn.
+/// dequeue distinguish a low-priority background relay (monitor terminal-output
+/// relay, self-paced TUI loop) from a real user/agent turn, so a queued external
+/// USER intervention is not perpetually deferred behind a continuously-cycling
+/// background turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum ActiveTurnKind {
     #[default]
     UserOrAgent,
     Background,
+    MonitorAutoTurn,
 }
 impl ActiveTurnKind {
     pub(crate) fn is_background(self) -> bool {
-        matches!(self, ActiveTurnKind::Background)
+        matches!(
+            self,
+            ActiveTurnKind::Background | ActiveTurnKind::MonitorAutoTurn
+        )
+    }
+
+    pub(crate) fn is_monitor_auto_turn(self) -> bool {
+        matches!(self, ActiveTurnKind::MonitorAutoTurn)
     }
 }
 
@@ -2097,9 +2107,9 @@ struct ChannelMailboxState {
     active_request_owner: Option<UserId>,
     active_user_message_id: Option<MessageId>,
     /// #3167 — priority class of the active-turn slot. `UserOrAgent` (default)
-    /// for a real user/agent turn; `Background` for a monitor terminal-output
-    /// relay or self-paced TUI loop turn. Reset to default wherever the
-    /// active-turn anchor is cleared.
+    /// for a real user/agent turn; background variants cover monitor
+    /// terminal-output relay or self-paced TUI loop turns. Reset to default
+    /// wherever the active-turn anchor is cleared.
     active_turn_kind: ActiveTurnKind,
     intervention_queue: Vec<Intervention>,
     /// #3167 BLOCKER-2 — reservation that closes the dequeue→claim starvation
@@ -2678,8 +2688,8 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     // dropped). UserOrAgent starts are UNCHANGED.
                     let queue_non_empty = !state.intervention_queue.is_empty();
                     let reservation_held = state.pending_user_dispatch.is_some();
-                    let background_yields = turn_kind == ActiveTurnKind::Background
-                        && (queue_non_empty || reservation_held);
+                    let background_yields =
+                        turn_kind.is_background() && (queue_non_empty || reservation_held);
                     // SAFETY VALVE: only the dequeue→claim window (queue empty,
                     // reservation held) can deadlock if the dequeued user turn is
                     // lost. Count those refusals; a queue-backed refusal is a real

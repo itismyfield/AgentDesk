@@ -178,6 +178,8 @@ pub(super) async fn claim_tui_direct_synthetic_turn(
                     tmux_session_name,
                     active_user_message_id,
                     snapshot.active_request_owner,
+                    snapshot.active_turn_kind,
+                    snapshot.turn_started_at,
                     anchor_message_id,
                 )
                 .await
@@ -378,8 +380,9 @@ pub(super) async fn claim_tui_direct_synthetic_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::discord::inflight::{self, InflightTurnState, TurnSource};
+    use crate::services::discord::inflight::{self, InflightTurnState, RelayOwnerKind, TurnSource};
     use crate::services::discord::mailbox_try_start_turn_kinded;
+    use crate::services::turn_orchestrator::ActiveTurnKind;
     use ::serenity::model::id::{MessageId, UserId};
 
     struct EnvGuard {
@@ -405,6 +408,19 @@ mod tests {
 
     fn synthetic_owner() -> UserId {
         UserId::new(TUI_DIRECT_SYNTHETIC_OWNER_USER_ID)
+    }
+
+    fn old_owner_started_at() -> Option<chrono::DateTime<chrono::Utc>> {
+        Some(
+            chrono::Utc::now()
+                - chrono::Duration::seconds(
+                    stale_reclaim::STALE_SYNTHETIC_MAILBOX_OWNER_MIN_AGE_SECS + 1,
+                ),
+        )
+    }
+
+    fn young_owner_started_at() -> Option<chrono::DateTime<chrono::Utc>> {
+        Some(chrono::Utc::now())
     }
 
     fn synthetic_state(
@@ -447,7 +463,7 @@ mod tests {
                 token.clone(),
                 synthetic_owner(),
                 user_msg_id,
-                crate::services::turn_orchestrator::ActiveTurnKind::Background,
+                ActiveTurnKind::Background,
             )
             .await
         );
@@ -456,54 +472,247 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn stale_synthetic_owner_absent_or_finalized_reclaims_for_new_turn() {
+    async fn young_rowless_synthetic_owner_is_not_reclaimed() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .expect("shared env lock poisoned");
         let root = tempfile::tempdir().expect("runtime root");
         let _env = EnvGuard::set_root(root.path());
         let provider = ProviderKind::Claude;
-        let tmux = "AgentDesk-claude-4018-reclaim";
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_018_200);
+        let tmux = "AgentDesk-claude-4018-young";
+        let stale_id = MessageId::new(4_018_300);
+        let next_id = MessageId::new(4_018_400);
+        let stale_token = seed_synthetic_mailbox_owner(&shared, channel_id, stale_id).await;
 
-        for (index, finalized_row) in [false, true].into_iter().enumerate() {
-            let shared = crate::services::discord::make_shared_data_for_tests();
-            let channel_id = ChannelId::new(4_018_200 + index as u64);
-            let stale_id = MessageId::new(4_018_300 + index as u64);
-            let next_id = MessageId::new(4_018_400 + index as u64);
-            let stale_token = seed_synthetic_mailbox_owner(&shared, channel_id, stale_id).await;
-            if finalized_row {
-                let state = synthetic_state(channel_id, stale_id, tmux, true);
-                inflight::save_inflight_state(&state).expect("save finalized synthetic inflight");
-            }
+        let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+            &shared,
+            &provider,
+            channel_id,
+            tmux,
+            stale_id,
+            Some(synthetic_owner()),
+            ActiveTurnKind::Background,
+            young_owner_started_at(),
+            next_id,
+        )
+        .await;
+        assert!(!reclaimed, "young row-less owner must not be reclaimed");
+        assert!(!stale_token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
 
-            let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+        let next_claimed = mailbox_try_start_turn_kinded(
+            &shared,
+            channel_id,
+            Arc::new(CancelToken::new()),
+            synthetic_owner(),
+            next_id,
+            ActiveTurnKind::Background,
+        )
+        .await;
+        assert!(!next_claimed, "young owner must keep the mailbox slot");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn aged_rowless_synthetic_owner_reclaims_and_finalizes_ledger() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = EnvGuard::set_root(root.path());
+        let provider = ProviderKind::Claude;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_018_201);
+        let tmux = "AgentDesk-claude-4018-aged";
+        let stale_id = MessageId::new(4_018_301);
+        let next_id = MessageId::new(4_018_401);
+        let stale_token = seed_synthetic_mailbox_owner(&shared, channel_id, stale_id).await;
+        let key = crate::services::discord::turn_finalizer::TurnKey::new(
+            channel_id,
+            stale_id.get(),
+            shared.restart.current_generation,
+        );
+        shared.turn_finalizer.register_start(
+            key,
+            provider.clone(),
+            RelayOwnerKind::Watcher,
+            &shared,
+        );
+        assert!(
+            shared
+                .turn_finalizer
+                .has_live_watcher_pending(channel_id, shared.restart.current_generation)
+                .await,
+            "deferred synthetic claim register_start should be Pending before reclaim"
+        );
+
+        let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+            &shared,
+            &provider,
+            channel_id,
+            tmux,
+            stale_id,
+            Some(synthetic_owner()),
+            ActiveTurnKind::Background,
+            old_owner_started_at(),
+            next_id,
+        )
+        .await;
+        assert!(reclaimed, "aged row-less synthetic owner should reclaim");
+        assert!(stale_token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+        assert!(
+            !shared
+                .turn_finalizer
+                .has_live_watcher_pending(channel_id, shared.restart.current_generation)
+                .await,
+            "finalizer-routed reclaim must leave no live Pending ledger residue"
+        );
+
+        let next_claimed = mailbox_try_start_turn_kinded(
+            &shared,
+            channel_id,
+            Arc::new(CancelToken::new()),
+            synthetic_owner(),
+            next_id,
+            ActiveTurnKind::Background,
+        )
+        .await;
+        assert!(next_claimed, "new synthetic turn must claim after reclaim");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn monitor_auto_turn_slot_is_not_reclaimed_even_when_aged() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = EnvGuard::set_root(root.path());
+        let provider = ProviderKind::Claude;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_018_202);
+        let tmux = "AgentDesk-claude-4018-monitor";
+        let monitor_id = MessageId::new(4_018_302);
+        let next_id = MessageId::new(4_018_402);
+        let token = Arc::new(CancelToken::new());
+        assert!(
+            mailbox_try_start_turn_kinded(
                 &shared,
-                &provider,
                 channel_id,
-                tmux,
-                stale_id,
-                Some(synthetic_owner()),
-                next_id,
-            )
-            .await;
-            assert!(
-                reclaimed,
-                "stale synthetic owner should reclaim when its inflight is absent or already finalized"
-            );
-            assert!(stale_token.cancelled.load(Ordering::Relaxed));
-            assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
-
-            let next_claimed = mailbox_try_start_turn_kinded(
-                &shared,
-                channel_id,
-                Arc::new(CancelToken::new()),
+                token.clone(),
                 synthetic_owner(),
-                next_id,
-                crate::services::turn_orchestrator::ActiveTurnKind::Background,
+                monitor_id,
+                ActiveTurnKind::MonitorAutoTurn,
             )
-            .await;
-            assert!(next_claimed, "new synthetic turn must claim after reclaim");
-        }
+            .await
+        );
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+
+        let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+            &shared,
+            &provider,
+            channel_id,
+            tmux,
+            monitor_id,
+            Some(synthetic_owner()),
+            ActiveTurnKind::MonitorAutoTurn,
+            old_owner_started_at(),
+            next_id,
+        )
+        .await;
+        assert!(
+            !reclaimed,
+            "monitor auto-turn must not be reclaimed by the synthetic stale-owner path"
+        );
+        assert!(!token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stale_synthetic_owner_finalized_row_reclaims_for_new_turn() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = EnvGuard::set_root(root.path());
+        let provider = ProviderKind::Claude;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_018_203);
+        let tmux = "AgentDesk-claude-4018-finalized";
+        let stale_id = MessageId::new(4_018_303);
+        let next_id = MessageId::new(4_018_403);
+        let stale_token = seed_synthetic_mailbox_owner(&shared, channel_id, stale_id).await;
+        let state = synthetic_state(channel_id, stale_id, tmux, true);
+        inflight::save_inflight_state(&state).expect("save finalized synthetic inflight");
+
+        let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+            &shared,
+            &provider,
+            channel_id,
+            tmux,
+            stale_id,
+            Some(synthetic_owner()),
+            ActiveTurnKind::Background,
+            young_owner_started_at(),
+            next_id,
+        )
+        .await;
+        assert!(
+            reclaimed,
+            "finalized synthetic inflight row remains positively stale without age gate"
+        );
+        assert!(stale_token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+
+        let next_claimed = mailbox_try_start_turn_kinded(
+            &shared,
+            channel_id,
+            Arc::new(CancelToken::new()),
+            synthetic_owner(),
+            next_id,
+            ActiveTurnKind::Background,
+        )
+        .await;
+        assert!(next_claimed, "new synthetic turn must claim after reclaim");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stale_synthetic_owner_replaced_requires_same_tmux_session() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = EnvGuard::set_root(root.path());
+        let provider = ProviderKind::Claude;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_018_204);
+        let tmux = "AgentDesk-claude-4018-replaced";
+        let stale_id = MessageId::new(4_018_304);
+        let replacement_id = MessageId::new(4_018_305);
+        let next_id = MessageId::new(4_018_404);
+        let stale_token = seed_synthetic_mailbox_owner(&shared, channel_id, stale_id).await;
+        let state = synthetic_state(channel_id, replacement_id, "AgentDesk-other-session", false);
+        inflight::save_inflight_state(&state).expect("save foreign-session replacement row");
+
+        let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+            &shared,
+            &provider,
+            channel_id,
+            tmux,
+            stale_id,
+            Some(synthetic_owner()),
+            ActiveTurnKind::Background,
+            old_owner_started_at(),
+            next_id,
+        )
+        .await;
+        assert!(
+            !reclaimed,
+            "replacement in a different tmux session must not declare this owner stale"
+        );
+        assert!(!stale_token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -530,6 +739,8 @@ mod tests {
             tmux,
             live_id,
             Some(synthetic_owner()),
+            ActiveTurnKind::Background,
+            old_owner_started_at(),
             next_id,
         )
         .await;
@@ -543,7 +754,7 @@ mod tests {
             Arc::new(CancelToken::new()),
             synthetic_owner(),
             next_id,
-            crate::services::turn_orchestrator::ActiveTurnKind::Background,
+            ActiveTurnKind::Background,
         )
         .await;
         assert!(
