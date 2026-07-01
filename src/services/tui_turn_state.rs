@@ -941,6 +941,31 @@ mod tests {
         );
     }
 
+    // #3981 (classifier invariant): a turn stopped immediately — before claude
+    // could write a terminator (`result`) or the `[Request interrupted by user]`
+    // marker — leaves an `assistant` envelope followed by a trailing *bare*
+    // `type=user` envelope. Structurally this is indistinguishable from a fresh
+    // submission, so the PURE classifier MUST still report `UserSubmitted`.
+    // Distinguishing dead (stopped) from live (about to flush) needs runtime
+    // evidence (activity mtime + live pane marker) that this pure function does
+    // not have — that staleness decision is the busy gate's responsibility
+    // (`tui_followup::user_submitted_is_stale_stranded`), NOT the classifier's.
+    // This test pins the separation of responsibilities: the #3981 fix must not
+    // be pushed down into the classifier.
+    #[test]
+    fn claude_trailing_bare_user_after_assistant_remains_user_submitted() {
+        let file = write_jsonl(&[
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"do something"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"and another thing"}]}}"#,
+        ]);
+
+        assert_eq!(
+            observe_claude_jsonl_turn_state(file.path()),
+            TuiTurnState::UserSubmitted
+        );
+    }
+
     // #3221: a turn aborted via a session-preserving interrupt (ESC / wrapper
     // control_request{interrupt}, #3207) leaves a trailing
     // `[Request interrupted by user]` user envelope. That marks the turn ENDED,
