@@ -25,7 +25,7 @@
 | `src/services/discord/tmux.rs` | 1507 | discord-relay | 2026-10-31 | #3841 |
 | `src/services/discord/tmux_watcher.rs` | 7120 | discord-relay | 2026-10-31 | #3832 |
 | `src/services/discord/tui_direct_pending_start.rs` | 1125 | discord-relay | 2026-08-31 | #3540 |
-| `src/services/discord/turn_bridge/mod.rs` | 6209 | discord-relay | 2026-08-31 | #3038 |
+| `src/services/discord/turn_bridge/mod.rs` | 6235 | discord-relay | 2026-08-31 | #3038 |
 | `src/services/discord/turn_finalizer.rs` | 1038 | discord-finalizer | 2026-08-31 | #3016 |
 | `src/services/discord/voice_barge_in.rs` | 2905 | voice-runtime | 2026-08-31 | #3405 |
 | `src/services/discord/watchers/lifecycle.rs` | 2079 | discord-relay | 2026-10-31 | #3840 |

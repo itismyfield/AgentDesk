@@ -1,3 +1,4 @@
+mod bridge_latency_spans;
 mod cancel_finalize_policy;
 mod chunk_compose;
 mod completion_guard;
@@ -64,6 +65,7 @@ use panel_lifecycle::{
 use std::collections::VecDeque;
 
 // Re-exports for pub(super) items used by sibling modules in the discord package
+use bridge_latency_spans::BridgeLatencySpans;
 pub(super) use cancel_finalize_policy::{
     classify_turn_finished_dispatch_kind, is_done_setting_terminal_frame,
     resolve_bridge_owner_channel, should_finalize_cancel_after_recv,
@@ -1607,6 +1609,9 @@ pub(super) fn spawn_turn_bridge(
         let mut status_panel_dirty = shared_owned.ui.status_panel_v2_enabled;
         let mut last_status_panel_edit = tokio::time::Instant::now() - status_interval;
         let turn_start = std::time::Instant::now();
+        // #3813 AC#1 tail: bridge-side latency spans (observation-only), anchored
+        // on `turn_start` above. See bridge_latency_spans.rs for the invariants.
+        let mut bridge_spans = BridgeLatencySpans::starting_at(turn_start);
 
         maybe_create_bridge_separate_status_panel_response(
             single_message_panel_footer_mode,
@@ -3370,11 +3375,21 @@ pub(super) fn spawn_turn_bridge(
             let indicator = SPINNER[spin_idx % SPINNER.len()];
             spin_idx += 1;
 
+            // #3813 Phase 2: hold the status-panel / footer edit off the shared
+            // rate lane while the opening answer is pending so the #4006 fast lane
+            // wins it. `status_panel_dirty` stays set → renders next interval. See
+            // status_panel_edit_defer_for_first_answer for the #3477 guard.
+            let defer_status_panel_for_first_answer = status_panel_edit_defer_for_first_answer(
+                first_answer_relayed,
+                !response_portion_after_offset(&full_response, response_sent_offset).is_empty(),
+            );
+
             if shared_owned.ui.status_panel_v2_enabled
                 && bridge_status_panel_dirty_should_edit_separate_panel(
                     status_panel_dirty,
                     single_message_panel_footer_mode,
                 )
+                && !defer_status_panel_for_first_answer
                 && last_status_panel_edit.elapsed() >= status_interval
                 && let Some(status_msg_id) = status_panel_msg_id
             {
@@ -3408,6 +3423,7 @@ pub(super) fn spawn_turn_bridge(
             }
             if single_message_panel_footer_mode
                 && status_panel_dirty
+                && !defer_status_panel_for_first_answer
                 && last_status_panel_edit.elapsed() >= status_interval
             {
                 refresh_bridge_footer(
@@ -3477,6 +3493,8 @@ pub(super) fn spawn_turn_bridge(
                                 inflight_state.response_sent_offset = response_sent_offset;
                                 inflight_state.full_response = full_response.clone();
                                 state_dirty = true;
+                                // #3813 AC#1 tail: rollover send = bridge first relay.
+                                bridge_spans.mark_first_relay(true);
                                 if let Some((_, _, _, _, pending_new_key)) =
                                     pending_long_running_retarget_after_state_save.as_mut()
                                 {
@@ -3540,6 +3558,8 @@ pub(super) fn spawn_turn_bridge(
 
                 let current_portion =
                     response_portion_after_offset(&full_response, response_sent_offset);
+                // #3813 AC#1 tail: first bridge-observed non-empty assistant output.
+                bridge_spans.mark_first_output(!current_portion.is_empty());
                 let status_block = build_bridge_single_message_panel_status_block(
                     shared_owned.as_ref(),
                     channel_id,
@@ -3583,6 +3603,8 @@ pub(super) fn spawn_turn_bridge(
                     last_status_edit = tokio::time::Instant::now();
                     if edit_ok {
                         first_answer_relayed |= !current_portion.is_empty();
+                        // #3813 AC#1 tail: first bridge-owned relay delivered.
+                        bridge_spans.mark_first_relay(!current_portion.is_empty());
                         last_edit_text = stable_display_text;
                         inflight_state.current_msg_id = current_msg_id.get();
                         inflight_state.current_msg_len = last_edit_text.len();
@@ -3772,6 +3794,10 @@ pub(super) fn spawn_turn_bridge(
                 last_inflight_long_run_heartbeat = std::time::Instant::now();
             }
         }
+
+        // #3813 AC#1 tail: emit bridge-side latency spans once at loop exit
+        // (observation-only; self-suppresses when no bridge relay happened).
+        bridge_spans.log(channel_id.get(), provider.as_str());
 
         // codex round-9 P3 on PR #1308: drain any active long-running
         // placeholder on stream-error / receive-disconnect exits too. The

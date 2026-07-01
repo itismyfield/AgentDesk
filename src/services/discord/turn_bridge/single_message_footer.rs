@@ -43,6 +43,36 @@ pub(super) fn bridge_status_panel_dirty_should_edit_separate_panel(
     )
 }
 
+/// #3813 Phase 2: should the status-panel / footer edit be DEFERRED this loop
+/// pass because the turn's opening answer body has not reached Discord yet?
+///
+/// The status-panel edit and the #4006 first-output fast-lane streaming edit
+/// share the same per-channel Discord rate lane (`discord_io` 1s `min_gap`).
+/// When a v2 panel is dirty from turn start it is eligible immediately, so on
+/// the very first loop pass it can consume that lane BEFORE the fast-lane first
+/// answer, pushing the opening answer back by up to the `min_gap` and eroding
+/// the fast lane's benefit. This predicate holds the panel edit back for exactly
+/// that window — while the first answer has NOT been relayed
+/// (`!first_answer_relayed`) AND there is un-relayed answer body pending
+/// (`first_answer_text_pending`).
+///
+/// It deliberately does NOT gate on `!first_answer_relayed` ALONE. A tool-only
+/// turn (or any turn whose bridge never relays assistant body — e.g. a
+/// watcher/standby-owned relay, where `response_sent_offset` tracks the response
+/// length so nothing stays pending) leaves `first_answer_relayed` false for the
+/// whole turn; a bare gate would then suppress the live panel for the entire
+/// turn (#3477 regression). Requiring `first_answer_text_pending` too means the
+/// deferral only bites while an opening answer body is genuinely competing for
+/// the lane. The caller leaves `status_panel_dirty` set across the skip, so the
+/// panel renders on the next interval once the first answer has been relayed —
+/// coalesced by at most one interval, never dropped.
+pub(super) fn status_panel_edit_defer_for_first_answer(
+    first_answer_relayed: bool,
+    first_answer_text_pending: bool,
+) -> bool {
+    !first_answer_relayed && first_answer_text_pending
+}
+
 #[cfg(test)]
 fn bridge_status_panel_msg_id_for_footer_mode(
     single_message_panel_footer_mode: bool,
@@ -585,6 +615,21 @@ mod tests {
         assert!(bridge_status_panel_dirty_should_edit_separate_panel(
             true, false,
         ));
+    }
+
+    #[test]
+    fn status_panel_defers_only_while_first_answer_body_pending() {
+        // First answer body pending and not yet relayed → defer the panel edit
+        // so the #4006 fast lane wins the shared rate lane.
+        assert!(status_panel_edit_defer_for_first_answer(false, true));
+        // No answer body pending (tool-only turn / watcher-owned relay where the
+        // response offset already tracks the length) → never defer. This is the
+        // #3477 live-panel guard: `!first_answer_relayed` alone must NOT suppress.
+        assert!(!status_panel_edit_defer_for_first_answer(false, false));
+        // First answer already relayed → never defer; the normal interval
+        // throttle resumes for the rest of the turn.
+        assert!(!status_panel_edit_defer_for_first_answer(true, true));
+        assert!(!status_panel_edit_defer_for_first_answer(true, false));
     }
 
     #[test]

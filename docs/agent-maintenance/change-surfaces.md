@@ -1157,7 +1157,27 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6209 lines; production LoC; +8
+  - `src/services/discord/turn_bridge/mod.rs` (6235 lines; production LoC; +26
+    from #3813 Phase 2 + Bridge-spans (same 3373-3800 region) — Phase 2 (§3
+    status-panel low-pri) defers the v2 status-panel / footer edit off the shared
+    per-channel rate lane while the opening answer is still un-relayed so the
+    #4006 fast lane relays the first answer first; the pure decision
+    `status_panel_edit_defer_for_first_answer` lives in `single_message_footer.rs`
+    (unit-tested) and mod.rs adds only the `first_answer_text_pending` compute +
+    one gate subcondition on each of the separate-panel / footer blocks. #3477
+    guarded — the deferral requires a genuinely-pending first-answer body, so
+    tool-only / watcher- or standby-owned relay turns (offset tracks the response
+    length → nothing pending) never suppress the live panel, and
+    `status_panel_dirty` stays set so a deferred panel renders on the next
+    interval (coalesced, never dropped). Bridge-spans (AC#1 tail) add
+    observation-only bridge-side latency spans (`turn_start`->first_output /
+    ->first_relay) reusing the existing `turn_start` `Instant` anchor (no
+    signature / `Context` field); the struct + emit live in the new non-ratchet
+    `bridge_latency_spans.rs` and mod.rs carries only the decl + idempotent
+    first_output/first_relay marks on the bridge-owned relay path + one loop-exit
+    emit (self-suppresses when nothing relayed; watcher-owned relay latency is
+    out of scope, `tmux_watcher.rs`); `discord_io` min_gap / ordering / finalize /
+    flicker untouched, no new await or lock. +8
     from #3813 Phase 1b adding the first-output fast-lane status-edit gate — the
     streaming status-edit gate forced the first assistant answer to wait up to
     `status_interval` (default 5s), so a single-shot fast lane now relays the

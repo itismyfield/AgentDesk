@@ -434,6 +434,37 @@ pub fn emit_intake_latency_spans(
     );
 }
 
+/// #3813 AC#1 tail: record the bridge-side latency spans (observation-only) so
+/// the trailing half of acceptance criterion #1 — first provider output observed
+/// and first Discord relay delivered — is PG-queryable alongside the intake
+/// spans (`emit_intake_latency_spans`). Both `*_ms` are measured from the
+/// bridge-entry `turn_start` anchor and are `None` when their waypoint was not
+/// reached on the bridge-owned relay path (a partial span, never a bogus zero).
+/// Emitted at most once per turn on the bridge streaming loop's exit; the caller
+/// suppresses the emit when neither waypoint was reached (e.g. a watcher-owned
+/// relay), so this is never an all-`None` row.
+pub fn emit_bridge_latency_spans(
+    provider: &str,
+    channel_id: u64,
+    turn_start_to_first_output_ms: Option<u64>,
+    turn_start_to_first_relay_ms: Option<u64>,
+) {
+    emit_event(
+        "bridge_latency_spans",
+        Some(provider),
+        Some(channel_id),
+        None,
+        None,
+        None,
+        None,
+        CounterDelta::default(),
+        json!({
+            "turn_start_to_first_output_ms": turn_start_to_first_output_ms,
+            "turn_start_to_first_relay_ms": turn_start_to_first_relay_ms,
+        }),
+    );
+}
+
 /// #2838 (relay-stability P0-1): record a structured event at each terminal
 /// relay delivery decision so the duplicate-emit (root cause #1) and
 /// missing-answer (root cause #4) vectors are PG-queryable and attributable to

@@ -403,6 +403,23 @@
 
 ### Audited touches
 
+- #3813 Phase 2 status-panel low-pri + Bridge-spans (AC#1 tail):
+  `turn_bridge/mod.rs` streaming loop now defers the v2 status-panel / footer edit
+  off the shared per-channel rate lane while the opening answer is still
+  un-relayed (pure `status_panel_edit_defer_for_first_answer` in
+  `single_message_footer.rs`), so the #4006 fast lane relays the first answer
+  first; and it emits observation-only bridge-side latency spans
+  (`turn_start`->first_output / ->first_relay, struct in the new
+  `bridge_latency_spans.rs`) reusing the existing `turn_start` `Instant` anchor.
+  Classification: worker-local — the low-pri deferral only reorders local
+  edit-timing within the shared per-channel lane (no `discord_io` min_gap change),
+  keeps `status_panel_dirty` set so the panel renders on the next interval
+  (coalesced, never dropped), and the #3477 live-panel guard (`first_answer_text_pending`)
+  means tool-only / watcher- or standby-owned relay turns are never suppressed.
+  The spans are pure `Instant` deltas emitted once at loop exit — no new
+  inflight-row field, delivery record, PG lease, leader gate, or cross-node
+  routing state, and no new await/lock on the hot path; watcher-owned relay
+  latency is out of scope (`tmux_watcher.rs`). No DB/schema change.
 - #3813 Phase 1b first-output fast-lane status-edit gate: `turn_bridge/mod.rs`
   streaming loop gained a single-shot fast lane so the FIRST non-empty assistant
   text is relayed immediately instead of waiting up to `status_interval`

@@ -39,11 +39,12 @@ mod worker;
 // that ship outside the default build profile.
 #[allow(unused_imports)]
 pub use emit::{
-    InvariantSeverity, emit_agent_quality_event, emit_dispatch_result, emit_guard_fired,
-    emit_inflight_lifecycle_event, emit_intake_latency_spans, emit_intake_placeholder_post_failed,
-    emit_recovery_fired, emit_relay_delete, emit_relay_delete_result, emit_relay_delivery,
-    emit_turn_cancelled, emit_turn_finished_with_dispatch_kind, emit_turn_started,
-    emit_watcher_replaced, record_invariant_check, record_invariant_check_with_severity,
+    InvariantSeverity, emit_agent_quality_event, emit_bridge_latency_spans, emit_dispatch_result,
+    emit_guard_fired, emit_inflight_lifecycle_event, emit_intake_latency_spans,
+    emit_intake_placeholder_post_failed, emit_recovery_fired, emit_relay_delete,
+    emit_relay_delete_result, emit_relay_delivery, emit_turn_cancelled,
+    emit_turn_finished_with_dispatch_kind, emit_turn_started, emit_watcher_replaced,
+    record_invariant_check, record_invariant_check_with_severity,
 };
 #[allow(unused_imports)]
 pub use queries::{
