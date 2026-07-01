@@ -3242,6 +3242,7 @@ mod tests {
                 ),
                 placeholder_live_events_enabled: false,
                 status_panel_v2_enabled: false,
+                two_message_panel_enabled: false,
             },
             queued: super::super::QueuedPlaceholderState {
                 queued_placeholders: dashmap::DashMap::new(),

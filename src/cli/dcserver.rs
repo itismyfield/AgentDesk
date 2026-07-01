@@ -1463,6 +1463,9 @@ pub fn handle_dcserver(token: Option<String>) {
         let api_port = ad_config.server.port;
         let placeholder_live_events_enabled = ad_config.placeholder.live_events_enabled;
         let status_panel_v2_enabled = ad_config.placeholder.status_panel_v2_enabled;
+        // #3805 P2: two-message panel rollout gate (default OFF). Scaffolding —
+        // copied into shared UI state at boot; no path reads it yet.
+        let two_message_panel_enabled = ad_config.placeholder.two_message_panel_enabled;
 
         // Self-watchdog: probes the axum server's /api/health endpoint
         services::discord::health::spawn_watchdog(api_port);
@@ -1507,6 +1510,7 @@ pub fn handle_dcserver(token: Option<String>) {
                         engine: discord_engine,
                         placeholder_live_events_enabled,
                         status_panel_v2_enabled,
+                        two_message_panel_enabled,
                     },
                 )
                 .await;
@@ -1584,6 +1588,7 @@ pub fn handle_dcserver(token: Option<String>) {
                     let engine_clone = discord_engine.clone();
                     let live_events_enabled = placeholder_live_events_enabled;
                     let status_panel_v2 = status_panel_v2_enabled;
+                    let two_message_panel = two_message_panel_enabled;
                     tasks.push(tokio::spawn(async move {
                         services::discord::run_bot(
                             &config.token,
@@ -1600,6 +1605,7 @@ pub fn handle_dcserver(token: Option<String>) {
                                 engine: engine_clone,
                                 placeholder_live_events_enabled: live_events_enabled,
                                 status_panel_v2_enabled: status_panel_v2,
+                                two_message_panel_enabled: two_message_panel,
                             },
                         )
                         .await;

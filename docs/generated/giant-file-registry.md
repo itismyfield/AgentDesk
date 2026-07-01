@@ -39,7 +39,7 @@
 | Path | Prod |
 | --- | ---: |
 | `src/cli/client.rs` | 2378 |
-| `src/cli/dcserver.rs` | 1627 |
+| `src/cli/dcserver.rs` | 1633 |
 | `src/cli/direct.rs` | 1813 |
 | `src/cli/doctor/orchestrator.rs` | 4381 |
 | `src/cli/init.rs` | 1444 |
@@ -47,7 +47,7 @@
 | `src/cli/migrate/plan.rs` | 1513 |
 | `src/cli/migrate/source.rs` | 1612 |
 | `src/cli/provider_cli/mod.rs` | 1039 |
-| `src/config.rs` | 2644 |
+| `src/config.rs` | 2654 |
 | `src/db/auto_queue/entries.rs` | 1508 |
 | `src/db/auto_queue/phase_gates.rs` | 1639 |
 | `src/db/dispatched_sessions.rs` | 1627 |
@@ -84,7 +84,7 @@
 | `src/services/discord/commands/text_commands.rs` | 1476 |
 | `src/services/discord/formatting.rs` | 2860 |
 | `src/services/discord/meeting_orchestrator.rs` | 3222 |
-| `src/services/discord/mod.rs` | 4158 |
+| `src/services/discord/mod.rs` | 4159 |
 | `src/services/discord/router/message_handler/headless_turn.rs` | 1543 |
 | `src/services/discord_config_audit.rs` | 1288 |
 | `src/services/dispatched_sessions.rs` | 1550 |

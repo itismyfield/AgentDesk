@@ -104,6 +104,16 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// enabled. `current_msg_id` remains the assistant response message.
     #[serde(default)]
     pub status_message_id: Option<u64>,
+    /// #3805 P2: per-turn epoch for the live status panel. Later stages bump
+    /// this on every two-message re-anchor (rollover / recovery) so a stale
+    /// turn can never edit or delete a newer turn's panel (the generation guard
+    /// rides alongside the existing `finalizer_turn_id` / snowflake identity
+    /// checks). Additive `#[serde(default)]` field — legacy rows deserialize as
+    /// `0`, no `INFLIGHT_STATE_VERSION` bump per the #2235 compat convention.
+    /// PR-A is pure scaffolding: no read/write site exists yet (later PR-B~
+    /// wires the generation bump and guard).
+    #[serde(default)]
+    pub status_panel_generation: u64,
     pub current_msg_id: u64,
     pub current_msg_len: usize,
     pub user_text: String,
@@ -715,6 +725,77 @@ mod turn_source_tests {
         assert_eq!(parsed.watcher_owner_channel_id, Some(99));
         assert_eq!(parsed.delivery_record_owner_channel_id(), 99);
     }
+
+    /// #3805 P2 (PR-A scaffolding): a legacy row written before the field
+    /// existed must still deserialize, with `status_panel_generation`
+    /// defaulting to 0 (additive `#[serde(default)]`, no version bump per the
+    /// #2235 compat convention).
+    #[test]
+    fn status_panel_generation_defaults_to_zero_for_legacy_rows() {
+        let state: InflightTurnState = serde_json::from_value(serde_json::json!({
+            "version": 9,
+            "provider": "codex",
+            "channel_id": 42,
+            "channel_name": "adk-cdx",
+            "request_owner_user_id": 7,
+            "user_msg_id": 8,
+            "current_msg_id": 9,
+            "current_msg_len": 0,
+            "user_text": "hello",
+            "source": "text",
+            "session_id": null,
+            "tmux_session_name": "AgentDesk-codex-adk-cdx",
+            "output_path": "/tmp/out.jsonl",
+            "input_fifo_path": null,
+            "last_offset": 0,
+            "full_response": "",
+            "response_sent_offset": 0,
+            "started_at": "2026-06-28 10:00:00",
+            "updated_at": "2026-06-28 10:00:00",
+            "watcher_owns_live_relay": false
+        }))
+        .expect("legacy row without status_panel_generation should deserialize");
+
+        assert_eq!(state.status_panel_generation, 0);
+    }
+
+    /// #3805 P2 (PR-A scaffolding): when the field is present it round-trips
+    /// through (de)serialization unchanged.
+    #[test]
+    fn status_panel_generation_round_trips_when_present() {
+        let json = serde_json::json!({
+            "version": 9,
+            "provider": "codex",
+            "channel_id": 42,
+            "channel_name": "adk-cdx",
+            "request_owner_user_id": 7,
+            "user_msg_id": 8,
+            "status_message_id": 555,
+            "status_panel_generation": 3,
+            "current_msg_id": 9,
+            "current_msg_len": 0,
+            "user_text": "hello",
+            "source": "text",
+            "session_id": null,
+            "tmux_session_name": "AgentDesk-codex-adk-cdx",
+            "output_path": "/tmp/out.jsonl",
+            "input_fifo_path": null,
+            "last_offset": 0,
+            "full_response": "",
+            "response_sent_offset": 0,
+            "started_at": "2026-06-28 10:00:00",
+            "updated_at": "2026-06-28 10:00:00",
+            "watcher_owns_live_relay": false
+        });
+        let parsed: InflightTurnState =
+            serde_json::from_value(json).expect("deserialize status_panel_generation");
+        assert_eq!(parsed.status_panel_generation, 3);
+        let reserialized = serde_json::to_value(&parsed).expect("serialize back");
+        assert_eq!(
+            reserialized["status_panel_generation"],
+            serde_json::json!(3)
+        );
+    }
 }
 
 impl InflightTurnState {
@@ -766,6 +847,7 @@ impl InflightTurnState {
             user_msg_id,
             finalizer_turn_id,
             status_message_id: None,
+            status_panel_generation: 0,
             current_msg_id,
             current_msg_len: 0,
             user_text,

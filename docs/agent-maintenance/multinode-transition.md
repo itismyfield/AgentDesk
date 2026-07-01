@@ -1133,3 +1133,16 @@
   already lived on the per-node inflight row. The only persisted change is the
   additive node-local inflight-row field (no PG schema change; relay-ownership
   adoption / bridge-tail stand-down / response finalize are all unaffected).
+- #3805 P2 PR-A (two-message model scaffolding — worker-local UI flag): adds the
+  additive `two_message_panel_enabled` flag to `PlaceholderConfig` and threads it
+  through the per-node UI plumbing (`runtime_bootstrap.rs` RunBotContext /
+  UiFeatureFlags → `runtime_bootstrap/shared_data.rs` → `shared_state.rs`
+  PlaceholderState) plus an additive `status_panel_generation` field on the
+  node-local inflight row (`inflight/model.rs`; `#[serde(default)]`, legacy rows
+  deserialize as 0). **Worker-local**: the flag is a per-node UI feature toggle
+  (default OFF, restart-required — the `placeholder` config section is already
+  restart-scoped) and the generation counter lives on the same per-node inflight
+  row the bridge/watcher already own. No behavior reads either yet (pure additive
+  no-op scaffolding for the later two-message PRs); introduces no new PG lease,
+  cross-node read, leader-only side effect, singleton assumption, or PG schema
+  change.
