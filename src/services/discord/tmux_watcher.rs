@@ -15,6 +15,15 @@ mod panel_decisions;
 
 use self::panel_decisions::*;
 
+// #3805 P2 (PR-C): two-message status-panel WATCHER creation-order parity — the
+// small PURE gate/generation/completion predicates the watcher loop and its
+// single_message_footer.rs completion call thread through thinly (logic here, not
+// in the EXTREME giant nor the 700-capped footer sibling).
+#[path = "tmux_watcher/two_message_panel.rs"]
+mod two_message_panel;
+
+use self::two_message_panel::*;
+
 #[path = "tmux_watcher/prompt_observe.rs"]
 mod prompt_observe;
 
@@ -1021,6 +1030,17 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             &watcher_provider,
             channel_id.get(),
         );
+        // #3805 P2 (PR-C): this turn's status-panel generation epoch, SEEDED from
+        // the on-disk row so a restart re-hydrating an existing panel carries the
+        // SAME epoch it was created with (a stale-epoch completion is thus never
+        // falsely skipped). The two-message create bumps it (opens the epoch on a
+        // fresh bind); the completion guard proves it against the on-disk epoch.
+        // Inert on the default-OFF path (stays 0) and while no mid-turn re-anchor
+        // exists yet (PR-D) — this turn's epoch always equals the on-disk epoch.
+        let mut this_turn_status_panel_generation: u64 = startup_inflight_snapshot
+            .as_ref()
+            .map(|state| state.status_panel_generation)
+            .unwrap_or(0);
         // status-panel-v2: panel eligibility (external-input OR synthetic
         // monitor/self-paced-loop) drives the panel-lifecycle sites that read
         // this flag. The lease/⏳-anchor sites keep the narrower external-input
@@ -2009,6 +2029,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     if watcher_separate_status_panel_enabled(shared.ui.status_panel_v2_enabled)
                         && status_panel_msg_id.is_none()
                         && has_visible_streaming_work
+                        // #3805 P2 (PR-C): under the two-message flag, defer panel
+                        // creation until the answer placeholder exists so the panel
+                        // is created BELOW it (answer-first). OFF: always true →
+                        // the legacy creation block runs byte-identical.
+                        && watcher_two_message_panel_creation_gated_by_answer(
+                            shared.ui.two_message_panel_enabled,
+                            placeholder_msg_id.is_some(),
+                        )
                     {
                         let inflight_for_panel =
                             crate::services::discord::inflight::load_inflight_state(
@@ -2125,6 +2153,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                             &crate::services::discord::inflight::StatusPanelBindGuard {
                                                 require_identity: pre_send_identity.clone(),
                                                 skip_if_panel_already_set: true,
+                                                // #3805 P2 (PR-C): open this turn's
+                                                // panel epoch atomically with the
+                                                // fresh bind (parity with the sink
+                                                // create). None on OFF → untouched.
+                                                set_status_panel_generation:
+                                                    watcher_two_message_bind_generation(
+                                                        shared.ui.two_message_panel_enabled,
+                                                        this_turn_status_panel_generation,
+                                                    ),
                                                 ..Default::default()
                                             },
                                         );
@@ -2206,6 +2243,23 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                             // Bound / AlreadyBound: the row now owns this exact id.
                                             debug_assert!(decision.adopt_sent_panel);
                                             status_panel_msg_id = Some(panel_msg.id);
+                                            // #3805 P2 (PR-C): a FRESH Bound opened this
+                                            // turn's panel epoch (the generation the
+                                            // guard just persisted); mirror it into the
+                                            // local so the completion guard proves the
+                                            // SAME epoch. AlreadyBound re-binds do NOT
+                                            // re-open it (the local already carries the
+                                            // on-disk seed). None/OFF → local untouched.
+                                            if bind_outcome
+                                                == crate::services::discord::inflight::StatusPanelBindOutcome::Bound
+                                                && let Some(opened) =
+                                                    watcher_two_message_bind_generation(
+                                                        shared.ui.two_message_panel_enabled,
+                                                        this_turn_status_panel_generation,
+                                                    )
+                                            {
+                                                this_turn_status_panel_generation = opened;
+                                            }
                                             let ts = chrono::Local::now().format("%H:%M:%S");
                                             tracing::info!(
                                                 "  [{ts}] 🪧 watcher: created status-panel-v2 for TUI-direct turn (channel {}, tmux={}, panel_msg={})",
@@ -5761,6 +5815,18 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         inflight_before_relay.as_ref(),
                         &tmux_session_name,
                     );
+                // #3805 P2 (PR-C): skip the status-panel completion edit when a
+                // NEWER panel epoch has superseded this stale completion for the
+                // SAME owned panel (parity with the sink completion guard). Inert
+                // on the default-OFF path (generation stays 0) and at PR-C (no
+                // mid-turn re-anchor bumps the epoch); the re-anchor stage (PR-D)
+                // makes it live.
+                let two_message_status_panel_generation_superseded =
+                    watcher_two_message_status_completion_superseded(
+                        this_turn_status_panel_generation,
+                        status_panel_msg_id,
+                        inflight_before_relay.as_ref(),
+                    );
                 complete_watcher_terminal_footer_or_status_panel(
                     &http,
                     &shared,
@@ -5778,6 +5844,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     status_panel_completion_user_msg_id,
                     turn_is_external_input_for_session,
                     turn_is_non_managed_tui_mirror,
+                    two_message_status_panel_generation_superseded,
                 )
                 .await;
             } // #3142: end `if !inflight_before_relay_is_stale_newer_turn` (EDIT/finalize gate)

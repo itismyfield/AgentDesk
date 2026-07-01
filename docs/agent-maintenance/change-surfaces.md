@@ -197,7 +197,18 @@
     late-frame fresh row B is rejected; -576 from #3841 extracting placeholder
     suppression helpers to `tmux_placeholder_suppression.rs`;
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (7120 production lines; +14 from #3805
+  - `src/services/discord/tmux_watcher.rs` (7189 production lines; +67 from #3805
+    P2 PR-C (watcher two-message creation-order parity) — an answer-first
+    subcondition on the existing panel-creation gate (defer the panel until the
+    answer placeholder exists so it lands BELOW the answer), a per-turn
+    `this_turn_status_panel_generation` local seeded from the inflight snapshot, a
+    `set_status_panel_generation` field on the existing `bind_status_panel` guard
+    (opens the epoch atomically on a fresh bind), and the completion
+    `generation_superseded` compute + arg; the pure gate/generation/completion
+    predicates and the panel-completion tail (moved verbatim out of the 700-capped
+    `single_message_footer.rs`) live in the new non-giant
+    `tmux_watcher/two_message_panel.rs`, gated on the default-OFF
+    `two_message_panel_enabled` → OFF byte-identical; +14 from #3805
     P1 (footer re-anchor) capturing the tail continuation chunk (id + text) in the
     terminal in-place edit arm and re-anchoring the completion footer onto it so a
     2000+ char answer no longer strands the footer in a middle chunk — the anchor
@@ -1157,7 +1168,11 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6237 lines; production LoC; +14
+  - `src/services/discord/turn_bridge/mod.rs` (6241 lines; production LoC; +4
+    from #3805 P2 PR-C re-exporting `two_message_status_edit_generation_is_stale`
+    at `pub(in crate::services::discord)` (one `use` line + comment) so the tmux
+    WATCHER completion guard reuses the SAME sink generation-staleness predicate
+    (parity); wiring-only, no logic change, OFF byte-identical; +14
     from #3805 P2 PR-B (two-message SINK creation order — answer-first, panel
     below); all real logic lives in the new non-giant
     `turn_bridge/two_message_panel.rs`, mod.rs adds only thin wiring: a

@@ -1163,3 +1163,26 @@
   flag so the OFF path is byte-identical; introduces no new PG lease, cross-node
   read, leader-only side effect, singleton assumption, or PG schema change. The
   watcher-path parity for this ordering is a later PR (PR-C, `tmux_watcher.rs`).
+- #3805 P2 PR-C (two-message WATCHER creation-order parity — worker-local): mirrors
+  PR-B on the fully-independent tmux WATCHER relay path. When
+  `two_message_panel_enabled` is ON the watcher defers its `status_panel_v2` panel
+  creation until the answer placeholder exists so the panel lands BELOW the answer
+  (answer-first), opens this turn's `status_panel_generation` epoch atomically with
+  the existing `bind_status_panel` publish (a new `set_status_panel_generation`
+  field on `StatusPanelBindGuard`, `inflight/ownership_ops.rs`), and skips a stale
+  completion edit superseded by a newer epoch for the SAME owned panel — reusing
+  the SAME generation-staleness predicate as the sink (re-exported from
+  `turn_bridge/two_message_panel.rs`, parity). All P2 logic lives in the new
+  node-local sibling `tmux_watcher/two_message_panel.rs` (pure predicates + the
+  panel-completion tail moved verbatim out of the 700-capped
+  `single_message_footer.rs`); `tmux_watcher.rs` carries only thin call-site wiring
+  plus a per-turn epoch local seeded from the node-local inflight snapshot.
+  **Worker-local**: this is per-node msg-id / HTTP bookkeeping on the
+  watcher-owned inflight sidecar row (the `status_message_id` panel handle and the
+  `status_panel_generation` epoch already lived on the node-local row; the
+  generation write is under the same per-turn inflight sidecar flock as the panel
+  bind) and per-node Discord messages. It never tears down the per-channel
+  `StatusPanelState`, so item4's `session_banner` exactly-once claim is untouched.
+  Gated on the default-OFF flag so the OFF path is byte-identical; introduces no
+  new PG lease, cross-node read, leader-only side effect, singleton assumption, or
+  PG schema change.

@@ -2204,6 +2204,13 @@ mod stall_recovery_tests {
             .and_then(|s| s.status_message_id)
     }
 
+    fn loaded_status_panel_generation(root: &Path, channel_id: u64) -> Option<u64> {
+        load_inflight_states_from_root(root, &ProviderKind::Claude)
+            .into_iter()
+            .find(|s| s.channel_id == channel_id)
+            .map(|s| s.status_panel_generation)
+    }
+
     #[test]
     fn bind_status_panel_sets_id_when_unguarded() {
         let (_lock, temp, _env_reset) = status_panel_test_root();
@@ -2219,6 +2226,56 @@ mod stall_recovery_tests {
 
         assert_eq!(outcome, StatusPanelBindOutcome::Bound);
         assert_eq!(loaded_status_message_id(temp.path(), 7001), Some(5555));
+    }
+
+    #[test]
+    fn bind_status_panel_opens_generation_epoch_only_on_fresh_bind() {
+        // #3805 P2 (PR-C): the two-message watcher create stamps the panel
+        // generation atomically with the fresh bind. A DEFAULT (OFF) bind never
+        // touches it (byte-identical); an `AlreadyBound` re-bind never re-opens it.
+        let (_lock, temp, _env_reset) = status_panel_test_root();
+
+        // OFF / default guard → generation untouched (stays 0).
+        seed_status_panel_state(temp.path(), 7101, 10, 11, Some("AgentDesk-claude-a"), None);
+        let off = bind_status_panel_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            7101,
+            5555,
+            &StatusPanelBindGuard::default(),
+        );
+        assert_eq!(off, StatusPanelBindOutcome::Bound);
+        assert_eq!(loaded_status_panel_generation(temp.path(), 7101), Some(0));
+
+        // ON / fresh bind → generation stamped to the caller-opened epoch.
+        seed_status_panel_state(temp.path(), 7102, 10, 11, Some("AgentDesk-claude-a"), None);
+        let fresh = bind_status_panel_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            7102,
+            6666,
+            &StatusPanelBindGuard {
+                set_status_panel_generation: Some(1),
+                ..Default::default()
+            },
+        );
+        assert_eq!(fresh, StatusPanelBindOutcome::Bound);
+        assert_eq!(loaded_status_message_id(temp.path(), 7102), Some(6666));
+        assert_eq!(loaded_status_panel_generation(temp.path(), 7102), Some(1));
+
+        // ON / same-id re-bind → AlreadyBound, epoch NOT re-opened (stays 1).
+        let again = bind_status_panel_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            7102,
+            6666,
+            &StatusPanelBindGuard {
+                set_status_panel_generation: Some(2),
+                ..Default::default()
+            },
+        );
+        assert_eq!(again, StatusPanelBindOutcome::AlreadyBound);
+        assert_eq!(loaded_status_panel_generation(temp.path(), 7102), Some(1));
     }
 
     #[test]

@@ -92,6 +92,9 @@ pub(super) use stale_resume::result_event_has_stale_resume_error;
 pub(in crate::services::discord) use status_panel::{
     complete_status_panel_v2_with_http, normalize_status_panel_message_id,
 };
+// #3805 P2 (PR-C): the ONE generation staleness rule shared by the sink (here)
+// and the tmux WATCHER completion guard, so both paths supersede a stale
+// status edit by the SAME epoch semantics (parity).
 pub(super) use streaming_edit_text::{
     CLAUDE_TUI_FOLLOWUP_REQUEUE_DELIVERY_NOTICE, bridge_claude_tui_followup_requeue_prompt_error,
     bridge_streaming_edit_gate_open, bridge_streaming_rollover_should_skip,
@@ -110,6 +113,7 @@ pub(super) use tmux_runtime::cancel_token_has_tmux_session;
 pub(super) use tmux_runtime::handoff_interrupted_message;
 pub(super) use tmux_runtime::stale_inflight_message;
 pub(super) use tmux_runtime::stop_active_turn;
+pub(in crate::services::discord) use two_message_panel::two_message_status_edit_generation_is_stale;
 pub(super) use watcher_orphan_cleanup::{
     cleanup_or_preserve_watcher_orphan_spinner,
     should_delete_bridge_created_watcher_orphan_response,

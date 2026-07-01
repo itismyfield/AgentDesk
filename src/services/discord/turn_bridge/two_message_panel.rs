@@ -110,7 +110,11 @@ pub(super) async fn create_bridge_two_message_status_panel_below_answer<G: TurnG
 /// generation is `0` (`0 > 0 == false`) — the completion edit fires exactly as
 /// today. The later re-anchor/recovery stages (PR-D/E) bump the epoch mid-turn
 /// so a stale in-flight edit for the OLD generation is skipped here.
-pub(super) fn two_message_status_edit_generation_is_stale(
+///
+/// #3805 P2 (PR-C): visible to the whole `discord` module so the tmux WATCHER
+/// completion guard reuses this exact predicate — the sink and watcher must
+/// share ONE generation staleness rule (parity), not two divergent copies.
+pub(in crate::services::discord) fn two_message_status_edit_generation_is_stale(
     this_turn_generation: u64,
     panel_owned_on_disk: bool,
     on_disk_generation: u64,

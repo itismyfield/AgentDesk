@@ -46,6 +46,13 @@ pub(in crate::services::discord) struct StatusPanelBindGuard {
     /// and our send is a duplicate (#3003 reclaim path). Synthetic-headless
     /// ids do not count as "already set".
     pub skip_if_panel_already_set: bool,
+    /// #3805 P2 (PR-C): when `Some(gen)`, ALSO stamp `status_panel_generation`
+    /// to `gen` in the SAME flock as the panel bind — but ONLY on a genuine
+    /// fresh bind (`Bound`), so the generation epoch is opened atomically with
+    /// the panel this turn owns. Mirrors the sink's PR-B create, which persists
+    /// `status_message_id` + `status_panel_generation` together. `None` (the
+    /// default / OFF path) leaves the generation untouched → byte-identical.
+    pub set_status_panel_generation: Option<u64>,
 }
 
 /// Outcome of a `bind_status_panel` attempt.
@@ -135,6 +142,13 @@ pub(super) fn bind_status_panel_in_root(
         );
     }
     state.status_message_id = Some(msg_id);
+    // #3805 P2 (PR-C): open this turn's status-panel generation epoch atomically
+    // with the fresh bind. Only reached on `Bound` (an `AlreadyBound` re-bind
+    // returned above without re-opening the epoch). `None` on the OFF path leaves
+    // the field untouched (byte-identical).
+    if let Some(generation) = guard.set_status_panel_generation {
+        state.status_panel_generation = generation;
+    }
     match persist_under_lock(
         root,
         &path,

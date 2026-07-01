@@ -483,8 +483,14 @@ pub(super) async fn complete_watcher_terminal_footer_or_status_panel(
     // /loop self-paced (ExternalInput) class the stale `turn_is_external_input_for_session`
     // flag misses; never set for a Discord-origin Managed turn.
     turn_is_non_managed_tui_mirror: bool,
+    // #3805 P2 (PR-C): a newer panel epoch superseded this stale status-panel
+    // completion for the SAME owned panel (computed by the caller against the
+    // on-disk row via the shared generation staleness predicate). Only skips the
+    // status-panel branch, mirroring the sink completion guard. Inert on the
+    // default-OFF path (always false).
+    two_message_status_panel_generation_superseded: bool,
 ) {
-    let committed = if single_message_panel_footer_mode {
+    if single_message_panel_footer_mode {
         let fallback_target =
             placeholder_msg_id.map(|msg_id| WatcherCompletionFooterTerminalTarget {
                 msg_id,
@@ -511,7 +517,7 @@ pub(super) async fn complete_watcher_terminal_footer_or_status_panel(
                 provider,
                 target_text,
             )
-            .await
+            .await;
         } else {
             let owner = crate::services::discord::single_message_panel::CompletionFooterOwner::new(
                 status_panel_completion_user_msg_id.unwrap_or(0),
@@ -534,44 +540,32 @@ pub(super) async fn complete_watcher_terminal_footer_or_status_panel(
                 indicator,
                 completion_background,
             )
-            .await
+            .await;
         }
-    } else {
-        complete_watcher_status_panel_v2(
-            http,
-            shared,
-            channel_id,
-            status_panel_msg_id,
-            provider,
-            started_at_unix,
-            last_status_panel_text,
-            completion_background,
-            status_panel_completion_user_msg_id,
-        )
-        .await
-    };
-    if !turn_is_external_input_for_session {
+        // Footer mode never owns a separate status panel (`status_panel_msg_id`
+        // is None here), so the panel orphan reconcile below is a no-op for it —
+        // the prior shared tail returned early via its `let Some(panel_msg_id) =
+        // status_panel_msg_id else { return }` guard. Done.
         return;
     }
-    let Some(panel_msg_id) = status_panel_msg_id else {
-        return;
-    };
-    if committed {
-        crate::services::discord::status_panel_orphan_store::remove(
-            provider,
-            &shared.token_hash,
-            channel_id.get(),
-            panel_msg_id.get(),
-        );
-    } else {
-        enqueue_watcher_status_panel_orphan(shared.as_ref(), provider, channel_id, panel_msg_id);
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!(
-            "  [{ts}] ⚠ watcher: status panel completion failed for channel {} msg {}; queued durable orphan cleanup",
-            channel_id.get(),
-            panel_msg_id.get()
-        );
-    }
+    // #3805 P2 (PR-C): panel mode — the generation guard (skip a superseded stale
+    // edit), the status-panel completion, and the durable orphan reconcile all
+    // live in the sibling so the P2 logic stays out of this 700-capped file and
+    // shares the sink's staleness predicate (parity).
+    complete_watcher_status_panel_v2_with_generation_guard(
+        http,
+        shared,
+        channel_id,
+        provider,
+        started_at_unix,
+        status_panel_msg_id,
+        last_status_panel_text,
+        completion_background,
+        status_panel_completion_user_msg_id,
+        turn_is_external_input_for_session,
+        two_message_status_panel_generation_superseded,
+    )
+    .await;
 }
 
 #[cfg(test)]
