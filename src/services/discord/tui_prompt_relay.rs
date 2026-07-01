@@ -102,6 +102,7 @@ use self::relay_ownership::{
     session_bound_discord_delivery_enabled,
 };
 
+mod synthetic_orphan_reclaim; // #3982 orphan-at-birth reclaim trigger (see module doc)
 mod synthetic_start;
 #[cfg(test)]
 pub(in crate::services::discord) use self::synthetic_start::synthetic_start_offset_carry_forward;

@@ -588,6 +588,36 @@ pub(super) type AbortCleanupFn = Box<
         + Sync,
 >;
 
+/// #3982: the worker's per-escalation-cycle orphan-reclaim attempt, consulted in
+/// the `BackstopForeignInflightLive` branch BEFORE the terminal abort. The
+/// backstop can only observe an inflight row; it cannot tell a genuinely live
+/// FOREIGN turn from a producer-dead `SessionBoundRelay` orphan born after its
+/// per-turn StreamRelay producer already exited (a stale `get_producer` `Some`
+/// stamps the owner `SessionBoundRelay`; the row never commits and is perpetually
+/// misread as live-foreign → every later TUI-direct turn aborts). This closure
+/// loads the row and, IFF it is orphan-shaped (300s-quiescent, zero-progress,
+/// never-delivered), downgrades its relay owner to `None` via the
+/// identity-guarded `downgrade_orphaned_session_bound_relay_owner_locked`.
+///
+/// Returns `true` ONLY when the owner was downgraded — the worker then
+/// re-evaluates immediately (`continue`): the next view's ownerless-stale filter
+/// drops the now-`None` row, so the deferred claim proceeds instead of aborting.
+/// Returns `false` for a genuinely live turn (not orphan-shaped), an
+/// identity/lifecycle mismatch, or an I/O failure → the worker keeps its EXISTING
+/// bounded escalation/abort (no new infinite spin). Provided by
+/// [`super::tui_prompt_relay`] (it owns inflight access); it NEVER gates on the
+/// proven-stale `get_producer` oracle — the authoritative guard is the in-lock
+/// orphan-shape re-check + identity inside the downgrade primitive (#3982).
+pub(super) type ReclaimOrphanFn = Box<
+    dyn for<'a> Fn(
+            &'a Arc<SharedData>,
+            &'a TuiDirectPendingStart,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>>
+        + Send
+        + Sync,
+>;
+
 /// #3296 codex r3: choose the foreign identity an aborted-anchor marker pins.
 /// The worker's LAST-VIEW identity is PRIMARY — that row was observed LIVE
 /// during the backstop window, so it is definitionally the turn the ABORT
@@ -622,11 +652,20 @@ pub(super) fn spawn_worker(
     view_fn: ViewFn,
     claim_fn: ClaimFn,
     abort_cleanup_fn: AbortCleanupFn,
+    reclaim_orphan_fn: ReclaimOrphanFn,
 ) {
     let active_guard = active_worker_guard_for_spawn(&record.provider, record.channel_id);
     super::task_supervisor::spawn_observed("tui_direct_pending_start_worker", async move {
         let _active_guard = active_guard;
-        run_worker_inner(shared, record, view_fn, claim_fn, abort_cleanup_fn).await;
+        run_worker_inner(
+            shared,
+            record,
+            view_fn,
+            claim_fn,
+            abort_cleanup_fn,
+            reclaim_orphan_fn,
+        )
+        .await;
     });
 }
 
@@ -650,9 +689,18 @@ async fn run_worker(
     view_fn: ViewFn,
     claim_fn: ClaimFn,
     abort_cleanup_fn: AbortCleanupFn,
+    reclaim_orphan_fn: ReclaimOrphanFn,
 ) {
     let _active_guard = ActiveWorkerGuard::new(&record.provider, record.channel_id);
-    run_worker_inner(shared, record, view_fn, claim_fn, abort_cleanup_fn).await;
+    run_worker_inner(
+        shared,
+        record,
+        view_fn,
+        claim_fn,
+        abort_cleanup_fn,
+        reclaim_orphan_fn,
+    )
+    .await;
 }
 
 async fn run_worker_inner(
@@ -661,6 +709,7 @@ async fn run_worker_inner(
     view_fn: ViewFn,
     claim_fn: ClaimFn,
     abort_cleanup_fn: AbortCleanupFn,
+    reclaim_orphan_fn: ReclaimOrphanFn,
 ) {
     let lock = channel_lock(&record.provider, record.channel_id);
     let _guard = lock.lock().await;
@@ -717,6 +766,34 @@ async fn run_worker_inner(
                 );
             }
             WaitOutcome::BackstopForeignInflightLive => {
+                // #3982: before escalating, try to reclaim a producer-dead
+                // `SessionBoundRelay` orphan masquerading as a live foreign
+                // inflight. The orphan-at-birth row (claim-time `get_producer`
+                // returned a stale `Some` after the per-turn producer task exited)
+                // is owned by `SessionBoundRelay`, never commits, and so is
+                // perpetually misread here as a live foreign turn → every later
+                // TUI-direct turn aborts indefinitely. The reclaim downgrades its
+                // owner to `None` under the flock, identity- and orphan-shape-
+                // guarded; a genuinely live turn cannot match (300s quiescence +
+                // zero-progress + never-delivered) and returns `false`, so the
+                // normal escalation/abort below runs unchanged. On a downgrade we
+                // re-evaluate IMMEDIATELY (a fresh wait window): the next view's
+                // ownerless-stale filter drops the now-`None` row so the deferred
+                // claim proceeds — never falling through to claim on this stale
+                // view. This attempt runs once per escalation cycle and does NOT
+                // consume the escalation budget, so a downgrade cannot exhaust it.
+                if reclaim_orphan_fn(&shared, &record).await {
+                    tracing::warn!(
+                        provider = %record.provider,
+                        channel_id = record.channel_id,
+                        tmux_session_name = %record.tmux_session_name,
+                        anchor_message_id = record.anchor_message_id,
+                        backstop_cycle = backstop_cycles,
+                        event = "tui_direct_pending_start.backstop_orphan_reclaimed",
+                        "tui_direct_pending_start: reclaimed a producer-dead SessionBoundRelay orphan blocking this synthetic start (relay owner downgraded to None); re-evaluating immediately so the deferred claim can proceed instead of aborting (#3982)"
+                    );
+                    continue;
+                }
                 backstop_cycles = backstop_cycles.saturating_add(1);
                 if backstop_cycles >= PENDING_START_MAX_BACKSTOP_CYCLES {
                     // ABORT SAFELY (P1-1): a foreign prior inflight stayed live
@@ -1303,6 +1380,13 @@ mod tests {
         (cleanup, calls, identity)
     }
 
+    /// A [`ReclaimOrphanFn`] that never reclaims (always `false`). Preserves the
+    /// pre-#3982 backstop behavior for every test that does not exercise the
+    /// orphan-reclaim path — the worker escalates/aborts exactly as before.
+    fn never_reclaim_orphan() -> ReclaimOrphanFn {
+        Box::new(|_shared, _record| Box::pin(async move { false }))
+    }
+
     fn record(provider: &str, channel_id: u64, anchor: u64) -> TuiDirectPendingStart {
         TuiDirectPendingStart {
             provider: provider.to_string(),
@@ -1396,6 +1480,7 @@ mod tests {
             a_view,
             a_claim,
             a_cleanup,
+            never_reclaim_orphan(),
         ));
 
         // ---- Channel B: prior turn already finalized → relays immediately. ----
@@ -1428,6 +1513,7 @@ mod tests {
             b_view,
             b_claim,
             b_cleanup,
+            never_reclaim_orphan(),
         ));
 
         // B is on a DIFFERENT channel lock; it must finish without waiting for A.
@@ -1569,7 +1655,14 @@ mod tests {
 
         let (abort_cleanup, abort_cleanup_calls, abort_cleanup_identity) =
             recording_abort_cleanup();
-        let handle = tokio::spawn(run_worker(shared.clone(), rec, view, claim, abort_cleanup));
+        let handle = tokio::spawn(run_worker(
+            shared.clone(),
+            rec,
+            view,
+            claim,
+            abort_cleanup,
+            never_reclaim_orphan(),
+        ));
 
         // Advance through the full escalation budget of backstop windows.
         for _ in 0..(PENDING_START_MAX_BACKSTOP_CYCLES + 1) {
@@ -1611,6 +1704,226 @@ mod tests {
              cleanup's own read still yields an identity-pinned marker — RED \
              if the hook receives None (the marker would be sweep-only and \
              tombstone 대조 could never ✅ it)"
+        );
+        reset_present_for_tests();
+    }
+
+    /// #3982: the orphan-at-birth reclaim trigger on the synthetic-start backstop
+    /// path. A producer-dead `SessionBoundRelay` orphan (born with a stale
+    /// `get_producer` `Some`, never commits) is perpetually misread as a live
+    /// FOREIGN inflight, so pre-#3982 EVERY later TUI-direct turn escalated to the
+    /// terminal abort and never relayed. The worker must, on the backstop, attempt
+    /// the orphan downgrade; once it reclaims (owner → `None`), the next view drops
+    /// the now-ownerless row and the deferred claim PROCEEDS. Proven by: the
+    /// reclaim runs, the claim runs exactly once, and the abort cleanup NEVER runs.
+    // SAFETY (await_holding_lock): `worker_test_lock()` serializes tests that
+    // mutate the process-wide PRESENT index / durable store root; the guard is
+    // held across `tokio::time::advance` awaits that drive `run_worker`.
+    // Releasing before the awaits would let concurrent tests stomp the statics.
+    // Test-only.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(start_paused = true)]
+    async fn backstop_orphan_reclaim_downgrades_then_claims() {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+        let _guard = worker_test_lock();
+        reset_present_for_tests();
+        let shared = super::super::make_shared_data_for_tests();
+
+        // The orphan blocks (a live FOREIGN inflight, never own-anchor) until the
+        // reclaim downgrades it; the reclaim then flips `reclaimed` so the next
+        // view reports the row gone — exactly what the production view builder's
+        // ownerless-stale filter does once the owner is `None`.
+        let reclaimed = Arc::new(AtomicBool::new(false));
+        let reclaimed_for_view = reclaimed.clone();
+        let view: ViewFn = Box::new(move |_shared, _record| {
+            let reclaimed = reclaimed_for_view.clone();
+            Box::pin(async move {
+                if reclaimed.load(Ordering::SeqCst) {
+                    // Post-downgrade: the now-ownerless orphan is filtered out →
+                    // no prior inflight → finalized.
+                    Some(obs(base_view()))
+                } else {
+                    Some(PriorTurnObservation {
+                        view: PriorTurnView {
+                            inflight_present: true,
+                            inflight_is_own_anchor: false,
+                            mailbox_blocking_turn_present: true,
+                            mailbox_turn_is_own_anchor: false,
+                            runtime_binding_present: true,
+                        },
+                        foreign_inflight_identity: Some((777, "2026-06-10 12:00:00".to_string())),
+                    })
+                }
+            })
+        });
+
+        let claim_calls = Arc::new(AtomicU32::new(0));
+        let claim_calls_for_fn = claim_calls.clone();
+        let claim: ClaimFn = Box::new(move |_shared, _record| {
+            let calls = claim_calls_for_fn.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                true
+            })
+        });
+
+        // The reclaim downgrades the orphan on the first backstop attempt.
+        let reclaim_calls = Arc::new(AtomicU32::new(0));
+        let reclaim_calls_for_fn = reclaim_calls.clone();
+        let reclaimed_for_fn = reclaimed.clone();
+        let reclaim_orphan: ReclaimOrphanFn = Box::new(move |_shared, _record| {
+            let calls = reclaim_calls_for_fn.clone();
+            let reclaimed = reclaimed_for_fn.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                reclaimed.store(true, Ordering::SeqCst);
+                true // downgraded
+            })
+        });
+
+        let rec = record("claude", 15, 150);
+        persist(&rec).unwrap();
+        assert!(pending_synthetic_start_present("claude", 15));
+
+        let (abort_cleanup, abort_cleanup_calls, _) = recording_abort_cleanup();
+        let handle = tokio::spawn(run_worker(
+            shared.clone(),
+            rec,
+            view,
+            claim,
+            abort_cleanup,
+            reclaim_orphan,
+        ));
+
+        // One backstop window to hit `BackstopForeignInflightLive` + reclaim, then
+        // a poll for the re-evaluated (now-finalized) view to claim. Advancing a
+        // few windows is harmless once the worker has claimed and returned.
+        for _ in 0..3 {
+            tokio::time::advance(PENDING_START_BACKSTOP + PENDING_START_POLL * 2).await;
+            tokio::task::yield_now().await;
+        }
+        handle.await.unwrap();
+
+        assert!(
+            reclaim_calls.load(Ordering::SeqCst) >= 1,
+            "the worker MUST attempt the orphan reclaim on the backstop before \
+             aborting — RED if the BackstopForeignInflightLive branch never calls \
+             reclaim_orphan_fn (#3982)"
+        );
+        assert_eq!(
+            claim_calls.load(Ordering::SeqCst),
+            1,
+            "after the orphan is downgraded the deferred claim PROCEEDS (the row is \
+             no longer a live foreign inflight) — RED if the worker aborts instead \
+             of re-evaluating + claiming (#3982)"
+        );
+        assert_eq!(
+            abort_cleanup_calls.load(Ordering::SeqCst),
+            0,
+            "#3982: a reclaimed orphan must NEVER reach the terminal backstop abort \
+             — the successful claim owns the ⏳ → ✅ completion. RED if the worker \
+             escalates to the abort despite a successful downgrade."
+        );
+        assert!(
+            !pending_synthetic_start_present("claude", 15),
+            "the successful claim deletes the durable record (gate releases)"
+        );
+        reset_present_for_tests();
+    }
+
+    /// #3982 — a FAILED downgrade (the reclaim returns `false`: not orphan-shaped,
+    /// identity mismatch, or I/O) must fall back to the EXISTING bounded escalation
+    /// + terminal abort, exactly as pre-#3982. Proven by: the reclaim is attempted
+    /// every cycle, the claim NEVER runs (no overwrite of the live foreign turn),
+    /// and the abort cleanup runs exactly once. Guards the "no new infinite spin"
+    /// invariant — a reclaim that never succeeds cannot dodge the escalation cap.
+    // SAFETY (await_holding_lock): see `backstop_orphan_reclaim_downgrades_then_claims`.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(start_paused = true)]
+    async fn backstop_failed_reclaim_falls_back_to_bounded_abort() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let _guard = worker_test_lock();
+        reset_present_for_tests();
+        let shared = super::super::make_shared_data_for_tests();
+
+        // A genuinely live foreign inflight forever (never orphan-shaped).
+        let view: ViewFn = Box::new(move |_shared, _record| {
+            Box::pin(async move {
+                Some(PriorTurnObservation {
+                    view: PriorTurnView {
+                        inflight_present: true,
+                        inflight_is_own_anchor: false,
+                        mailbox_blocking_turn_present: true,
+                        mailbox_turn_is_own_anchor: false,
+                        runtime_binding_present: true,
+                    },
+                    foreign_inflight_identity: Some((888, "2026-06-10 12:00:00".to_string())),
+                })
+            })
+        });
+
+        let claim_calls = Arc::new(AtomicU32::new(0));
+        let claim_calls_for_fn = claim_calls.clone();
+        let claim: ClaimFn = Box::new(move |_shared, _record| {
+            let calls = claim_calls_for_fn.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                true
+            })
+        });
+
+        // The reclaim is always attempted but never succeeds (live turn).
+        let reclaim_calls = Arc::new(AtomicU32::new(0));
+        let reclaim_calls_for_fn = reclaim_calls.clone();
+        let reclaim_orphan: ReclaimOrphanFn = Box::new(move |_shared, _record| {
+            let calls = reclaim_calls_for_fn.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                false // never orphan-shaped → no downgrade
+            })
+        });
+
+        let rec = record("claude", 16, 160);
+        persist(&rec).unwrap();
+        assert!(pending_synthetic_start_present("claude", 16));
+
+        let (abort_cleanup, abort_cleanup_calls, _) = recording_abort_cleanup();
+        let handle = tokio::spawn(run_worker(
+            shared.clone(),
+            rec,
+            view,
+            claim,
+            abort_cleanup,
+            reclaim_orphan,
+        ));
+
+        for _ in 0..(PENDING_START_MAX_BACKSTOP_CYCLES + 1) {
+            tokio::time::advance(PENDING_START_BACKSTOP + PENDING_START_POLL * 2).await;
+            tokio::task::yield_now().await;
+        }
+        handle.await.unwrap();
+
+        assert!(
+            reclaim_calls.load(Ordering::SeqCst) >= 1,
+            "the reclaim is attempted on the backstop before escalating (#3982)"
+        );
+        assert_eq!(
+            claim_calls.load(Ordering::SeqCst),
+            0,
+            "a failed reclaim must NOT claim over a genuinely live foreign inflight \
+             (the #3154 overwrite regression) — RED if a false reclaim still claims"
+        );
+        assert_eq!(
+            abort_cleanup_calls.load(Ordering::SeqCst),
+            1,
+            "a reclaim that never succeeds falls back to the bounded terminal abort \
+             exactly once (#3982 — no new infinite spin)"
+        );
+        assert!(
+            !pending_synthetic_start_present("claude", 16),
+            "the terminal abort still drops the ownership record (gate releases)"
         );
         reset_present_for_tests();
     }
@@ -1693,7 +2006,14 @@ mod tests {
             assert!(pending_synthetic_start_present("claude", 14));
 
             let (abort_cleanup, abort_cleanup_calls, _) = recording_abort_cleanup();
-            let handle = tokio::spawn(run_worker(shared.clone(), rec, view, claim, abort_cleanup));
+            let handle = tokio::spawn(run_worker(
+                shared.clone(),
+                rec,
+                view,
+                claim,
+                abort_cleanup,
+                never_reclaim_orphan(),
+            ));
 
             for _ in 0..(PENDING_START_MAX_BACKSTOP_CYCLES + 1) {
                 tokio::time::advance(PENDING_START_BACKSTOP + PENDING_START_POLL * 2).await;
@@ -1749,6 +2069,19 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
 
         let _guard = worker_test_lock();
+        // Isolate the durable store root to a per-test temp dir under the crate
+        // env lock — mirrors the sibling `claim_false_exhausted_still_retains_record`.
+        // Without it this test reads the ambient `AGENTDESK_ROOT_DIR`, so a
+        // concurrent env-mutating test in ANOTHER module under the combined CI
+        // filter (e.g. `tui_prompt_relay::tests`'s `EnvRootGuard`) racing
+        // `set_var`/`var_os` — which is not thread-safe — tears the path and this
+        // test's `persist` fails (a pre-existing isolation gap).
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let temp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
         reset_present_for_tests();
         let shared = super::super::make_shared_data_for_tests();
 
@@ -1770,7 +2103,14 @@ mod tests {
         let rec = record("claude", 11, 111);
         persist(&rec).unwrap();
         let (abort_cleanup, abort_cleanup_calls, _) = recording_abort_cleanup();
-        let handle = tokio::spawn(run_worker(shared.clone(), rec, view, claim, abort_cleanup));
+        let handle = tokio::spawn(run_worker(
+            shared.clone(),
+            rec,
+            view,
+            claim,
+            abort_cleanup,
+            never_reclaim_orphan(),
+        ));
 
         // Drive the retry backoffs. After the first false, assert the record is
         // STILL present (RETAINED) before the eventual success deletes it.
@@ -1846,7 +2186,14 @@ mod tests {
         let rec = record("claude", 12, 122);
         persist(&rec).unwrap();
         let (abort_cleanup, abort_cleanup_calls, _) = recording_abort_cleanup();
-        let handle = tokio::spawn(run_worker(shared.clone(), rec, view, claim, abort_cleanup));
+        let handle = tokio::spawn(run_worker(
+            shared.clone(),
+            rec,
+            view,
+            claim,
+            abort_cleanup,
+            never_reclaim_orphan(),
+        ));
 
         for _ in 0..(PENDING_START_MAX_CLAIM_ATTEMPTS + 2) {
             tokio::time::advance(PENDING_START_CLAIM_RETRY_BACKOFF + PENDING_START_POLL).await;
@@ -1935,7 +2282,14 @@ mod tests {
             rec.attempt_count = PENDING_START_MAX_CLAIM_ATTEMPTS;
             persist(&rec).unwrap();
             let (abort_cleanup, _, _) = recording_abort_cleanup();
-            let handle = tokio::spawn(run_worker(shared.clone(), rec, view, claim, abort_cleanup));
+            let handle = tokio::spawn(run_worker(
+            shared.clone(),
+            rec,
+            view,
+            claim,
+            abort_cleanup,
+            never_reclaim_orphan(),
+        ));
 
             tokio::task::yield_now().await;
             assert!(
@@ -2169,6 +2523,7 @@ mod tests {
             finalized_view(),
             claim_succeeds(),
             cleanup,
+            never_reclaim_orphan(),
         ));
 
         let markers = super::super::tui_direct_abort_marker::load_for_channel("claude", 21);
@@ -2246,6 +2601,7 @@ mod tests {
             finalized_view(),
             claim_succeeds(),
             cleanup,
+            never_reclaim_orphan(),
         ));
 
         assert!(
@@ -2300,6 +2656,7 @@ mod tests {
             finalized_view(),
             claim_succeeds(),
             cleanup,
+            never_reclaim_orphan(),
         ));
 
         let markers = super::super::tui_direct_abort_marker::load_for_channel("claude", 23);

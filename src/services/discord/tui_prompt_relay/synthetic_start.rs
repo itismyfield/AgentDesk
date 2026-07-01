@@ -488,6 +488,7 @@ pub(super) fn defer_synthetic_turn_start(
         pending_start_view_fn(),
         pending_start_claim_fn(),
         pending_start_abort_cleanup_fn(),
+        super::synthetic_orphan_reclaim::pending_start_reclaim_orphan_fn(),
     );
 }
 
@@ -755,6 +756,7 @@ pub(super) fn restore_pending_starts(shared: &Arc<SharedData>, provider: &Provid
             pending_start_view_fn(),
             pending_start_claim_fn(),
             pending_start_abort_cleanup_fn(),
+            super::synthetic_orphan_reclaim::pending_start_reclaim_orphan_fn(),
         );
     }
 }
@@ -986,3 +988,8 @@ pub(super) fn build_tui_direct_synthetic_inflight_state(
     state.injected_prompt_message_id = Some(user_msg_id.get());
     state
 }
+
+// #3982 orphan-at-birth reclaim helpers + their unit tests live in the sibling
+// `synthetic_orphan_reclaim` module (keeps this file focused and under the
+// giant-file threshold); `defer_synthetic_turn_start` / `restore_pending_starts`
+// inject `synthetic_orphan_reclaim::pending_start_reclaim_orphan_fn()`.
