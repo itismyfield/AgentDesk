@@ -278,7 +278,7 @@
 # carry-forward parameter (`None` here; queued kickoff carries the voice payload via
 # the accepted-replay store reinsert above) plus its one-line rationale comment.
 # Bugfix-only (#3905 direct-dispatch carry-forward).
-"src/services/discord/mod.rs" = 4158 # 2026-07-02 #3983 item4: 4156 -> 4158 (+2 prod LoC), reviewable admission — registers the new non-giant `session_banner` module (one-shot top session banner emit + dual-path de-dup) with a one-line doc comment; no other logic added to this giant.
+"src/services/discord/mod.rs" = 4159 # 2026-07-02 #3805 P2 PR-A: 4158 -> 4159 (+1 prod LoC), reviewable admission — the `make_shared_data_for_tests` fixture literal gains one `two_message_panel_enabled: false` line for the new additive scaffolding flag (no-op, no reader); no logic added to this giant. Prior: #3983 item4 4156 -> 4158 (session_banner module registration).
 # #3305: the local-only pass-through lifecycle-skip (kind hoist + note-only return
 # branch + idle-loop skip) is offset by comment dedup in the same root, lowering the
 # frozen baseline 5438 -> 5429 (-9). Locks in the shrink win (#3028 ratchet).

@@ -2296,6 +2296,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
             ),
             placeholder_live_events_enabled: false,
             status_panel_v2_enabled: false,
+            two_message_panel_enabled: false,
         },
         queued: QueuedPlaceholderState {
             queued_placeholders: dashmap::DashMap::new(),

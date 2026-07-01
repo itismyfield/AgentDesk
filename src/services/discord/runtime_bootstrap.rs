@@ -50,6 +50,9 @@ pub(crate) struct RunBotContext {
     pub(crate) engine: Option<crate::engine::PolicyEngine>,
     pub(crate) placeholder_live_events_enabled: bool,
     pub(crate) status_panel_v2_enabled: bool,
+    /// #3805 P2: two-message panel rollout gate (default OFF). Scaffolding —
+    /// threaded from config into shared UI state, not read by any path in PR-A.
+    pub(crate) two_message_panel_enabled: bool,
 }
 
 pub(super) fn discord_gateway_intents() -> serenity::GatewayIntents {
@@ -76,6 +79,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         engine,
         placeholder_live_events_enabled,
         status_panel_v2_enabled,
+        two_message_panel_enabled,
     } = context;
 
     if let Some(bot_name) = should_skip_agent_runtime_launch(token) {
@@ -193,6 +197,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         UiFeatureFlags {
             placeholder_live_events_enabled,
             status_panel_v2_enabled,
+            two_message_panel_enabled,
         },
         RestoredSessionState {
             model_overrides: &restored_model_overrides,
@@ -768,6 +773,7 @@ mod restart_lifecycle_characterization_tests {
             UiFeatureFlags {
                 placeholder_live_events_enabled: false,
                 status_panel_v2_enabled: false,
+                two_message_panel_enabled: false,
             },
             RestoredSessionState {
                 model_overrides: &[],

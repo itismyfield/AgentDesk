@@ -1376,6 +1376,15 @@ pub struct PlaceholderConfig {
     pub live_events_enabled: bool,
     #[serde(default = "default_true")]
     pub status_panel_v2_enabled: bool,
+    /// #3805 P2: rollout gate for the two-message panel model (answer chunks
+    /// first, the live status panel re-anchored beneath the latest chunk).
+    /// Default OFF and restart-required — the whole `placeholder` section is
+    /// boot-bound, copied into shared UI state once at startup (see
+    /// `config_live_reload::restart_required_changes`). PR-A is pure
+    /// scaffolding: no branch reads this flag yet (later PR-B~ gates the
+    /// two-message create/re-anchor path behind it).
+    #[serde(default)]
+    pub two_message_panel_enabled: bool,
 }
 
 impl Default for PlaceholderConfig {
@@ -1383,6 +1392,7 @@ impl Default for PlaceholderConfig {
         Self {
             live_events_enabled: true,
             status_panel_v2_enabled: true,
+            two_message_panel_enabled: false,
         }
     }
 }

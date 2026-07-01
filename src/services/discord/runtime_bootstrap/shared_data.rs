@@ -25,6 +25,10 @@ pub(super) struct ProcessLifecycleCounters {
 pub(super) struct UiFeatureFlags {
     pub(super) placeholder_live_events_enabled: bool,
     pub(super) status_panel_v2_enabled: bool,
+    /// #3805 P2: two-message panel rollout gate (default OFF). Scaffolding —
+    /// copied into shared UI state alongside `status_panel_v2_enabled` but not
+    /// read by any path in PR-A.
+    pub(super) two_message_panel_enabled: bool,
 }
 
 /// #3479 Item 3: session state restored from persisted bot settings. Borrowed
@@ -75,6 +79,7 @@ pub(super) fn run_bot_build_shared_data(
     let UiFeatureFlags {
         placeholder_live_events_enabled,
         status_panel_v2_enabled,
+        two_message_panel_enabled,
     } = flags;
     let RestoredSessionState {
         model_overrides: restored_model_overrides,
@@ -111,6 +116,7 @@ pub(super) fn run_bot_build_shared_data(
             ),
             placeholder_live_events_enabled,
             status_panel_v2_enabled,
+            two_message_panel_enabled,
         },
         // #3038 S1: wrapped verbatim at the first-member position (evaluation-order preserved).
         queued: QueuedPlaceholderState {
