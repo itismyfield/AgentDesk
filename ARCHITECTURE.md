@@ -632,6 +632,7 @@ src/
 │   │   │   ├── relay_ownership.rs
 │   │   │   ├── synthetic_orphan_reclaim.rs
 │   │   │   ├── synthetic_start.rs
+│   │   │   ├── synthetic_start_wiring.rs
 │   │   │   └── tests.rs
 │   │   ├── turn_bridge/
 │   │   │   ├── completion_guard/

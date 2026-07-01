@@ -1062,3 +1062,20 @@
   - `src/voice/tts/edge.rs` keeps the edge-tts subprocess timeout a worker-local
     constant; making it configurable + adding TTS synth/cache hit-miss metrics is
     explicitly deferred (informational sub-item) and would also be worker-local.
+- #4002 (recap duplicate root fix — SystemContinuation Path-X convergence): the
+  compact-resume suppress branch (`tui_prompt_relay.rs`) used to post its neutral
+  note and fall through INFLIGHT-LESS, so the observer spawned an un-arbitrated
+  BridgeAdapter idle tail that raced the real turn's inflight-owned relayer → two
+  live panels. The active-turn else-branch relay-ownership wiring (prior-view →
+  defer/claim → adopt resolved `relay_owner` into the lease) was extracted VERBATIM
+  into a new node-local module (`tui_prompt_relay/synthetic_start_wiring.rs`,
+  `wire_tui_direct_synthetic_turn_start`) and the suppress branch now reuses it,
+  installing a PASSIVE synthetic inflight (Background kind, relay-ownership only —
+  no ⏳/anchor/lifecycle) so the post-block bridge-tail gate honours cross-relayer
+  single-ownership. **Worker-local**: the passive inflight, the in-memory external-
+  input relay lease, and the durable pending-start / claim-marker stores are all
+  the SAME per-node surfaces the active-turn synthetic path already uses; the fix
+  only ROUTES the compact-resume observation onto them. It introduces no new PG
+  lease, cross-node read, leader-only side effect, or singleton assumption — the
+  cross-relayer single-owner invariant it now enforces already lived on the per-
+  node inflight row. No DB/schema change.

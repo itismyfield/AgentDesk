@@ -104,11 +104,11 @@ use self::relay_ownership::{
 
 mod synthetic_orphan_reclaim; // #3982 orphan-at-birth reclaim trigger (see module doc)
 mod synthetic_start;
+mod synthetic_start_wiring; // #4002 shared Path-X wiring reused by the suppress branch
 #[cfg(test)]
 pub(in crate::services::discord) use self::synthetic_start::synthetic_start_offset_carry_forward;
 use self::synthetic_start::{
-    build_tui_direct_synthetic_inflight_state, claim_tui_direct_synthetic_turn,
-    defer_synthetic_turn_start, restore_pending_starts, synthetic_start_prior_turn_view,
+    build_tui_direct_synthetic_inflight_state, restore_pending_starts,
     tui_direct_synthetic_inflight_active_for_prompt,
 };
 #[cfg(unix)]
@@ -538,6 +538,31 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
                     note_message_id = message.id.get(),
                     "rendered system/compact continuation injection as neutral session note; no active-turn lifecycle, assistant output still relayed via bridge tail"
                 );
+                // #4002 (recap duplicate root fix): the compact-resume note is NOT an
+                // active-turn anchor — no ⏳/anchor-card/`record_prompt_anchor`/
+                // completion-drain ran above, so this stays a neutral "not an active
+                // turn" note. But the SystemContinuation output IS still relayed, and
+                // before this fix it fell through inflight-less: the observer spawned an
+                // UN-ARBITRATED BridgeAdapter tail that raced the real turn's owner →
+                // two live panels (2 slots). Route it through the SAME Path-X seam the
+                // active-turn else-branch uses: pin the note as this turn's anchor so
+                // the idle-tail drain-wait identity-pins our own row, then install a
+                // passive synthetic inflight + adopt the resolved relay_owner into the
+                // lease. The post-block bridge-tail gate then honours cross-relayer
+                // single-ownership: watcher-alive → adopt → tail stands down (1 slot);
+                // watcher-dead → BridgeAdapter → tail is the SOLE relayer (no GAP);
+                // deferred → observer stands down, the worker spawns exactly one tail.
+                current_turn_anchor_id = Some(message.id.get());
+                deferred_synthetic_start =
+                    synthetic_start_wiring::wire_tui_direct_synthetic_turn_start(
+                        shared,
+                        &prompt.provider,
+                        channel_id,
+                        &prompt,
+                        message.id,
+                        &mut lease,
+                    )
+                    .await;
             }
             Err(error) => {
                 tracing::warn!(
@@ -719,82 +744,23 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
                 || matches!(injected_class, InjectedPromptClass::TaskNotificationEvent),
             "system-continuation injections must not reach active-turn handling",
         );
-        // #3154 P1-3: set when the synthetic turn-start is DEFERRED to the detached
-        // per-channel worker; the observer then must NOT spawn its own BridgeAdapter
-        // tail below (a second observer tail would relay the SAME output twice — the
-        // original bug). The worker owns the relay-owner handoff.
-        if let Some(provider) = ProviderKind::from_str(&prompt.provider) {
-            // #3154 — TEMPORAL fix for turn-interleaving. An INLINE claim while the
-            // PRIOR turn's tail still drains seeds `turn_start_offset` from the prior
-            // cursor (duplicate relay), and an inline wait starves OTHER channels. So
-            // an un-finalized prior turn persists a DURABLE pending-start and hands
-            // the claim to a DETACHED per-channel worker (fresh EOF offset); the
-            // common no-interleave case stays on the inline fast path.
-            let prior = synthetic_start_prior_turn_view(
-                shared,
-                &provider,
-                channel_id,
-                &prompt.tmux_session_name,
-                anchor_message.id.get(),
-            )
-            .await;
-            if super::tui_direct_pending_start::should_defer_synthetic_turn_start(prior.view) {
-                deferred_synthetic_start = true;
-                defer_synthetic_turn_start(
-                    shared,
-                    &provider,
-                    channel_id,
-                    &prompt,
-                    anchor_message.id,
-                    &lease,
-                );
-                tracing::info!(
-                    provider = %prompt.provider,
-                    channel_id = channel_id.get(),
-                    tmux_session_name = %prompt.tmux_session_name,
-                    anchor_message_id = anchor_message.id.get(),
-                    "deferred TUI-direct synthetic turn-start off the observer loop; prior turn not yet finalized (durable record persisted, detached per-channel worker spawned)"
-                );
-            } else {
-                let claim = claim_tui_direct_synthetic_turn(
-                    shared,
-                    &provider,
-                    channel_id,
-                    &prompt.tmux_session_name,
-                    &prompt.prompt,
-                    anchor_message.id,
-                    &lease,
-                )
-                .await;
-                if claim_should_adopt_relay_owner(
-                    claim.claimed,
-                    lease.relay_owner,
-                    claim.relay_owner,
-                ) {
-                    lease.relay_owner = claim.relay_owner;
-                    // Re-record overwrites the lease with a FRESH generation; adopt it
-                    // back into `lease` so the bridge-tail guard below captures the
-                    // exact stored identity (a stale generation's Drop would clear
-                    // nothing / the wrong lease).
-                    lease = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
-                        provider.as_str(),
-                        &prompt.tmux_session_name,
-                        lease,
-                    );
-                }
-                // #3350: the INLINE claim records the same #3303 DeferredClaim marker
-                // as the deferred worker (drain ✅ / sweep TTL ⚠). SC3/own-row/I5 gates
-                // live in the recorder; a pending_start test pins this wiring.
-                super::tui_direct_pending_start::record_inline_claim_marker_if_claimed(
-                    claim.claimed,
-                    &prompt.provider,
-                    channel_id.get(),
-                    anchor_message.id.get(),
-                    &prompt.tmux_session_name,
-                    super::tui_direct_pending_start::record_claim_marker_if_watcher_owned,
-                );
-            }
-        }
+        // #3154 P1-3 / #4002: run the shared synthetic-start wiring. It reads the
+        // prior-turn view and either DEFERS to the detached per-channel worker when
+        // a prior turn is still draining — the observer then must NOT spawn its own
+        // BridgeAdapter tail below (a second observer tail would relay the SAME
+        // output twice — the original bug); the worker owns the relay-owner handoff
+        // — else INLINE-claims a passive synthetic inflight and adopts the resolved
+        // relay_owner into `lease` for the post-block bridge-tail ownership guard.
+        // Extracted so the SystemContinuation suppress branch reuses the SAME seam.
+        deferred_synthetic_start = synthetic_start_wiring::wire_tui_direct_synthetic_turn_start(
+            shared,
+            &prompt.provider,
+            channel_id,
+            &prompt,
+            anchor_message.id,
+            &mut lease,
+        )
+        .await;
         tracing::info!(
             provider = %prompt.provider,
             channel_id = channel_id.get(),

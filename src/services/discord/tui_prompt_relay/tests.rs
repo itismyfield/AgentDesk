@@ -2981,6 +2981,170 @@ fn synthetic_owner_delivery_path_matches_producer_presence() {
     ));
 }
 
+// ====================================================================
+// #4002 (recap duplicate root fix) — the SystemContinuation (compact
+// resume) suppress branch now CONVERGES on the SAME Path-X synthetic-start
+// seam the active-turn else-branch uses (`wire_tui_direct_synthetic_turn_start`):
+// it installs a passive synthetic inflight, adopts the resolved relay_owner
+// into the lease, and the post-block bridge-tail gate then honours cross-
+// relayer single-ownership. Before the fix the suppress branch fell through
+// INFLIGHT-LESS — the observer spawned an UN-ARBITRATED BridgeAdapter tail
+// that raced the real turn's owner → two live panels (2 slots). These pin the
+// convergence at the pure seams the helper chains (owner-resolve → adopt →
+// observer gate) plus the UNCHANGED lifecycle contract (the note stays a
+// neutral "not an active turn" note — no ⏳/anchor/lifecycle reactions).
+// ====================================================================
+
+/// (a) ROUTING PIN. The compact-resume note keeps its neutral lifecycle
+/// (`suppresses_user_turn_lifecycle` stays true — the ⏳/anchor-card/
+/// `record_prompt_anchor`/completion-drain all live BEFORE the extracted seam,
+/// so the suppress path never runs them) yet STILL relays the model's output
+/// (`still_delivers_assistant_output`). The fix adds ONLY relay-ownership
+/// wiring: once the passive synthetic inflight's claim resolves to the live
+/// watcher, the observer bridge tail stands down, so the SystemContinuation
+/// output relays from EXACTLY ONE owner (the watcher) — not the unarbitrated
+/// second tail that produced the duplicate slot.
+#[test]
+fn system_continuation_converges_on_synthetic_start_seam() {
+    use super::synthetic_start::tui_direct_synthetic_relay_owner;
+
+    let cont = InjectedPromptClass::SystemContinuation;
+    // Side-effect no-leak: the suppress branch runs NONE of the active-turn
+    // lifecycle, so this contract is unchanged by the fix.
+    assert!(
+        cont.suppresses_user_turn_lifecycle(),
+        "the compact-resume note must stay a neutral 'not an active turn' note"
+    );
+    assert!(
+        cont.still_delivers_assistant_output(),
+        "SystemContinuation output is still relayed — the fix only arbitrates WHO relays it"
+    );
+    assert!(!cont.is_human_active_turn());
+
+    // The seam resolves ownership IDENTICALLY to the active-turn path: watcher
+    // alive ⇒ the passive synthetic inflight's claim resolves to the watcher …
+    let resolved = tui_direct_synthetic_relay_owner(true, true, true);
+    assert_eq!(resolved, ExternalInputRelayOwner::TmuxWatcher);
+    // … and the adopted (watcher-owned) lease makes the observer stand down —
+    // the watcher is the SOLE relayer (1 slot). RED if the suppress branch is
+    // reverted to fall through inflight-less (the observer would spawn a 2nd tail).
+    assert!(
+        !observer_should_spawn_bridge_tail(false, resolved),
+        "a watcher-owned SystemContinuation turn: the observer bridge tail stands down"
+    );
+}
+
+/// (b interleaving — watcher alive → adopt → 1 slot). The passive synthetic
+/// inflight the fix installs on the SystemContinuation path claims the turn; the
+/// claim resolves to the LIVE watcher, so the lease adopts the watcher owner and
+/// the observer stands down. EXACTLY ONE relayer (the watcher) — the duplicate
+/// second tail is gone. Mirrors the active-turn adoption against the REAL lease store.
+#[test]
+fn system_continuation_watcher_alive_adopts_owner_exactly_one_relayer() {
+    let provider = "claude";
+    let tmux = "tmux-4002-sc-watcher-alive";
+    let channel_id: u64 = 771_000_000_004_002;
+
+    // The suppress branch records the pre-claim (BridgeAdapter) lease, then the
+    // passive synthetic claim resolves to the watcher (watcher_can_own == true).
+    let mut lease = ExternalInputRelayLease::unassigned(Some(channel_id));
+    lease.relay_owner = ExternalInputRelayOwner::BridgeAdapter;
+    let lease =
+        crate::services::tui_prompt_dedupe::record_external_input_turn_lease(provider, tmux, lease);
+
+    let claimed_owner = super::synthetic_start::tui_direct_synthetic_relay_owner(true, true, true);
+    assert_eq!(claimed_owner, ExternalInputRelayOwner::TmuxWatcher);
+    assert!(
+        claim_should_adopt_relay_owner(true, lease.relay_owner, claimed_owner),
+        "a successful watcher claim flips the BridgeAdapter lease → must adopt"
+    );
+
+    // Adopt exactly as the shared seam does: re-record with the claimed owner.
+    let mut adopted = lease.clone();
+    adopted.relay_owner = claimed_owner;
+    crate::services::tui_prompt_dedupe::record_external_input_turn_lease(provider, tmux, adopted);
+
+    let stored =
+        crate::services::tui_prompt_dedupe::external_input_relay_lease(provider, tmux, channel_id)
+            .expect("lease present after adoption");
+    let observer_relays = observer_should_spawn_bridge_tail(false, stored.relay_owner);
+    let watcher_relays = matches!(stored.relay_owner, ExternalInputRelayOwner::TmuxWatcher);
+    assert_eq!(
+        u8::from(observer_relays) + u8::from(watcher_relays),
+        1,
+        "watcher-alive SystemContinuation: exactly ONE relayer (the watcher); the \
+         pre-fix unarbitrated observer tail would make this 2 (the duplicate slot)"
+    );
+
+    let _ = crate::services::tui_prompt_dedupe::clear_external_input_relay_lease(
+        provider, tmux, channel_id,
+    );
+}
+
+/// (b interleaving — watcher dead → BridgeAdapter → tail retained, no GAP). The
+/// critical no-GAP guard: when the watcher is dead the claim resolves to the
+/// BridgeAdapter, so the passive synthetic inflight must NOT stand the tail down —
+/// the observer's bridge tail (inline) OR the worker's tail (deferred) is the SOLE
+/// relayer. RED if the fix over-suppresses (relayer_count == 0 == GAP).
+#[test]
+fn system_continuation_watcher_dead_bridge_tail_is_sole_relayer_no_gap() {
+    // Watcher cannot own (dead) + no live producer ⇒ BridgeAdapter.
+    let resolved = super::synthetic_start::tui_direct_synthetic_relay_owner(false, true, false);
+    assert_eq!(resolved, ExternalInputRelayOwner::BridgeAdapter);
+    assert!(bridge_adapter_owns_external_turn(resolved));
+
+    // Inline (non-deferred) path: the observer tail is the sole relayer.
+    let observer_relays = observer_should_spawn_bridge_tail(false, resolved);
+    let watcher_relays = matches!(resolved, ExternalInputRelayOwner::TmuxWatcher);
+    assert_eq!(
+        u8::from(observer_relays) + u8::from(watcher_relays),
+        1,
+        "watcher-dead SystemContinuation: the bridge tail is the SOLE relayer (no \
+         GAP) — the fix must not suppress the only relayer"
+    );
+
+    // Deferred variant (prior turn still draining): the observer stands down but
+    // the worker spawns EXACTLY ONE tail for the BridgeAdapter resolution — no GAP
+    // on the deferred path either.
+    assert!(!observer_should_spawn_bridge_tail(true, resolved));
+    assert!(deferred_claim_requires_bridge_tail_relayer(resolved));
+}
+
+/// (b interleaving — SystemContinuation then a real turn → 1 slot). The passive
+/// synthetic inflight the fix installs occupies the mailbox, so a near-simultaneous
+/// real turn's claim FAILS (claimed == false) and adopts nothing — no second owner,
+/// no second relayer. The single owner established by the SystemContinuation turn
+/// stays the sole relayer (1 slot). Pins that a failed 2nd claim never re-records.
+#[test]
+fn system_continuation_then_real_turn_second_claim_mints_no_extra_relayer() {
+    // Obs1 (SystemContinuation): the passive synthetic claim resolves to the live
+    // watcher and adopts — the watcher is the sole relayer (1).
+    let obs1_owner = super::synthetic_start::tui_direct_synthetic_relay_owner(true, true, true);
+    assert_eq!(obs1_owner, ExternalInputRelayOwner::TmuxWatcher);
+    let obs1_relayers = u8::from(observer_should_spawn_bridge_tail(false, obs1_owner))
+        + u8::from(matches!(obs1_owner, ExternalInputRelayOwner::TmuxWatcher));
+    assert_eq!(obs1_relayers, 1);
+
+    // Obs2 (the real turn, same session): the mailbox is held by obs1's inflight,
+    // so its claim returns claimed == false → adoption is skipped, NOTHING is
+    // re-recorded, and no second inflight/relayer is minted.
+    let obs2_adopts = claim_should_adopt_relay_owner(
+        false,
+        ExternalInputRelayOwner::TmuxWatcher,
+        ExternalInputRelayOwner::BridgeAdapter,
+    );
+    let obs2_extra_relayers = u8::from(obs2_adopts);
+    assert_eq!(
+        obs2_extra_relayers, 0,
+        "a failed 2nd claim (mailbox occupied) mints no extra relayer"
+    );
+    assert_eq!(
+        obs1_relayers + obs2_extra_relayers,
+        1,
+        "1 slot total across the interleaving (no duplicate)"
+    );
+}
+
 #[tokio::test]
 async fn tui_direct_pre_save_cleanup_does_not_decrement_global_active() {
     let shared = super::super::make_shared_data_for_tests();
