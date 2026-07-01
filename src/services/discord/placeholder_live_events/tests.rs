@@ -280,8 +280,10 @@ fn status_panel_recent_compacts_raw_command_details() {
     );
 
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(rendered.contains("🖥️ Recent"));
-    assert!(rendered.contains("• [Bash] 실행"));
+    // #3983 item 5a: the footer no longer echoes the compact 🖥️ Recent block; the
+    // activity label shows the tool class, never the raw command detail.
+    assert!(rendered.contains("🔧 도구 실행 중"));
+    assert!(!rendered.contains("🖥️ Recent"));
     assert!(!rendered.contains("```text"));
     assert!(
         !rendered.contains(raw_command),
@@ -361,83 +363,43 @@ fn status_panel_turn_completed_renders_foreground_completion() {
         }
     );
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(rendered.starts_with("✅ **응답 완료** — claude"));
+    assert!(rendered.starts_with("✅ 완료"));
     assert!(!rendered.contains("🟢 진행 중"));
 }
 
 #[test]
-fn status_panel_turn_completed_drops_recent_live_block() {
-    let events = PlaceholderLiveEvents::default();
-    let channel_id = ChannelId::new(174);
-    events.push_status_events(
-        channel_id,
-        status_events_from_tool_use(
-            "Bash",
-            &json!({"command": "printf E2E_TOOL_OK"}).to_string(),
-        ),
-    );
-    events.push_event(
-        channel_id,
-        RecentPlaceholderEvent::tool_use(
-            "Bash",
-            &json!({"command": "printf E2E_TOOL_OK"}).to_string(),
-        )
-        .unwrap(),
-    );
-
-    let active = events.render_status_panel_with_heartbeat(
-        channel_id,
-        &ProviderKind::Claude,
-        1_700_000_000,
-        1_700_000_005,
-    );
-    assert!(active.contains("🖥️ Recent"));
-    assert!(active.contains("[Bash]"));
-    assert!(!active.contains("계속 처리 중"));
-
-    events.push_status_event(channel_id, StatusEvent::TurnCompleted { background: false });
-
-    let completed = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(completed.starts_with("✅ **응답 완료** — claude"));
-    assert!(!completed.contains("🖥️ Recent"));
-    assert!(!completed.contains("[Bash]"));
-    assert!(!completed.contains("계속 처리 중"));
-}
-
-#[test]
-fn status_panel_surfaces_live_final_stale_and_unknown_confidence() {
-    // #3812: every status panel carries a compact live/stale confidence line in
-    // its header block, derived from deterministic ADK status signals (never age
-    // alone). Pins the four user-facing states end-to-end through the store.
+fn status_panel_absorbs_stale_and_final_into_the_activity_emoji() {
+    // #3983 items 2 + B: the separate 신뢰도 line is retired; the freshness class is
+    // absorbed into the line-1 activity emoji, and line 2 carries the time line.
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(38120);
 
-    // Running turn with a fresh live event → `live`.
+    // Running turn → 🟢 activity + `마지막 업데이트`/`턴 시작` time line, no 신뢰도.
     events.push_status_events(
         channel_id,
         status_events_from_tool_use("Bash", &json!({"command": "cargo test"}).to_string()),
     );
-    events.push_event(
-        channel_id,
-        RecentPlaceholderEvent::tool_use("Bash", &json!({"command": "cargo test"}).to_string())
-            .unwrap(),
-    );
     let live = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
     assert!(
-        live.contains("신뢰도: live · 마지막 업데이트"),
-        "running panel must show a live confidence line: {live:?}"
+        live.contains("🔧 도구 실행 중"),
+        "running activity: {live:?}"
+    );
+    assert!(
+        live.contains("마지막 업데이트 : <t:") && live.contains("턴 시작 : <t:"),
+        "time line must render: {live:?}"
+    );
+    assert!(
+        !live.contains("신뢰도"),
+        "confidence line is retired: {live:?}"
     );
 
-    // Completion → distinct `final` confidence state (not `live`).
+    // Completion → `✅ 완료` (final absorbed into the emoji).
     events.push_status_event(channel_id, StatusEvent::TurnCompleted { background: false });
     let done = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(
-        done.contains("신뢰도: final"),
-        "completed panel must show a final confidence line: {done:?}"
-    );
-    assert!(!done.contains("신뢰도: live"));
+    assert!(done.starts_with("✅ 완료"), "final activity: {done:?}");
+    assert!(!done.contains("신뢰도"));
 
-    // Answer relayed but session-end unconfirmed → corroborated `stale · 조사 권장`.
+    // Answer relayed but session-end unconfirmed → `🟡 응답 지연 · 조사 권장`.
     let stale = events.render_terminal_ui_obligation_panel(
         channel_id,
         &ProviderKind::Claude,
@@ -445,11 +407,11 @@ fn status_panel_surfaces_live_final_stale_and_unknown_confidence() {
         TerminalUiObligationPanelStatus::Deadline,
     );
     assert!(
-        stale.contains("신뢰도: stale") && stale.contains("조사 권장"),
-        "unconfirmed-delivery panel must show a stale confidence line: {stale:?}"
+        stale.starts_with("🟡 응답 지연 · 조사 권장"),
+        "stale is absorbed into the 🟡 activity emoji: {stale:?}"
     );
 
-    // Delivery done, termination still confirming → ambiguous `상태 불명확`.
+    // Delivery done, termination still confirming → the pending `↻` activity.
     let pending = events.render_terminal_ui_obligation_panel(
         channel_id,
         &ProviderKind::Claude,
@@ -457,8 +419,8 @@ fn status_panel_surfaces_live_final_stale_and_unknown_confidence() {
         TerminalUiObligationPanelStatus::Pending,
     );
     assert!(
-        pending.contains("신뢰도: 상태 불명확"),
-        "pending-delivery panel must show an unknown confidence line: {pending:?}"
+        pending.starts_with("↻ 응답 전달됨 · 세션 종료 확인 중"),
+        "pending activity: {pending:?}"
     );
 }
 
@@ -490,8 +452,9 @@ fn status_panel_codex_active_omits_processing_tail_after_recent_block() {
     );
 
     assert!(rendered.contains("🔧 도구 실행 중"));
-    assert!(rendered.contains("🖥️ Recent"));
     assert!(rendered.contains("[Bash]"));
+    // #3983 item 5a: the 🖥️ Recent echo is retired from the footer.
+    assert!(!rendered.contains("🖥️ Recent"));
     assert!(!rendered.contains("계속 처리 중"));
 }
 
@@ -541,7 +504,7 @@ fn status_panel_turn_completed_after_monitor_wait_renders_background_completion(
         }
     );
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(rendered.starts_with("✅ **백그라운드 완료** — claude"));
+    assert!(rendered.starts_with("✅ 백그라운드 완료"));
     assert!(!rendered.contains("💤 monitor 대기"));
 }
 
@@ -566,7 +529,7 @@ fn status_panel_turn_completed_after_aborted_tool_renders_terminal_completion() 
         }
     );
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(rendered.starts_with("✅ **응답 완료** — claude"));
+    assert!(rendered.starts_with("✅ 완료"));
     assert!(!rendered.contains("🟢 진행 중"));
 }
 
@@ -1453,66 +1416,6 @@ fn status_panel_omits_context_line_when_token_data_is_absent() {
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
 
     assert!(!rendered.contains("Context   "));
-}
-
-#[test]
-fn recent_header_prefers_dispatch_owner_over_local_node() {
-    let snapshot = TaskPanelSnapshot {
-        dispatch_id: "dsp_55".to_string(),
-        card_id: None,
-        dispatch_type: None,
-        owner_instance_id: Some("mac-book-release".to_string()),
-        card_title: None,
-        dispatch_title: None,
-        github_issue_number: None,
-    };
-    assert_eq!(
-        render_recent_section_header(Some(&snapshot), true, Some("mac-mini-release")),
-        "🖥️ Recent (mac-book-release)"
-    );
-}
-
-#[test]
-fn recent_header_falls_back_to_local_node_when_no_dispatch_owner() {
-    assert_eq!(
-        render_recent_section_header(None, true, Some("mac-mini-release")),
-        "🖥️ Recent (mac-mini-release)"
-    );
-    let snapshot_without_owner = TaskPanelSnapshot {
-        dispatch_id: "dsp_99".to_string(),
-        card_id: None,
-        dispatch_type: None,
-        owner_instance_id: None,
-        card_title: None,
-        dispatch_title: None,
-        github_issue_number: None,
-    };
-    assert_eq!(
-        render_recent_section_header(
-            Some(&snapshot_without_owner),
-            true,
-            Some("mac-mini-release")
-        ),
-        "🖥️ Recent (mac-mini-release)"
-    );
-}
-
-#[test]
-fn recent_header_omits_node_when_cluster_disabled_or_unknown() {
-    let snapshot = TaskPanelSnapshot {
-        dispatch_id: "dsp_55".to_string(),
-        card_id: None,
-        dispatch_type: None,
-        owner_instance_id: Some("mac-book-release".to_string()),
-        card_title: None,
-        dispatch_title: None,
-        github_issue_number: None,
-    };
-    assert_eq!(
-        render_recent_section_header(Some(&snapshot), false, Some("mac-mini-release")),
-        "🖥️ Recent"
-    );
-    assert_eq!(render_recent_section_header(None, true, None), "🖥️ Recent");
 }
 
 #[test]
@@ -6128,112 +6031,6 @@ fn compaction_log_gate_fires_on_change_only() {
 // #3477 / #3473 — live panel terminal block reorder/blank/multiline + TTL.
 // ===========================================================================
 
-// #3477 item 4: the 🖥️ Recent/terminal block renders BEFORE the Tasks and
-// Subagents sections (it is the most useful at-a-glance signal and, ahead of the
-// bulky sections, is also protected from trailing-section budget drops).
-#[test]
-fn status_panel_recent_block_renders_before_tasks_and_subagents() {
-    let events = PlaceholderLiveEvents::default();
-    let channel_id = ChannelId::new(3_477_001);
-    // A running background task (Tasks section) and a running subagent.
-    events.push_status_event(
-        channel_id,
-        StatusEvent::BackgroundTaskStart {
-            name: "Bash".to_string(),
-            summary: "long build".to_string(),
-            tool_use_id: "bg-1".to_string(),
-        },
-    );
-    events.push_status_event(
-        channel_id,
-        StatusEvent::SubagentStart {
-            subagent_type: Some("Explore".to_string()),
-            desc: Some("scan repo".to_string()),
-            tool_use_id: Some("sa-1".to_string()),
-            background: false,
-        },
-    );
-    // A live Recent event.
-    events.push_event(
-        channel_id,
-        RecentPlaceholderEvent::tool_use("Read", &json!({"file_path": "/tmp/x.rs"}).to_string())
-            .unwrap(),
-    );
-
-    let rendered = events.render_status_panel_with_heartbeat(
-        channel_id,
-        &ProviderKind::Claude,
-        1_700_000_000,
-        1_700_000_005,
-    );
-    let recent_at = rendered.find("🖥️ Recent").expect("recent present");
-    let tasks_at = rendered.find("Tasks").expect("tasks present");
-    let subagents_at = rendered.find("Subagents").expect("subagents present");
-    assert!(
-        recent_at < tasks_at,
-        "Recent must precede Tasks: {rendered}"
-    );
-    assert!(
-        recent_at < subagents_at,
-        "Recent must precede Subagents: {rendered}"
-    );
-}
-
-// #3477 item 3: a live output batch that lands AFTER TurnCompleted keeps the
-// 🖥️ Recent block visible (the late batch is not blanked), while a genuinely idle
-// completed turn (no fresh content) still drops its stale block.
-#[test]
-fn status_panel_late_batch_after_completion_keeps_recent_block() {
-    let events = PlaceholderLiveEvents::default();
-    let channel_id = ChannelId::new(3_477_002);
-
-    // Stale pre-completion content, then completion: must be suppressed.
-    events.push_event(
-        channel_id,
-        RecentPlaceholderEvent::tool_use("Bash", &json!({"command": "echo stale"}).to_string())
-            .unwrap(),
-    );
-    events.push_status_event(channel_id, StatusEvent::TurnCompleted { background: false });
-    let idle_completed = events.render_status_panel_with_heartbeat(
-        channel_id,
-        &ProviderKind::Claude,
-        1_700_000_000,
-        1_700_000_010,
-    );
-    assert!(
-        !idle_completed.contains("🖥️ Recent"),
-        "stale block on a genuinely idle completed turn must be dropped: {idle_completed}"
-    );
-
-    // A late output batch arrives AFTER completion: must keep showing Recent.
-    events.push_event(
-        channel_id,
-        RecentPlaceholderEvent::tool_use(
-            "Bash",
-            &json!({"command": "echo LATE_BATCH"}).to_string(),
-        )
-        .unwrap(),
-    );
-    let late = events.render_status_panel_with_heartbeat(
-        channel_id,
-        &ProviderKind::Claude,
-        1_700_000_000,
-        1_700_000_011,
-    );
-    assert!(
-        late.contains("🖥️ Recent"),
-        "a fresh late batch racing TurnCompleted must not be blanked: {late}"
-    );
-    assert!(
-        late.contains("• [Bash] 실행"),
-        "late compact activity must render without raw command text: {late}"
-    );
-    assert!(
-        !late.contains("LATE_BATCH"),
-        "raw late command leaked: {late}"
-    );
-}
-
 // #3477 item 1: multi-line tool output stays readable in the Recent/terminal
 // block (multiple lines preserved) instead of collapsing to one run-on line.
 #[test]
@@ -6505,13 +6302,13 @@ fn completion_footer_free_renderer_prepends_request_anchor_and_target() {
         snapshot,
         &ProviderKind::Claude,
         "⠸",
-        Some("요청: https://discord.com/channels/1/2/3".to_string()),
+        Some("턴 트리거: https://discord.com/channels/1/2/3".to_string()),
     );
     let block = render
         .block
         .expect("anchor + target should render on the result surface");
     assert!(
-        block.starts_with("요청: https://discord.com/channels/1/2/3"),
+        block.starts_with("턴 트리거: https://discord.com/channels/1/2/3"),
         "request anchor must lead the footer: {block:?}"
     );
     assert!(
@@ -6541,31 +6338,34 @@ fn completion_footer_free_renderer_omits_anchor_and_target_when_absent() {
 }
 
 #[test]
-fn status_panel_free_renderer_keeps_request_anchor_first_on_overflow() {
-    // Long-message split: the 요청 anchor is the FIRST section, so it survives the
-    // trailing-section overflow trim on the first visible status surface.
-    let huge_recent = "X".repeat(STATUS_PANEL_MAX_CHARS + 400);
+fn status_panel_free_renderer_leads_with_activity_and_time_lines() {
+    // #3983: the panel opens with the activity label (line 1) then the time line
+    // (line 2); the 턴 트리거 deeplink trails as the last section.
     let out = super::status_panel::render_status_panel(
         StatusPanelState::default(),
-        Some(huge_recent.clone()),
         &ProviderKind::Claude,
-        1_700_000_000,
-        1_700_000_000,
-        true,
-        Some("요청: https://discord.com/channels/1/2/3".to_string()),
-        None,
+        "마지막 업데이트 : <t:1700000000:R> / 턴 시작 : <t:1700000000:R>".to_string(),
+        Some("턴 트리거: https://discord.com/channels/1/2/3".to_string()),
+    );
+    let mut sections = out.split("\n\n");
+    assert_eq!(
+        sections.next(),
+        Some("🟢 진행 중"),
+        "line 1 = activity: {out:?}"
+    );
+    assert_eq!(
+        sections.next(),
+        Some("마지막 업데이트 : <t:1700000000:R> / 턴 시작 : <t:1700000000:R>"),
+        "line 2 = time line: {out:?}"
     );
     assert!(
-        out.starts_with("요청: https://discord.com/channels/1/2/3"),
-        "anchor must lead the panel: {out:?}"
+        out.trim_end()
+            .ends_with("턴 트리거: https://discord.com/channels/1/2/3"),
+        "턴 트리거 must be the last footer line: {out:?}"
     );
     assert!(
         out.chars().count() <= STATUS_PANEL_MAX_CHARS,
         "panel must respect the size cap"
-    );
-    assert!(
-        !out.contains(&huge_recent),
-        "the oversized trailing section must be trimmed, not the anchor"
     );
 }
 

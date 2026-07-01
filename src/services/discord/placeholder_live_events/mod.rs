@@ -45,7 +45,7 @@ use common::{
     STATUS_PANEL_WORKFLOW_LIMIT, STATUS_PANEL_WORKFLOW_PHASE_LIMIT,
 };
 #[cfg(test)]
-use status_panel::{render_recent_section_header, truncate_status_panel_sections};
+use status_panel::truncate_status_panel_sections;
 
 pub(in crate::services::discord) use recent_events::RecentPlaceholderEvent;
 pub(in crate::services::discord) use status_events::{
@@ -563,19 +563,9 @@ impl PlaceholderLiveEvents {
             },
             TerminalUiObligationPanelStatus::Deadline => DerivedStatus::TerminalDeliveryUnconfirmed,
         };
-        let completed = matches!(status, TerminalUiObligationPanelStatus::Completed);
-        let request_anchor_line = self.request_anchor_line(channel_id, &snapshot);
-        let confidence_line = self.panel_confidence_line(channel_id, &snapshot, started_at_unix);
-        render_status_panel(
-            snapshot,
-            self.render_block(channel_id),
-            provider,
-            started_at_unix,
-            chrono::Utc::now().timestamp(),
-            !completed,
-            request_anchor_line,
-            confidence_line,
-        )
+        let turn_trigger_line = self.request_anchor_line(channel_id, &snapshot);
+        let time_line = self.panel_time_line(channel_id, started_at_unix);
+        render_status_panel(snapshot, provider, time_line, turn_trigger_line)
     }
 
     // True when the live-panel compaction counts for this channel differ from
@@ -600,7 +590,9 @@ impl PlaceholderLiveEvents {
         channel_id: ChannelId,
         provider: &ProviderKind,
         started_at_unix: i64,
-        heartbeat_at_unix: i64,
+        // #3983: retained for call-site parity (the footer time line anchors to the
+        // stable stored last-activity stamp, not this render-time heartbeat).
+        _heartbeat_at_unix: i64,
     ) -> String {
         let snapshot = self
             .status_by_channel
@@ -627,28 +619,9 @@ impl PlaceholderLiveEvents {
                 "#3404: compacted delivered terminal slots from the live status panel"
             );
         }
-        // #3477 item 3: a live batch counts as "fresh" when it arrived strictly
-        // after the turn's completion instant. `None` completed_at means the turn
-        // never completed (still running), so any present live content is fresh.
-        let live_content_fresh = match snapshot.completed_at {
-            Some(completed_at) => self
-                .last_recent_event_at
-                .get(&channel_id)
-                .is_some_and(|stamp| *stamp.value() > completed_at),
-            None => true,
-        };
-        let request_anchor_line = self.request_anchor_line(channel_id, &snapshot);
-        let confidence_line = self.panel_confidence_line(channel_id, &snapshot, started_at_unix);
-        render_status_panel(
-            snapshot,
-            self.render_block(channel_id),
-            provider,
-            started_at_unix,
-            heartbeat_at_unix,
-            live_content_fresh,
-            request_anchor_line,
-            confidence_line,
-        )
+        let turn_trigger_line = self.request_anchor_line(channel_id, &snapshot);
+        let time_line = self.panel_time_line(channel_id, started_at_unix);
+        render_status_panel(snapshot, provider, time_line, turn_trigger_line)
     }
 
     pub(in crate::services::discord) fn render_completion_footer(

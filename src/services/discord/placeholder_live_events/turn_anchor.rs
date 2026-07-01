@@ -1,7 +1,7 @@
 //! #3811: deterministic turn-anchor rendering + store plumbing for the
 //! status/result surfaces.
 //!
-//! The `요청:` original-request line is built from ADK relay metadata
+//! The `턴 트리거:` original-request line is built from ADK relay metadata
 //! (`guild_id` + `channel_id` + the real Discord `user_msg_id`), never from
 //! agent prose. It deliberately renders ONLY for genuine interactive Discord
 //! turns: headless / synthetic / voice / id-0 turns carry no real user message,
@@ -17,9 +17,9 @@ use poise::serenity_prelude::ChannelId;
 use super::status_panel::StatusPanelState;
 use crate::services::discord::is_synthetic_headless_message_id_raw;
 
-/// Builds the `요청:` original-request deeplink, or `None` when no real Discord
-/// user message backs the turn (headless / synthetic / voice / id-0) or the
-/// process has no configured guild id.
+/// Builds the `턴 트리거:` original-request deeplink, or `None` when no real
+/// Discord user message backs the turn (headless / synthetic / voice / id-0) or
+/// the process has no configured guild id.
 ///
 /// Gating: id `0` is the id-less sentinel; the synthetic-headless floor
 /// (`SYNTHETIC_HEADLESS_MESSAGE_ID_FLOOR`, 8e18) sits BELOW both the voice
@@ -37,8 +37,11 @@ pub(super) fn render_request_anchor_line(
         return None;
     }
     let guild_id = guild_id.map(str::trim).filter(|guild| !guild.is_empty())?;
+    // #3983 item 3: the label reads `턴 트리거:` (the turn's triggering request),
+    // rendered as the LAST footer line by `render_status_panel` (the completion
+    // footer still prepends it via `prepend_request_anchor`).
     Some(format!(
-        "요청: https://discord.com/channels/{guild_id}/{}/{user_msg_id}",
+        "턴 트리거: https://discord.com/channels/{guild_id}/{}/{user_msg_id}",
         channel_id.get()
     ))
 }
@@ -129,7 +132,7 @@ mod tests {
         assert_eq!(
             line.as_deref(),
             Some(
-                "요청: https://discord.com/channels/1469870512812462284/1475086789696946196/1520312799245504542"
+                "턴 트리거: https://discord.com/channels/1469870512812462284/1475086789696946196/1520312799245504542"
             )
         );
     }

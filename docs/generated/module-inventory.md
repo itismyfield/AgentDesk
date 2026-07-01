@@ -508,21 +508,21 @@
 | `services::discord::outbound::turn_output_controller_rollout_health` | `src/services/discord/outbound/turn_output_controller_rollout_health.rs` | 195 | 129 | 66 |  |
 | `services::discord::placeholder_cleanup` | `src/services/discord/placeholder_cleanup.rs` | 664 | 424 | 240 |  |
 | `services::discord::placeholder_controller` | `src/services/discord/placeholder_controller.rs` | 977 | 573 | 404 |  |
-| `services::discord::placeholder_live_events` | `src/services/discord/placeholder_live_events/mod.rs` | 700 | 700 | 0 |  |
+| `services::discord::placeholder_live_events` | `src/services/discord/placeholder_live_events/mod.rs` | 673 | 673 | 0 |  |
 | `services::discord::placeholder_live_events::background_task_events` | `src/services/discord/placeholder_live_events/background_task_events.rs` | 109 | 109 | 0 |  |
 | `services::discord::placeholder_live_events::common` | `src/services/discord/placeholder_live_events/common.rs` | 226 | 226 | 0 |  |
 | `services::discord::placeholder_live_events::completion_footer` | `src/services/discord/placeholder_live_events/completion_footer.rs` | 536 | 536 | 0 |  |
 | `services::discord::placeholder_live_events::context_panel` | `src/services/discord/placeholder_live_events/context_panel.rs` | 72 | 72 | 0 |  |
-| `services::discord::placeholder_live_events::freshness` | `src/services/discord/placeholder_live_events/freshness.rs` | 362 | 182 | 180 |  |
+| `services::discord::placeholder_live_events::freshness` | `src/services/discord/placeholder_live_events/freshness.rs` | 201 | 90 | 111 |  |
 | `services::discord::placeholder_live_events::recent_events` | `src/services/discord/placeholder_live_events/recent_events.rs` | 321 | 321 | 0 |  |
 | `services::discord::placeholder_live_events::session_panel` | `src/services/discord/placeholder_live_events/session_panel.rs` | 262 | 262 | 0 |  |
 | `services::discord::placeholder_live_events::slot_rehydration` | `src/services/discord/placeholder_live_events/slot_rehydration.rs` | 525 | 447 | 78 |  |
 | `services::discord::placeholder_live_events::status_events` | `src/services/discord/placeholder_live_events/status_events.rs` | 700 | 700 | 0 |  |
-| `services::discord::placeholder_live_events::status_panel` | `src/services/discord/placeholder_live_events/status_panel.rs` | 688 | 688 | 0 |  |
+| `services::discord::placeholder_live_events::status_panel` | `src/services/discord/placeholder_live_events/status_panel.rs` | 654 | 654 | 0 |  |
 | `services::discord::placeholder_live_events::subagent_rollout` | `src/services/discord/placeholder_live_events/subagent_rollout.rs` | 445 | 270 | 175 |  |
 | `services::discord::placeholder_live_events::subagent_summary` | `src/services/discord/placeholder_live_events/subagent_summary.rs` | 69 | 69 | 0 |  |
 | `services::discord::placeholder_live_events::task_panel` | `src/services/discord/placeholder_live_events/task_panel.rs` | 348 | 348 | 0 |  |
-| `services::discord::placeholder_live_events::turn_anchor` | `src/services/discord/placeholder_live_events/turn_anchor.rs` | 207 | 112 | 95 |  |
+| `services::discord::placeholder_live_events::turn_anchor` | `src/services/discord/placeholder_live_events/turn_anchor.rs` | 210 | 115 | 95 |  |
 | `services::discord::placeholder_live_events::workflow_panel` | `src/services/discord/placeholder_live_events/workflow_panel.rs` | 185 | 185 | 0 |  |
 | `services::discord::placeholder_sweeper` | `src/services/discord/placeholder_sweeper.rs` | 1314 | 1019 | 295 | giant-file |
 | `services::discord::prompt_builder` | `src/services/discord/prompt_builder/mod.rs` | 431 | 431 | 0 |  |
@@ -625,7 +625,7 @@
 | `services::discord::shared_memory` | `src/services/discord/shared_memory.rs` | 81 | 81 | 0 |  |
 | `services::discord::shared_state` | `src/services/discord/shared_state.rs` | 737 | 666 | 71 |  |
 | `services::discord::sidecar_interaction` | `src/services/discord/sidecar_interaction.rs` | 390 | 390 | 0 |  |
-| `services::discord::single_message_panel` | `src/services/discord/single_message_panel.rs` | 2759 | 821 | 1938 |  |
+| `services::discord::single_message_panel` | `src/services/discord/single_message_panel.rs` | 2803 | 865 | 1938 |  |
 | `services::discord::single_message_panel::completion_footer_registry` | `src/services/discord/single_message_panel/completion_footer_registry.rs` | 624 | 624 | 0 |  |
 | `services::discord::stall_recovery` | `src/services/discord/stall_recovery.rs` | 113 | 113 | 0 |  |
 | `services::discord::standby_relay` | `src/services/discord/standby_relay.rs` | 1642 | 912 | 730 |  |

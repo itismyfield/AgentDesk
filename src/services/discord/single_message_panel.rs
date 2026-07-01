@@ -225,7 +225,12 @@ fn strip_panel_header_status_marker(header_line: &str) -> Option<&str> {
 }
 
 fn is_panel_header_status_marker(marker: char) -> bool {
-    matches!(marker, '🟢' | '💤' | '⏰' | '✅' | '🔧' | '🧵' | '🧬')
+    // #3983: `🟡` is the new stale activity marker (`🟡 응답 지연 · 조사 권장`), swapped
+    // for the spinner like every other leading status emoji.
+    matches!(
+        marker,
+        '🟢' | '💤' | '⏰' | '✅' | '🔧' | '🧵' | '🧬' | '🟡'
+    )
 }
 
 fn clamp_footer_panel_text(panel_text: &str) -> String {
@@ -659,6 +664,9 @@ fn text_has_single_message_footer_surface(text: &str) -> bool {
                 || line == "Tasks"
                 || line == "Subagents"
                 || line.starts_with("└ ")
+                // #3983: the footer's line-2 time line identifies the new panel surface.
+                || line.starts_with("마지막 업데이트 ")
+                // Legacy pre-#3983 merged header shape.
                 || (line.contains(" — ") && line.contains("(<t:"))
         })
 }
@@ -796,16 +804,52 @@ fn is_merged_footer_status_line(line: &str) -> bool {
     let Some(status) = strip_footer_braille_spinner_prefix(line) else {
         return false;
     };
-    status.contains(" — ")
-        && status.contains("(<t:")
-        && (status.starts_with("진행 중")
-            || status.starts_with("monitor 대기")
-            || status.starts_with("scheduled wakeup")
-            || status.starts_with("**백그라운드 완료**")
-            || status.starts_with("**응답 완료**")
-            || status.starts_with("도구 실행 중")
-            || status.starts_with("subagent 실행 중")
-            || status.starts_with("workflow 실행 중"))
+    // #3983: the header first line is now the BARE activity label — the provider +
+    // relative-start suffix moved to the separate time line. Match those exact
+    // labels so a user body line that merely opens with the same words (e.g.
+    // `진행 중 — my note`) is not mistaken for the panel status line now that the
+    // disambiguating `(<t:` suffix is gone.
+    is_panel_activity_status_label(status)
+        // Legacy pre-#3983 merged header (`<label> — <provider> (<t:..:R>)`), kept so
+        // in-flight messages during a rollout keep stripping/comparing correctly.
+        || (status.contains(" — ")
+            && status.contains("(<t:")
+            && legacy_merged_status_prefix(status))
+}
+
+/// #3983: exact-shape match for the bare footer activity labels
+/// (`freshness::render_activity_line`, marker emoji already swapped for the
+/// spinner). Fixed labels match exactly; parameterized labels match their
+/// `<phrase> (…)` shape — never a bare prefix — so ordinary prose does not
+/// false-positive without the old `(<t:` disambiguator.
+fn is_panel_activity_status_label(status: &str) -> bool {
+    matches!(
+        status,
+        "진행 중" | "monitor 대기" | "완료" | "백그라운드 완료" | "scheduled wakeup"
+    ) || status.starts_with("응답 지연")
+        || parenthesized_status_label(status, "scheduled wakeup")
+        || parenthesized_status_label(status, "도구 실행 중")
+        || parenthesized_status_label(status, "subagent 실행 중")
+        || parenthesized_status_label(status, "workflow 실행 중")
+}
+
+/// True when `status` is exactly `<phrase> (…)` — the shape of the parameterized
+/// activity labels — so a bare `<phrase> …` prose line does not match.
+fn parenthesized_status_label(status: &str, phrase: &str) -> bool {
+    status
+        .strip_prefix(phrase)
+        .is_some_and(|rest| rest.starts_with(" (") && rest.ends_with(')'))
+}
+
+fn legacy_merged_status_prefix(status: &str) -> bool {
+    status.starts_with("진행 중")
+        || status.starts_with("monitor 대기")
+        || status.starts_with("scheduled wakeup")
+        || status.starts_with("**백그라운드 완료**")
+        || status.starts_with("**응답 완료**")
+        || status.starts_with("도구 실행 중")
+        || status.starts_with("subagent 실행 중")
+        || status.starts_with("workflow 실행 중")
 }
 
 fn strip_footer_braille_spinner_prefix(line: &str) -> Option<&str> {

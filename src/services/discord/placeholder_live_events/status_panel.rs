@@ -458,15 +458,12 @@ impl StatusPanelState {
 
 pub(super) fn render_status_panel(
     snapshot: StatusPanelState,
-    live_block: Option<String>,
     provider: &ProviderKind,
-    started_at_unix: i64,
-    _heartbeat_at_unix: i64,
-    // #3477 item 3: live batch arrived AFTER `completed_at` → a Completed turn
-    // keeps 🖥️ Recent (late batch not blanked; stale idle block still dropped).
-    live_content_fresh: bool,
-    request_anchor_line: Option<String>, // #3811: precomputed `요청:` line, or `None`
-    confidence_line: Option<String>,     // #3812: precomputed live/stale confidence line
+    // #3983 item 2: precomputed `마지막 업데이트 : … / 턴 시작 : …` time line (line 2).
+    time_line: String,
+    // #3983 item 3: precomputed `턴 트리거:` deeplink, appended as the LAST footer
+    // line (or `None` for headless/synthetic/id-0 turns with no real user message).
+    turn_trigger_line: Option<String>,
 ) -> String {
     let header_status = if matches!(provider, ProviderKind::Codex)
         && matches!(snapshot.status, DerivedStatus::SubagentRunning { .. })
@@ -475,15 +472,15 @@ pub(super) fn render_status_panel(
     } else {
         snapshot.status.clone()
     };
-    // #3812: header + freshness confidence line built in the colocated `freshness`
-    // module (status_panel.rs is at the namespace cap — keep it to the call site).
-    let mut sections = vec![super::freshness::render_status_header(
-        &header_status,
-        provider,
-        started_at_unix,
-        confidence_line.as_deref(),
-    )];
-    super::turn_anchor::prepend_request_anchor(&mut sections, request_anchor_line); // #3811
+    // #3983: line 1 = derived-status ACTIVITY label, line 2 = relative TIME line
+    // (both built in the colocated `freshness` module — status_panel.rs is at the
+    // namespace cap). The pre-#3983 confidence line + `진행 중 — provider` header is
+    // retired (item 2); the request anchor no longer prepends here (item 3, see the
+    // trailing `턴 트리거:` push below).
+    let mut sections = vec![
+        super::freshness::render_activity_line(&header_status),
+        time_line,
+    ];
 
     if let Some(session) = snapshot.session.as_ref() {
         sections.push(render_session_panel_line(session, provider));
@@ -518,23 +515,8 @@ pub(super) fn render_status_panel(
         sections.push(format!("Plan\n{}", lines.join("\n")));
     }
 
-    // #3477 item 4: 🖥️ Recent renders BEFORE Tasks/Subagents/Workflow (top
-    // signal + shielded from the trailing-section footer-budget drop — item 3).
-    let cluster_config = &crate::config::load_graceful().cluster;
-    let recent_header = render_recent_section_header(
-        snapshot.task.as_ref(),
-        cluster_config.enabled,
-        cluster_config.instance_id.as_deref(),
-    );
-    // #3394 self-contained fenced section (overflow drops it whole). #3477 item 3:
-    // a Completed turn suppresses it only when stale; a fresh late batch shows.
-    let completed = matches!(header_status, DerivedStatus::Completed { .. });
-    if (!completed || live_content_fresh)
-        && let Some(block) = live_block.filter(|block| !block.trim().is_empty())
-    {
-        sections.push(format!("{recent_header}\n{block}"));
-    }
-
+    // #3983 item 5a: the compact 🖥️ Recent + host block is removed from the footer
+    // (the terminal echo is retired from the status panel entirely).
     if !snapshot.tasks.is_empty() {
         let lines = snapshot
             .tasks
@@ -572,6 +554,13 @@ pub(super) fn render_status_panel(
         }
     }
 
+    // #3983 item 3: the `턴 트리거:` original-request deeplink is the LAST footer
+    // line (it previously prepended above the header). Absent for headless /
+    // synthetic / id-0 turns that carry no real Discord user message.
+    if let Some(trigger) = turn_trigger_line.filter(|line| !line.trim().is_empty()) {
+        sections.push(trigger);
+    }
+
     truncate_status_panel_sections(sections)
 }
 
@@ -595,29 +584,6 @@ pub(super) fn truncate_status_panel_sections(mut sections: Vec<String>) -> Strin
         return repair_fence_parity(&joined);
     }
     repair_fence_parity(&truncate_chars(&joined, STATUS_PANEL_MAX_CHARS))
-}
-
-pub(super) fn render_recent_section_header(
-    task: Option<&TaskPanelSnapshot>,
-    cluster_enabled: bool,
-    local_instance_id: Option<&str>,
-) -> String {
-    if !cluster_enabled {
-        return "🖥️ Recent".to_string();
-    }
-    let dispatch_owner = task
-        .and_then(|task| task.owner_instance_id.as_deref())
-        .map(str::trim)
-        .filter(|owner| !owner.is_empty());
-    let owner = dispatch_owner.or_else(|| {
-        local_instance_id
-            .map(str::trim)
-            .filter(|owner| !owner.is_empty())
-    });
-    match owner {
-        Some(owner) => format!("🖥️ Recent ({})", escape_status_panel_markdown(owner)),
-        None => "🖥️ Recent".to_string(),
-    }
 }
 
 pub(super) fn render_subagent_slot(slot: &SubagentSlot) -> String {

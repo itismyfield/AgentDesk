@@ -643,7 +643,7 @@ async fn status_panel_fallback_completion_is_blocked_until_body_visible() {
         .expect("sent messages lock")
         .clone();
     assert_eq!(sent_messages.len(), 1);
-    assert!(sent_messages[0].contains("응답 완료"));
+    assert!(sent_messages[0].contains("완료"));
 }
 
 #[tokio::test]
@@ -684,7 +684,7 @@ async fn status_panel_completion_fallback_posts_when_message_id_is_synthetic() {
         .expect("sent messages lock")
         .clone();
     assert_eq!(sent_messages.len(), 1);
-    assert!(sent_messages[0].contains("응답 완료"));
+    assert!(sent_messages[0].contains("완료"));
     assert_eq!(last_status_panel_text, sent_messages[0]);
 
     let committed = complete_status_panel_v2(
@@ -760,7 +760,7 @@ async fn status_panel_completion_sends_wip_warning_before_completion_surface() {
     assert!(sent_messages[0].contains("WIP uncommitted files detected"));
     assert!(sent_messages[0].contains(&format!("Workspace: `{}`", worktree.path().display())));
     assert!(sent_messages[0].contains("Counts: 0 staged, 0 unstaged, 1 untracked."));
-    assert!(sent_messages[1].contains("응답 완료"));
+    assert!(sent_messages[1].contains("완료"));
 
     let committed_retry = complete_status_panel_v2(
         shared.as_ref(),
@@ -861,7 +861,7 @@ async fn status_panel_completion_fallback_posts_after_unknown_message_edit() {
         .expect("sent messages lock")
         .clone();
     assert_eq!(sent_messages.len(), 1);
-    assert!(sent_messages[0].contains("응답 완료"));
+    assert!(sent_messages[0].contains("완료"));
     assert_eq!(last_status_panel_text, sent_messages[0]);
 }
 
