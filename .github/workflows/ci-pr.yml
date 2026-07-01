@@ -279,13 +279,17 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
-      - name: Cache cargo registry & build
+      # `target/` is intentionally NOT cached — sccache (GHA-backed) handles
+      # compiled rustc output, and caching multi-GB `target/` directories
+      # starves the 10GB GHA cache quota, evicting sccache shards (observed
+      # Rust hit-rate collapse: 99.80% → 0.00% within hours of merges). See
+      # docs/ci/sccache-setup.md §4.2.
+      - name: Cache cargo registry & git
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
@@ -300,6 +304,18 @@ jobs:
 
       - name: just check
         run: just check
+        env:
+          # Cold `cargo test --all-targets` on the 16GB ubuntu runner peaks over
+          # RAM during codegen+link (SIGTERM/143). Cap parallel compile jobs at 2
+          # (default = 4 vCPU) to roughly halve peak RSS. Test semantics are
+          # unchanged — this only bounds concurrent rustc/link, not test threads.
+          # Step-scoped so no other Rust job's resource envelope is affected.
+          CARGO_BUILD_JOBS: "2"
+
+      - name: sccache stats
+        if: always()
+        shell: bash
+        run: sccache --show-stats || true
 
   # Cross-OS Rust compile lanes: macOS + Windows. Gated on the narrower
   # rust_compile filter so docs-only, dashboard-only, JS-policy-only,
