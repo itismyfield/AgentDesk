@@ -306,11 +306,20 @@ jobs:
         run: just check
         env:
           # Cold `cargo test --all-targets` on the 16GB ubuntu runner peaks over
-          # RAM during codegen+link (SIGTERM/143). Cap parallel compile jobs at 2
-          # (default = 4 vCPU) to roughly halve peak RSS. Test semantics are
-          # unchanged — this only bounds concurrent rustc/link, not test threads.
-          # Step-scoped so no other Rust job's resource envelope is affected.
+          # RAM during codegen+link (SIGTERM/143). Two step-scoped levers keep
+          # peak RSS under the ceiling; test semantics are unchanged (neither
+          # affects which tests run or their results). Step-scoped so no other
+          # Rust job's resource envelope is touched.
+          #   1. Cap parallel compile jobs at 2 (default = 4 vCPU) to bound
+          #      concurrent rustc/link.
           CARGO_BUILD_JOBS: "2"
+          #   2. Drop debuginfo for the dev/test profiles. Linking many
+          #      `--all-targets` test binaries with full debuginfo is the
+          #      dominant peak-memory source; `-j2` alone still OOM'd on the
+          #      link phase, so strip it here. CI test failures still report
+          #      panics/asserts; only source-line debug data is omitted.
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
 
       - name: sccache stats
         if: always()
