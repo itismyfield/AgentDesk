@@ -9,8 +9,9 @@ use super::{
 use crate::services::discord::formatting::ReplaceLongMessageOutcome;
 use crate::services::discord::gateway::TurnGateway;
 use crate::services::discord::inflight::{
-    GuardedClearOutcome, clear_inflight_state, clear_inflight_state_if_matches,
-    clear_inflight_state_if_matches_zero_owned, load_inflight_state, save_inflight_state,
+    GuardedClearOutcome, InflightTurnIdentity, clear_inflight_state,
+    clear_inflight_state_if_matches, clear_inflight_state_if_matches_zero_owned,
+    load_inflight_state, save_inflight_state,
 };
 use crate::services::git::GitCommand;
 use std::fs;
@@ -863,6 +864,72 @@ async fn status_panel_completion_fallback_posts_after_unknown_message_edit() {
     assert_eq!(sent_messages.len(), 1);
     assert!(sent_messages[0].contains("완료"));
     assert_eq!(last_status_panel_text, sent_messages[0]);
+}
+
+#[tokio::test]
+async fn status_panel_completion_purges_pending_bind_for_final_panel() {
+    let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
+    let shared = make_status_panel_v2_shared_for_tests();
+    let gateway = StatusPanelFallbackGateway::default();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(3_805_401);
+    let user_msg_id = 3_805_402;
+    let panel = MessageId::new(1_500_000_000_380_540);
+    let mut state = test_inflight_state();
+    state.provider = provider.as_str().to_string();
+    state.channel_id = channel_id.get();
+    state.user_msg_id = user_msg_id;
+    state.request_owner_user_id = user_msg_id;
+    state.current_msg_id = user_msg_id + 1;
+    state.status_message_id = Some(panel.get());
+    save_inflight_state(&state).expect("save inflight state");
+    crate::services::discord::status_panel_orphan_store::enqueue_pending_bind(
+        &provider,
+        &shared.token_hash,
+        channel_id.get(),
+        panel.get(),
+        Some(InflightTurnIdentity::from_state(&state)),
+    );
+    assert_eq!(
+        crate::services::discord::status_panel_orphan_store::load_pending(
+            &provider,
+            &shared.token_hash,
+        ),
+        vec![(channel_id.get(), panel.get())]
+    );
+
+    let mut last_status_panel_text = String::new();
+    let committed = complete_status_panel_v2(
+        shared.as_ref(),
+        &gateway,
+        channel_id,
+        Some(panel),
+        &provider,
+        1_700_000_000,
+        &mut last_status_panel_text,
+        false,
+        "test_pending_bind_completion_purge",
+        user_msg_id,
+    )
+    .await;
+
+    assert!(committed);
+    assert_eq!(
+        gateway
+            .edited_message_ids
+            .lock()
+            .expect("edited ids lock")
+            .as_slice(),
+        &[panel]
+    );
+    assert!(
+        crate::services::discord::status_panel_orphan_store::load_pending(
+            &provider,
+            &shared.token_hash,
+        )
+        .is_empty(),
+        "completion success must purge a crash-window pending_bind for the final live panel"
+    );
 }
 
 fn inflight_row_owned_by(

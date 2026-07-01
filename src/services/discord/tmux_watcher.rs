@@ -2466,23 +2466,22 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         }
                     }
 
-                    // #3805 P2 (PR-D): after a mid-turn answer rollover the live
-                    // status panel is now stranded ABOVE the new tail answer. Under
-                    // the two-message flag, re-anchor it BELOW the new answer (send
-                    // new, atomic epoch-bump rebind under the inflight flock, retire
-                    // old) so it stays pinned to the latest chunk. OFF-inert →
-                    // byte-identical rollover when the flag is off.
-                    let inflight_for_reanchor = if watcher_did_rollover_this_interval {
-                        crate::services::discord::inflight::load_inflight_state(
-                            &watcher_provider,
-                            channel_id.get(),
-                        )
-                    } else {
-                        None
-                    };
+                    // #3805 P2 (PR-D): after answer rollover the live status
+                    // panel is stranded ABOVE the new tail answer. Flag ON
+                    // re-anchors it BELOW; flag OFF stays byte-identical.
+                    let two_message_panel_enabled = shared.ui.two_message_panel_enabled;
+                    let inflight_for_reanchor =
+                        if two_message_panel_enabled && watcher_did_rollover_this_interval {
+                            crate::services::discord::inflight::load_inflight_state(
+                                &watcher_provider,
+                                channel_id.get(),
+                            )
+                        } else {
+                            None
+                        };
                     if watcher_did_rollover_this_interval
                         && watcher_two_message_should_reanchor_panel_on_rollover(
-                            shared.ui.two_message_panel_enabled,
+                            two_message_panel_enabled,
                             status_panel_msg_id.is_some(),
                             inflight_for_reanchor.as_ref(),
                             &tmux_session_name,

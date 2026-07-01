@@ -1068,7 +1068,7 @@ impl InflightTurnState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(in crate::services::discord) struct InflightTurnIdentity {
     pub user_msg_id: u64,
     pub started_at: String,

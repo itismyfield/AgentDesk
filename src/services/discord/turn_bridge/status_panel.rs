@@ -36,7 +36,15 @@ pub(super) async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
     );
 
     match status_panel_completion_action(status_panel_msg_id, last_status_panel_text, &panel_text) {
-        StatusPanelCompletionAction::AlreadyCommitted => true,
+        StatusPanelCompletionAction::AlreadyCommitted => {
+            purge_pending_bind_for_completed_status_panel(
+                shared,
+                provider,
+                channel_id,
+                status_panel_msg_id,
+            );
+            true
+        }
         StatusPanelCompletionAction::SendFallback => {
             let inflight =
                 crate::services::discord::turn_end_wip_warning::load_matching_inflight_state(
@@ -92,6 +100,12 @@ pub(super) async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
             match edit_result {
                 Ok(()) => {
                     *last_status_panel_text = panel_text;
+                    purge_pending_bind_for_completed_status_panel(
+                        shared,
+                        provider,
+                        channel_id,
+                        status_panel_msg_id,
+                    );
                     true
                 }
                 Err(error) => {
@@ -258,7 +272,15 @@ pub(in crate::services::discord) async fn complete_status_panel_v2_with_http(
     );
 
     match status_panel_completion_action(status_panel_msg_id, last_status_panel_text, &panel_text) {
-        StatusPanelCompletionAction::AlreadyCommitted => true,
+        StatusPanelCompletionAction::AlreadyCommitted => {
+            purge_pending_bind_for_completed_status_panel(
+                shared.as_ref(),
+                provider,
+                channel_id,
+                status_panel_msg_id,
+            );
+            true
+        }
         StatusPanelCompletionAction::SendFallback => {
             let inflight = status_panel_wip_inflight_for_completion(
                 inflight_snapshot,
@@ -305,6 +327,12 @@ pub(in crate::services::discord) async fn complete_status_panel_v2_with_http(
             {
                 Ok(_) => {
                     *last_status_panel_text = panel_text;
+                    purge_pending_bind_for_completed_status_panel(
+                        shared.as_ref(),
+                        provider,
+                        channel_id,
+                        status_panel_msg_id,
+                    );
                     true
                 }
                 Err(error) => {
@@ -366,6 +394,23 @@ async fn complete_status_panel_v2_fallback_with_http(
             false
         }
     }
+}
+
+fn purge_pending_bind_for_completed_status_panel(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    status_panel_msg_id: Option<MessageId>,
+) {
+    let Some(message_id) = normalize_status_panel_message_id(status_panel_msg_id) else {
+        return;
+    };
+    crate::services::discord::status_panel_orphan_store::remove_pending_bind(
+        provider,
+        &shared.token_hash,
+        channel_id.get(),
+        message_id.get(),
+    );
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

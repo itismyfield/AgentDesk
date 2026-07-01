@@ -184,11 +184,16 @@ pub(super) async fn reanchor_bridge_two_message_status_panel_below_answer<
     };
     match gateway.send_message(channel_id, panel_text).await {
         Ok(new_panel_id) => {
-            crate::services::discord::status_panel_orphan_store::enqueue(
+            crate::services::discord::status_panel_orphan_store::enqueue_pending_bind(
                 provider,
                 &shared.token_hash,
                 channel_id.get(),
                 new_panel_id.get(),
+                Some(
+                    crate::services::discord::inflight::InflightTurnIdentity::from_state(
+                        inflight_state,
+                    ),
+                ),
             );
             let mut updated = inflight_state.clone();
             updated.status_message_id = Some(new_panel_id.get());

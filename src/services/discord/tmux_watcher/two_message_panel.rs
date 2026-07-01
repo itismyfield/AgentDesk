@@ -99,6 +99,14 @@ pub(in crate::services::discord) fn watcher_two_message_should_reanchor_panel_on
     ) && watcher_inflight_is_panel_eligible_for_session(inflight, tmux_session_name)
 }
 
+#[cfg(test)]
+pub(in crate::services::discord) fn watcher_should_load_inflight_for_reanchor(
+    watcher_did_rollover_this_interval: bool,
+    two_message_panel_enabled: bool,
+) -> bool {
+    watcher_did_rollover_this_interval && two_message_panel_enabled
+}
+
 pub(in crate::services::discord) fn preregister_watcher_two_message_panel_orphan(
     two_message_panel_enabled: bool,
     shared: &SharedData,
@@ -107,11 +115,17 @@ pub(in crate::services::discord) fn preregister_watcher_two_message_panel_orphan
     panel_msg_id: serenity::MessageId,
 ) {
     if two_message_panel_enabled {
-        crate::services::discord::status_panel_orphan_store::enqueue(
+        let turn_identity =
+            crate::services::discord::inflight::load_inflight_state(provider, channel_id.get())
+                .map(|state| {
+                    crate::services::discord::inflight::InflightTurnIdentity::from_state(&state)
+                });
+        crate::services::discord::status_panel_orphan_store::enqueue_pending_bind(
             provider,
             &shared.token_hash,
             channel_id.get(),
             panel_msg_id.get(),
+            turn_identity,
         );
     }
 }
@@ -189,12 +203,20 @@ pub(in crate::services::discord) async fn complete_watcher_status_panel_v2_with_
         )
         .await
     };
-    if !turn_is_external_input_for_session {
-        return;
-    }
     let Some(panel_msg_id) = status_panel_msg_id else {
         return;
     };
+    if committed {
+        crate::services::discord::status_panel_orphan_store::remove_pending_bind(
+            provider,
+            &shared.token_hash,
+            channel_id.get(),
+            panel_msg_id.get(),
+        );
+    }
+    if !turn_is_external_input_for_session {
+        return;
+    }
     if committed {
         crate::services::discord::status_panel_orphan_store::remove(
             provider,
@@ -499,6 +521,14 @@ mod tests {
             Some(&external),
             "AgentDesk-claude-a",
         ));
+    }
+
+    #[test]
+    fn reanchor_inflight_reload_gate_requires_rollover_and_flag_on() {
+        assert!(!watcher_should_load_inflight_for_reanchor(false, false));
+        assert!(!watcher_should_load_inflight_for_reanchor(false, true));
+        assert!(!watcher_should_load_inflight_for_reanchor(true, false));
+        assert!(watcher_should_load_inflight_for_reanchor(true, true));
     }
 
     #[test]
