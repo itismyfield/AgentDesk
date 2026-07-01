@@ -197,7 +197,7 @@
     late-frame fresh row B is rejected; -576 from #3841 extracting placeholder
     suppression helpers to `tmux_placeholder_suppression.rs`;
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (6935 production lines; +10 from #3558
+  - `src/services/discord/tmux_watcher.rs` (7106 production lines; +10 from #3558
     (codex review follow-up) routing the two remaining session-bound-relay-success
     sites — which still did an unlocked `load_inflight_state` -> mutate ->
     `save_inflight_state` (re-writing a stale `last_offset`/`response_sent_offset`)
