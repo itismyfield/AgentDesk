@@ -40,6 +40,8 @@ Last refreshed: 2026-06-16 (against `main` @ `8ec7336e32eb6ef89e1143fab2543f2fc6
 >
 > Last refreshed: 2026-06-29 (#3809 — idle-recap relay diagnostics add a READ-ONLY current-generation delivered-frontier report path in `outbound/delivery_frontier_probe.rs`. `outbound/delivery_record.rs` only widens existing internal read primitives (`delivery_record_path`, `read_record_at`, generation guard, generation mtime) so the probe can reuse the same trusted durable frontier without adding a writer, retry, cleanup, delivery API, or direct-send callsite. The production callsite coverage map is unchanged).
 >
+> Last refreshed: 2026-07-01 (#3794 — turn-output controller rollout closeout. All six owner cutovers (A2b sink, A3 standby, A4 watcher, A5 turn_bridge, A6a recovery, A6b tui_prompt_relay) are wired behind their `AGENTDESK_*_CONTROLLER` flags; every flag is compiled default OFF (byte-identical legacy → per-owner rollback lever), while the release `~/.adk/release/config/launchd.env` forces all six `=1` so the controller path is effective on every release node. Release health now reports the effective per-node rollout as `turn_output_controller_rollout` in `outbound/turn_output_controller_rollout_health.rs` (read-only, side-effect-free env snapshot mirroring the #3746 `delivery_record_rollout` pattern; preserved on the public `/api/health` allowlist): per-owner `enabled`, `enabled_count`, and `effective_authority` of `controller`/`mixed`/`legacy`. NO controller path, default, or flip changed — the excluded arms (empty body, no cutover range, long-chunk/new-message, TUI-gate) stay legacy until the Phase-B excluded-arm migration, so the legacy branches are not vestigial and are not removed. Additive observability only).
+>
 > Companion docs: [`docs/discord-outbound-remaining-producers.md`](../discord-outbound-remaining-producers.md) (#1175 closure), [`docs/source-of-truth.md`](../source-of-truth.md).
 
 This is the single source of truth for "where is each Discord outbound callsite
@@ -72,15 +74,26 @@ HTTP path.
 | **v3 delivery** `deliver_outbound<C>(...)` | `outbound/delivery.rs:46` | active | Executes the v3 message/policy/decision/result contract. Accepts an optional `CancelToken`; split delivery records ordered chunk metadata and duplicate replay preserves it. Success paths record the reservation; terminal skip/permanent-failure paths explicitly release it before returning. |
 | `DiscordOutboundClient`, `HttpOutboundClient`, `OutboundDeduper` | `outbound/transport.rs` | active | Transport trait, HTTP client, fingerprint helper, and in-memory dedup store with atomic `reserve` / in-flight wait semantics over the lookup -> send -> record/release window. v3 stores serialized `Vec<DeliveredMessage>`. |
 | `shared_outbound_deduper()` | `outbound/mod.rs` | active | Process-wide in-memory deduper shared by migrated producers once they have built a structured outbound delivery key. This is only the final in-process duplicate-send guard; durable SQL outbox uniqueness still belongs to the `message_outbox` enqueue/claim path. |
-| **turn-output controller** `deliver_turn_output<G, L>(...)` | `outbound/turn_output_controller.rs` | **first live owner wired: `session_relay_sink` short-replace, flag-gated (#3089 A2b)** | The single delivery entry point Phase A will route all seven turn-output surfaces through (sink / standby / watcher / turn_bridge / recovery / tui_prompt_relay). A2b cuts the FIRST owner over: `session_relay_sink`'s short-replace branch behind `AGENTDESK_SINK_SHORT_REPLACE_CONTROLLER` (default OFF → byte-identical legacy; the other six owners stay legacy). Owns lease `commit`+advance inline before any post-send await (I1), never advances on ambiguous/partial transport (I2), maps `ReplaceLongMessageOutcome::PartialContinuationFailure` to non-advance, and drives the live placeholder card to its terminal state via `PlaceholderController.transition` with the explicit `EditFailPlaceholderPolicy` (#2757) fence. The held lease is now RAII-released on future cancel/panic via the internal `ControllerLeaseGuard` (review-fix H1 r2), matching legacy `SinkDeliveryLeaseGuard::Drop`. The `DeliveryLease` trait abstracts the frozen #3041 `DeliveryLeaseCell` so the controller's commit invariants are mutation-tested. |
+| **turn-output controller** `deliver_turn_output<G, L>(...)` | `outbound/turn_output_controller.rs` | **all six owners wired + flag-gated (#3089 A2b–A6b); release `launchd.env` forces all six flags ON on every node; compiled default OFF is the per-owner rollback lever** | The single delivery entry point routes the turn-output surfaces through the controller (sink / standby / watcher / turn_bridge / recovery / tui_prompt_relay). All six owner cutovers are wired behind their `AGENTDESK_*_CONTROLLER` flags (A2b sink, A3 standby, A4 watcher, A5 turn_bridge, A6a recovery, A6b tui_prompt_relay). Each flag is **compiled default OFF → byte-identical legacy** so unsetting it is a per-owner rollback lever, but the release `~/.adk/release/config/launchd.env` sets all six `=1`, so on every release node the controller path is effective. Even when a flag is ON only the common short-replace arm leaves legacy; the intentionally-scoped **excluded arms** (empty body, no cutover range, long-chunk/new-message, TUI-gate) still route the legacy `else` and remain until the Phase-B excluded-arm migration (see §3). A2b (`session_relay_sink` short-replace) owns lease `commit`+advance inline before any post-send await (I1), never advances on ambiguous/partial transport (I2), maps `ReplaceLongMessageOutcome::PartialContinuationFailure` to non-advance, and drives the live placeholder card to its terminal state via `PlaceholderController.transition` with the explicit `EditFailPlaceholderPolicy` (#2757) fence. The held lease is RAII-released on future cancel/panic via the internal `ControllerLeaseGuard` (review-fix H1 r2), matching legacy `SinkDeliveryLeaseGuard::Drop`. The `DeliveryLease` trait abstracts the frozen #3041 `DeliveryLeaseCell` so the controller's commit invariants are mutation-tested. Release health surfaces the effective per-node rollout as `turn_output_controller_rollout` (#3794, read-only). |
 
 `outbound/mod.rs` re-exports the v3 message/policy/result and shared
 transport primitives. New production callsites should import
 `outbound::delivery::deliver_outbound` explicitly.
 
 The turn-output controller (`outbound/turn_output_controller.rs`, #3089) now has
-its FIRST live owner: the `session_relay_sink` short-replace branch, flag-gated
-(A2b, default OFF). The remaining owners cut over in §3 (A3–A6b).
+**all six owner cutovers wired** (A2b sink, A3 standby, A4 watcher, A5 turn_bridge,
+A6a recovery, A6b tui_prompt_relay), each behind its own `AGENTDESK_*_CONTROLLER`
+flag. Every flag is **compiled default OFF** (byte-identical legacy → per-owner
+rollback lever), but the release `~/.adk/release/config/launchd.env` sets all six
+`=1`, so on every release node the controller path is the effective delivery
+authority. A flag ON only moves the common short-replace arm off legacy; the
+scoped **excluded arms** (empty body, no cutover range, long-chunk/new-message,
+TUI-gate) still route the legacy `else` and stay there until the Phase-B
+excluded-arm migration, so the legacy branches are not yet vestigial. Release
+health reports the effective per-node rollout under `turn_output_controller_rollout`
+(#3794, read-only): per-owner `enabled`, `enabled_count`, and an
+`effective_authority` of `controller` / `mixed` / `legacy` so operators can detect
+a node that is missing an env override.
 
 ---
 

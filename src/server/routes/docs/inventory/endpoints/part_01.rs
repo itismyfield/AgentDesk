@@ -25,6 +25,12 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                     "same_turn_backward_write_enforcement": "observe_only",
                     "warning_count": 1
                 },
+                "turn_output_controller_rollout": {
+                    "owner_count": 6,
+                    "enabled_count": 6,
+                    "effective_authority": "controller",
+                    "warning_count": 0
+                },
                 "intake_routing": {
                     "mode": "disabled",
                     "source": "yaml",
@@ -83,6 +89,21 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                     "mode": "shadow_and_authority",
                     "dedup_authority": "durable_delivery_record_frontier",
                     "same_turn_backward_write_enforcement": "enforcing",
+                    "warning_count": 0,
+                    "configuration_warnings": []
+                },
+                "turn_output_controller_rollout": {
+                    "owners": {
+                        "sink_short_replace": {"enabled": true, "env_var": "AGENTDESK_SINK_SHORT_REPLACE_CONTROLLER"},
+                        "standby_relay": {"enabled": true, "env_var": "AGENTDESK_STANDBY_RELAY_CONTROLLER"},
+                        "watcher_terminal": {"enabled": true, "env_var": "AGENTDESK_WATCHER_TERMINAL_CONTROLLER"},
+                        "turn_bridge_terminal": {"enabled": true, "env_var": "AGENTDESK_TURN_BRIDGE_TERMINAL_CONTROLLER"},
+                        "recovery_relay": {"enabled": true, "env_var": "AGENTDESK_RECOVERY_RELAY_CONTROLLER"},
+                        "tui_prompt_relay": {"enabled": true, "env_var": "AGENTDESK_TUI_PROMPT_RELAY_CONTROLLER"}
+                    },
+                    "owner_count": 6,
+                    "enabled_count": 6,
+                    "effective_authority": "controller",
                     "warning_count": 0,
                     "configuration_warnings": []
                 },
