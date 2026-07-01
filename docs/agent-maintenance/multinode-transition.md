@@ -403,6 +403,18 @@
 
 ### Audited touches
 
+- #3038 (b) early TUI completion gate extraction: `turn_bridge/mod.rs` moved the
+  #2293/#2780 early TUI quiescence gate (the eligibility filter + bounded
+  `run_tui_completion_gate` probe + timed-out warning that compute
+  `bridge_tui_gate_outcome_early` + `bridge_early_gate_timed_out`) verbatim into
+  the new `early_tui_completion.rs` sibling; context is threaded in by shared
+  reference (`inflight_state`, `provider`) and `Copy` value, and the two outputs
+  are returned. Classification: worker-local — a pure behavior-preserving
+  decompose: control flow, conditions, order, and side effects are byte-identical
+  to the inline block, and it adds no new inflight-row field, delivery record, PG
+  lease, leader gate, or cross-node routing state (the gate only reads
+  worker-local tmux / inflight runtime state and is `#[cfg(unix)]`). No DB/schema
+  change.
 - #3813 Phase 2 status-panel low-pri + Bridge-spans (AC#1 tail):
   `turn_bridge/mod.rs` streaming loop now defers the v2 status-panel / footer edit
   off the shared per-channel rate lane while the opening answer is still

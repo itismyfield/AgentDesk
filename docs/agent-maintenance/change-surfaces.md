@@ -1157,7 +1157,13 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6235 lines; production LoC; +26
+  - `src/services/discord/turn_bridge/mod.rs` (6222 lines; production LoC; -13
+    from #3038 (b) extracting the early TUI completion gate (the #2293/#2780
+    eligibility filter + bounded quiescence probe + timed-out warning, worker-local)
+    verbatim into the `early_tui_completion.rs` sibling (behavior-preserving
+    decompose; the two computed outputs — `bridge_tui_gate_outcome_early` +
+    `bridge_early_gate_timed_out` — are threaded back by return value, context in
+    by shared reference / `Copy` value); +26
     from #3813 Phase 2 + Bridge-spans (same 3373-3800 region) — Phase 2 (§3
     status-panel low-pri) defers the v2 status-panel / footer edit off the shared
     per-channel rate lane while the opening answer is still un-relayed so the
