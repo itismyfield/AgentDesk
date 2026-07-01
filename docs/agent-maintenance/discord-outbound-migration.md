@@ -413,3 +413,95 @@ Expected counts as of the #1457 refresh:
   placeholder sends/edits).
 - legacy-facade production callsites and explicit compatibility shims still
   remain; migrate them in the order above.
+
+---
+
+## 8. Turn-output controller compiled-default flip — decision matrix (#3794 D3)
+
+> Last refreshed: 2026-07-01 (#3794 D3 — compiled-default flip decision matrix +
+> Phase-B tracking issue #3998. No code / default / flip changed; docs-only.)
+
+**Scope.** #3794 D1 (release-health `turn_output_controller_rollout` read-only
+exposure) and D2 (this page's rollout-state sync) landed in PR #3994. D3 is the
+remaining decision: should the six `AGENTDESK_*_CONTROLLER` flags be flipped from
+**compiled default OFF to compiled default ON**? This section records that
+decision. The Phase-B follow-up is tracked in **#3998**.
+
+**What "flip" means precisely.** Each owner getter today returns `false` when its
+env var is unset (`std::env::var(FLAG) … is_some_and(v == "1" || "true")`, with
+telemetry emitted *only* when ON so the default-OFF first evaluation is a
+byte-identical / deploy no-op). A "flip" changes that default so an unset var
+returns `true` (controller path), inverting the rollback semantics from
+"unset → legacy" to "must set `=0` → legacy". It does **not** delete any legacy
+code: even with a flag ON, only the common short-replace arm leaves legacy — the
+scoped excluded arms still route the legacy `else` (see §1 / §3).
+
+### 8.1 Current state (post-#3794 D1/D2)
+
+- Six owner getters, all **compiled default OFF** — `session_relay_sink.rs:57`,
+  `standby_relay.rs:51`, `tmux_watcher/terminal_send.rs:34`,
+  `turn_bridge/terminal_controller_cutover.rs:36`,
+  `recovery_paths/controller_cutover.rs:77`,
+  `tui_prompt_relay_controller_cutover.rs:78`.
+- Release `~/.adk/release/config/launchd.env` forces all six `=1`, so the
+  controller path is **already the effective delivery authority on every release
+  node**.
+- Read-only per-node rollout is reported under `turn_output_controller_rollout`
+  (`outbound/turn_output_controller_rollout_health.rs`, #3794 D1).
+- Excluded arms (empty body, no cutover range / `NoRange`, long-chunk /
+  new-message, TUI-gate) remain legacy by design.
+
+### 8.2 Per-flag flip evaluation
+
+| flag (owner) | flip runtime benefit | flip risk / blocker | decision |
+|---|---|---|---|
+| A2b `sink_short_replace` / A3 `standby_relay` | none — release already env-ON | loses the byte-identical rollback lever; excluded empty-body / `None`-range arms stay legacy | **DEFER** → couple with legacy retirement |
+| A4 `watcher_terminal` / A5 `turn_bridge_terminal` | none — release already env-ON | cleanest self-contained legacy-`else` deletion targets, but excluded arms (long-chunk / `NoRange` / no-placeholder / full-body / TUI-gate) must migrate into the controller first | **DEFER** → excluded-arm migration is the real blocker |
+| A6a `recovery_relay` | none — release already env-ON | #3297 recovery probe must survive; `None`-placeholder fresh-send stays legacy | **DEFER** |
+| A6b `tui_prompt_relay` | none — reuses the A5 path | no independent cutover | **DEFER** → retire with A5 |
+
+### 8.3 Why DEFER (flip cost/benefit)
+
+- **Benefit ≈ 0 on the surface it targets.** Release nodes already run the
+  controller via `launchd.env`; a compiled-default flip changes nothing there.
+  The only marginal gain is defense-in-depth for a node that *lost* its env
+  override — but "unset → known-good legacy" is precisely the safety property the
+  default-OFF lever provides, so the flip trades that away.
+- **Loses the clean rollback lever.** Today `unset env → byte-identical legacy`
+  is the safest rollback (no rebuild, no behavior delta). Compiled-default ON
+  makes rollback an explicit `=0` opt-out and removes the "unset = known-good"
+  guarantee.
+- **Does not complete #3089 single-authority.** The excluded-arm legacy `else`
+  branches survive a flip, so the flip alone cannot retire legacy — it is only
+  worth taking **coupled with legacy retirement** once the excluded arms are
+  migrated.
+- **CI OFF-assumption tests go red.** Six default-OFF assertions guard the
+  byte-identical-legacy contract (`if env::var_os(FLAG).is_none() {
+  assert!(!..._enabled()) }`). A naive flip inverts their premise and turns them
+  red; they must be re-authored (assert the new default + add `=0`-opt-out
+  coverage), not silently deleted.
+
+This mirrors #3933, which deferred the `AGENTDESK_DELIVERY_RECORD_AUTHORITY`
+default-ON flip until the combined flag was split / the enforce guard made
+precise.
+
+### 8.4 Phase-B GO conditions (tracked in #3998)
+
+The flip becomes a real single-authority win only when coupled with legacy
+retirement. Before flipping:
+
+1. **Excluded-arm migration** — migrate each owner's excluded arms into the
+   controller so a flag ON = full single-authority for that owner (A4/A5 `else`
+   are the cleanest targets; A6a keeps the #3297 probe; A6b retires with A5).
+2. **CI-wide OFF-assumption audit** — invert/re-author the six default-OFF
+   assertions and audit any other dev/CI default-OFF assumptions.
+3. **Release soak evidence** — record duplicate-relay / missed-terminal-body
+   metrics via `turn_output_controller_rollout` across a soak window (env-ON is
+   behaviorally identical to compiled-ON, so the soak transfers).
+4. **Then** flip compiled default OFF→ON **and delete the now-vestigial legacy
+   `else` branches in the same slice**, keeping `=0` as the explicit rollback
+   opt-out.
+
+**Recommendation: DEFER the compiled-default flip; fold it into the Phase-B
+excluded-arm migration + legacy retirement (#3998).** Do not flip standalone —
+it costs the rollback lever for no runtime gain.
