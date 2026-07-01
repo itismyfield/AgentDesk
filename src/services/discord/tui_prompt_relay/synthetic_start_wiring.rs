@@ -32,6 +32,12 @@ use super::*;
 /// [`observer_should_spawn_bridge_tail`] so a deferred start stands the observer
 /// tail down. `lease` is `&mut` so the adopt re-record (fresh generation) is
 /// reflected in the caller's lease for that guard.
+///
+/// #4002: the passive inflight `claim_tui_direct_synthetic_turn` installs stamps
+/// `relay_ownership_only` by RE-DERIVING `suppresses_user_turn_lifecycle` from the
+/// prompt itself, so a SystemContinuation (compact-resume) turn never gains watcher
+/// completion Path B (⏳→✅ + session_transcripts / turn_analytics) — no extra flag
+/// is threaded through this seam.
 pub(super) async fn wire_tui_direct_synthetic_turn_start(
     shared: &Arc<SharedData>,
     provider_str: &str,

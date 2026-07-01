@@ -6197,7 +6197,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             && !completion_is_stale_for_newer_turn
             && let Some(state) = inflight_state
                 .as_ref()
-                .filter(|s| !s.rebind_origin && s.user_msg_id != 0)
+                .filter(|s| watcher_completion_lifecycle_applies(s))
         {
             let user_msg_id = serenity::MessageId::new(state.user_msg_id);
             crate::services::discord::formatting::remove_reaction_raw(

@@ -299,6 +299,20 @@ pub(in crate::services::discord) struct InflightTurnState {
     pub rebind_origin_deadline_secs: Option<u64>,
     #[serde(default)]
     pub rebind_origin_birth_generation: Option<u64>,
+    /// #4002: `true` when this inflight exists ONLY to carry relay ownership for
+    /// a `SystemContinuation` (compact-resume) turn. It has a real note message id
+    /// in `user_msg_id` (so the idle-tail self-pin / Path A gates work) but is NOT
+    /// a user-authored lifecycle turn: the watcher completion Path B (⏳ → ✅
+    /// reaction + `session_transcripts` / `turn_analytics` rows keyed on
+    /// `user_msg_id`) MUST skip such a row, or every compact resume would brand its
+    /// neutral note with a `✅` and write a phantom user-turn analytics/transcript
+    /// row (`turn_id=discord:<channel>:note.id`). Relay-ownership adoption and the
+    /// bridge-tail stand-down are unaffected — only the post-completion bookkeeping
+    /// is suppressed. Additive `#[serde(default)]` field — legacy rows deserialize
+    /// as `false` (unchanged behaviour); set only at the SystemContinuation
+    /// synthetic birth site.
+    #[serde(default)]
+    pub relay_ownership_only: bool,
     /// #1255 codex round-2 P2: `true` while a long-running tool placeholder
     /// (`Monitor` / background `Bash`/`Task`/`Agent`) owns `current_msg_id`.
     /// `placeholder_sweeper` skips inflights whose `full_response` is non-empty
@@ -799,6 +813,8 @@ impl InflightTurnState {
             rebind_origin_created_at_unix: None,
             rebind_origin_deadline_secs: None,
             rebind_origin_birth_generation: None,
+            // #4002: only the SystemContinuation synthetic birth site sets this.
+            relay_ownership_only: false,
             long_running_placeholder_active: false,
             watcher_owns_live_relay: false,
             relay_owner_kind: RelayOwnerKind::None,

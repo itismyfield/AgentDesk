@@ -95,6 +95,24 @@ pub(super) fn watcher_inflight_needs_anchor_lifecycle_cleanup(
 ) -> bool {
     watcher_inflight_represents_external_input(Some(inflight))
         && (inflight.user_msg_id == 0 || inflight.rebind_origin)
+        // #4002 (safety belt): a relay-ownership-only SystemContinuation row must
+        // never drive ANY completion reaction path. It currently keeps
+        // `user_msg_id != 0` and `!rebind_origin` so this predicate is already
+        // `false` for it; the explicit guard keeps that true if either invariant
+        // ever changes.
+        && !inflight.relay_ownership_only
+}
+
+/// #4002: gate for the watcher completion **Path B** — the `⏳ → ✅` reaction on
+/// `user_msg_id` plus the `session_transcripts` / `turn_analytics` row persistence.
+/// It applies ONLY to a real user-authored turn: a live `user_msg_id`, not a
+/// `rebind_origin` synthetic, and NOT a `relay_ownership_only` SystemContinuation
+/// (compact-resume) row — whose neutral note must never gain a `✅` or a phantom
+/// user-turn analytics/transcript row (`turn_id=discord:<channel>:note.id`). The
+/// relay-ownership adoption / bridge-tail stand-down / response finalize are all
+/// upstream of this gate and stay unaffected.
+pub(super) fn watcher_completion_lifecycle_applies(inflight: &InflightTurnState) -> bool {
+    !inflight.rebind_origin && inflight.user_msg_id != 0 && !inflight.relay_ownership_only
 }
 
 pub(super) fn watcher_direct_terminal_should_commit_session_idle(

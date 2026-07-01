@@ -282,7 +282,7 @@ pub(super) async fn claim_tui_direct_synthetic_turn(
         };
     }
 
-    let inflight_state = build_tui_direct_synthetic_inflight_state(
+    let mut inflight_state = build_tui_direct_synthetic_inflight_state(
         provider.clone(),
         channel_id,
         anchor_message_id,
@@ -294,6 +294,10 @@ pub(super) async fn claim_tui_direct_synthetic_turn(
         lease,
         relay_owner_kind,
     );
+    // #4002: mark a SystemContinuation (compact-resume) inflight relay-ownership-only so
+    // watcher completion Path B (⏳→✅ + transcripts/analytics) skips it (inline+deferred).
+    inflight_state.relay_ownership_only =
+        classify_injected_prompt(prompt_text).suppresses_user_turn_lifecycle();
     if let Err(error) = super::super::inflight::save_inflight_state(&inflight_state) {
         tracing::warn!(
             provider = %provider.as_str(),

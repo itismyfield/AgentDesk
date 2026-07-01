@@ -1070,12 +1070,26 @@
   defer/claim → adopt resolved `relay_owner` into the lease) was extracted VERBATIM
   into a new node-local module (`tui_prompt_relay/synthetic_start_wiring.rs`,
   `wire_tui_direct_synthetic_turn_start`) and the suppress branch now reuses it,
-  installing a PASSIVE synthetic inflight (Background kind, relay-ownership only —
-  no ⏳/anchor/lifecycle) so the post-block bridge-tail gate honours cross-relayer
-  single-ownership. **Worker-local**: the passive inflight, the in-memory external-
-  input relay lease, and the durable pending-start / claim-marker stores are all
-  the SAME per-node surfaces the active-turn synthetic path already uses; the fix
-  only ROUTES the compact-resume observation onto them. It introduces no new PG
-  lease, cross-node read, leader-only side effect, or singleton assumption — the
-  cross-relayer single-owner invariant it now enforces already lived on the per-
-  node inflight row. No DB/schema change.
+  installing a PASSIVE synthetic inflight (relay-ownership only — no ⏳/anchor and,
+  per the round-2 fix below, no completion lifecycle either) so the post-block
+  bridge-tail gate honours cross-relayer single-ownership. Round-2 (dual-review P2):
+  that passive inflight kept `user_msg_id = note.id` (≠ 0) and `rebind_origin =
+  false`, so the watcher completion **Path B** (`tmux_watcher.rs` `⏳→✅` reaction +
+  `session_transcripts` / `turn_analytics` persistence) would have branded the
+  neutral compact-resume note with a `✅` and written a phantom user-turn
+  analytics/transcript row (`turn_id=discord:<channel>:note.id`). The fix adds an
+  additive `#[serde(default)] relay_ownership_only` flag on the node-local inflight
+  row (`inflight/model.rs`; legacy rows deserialize as `false`), set at the
+  SystemContinuation synthetic birth site (`claim_tui_direct_synthetic_turn`, and
+  re-derived from the durable prompt text on the deferred worker path), and gates
+  Path B on `terminal_readiness::watcher_completion_lifecycle_applies` so a
+  relay-ownership-only row is skipped. **Worker-local**: the passive inflight, the
+  in-memory external-input relay lease, and the durable pending-start / claim-marker
+  stores are all the SAME per-node surfaces the active-turn synthetic path already
+  uses; the fix only ROUTES the compact-resume observation onto them and suppresses
+  its per-node completion bookkeeping. It introduces no new PG lease, cross-node
+  read, leader-only side effect, or singleton assumption — the cross-relayer
+  single-owner invariant it enforces, and the completion Path B it gates, both
+  already lived on the per-node inflight row. The only persisted change is the
+  additive node-local inflight-row field (no PG schema change; relay-ownership
+  adoption / bridge-tail stand-down / response finalize are all unaffected).

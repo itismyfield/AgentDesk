@@ -336,3 +336,75 @@ fn claude_watcher_ready_keeps_busy_when_partial_user_follows_terminator() {
         Some(false)
     );
 }
+
+// #4002: a relay-ownership-only SystemContinuation (compact-resume) synthetic
+// inflight carries relay ownership but is NOT a user-authored turn — the watcher
+// completion Path B (⏳→✅ reaction on `user_msg_id` + session_transcripts /
+// turn_analytics persistence) must SKIP it, while a real user-authored turn still
+// completes. Also pins the anchor-cleanup safety belt.
+#[test]
+fn relay_ownership_only_inflight_is_excluded_from_watcher_completion_lifecycle() {
+    let base = || {
+        InflightTurnState::new(
+            ProviderKind::Claude,
+            123,
+            Some("adk-cc".to_string()),
+            42,
+            5001, // user_msg_id = the compact-resume note id (non-zero)
+            0,
+            "This session is being continued from a previous conversation".to_string(),
+            Some("session".to_string()),
+            Some("AgentDesk-claude-adk-cc".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            0,
+        )
+    };
+
+    // A real user-authored turn (HumanTuiDirect-style): non-zero user_msg_id, not
+    // rebind-origin, not relay-ownership-only → Path B APPLIES (✅ + transcript).
+    let real = base();
+    assert!(!real.relay_ownership_only);
+    assert!(
+        watcher_completion_lifecycle_applies(&real),
+        "a real user-authored turn must still complete (⏳→✅ + transcript/analytics)"
+    );
+
+    // THE #4002 REGRESSION: the compact-resume SystemContinuation row has the SAME
+    // non-zero note id, but is relay-ownership-only → Path B is SKIPPED (no ✅ on
+    // the neutral note, no phantom session_transcripts / turn_analytics row). RED if
+    // the completion filter drops the `!relay_ownership_only` guard.
+    let mut relay_only = base();
+    relay_only.relay_ownership_only = true;
+    assert!(
+        !watcher_completion_lifecycle_applies(&relay_only),
+        "a relay-ownership-only SystemContinuation row must NOT gain a ✅ / transcript / analytics row"
+    );
+
+    // rebind-origin and user_msg_id == 0 stay excluded (unchanged pre-#4002 behaviour).
+    let mut rebind = base();
+    rebind.rebind_origin = true;
+    assert!(!watcher_completion_lifecycle_applies(&rebind));
+    let mut zero = base();
+    zero.user_msg_id = 0;
+    assert!(!watcher_completion_lifecycle_applies(&zero));
+
+    // Anchor-cleanup safety belt (#4002 step 4): even an external-input row that
+    // somehow lost its user_msg_id must NOT drive anchor-lifecycle cleanup when it
+    // is relay-ownership-only.
+    let mut ext_relay_only = base();
+    ext_relay_only.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
+    ext_relay_only.user_msg_id = 0;
+    ext_relay_only.relay_ownership_only = true;
+    assert!(
+        !watcher_inflight_needs_anchor_lifecycle_cleanup(&ext_relay_only),
+        "the safety belt excludes a relay-ownership-only row from anchor cleanup"
+    );
+
+    // Guard against over-suppression: the SAME external-input user_msg_id==0 row
+    // WITHOUT the relay-ownership-only flag still legitimately needs anchor cleanup.
+    let mut ext_needs = base();
+    ext_needs.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
+    ext_needs.user_msg_id = 0;
+    assert!(watcher_inflight_needs_anchor_lifecycle_cleanup(&ext_needs));
+}
