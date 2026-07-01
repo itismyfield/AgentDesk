@@ -23,13 +23,13 @@ python3 "$SCRIPTS_DIR/daily_ai_briefing_data.py" \
   > "$DATA_DIR/weather.json" 2>/dev/null || echo '{"error":"weather fetch failed"}' > "$DATA_DIR/weather.json"
 
 # 2. Calendar (본인=janelley94 / 배우자=primary / 가족)
-gog cal events janelley94@gmail.com --from "$TODAY_FROM" --to "$TOMORROW_FROM" --account itismyfield@gmail.com --client my-personal --plain --no-input \
+gog cal events janelley94@gmail.com --from "$TODAY_FROM" --to "$TOMORROW_FROM" --account itismyfield@gmail.com --client default --plain --no-input \
   > "$DATA_DIR/cal_self.txt" 2>/dev/null || echo "조회 실패" > "$DATA_DIR/cal_self.txt"
 
-gog cal events primary --from "$TODAY_FROM" --to "$TOMORROW_FROM" --account itismyfield@gmail.com --client my-personal --plain --no-input \
+gog cal events primary --from "$TODAY_FROM" --to "$TOMORROW_FROM" --account itismyfield@gmail.com --client default --plain --no-input \
   > "$DATA_DIR/cal_spouse.txt" 2>/dev/null || echo "조회 실패" > "$DATA_DIR/cal_spouse.txt"
 
-gog cal events family03910667166220074979@group.calendar.google.com --from "$TODAY_FROM" --to "$TOMORROW_FROM" --account itismyfield@gmail.com --client my-personal --plain --no-input \
+gog cal events family03910667166220074979@group.calendar.google.com --from "$TODAY_FROM" --to "$TOMORROW_FROM" --account itismyfield@gmail.com --client default --plain --no-input \
   > "$DATA_DIR/cal_family.txt" 2>/dev/null || echo "조회 실패" > "$DATA_DIR/cal_family.txt"
 
 # 3. Family reminders
