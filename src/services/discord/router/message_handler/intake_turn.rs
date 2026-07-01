@@ -1319,6 +1319,10 @@ pub(in crate::services::discord) async fn handle_text_message(
     )
     .await;
 
+    // #3813 Phase 1a: intake latency span anchor (turn claimed; observation-only
+    // — see latency_spans.rs). Never `.log()`'d on the early returns below.
+    let mut intake_latency = super::latency_spans::IntakeLatencySpans::turn_claimed();
+
     if started
         && let Some(stale) =
             super::super::super::stale_dispatch_turn_for_text(shared.pg_pool.as_ref(), user_text)
@@ -1648,6 +1652,8 @@ pub(in crate::services::discord) async fn handle_text_message(
             }
         }
     };
+    // #3813 Phase 1a: the intake placeholder POST returned a live id.
+    intake_latency.mark_placeholder_posted();
     crate::services::discord::increment_global_active(shared, "intake_after_mailbox_slot");
     shared
         .turn_start_times
@@ -1857,6 +1863,9 @@ pub(in crate::services::discord) async fn handle_text_message(
         );
     }
     let prompt_prep_duration_ms = prompt_prep_started.elapsed().as_millis();
+    // #3813 Phase 1a: prompt prep complete (distinct window from the
+    // `[prompt-prep]` line below; no shared boundary, so they cannot conflict).
+    intake_latency.mark_prep_done();
     let memory_backend_label = memory_settings.backend.as_str();
     let provider_label = match &provider {
         ProviderKind::Claude => "claude",
@@ -2413,6 +2422,10 @@ pub(in crate::services::discord) async fn handle_text_message(
             .cancelled
             .store(true, std::sync::atomic::Ordering::Relaxed);
         super::super::super::clear_watchdog_deadline_override(channel_id.get()).await;
+        // #3813 Phase 1a: prep done but input deferred pre-submit (TUI busy) —
+        // emit the partial span (input/total render `-`); the retry re-enters
+        // intake and emits its own `submitted` span.
+        intake_latency.log(channel_id.get(), provider_label, "deferred_busy");
         return Ok(());
     }
     #[cfg(unix)]
@@ -2738,6 +2751,8 @@ pub(in crate::services::discord) async fn handle_text_message(
         }
     });
 
+    // #3813 Phase 1a: provider input is about to be handed to the turn bridge.
+    intake_latency.mark_input_written();
     spawn_turn_bridge(
         shared.clone(),
         cancel_token.clone(),
@@ -2786,6 +2801,9 @@ pub(in crate::services::discord) async fn handle_text_message(
             inflight_state,
         },
     );
+
+    // #3813 Phase 1a: full intake span complete — emit the structured line + event.
+    intake_latency.log(channel_id.get(), provider_label, "submitted");
 
     if let Some(rx) = completion_rx {
         rx.await

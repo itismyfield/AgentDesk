@@ -44,6 +44,7 @@ mod control;
 mod goal_lifecycle;
 mod headless_turn;
 mod intake_turn;
+mod latency_spans;
 mod provider_isolation;
 mod tui_followup;
 mod turn_lifecycle;

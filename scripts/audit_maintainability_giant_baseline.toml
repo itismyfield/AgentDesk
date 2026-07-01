@@ -445,7 +445,13 @@
 # `if !started` mailbox enqueue + queued-placeholder render + reaction lifecycle),
 # and turn_watchdog (the per-turn watchdog spawn). Pure code movement; the new
 # child modules live under the `intake_turn/**` 700-line namespace cap.
-"src/services/discord/router/message_handler/intake_turn.rs" = 2797
+# #3813 Phase 1a (observation-only, reviewable admission): +18 prod LoC for six
+# thin intake latency-span call-sites — the turn-claimed anchor plus the
+# placeholder/prep/input marks and the `submitted`/`deferred_busy` emit. All
+# measurement/formatting logic lives in the sibling `latency_spans.rs` (monotonic
+# `Instant` deltas); the root only captures marks + emits. No control-flow change,
+# no new await/lock. 2797 -> 2815.
+"src/services/discord/router/message_handler/intake_turn.rs" = 2815
 "src/services/discord/meeting_orchestrator.rs" = 3227
 # #3293: +3 for the `registry_purge` child-module declaration (peek +
 # operator-gated idle-entry purge live outside the frozen root); lowered

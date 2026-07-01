@@ -398,6 +398,42 @@ pub fn emit_intake_placeholder_post_failed(
     );
 }
 
+/// #3813 Phase 1a: record the intake-side latency spans (observation-only) so
+/// the `claim → placeholder → prep → input` durations are PG-queryable and the
+/// downstream fast-lane tuning (Phase 2) can be made data-backed. `outcome`
+/// is `submitted` (input handed to the turn bridge) or `deferred_busy` (a
+/// pre-submission defer), and each `*_ms` is `None` when its milestone was not
+/// reached — a partial span, never a bogus zero. Emitted at most once per turn
+/// on the intake path (same non-blocking family as `emit_intake_placeholder_post_failed`).
+#[allow(clippy::too_many_arguments)]
+pub fn emit_intake_latency_spans(
+    provider: &str,
+    channel_id: u64,
+    outcome: &str,
+    accept_to_placeholder_ms: Option<u64>,
+    placeholder_to_prep_ms: Option<u64>,
+    prep_to_input_ms: Option<u64>,
+    accept_to_input_ms: Option<u64>,
+) {
+    emit_event(
+        "intake_latency_spans",
+        Some(provider),
+        Some(channel_id),
+        None,
+        None,
+        None,
+        normalize_string(outcome).as_deref(),
+        CounterDelta::default(),
+        json!({
+            "outcome": normalize_string(outcome),
+            "accept_to_placeholder_ms": accept_to_placeholder_ms,
+            "placeholder_to_prep_ms": placeholder_to_prep_ms,
+            "prep_to_input_ms": prep_to_input_ms,
+            "accept_to_input_ms": accept_to_input_ms,
+        }),
+    );
+}
+
 /// #2838 (relay-stability P0-1): record a structured event at each terminal
 /// relay delivery decision so the duplicate-emit (root cause #1) and
 /// missing-answer (root cause #4) vectors are PG-queryable and attributable to
