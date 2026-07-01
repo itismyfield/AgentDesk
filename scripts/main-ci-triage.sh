@@ -148,6 +148,37 @@ parse_passed_identifiers_from_log() {
   sed -nE 's/^test ([A-Za-z0-9_:]+) \.\.\. ok$/\1/p' "$log_path" | sort -u
 }
 
+# #3991: Infrastructure-level termination is flaky runner pressure (OOM /
+# SIGTERM / exit 143 / runner cancellation), not a test assertion. This is only
+# consulted on the job-level fallback path — a failed job whose log has NO
+# `test … FAILED` line. A real test failure produces a `test … FAILED` line and
+# never reaches this check, so genuine red is never suppressed.
+log_has_infra_termination() {
+  local log_path="$1"
+  [[ -f "$log_path" ]] || return 1
+  grep -E -i -q -- \
+    'signal[: ]+(9|15)([^0-9]|$)|sig(term|kill)|terminated on line [0-9]+ by signal|(exit(ed)?|code|status)[^0-9]*143([^0-9]|$)|the operation was cancell?ed|runner has received a shutdown signal' \
+    "$log_path"
+}
+
+# #3996: Real-failure guard for the flaky skip filter. `log_has_infra_termination`
+# is too coarse on its own — a genuine job-level regression (e.g. a compile error
+# that never emits a `test … FAILED` line, so it hits the job-level fallback) can
+# ALSO carry SIGTERM / exit-143 noise (the runner tears down remaining steps after
+# a hard failure). Skipping that as flaky would be a false negative: real red
+# silently dropped, never promoted to ci-red. This helper detects *deterministic*
+# failure signals that unambiguously mean "the code is broken", so infra-only
+# skips can be gated on their absence. Kept deliberately narrow — only signals
+# that appear on a genuine compile/test failure, not benign `error:`/`failed`
+# chatter — to avoid re-widening into a false-positive filter.
+log_has_real_failure() {
+  local log_path="$1"
+  [[ -f "$log_path" ]] || return 1
+  grep -E -i -q -- \
+    'error\[E[0-9]|error: could not compile|test result: FAILED|panicked at|assertion .*failed' \
+    "$log_path"
+}
+
 record_failed_identifier() {
   local prefix="$1"
   local identifier="$2"
@@ -200,6 +231,17 @@ collect_failed_identifiers() {
     done < <(parse_failed_identifiers_from_log "$log_path")
 
     if [[ "$matched" == "0" ]]; then
+      # #3991/#3996: No `test … FAILED` assertion in a failed job's log means this
+      # is a job-level fallback. Skip it as flaky ONLY when an infrastructure-level
+      # termination (SIGTERM / signal 15 / exit 143 / runner cancellation) is the
+      # *sole* failure signal. If the log ALSO carries a deterministic real-failure
+      # signal (compile error `error[E…]` / `could not compile`, `test result:
+      # FAILED`, `panicked at`, failed assertion), the infra noise is incidental —
+      # promote it normally so genuine red is never silently dropped (false
+      # negative). Only pure infra terminations are suppressed.
+      if log_has_infra_termination "$log_path" && ! log_has_real_failure "$log_path"; then
+        continue
+      fi
       identifier="job::$job_name"
       record_failed_identifier "$prefix" "$identifier" "$job_name" "$job_id" "$job_url" "$log_path"
     fi
@@ -1044,6 +1086,153 @@ EOF
   fi
 }
 
+scenario_sigterm_job_failure_is_skipped_as_flaky() {
+  # #3991: A failed job whose log has no `test … FAILED` assertion but shows an
+  # infrastructure-level termination (SIGTERM / signal 15 / exit 143 / runner
+  # cancellation) must be classified as flaky and skipped — even across two
+  # consecutive red runs it must NOT be promoted to a ci-red issue.
+  local scenario_dir="$TMP_DIR/selftest-sigterm-flaky"
+  mkdir -p "$scenario_dir"
+  install_mock_gh "$scenario_dir"
+  write_event_payload "$scenario_dir/event.json"
+  cat >"$scenario_dir/workflow-runs.json" <<'EOF'
+{"workflow_runs":[{"id":200,"conclusion":"failure"},{"id":199,"conclusion":"failure"}]}
+EOF
+  cat >"$scenario_dir/current-jobs.json" <<'EOF'
+{"jobs":[{"id":901,"name":"Full tests (ubuntu-latest)","conclusion":"failure","html_url":"https://example.com/jobs/901"}]}
+EOF
+  cat >"$scenario_dir/previous-jobs.json" <<'EOF'
+{"jobs":[{"id":902,"name":"Full tests (ubuntu-latest)","conclusion":"failure","html_url":"https://example.com/jobs/902"}]}
+EOF
+  cat >"$scenario_dir/log-200-901.txt" <<'EOF'
+   Compiling agentdesk v0.1.0 (/home/runner/work/AgentDesk/AgentDesk)
+    Building [=======================>   ] 812/845: agentdesk(test)
+/home/runner/work/_temp/abc.sh: line 3: 1234 Terminated (signal 15) just check
+Error: The process '/usr/bin/just' failed with exit code 143
+##[error]The operation was canceled.
+EOF
+  cat >"$scenario_dir/log-199-902.txt" <<'EOF'
+   Compiling agentdesk v0.1.0 (/home/runner/work/AgentDesk/AgentDesk)
+    Building [=====================>     ] 790/845: agentdesk(test)
+/home/runner/work/_temp/def.sh: line 3: 5678 Terminated (signal 15) just check
+Error: The process '/usr/bin/just' failed with exit code 143
+##[error]The operation was canceled.
+EOF
+  echo '[]' >"$scenario_dir/open-issues.json"
+
+  PATH="$scenario_dir:$PATH" \
+    GITHUB_REPOSITORY="test/repo" \
+    GITHUB_EVENT_PATH="$scenario_dir/event.json" \
+    GH_TOKEN="test-token" \
+    bash "$0"
+
+  if [[ -f "$scenario_dir/issue-create.txt" || -f "$scenario_dir/issue-comment.txt" || -f "$scenario_dir/issue-close.txt" ]]; then
+    echo "assertion failed: SIGTERM/infra-termination job failure must be skipped as flaky, not promoted to ci-red" >&2
+    exit 1
+  fi
+}
+
+scenario_sigterm_noise_with_real_test_failure_still_creates_issue() {
+  # #3991 regression guard: a real `test … FAILED` assertion must still be
+  # promoted to a ci-red issue even when the same job log ALSO contains SIGTERM /
+  # exit 143 infrastructure noise. The flaky filter only applies to the
+  # job-level fallback (zero test-FAILED matches), never to real failures.
+  local scenario_dir="$TMP_DIR/selftest-sigterm-real-fail"
+  mkdir -p "$scenario_dir"
+  install_mock_gh "$scenario_dir"
+  write_event_payload "$scenario_dir/event.json"
+  cat >"$scenario_dir/workflow-runs.json" <<'EOF'
+{"workflow_runs":[{"id":200,"conclusion":"failure"},{"id":199,"conclusion":"failure"}]}
+EOF
+  cat >"$scenario_dir/current-jobs.json" <<'EOF'
+{"jobs":[{"id":911,"name":"Full tests (ubuntu-latest)","conclusion":"failure","html_url":"https://example.com/jobs/911"}]}
+EOF
+  cat >"$scenario_dir/previous-jobs.json" <<'EOF'
+{"jobs":[{"id":912,"name":"Full tests (ubuntu-latest)","conclusion":"failure","html_url":"https://example.com/jobs/912"}]}
+EOF
+  cat >"$scenario_dir/log-200-911.txt" <<'EOF'
+running 42 tests
+test pipeline::tests::sigterm_noise_regression ... FAILED
+error: test failed, to rerun pass `-p agentdesk --lib`
+Caused by:
+  process didn't exit successfully: `.../agentdesk-abc123 --skip _pg` (signal: 15, SIGTERM: termination signal)
+Error: The process '/usr/bin/just' failed with exit code 143
+EOF
+  cat >"$scenario_dir/log-199-912.txt" <<'EOF'
+running 42 tests
+test pipeline::tests::sigterm_noise_regression ... FAILED
+error: test failed, to rerun pass `-p agentdesk --lib`
+Caused by:
+  process didn't exit successfully: `.../agentdesk-def456 --skip _pg` (signal: 15, SIGTERM: termination signal)
+Error: The process '/usr/bin/just' failed with exit code 143
+EOF
+  echo '[]' >"$scenario_dir/open-issues.json"
+
+  PATH="$scenario_dir:$PATH" \
+    GITHUB_REPOSITORY="test/repo" \
+    GITHUB_EVENT_PATH="$scenario_dir/event.json" \
+    GH_TOKEN="test-token" \
+    bash "$0"
+
+  assert_contains "issue create --repo test/repo --title [ci-red] pipeline::tests::sigterm_noise_regression 실패 (main)" "$scenario_dir/issue-create.txt"
+}
+
+scenario_compile_error_with_sigterm_noise_still_creates_issue() {
+  # #3996 regression guard: a genuine job-level compile regression (`error[E…]` /
+  # `error: could not compile`) emits NO `test … FAILED` line, so it takes the
+  # job-level fallback path. When SIGTERM / exit-143 infra noise is ALSO present
+  # (runner tears down after the hard failure), the flaky filter must NOT skip it.
+  # `log_has_real_failure` gates the infra skip: real red is still promoted to a
+  # ci-red issue across two consecutive red runs. Before #3996 this was a false
+  # negative (silently dropped).
+  local scenario_dir="$TMP_DIR/selftest-compile-error-sigterm"
+  mkdir -p "$scenario_dir"
+  install_mock_gh "$scenario_dir"
+  write_event_payload "$scenario_dir/event.json"
+  cat >"$scenario_dir/workflow-runs.json" <<'EOF'
+{"workflow_runs":[{"id":200,"conclusion":"failure"},{"id":199,"conclusion":"failure"}]}
+EOF
+  cat >"$scenario_dir/current-jobs.json" <<'EOF'
+{"jobs":[{"id":921,"name":"Full tests (ubuntu-latest)","conclusion":"failure","html_url":"https://example.com/jobs/921"}]}
+EOF
+  cat >"$scenario_dir/previous-jobs.json" <<'EOF'
+{"jobs":[{"id":922,"name":"Full tests (ubuntu-latest)","conclusion":"failure","html_url":"https://example.com/jobs/922"}]}
+EOF
+  cat >"$scenario_dir/log-200-921.txt" <<'EOF'
+   Compiling agentdesk v0.1.0 (/home/runner/work/AgentDesk/AgentDesk)
+error[E0308]: mismatched types
+  --> src/pipeline/mod.rs:42:9
+   |
+42 |         dispatch(count)
+   |         ^^^^^^^^ expected `u64`, found `String`
+error: could not compile `agentdesk` (lib) due to 1 previous error
+/home/runner/work/_temp/abc.sh: line 3: 1234 Terminated (signal 15) just check
+Error: The process '/usr/bin/just' failed with exit code 143
+##[error]The operation was canceled.
+EOF
+  cat >"$scenario_dir/log-199-922.txt" <<'EOF'
+   Compiling agentdesk v0.1.0 (/home/runner/work/AgentDesk/AgentDesk)
+error[E0308]: mismatched types
+  --> src/pipeline/mod.rs:42:9
+   |
+42 |         dispatch(count)
+   |         ^^^^^^^^ expected `u64`, found `String`
+error: could not compile `agentdesk` (lib) due to 1 previous error
+/home/runner/work/_temp/def.sh: line 3: 5678 Terminated (signal 15) just check
+Error: The process '/usr/bin/just' failed with exit code 143
+##[error]The operation was canceled.
+EOF
+  echo '[]' >"$scenario_dir/open-issues.json"
+
+  PATH="$scenario_dir:$PATH" \
+    GITHUB_REPOSITORY="test/repo" \
+    GITHUB_EVENT_PATH="$scenario_dir/event.json" \
+    GH_TOKEN="test-token" \
+    bash "$0"
+
+  assert_contains "issue create --repo test/repo --title [ci-red] job::Full tests (ubuntu-latest) 실패 (main)" "$scenario_dir/issue-create.txt"
+}
+
 run_self_test() {
   require_cmd jq
   scenario_two_run_failure_creates_issue
@@ -1055,6 +1244,9 @@ run_self_test() {
   scenario_skipped_lane_does_not_close_issue
   scenario_single_failure_stays_pending
   scenario_three_gate_failures_produce_distinct_identifiers
+  scenario_sigterm_job_failure_is_skipped_as_flaky
+  scenario_sigterm_noise_with_real_test_failure_still_creates_issue
+  scenario_compile_error_with_sigterm_noise_still_creates_issue
   echo "self-test passed"
 }
 
