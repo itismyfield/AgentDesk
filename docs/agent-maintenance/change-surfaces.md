@@ -1418,7 +1418,7 @@
     2026-08-31, #3036)).
   - `src/services/discord/{commands/text_commands.rs,
     discord_config_audit.rs, router/intake_gate.rs}` (all 1000+ production
-    lines) and `src/services/discord/inflight.rs` (2328 lines; +8 from #3960
+    lines) and `src/services/discord/inflight.rs` (2339 lines; +8 from #3960
     `mod orphan_relay_reclaim` + its re-export — the producer-liveness TOCTOU
     reclaim predicate and the locked owner-downgrade RMW live in their own
     submodule, not this giant file; this is the mod-decl + re-export cost; +1
@@ -1462,7 +1462,13 @@
     guard so the authority-ON release path permits the legitimate re-stream
     instead of enforce-skipping it, plus the paired monotonic debug-tripwire
     relaxation for the already-skipped case; the enforce decision itself stays a
-    pure helper in `outbound/delivery_record.rs`).
+    pure helper in `outbound/delivery_record.rs`; +11 from the #3933 follow-up
+    classifying a permitted full reset's offset-monotonic violation as WARN
+    instead of ERROR (the `monotonic_violation_safely_handled =
+    enforce_skips_backward_write || is_legitimate_full_reset` input at the
+    save-path chokepoint — log-severity ONLY; enforce guard, debug tripwire, and
+    on-disk schema unchanged, killing the per-retry authority-ON operator ERROR
+    noise on every Gemini/Qwen `RetryBoundary`)).
   - `src/services/discord/placeholder_sweeper.rs` (1019 lines; +5 from #3886
     calling the deterministic TimedOut-completion-gate status-panel reconcile
     (`super::tmux::reconcile_timed_out_tui_status_panel`) before the age-based

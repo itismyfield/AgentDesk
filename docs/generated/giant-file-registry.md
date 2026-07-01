@@ -17,7 +17,7 @@
 | `src/services/codex_tui/rollout_tail.rs` | 1276 | discord-relay | 2026-10-31 | #3843 |
 | `src/services/discord/health/recovery.rs` | 2223 | discord-relay | 2026-10-31 | #3839 |
 | `src/services/discord/idle_recap.rs` | 1252 | discord-relay | 2026-08-31 | #3405 |
-| `src/services/discord/inflight.rs` | 2328 | discord-relay | 2026-10-31 | #3835 |
+| `src/services/discord/inflight.rs` | 2339 | discord-relay | 2026-10-31 | #3835 |
 | `src/services/discord/placeholder_sweeper.rs` | 1019 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/recovery_engine.rs` | 2935 | discord-relay | 2026-10-31 | #3834 |
 | `src/services/discord/router/intake_gate.rs` | 1591 | discord-relay | 2026-10-31 | #3838 |

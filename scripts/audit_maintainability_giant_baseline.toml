@@ -614,7 +614,14 @@
 # The split keeps ONE implementation (no duplicated validate/atomic-write) behind
 # the flag. Root-consistent with #3960; smallest possible blast radius.
 # 2026-07-01 #3933: +19 prod LoC — is_legitimate_full_reset enforce-guard precision (live data-loss fix); 로직은 validate_inflight_state_for_save에 상주해야 함
-"src/services/discord/inflight.rs" = 2328 # #3835: 3077 -> 2275, locked-in win — verbatim decompose moved the status-panel/current-message ownership writes to inflight/ownership_ops.rs and the staleness predicates + orphan-lock/rebind-origin reap helpers to inflight/rebind_reap.rs (zero behavior change, facade re-exports keep inflight::* paths byte-identical); #3982 -> 2309 (+34) persist bump-flag split (see comment above); #3933 -> 2328 (+19) is_legitimate_full_reset enforce-guard precision (see comment above)
+# 2026-07-01 #3933 follow-up: +11 prod LoC — severity WARN downgrade for a legitimate
+# full reset. The `monotonic_violation_safely_handled = enforce_skips_backward_write ||
+# is_legitimate_full_reset` binding + its rationale comment make a permitted re-stream
+# rewind record its offset-monotonic violation at WARN (not ERROR), removing the
+# per-retry operator ERROR noise the release (authority-ON) emits on every Gemini/Qwen
+# RetryBoundary. Log-severity ONLY — enforce guard, debug tripwire, and on-disk schema
+# unchanged; the classification input necessarily lives at the save-path chokepoint.
+"src/services/discord/inflight.rs" = 2339 # #3835: 3077 -> 2275, locked-in win — verbatim decompose moved the status-panel/current-message ownership writes to inflight/ownership_ops.rs and the staleness predicates + orphan-lock/rebind-origin reap helpers to inflight/rebind_reap.rs (zero behavior change, facade re-exports keep inflight::* paths byte-identical); #3982 -> 2309 (+34) persist bump-flag split (see comment above); #3933 -> 2328 (+19) is_legitimate_full_reset enforce-guard precision (see comment above); #3933 follow-up -> 2339 (+11) severity WARN downgrade (see comment above)
 # #3779 extracted relay-recovery auto-heal attempt accounting to a sibling
 # module, dropping relay_recovery.rs below the prod-giant threshold; the ratchet
 # entry is retired instead of raising the baseline.

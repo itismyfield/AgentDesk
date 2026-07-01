@@ -2127,4 +2127,238 @@ mod tests {
         assert!(!should_shadow_mirror(false, true)); // not-advanced/partial → no record (M4/I2)
         assert!(!should_shadow_mirror(true, false)); // flag OFF → no record (deploy no-op)
     }
+
+    // ---- #3933 item 1: read-authority (authority-ON) end-to-end wiring --------
+    // The pure helpers above (fuse / #1270 generation gate / range_already_committed)
+    // are covered, but no test drove the ENV-RESOLVED public gates
+    // (`effective_committed_offset` / `committed_floor_for_resend_dedup`) with the
+    // flag FORCED ON — the release config (AGENTDESK_DELIVERY_RECORD_AUTHORITY=1)
+    // the compiled default (OFF) never exercises. These tests force it ON via the
+    // #3993 per-thread seam and verify the whole wiring end-to-end (not by
+    // hand-computing the fusion): the dedup floor is `max(durable, in_memory)` so it
+    // never over-suppresses, the #1270 gate distrusts a stale generation, and the
+    // #3871 / #3885 duplicate-relay scenarios are correctly suppressed. This closes
+    // #3933 prerequisite #2 (independent read-authority verification).
+
+    /// RAII: point `AGENTDESK_ROOT_DIR` at an isolated tempdir for a test
+    /// (restoring the prior value on drop) while holding the process-global env
+    /// lock. BOTH the delivery-record path and the tmux `.generation` marker path
+    /// resolve through this root, so the whole read-authority wiring runs against a
+    /// throw-away tree with zero cross-test interference.
+    struct IsolatedRoot {
+        _dir: tempfile::TempDir,
+        previous: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl IsolatedRoot {
+        fn new() -> Self {
+            let lock = crate::config::shared_test_env_lock()
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let dir = tempfile::tempdir().expect("isolated runtime root");
+            let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
+            unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", dir.path()) };
+            Self {
+                _dir: dir,
+                previous,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for IsolatedRoot {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
+
+    /// Seed a CURRENT-generation durable frontier for `(provider, channel)` under
+    /// the isolated root plus its matching `.generation` marker, and return the
+    /// generation mtime the record was stamped with. The record's
+    /// `generation_mtime_ns` is set to the marker's REAL on-disk mtime so the #1270
+    /// generation gate TRUSTS it — mirroring the production write/read parity.
+    fn seed_current_generation_frontier(
+        provider: &ProviderKind,
+        channel: ChannelId,
+        tmux_session_name: &str,
+        durable_end: u64,
+    ) -> i64 {
+        let gen_path =
+            crate::services::tmux_common::session_temp_path(tmux_session_name, "generation");
+        if let Some(parent) = Path::new(&gen_path).parent() {
+            fs::create_dir_all(parent).expect("create sessions dir");
+        }
+        fs::write(&gen_path, b"1").expect("write generation marker");
+        let gen_ns = current_generation_mtime_ns(tmux_session_name);
+        assert_ne!(
+            gen_ns, 0,
+            "seeded .generation marker must have a readable mtime"
+        );
+        let record_path =
+            delivery_record_path(provider, channel.get()).expect("env-resolved record path");
+        write_delivered_frontier_at(
+            &record_path,
+            DeliveredCommit {
+                range: (0, durable_end),
+                generation_mtime_ns: gen_ns,
+                attempts: 1,
+                panel_msg_id: Some(1),
+                panel_channel_id: None,
+            },
+        )
+        .expect("seed durable frontier");
+        gen_ns
+    }
+
+    fn shared_with_committed(
+        channel: ChannelId,
+        in_memory: u64,
+    ) -> std::sync::Arc<crate::services::discord::SharedData> {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        shared
+            .tmux_relay_coord(channel)
+            .confirmed_end_offset
+            .store(in_memory, Ordering::Release);
+        shared
+    }
+
+    /// authority-ON fuses the CURRENT-generation durable frontier into the dedup
+    /// floor (`max(durable, in_memory)`) through the ENV-RESOLVED public reader,
+    /// while authority-OFF returns the in-memory value verbatim (deploy no-op).
+    /// This proves the flag actually gates the wiring — not just the pure `fuse`
+    /// arithmetic already covered above.
+    #[test]
+    fn effective_committed_offset_authority_on_fuses_durable_3933() {
+        let _root = IsolatedRoot::new();
+        let provider = ProviderKind::Claude;
+        let channel = ChannelId::new(39_330_401);
+        let tmux = "AgentDesk-claude-3933fuse";
+        let durable_end = 443_154_u64;
+        let in_memory = 100_u64;
+        seed_current_generation_frontier(&provider, channel, tmux, durable_end);
+        let shared = shared_with_committed(channel, in_memory);
+
+        {
+            // authority ON → durable frontier RAISES the floor above in-memory.
+            let _authority = authority_test_seam::force(true);
+            assert_eq!(
+                effective_committed_offset(shared.as_ref(), &provider, channel, tmux),
+                durable_end.max(in_memory),
+            );
+            // `committed_floor_for_resend_dedup` = effective.max(flag-independent
+            // durable) → the same fused value (floor never drops below in-memory).
+            assert_eq!(
+                committed_floor_for_resend_dedup(shared.as_ref(), &provider, channel, tmux),
+                durable_end.max(in_memory),
+            );
+        }
+        {
+            // authority OFF (forced) → in-memory verbatim; the durable frontier is
+            // hidden by the flag. Pins the flag-gated branch.
+            let _authority = authority_test_seam::force(false);
+            assert_eq!(
+                effective_committed_offset(shared.as_ref(), &provider, channel, tmux),
+                in_memory,
+            );
+        }
+    }
+
+    /// #3871 (rollover dup relay): after a JSONL rollover a re-observing pass would
+    /// re-relay the frozen PREFIX range (ends BELOW the durable committed floor →
+    /// already delivered → suppressed), while a genuinely-NEW tail produced after
+    /// the rollover ends ABOVE the floor → NOT suppressed → relayed. The floor is
+    /// `max(durable, in_memory)`, so raising it to the known-delivered watermark
+    /// never over-suppresses fresh output. Rides the in-memory=0 restart hazard.
+    #[test]
+    fn committed_floor_authority_on_does_not_oversuppress_rollover_resend_3871() {
+        let _root = IsolatedRoot::new();
+        let provider = ProviderKind::Claude;
+        let channel = ChannelId::new(39_330_402);
+        let tmux = "AgentDesk-claude-3871";
+        let durable_end = 443_154_u64;
+        seed_current_generation_frontier(&provider, channel, tmux, durable_end);
+        // In-memory reset to 0 (the restart / synthetic-resume hazard #3871 rides).
+        let shared = shared_with_committed(channel, 0);
+
+        let _authority = authority_test_seam::force(true);
+        let floor = committed_floor_for_resend_dedup(shared.as_ref(), &provider, channel, tmux);
+        assert_eq!(
+            floor, durable_end,
+            "durable frontier must lift the reset in-memory floor"
+        );
+        // Frozen prefix already delivered → suppressed (no dup relay).
+        assert!(range_already_committed(422_855, floor));
+        // New tail past the durable high watermark → relayed (no over-suppression).
+        assert!(!range_already_committed(443_500, floor));
+    }
+
+    /// #3885 (no-response watchdog re-relay): the streaming-aware watchdog can
+    /// trigger a re-observing pass over an ALREADY-delivered range. Under
+    /// authority-ON the durable frontier makes the committed floor recognize that
+    /// range as delivered (`range_already_committed == true`) → the watchdog
+    /// re-relay is suppressed (no duplicate) even though the in-memory offset was
+    /// reset. The boundary (range_end == floor) is inclusive.
+    #[test]
+    fn committed_floor_authority_on_suppresses_watchdog_rerelay_3885() {
+        let _root = IsolatedRoot::new();
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(39_330_403);
+        let tmux = "AgentDesk-codex-3885";
+        let durable_end = 512_000_u64;
+        seed_current_generation_frontier(&provider, channel, tmux, durable_end);
+        let shared = shared_with_committed(channel, 0); // watchdog fires post in-memory reset
+
+        let _authority = authority_test_seam::force(true);
+        let floor = committed_floor_for_resend_dedup(shared.as_ref(), &provider, channel, tmux);
+        assert_eq!(floor, durable_end);
+        // Watchdog re-relay of the delivered body → suppressed (dup guard).
+        assert!(range_already_committed(500_000, floor));
+        assert!(range_already_committed(durable_end, floor)); // inclusive boundary
+    }
+
+    /// Even with authority ON, a STALE prior-generation durable frontier is
+    /// distrusted (#1270 gate) → it does NOT raise the floor → a genuinely-new
+    /// answer after a pane reset / same-named respawn is never over-suppressed.
+    /// Proves the generation gate is honored through the ENV-RESOLVED wiring, not
+    /// only in the pure helper.
+    #[test]
+    fn effective_committed_offset_authority_on_distrusts_stale_generation_3933() {
+        let _root = IsolatedRoot::new();
+        let provider = ProviderKind::Claude;
+        let channel = ChannelId::new(39_330_404);
+        let tmux = "AgentDesk-claude-3933stale";
+        // Seed marker + a current-gen frontier, then OVERWRITE the record with a
+        // PRIOR-generation stamp (mtime 1 ≠ the marker's real nanosecond mtime).
+        seed_current_generation_frontier(&provider, channel, tmux, 443_154);
+        let record_path = delivery_record_path(&provider, channel.get()).unwrap();
+        write_delivered_frontier_at(
+            &record_path,
+            DeliveredCommit {
+                range: (0, 443_154),
+                generation_mtime_ns: 1, // PRIOR generation → distrusted
+                attempts: 1,
+                panel_msg_id: None,
+                panel_channel_id: None,
+            },
+        )
+        .unwrap();
+        let shared = shared_with_committed(channel, 0);
+
+        let _authority = authority_test_seam::force(true);
+        // Stale frontier distrusted → floor stays at the in-memory value (0).
+        assert_eq!(
+            effective_committed_offset(shared.as_ref(), &provider, channel, tmux),
+            0,
+        );
+        assert_eq!(
+            committed_floor_for_resend_dedup(shared.as_ref(), &provider, channel, tmux),
+            0,
+        );
+        // A fresh answer above 0 is NOT over-suppressed.
+        assert!(!range_already_committed(422_855, 0));
+    }
 }
