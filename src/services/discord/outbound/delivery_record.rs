@@ -480,6 +480,15 @@ pub(in crate::services::discord) fn delivery_record_shadow_enabled() -> bool {
 /// gates consult the durable `delivered_frontier` (fused with in-memory) so the
 /// "already-relayed → skip" decision survives a restart / cross-actor boundary.
 pub(in crate::services::discord) fn delivery_record_authority_enabled() -> bool {
+    // #3933: a per-thread test override (see `authority_test_seam`) lets a unit
+    // test drive the authority-ON enforce path (the release config) through the
+    // real save path WITHOUT poisoning the env-global `OnceLock` cache for
+    // sibling tests that assume the compiled-default OFF. Production strips this
+    // branch entirely (`cfg(test)`), so the flag stays byte-identical at runtime.
+    #[cfg(test)]
+    if let Some(forced) = authority_test_seam::current_override() {
+        return forced;
+    }
     static CACHED: OnceLock<bool> = OnceLock::new();
     *CACHED.get_or_init(|| {
         let on = std::env::var("AGENTDESK_DELIVERY_RECORD_AUTHORITY")
@@ -491,6 +500,48 @@ pub(in crate::services::discord) fn delivery_record_authority_enabled() -> bool 
         }
         on
     })
+}
+
+/// #3933 test seam: a per-thread override of `delivery_record_authority_enabled()`
+/// so a unit test can drive the authority-ON enforce path (the release config)
+/// deterministically. Housed in a `#[cfg(test)] mod` (not inline `#[cfg(test)]`
+/// items) so the seam counts as test — not production — review surface.
+#[cfg(test)]
+pub(in crate::services::discord) mod authority_test_seam {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// When `Some`, forces the flag on THIS thread only; `None` (default)
+        /// falls through to the env-cached `OnceLock`.
+        static OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+
+    pub(in crate::services::discord) fn current_override() -> Option<bool> {
+        OVERRIDE.with(Cell::get)
+    }
+
+    /// RAII: force `delivery_record_authority_enabled()` to `value` on the
+    /// current thread until the returned guard drops (then restore the prior
+    /// override). The env-cached `OnceLock` cannot be re-set once initialized,
+    /// and mutating the process-global env would race sibling tests, so a
+    /// thread-local + RAII keeps the authority-ON honor path order-independent
+    /// and leak-free.
+    #[must_use]
+    pub(in crate::services::discord) fn force(value: bool) -> Guard {
+        Guard {
+            previous: OVERRIDE.with(|cell| cell.replace(Some(value))),
+        }
+    }
+
+    pub(in crate::services::discord) struct Guard {
+        previous: Option<bool>,
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            OVERRIDE.with(|cell| cell.set(self.previous));
+        }
+    }
 }
 
 pub(super) fn delivery_record_rollout_health_json() -> serde_json::Value {
@@ -543,19 +594,32 @@ fn delivery_record_rollout_health_json_for_flags(
     })
 }
 
-/// #3089 B3 / #3416 (pure, testable): the same-turn monotonic guard's enforce
-/// decision. Returns `true` (block the backward inflight write) ONLY when the
-/// durable delivered-frontier authority is ON **and** a same-turn offset moved
-/// backward (`response_sent_offset` or `last_offset`). Authority OFF (default) →
-/// always `false` → the guard stays observe-only and the write proceeds
-/// byte-identically (deploy no-op). Gated by the SAME flag as the read-authority
-/// flip so the single offset authority + its enforcement cut over atomically.
+/// #3089 B3 / #3416 / #3933 (pure, testable): the same-turn monotonic guard's
+/// enforce decision. Returns `true` (block the backward inflight write) ONLY when
+/// the durable delivered-frontier authority is ON, a same-turn offset moved
+/// backward (`response_sent_offset` or `last_offset`), **and** the backward move
+/// is NOT a legitimate full reset. Authority OFF (default) → always `false` → the
+/// guard stays observe-only and the write proceeds byte-identically (deploy
+/// no-op). Gated by the SAME flag as the read-authority flip so the single offset
+/// authority + its enforcement cut over atomically.
+///
+/// #3933: `is_legitimate_full_reset` carves the legitimate Gemini/Qwen
+/// `RetryBoundary` rewind (turn_bridge/retry_state.rs clears `full_response` and
+/// rewinds `response_sent_offset`→0 for the SAME turn identity to re-stream) out
+/// of the coarse backward-write skip. The release runs
+/// `AGENTDESK_DELIVERY_RECORD_AUTHORITY=1`, so before this carve-out the enforce
+/// branch dropped the re-streamed body (live data loss). A genuine stale-snapshot
+/// backward regression carries a NON-EMPTY body, so it never matches the reset
+/// signature and stays blocked.
 pub(in crate::services::discord) fn authority_blocks_backward_inflight_write(
     authority_enabled: bool,
     response_sent_offset_monotonic: bool,
     last_offset_monotonic: bool,
+    is_legitimate_full_reset: bool,
 ) -> bool {
-    authority_enabled && (!response_sent_offset_monotonic || !last_offset_monotonic)
+    authority_enabled
+        && (!response_sent_offset_monotonic || !last_offset_monotonic)
+        && !is_legitimate_full_reset
 }
 
 /// Pure fusion (testable): the effective committed offset under the flip. The
@@ -1194,17 +1258,51 @@ mod tests {
     fn authority_blocks_backward_inflight_write_truth_table() {
         // #3416 (#3089 B3): ENFORCE only when authority is ON AND a same-turn
         // offset moved backward. OFF → never blocks (observe-only, no-op deploy).
-        // authority OFF → false regardless of the monotonic flags.
+        // authority OFF → false regardless of the monotonic flags. The 4th arg
+        // (#3933 is_legitimate_full_reset) is `false` for every genuine-regression
+        // row here — it only ever RELAXES, never tightens.
         assert!(!authority_blocks_backward_inflight_write(
-            false, false, false
+            false, false, false, false
         ));
-        assert!(!authority_blocks_backward_inflight_write(false, true, true));
+        assert!(!authority_blocks_backward_inflight_write(
+            false, true, true, false
+        ));
         // authority ON, both monotonic OK → permit the write.
-        assert!(!authority_blocks_backward_inflight_write(true, true, true));
+        assert!(!authority_blocks_backward_inflight_write(
+            true, true, true, false
+        ));
         // authority ON, a backward move on EITHER offset → block (pins the OR).
-        assert!(authority_blocks_backward_inflight_write(true, false, true));
-        assert!(authority_blocks_backward_inflight_write(true, true, false));
-        assert!(authority_blocks_backward_inflight_write(true, false, false));
+        assert!(authority_blocks_backward_inflight_write(
+            true, false, true, false
+        ));
+        assert!(authority_blocks_backward_inflight_write(
+            true, true, false, false
+        ));
+        assert!(authority_blocks_backward_inflight_write(
+            true, false, false, false
+        ));
+
+        // #3933: a legitimate full reset (empty body + rso→0, same turn) must be
+        // PERMITTED even under authority-ON with a backward move — otherwise the
+        // Gemini/Qwen retry re-stream is dropped. The carve-out only fires for a
+        // backward move; a fully-monotonic forward write is unaffected either way.
+        assert!(!authority_blocks_backward_inflight_write(
+            true, false, true, true
+        ));
+        assert!(!authority_blocks_backward_inflight_write(
+            true, true, false, true
+        ));
+        assert!(!authority_blocks_backward_inflight_write(
+            true, false, false, true
+        ));
+        // The reset flag never turns a permitted write into a block.
+        assert!(!authority_blocks_backward_inflight_write(
+            true, true, true, true
+        ));
+        // Authority OFF stays a no-op regardless of the reset flag.
+        assert!(!authority_blocks_backward_inflight_write(
+            false, false, false, true
+        ));
     }
 
     #[test]

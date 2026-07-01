@@ -1415,7 +1415,7 @@
     2026-08-31, #3036)).
   - `src/services/discord/{commands/text_commands.rs,
     discord_config_audit.rs, router/intake_gate.rs}` (all 1000+ production
-    lines) and `src/services/discord/inflight.rs` (2309 lines; +8 from #3960
+    lines) and `src/services/discord/inflight.rs` (2328 lines; +8 from #3960
     `mod orphan_relay_reclaim` + its re-export — the producer-liveness TOCTOU
     reclaim predicate and the locked owner-downgrade RMW live in their own
     submodule, not this giant file; this is the mod-decl + re-export cost; +1
@@ -1452,7 +1452,14 @@
     splitting `persist_under_lock` into a bump-parameterized `persist_under_lock_inner`
     plus a `persist_under_lock_preserving_updated_at` wrapper, so the orphan
     owner-downgrade can persist without resetting the quiescence clock — all
-    existing `persist_under_lock` callers unchanged).
+    existing `persist_under_lock` callers unchanged; +19 from #3933 deriving the
+    `is_legitimate_full_reset` signal inside `validate_inflight_state_for_save`
+    (empty `full_response` + `response_sent_offset == 0` for the SAME turn — the
+    Gemini/Qwen `RetryBoundary` rewind signature) and passing it to the enforce
+    guard so the authority-ON release path permits the legitimate re-stream
+    instead of enforce-skipping it, plus the paired monotonic debug-tripwire
+    relaxation for the already-skipped case; the enforce decision itself stays a
+    pure helper in `outbound/delivery_record.rs`).
   - `src/services/discord/placeholder_sweeper.rs` (1019 lines; +5 from #3886
     calling the deterministic TimedOut-completion-gate status-panel reconcile
     (`super::tmux::reconcile_timed_out_tui_status_panel`) before the age-based

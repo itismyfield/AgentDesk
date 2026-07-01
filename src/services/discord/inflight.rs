@@ -346,12 +346,25 @@ fn validate_inflight_state_for_save(
     // actually persists below, so the violation stays ERROR (a genuine breach).
     // Computed BEFORE the records so the severity is correct; the enforce branch
     // itself (skip + return false) is unchanged.
+    // #3933: a legitimate Gemini/Qwen `RetryBoundary` reset rewinds the SAME
+    // turn's frontier to the start — `full_response` cleared and
+    // `response_sent_offset` back to 0 — to re-stream the answer
+    // (turn_bridge/retry_state.rs::clear_response_delivery_state). That backward
+    // move is NOT a stale-snapshot regression, so the enforce guard must permit
+    // it (the release runs AGENTDESK_DELIVERY_RECORD_AUTHORITY=1; blocking it
+    // drops the re-streamed body). A genuine backward regression carries a
+    // non-empty body, so it never matches this rewind signature and stays
+    // blocked. The signal is derived here from the incoming state — no call-site
+    // change — so the guard stays self-contained.
+    let is_legitimate_full_reset =
+        same_turn_identity && state.full_response.is_empty() && state.response_sent_offset == 0;
     use crate::services::discord::outbound::delivery_record as dr;
     let authority = dr::delivery_record_authority_enabled();
     let enforce_skips_backward_write = dr::authority_blocks_backward_inflight_write(
         authority,
         monotonic_offset,
         last_offset_monotonic,
+        is_legitimate_full_reset,
     );
     let offset_monotonic_severity =
         offset_monotonic_invariant_severity(enforce_skips_backward_write);
@@ -370,8 +383,14 @@ fn validate_inflight_state_for_save(
         }),
         offset_monotonic_severity,
     );
+    // #3933: when the enforce guard is about to SKIP this backward write it never
+    // persists, so the debug tripwire has nothing to catch — asserting there would
+    // panic on a write we already discard. Relax the tripwire for that skipped
+    // case only; a backward move that actually PERSISTS (enforce OFF, or a
+    // permitted legitimate reset in release) still trips it, preserving the
+    // tripwire's purpose and every existing observe-only test verbatim.
     debug_assert!(
-        monotonic_offset,
+        monotonic_offset || enforce_skips_backward_write,
         "inflight response_sent_offset must not move backwards for the same turn identity"
     );
 
@@ -390,7 +409,7 @@ fn validate_inflight_state_for_save(
         offset_monotonic_severity,
     );
     debug_assert!(
-        last_offset_monotonic,
+        last_offset_monotonic || enforce_skips_backward_write,
         "inflight last_offset must not move backwards for the same turn identity"
     );
 
@@ -3265,6 +3284,123 @@ mod stall_recovery_tests {
         );
     }
 
+    /// #3933 (release-path coverage): under authority-ON — the live release config
+    /// (`AGENTDESK_DELIVERY_RECORD_AUTHORITY=1`) — the LEGITIMATE Gemini/Qwen
+    /// `RetryBoundary` reset (`full_response` cleared + `response_sent_offset`→0 for
+    /// the SAME turn identity to re-stream) must NOT be enforce-skipped, so the
+    /// re-streamed answer survives. Before the `is_legitimate_full_reset` carve-out
+    /// the coarse guard returned `false` here and dropped the body live. The suite
+    /// default is authority-OFF, so this path is only exercised by forcing the flag
+    /// ON via the per-thread test seam.
+    #[test]
+    fn authority_on_permits_legit_retry_reset_3933() {
+        use crate::services::discord::outbound::delivery_record as dr;
+        // Share the panic-hook serialization the other tripwire tests use.
+        let _serialized = monotonic_3358_test_mutex()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let temp = TempDir::new().unwrap();
+        let channel_id = 39_330_101;
+        // Existing on-disk row: a streamed answer with an advanced frontier.
+        let mut reset = seed_watcher_stream_state(
+            temp.path(),
+            channel_id,
+            "AgentDesk-claude-3933a",
+            "streamed answer body",
+            120,
+        );
+        // The RetryBoundary reset rewinds the SAME turn to re-stream from empty.
+        reset.full_response = String::new();
+        reset.response_sent_offset = 0;
+        let provider = ProviderKind::Claude;
+        let path = inflight_state_path(temp.path(), &provider, channel_id);
+
+        // Force authority-ON for THIS thread only (the release config).
+        let _authority = dr::authority_test_seam::force(true);
+        let verdict = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            validate_inflight_state_for_save(
+                temp.path(),
+                &path,
+                &reset,
+                "src/services/discord/inflight.rs:test",
+            )
+        }));
+        // The reset is a same-turn backward move. The debug tripwire relaxes ONLY
+        // for an enforce-SKIP, and this write is PERMITTED (not skipped), so in
+        // debug it fires — the panic itself witnesses "permitted, not
+        // enforce-skipped" (a wrongly-blocked reset would relax the tripwire and
+        // return `false` WITHOUT panicking, failing this assert). In release the
+        // tripwire is compiled out, `validate` returns `true`, and the reset
+        // persists end-to-end.
+        match verdict {
+            Ok(permitted) => {
+                assert!(
+                    permitted,
+                    "authority-ON must PERMIT the legitimate retry reset, not enforce-skip it"
+                );
+                save_inflight_state_in_root(temp.path(), &reset).unwrap();
+                let persisted = loaded_row(temp.path(), channel_id);
+                assert!(
+                    persisted.full_response.is_empty(),
+                    "the permitted retry reset must persist (cleared body survives the re-stream)"
+                );
+                assert_eq!(persisted.response_sent_offset, 0);
+            }
+            Err(_) => assert!(
+                cfg!(debug_assertions),
+                "a panic is only expected from the debug tripwire on the permitted backward move"
+            ),
+        }
+    }
+
+    /// #3933 (release-path coverage): a GENUINE stale-snapshot backward regression
+    /// — a NON-EMPTY body moving the frontier back for the SAME turn — must STILL
+    /// be enforce-skipped under authority-ON. The reset carve-out must not weaken
+    /// the real guard, so the committed answer already on disk survives untouched.
+    /// The skipped case is exactly what the #3933 tripwire relaxation exempts, so
+    /// this runs cleanly (no panic) even in debug builds.
+    #[test]
+    fn authority_on_still_skips_nonempty_stale_backward_write_3933() {
+        use crate::services::discord::outbound::delivery_record as dr;
+        let temp = TempDir::new().unwrap();
+        let channel_id = 39_330_102;
+        let committed_body = "the full committed answer";
+        let streamed = seed_watcher_stream_state(
+            temp.path(),
+            channel_id,
+            "AgentDesk-claude-3933b",
+            committed_body,
+            200,
+        );
+        // A stale snapshot for the SAME turn: non-empty but SHORTER body, backward
+        // rso and last_offset. NOT the reset signature (the body is non-empty).
+        let mut stale = streamed.clone();
+        stale.full_response = "stale".to_string();
+        stale.response_sent_offset = 3;
+        stale.last_offset = 50;
+        let provider = ProviderKind::Claude;
+        let path = inflight_state_path(temp.path(), &provider, channel_id);
+
+        let _authority = dr::authority_test_seam::force(true);
+        assert!(
+            !validate_inflight_state_for_save(
+                temp.path(),
+                &path,
+                &stale,
+                "src/services/discord/inflight.rs:test",
+            ),
+            "authority-ON must still enforce-skip a non-empty stale backward write"
+        );
+        // Driving the honor path, the committed body on disk must survive untouched.
+        save_inflight_state_in_root(temp.path(), &stale).unwrap();
+        let persisted = loaded_row(temp.path(), channel_id);
+        assert_eq!(
+            persisted.full_response, committed_body,
+            "the enforce-skipped stale write must not clobber the committed answer"
+        );
+        assert_eq!(persisted.response_sent_offset, committed_body.len());
+    }
+
     // ---- #3077: typed status-panel ownership write tests ----
 
     /// Seeds a single inflight row in `root` and returns it. `user_msg_id` /
@@ -4967,34 +5103,39 @@ mod stall_recovery_tests {
     }
 
     #[test]
-    fn authority_guard_would_suppress_same_turn_frontier_reset_3860() {
-        // #3860 SAFETY rationale (why the compiled monotonic-guard default stays
-        // OFF and is NOT flipped to enforce-ON in this PR): when ON,
-        // `authority_blocks_backward_inflight_write` blocks ANY same-turn backward
-        // `response_sent_offset` write — including the LEGITIMATE Gemini/Qwen
-        // RetryBoundary reset (turn_bridge/retry_state.rs clears `full_response`
-        // and rewinds rso→0 for the SAME identity to re-stream the turn). Blocking
-        // it drops the re-streamed body (a real, observed danger — the live
-        // AGENTDESK_DELIVERY_RECORD_AUTHORITY=1 config enforce-skips that reset).
-        // The root-cause fix (the per-row RMW restart-mode marker) avoids the
-        // frontier regression WITHOUT this collateral suppression, so the risky
-        // default flip is deferred, not taken here.
+    fn authority_guard_distinguishes_legit_reset_from_stale_regression_3933() {
+        // #3933 (supersedes the #3860-era "would suppress" doc-guard): under
+        // authority-ON the enforce guard MUST tell apart the LEGITIMATE Gemini/Qwen
+        // RetryBoundary reset (turn_bridge/retry_state.rs clears `full_response` and
+        // rewinds rso→0 for the SAME identity to re-stream) from a genuine
+        // stale-snapshot backward regression (a non-empty body moving the frontier
+        // back). The release runs AGENTDESK_DELIVERY_RECORD_AUTHORITY=1, so the old
+        // coarse guard dropped the re-streamed body live; the `is_legitimate_full_reset`
+        // signal carves the reset out while keeping the real regression blocked.
         use crate::services::discord::outbound::delivery_record as dr;
-        // authority ON + same-turn backward rso (monotonic == false) → blocked
-        // (this is the legitimate retry reset that would be wrongly suppressed).
-        assert!(dr::authority_blocks_backward_inflight_write(
-            true, false, true
-        ));
-        assert!(dr::authority_blocks_backward_inflight_write(
-            true, true, false
-        ));
-        // authority OFF (compiled default) → never blocks → reset persists.
+        // authority ON + same-turn backward move + legit reset signature → PERMIT
+        // (the retry reset persists and the re-streamed body survives).
         assert!(!dr::authority_blocks_backward_inflight_write(
-            false, false, true
+            true, false, true, true
+        ));
+        assert!(!dr::authority_blocks_backward_inflight_write(
+            true, true, false, true
+        ));
+        // authority ON + same-turn backward move + NON-reset (non-empty body) → BLOCK
+        // (a genuine stale-snapshot regression stays suppressed).
+        assert!(dr::authority_blocks_backward_inflight_write(
+            true, false, true, false
+        ));
+        assert!(dr::authority_blocks_backward_inflight_write(
+            true, true, false, false
+        ));
+        // authority OFF (compiled default) → never blocks, reset flag irrelevant.
+        assert!(!dr::authority_blocks_backward_inflight_write(
+            false, false, true, false
         ));
         // authority ON but fully monotonic → not blocked (forward writes pass).
         assert!(!dr::authority_blocks_backward_inflight_write(
-            true, true, true
+            true, true, true, false
         ));
     }
 
