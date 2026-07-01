@@ -3370,6 +3370,7 @@ pub(super) fn spawn_turn_bridge(
                     channel_id,
                     turn_id.as_str(),
                     inflight_state.tmux_session_name.as_deref(),
+                    &provider, // #3983 item4: one-shot session banner render
                 )
                 .await;
             }

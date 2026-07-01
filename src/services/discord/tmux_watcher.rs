@@ -1793,6 +1793,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 .map(|identity| identity.user_msg_id)
                                 .unwrap_or(0),
                             &tmux_session_name,
+                            &watcher_provider, // #3983 item4: one-shot session banner render
                         )
                         .await;
                     }
@@ -5737,6 +5738,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 channel_id,
                 session_panel_lifecycle_user_msg_id,
                 &tmux_session_name,
+                &watcher_provider, // #3983 item4: one-shot session banner render
             )
             .await;
             // #3142: gate the EDIT/finalize + orphan-store reconciliation on

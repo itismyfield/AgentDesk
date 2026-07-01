@@ -46,6 +46,8 @@ pub(crate) mod relay_recovery;
 #[cfg(unix)] // #3089 A0: shared ReplaceLongMessageOutcome disposition policy.
 mod replace_outcome_policy;
 pub(crate) mod response_sanitizer;
+// #3983 item4: one-shot top session banner emit + dual-path (sink/watcher) de-dup.
+mod session_banner;
 #[cfg(unix)]
 mod session_relay_sink;
 mod sidecar_interaction;

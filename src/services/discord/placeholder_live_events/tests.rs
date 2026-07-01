@@ -547,11 +547,24 @@ fn status_panel_renders_session_resumed_line_from_lifecycle_details() {
         }),
     ));
 
-    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(rendered.contains("기존 세션 복원"));
-    assert!(rendered.contains("provider session claude#8f21abcd…"));
-    assert!(rendered.contains("tmux kept"));
-    assert!(!rendered.contains("📋 세션 복원"));
+    // #3983 item4: the session line is NO LONGER in the every-tick footer.
+    let footer = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(!footer.contains("기존 세션 복원"));
+
+    // It is emitted once, at the top, via the one-shot banner claim.
+    let banner = events
+        .claim_session_banner_line(channel_id, &ProviderKind::Claude)
+        .expect("first claim yields the one-shot session banner");
+    assert!(banner.contains("기존 세션 복원"));
+    assert!(banner.contains("provider session claude#8f21abcd…"));
+    assert!(banner.contains("tmux kept"));
+    assert!(!banner.contains("📋 세션 복원"));
+    // Dedup: a second claim for the same session yields nothing.
+    assert!(
+        events
+            .claim_session_banner_line(channel_id, &ProviderKind::Claude)
+            .is_none()
+    );
 }
 
 /// #3087 — when a new session INSTANCE begins (a new tmux spawn → new
@@ -1267,10 +1280,18 @@ fn status_panel_renders_session_fresh_and_fallback_distinctly() {
         }),
     );
 
-    let fresh = events.render_status_panel(fresh_channel_id, &ProviderKind::Codex, 1_700_000_000);
+    // #3983 item4: session identity surfaces via the one-shot banner, not the footer.
+    let fresh = events
+        .claim_session_banner_line(fresh_channel_id, &ProviderKind::Codex)
+        .expect("fresh session yields a one-shot banner");
     assert!(fresh.contains("🆕 새 세션 시작"));
     assert!(fresh.contains("provider session codex#fresh-se…"));
     assert!(fresh.contains("tmux new"));
+    assert!(
+        !events
+            .render_status_panel(fresh_channel_id, &ProviderKind::Codex, 1_700_000_000)
+            .contains("🆕 새 세션 시작")
+    );
 
     let fallback_channel_id = ChannelId::new(179);
     events.set_session_panel_lifecycle_event(
@@ -1284,8 +1305,9 @@ fn status_panel_renders_session_fresh_and_fallback_distinctly() {
         }),
     );
 
-    let fallback =
-        events.render_status_panel(fallback_channel_id, &ProviderKind::Claude, 1_700_000_000);
+    let fallback = events
+        .claim_session_banner_line(fallback_channel_id, &ProviderKind::Claude)
+        .expect("fallback session yields a one-shot banner");
     assert!(fallback.contains("Lifecycle fallback"));
     assert!(fallback.contains("provider session claude#fallback…"));
     assert!(fallback.contains("tmux kept"));
@@ -1305,9 +1327,12 @@ fn status_panel_appends_recovery_message_count_line_when_present() {
         }),
     ));
 
-    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(rendered.contains("🆕 새 세션 시작"));
-    assert!(rendered.contains("(최근 대화 7개를 읽어들였습니다)"));
+    // #3983 item4: the recovery-count line rides on the one-shot banner.
+    let banner = events
+        .claim_session_banner_line(channel_id, &ProviderKind::Claude)
+        .expect("fresh session yields a one-shot banner");
+    assert!(banner.contains("🆕 새 세션 시작"));
+    assert!(banner.contains("(최근 대화 7개를 읽어들였습니다)"));
 }
 
 /// #3055 — a watcher-direct turn that has no session lifecycle event of its own
@@ -1331,14 +1356,29 @@ fn status_panel_clears_stale_session_line_for_watcher_turn_without_lifecycle() {
             "recoveryMessageCount": 33,
         }),
     ));
-    let turn_a = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    // Turn A: the one-shot banner renders the fresh-session/recovery line once;
+    // the every-tick footer never carries it (#3983 item4).
+    let turn_a = events
+        .claim_session_banner_line(channel_id, &ProviderKind::Claude)
+        .expect("fresh session yields a one-shot banner");
     assert!(turn_a.contains("🆕 새 세션 시작"));
     assert!(turn_a.contains("(최근 대화 33개를 읽어들였습니다)"));
+    assert!(
+        !events
+            .render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000)
+            .contains("🆕 새 세션 시작")
+    );
 
     // Turn B (watcher-direct, no lifecycle row): the completion path clears the
-    // session panel before rendering. The cleared snapshot must drop the stale
-    // new-session/recovery line.
+    // session panel. The cleared snapshot has no session to banner, so a
+    // subsequent claim yields nothing — the stale new-session/recovery line can
+    // never re-post.
     assert!(events.clear_session_panel(channel_id));
+    assert!(
+        events
+            .claim_session_banner_line(channel_id, &ProviderKind::Claude)
+            .is_none()
+    );
     let turn_b = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
     assert!(!turn_b.contains("🆕 새 세션 시작"));
     assert!(!turn_b.contains("최근 대화"));
@@ -1361,9 +1401,12 @@ fn status_panel_omits_recovery_line_when_count_is_zero_or_missing() {
         }),
     ));
 
-    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(rendered.contains("🆕 새 세션 시작"));
-    assert!(!rendered.contains("최근 대화"));
+    // #3983 item4: assert on the one-shot banner (the session line left the footer).
+    let banner = events
+        .claim_session_banner_line(channel_id, &ProviderKind::Claude)
+        .expect("fresh session yields a one-shot banner");
+    assert!(banner.contains("🆕 새 세션 시작"));
+    assert!(!banner.contains("최근 대화"));
 
     let other_channel = ChannelId::new(1783);
     assert!(events.set_session_panel_lifecycle_event(
@@ -1372,8 +1415,10 @@ fn status_panel_omits_recovery_line_when_count_is_zero_or_missing() {
         "session_fresh",
         &json!({ "reason": "first_turn" }),
     ));
-    let rendered = events.render_status_panel(other_channel, &ProviderKind::Claude, 1_700_000_000);
-    assert!(!rendered.contains("최근 대화"));
+    let banner = events
+        .claim_session_banner_line(other_channel, &ProviderKind::Claude)
+        .expect("fresh session yields a one-shot banner");
+    assert!(!banner.contains("최근 대화"));
 }
 
 #[test]
@@ -1389,23 +1434,219 @@ fn status_panel_omits_session_line_when_lifecycle_details_are_absent() {
             "recoveryMessageCount": 25,
         }),
     ));
+    // #3983 item4: the fresh session yields a one-shot banner (not a footer line).
     assert!(
         events
-            .render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000)
+            .claim_session_banner_line(channel_id, &ProviderKind::Claude)
+            .expect("fresh session yields a one-shot banner")
             .contains("🆕 새 세션 시작")
     );
 
+    // Empty lifecycle details drop the session snapshot, so there is nothing to
+    // banner and nothing in the footer.
     assert!(events.set_session_panel_lifecycle_event(
         channel_id,
         None,
         "session_resumed",
         &json!({}),
     ));
+    assert!(
+        events
+            .claim_session_banner_line(channel_id, &ProviderKind::Claude)
+            .is_none()
+    );
 
-    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(!rendered.contains("Lifecycle "));
-    assert!(!rendered.contains("새 세션 시작"));
-    assert!(!rendered.contains("최근 대화"));
+    let footer = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(!footer.contains("Lifecycle "));
+    assert!(!footer.contains("새 세션 시작"));
+    assert!(!footer.contains("최근 대화"));
+}
+
+/// #3983 item4 — dual-path de-dup, SINK arrives first. The session-panel snapshot
+/// is refreshed from both the bridge (sink) and the tmux watcher. Modelling the
+/// sink reaching the atomic claim first: it wins the one-shot banner and the
+/// watcher's subsequent claim (same session) observes the recorded key and skips.
+#[test]
+fn session_banner_claimed_exactly_once_sink_first() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(39831);
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some("AgentDesk-claude-ch39831#100"),
+        "session_fresh",
+        &json!({ "provider_session_id": "session-A", "tmux_reused": false }),
+    ));
+
+    // Sink path claims first → gets the banner.
+    let sink = events.claim_session_banner_line(channel_id, &ProviderKind::Claude);
+    assert!(
+        sink.as_deref()
+            .is_some_and(|line| line.contains("🆕 새 세션 시작")),
+        "the first (sink) claim yields the one-shot banner"
+    );
+    // Watcher path claims second for the SAME session → nothing.
+    assert!(
+        events
+            .claim_session_banner_line(channel_id, &ProviderKind::Claude)
+            .is_none(),
+        "the second (watcher) claim for the same session must not double-post"
+    );
+}
+
+/// #3983 item4 — dual-path de-dup, WATCHER arrives first. Symmetric to the
+/// sink-first case: whichever refresh path reaches the atomic claim first emits
+/// the banner, proving the claim is order-independent (no double post, no
+/// omission) when the two paths race.
+#[test]
+fn session_banner_claimed_exactly_once_watcher_first() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(39832);
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some("AgentDesk-claude-ch39832#100"),
+        "session_resumed",
+        &json!({ "provider_session_id": "session-A", "tmux_reused": true }),
+    ));
+
+    // Watcher path claims first → gets the banner.
+    let watcher = events.claim_session_banner_line(channel_id, &ProviderKind::Claude);
+    assert!(
+        watcher
+            .as_deref()
+            .is_some_and(|line| line.contains("기존 세션 복원")),
+        "the first (watcher) claim yields the one-shot banner"
+    );
+    // Sink path claims second for the SAME session → nothing.
+    assert!(
+        events
+            .claim_session_banner_line(channel_id, &ProviderKind::Claude)
+            .is_none(),
+        "the second (sink) claim for the same session must not double-post"
+    );
+}
+
+/// #3983 item4 — a genuine new-session boundary (new spawn nonce → new
+/// `session_instance_key`) re-arms the claim, so the NEXT session gets its own
+/// one-shot banner exactly once, while unrelated field churn within the same
+/// session never re-posts.
+#[test]
+fn session_banner_reemits_once_on_new_session_boundary() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(39833);
+
+    // Session A → one banner, then deduped.
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some("AgentDesk-claude-ch39833#100"),
+        "session_fresh",
+        &json!({ "provider_session_id": "session-A", "tmux_reused": false }),
+    ));
+    assert!(
+        events
+            .claim_session_banner_line(channel_id, &ProviderKind::Claude)
+            .is_some()
+    );
+    assert!(
+        events
+            .claim_session_banner_line(channel_id, &ProviderKind::Claude)
+            .is_none()
+    );
+
+    // Session B (new spawn nonce) → a fresh one-shot banner.
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some("AgentDesk-claude-ch39833#200"),
+        "session_fresh",
+        &json!({ "provider_session_id": "session-B", "tmux_reused": false }),
+    ));
+    assert!(
+        events
+            .claim_session_banner_line(channel_id, &ProviderKind::Claude)
+            .is_some(),
+        "a new session INSTANCE re-arms the one-shot banner"
+    );
+    // Field churn within session B (same instance key + provider id) → no re-post.
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some("AgentDesk-claude-ch39833#200"),
+        "session_fresh",
+        &json!({ "provider_session_id": "session-B", "tmux_reused": true }),
+    ));
+    assert!(
+        events
+            .claim_session_banner_line(channel_id, &ProviderKind::Claude)
+            .is_none(),
+        "unrelated field churn within the same session must not re-post the banner"
+    );
+}
+
+/// #3983 item4 — with no live tmux marker (`session_instance_key == None`) the
+/// dedup falls back to the provider session id, so a headless session still
+/// banners exactly once and a genuinely different provider session re-arms it.
+#[test]
+fn session_banner_dedup_falls_back_to_provider_session_id() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(39834);
+
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        None, // no instance key → provider-session-id fallback
+        "session_resumed",
+        &json!({ "provider_session_id": "prov-A", "tmux_reused": true }),
+    ));
+    assert!(
+        events
+            .claim_session_banner_line(channel_id, &ProviderKind::Claude)
+            .is_some()
+    );
+    assert!(
+        events
+            .claim_session_banner_line(channel_id, &ProviderKind::Claude)
+            .is_none()
+    );
+
+    // A genuinely different provider session (still no instance key) re-arms.
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        None,
+        "session_resumed",
+        &json!({ "provider_session_id": "prov-B", "tmux_reused": true }),
+    ));
+    assert!(
+        events
+            .claim_session_banner_line(channel_id, &ProviderKind::Claude)
+            .is_some(),
+        "a different provider session re-arms the one-shot banner"
+    );
+}
+
+/// #3983 item4 — a channel with no session snapshot (or a cleared one) yields no
+/// banner, so the emit path never posts a spurious top message.
+#[test]
+fn session_banner_none_without_session_snapshot() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(39835);
+
+    // Never set → nothing to claim.
+    assert!(
+        events
+            .claim_session_banner_line(channel_id, &ProviderKind::Claude)
+            .is_none()
+    );
+
+    // Set then clear → nothing to claim.
+    assert!(events.set_session_panel_lifecycle_event(
+        channel_id,
+        Some("AgentDesk-claude-ch39835#100"),
+        "session_fresh",
+        &json!({ "provider_session_id": "session-A", "tmux_reused": false }),
+    ));
+    assert!(events.clear_session_panel(channel_id));
+    assert!(
+        events
+            .claim_session_banner_line(channel_id, &ProviderKind::Claude)
+            .is_none()
+    );
 }
 
 #[test]

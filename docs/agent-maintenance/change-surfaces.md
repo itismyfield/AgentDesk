@@ -1157,7 +1157,11 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6222 lines; production LoC; -13
+  - `src/services/discord/turn_bridge/mod.rs` (6223 lines; production LoC; +1
+    from #3983 item4 (thin `&provider` argument threaded into the existing sink
+    `refresh_session_panel_line_from_lifecycle` call so the one-shot top session
+    banner can render the provider-session-id label; the emit + dual-path
+    (sink/watcher) de-dup live in the new non-giant `session_banner.rs`); -13
     from #3038 (b) extracting the early TUI completion gate (the #2293/#2780
     eligibility filter + bounded quiescence probe + timed-out warning, worker-local)
     verbatim into the `early_tui_completion.rs` sibling (behavior-preserving

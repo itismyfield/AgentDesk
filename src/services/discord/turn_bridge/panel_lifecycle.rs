@@ -37,6 +37,9 @@ pub(super) async fn refresh_session_panel_line_from_lifecycle(
     channel_id: ChannelId,
     turn_id: &str,
     tmux_session_name: Option<&str>,
+    // #3983 item4: provider for the one-shot session banner render (provider
+    // session id label). Threaded from the bridge call site.
+    provider: &crate::services::provider::ProviderKind,
 ) -> bool {
     let Some(pg_pool) = shared.pg_pool.as_ref() else {
         return false;
@@ -54,36 +57,46 @@ pub(super) async fn refresh_session_panel_line_from_lifecycle(
         Option::<String>::None
     };
     let channel_id_text = channel_id.get().to_string();
-    match crate::services::observability::turn_lifecycle::load_latest_session_lifecycle_event(
-        pg_pool,
-        &channel_id_text,
-        turn_id,
+    let dirty =
+        match crate::services::observability::turn_lifecycle::load_latest_session_lifecycle_event(
+            pg_pool,
+            &channel_id_text,
+            turn_id,
+        )
+        .await
+        {
+            Ok(Some(event)) => shared
+                .ui
+                .placeholder_live_events
+                .set_session_panel_lifecycle_event(
+                    channel_id,
+                    session_instance_key.as_deref(),
+                    &event.kind,
+                    &event.details_json,
+                ),
+            Ok(None) => shared
+                .ui
+                .placeholder_live_events
+                .clear_session_panel(channel_id),
+            Err(error) => {
+                tracing::debug!(
+                    "[turn_bridge] failed to load session lifecycle line for turn {} in channel {}: {}",
+                    turn_id,
+                    channel_id,
+                    error
+                );
+                false
+            }
+        };
+    // #3983 item4: after the snapshot is (re)set, emit the one-shot top session
+    // banner. The claim is deduped per session across this sink path and the
+    // tmux-watcher path, so calling it on every status tick posts at most once
+    // per session (and re-arms on a genuine new-session boundary).
+    crate::services::discord::session_banner::emit_session_banner_if_new(
+        shared, channel_id, provider,
     )
-    .await
-    {
-        Ok(Some(event)) => shared
-            .ui
-            .placeholder_live_events
-            .set_session_panel_lifecycle_event(
-                channel_id,
-                session_instance_key.as_deref(),
-                &event.kind,
-                &event.details_json,
-            ),
-        Ok(None) => shared
-            .ui
-            .placeholder_live_events
-            .clear_session_panel(channel_id),
-        Err(error) => {
-            tracing::debug!(
-                "[turn_bridge] failed to load session lifecycle line for turn {} in channel {}: {}",
-                turn_id,
-                channel_id,
-                error
-            );
-            false
-        }
-    }
+    .await;
+    dirty
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
