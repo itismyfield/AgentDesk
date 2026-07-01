@@ -153,7 +153,7 @@ for f in "$CHUNK_DIR"/*.txt; do
   JSON_CONTENT="$(python3 -c "import json,sys; print(json.dumps(sys.stdin.read().strip()))" < "$f")"
   SEND_RESULT="$(curl -s -X POST "http://127.0.0.1:${ADK_PORT}/api/discord/send" \
     -H "Content-Type: application/json" \
-    -d "{\"target\":\"channel:${CHANNEL_ID}\",\"content\":${JSON_CONTENT},\"source\":\"project-scheduler\",\"bot\":\"${ADK_BOT:-notify}\"}")"
+    -d "{\"target\":\"channel:${CHANNEL_ID}\",\"content\":${JSON_CONTENT},\"source\":\"${ADK_SEND_SOURCE:-routine-runtime}\",\"bot\":\"${ADK_BOT:-notify}\"}")"
   if ! printf '%s' "$SEND_RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin); exit(0 if d.get('ok') else 1)" 2>/dev/null; then
     echo "ADK send failed: $SEND_RESULT (source=$SOURCE)" >&2
     SEND_FAILED=1
