@@ -197,7 +197,7 @@
     late-frame fresh row B is rejected; -576 from #3841 extracting placeholder
     suppression helpers to `tmux_placeholder_suppression.rs`;
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (7261 production lines; +34 from #3805
+  - `src/services/discord/tmux_watcher.rs` (7260 production lines; +33 from #3805
     P2 PR-D review fixes — watcher re-anchor now reloads the current inflight row
     and calls the sibling watcher-ownership gate so Managed bridge-owned turns are
     never watcher-reanchored; watcher panel sends are durably pre-registered in
