@@ -451,7 +451,16 @@
 # measurement/formatting logic lives in the sibling `latency_spans.rs` (monotonic
 # `Instant` deltas); the root only captures marks + emits. No control-flow change,
 # no new await/lock. 2797 -> 2815.
-"src/services/discord/router/message_handler/intake_turn.rs" = 2815
+# #3813 Phase 3 (§4/AC#6, reviewable admission): +10 prod LoC for one
+# `edit_channel_message` call-site that surfaces the hosted-TUI busy preflight
+# readiness wait on the intake placeholder (⏳ TUI 준비 대기 중) so a safe up-to-45s
+# wait doesn't look like a stalled session start. The render logic/const/tests
+# live in the sibling `tui_followup.rs` (non-baselined); the root only adds the
+# single edit call-site before `wait_readiness` moves into spawn_blocking. No
+# new control-flow branch; the compact state is transient (overwritten by
+# dispatch streaming on ready or by the queued-card / delete / refusal-notice
+# paths on the still-busy branch). 2815 -> 2825.
+"src/services/discord/router/message_handler/intake_turn.rs" = 2825
 "src/services/discord/meeting_orchestrator.rs" = 3227
 # #3293: +3 for the `registry_purge` child-module declaration (peek +
 # operator-gated idle-entry purge live outside the frozen root); lowered
