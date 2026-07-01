@@ -539,6 +539,7 @@ src/
 │   │   │   │   ├── goal_lifecycle.rs
 │   │   │   │   ├── headless_turn.rs
 │   │   │   │   ├── intake_turn.rs
+│   │   │   │   ├── latency_spans.rs
 │   │   │   │   ├── provider_isolation.rs
 │   │   │   │   ├── session_strategy_lifecycle_tests.rs
 │   │   │   │   ├── tui_followup.rs
