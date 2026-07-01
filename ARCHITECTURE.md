@@ -671,6 +671,7 @@ src/
 │   │   │   ├── terminal_delivery.rs
 │   │   │   ├── tmux_runtime.rs
 │   │   │   ├── turn_analytics.rs
+│   │   │   ├── two_message_panel.rs
 │   │   │   ├── voice_completion.rs
 │   │   │   ├── voice_completion_tests.rs
 │   │   │   ├── watcher_handoff.rs

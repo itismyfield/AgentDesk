@@ -1157,7 +1157,16 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6223 lines; production LoC; +1
+  - `src/services/discord/turn_bridge/mod.rs` (6237 lines; production LoC; +14
+    from #3805 P2 PR-B (two-message SINK creation order — answer-first, panel
+    below); all real logic lives in the new non-giant
+    `turn_bridge/two_message_panel.rs`, mod.rs adds only thin wiring: a
+    `mod two_message_panel;` decl, a per-turn `status_panel_generation` local
+    seeded from the pinned inflight snapshot, and the `two_message_panel_enabled`
+    + `&mut status_panel_generation` args threaded into the pre-existing
+    separate-panel create call plus the `status_panel_generation` arg on the
+    terminal completion call; gated on the default-OFF `two_message_panel_enabled`
+    flag so the OFF path is byte-identical, no new await/lock on the hot path; +1
     from #3983 item4 (thin `&provider` argument threaded into the existing sink
     `refresh_session_panel_line_from_lifecycle` call so the one-shot top session
     banner can render the provider-session-id label; the emit + dual-path

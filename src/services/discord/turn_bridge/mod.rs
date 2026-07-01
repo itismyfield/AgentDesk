@@ -24,6 +24,11 @@ mod terminal_controller_cutover;
 mod terminal_delivery;
 mod tmux_runtime;
 mod turn_analytics;
+// #3805 P2 (PR-B): two-message sink creation order (answer-first, panel below)
+// + the pure generation-epoch staleness guard. Isolated sibling so the EXTREME
+// turn_bridge/mod.rs giant and the 700-capped status_panel.rs stay lean; the
+// call sites here and in single_message_footer.rs are thin.
+mod two_message_panel;
 mod voice_completion;
 mod watcher_handoff;
 mod watcher_orphan_cleanup;
@@ -1615,7 +1620,14 @@ pub(super) fn spawn_turn_bridge(
         // on `turn_start` above. See bridge_latency_spans.rs for the invariants.
         let mut bridge_spans = BridgeLatencySpans::starting_at(turn_start);
 
+        // #3805 P2 (PR-B): this turn's status-panel epoch. Seeded from the pinned
+        // inflight snapshot and threaded through the two-message create (which
+        // bumps it) and the terminal completion edit (which proves it against the
+        // on-disk epoch). Inert on the default-OFF path (stays 0).
+        let mut status_panel_generation = inflight_state.status_panel_generation;
+
         maybe_create_bridge_separate_status_panel_response(
+            shared_owned.ui.two_message_panel_enabled,
             single_message_panel_footer_mode,
             shared_owned.ui.status_panel_v2_enabled,
             gateway.as_ref(),
@@ -1626,6 +1638,7 @@ pub(super) fn spawn_turn_bridge(
             &mut bridge_created_response_placeholder_msg_id,
             &mut last_edit_text,
             &mut inflight_state,
+            &mut status_panel_generation,
             response_sent_offset,
             &full_response,
             &mut status_panel_dirty,
@@ -5914,6 +5927,7 @@ pub(super) fn spawn_turn_bridge(
                     is_external_input_tui_direct, // #3959: suppress mirror chrome footer
                     completion_footer_terminal_text.as_deref(),
                     indicator,
+                    status_panel_generation, // #3805 P2: prove this turn's panel epoch
                 )
                 .await;
         }

@@ -65,6 +65,12 @@ direct_discord_sends = [
   # `shadow_register_bridge_panel` helper above it + renaming the now-unused
   # `shared`/`provider` params to `_shared`/`_provider` — no new direct send).
   "src/services/discord/turn_bridge/single_message_footer.rs#direct_discord_sends:d2d9f46d97bfa069",
+  # #3805 P2 PR-B: the two-message SINK create — same `gateway.send_message`
+  # status-panel placeholder send as the OFF separate-panel path above, but
+  # gated on `two_message_panel_enabled` and ordered answer-first (the panel is
+  # the NEW message BELOW the answer). Retires with the #1436 outbound v3
+  # extraction alongside the other bridge panel sends.
+  "src/services/discord/turn_bridge/two_message_panel.rs#direct_discord_sends:dd70d6753b664c07",
   # #3038 turn_bridge S1: status-panel completion direct gateway calls moved
   # verbatim from turn_bridge/mod.rs to turn_bridge/status_panel.rs.
   "src/services/discord/turn_bridge/status_panel.rs#direct_discord_sends:8806b21b9432ae8a",

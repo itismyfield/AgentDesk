@@ -56,12 +56,11 @@ pub(in crate::services::discord) struct PlaceholderState {
     pub(in crate::services::discord) placeholder_live_events_enabled: bool,
     pub(in crate::services::discord) status_panel_v2_enabled: bool,
     /// #3805 P2: two-message panel rollout gate copied from
-    /// `placeholder.two_message_panel_enabled` at boot. Default OFF. PR-A
-    /// scaffolding only — no reader yet; later stages branch the two-message
-    /// create/re-anchor path on this flag. `#[allow(dead_code)]` because the
-    /// discord-tree dead_code lint is live (#3034) and this terminal storage
-    /// field is intentionally unread until PR-B wires the gate.
-    #[allow(dead_code)]
+    /// `placeholder.two_message_panel_enabled` at boot. Default OFF. PR-B wires
+    /// the SINK read: when ON the bridge creates the status panel as a NEW
+    /// message BELOW the answer (answer-first layout) via
+    /// `turn_bridge::two_message_panel`; when OFF the single-message path is
+    /// byte-identical. Later stages extend the same gate to re-anchor/recovery.
     pub(in crate::services::discord) two_message_panel_enabled: bool,
 }
 

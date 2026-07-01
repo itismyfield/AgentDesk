@@ -102,6 +102,7 @@ pub(super) fn bridge_should_complete_separate_status_panel(status_panel_v2_enabl
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn maybe_create_bridge_separate_status_panel_response<G: TurnGateway + ?Sized>(
+    two_message_panel_enabled: bool,
     single_message_panel_footer_mode: bool,
     status_panel_v2_enabled: bool,
     gateway: &G,
@@ -112,12 +113,40 @@ pub(super) async fn maybe_create_bridge_separate_status_panel_response<G: TurnGa
     bridge_created_response_placeholder_msg_id: &mut Option<MessageId>,
     last_edit_text: &mut String,
     inflight_state: &mut InflightTurnState,
+    status_panel_generation: &mut u64,
     response_sent_offset: usize,
     full_response: &str,
     status_panel_dirty: &mut bool,
     _shared: &Arc<SharedData>,
     _provider: &crate::services::provider::ProviderKind,
 ) {
+    // #3805 P2 (PR-B): flag ON → create the status panel as a NEW message BELOW
+    // the answer (answer-first layout). The ON path is fully mutually exclusive
+    // with the OFF panel-above swap below: it either creates the two-message
+    // panel or does nothing, so the default-OFF path stays byte-identical.
+    if two_message_panel_enabled {
+        if super::two_message_panel::bridge_should_create_two_message_status_panel(
+            two_message_panel_enabled,
+            single_message_panel_footer_mode,
+            status_panel_v2_enabled,
+            *status_panel_msg_id,
+            *current_msg_id,
+        ) {
+            super::two_message_panel::create_bridge_two_message_status_panel_below_answer(
+                gateway,
+                channel_id,
+                initial_indicator,
+                *current_msg_id,
+                status_panel_msg_id,
+                inflight_state,
+                status_panel_generation,
+                status_panel_dirty,
+            )
+            .await;
+        }
+        return;
+    }
+
     if !bridge_should_create_separate_status_panel(
         single_message_panel_footer_mode,
         status_panel_v2_enabled,
@@ -468,19 +497,41 @@ pub(super) async fn complete_bridge_terminal_footer_or_status_panel<G: TurnGatew
     is_external_input_tui_direct: bool,
     terminal_text: Option<&str>,
     indicator: &str,
+    this_turn_status_panel_generation: u64,
 ) -> bool {
     let this_turn_user_msg_id = user_msg_id.map(|id| id.get()).unwrap_or(0);
-    let aliases_newer_turn = match super::inflight::load_inflight_state(provider, channel_id.get())
-    {
-        Some(on_disk) => super::status_panel::status_panel_completion_edit_aliases_newer_turn(
-            this_turn_user_msg_id,
-            status_panel_msg_id,
-            on_disk.user_msg_id,
-            on_disk.status_message_id,
-        ),
-        None => false,
-    };
-    if aliases_newer_turn && !single_message_panel_footer_mode {
+    // #3805 P2: a completion edit is skipped when EITHER a different real turn
+    // now owns this panel (identity aliasing, unchanged) OR — under the
+    // two-message path — a NEWER panel epoch has superseded this stale edit for
+    // the SAME owned panel. On the default-OFF path every generation is 0, so
+    // the generation term is inert and this stays byte-identical.
+    let (aliases_newer_turn, generation_superseded) =
+        match super::inflight::load_inflight_state(provider, channel_id.get()) {
+            Some(on_disk) => {
+                let identity_alias =
+                    super::status_panel::status_panel_completion_edit_aliases_newer_turn(
+                        this_turn_user_msg_id,
+                        status_panel_msg_id,
+                        on_disk.user_msg_id,
+                        on_disk.status_message_id,
+                    );
+                let panel_owned_on_disk = match status_panel_msg_id {
+                    Some(id) if !is_synthetic_headless_message_id(id) => {
+                        on_disk.status_message_id == Some(id.get())
+                    }
+                    _ => false,
+                };
+                let generation_superseded =
+                    super::two_message_panel::two_message_status_edit_generation_is_stale(
+                        this_turn_status_panel_generation,
+                        panel_owned_on_disk,
+                        on_disk.status_panel_generation,
+                    );
+                (identity_alias, generation_superseded)
+            }
+            None => (false, false),
+        };
+    if (aliases_newer_turn || generation_superseded) && !single_message_panel_footer_mode {
         tracing::debug!(
             "[turn_bridge] skipping status-panel-v2 completion edit of msg {:?} in channel {}: a newer turn now owns the panel (this turn user_msg_id {})",
             status_panel_msg_id,

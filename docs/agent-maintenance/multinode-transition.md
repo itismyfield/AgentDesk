@@ -1146,3 +1146,20 @@
   no-op scaffolding for the later two-message PRs); introduces no new PG lease,
   cross-node read, leader-only side effect, singleton assumption, or PG schema
   change.
+- #3805 P2 PR-B (two-message SINK creation order — worker-local, first reader of
+  the PR-A flag): when `two_message_panel_enabled` is ON the bridge sink creates
+  the `status_panel_v2` status panel as a NEW message BELOW the answer
+  (answer-first layout) instead of the legacy panel-above swap. All logic lives
+  in the new node-local sibling `turn_bridge/two_message_panel.rs`; `mod.rs` /
+  `single_message_footer.rs` carry only thin call-site wiring plus a per-turn
+  `status_panel_generation` epoch (already the node-local inflight row's field
+  from PR-A) threaded from the pinned inflight snapshot into the create + the
+  terminal completion edit. **Worker-local**: this is pure per-node msg-id / HTTP
+  bookkeeping on the bridge/watcher-owned inflight row and Discord messages — the
+  panel handle (`status_message_id`), the answer anchor (`current_msg_id`), and
+  the epoch counter all already lived on the node-local row. It never tears down
+  the per-channel `StatusPanelState`, so item4's `session_banner` exactly-once
+  claim (`session_banner_emitted_key`) is untouched. Gated on the default-OFF
+  flag so the OFF path is byte-identical; introduces no new PG lease, cross-node
+  read, leader-only side effect, singleton assumption, or PG schema change. The
+  watcher-path parity for this ordering is a later PR (PR-C, `tmux_watcher.rs`).
