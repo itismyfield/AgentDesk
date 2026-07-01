@@ -254,7 +254,7 @@
     clusters A/B/C/E/F/I/J/K
     into `tmux_watcher/` child modules: `liveness.rs` (301),
     `panel_decisions.rs` (372), `prompt_observe.rs` (109),
-    `turn_identity.rs` (327), `completion_gate.rs` (275), and
+    `turn_identity.rs` (327), `completion_gate.rs` (307), and
     `commit_decisions.rs` (140); plus the #3479 rank-2 child modules
     `utf8_chunk_decoder.rs` (88) and `terminal_readiness.rs` (214). #3016 phase-5b2 removed the `mailbox_finalize_owed`
     swap reads, the watcher-fn flag params, and the `LegacyFlagGated`
@@ -596,7 +596,12 @@
   - `src/services/discord/tui_prompt_relay.rs` (no longer a registered giant as
     of #3833; external-input ownership, synthetic-start, and Claude idle
     tail/runtime/bridge glue moved into `tui_prompt_relay/` child modules while
-    preserving the parent spawn/provider wiring surface. Historical context:
+    the #4018 compact-resume stale-mailbox follow-up stayed in those child
+    modules: `tui_prompt_relay/claude_idle_bridge.rs` (662 prod LoC),
+    `tui_prompt_relay/synthetic_start.rs` (983 prod LoC), and
+    `tui_prompt_relay/synthetic_start/stale_reclaim.rs` (133 prod LoC);
+    worker-local relay lifecycle only, no PG lease/schema. The parent
+    spawn/provider wiring surface stays preserved. Historical context:
     #3296
     codex r1+r2: the ABORT cleanup hook pins the foreign prior inflight's
     identity — the live row at the record instant, or the worker's LAST-VIEW
@@ -1207,8 +1212,8 @@
     (sink/watcher) de-dup live in the new non-giant `session_banner.rs`); -13
     from #3038 (b) extracting the early TUI completion gate (the #2293/#2780
     eligibility filter + bounded quiescence probe + timed-out warning, worker-local)
-    verbatim into the `early_tui_completion.rs` sibling (behavior-preserving
-    decompose; the two computed outputs — `bridge_tui_gate_outcome_early` +
+    verbatim into the `early_tui_completion.rs` sibling (96 prod LoC;
+    behavior-preserving decompose; the two computed outputs — `bridge_tui_gate_outcome_early` +
     `bridge_early_gate_timed_out` — are threaded back by return value, context in
     by shared reference / `Copy` value); +26
     from #3813 Phase 2 + Bridge-spans (same 3373-3800 region) — Phase 2 (§3
@@ -1402,7 +1407,9 @@
     (dormant `DeliveryLeaseCell` handlers), and
     `turn_finalizer/watcher_backstop.rs` (watcher far-backstop tunables +
     terminal-or-defer verdict pair). Bugfix only outside a
-    finalizer-decomposition plan).
+    finalizer-decomposition plan). #4018's identity-release diagnostic WARN is
+    confined to `turn_finalizer/finalize.rs` (223 prod LoC), preserving the
+    actor authority surface and adding no PG lease/schema.
   - `src/services/discord/formatting.rs` (2860 lines; #3805 P1 adds the watcher
     completion-footer re-anchor machinery here — the `ReplaceLastChunkAnchor`
     struct, the `&mut Option<..>` last-chunk out-param on

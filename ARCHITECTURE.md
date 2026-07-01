@@ -618,6 +618,8 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   └── store.rs
 │   │   ├── tui_prompt_relay/
+│   │   │   ├── synthetic_start/
+│   │   │   │   └── stale_reclaim.rs
 │   │   │   ├── anchor_completion.rs
 │   │   │   ├── bridge_completion.rs
 │   │   │   ├── bridge_gateway.rs

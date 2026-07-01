@@ -148,7 +148,7 @@
 # as #3715 (`tui_prompt_relay/tests.rs`); zero behavior change, no visibility widening.
 # #3038 tmux_watcher S1 child modules, frozen at landed production LoC.
 "src/services/discord/tmux_watcher/commit_decisions.rs" = 140
-"src/services/discord/tmux_watcher/completion_gate.rs" = 275
+"src/services/discord/tmux_watcher/completion_gate.rs" = 307 # 2026-07-02 #4018: 275 -> 307 (+32 prod LoC), reviewable admission — passive compact/SystemContinuation synthetic rows with relay_ownership_only now self-suppress watcher Path B completion at the completion-gate seam; normal eligible human-turn JSONL idle confirmation stays on the existing path, with regression coverage in completion_gate_tests.rs.
 "src/services/discord/tmux_watcher/liveness.rs" = 301
 "src/services/discord/tmux_watcher/panel_decisions.rs" = 372
 "src/services/discord/tmux_watcher/placeholder_reclaim.rs" = 106
@@ -664,7 +664,7 @@
 # giant threshold; tracked here at their landed production LoC so the decomposition
 # cannot silently re-inflate any child toward giant-hood (the ratchet only fails
 # once a file actually crosses the giant threshold, so these freeze them sub-giant).
-"src/services/discord/turn_finalizer/finalize.rs" = 208
+"src/services/discord/turn_finalizer/finalize.rs" = 223 # 2026-07-02 #4018: 208 -> 223 (+15 prod LoC), reviewable admission — finalizer emits a WARN when the mailbox identity guard rejects release, exposing stale-owner mismatches while preserving exact-match release authority; regression coverage lives in the module test.
 "src/services/discord/turn_finalizer/finalize_context.rs" = 106
 "src/services/discord/turn_finalizer/reconcile.rs" = 220
 # #3557 (A) codex r2: the headless watchdog was missing the per-turn hard

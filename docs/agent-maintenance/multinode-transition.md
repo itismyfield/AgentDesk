@@ -1154,6 +1154,16 @@
   already lived on the per-node inflight row. The only persisted change is the
   additive node-local inflight-row field (no PG schema change; relay-ownership
   adoption / bridge-tail stand-down / response finalize are all unaffected).
+- #4018 compact-resume stale mailbox follow-up - **Worker-local relay lifecycle,
+  no PG lease/schema**: the passive synthetic completion guard is confined to
+  `tmux_watcher/completion_gate.rs` and `turn_bridge/early_tui_completion.rs`,
+  finalizer identity-release diagnostics stay in `turn_finalizer/finalize.rs`,
+  stale-owner reclaim stays in `tui_prompt_relay/synthetic_start.rs` plus
+  `synthetic_start/stale_reclaim.rs`, and frame-decision logging stays in
+  `tui_prompt_relay/claude_idle_bridge.rs`. All touched state is the existing
+  per-node mailbox/inflight/relay-owner surface; no leader election, PG lease,
+  PG schema, cross-node read, or singleton assumption is introduced. The
+  watchdog observe_only/force-clean behavior remains a follow-up audit item.
 - #3805 P2 PR-A (two-message model scaffolding — worker-local UI flag): adds the
   additive `two_message_panel_enabled` flag to `PlaceholderConfig` and threads it
   through the per-node UI plumbing (`runtime_bootstrap.rs` RunBotContext /

@@ -130,6 +130,20 @@ pub(super) async fn do_finalize(
     // skip the channel cleanup entirely — exactly as we already skip the token
     // release and counter decrement. (An id-0 orphan keeps today's behaviour.)
     let guarded_finish_missed = key.user_msg_id != 0 && finish.removed_token.is_none();
+    if guarded_finish_missed {
+        let active_user_message_id = crate::services::discord::mailbox_snapshot(shared, channel_id)
+            .await
+            .active_user_message_id
+            .map(|id| id.get());
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel_id = channel_id.get(),
+            expected_user_msg_id = key.user_msg_id,
+            active_user_message_id = active_user_message_id.unwrap_or(0),
+            generation = key.generation,
+            "TurnFinalizer identity-guarded mailbox release skipped; active mailbox owner did not match finalizer turn identity"
+        );
+    }
 
     let has_pending_after_voice = if guarded_finish_missed {
         // No-op finalize on a stale terminal: leave the live newer turn's
@@ -204,5 +218,133 @@ pub(super) async fn do_finalize(
         removed_token: finish.removed_token,
         has_pending: has_pending_after_voice,
         mailbox_online: finish.mailbox_online,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serenity::model::id::{MessageId, UserId};
+    use std::io::{self, Write};
+    use std::sync::Mutex;
+    use std::sync::atomic::Ordering;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone)]
+    struct CapturingWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for CapturingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.buffer.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for CapturingWriter {
+        type Writer = CapturingWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    struct EnvGuard {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set_root(path: &std::path::Path) -> Self {
+            let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
+            unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", path) };
+            Self { previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.previous.as_ref() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn identity_guard_mismatch_does_not_release_wrong_owner_and_logs() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = EnvGuard::set_root(root.path());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_018_101);
+        let stale_user_msg_id = 4_018_111;
+        let active_user_msg_id = 4_018_222;
+        let active_token = Arc::new(CancelToken::new());
+        assert!(
+            crate::services::discord::mailbox_try_start_turn(
+                &shared,
+                channel_id,
+                active_token.clone(),
+                UserId::new(7),
+                MessageId::new(active_user_msg_id),
+            )
+            .await
+        );
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(CapturingWriter {
+                buffer: buffer.clone(),
+            })
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let outcome = do_finalize(
+            TurnKey::new(channel_id, stale_user_msg_id, 0),
+            ProviderKind::Claude,
+            &TerminalEvent::Complete,
+            FinalizeContext::bridge(),
+            &shared,
+        )
+        .await;
+        drop(_guard);
+
+        match outcome {
+            FinalizeOutcome::Finalized {
+                removed_token,
+                has_pending,
+                ..
+            } => {
+                assert!(removed_token.is_none());
+                assert!(!has_pending);
+            }
+            _ => panic!("direct do_finalize should return Finalized on a guarded miss"),
+        }
+        assert!(!active_token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            crate::services::discord::mailbox_snapshot(&shared, channel_id)
+                .await
+                .active_user_message_id,
+            Some(MessageId::new(active_user_msg_id))
+        );
+        let logs = String::from_utf8_lossy(&buffer.lock().unwrap()).into_owned();
+        assert!(
+            logs.contains("TurnFinalizer identity-guarded mailbox release skipped"),
+            "identity mismatch must be operator-visible; logs={logs}"
+        );
+        assert!(logs.contains("expected_user_msg_id=4018111"), "{logs}");
+        assert!(logs.contains("active_user_message_id=4018222"), "{logs}");
     }
 }

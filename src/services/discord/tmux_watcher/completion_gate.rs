@@ -41,6 +41,12 @@ impl TuiCompletionGateOutcome {
     }
 }
 
+pub(super) fn inflight_suppresses_tui_completion_lifecycle(
+    inflight: Option<&crate::services::discord::inflight::InflightTurnState>,
+) -> bool {
+    inflight.is_some_and(|state| state.relay_ownership_only)
+}
+
 /// Source-agnostic terminal probe for a matched session's provider JSONL.
 /// `InflightTurnState::turn_source` is audit metadata only (#2346/#2285).
 pub(super) fn matched_session_jsonl_turn_state(
@@ -93,6 +99,9 @@ pub(super) fn jsonl_terminal_can_confirm_completion(
     inflight: Option<&crate::services::discord::inflight::InflightTurnState>,
 ) -> bool {
     inflight.is_some_and(|state| {
+        if state.relay_ownership_only {
+            return false;
+        }
         let has_session_binding = state
             .tmux_session_name
             .as_deref()
@@ -184,6 +193,17 @@ pub(in crate::services::discord) async fn run_tui_completion_gate(
 ) -> TuiCompletionGateOutcome {
     let inflight =
         crate::services::discord::inflight::load_inflight_state(provider, channel_id.get());
+    if inflight_suppresses_tui_completion_lifecycle(inflight.as_ref()) {
+        tracing::info!(
+            provider = %provider.as_str(),
+            channel = channel_id.get(),
+            tmux_session = %tmux_session_name,
+            inflight_user_msg_id = inflight.as_ref().map(|state| state.user_msg_id).unwrap_or(0),
+            inflight_current_msg_id = inflight.as_ref().map(|state| state.current_msg_id).unwrap_or(0),
+            "suppressed TUI completion gate for relay-only synthetic turn; relay remains owned by the bridge/sink path"
+        );
+        return TuiCompletionGateOutcome::TimedOut;
+    }
     if jsonl_terminal_can_confirm_completion(inflight.as_ref())
         && matched_session_jsonl_turn_state(provider, inflight.as_ref(), tmux_session_name)
             == Some(crate::services::tui_turn_state::TuiTurnState::Idle)

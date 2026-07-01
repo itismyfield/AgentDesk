@@ -1,5 +1,10 @@
 use super::*;
 
+mod stale_reclaim;
+
+use stale_reclaim::release_reclaimable_stale_synthetic_mailbox_owner_if_current;
+pub(super) use stale_reclaim::release_stale_ownerless_tui_direct_mailbox_if_current;
+
 #[derive(Debug)]
 pub(super) struct TuiDirectSyntheticTurnClaim {
     pub(super) relay_owner: ExternalInputRelayOwner,
@@ -161,6 +166,38 @@ pub(super) async fn claim_tui_direct_synthetic_turn(
                         tmux_session_name = %tmux_session_name,
                         anchor_message_id = anchor_message_id.get(),
                         "TUI-direct synthetic inflight claimed after releasing stale ownerless mailbox"
+                    );
+                }
+            }
+            if !started
+                && let Some(active_user_message_id) = snapshot.active_user_message_id
+                && release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+                    shared,
+                    provider,
+                    channel_id,
+                    tmux_session_name,
+                    active_user_message_id,
+                    snapshot.active_request_owner,
+                    anchor_message_id,
+                )
+                .await
+            {
+                started = super::super::mailbox_try_start_turn_kinded(
+                    shared,
+                    channel_id,
+                    cancel_token.clone(),
+                    serenity::UserId::new(TUI_DIRECT_SYNTHETIC_OWNER_USER_ID),
+                    anchor_message_id,
+                    crate::services::turn_orchestrator::ActiveTurnKind::Background,
+                )
+                .await;
+                if started {
+                    tracing::info!(
+                        provider = %provider.as_str(),
+                        channel_id = channel_id.get(),
+                        tmux_session_name = %tmux_session_name,
+                        anchor_message_id = anchor_message_id.get(),
+                        "TUI-direct synthetic inflight claimed after reclaiming stale synthetic mailbox owner"
                     );
                 }
             }
@@ -338,58 +375,182 @@ pub(super) async fn claim_tui_direct_synthetic_turn(
     }
 }
 
-pub(super) async fn release_stale_ownerless_tui_direct_mailbox_if_current(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    tmux_session_name: &str,
-    active_user_message_id: MessageId,
-    anchor_message_id: MessageId,
-) -> bool {
-    let Some(state) = super::super::inflight::load_inflight_state(provider, channel_id.get())
-    else {
-        return false;
-    };
-    if state.user_msg_id != active_user_message_id.get()
-        || state.tmux_session_name.as_deref() != Some(tmux_session_name)
-        || !super::super::inflight::ownerless_external_input_inflight_is_stale(&state)
-    {
-        return false;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::discord::inflight::{self, InflightTurnState, TurnSource};
+    use crate::services::discord::mailbox_try_start_turn_kinded;
+    use ::serenity::model::id::{MessageId, UserId};
+
+    struct EnvGuard {
+        previous: Option<std::ffi::OsString>,
     }
 
-    let finish = super::super::mailbox_finish_turn_if_matches(
-        shared,
-        provider,
-        channel_id,
-        active_user_message_id,
-    )
-    .await;
-    let Some(token) = finish.removed_token.as_ref() else {
-        tracing::info!(
-            provider = %provider.as_str(),
-            channel_id = channel_id.get(),
-            tmux_session_name = %tmux_session_name,
-            stale_user_message_id = active_user_message_id.get(),
-            anchor_message_id = anchor_message_id.get(),
-            "TUI-direct stale ownerless mailbox release skipped because mailbox identity changed"
+    impl EnvGuard {
+        fn set_root(path: &std::path::Path) -> Self {
+            let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
+            unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", path) };
+            Self { previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.previous.as_ref() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
+
+    fn synthetic_owner() -> UserId {
+        UserId::new(TUI_DIRECT_SYNTHETIC_OWNER_USER_ID)
+    }
+
+    fn synthetic_state(
+        channel_id: ChannelId,
+        user_msg_id: MessageId,
+        tmux_session_name: &str,
+        terminal_delivery_committed: bool,
+    ) -> InflightTurnState {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            channel_id.get(),
+            None,
+            TUI_DIRECT_SYNTHETIC_OWNER_USER_ID,
+            user_msg_id.get(),
+            0,
+            "This session is being continued from a previous conversation".to_string(),
+            Some("session-4018".to_string()),
+            Some(tmux_session_name.to_string()),
+            Some("/tmp/agentdesk-4018.jsonl".to_string()),
+            None,
+            0,
         );
-        return false;
-    };
-    token
-        .cancelled
-        .store(true, std::sync::atomic::Ordering::Relaxed);
-    let global_active_decremented = super::super::saturating_decrement_global_active(shared);
-    tracing::warn!(
-        provider = %provider.as_str(),
-        channel_id = channel_id.get(),
-        tmux_session_name = %tmux_session_name,
-        stale_user_message_id = active_user_message_id.get(),
-        anchor_message_id = anchor_message_id.get(),
-        global_active_decremented,
-        had_pending_queue = finish.has_pending,
-        "released stale ownerless TUI-direct mailbox before claiming new synthetic inflight"
-    );
-    true
+        state.turn_source = TurnSource::ExternalInput;
+        state.relay_ownership_only = true;
+        state.terminal_delivery_committed = terminal_delivery_committed;
+        state.injected_prompt_message_id = Some(user_msg_id.get());
+        state
+    }
+
+    async fn seed_synthetic_mailbox_owner(
+        shared: &Arc<SharedData>,
+        channel_id: ChannelId,
+        user_msg_id: MessageId,
+    ) -> Arc<CancelToken> {
+        let token = Arc::new(CancelToken::new());
+        assert!(
+            mailbox_try_start_turn_kinded(
+                shared,
+                channel_id,
+                token.clone(),
+                synthetic_owner(),
+                user_msg_id,
+                crate::services::turn_orchestrator::ActiveTurnKind::Background,
+            )
+            .await
+        );
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+        token
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stale_synthetic_owner_absent_or_finalized_reclaims_for_new_turn() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = EnvGuard::set_root(root.path());
+        let provider = ProviderKind::Claude;
+        let tmux = "AgentDesk-claude-4018-reclaim";
+
+        for (index, finalized_row) in [false, true].into_iter().enumerate() {
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let channel_id = ChannelId::new(4_018_200 + index as u64);
+            let stale_id = MessageId::new(4_018_300 + index as u64);
+            let next_id = MessageId::new(4_018_400 + index as u64);
+            let stale_token = seed_synthetic_mailbox_owner(&shared, channel_id, stale_id).await;
+            if finalized_row {
+                let state = synthetic_state(channel_id, stale_id, tmux, true);
+                inflight::save_inflight_state(&state).expect("save finalized synthetic inflight");
+            }
+
+            let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+                &shared,
+                &provider,
+                channel_id,
+                tmux,
+                stale_id,
+                Some(synthetic_owner()),
+                next_id,
+            )
+            .await;
+            assert!(
+                reclaimed,
+                "stale synthetic owner should reclaim when its inflight is absent or already finalized"
+            );
+            assert!(stale_token.cancelled.load(Ordering::Relaxed));
+            assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+
+            let next_claimed = mailbox_try_start_turn_kinded(
+                &shared,
+                channel_id,
+                Arc::new(CancelToken::new()),
+                synthetic_owner(),
+                next_id,
+                crate::services::turn_orchestrator::ActiveTurnKind::Background,
+            )
+            .await;
+            assert!(next_claimed, "new synthetic turn must claim after reclaim");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stale_synthetic_owner_live_inflight_still_skips_reclaim() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = EnvGuard::set_root(root.path());
+        let provider = ProviderKind::Claude;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_018_260);
+        let tmux = "AgentDesk-claude-4018-live";
+        let live_id = MessageId::new(4_018_360);
+        let next_id = MessageId::new(4_018_460);
+        let live_token = seed_synthetic_mailbox_owner(&shared, channel_id, live_id).await;
+        let state = synthetic_state(channel_id, live_id, tmux, false);
+        inflight::save_inflight_state(&state).expect("save live synthetic inflight");
+
+        let reclaimed = release_reclaimable_stale_synthetic_mailbox_owner_if_current(
+            &shared,
+            &provider,
+            channel_id,
+            tmux,
+            live_id,
+            Some(synthetic_owner()),
+            next_id,
+        )
+        .await;
+        assert!(!reclaimed, "live synthetic owner must not be reclaimed");
+        assert!(!live_token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+
+        let next_claimed = mailbox_try_start_turn_kinded(
+            &shared,
+            channel_id,
+            Arc::new(CancelToken::new()),
+            synthetic_owner(),
+            next_id,
+            crate::services::turn_orchestrator::ActiveTurnKind::Background,
+        )
+        .await;
+        assert!(
+            !next_claimed,
+            "new synthetic turn must still skip while owner is live"
+        );
+    }
 }
 
 // ===========================================================================

@@ -52,6 +52,20 @@ pub(super) async fn run_early_tui_completion_gate(
     if eligible_for_early_gate
         && let Some(tmux_session_name) = inflight_state.tmux_session_name.as_deref()
     {
+        if inflight_state.relay_ownership_only {
+            tracing::info!(
+                provider = %provider.as_str(),
+                channel = channel_id.get(),
+                tmux_session = %tmux_session_name,
+                inflight_user_msg_id = inflight_state.user_msg_id,
+                inflight_current_msg_id = inflight_state.current_msg_id,
+                "early TUI completion gate suppressed for relay-only synthetic turn"
+            );
+            bridge_tui_gate_outcome_early =
+                Some(super::super::tmux::TuiCompletionGateOutcome::TimedOut);
+            bridge_early_gate_timed_out = true;
+            return (bridge_tui_gate_outcome_early, bridge_early_gate_timed_out);
+        }
         bridge_tui_gate_outcome_early = Some(
             super::super::tmux::run_tui_completion_gate(
                 provider,

@@ -5,20 +5,35 @@ fn state_for_matched_session(
     tmux_session_name: &str,
     output_path: &str,
 ) -> crate::services::discord::inflight::InflightTurnState {
-    let mut state = crate::services::discord::inflight::InflightTurnState::new(
-        provider,
-        42,
-        Some("relay-test".to_string()),
-        7,
-        9001,
-        9002,
-        "typed over ssh".to_string(),
-        Some("session-1".to_string()),
-        Some(tmux_session_name.to_string()),
-        Some(output_path.to_string()),
-        Some("/tmp/input.fifo".to_string()),
-        0,
-    );
+    let mut state: crate::services::discord::inflight::InflightTurnState =
+        serde_json::from_value(serde_json::json!({
+            "version": 9,
+            "provider": provider.as_str(),
+            "channel_id": 42,
+            "channel_name": "relay-test",
+            "watcher_owner_channel_id": 42,
+            "logical_channel_id": 42,
+            "request_owner_user_id": 7,
+            "user_msg_id": 9001,
+            "finalizer_turn_id": 9001,
+            "current_msg_id": 9002,
+            "current_msg_len": 0,
+            "user_text": "typed over ssh",
+            "source": "text",
+            "session_id": "session-1",
+            "tmux_session_name": tmux_session_name,
+            "output_path": output_path,
+            "input_fifo_path": "/tmp/input.fifo",
+            "runtime_kind": "legacy_tmux_wrapper",
+            "last_offset": 0,
+            "turn_start_offset": 0,
+            "full_response": "",
+            "response_sent_offset": 0,
+            "started_at": "2026-07-02 00:00:00",
+            "updated_at": "2026-07-02 00:00:00",
+            "born_generation": 0
+        }))
+        .expect("deserialize test inflight");
     state.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
     state
 }
@@ -104,6 +119,40 @@ fn jsonl_terminal_completion_accepts_session_bound_watcher_owned_placeholder() {
     assert!(
         jsonl_terminal_can_confirm_completion(Some(&state)),
         "session-bound watcher-owned terminal envelopes should finish cleanup even with a placeholder/status panel"
+    );
+}
+
+#[test]
+fn relay_ownership_only_turn_cannot_confirm_idle_via_tui_completion_gate() {
+    let file = tempfile::NamedTempFile::new().expect("temp jsonl");
+    std::fs::write(
+        file.path(),
+        r#"{"type":"result","result":"done","session_id":"s"}"#,
+    )
+    .expect("write jsonl");
+    let tmux_session_name = "AgentDesk-claude-relay-only";
+    let mut state = state_for_matched_session(
+        ProviderKind::Claude,
+        tmux_session_name,
+        &file.path().display().to_string(),
+    );
+    state.channel_id = 4_018_001;
+    state.current_msg_id = state.user_msg_id + 1;
+    state.status_message_id = Some(state.current_msg_id + 1);
+    state.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
+    state.relay_ownership_only = true;
+
+    assert!(
+        inflight_suppresses_tui_completion_lifecycle(Some(&state)),
+        "relay-only synthetic rows must force the completion gate onto the suppressing path"
+    );
+    assert!(
+        !jsonl_terminal_can_confirm_completion(Some(&state)),
+        "relay-only synthetic rows must not use matched JSONL idle as terminal completion evidence"
+    );
+    assert!(
+        !TuiCompletionGateOutcome::TimedOut.should_emit_completion(),
+        "relay-only synthetic rows must suppress watcher/bridge visible completion"
     );
 }
 
