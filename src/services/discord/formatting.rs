@@ -2242,7 +2242,12 @@ pub(super) async fn replace_long_message_raw(
     shared: &Arc<SharedData>,
 ) -> Result<(), Error> {
     replace_long_message_outcome_to_result(
-        replace_long_message_raw_with_outcome(http, channel_id, message_id, text, shared).await?,
+        // #3805 P1: this wrapper discards the last-chunk anchor (footer re-anchor
+        // is watcher-only); pass a throwaway sink.
+        replace_long_message_raw_with_outcome(
+            http, channel_id, message_id, text, shared, &mut None,
+        )
+        .await?,
     )
 }
 
@@ -2270,6 +2275,43 @@ pub(super) enum ReplaceLongMessageOutcome {
     },
 }
 
+/// #3805 P1: the LAST continuation chunk produced by a fully-successful
+/// multi-chunk `replace_long_message_raw_with_outcome` (`EditedOriginal` where
+/// the body split into 2+ chunks). Carries BOTH the tail chunk's message id
+/// (the highest snowflake — #3717 latest-wins) AND its exact text so a caller
+/// that appends a completion footer can re-anchor onto the tail chunk instead of
+/// stranding the footer on the edited chunk 0. The text MUST be the tail chunk's
+/// OWN text: the footer edit rewrites the target message with `strip(text) +
+/// footer`, so registering the full body would clobber the tail chunk with the
+/// entire answer. Reported via a `&mut Option` out-param (the enum stays a unit
+/// variant — ~20 `matches!` commit/delivered sites depend on that) and left
+/// `None` for single-chunk answers, where chunk 0 already IS the tail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ReplaceLastChunkAnchor {
+    pub(super) msg_id: u64,
+    pub(super) text: String,
+}
+
+/// #3805 P1: pick the completion-footer terminal target (message id + text) for
+/// the watcher's in-place edit arm (`replace_long_message_raw_with_outcome`
+/// `EditedOriginal`). When the answer split into multiple chunks the tail
+/// continuation is the durable anchor (highest snowflake — #3717 latest-wins),
+/// and its edit text MUST be the tail chunk's OWN text: the completion edit
+/// rewrites the target with `strip(text) + footer`, so passing the full body
+/// would overwrite the tail chunk with the entire answer (§4 regression). For a
+/// single-chunk answer there is no continuation anchor, so the edited chunk-0 id
+/// plus the full relay text are the target (identical there — no regression).
+pub(super) fn watcher_completion_footer_anchor<'a>(
+    last_chunk_anchor: Option<&'a ReplaceLastChunkAnchor>,
+    edited_chunk0_msg_id: MessageId,
+    full_relay_text: &'a str,
+) -> (MessageId, &'a str) {
+    match last_chunk_anchor {
+        Some(anchor) => (MessageId::new(anchor.msg_id), anchor.text.as_str()),
+        None => (edited_chunk0_msg_id, full_relay_text),
+    }
+}
+
 /// Replace an existing Discord message and report whether the original
 /// placeholder was actually edited. If the edit fails but the fallback send
 /// succeeds, wrapper callers treat delivery as committed, while callers that
@@ -2281,6 +2323,11 @@ pub(super) async fn replace_long_message_raw_with_outcome(
     message_id: MessageId,
     text: &str,
     shared: &Arc<SharedData>,
+    // #3805 P1: on the fully-successful multi-chunk edit path this is set to the
+    // tail continuation chunk (id + text) so a footer-appending caller can
+    // re-anchor onto it; left untouched (caller-initialised `None`) on every
+    // other path (single-chunk, edit-failure fallback, partial failure).
+    last_chunk_anchor: &mut Option<ReplaceLastChunkAnchor>,
 ) -> Result<ReplaceLongMessageOutcome, Error> {
     let payload_byte_len = text.len();
     let chunks = split_message(text);
@@ -2592,6 +2639,18 @@ pub(super) async fn replace_long_message_raw_with_outcome(
             error,
         });
     }
+    // #3805 P1: fully-successful edit+continuations. When continuations were
+    // sent, hand back the TAIL chunk (id + its own text) so the watcher footer
+    // can re-anchor onto it (highest snowflake, #3717 latest-wins). Empty
+    // continuations ⇒ single-chunk answer ⇒ leave `None` (chunk 0 is the tail).
+    *last_chunk_anchor =
+        sent_continuation_message_ids
+            .last()
+            .copied()
+            .map(|msg_id| ReplaceLastChunkAnchor {
+                msg_id,
+                text: chunks.last().cloned().unwrap_or_default(),
+            });
     Ok(ReplaceLongMessageOutcome::EditedOriginal)
 }
 
@@ -2805,6 +2864,44 @@ mod replace_long_message_tests {
                 None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
             }
         }
+    }
+
+    // #3805 P1: a multi-chunk answer must re-anchor the completion footer onto the
+    // TAIL continuation chunk (highest snowflake, #3717 latest-wins) carrying the
+    // tail chunk's OWN text — NOT chunk 0, and NOT the full body (which would
+    // clobber the tail chunk once the footer edit rewrites it, §4 regression).
+    #[test]
+    fn completion_footer_anchor_reanchors_to_last_chunk_with_tail_text() {
+        let chunk0 = MessageId::new(1000);
+        let full_body = "chunk-0 body ... continuation tail body";
+        let tail = super::ReplaceLastChunkAnchor {
+            msg_id: 2000,
+            text: "continuation tail body".to_string(),
+        };
+
+        let (target_id, target_text) =
+            super::watcher_completion_footer_anchor(Some(&tail), chunk0, full_body);
+
+        // Re-anchored to the tail chunk id (2000 > 1000: never re-anchors DOWN).
+        assert_eq!(target_id, MessageId::new(2000));
+        assert!(target_id > chunk0, "must re-anchor to the higher snowflake");
+        // Registered text is the tail chunk's OWN text, never the full body.
+        assert_eq!(target_text, "continuation tail body");
+        assert_ne!(target_text, full_body);
+    }
+
+    // #3805 P1: single-chunk answers have no continuation anchor → keep chunk 0 +
+    // the full relay text (identical there); the fix is a strict no-op for them.
+    #[test]
+    fn completion_footer_anchor_single_chunk_keeps_chunk0_and_full_text() {
+        let chunk0 = MessageId::new(1000);
+        let full_body = "short single-chunk answer";
+
+        let (target_id, target_text) =
+            super::watcher_completion_footer_anchor(None, chunk0, full_body);
+
+        assert_eq!(target_id, chunk0);
+        assert_eq!(target_text, full_body);
     }
 
     #[test]

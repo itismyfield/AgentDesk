@@ -811,7 +811,9 @@ async fn deliver_response(
                 .await;
             }
             let outcome = formatting::replace_long_message_raw_with_outcome(
-                http, channel_id, msg_id, &formatted, shared,
+                // #3805 P1: standby relay does not append a completion footer, so
+                // the last-chunk anchor is unused here.
+                http, channel_id, msg_id, &formatted, shared, &mut None,
             )
             .await;
             // #3089 A0: the "delivered?" return is sourced from the shared
