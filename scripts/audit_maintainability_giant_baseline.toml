@@ -528,120 +528,12 @@
 # new argument line plus a 2-line explanatory comment at the existing call site;
 # splitting recovery.rs is out of scope.
 "src/services/discord/health/recovery.rs" = 2736
-# #3629: +81 (2641 -> 2722) for the NO_REPLY/empty orphan inflight cleanup in the
-# completed-stale leak-detection path: the `completed_stale_no_answer_orphan_should_clean`
-# pure seam (+ safety doc), the identity-guarded clear + lifecycle telemetry at the
-# call site, and its unit test. P1 bugfix (#3629); the clean logic needs the
-# file-private detection context so it lives here until the inflight/recovery split.
-# #3293: +11 for the additive `recovery_relay_attempts` restart-budget counter
-# (field + `RECOVERY_RELAY_RESTART_ATTEMPT_BUDGET`), lowered 2466 -> 2465 to
-# lock the net position.
-# #3351: +58 for `clear_current_msg_if_matches(_in_root)` — the relay-placeholder
-# compare-and-clear needs the file-private lock/load/persist internals, so it
-# lives here until the inflight split.
-# FIX #6 (Codex P2): +62 (2523 -> 2585) for the five `#[serde(default)]`
-# follow-up requeue context fields on `InflightTurnState` (+ doc comments), the
-# v8->v9 version bump comment, the `set_followup_requeue_context` setter, and the
-# matching defaults in `InflightTurnState::new`, so a PRE-submit busy-timeout
-# requeue rebuilds the retry Intervention without losing reply/upload/voice data.
-# #3479 Phase-2 rank-7: behaviour-preserving split — the pure domain model moved
-# to inflight/model.rs (587 prod LoC) and the FS path/flock seam to
-# inflight/store.rs (64 prod LoC). Both sub-1000 (not giants → no registry/doc
-# entry). Lowers 2585 -> 1980 (actual post-split prod LoC). The status-panel
-# guards stay in root: their compare-and-clear still needs the file-private
-# load/persist-under-lock internals, so they cannot move cleanly yet.
-# #3552: +55 (1980 -> 2035) for the severity-aware invariant recorder
-# (`record_inflight_invariant_with_severity` + `offset_monotonic_invariant_severity`
-# pure helper + doc) on the save path. When the #3416 enforce guard will skip a
-# backward inflight write (offset preserved, zero data loss) the paired
-# offset-monotonic invariant is recorded at WARN instead of ERROR, killing the
-# duplicate ERROR-log noise; the ERROR severity is preserved for the persist path.
-# This save-path emit is the SINGLE lock-atomic authority for the
-# response_sent_offset_monotonic invariant (codex r2): it re-validates the row
-# under its own lock and emits at the correct severity atomically with the
-# skip/persist decision, so the tmux watcher pre-save emit was removed as a
-# race-prone duplicate (`offset_monotonic_invariant_severity` stays private).
-# #3558 raised 2035 -> 2275 (+240): two new single-flock read-modify-write helpers
-# that fix the watcher offset TOCTOU — `persist_watcher_stream_progress_locked`
-# (preserves the non-owned `last_offset` from the in-lock reload) and
-# `commit_watcher_terminal_delivery_locked` (max-serializes the watermark) — plus
-# their `WatcherStreamProgressPatch` / `WatcherTerminalCommitPatch` value structs,
-# `WatcherProgressOutcome` / `WatcherTerminalCommitOutcome` enums, and 5 unit
-# tests covering last_offset preservation, fresh-row identity rejection,
-# backward/forward commit max-serialize, and Gemini retry-reset non-destruction.
-# #3558 (codex review follow-up) raised 2275 -> 2378 (+103): a third single-flock
-# RMW helper `persist_watcher_relay_watermark_locked` (with its
-# `WatcherRelayWatermarkPatch` value struct and `WatcherRelayWatermarkOutcome`
-# enum) for the two `tmux_watcher.rs` session-bound-relay-success sites — it
-# patches ONLY `last_watcher_relayed_*` and preserves the in-lock
-# `last_offset`/`response_sent_offset`/`full_response`, so a late relay can no
-# longer clobber a concurrently-advanced watermark backward — plus 2 unit tests
-# (concurrent-advance preservation, fresh-row identity rejection).
-# #3581 raised 2378 -> 2551 (+173): bounded reap of abandoned rebind-origin
-# orphans (the STALL-WATCHDOG wedge source). Adds the env-overridable deadline
-# constant + `rebind_origin_deadline_secs_env` (clamped) + `now_unix`, the
-# strict-conjunction predicate `should_reap_abandoned_rebind_origin` (owner-less +
-# unadopted + never-progressed + never-delivered; reap iff past-deadline OR
-# prior-generation), the `rebind_origin_age_secs` stamp/mtime age helper, the
-# `emit_reap_abandoned_rebind_origin` #3561 lifecycle event, and the boot-time
-# reap branch wired into `invalidate_stale_generation_in_root` (the prior code
-# skipped every rebind row unconditionally, the permanent-orphan source). The
-# bulk is load-bearing doc comments pinning the never-live argument; the tests
-# live in `#[cfg(test)] mod rebind_origin_reap_tests` and are excluded here.
-# #3581 (codex TOCTOU follow-up) raised 2551 -> 2660 (+109): closes the
-# placeholder-sweeper reap race (unlocked-snapshot pre-check, then
-# `delete_inflight_state_file` unlinked without re-reading the row under the
-# lock — a racing intake/TUI claim could persist a new live inflight at the same
-# sidecar path and have it wiped). Adds the shared locked re-validate helper
-# `reap_abandoned_rebind_origin_locked_in_root` (+ its env wrapper
-# `reap_abandoned_rebind_origin_locked`), the `RebindReapOutcome` enum, and the
-# `rebind_row_identity_unchanged` identity guard (created_at + birth_generation +
-# turn_start_offset) so a replacement turn is never mistaken for the snapshotted
-# orphan. Both the sweeper and the boot `invalidate_stale_generation_in_root`
-# path now route their unlink through this single helper (the boot branch loses
-# its inline lock+reload). The bulk is load-bearing doc comments; the 4 new
-# boundary tests live in the excluded `rebind_origin_reap_tests` module.
-# #3641 raised 2660 -> 2771 (+111): boot-time orphan `.json.lock` sweep for
-# `discord_inflight/{provider}` sidecars whose matching `.json` row is gone.
-# Adds the 1h conservative age floor, lock-name/base-path helpers, root-explicit
-# testable sweep, runtime-root wrapper, and boot hook. Tests live in the excluded
-# `orphan_lock_reap_tests` module.
-# #3635 raised 2771 -> 3052 (+281): dead-watcher rebind-origin reap. A
-# Watcher-owned rebind orphan (the #897 birth shape, `relay_owner_kind =
-# Watcher`) can never satisfy the existing `should_reap_abandoned_rebind_origin`
-# `== None` owner conjunct, so it leaked on disk forever after the watcher died.
-# This adds a SEPARATE gate that leaves the byte-for-byte-unchanged None-owner
-# predicate (and its 19 live-protection pinning tests) intact: the new
-# `WatcherLiveness` DI trait + `RuntimeWatcherLiveness` operational oracle
-# (three-state tmux pane liveness + dispatched-sessions runtime-activity age,
-# reused from #3169 / #3629), the Watcher-owner structural predicate, and the
-# `sweep_reap_dead_watcher_rebind_origin` warm sweeper entry point. Codex review
-# follow-up removed the bool-collapse bug (`ProbeError` is unknown/preserve), runs
-# tmux subprocess probes outside the sidecar lock on `spawn_blocking` with a
-# timeout, and keeps the locked helper to cheap fs-only identity/structure plus
-# recent-runtime-activity rechecks. recovery_engine.rs (#3016 birth) is 0 lines
-# changed; only the warm placeholder-sweeper carries the liveness gate (never the
-# boot path) so a freshly-restarted live watcher is never false-classified as dead.
-# Tests live in the excluded `rebind_origin_reap_tests` module.
-# #3982 raised 2275 -> 2309 (+34): the orphan-downgrade efficacy fix splits the
-# shared persist tail `persist_under_lock` into a bump-parameterized
-# `persist_under_lock_inner(..., bump_updated_at: bool)` plus two thin wrappers —
-# `persist_under_lock` (bump=true; ALL existing callers unchanged) and the new
-# `persist_under_lock_preserving_updated_at` (bump=false). The downgrade of a
-# confirmed-dead SessionBoundRelay orphan must NOT reset the quiescence clock, or
-# the triggering TUI-direct turn's fresh re-read sees a "0 s-old" ownerless row →
-# not stale → the view builder keeps it → the deferred claim keeps aborting ~300 s.
-# The split keeps ONE implementation (no duplicated validate/atomic-write) behind
-# the flag. Root-consistent with #3960; smallest possible blast radius.
-# 2026-07-01 #3933: +19 prod LoC — is_legitimate_full_reset enforce-guard precision (live data-loss fix); 로직은 validate_inflight_state_for_save에 상주해야 함
-# 2026-07-01 #3933 follow-up: +11 prod LoC — severity WARN downgrade for a legitimate
-# full reset. The `monotonic_violation_safely_handled = enforce_skips_backward_write ||
-# is_legitimate_full_reset` binding + its rationale comment make a permitted re-stream
-# rewind record its offset-monotonic violation at WARN (not ERROR), removing the
-# per-retry operator ERROR noise the release (authority-ON) emits on every Gemini/Qwen
-# RetryBoundary. Log-severity ONLY — enforce guard, debug tripwire, and on-disk schema
-# unchanged; the classification input necessarily lives at the save-path chokepoint.
-"src/services/discord/inflight.rs" = 2339 # #3835: 3077 -> 2275, locked-in win — verbatim decompose moved the status-panel/current-message ownership writes to inflight/ownership_ops.rs and the staleness predicates + orphan-lock/rebind-origin reap helpers to inflight/rebind_reap.rs (zero behavior change, facade re-exports keep inflight::* paths byte-identical); #3982 -> 2309 (+34) persist bump-flag split (see comment above); #3933 -> 2328 (+19) is_legitimate_full_reset enforce-guard precision (see comment above); #3933 follow-up -> 2339 (+11) severity WARN downgrade (see comment above)
+# inflight.rs was decomposed in #3835: the store-side CAS "save" cluster moved to
+# inflight/save_store.rs, the "clear"/abandon cluster to inflight/clear_store.rs, and
+# the shared persist/lock + validate primitives to inflight/store.rs (each sub-1000
+# prod LoC, not a giant). The module root dropped 2339 -> 914 prod LoC — below the
+# 1000 threshold, so its ratchet entry is deleted (win; no baseline raises) and the
+# giant-file registry [[entry]] + frozen-list membership are retired (#3835 closed).
 # #3779 extracted relay-recovery auto-heal attempt accounting to a sibling
 # module, dropping relay_recovery.rs below the prod-giant threshold; the ratchet
 # entry is retired instead of raising the baseline.

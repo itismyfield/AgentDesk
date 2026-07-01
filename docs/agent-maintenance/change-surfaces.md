@@ -1429,57 +1429,7 @@
     2026-08-31, #3036)).
   - `src/services/discord/{commands/text_commands.rs,
     discord_config_audit.rs, router/intake_gate.rs}` (all 1000+ production
-    lines) and `src/services/discord/inflight.rs` (2339 lines; +8 from #3960
-    `mod orphan_relay_reclaim` + its re-export — the producer-liveness TOCTOU
-    reclaim predicate and the locked owner-downgrade RMW live in their own
-    submodule, not this giant file; this is the mod-decl + re-export cost; +1
-    from #3918 `mod anchor_repost` — the durable at-most-once anchor-repost
-    idempotency guards live in their own submodule, not in this giant file; +37 from #3860
-    `set_inflight_restart_mode_under_lock` — the per-row lock-RMW that makes the
-    bulk restart-mode marker set only `restart_mode` on the FRESH on-disk row so
-    a draining watcher's delivery frontier can no longer be regressed (duplicate
-    relay root cause); +229 from #3859
-    `request_inflight_abandon_if_matches{,_zero_owned}` — the failure-path
-    helpers that enqueue a durable abandon-request (so the placeholder sweeper
-    finalizes the stranded "🔄 처리 중" card to "중단됨" by message id) and then
-    DELETE the inflight row, freeing the channel immediately like the pre-#3859
-    path (the row is no longer kept alive, dissolving the flag-on-live-row race
-    class). r5: the enqueue surfaces durable-write failures so the row is
-    PRESERVED (outcome IoError) when a finalizable placeholder's record cannot be
-    written — never `(row deleted ∧ record absent)`; +116 from current
-    inventory refresh after the relay split stack landed; #3680 relay
-    recovery review hardening; #3685 exposes the inflight sidecar lock
-    crate-wide for locked legacy rebind backfill; #3715 moved the #3635
-    dead-watcher rebind-origin reap helpers into
-    `src/services/discord/inflight/rebind_reap.rs`, while the parent preserves
-    the #3581 None-owner predicate and sidecar state contract; #3809 adds a
-    read-only single-row loader for deterministic idle-recap diagnostics that
-    must not run compatibility backfills or cleanup writes; #3835 moved the
-    watcher progress / terminal commit / relay-watermark locked update helpers
-    into `src/services/discord/inflight/watcher_state.rs`, then completed the
-    decompose by relocating the typed status-panel / current-message ownership
-    writes into `src/services/discord/inflight/ownership_ops.rs` and the
-    staleness predicates + orphan-lock / rebind-origin reap helpers into the
-    existing `src/services/discord/inflight/rebind_reap.rs` — pure verbatim move
-    (zero behavior change), every externally-referenced symbol re-exported from
-    the facade so `inflight::*` call-site paths stay byte-identical; +34 from #3982
-    splitting `persist_under_lock` into a bump-parameterized `persist_under_lock_inner`
-    plus a `persist_under_lock_preserving_updated_at` wrapper, so the orphan
-    owner-downgrade can persist without resetting the quiescence clock — all
-    existing `persist_under_lock` callers unchanged; +19 from #3933 deriving the
-    `is_legitimate_full_reset` signal inside `validate_inflight_state_for_save`
-    (empty `full_response` + `response_sent_offset == 0` for the SAME turn — the
-    Gemini/Qwen `RetryBoundary` rewind signature) and passing it to the enforce
-    guard so the authority-ON release path permits the legitimate re-stream
-    instead of enforce-skipping it, plus the paired monotonic debug-tripwire
-    relaxation for the already-skipped case; the enforce decision itself stays a
-    pure helper in `outbound/delivery_record.rs`; +11 from the #3933 follow-up
-    classifying a permitted full reset's offset-monotonic violation as WARN
-    instead of ERROR (the `monotonic_violation_safely_handled =
-    enforce_skips_backward_write || is_legitimate_full_reset` input at the
-    save-path chokepoint — log-severity ONLY; enforce guard, debug tripwire, and
-    on-disk schema unchanged, killing the per-retry authority-ON operator ERROR
-    noise on every Gemini/Qwen `RetryBoundary`)).
+    lines).
   - `src/services/discord/placeholder_sweeper.rs` (1019 lines; +5 from #3886
     calling the deterministic TimedOut-completion-gate status-panel reconcile
     (`super::tmux::reconcile_timed_out_tui_status_panel`) before the age-based

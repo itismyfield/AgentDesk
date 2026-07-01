@@ -101,7 +101,12 @@ grandfathered_baseline_paths = [
   # land as a full [[entry]] (owner + deadline + decompose_issue) or fail the
   # generation gate.
   "src/services/discord/health/recovery.rs",
-  "src/services/discord/inflight.rs",
+  # inflight.rs was decomposed in #3835 (store-side CAS save/clear clusters +
+  # shared persist/lock/validate primitives moved to inflight/{save_store,
+  # clear_store,store}.rs; module root 2339 -> 914 prod LoC). No longer a
+  # prod-giant, so it is removed from the frozen baseline as well as the
+  # [[entry]] below (win-locked: a re-expanded inflight cannot be
+  # re-grandfathered — it would have to land as a full [[entry]] or shrink).
   "src/services/discord/meeting_orchestrator.rs",
   "src/services/discord/mod.rs",
   "src/services/discord/recovery_engine.rs",
@@ -282,14 +287,6 @@ file = "src/services/discord/recovery_engine.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
 decompose_issue = "#3834"
-
-[[entry]]
-# #3721 first-batch promotion: canonical inflight JSON lifecycle and
-# identity-guarded owner APIs for relay/session/recovery paths.
-file = "src/services/discord/inflight.rs"
-owner = "discord-relay"
-deadline = "2026-10-31"
-decompose_issue = "#3835"
 
 [[entry]]
 # #3721 first-batch promotion: Discord message intake execution mixes request

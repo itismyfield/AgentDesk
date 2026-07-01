@@ -60,3 +60,245 @@ pub(crate) fn lock_inflight_state_path(path: &Path) -> Result<InflightStateFileL
     }
     Ok(InflightStateFileLock { _file: file })
 }
+
+// ---------------------------------------------------------------------------
+// #3835: shared lock-held persist tail + save-side validation gate.
+//
+// Moved verbatim from the `inflight` parent so the CAS save/clear children and
+// the sibling child modules (`watcher_state`, `ownership_ops`,
+// `orphan_relay_reclaim`, `finalizer_identity`) consume one primitive layer.
+// The parent re-imports these at their original inflight-private visibility, so
+// `super::persist_under_lock` / `super::validate_inflight_state_for_save` (and the
+// CAS children's unqualified calls via `use super::*`) resolve unchanged.
+// `persist_under_lock_inner` stays module-private here (internal to the two
+// persist wrappers). Behaviour-preserving: no function body is altered.
+// ---------------------------------------------------------------------------
+
+pub(super) fn validate_inflight_state_for_save(
+    root: &Path,
+    path: &Path,
+    state: &InflightTurnState,
+    code_location: &'static str,
+) -> bool {
+    let offset_in_bounds = state.response_sent_offset <= state.full_response.len()
+        && state
+            .full_response
+            .is_char_boundary(state.response_sent_offset);
+    record_inflight_invariant(
+        offset_in_bounds,
+        state,
+        "response_sent_offset_in_bounds",
+        code_location,
+        "inflight response_sent_offset must stay within full_response",
+        serde_json::json!({
+            "response_sent_offset": state.response_sent_offset,
+            "full_response_len": state.full_response.len(),
+            "path": path.display().to_string(),
+        }),
+    );
+    debug_assert!(
+        offset_in_bounds,
+        "inflight response_sent_offset must stay within full_response"
+    );
+
+    let Ok(existing_content) = fs::read_to_string(path) else {
+        return true;
+    };
+    let Ok(existing) = serde_json::from_str::<InflightTurnState>(&existing_content) else {
+        return true;
+    };
+
+    // #3154 — OBSERVE-ONLY on the bridge/watcher save path. A legit fresh-turn
+    // reset (different user_msg_id or turn_start_offset) resets
+    // response_sent_offset to 0 on purpose (see InflightTurnState::new), so the
+    // check is gated by SAME turn identity; only a backward move within the same
+    // turn is a violation. We do not skip the write here (that would drop a
+    // legit fresh turn); this mirrors the last_offset_monotonic precedent below.
+    let same_turn_identity = existing.user_msg_id == state.user_msg_id
+        && existing.turn_start_offset == state.turn_start_offset;
+    let monotonic_offset =
+        !same_turn_identity || state.response_sent_offset >= existing.response_sent_offset;
+    // I6 (last_offset_monotonic) — OBSERVE-ONLY on the bridge/watcher save
+    // path. A legit fresh-turn reset (different user_msg_id or
+    // turn_start_offset) lowers last_offset on purpose, so the check is gated
+    // by SAME turn identity; only a backward move within the same turn is a
+    // violation. We do not skip the write here (that would drop a legit fresh
+    // turn); the enforcing variant lives in the standby/refresh path.
+    let last_offset_monotonic = !same_turn_identity || state.last_offset >= existing.last_offset;
+
+    // #3552: when the #3416 enforce guard (below) will SKIP this backward write
+    // and preserve the offset (zero data loss), the offset-monotonic violation
+    // has already been safely handled — record it at WARN instead of ERROR so
+    // the paired `#3416 enforce` WARN is the only operator-facing log, killing
+    // the duplicate ERROR-log noise. When enforce is OFF a GENUINE (non-reset)
+    // backward write actually persists below, so that violation stays ERROR (a
+    // real breach); the legitimate re-stream reset (#3933) is handled separately
+    // just before the records below. Computed BEFORE the records so the severity
+    // is correct; the enforce branch itself (skip + return false) is unchanged.
+    // #3933: a legitimate Gemini/Qwen `RetryBoundary` reset rewinds the SAME
+    // turn's frontier to the start — `full_response` cleared and
+    // `response_sent_offset` back to 0 — to re-stream the answer
+    // (turn_bridge/retry_state.rs::clear_response_delivery_state). That backward
+    // move is NOT a stale-snapshot regression, so the enforce guard must permit
+    // it (the release runs AGENTDESK_DELIVERY_RECORD_AUTHORITY=1; blocking it
+    // drops the re-streamed body). A genuine backward regression carries a
+    // non-empty body, so it never matches this rewind signature and stays
+    // blocked. The signal is derived here from the incoming state — no call-site
+    // change — so the guard stays self-contained.
+    let is_legitimate_full_reset =
+        same_turn_identity && state.full_response.is_empty() && state.response_sent_offset == 0;
+    use crate::services::discord::outbound::delivery_record as dr;
+    let authority = dr::delivery_record_authority_enabled();
+    let enforce_skips_backward_write = dr::authority_blocks_backward_inflight_write(
+        authority,
+        monotonic_offset,
+        last_offset_monotonic,
+        is_legitimate_full_reset,
+    );
+    // #3933: a legitimate full reset PERSISTS its backward write (it is a permitted
+    // re-stream rewind, so the enforce guard does NOT skip it —
+    // `enforce_skips_backward_write` is false). That rewind is intended, not a
+    // data-loss regression, so it must not surface an operator-facing ERROR: treat
+    // it as "safely handled" (WARN) exactly like the enforce-skip case. This is a
+    // severity-label change ONLY — the enforce guard, the debug tripwire (which
+    // still keys off `enforce_skips_backward_write`), and the on-disk schema are
+    // all unchanged.
+    let monotonic_violation_safely_handled =
+        enforce_skips_backward_write || is_legitimate_full_reset;
+    let offset_monotonic_severity =
+        offset_monotonic_invariant_severity(monotonic_violation_safely_handled);
+
+    record_inflight_invariant_with_severity(
+        monotonic_offset,
+        state,
+        "response_sent_offset_monotonic",
+        code_location,
+        "inflight response_sent_offset must not move backwards for the same turn identity",
+        serde_json::json!({
+            "previous": existing.response_sent_offset,
+            "next": state.response_sent_offset,
+            "same_turn_identity": same_turn_identity,
+            "path": path.display().to_string(),
+        }),
+        offset_monotonic_severity,
+    );
+    // #3933: when the enforce guard is about to SKIP this backward write it never
+    // persists, so the debug tripwire has nothing to catch — asserting there would
+    // panic on a write we already discard. Relax the tripwire for that skipped
+    // case only; a backward move that actually PERSISTS (enforce OFF, or a
+    // permitted legitimate reset in release) still trips it, preserving the
+    // tripwire's purpose and every existing observe-only test verbatim.
+    debug_assert!(
+        monotonic_offset || enforce_skips_backward_write,
+        "inflight response_sent_offset must not move backwards for the same turn identity"
+    );
+
+    record_inflight_invariant_with_severity(
+        last_offset_monotonic,
+        state,
+        "last_offset_monotonic",
+        code_location,
+        "inflight last_offset must not move backwards for the same turn identity",
+        serde_json::json!({
+            "previous": existing.last_offset,
+            "next": state.last_offset,
+            "same_turn_identity": same_turn_identity,
+            "path": path.display().to_string(),
+        }),
+        offset_monotonic_severity,
+    );
+    debug_assert!(
+        last_offset_monotonic || enforce_skips_backward_write,
+        "inflight last_offset must not move backwards for the same turn identity"
+    );
+
+    let same_tmux_owner = existing.tmux_session_name.is_none()
+        || state.tmux_session_name.is_none()
+        || existing.tmux_session_name == state.tmux_session_name;
+    record_inflight_invariant(
+        same_tmux_owner,
+        state,
+        "inflight_tmux_one_to_one",
+        code_location,
+        "inflight state for a channel must not drift between tmux sessions",
+        serde_json::json!({
+            "previous_tmux_session_name": existing.tmux_session_name.as_deref(),
+            "next_tmux_session_name": state.tmux_session_name.as_deref(),
+            "root": root.display().to_string(),
+            "path": path.display().to_string(),
+        }),
+    );
+
+    // #3416 (#3089 B3): observe→ENFORCE under the durable-authority flag (no-op
+    // when OFF); see dr::authority_blocks_backward_inflight_write. The violation
+    // itself was already recorded by the monotonic record_inflight_invariant
+    // above (downgraded to WARN for this skipped-write case — see #3552).
+    if enforce_skips_backward_write {
+        tracing::warn!(
+            "#3416 enforce: skipped backward inflight write at {}",
+            path.display()
+        );
+        return false;
+    }
+    true
+}
+
+/// Reads + deserializes the inflight row at `path` while the caller holds the
+/// sidecar flock. Returns `None` on a missing/malformed file (same lenient
+/// posture as `load_inflight_state`).
+pub(super) fn load_inflight_state_unlocked(path: &Path) -> Option<InflightTurnState> {
+    let data = fs::read_to_string(path).ok()?;
+    parse_inflight_state_content(&data).ok()
+}
+
+/// Shared lock-held persist tail: validate, optionally stamp `updated_at`,
+/// atomic-write. Caller must already hold `lock_inflight_state_path`.
+///
+/// `bump_updated_at` controls whether `updated_at` is reset to now. Real
+/// lifecycle mutations bump it (quiescence clock resets); an owner *correction*
+/// of a proven-dead orphan (#3982) preserves the old, already-stale timestamp so
+/// downstream ownerless-stale filters drop the row immediately on the next read
+/// instead of after another 300 s window.
+fn persist_under_lock_inner(
+    root: &Path,
+    path: &Path,
+    state: &InflightTurnState,
+    caller: &'static str,
+    bump_updated_at: bool,
+) -> Result<(), String> {
+    let mut updated = state.clone();
+    updated.ensure_finalizer_turn_id();
+    if !validate_inflight_state_for_save(root, path, &updated, caller) {
+        return Ok(());
+    }
+    if bump_updated_at {
+        updated.updated_at = now_string();
+    }
+    let json = serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())?;
+    atomic_write(path, &json)
+}
+
+/// Shared lock-held persist tail: validate, stamp `updated_at`, atomic-write.
+/// Caller must already hold `lock_inflight_state_path`.
+pub(super) fn persist_under_lock(
+    root: &Path,
+    path: &Path,
+    state: &InflightTurnState,
+    caller: &'static str,
+) -> Result<(), String> {
+    persist_under_lock_inner(root, path, state, caller, true)
+}
+
+/// Like [`persist_under_lock`] but preserves the row's existing `updated_at`
+/// instead of bumping it to now. Used by the #3982 orphan downgrade: the owner
+/// correction of a confirmed-dead orphan is not new lifecycle activity, so its
+/// quiescence clock must not be reset, or the triggering TUI-direct turn's fresh
+/// re-read would see a "fresh" row and keep aborting.
+pub(super) fn persist_under_lock_preserving_updated_at(
+    root: &Path,
+    path: &Path,
+    state: &InflightTurnState,
+    caller: &'static str,
+) -> Result<(), String> {
+    persist_under_lock_inner(root, path, state, caller, false)
+}
