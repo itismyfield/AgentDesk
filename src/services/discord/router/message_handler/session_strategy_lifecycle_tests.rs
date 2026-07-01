@@ -103,14 +103,21 @@ fn db_provider_session_restore_existing_cli_renders_session_panel_line() {
     let channel_id = serenity::ChannelId::new(3_653);
     assert!(events.set_session_panel_lifecycle_event(channel_id, None, kind, &details));
 
-    let rendered = events.render_status_panel(
+    // #3983 item4: the session line is no longer in the every-tick footer — it is
+    // emitted once, at the top, via the one-shot banner claim.
+    let footer = events.render_status_panel(
         channel_id,
         &crate::services::provider::ProviderKind::Claude,
         1_700_000_000,
     );
-    assert!(rendered.contains("기존 세션 복원"));
-    assert!(rendered.contains("provider session claude#provider…"));
-    assert!(!rendered.contains("📋 세션 복원"));
+    assert!(!footer.contains("기존 세션 복원"));
+
+    let banner = events
+        .claim_session_banner_line(channel_id, &crate::services::provider::ProviderKind::Claude)
+        .expect("restored session yields a one-shot banner");
+    assert!(banner.contains("기존 세션 복원"));
+    assert!(banner.contains("provider session claude#provider…"));
+    assert!(!banner.contains("📋 세션 복원"));
 }
 
 #[test]

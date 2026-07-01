@@ -329,6 +329,28 @@ impl PlaceholderLiveEvents {
         self.set_session_panel_snapshot(channel_id, None)
     }
 
+    /// #3983 item4: atomically claim the one-shot top session banner for this
+    /// channel's CURRENT session snapshot, returning the rendered session line
+    /// EXACTLY ONCE per session. Both the sink and tmux-watcher refresh paths
+    /// call this after (re)setting the snapshot; the per-channel mutex makes the
+    /// claim a single atomic compare-and-record, so whichever path arrives first
+    /// for a given session emits the banner and the other observes the recorded
+    /// key and returns `None` (dual-path de-dup, no double post / no omission).
+    /// `None` when the channel has no session snapshot or its banner was already
+    /// claimed. See `StatusPanelState::claim_session_banner` for the identity
+    /// keying (session_instance_key → provider_session_id → rendered line).
+    pub(in crate::services::discord) fn claim_session_banner_line(
+        &self,
+        channel_id: ChannelId,
+        provider: &ProviderKind,
+    ) -> Option<String> {
+        let entry = self.status_by_channel.get(&channel_id)?;
+        let mut guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.claim_session_banner(provider)
+    }
+
     fn set_session_panel_snapshot(
         &self,
         channel_id: ChannelId,
