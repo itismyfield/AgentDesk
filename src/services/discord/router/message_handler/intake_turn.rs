@@ -1863,8 +1863,8 @@ pub(in crate::services::discord) async fn handle_text_message(
         );
     }
     let prompt_prep_duration_ms = prompt_prep_started.elapsed().as_millis();
-    // #3813 Phase 1a: prompt prep complete (distinct window from the
-    // `[prompt-prep]` line below; no shared boundary, so they cannot conflict).
+    // #3813 Phase 1a: prompt prep complete — this mark sits INSIDE the
+    // `[prompt-prep]` window below (overlaps it; do not sum — see latency_spans.rs).
     intake_latency.mark_prep_done();
     let memory_backend_label = memory_settings.backend.as_str();
     let provider_label = match &provider {

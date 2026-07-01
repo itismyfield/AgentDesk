@@ -15,10 +15,14 @@
 //!   * missing marks (early return / cancel / error before a milestone) render
 //!     as `-`, so a partial span stays legible.
 //!
-//! It is intentionally DISTINCT from the existing `[prompt-prep]` `duration_ms`
-//! log (`intake_turn.rs:1859/1872`): that measures `1152 → 1859` (prep window),
-//! while these spans decompose the non-overlapping `claim → placeholder → prep
-//! → input` waypoints. The two never share a boundary, so they cannot conflict.
+//! These spans intentionally measure FINER sub-intervals of the intake work the
+//! existing `[prompt-prep]` `duration_ms` log already times as one number: that
+//! log covers the whole prep window (`intake_turn.rs:1152 → :1865`), whereas the
+//! `claim` / `placeholder` / `prep` marks captured here land INSIDE that window,
+//! so the two instruments OVERLAP on the time axis BY DESIGN. Read them
+//! independently — do NOT add `[prompt-prep] duration_ms` and these segments
+//! together (double counting). Only the trailing `prep → input` segment reaches
+//! past the prep window, out to the provider-input handoff.
 
 use std::time::Instant;
 
