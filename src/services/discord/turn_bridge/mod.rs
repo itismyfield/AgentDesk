@@ -3,6 +3,8 @@ mod cancel_finalize_policy;
 mod chunk_compose;
 mod completion_guard;
 mod context_window;
+#[cfg(unix)]
+mod early_tui_completion;
 mod finalize_epilogue;
 mod followup_requeue;
 mod headless_delivery;
@@ -4099,48 +4101,33 @@ pub(super) fn spawn_turn_bridge(
         // later user messages behind a stale active turn. The hosted-TUI
         // pre-submit guard below is the correctness barrier that prevents
         // follow-up input from being injected into a still-busy pane.
+        // #3038: the early TUI completion gate (eligibility filter + bounded
+        // quiescence probe + timed-out warning) is extracted verbatim to
+        // `early_tui_completion.rs`. The two outputs are consumed later, so the
+        // `#[cfg]` `let` declarations stay here (preserving the exact unix /
+        // non-unix split) and the helper returns the computed values; behavior
+        // is byte-identical (see the module doc for the seam-fix note).
         #[cfg(unix)]
         let bridge_early_gate_timed_out;
         #[cfg(not(unix))]
         let bridge_early_gate_timed_out = false;
         #[cfg(unix)]
-        #[allow(unused_assignments, unused_mut)]
-        let mut bridge_tui_gate_outcome_early: Option<super::tmux::TuiCompletionGateOutcome> = None;
+        let bridge_tui_gate_outcome_early: Option<super::tmux::TuiCompletionGateOutcome>;
         #[cfg(unix)]
         {
-            // Reproduce the same eligibility filter the late gate already
-            // applies, but BEFORE the channel-mailbox release.
-            let eligible_for_early_gate =
-                !cancelled && !is_prompt_too_long && !transport_error && !recovery_retry;
-            if eligible_for_early_gate
-                && let Some(tmux_session_name) = inflight_state.tmux_session_name.as_deref()
-            {
-                bridge_tui_gate_outcome_early = Some(
-                    super::tmux::run_tui_completion_gate(
-                        &provider,
-                        channel_id,
-                        tmux_session_name,
-                        inflight_state.task_notification_kind,
-                    )
-                    .await,
-                );
-                if matches!(
-                    bridge_tui_gate_outcome_early,
-                    Some(super::tmux::TuiCompletionGateOutcome::TimedOut)
-                ) {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::warn!(
-                        provider = %provider.as_str(),
-                        channel = channel_id.get(),
-                        tmux_session = %tmux_session_name,
-                        "[{ts}] ⚠ #2293/#2780: bridge TUI quiescence gate timed out before visible completion; mailbox release will continue and hosted-TUI pre-submit will guard follow-up injection"
-                    );
-                }
-            }
-            bridge_early_gate_timed_out = matches!(
-                bridge_tui_gate_outcome_early,
-                Some(super::tmux::TuiCompletionGateOutcome::TimedOut)
-            );
+            let (outcome_early, gate_timed_out) =
+                early_tui_completion::run_early_tui_completion_gate(
+                    cancelled,
+                    is_prompt_too_long,
+                    transport_error,
+                    recovery_retry,
+                    &inflight_state,
+                    &provider,
+                    channel_id,
+                )
+                .await;
+            bridge_tui_gate_outcome_early = outcome_early;
+            bridge_early_gate_timed_out = gate_timed_out;
         }
         // #3268 (Defect B): on (gate timeout + non-terminal + genuinely-live
         // watcher) hand the busy turn back to the watcher — see `watcher_handoff`.
