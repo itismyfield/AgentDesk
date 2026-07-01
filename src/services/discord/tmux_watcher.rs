@@ -2114,6 +2114,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             .await
                             {
                                 Ok(panel_msg) => {
+                                    preregister_watcher_two_message_panel_orphan(
+                                        shared.ui.two_message_panel_enabled,
+                                        shared.as_ref(),
+                                        &watcher_provider,
+                                        channel_id,
+                                        panel_msg.id,
+                                    );
                                     let fresh_inflight =
                                         crate::services::discord::inflight::load_inflight_state(
                                             &watcher_provider,
@@ -2153,15 +2160,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                             &crate::services::discord::inflight::StatusPanelBindGuard {
                                                 require_identity: pre_send_identity.clone(),
                                                 skip_if_panel_already_set: true,
-                                                // #3805 P2 (PR-C): open this turn's
-                                                // panel epoch atomically with the
-                                                // fresh bind (parity with the sink
-                                                // create). None on OFF → untouched.
-                                                set_status_panel_generation:
-                                                    watcher_two_message_bind_generation(
-                                                        shared.ui.two_message_panel_enabled,
-                                                        this_turn_status_panel_generation,
-                                                    ),
+                                                // #3805 P2: when the two-message
+                                                // flag is ON, open this turn's
+                                                // panel epoch from the on-disk
+                                                // row inside the bind flock.
+                                                // OFF leaves the field untouched.
+                                                bump_status_panel_generation:
+                                                    shared.ui.two_message_panel_enabled,
                                                 ..Default::default()
                                             },
                                         );
@@ -2213,6 +2218,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                                     channel_id,
                                                     panel_msg.id,
                                                 );
+                                            } else {
+                                                remove_watcher_two_message_panel_orphan_registration(
+                                                    shared.ui.two_message_panel_enabled,
+                                                    shared.as_ref(),
+                                                    &watcher_provider,
+                                                    channel_id,
+                                                    panel_msg.id,
+                                                );
                                             }
                                             // Resolve the handle from the row's CURRENT owned id as
                                             // observed by the bind (`decision.owned_panel_id`), never
@@ -2242,6 +2255,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                         } else {
                                             // Bound / AlreadyBound: the row now owns this exact id.
                                             debug_assert!(decision.adopt_sent_panel);
+                                            remove_watcher_two_message_panel_orphan_registration(
+                                                shared.ui.two_message_panel_enabled,
+                                                shared.as_ref(),
+                                                &watcher_provider,
+                                                channel_id,
+                                                panel_msg.id,
+                                            );
                                             status_panel_msg_id = Some(panel_msg.id);
                                             // #3805 P2 (PR-C): a FRESH Bound opened this
                                             // turn's panel epoch (the generation the
@@ -2250,13 +2270,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                             // SAME epoch. AlreadyBound re-binds do NOT
                                             // re-open it (the local already carries the
                                             // on-disk seed). None/OFF → local untouched.
-                                            if bind_outcome
-                                                == crate::services::discord::inflight::StatusPanelBindOutcome::Bound
+                                            if shared.ui.two_message_panel_enabled
                                                 && let Some(opened) =
-                                                    watcher_two_message_bind_generation(
-                                                        shared.ui.two_message_panel_enabled,
-                                                        this_turn_status_panel_generation,
-                                                    )
+                                                    bind_outcome.bound_status_panel_generation()
                                             {
                                                 this_turn_status_panel_generation = opened;
                                             }
@@ -2310,6 +2326,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                             } else {
                                                 status_panel_msg_id = Some(panel_msg.id);
                                             }
+                                        } else {
+                                            remove_watcher_two_message_panel_orphan_registration(
+                                                shared.ui.two_message_panel_enabled,
+                                                shared.as_ref(),
+                                                &watcher_provider,
+                                                channel_id,
+                                                panel_msg.id,
+                                            );
                                         }
                                         let ts = chrono::Local::now().format("%H:%M:%S");
                                         tracing::warn!(
@@ -2448,10 +2472,20 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     // new, atomic epoch-bump rebind under the inflight flock, retire
                     // old) so it stays pinned to the latest chunk. OFF-inert →
                     // byte-identical rollover when the flag is off.
+                    let inflight_for_reanchor = if watcher_did_rollover_this_interval {
+                        crate::services::discord::inflight::load_inflight_state(
+                            &watcher_provider,
+                            channel_id.get(),
+                        )
+                    } else {
+                        None
+                    };
                     if watcher_did_rollover_this_interval
-                        && crate::services::discord::turn_bridge::two_message_should_reanchor_panel_on_rollover(
+                        && watcher_two_message_should_reanchor_panel_on_rollover(
                             shared.ui.two_message_panel_enabled,
                             status_panel_msg_id.is_some(),
+                            inflight_for_reanchor.as_ref(),
+                            &tmux_session_name,
                         )
                     {
                         let panel_text = shared.ui.placeholder_live_events.render_status_panel(

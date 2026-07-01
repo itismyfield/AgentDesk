@@ -483,7 +483,7 @@ fn persist_status_panel_completion_fallback_message_id(
         ..Default::default()
     };
     match super::inflight::bind_status_panel(provider, channel_id.get(), message_id.get(), &guard) {
-        super::inflight::StatusPanelBindOutcome::Bound
+        super::inflight::StatusPanelBindOutcome::Bound { .. }
         | super::inflight::StatusPanelBindOutcome::AlreadyBound
         | super::inflight::StatusPanelBindOutcome::SkippedPanelAlreadySet(_) => {}
         super::inflight::StatusPanelBindOutcome::Missing => {}

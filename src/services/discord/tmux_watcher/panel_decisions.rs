@@ -329,7 +329,7 @@ pub(super) fn resolve_tui_status_panel_bind_decision(
 ) -> TuiStatusPanelBindDecision {
     use crate::services::discord::inflight::StatusPanelBindOutcome as Outcome;
     match outcome {
-        Outcome::Bound | Outcome::AlreadyBound => TuiStatusPanelBindDecision {
+        Outcome::Bound { .. } | Outcome::AlreadyBound => TuiStatusPanelBindDecision {
             delete_sent_panel: false,
             adopt_sent_panel: true,
             owned_panel_id: None,

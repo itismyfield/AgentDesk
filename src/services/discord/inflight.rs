@@ -2224,7 +2224,7 @@ mod stall_recovery_tests {
             &StatusPanelBindGuard::default(),
         );
 
-        assert_eq!(outcome, StatusPanelBindOutcome::Bound);
+        assert!(outcome.is_bound());
         assert_eq!(loaded_status_message_id(temp.path(), 7001), Some(5555));
     }
 
@@ -2244,10 +2244,10 @@ mod stall_recovery_tests {
             5555,
             &StatusPanelBindGuard::default(),
         );
-        assert_eq!(off, StatusPanelBindOutcome::Bound);
+        assert!(off.is_bound());
         assert_eq!(loaded_status_panel_generation(temp.path(), 7101), Some(0));
 
-        // ON / fresh bind → generation stamped to the caller-opened epoch.
+        // ON / fresh bind → generation bumped from the row under the bind lock.
         seed_status_panel_state(temp.path(), 7102, 10, 11, Some("AgentDesk-claude-a"), None);
         let fresh = bind_status_panel_in_root(
             temp.path(),
@@ -2255,11 +2255,11 @@ mod stall_recovery_tests {
             7102,
             6666,
             &StatusPanelBindGuard {
-                set_status_panel_generation: Some(1),
+                bump_status_panel_generation: true,
                 ..Default::default()
             },
         );
-        assert_eq!(fresh, StatusPanelBindOutcome::Bound);
+        assert_eq!(fresh.bound_status_panel_generation(), Some(1));
         assert_eq!(loaded_status_message_id(temp.path(), 7102), Some(6666));
         assert_eq!(loaded_status_panel_generation(temp.path(), 7102), Some(1));
 
@@ -2270,12 +2270,64 @@ mod stall_recovery_tests {
             7102,
             6666,
             &StatusPanelBindGuard {
-                set_status_panel_generation: Some(2),
+                bump_status_panel_generation: true,
                 ..Default::default()
             },
         );
         assert_eq!(again, StatusPanelBindOutcome::AlreadyBound);
         assert_eq!(loaded_status_panel_generation(temp.path(), 7102), Some(1));
+    }
+
+    #[test]
+    fn reanchor_bind_requires_old_panel_and_bumps_generation_from_disk() {
+        // #3805 P2 (PR-D): overlapping same-identity re-anchor frames must not
+        // both overwrite the row with caller-computed `seed + 1`. The old panel
+        // id is the CAS compare, and the generation bump is computed from the
+        // row while the flock is held.
+        let (_lock, temp, _env_reset) = status_panel_test_root();
+        let mut state = seed_status_panel_state(
+            temp.path(),
+            7103,
+            10,
+            11,
+            Some("AgentDesk-claude-a"),
+            Some(5000),
+        );
+        state.status_panel_generation = 1;
+        save_inflight_state_in_root(temp.path(), &state).expect("seed generation");
+        let identity = InflightTurnIdentity::from_state(&state);
+
+        let first = bind_status_panel_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            7103,
+            6000,
+            &StatusPanelBindGuard {
+                require_identity: Some(identity.clone()),
+                require_current_status_message_id: Some(5000),
+                bump_status_panel_generation: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(first.bound_status_panel_generation(), Some(2));
+        assert_eq!(loaded_status_message_id(temp.path(), 7103), Some(6000));
+        assert_eq!(loaded_status_panel_generation(temp.path(), 7103), Some(2));
+
+        let second = bind_status_panel_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            7103,
+            7000,
+            &StatusPanelBindGuard {
+                require_identity: Some(identity),
+                require_current_status_message_id: Some(5000),
+                bump_status_panel_generation: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(second, StatusPanelBindOutcome::GuardMismatch);
+        assert_eq!(loaded_status_message_id(temp.path(), 7103), Some(6000));
+        assert_eq!(loaded_status_panel_generation(temp.path(), 7103), Some(2));
     }
 
     #[test]
@@ -2443,7 +2495,7 @@ mod stall_recovery_tests {
             },
         );
 
-        assert_eq!(outcome, StatusPanelBindOutcome::Bound);
+        assert!(outcome.is_bound());
         assert_eq!(loaded_status_message_id(temp.path(), 7005), Some(5555));
     }
 
@@ -2710,15 +2762,15 @@ mod stall_recovery_tests {
         // bind then clear-if-current with the same id returns the row to None,
         // mirroring the watcher publish → orphan-cleanup lifecycle through the
         // single locked store path.
-        assert_eq!(
+        assert!(
             bind_status_panel_in_root(
                 temp.path(),
                 &ProviderKind::Claude,
                 7200,
                 5555,
                 &StatusPanelBindGuard::default(),
-            ),
-            StatusPanelBindOutcome::Bound
+            )
+            .is_bound()
         );
         assert_eq!(loaded_status_message_id(temp.path(), 7200), Some(5555));
 

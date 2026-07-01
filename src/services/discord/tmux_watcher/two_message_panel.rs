@@ -20,9 +20,9 @@
 //!    until the ANSWER placeholder exists, so the panel is created BELOW it
 //!    (answer-first). This is the watcher analog of the sink gate's "the answer
 //!    is a real message" precondition. OFF: always `true` (byte-identical).
-//! 2. `watcher_two_message_bind_generation` — the epoch to stamp when the panel
-//!    is freshly bound (seed + 1), parity with the sink create's `saturating_add(1)`.
-//!    OFF: `None` (the bind leaves the generation untouched).
+//! 2. Fresh binds/re-anchors ask `bind_status_panel` to bump the generation from
+//!    the on-disk row while holding the inflight flock. OFF: the bind leaves the
+//!    generation untouched.
 //! 3. `watcher_two_message_status_completion_superseded` — the completion guard,
 //!    reusing the ONE shared staleness predicate from PR-B's sink sibling
 //!    (`turn_bridge::two_message_status_edit_generation_is_stale`) so the sink and
@@ -49,22 +49,6 @@ pub(in crate::services::discord) fn watcher_two_message_panel_creation_gated_by_
     placeholder_present: bool,
 ) -> bool {
     !two_message_panel_enabled || placeholder_present
-}
-
-/// #3805 P2 (PR-C): the `status_panel_generation` to stamp when the watcher
-/// FRESHLY binds the two-message panel — one past the turn's seed epoch, opening
-/// this turn's panel epoch. Parity with the sink create's
-/// `inflight_state.status_panel_generation.saturating_add(1)`.
-///
-/// Returns `None` on the OFF path (the bind guard leaves the generation
-/// untouched → byte-identical) and `Some(seed + 1)` when the flag is ON. The
-/// caller mirrors the same value into its per-turn generation local ONLY on a
-/// genuine fresh `Bound`; an `AlreadyBound` re-bind does not re-open the epoch.
-pub(in crate::services::discord) fn watcher_two_message_bind_generation(
-    two_message_panel_enabled: bool,
-    seed_generation: u64,
-) -> Option<u64> {
-    two_message_panel_enabled.then(|| seed_generation.saturating_add(1))
 }
 
 /// #3805 P2 (PR-C): the watcher completion guard — is this turn's status-panel
@@ -97,6 +81,62 @@ pub(in crate::services::discord) fn watcher_two_message_status_completion_supers
         panel_owned_on_disk,
         on_disk.status_panel_generation,
     )
+}
+
+/// #3805 P2 (PR-D): watcher-side re-anchor is allowed only for panels the
+/// watcher owns. A Discord-managed bridge turn can delegate relay to the watcher
+/// while the bridge still owns the status panel; re-anchoring that panel from
+/// the watcher would hijack the bridge-owned surface.
+pub(in crate::services::discord) fn watcher_two_message_should_reanchor_panel_on_rollover(
+    two_message_panel_enabled: bool,
+    status_panel_present: bool,
+    inflight: Option<&InflightTurnState>,
+    tmux_session_name: &str,
+) -> bool {
+    crate::services::discord::turn_bridge::two_message_should_reanchor_panel_on_rollover(
+        two_message_panel_enabled,
+        status_panel_present,
+    ) && watcher_inflight_is_panel_eligible_for_session(inflight, tmux_session_name)
+}
+
+pub(in crate::services::discord) fn preregister_watcher_two_message_panel_orphan(
+    two_message_panel_enabled: bool,
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    panel_msg_id: serenity::MessageId,
+) {
+    if two_message_panel_enabled {
+        crate::services::discord::status_panel_orphan_store::enqueue(
+            provider,
+            &shared.token_hash,
+            channel_id.get(),
+            panel_msg_id.get(),
+        );
+    }
+}
+
+pub(in crate::services::discord) fn remove_watcher_two_message_panel_orphan_registration(
+    two_message_panel_enabled: bool,
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    panel_msg_id: serenity::MessageId,
+) {
+    if two_message_panel_enabled {
+        crate::services::discord::status_panel_orphan_store::remove(
+            provider,
+            &shared.token_hash,
+            channel_id.get(),
+            panel_msg_id.get(),
+        );
+    }
+}
+
+fn watcher_status_panel_delete_needs_orphan_retry(
+    outcome: &crate::services::discord::placeholder_cleanup::PlaceholderCleanupOutcome,
+) -> bool {
+    !outcome.is_committed() && !outcome.is_permanent_failure()
 }
 
 /// #3805 P2 (PR-C): the watcher status-panel completion tail — apply the
@@ -180,15 +220,16 @@ pub(in crate::services::discord) async fn complete_watcher_status_panel_v2_with_
 /// watcher is NOT turn-scoped, so the msg-id repoint + epoch bump go through the
 /// atomic `bind_status_panel` flock (the same CAS store the create bind uses)
 /// rather than an in-memory snapshot:
-/// 1. Send the NEW panel BELOW the new tail answer (never a zero-panel window).
-/// 2. `bind_status_panel(new_id, skip_if_panel_already_set = false,
-///    set_status_panel_generation = seed+1, require_identity)` — under ONE flock
-///    it overwrites the OLD panel id AND bumps the generation epoch, but only
-///    when the row still belongs to THIS turn (`Bound`). A non-`Bound` outcome
-///    means the row changed turns / disappeared / IO failed: the on-disk row was
-///    NOT advanced (no partial re-anchor), so the just-sent NEW panel is discarded
-///    (durable orphan on transient delete failure) and the OLD panel + epoch are
-///    kept.
+/// 1. Send the NEW panel BELOW the new tail answer and immediately record it in
+///    the durable orphan store as a crash-window safety net.
+/// 2. `bind_status_panel(new_id, require_current_status_message_id = old_id,
+///    bump_status_panel_generation = true, require_identity)` — under ONE flock
+///    it overwrites the OLD panel id AND bumps the generation epoch from the
+///    on-disk row, but only when the row still belongs to THIS turn and still
+///    points at the caller's OLD panel (`Bound`). A non-`Bound` outcome means the
+///    row changed / disappeared / IO failed: the on-disk row was NOT advanced (no
+///    partial re-anchor), so the just-sent NEW panel is discarded (durable orphan
+///    on transient delete failure) and the OLD panel + epoch are kept.
 /// 3. On `Bound`: retire the stranded OLD panel above the answer (durable orphan
 ///    on transient delete failure) and adopt the new id + epoch into the loop
 ///    locals so this turn's own completion proves the SAME (new) epoch while a
@@ -213,7 +254,6 @@ pub(in crate::services::discord) async fn reanchor_watcher_two_message_status_pa
     let Some(old_panel_id) = *status_panel_msg_id else {
         return false;
     };
-    let next_generation = this_turn_status_panel_generation.saturating_add(1);
 
     rate_limit_wait(shared, channel_id).await;
     let new_panel =
@@ -231,6 +271,13 @@ pub(in crate::services::discord) async fn reanchor_watcher_two_message_status_pa
                 return false;
             }
         };
+    preregister_watcher_two_message_panel_orphan(
+        true,
+        shared.as_ref(),
+        provider,
+        channel_id,
+        new_panel.id,
+    );
 
     let bind_outcome = crate::services::discord::inflight::bind_status_panel(
         provider,
@@ -239,12 +286,13 @@ pub(in crate::services::discord) async fn reanchor_watcher_two_message_status_pa
         &crate::services::discord::inflight::StatusPanelBindGuard {
             require_identity,
             skip_if_panel_already_set: false,
-            set_status_panel_generation: Some(next_generation),
+            require_current_status_message_id: Some(old_panel_id.get()),
+            bump_status_panel_generation: true,
             ..Default::default()
         },
     );
 
-    if bind_outcome != crate::services::discord::inflight::StatusPanelBindOutcome::Bound {
+    if !bind_outcome.is_bound() {
         let discard = delete_nonterminal_placeholder(
             http,
             channel_id,
@@ -255,8 +303,16 @@ pub(in crate::services::discord) async fn reanchor_watcher_two_message_status_pa
             "watcher_two_message_reanchor_bind_unowned",
         )
         .await;
-        if !discard.is_committed() && !discard.is_permanent_failure() {
+        if watcher_status_panel_delete_needs_orphan_retry(&discard) {
             enqueue_watcher_status_panel_orphan(
+                shared.as_ref(),
+                provider,
+                channel_id,
+                new_panel.id,
+            );
+        } else {
+            remove_watcher_two_message_panel_orphan_registration(
+                true,
                 shared.as_ref(),
                 provider,
                 channel_id,
@@ -272,6 +328,13 @@ pub(in crate::services::discord) async fn reanchor_watcher_two_message_status_pa
         return false;
     }
 
+    remove_watcher_two_message_panel_orphan_registration(
+        true,
+        shared.as_ref(),
+        provider,
+        channel_id,
+        new_panel.id,
+    );
     let retire = delete_nonterminal_placeholder(
         http,
         channel_id,
@@ -282,11 +345,13 @@ pub(in crate::services::discord) async fn reanchor_watcher_two_message_status_pa
         "watcher_two_message_reanchor_old_panel",
     )
     .await;
-    if !retire.is_committed() && !retire.is_permanent_failure() {
+    if watcher_status_panel_delete_needs_orphan_retry(&retire) {
         enqueue_watcher_status_panel_orphan(shared.as_ref(), provider, channel_id, old_panel_id);
     }
     *status_panel_msg_id = Some(new_panel.id);
-    *this_turn_status_panel_generation = next_generation;
+    *this_turn_status_panel_generation = bind_outcome
+        .bound_status_panel_generation()
+        .unwrap_or(*this_turn_status_panel_generation);
     *last_status_panel_text = panel_text.to_string();
     true
 }
@@ -294,6 +359,7 @@ pub(in crate::services::discord) async fn reanchor_watcher_two_message_status_pa
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn creation_gate_off_is_byte_identical_true_regardless_of_answer() {
@@ -316,20 +382,6 @@ mod tests {
         assert!(watcher_two_message_panel_creation_gated_by_answer(
             true, true
         ));
-    }
-
-    #[test]
-    fn bind_generation_off_is_none_on_opens_next_epoch() {
-        // OFF → None (the bind guard leaves the generation untouched).
-        assert_eq!(watcher_two_message_bind_generation(false, 0), None);
-        assert_eq!(watcher_two_message_bind_generation(false, 5), None);
-        // ON → seed + 1 (parity with the sink create's saturating_add(1)).
-        assert_eq!(watcher_two_message_bind_generation(true, 0), Some(1));
-        assert_eq!(watcher_two_message_bind_generation(true, 5), Some(6));
-        assert_eq!(
-            watcher_two_message_bind_generation(true, u64::MAX),
-            Some(u64::MAX)
-        );
     }
 
     fn on_disk(status_message_id: Option<u64>, status_panel_generation: u64) -> InflightTurnState {
@@ -415,10 +467,46 @@ mod tests {
     }
 
     #[test]
+    fn reanchor_gate_rejects_managed_bridge_owned_turn_even_when_watcher_relays() {
+        let _env = isolate_agentdesk_runtime_root_for_two_message_tests();
+        let mut managed = on_disk(Some(20), 1);
+        managed.tmux_session_name = Some("AgentDesk-claude-a".to_string());
+        managed.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
+        managed.turn_source = crate::services::discord::inflight::TurnSource::Managed;
+
+        assert!(!watcher_two_message_should_reanchor_panel_on_rollover(
+            true,
+            true,
+            Some(&managed),
+            "AgentDesk-claude-a",
+        ));
+
+        let mut external = managed.clone();
+        external.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
+        assert!(watcher_two_message_should_reanchor_panel_on_rollover(
+            true,
+            true,
+            Some(&external),
+            "AgentDesk-claude-a",
+        ));
+
+        external.set_relay_owner_kind(
+            crate::services::discord::inflight::RelayOwnerKind::SessionBoundRelay,
+        );
+        assert!(!watcher_two_message_should_reanchor_panel_on_rollover(
+            true,
+            true,
+            Some(&external),
+            "AgentDesk-claude-a",
+        ));
+    }
+
+    #[test]
     fn reanchor_bind_bumps_epoch_atomically_and_guard_stale_skips_old_epoch() {
         // #3805 P2 (PR-D) watcher CAS parity: the re-anchor's atomic rebind
-        // (`bind_status_panel` with `set_status_panel_generation`) overwrites the
-        // OLD panel id AND bumps the epoch under ONE flock. The completion guard
+        // (`bind_status_panel` with an expected old panel id + in-lock
+        // generation bump) overwrites the OLD panel id AND bumps the epoch under
+        // ONE flock. The completion guard
         // then stale-skips a completion carrying the OLD epoch for the re-anchored
         // (owned) panel, while this turn's own completion at the NEW epoch passes.
         let _env = isolate_agentdesk_runtime_root_for_two_message_tests();
@@ -441,14 +529,12 @@ mod tests {
             new_panel.get(),
             &crate::services::discord::inflight::StatusPanelBindGuard {
                 skip_if_panel_already_set: false,
-                set_status_panel_generation: Some(2),
+                require_current_status_message_id: Some(old_panel.get()),
+                bump_status_panel_generation: true,
                 ..Default::default()
             },
         );
-        assert_eq!(
-            outcome,
-            crate::services::discord::inflight::StatusPanelBindOutcome::Bound
-        );
+        assert_eq!(outcome.bound_status_panel_generation(), Some(2));
 
         let after = crate::services::discord::inflight::load_inflight_state(&provider, channel_id)
             .expect("reload inflight");
@@ -477,6 +563,66 @@ mod tests {
             Some(old_panel),
             Some(&after),
         ));
+    }
+
+    #[test]
+    fn watcher_orphan_preregistration_is_flag_gated_and_removed_after_persist() {
+        let _env = isolate_agentdesk_runtime_root_for_two_message_tests();
+        let mut shared = crate::services::discord::make_shared_data_for_tests();
+        Arc::get_mut(&mut shared)
+            .expect("fresh shared data should be uniquely owned")
+            .ui
+            .status_panel_v2_enabled = true;
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(777);
+        let panel = serenity::MessageId::new(44);
+
+        preregister_watcher_two_message_panel_orphan(
+            false,
+            shared.as_ref(),
+            &provider,
+            channel_id,
+            panel,
+        );
+        assert!(
+            crate::services::discord::status_panel_orphan_store::load_pending(
+                &provider,
+                &shared.token_hash,
+            )
+            .is_empty(),
+            "flag OFF must not introduce orphan-store side effects"
+        );
+
+        preregister_watcher_two_message_panel_orphan(
+            true,
+            shared.as_ref(),
+            &provider,
+            channel_id,
+            panel,
+        );
+        assert!(
+            crate::services::discord::status_panel_orphan_store::load_pending(
+                &provider,
+                &shared.token_hash,
+            )
+            .contains(&(channel_id.get(), panel.get()))
+        );
+
+        remove_watcher_two_message_panel_orphan_registration(
+            true,
+            shared.as_ref(),
+            &provider,
+            channel_id,
+            panel,
+        );
+        assert!(
+            crate::services::discord::status_panel_orphan_store::load_pending(
+                &provider,
+                &shared.token_hash,
+            )
+            .is_empty(),
+            "successful bind/persist must remove the crash-window orphan record"
+        );
     }
 
     /// #3293: `InflightTurnState::new` resolves the AgentDesk runtime store, which

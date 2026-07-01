@@ -871,7 +871,9 @@ fn watcher_has_no_persisted_panel_without_status_message_id() {
 #[test]
 fn tui_status_panel_bind_bound_adopts_without_delete() {
     let decision = resolve_tui_status_panel_bind_decision(
-        crate::services::discord::inflight::StatusPanelBindOutcome::Bound,
+        crate::services::discord::inflight::StatusPanelBindOutcome::Bound {
+            status_panel_generation: 0,
+        },
     );
     assert!(decision.adopt_sent_panel);
     assert!(!decision.delete_sent_panel);

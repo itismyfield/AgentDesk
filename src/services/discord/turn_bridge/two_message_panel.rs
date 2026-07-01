@@ -145,13 +145,15 @@ pub(in crate::services::discord) fn two_message_should_reanchor_panel_on_rollove
 /// #3805 P2 (PR-D): re-anchor the sink's two-message status panel BELOW the new
 /// answer chunk after a mid-turn rollover created a fresh tail answer message.
 ///
-/// Sequence (atomic-persist deferred to the caller's `save_inflight_state`, whose
-/// flock makes the msg-id + generation write a single durable step):
-/// 1. Send the NEW panel BELOW the new tail answer (never a zero-panel window).
-/// 2. Retire the stranded OLD panel above the answer; on a transient delete
+/// Sequence:
+/// 1. Send the NEW panel BELOW the new tail answer and immediately record it in
+///    the durable orphan store as a crash-window safety net.
+/// 2. Persist `status_message_id` + `status_panel_generation` before deleting
+///    the old panel, then remove the new panel's orphan record.
+/// 3. Retire the stranded OLD panel above the answer; on a delete
 ///    failure record it in the durable orphan store so the sweeper reclaims it
 ///    (never a permanently stranded "in progress" panel).
-/// 3. Repoint `status_message_id` to the new panel, keep the answer anchor
+/// 4. Repoint `status_message_id` to the new panel, keep the answer anchor
 ///    coherent, and BUMP `status_panel_generation` (CAS epoch ++): every stale
 ///    in-flight completion tagged with the OLD epoch for the SAME owned panel is
 ///    now stale-skipped by `two_message_status_edit_generation_is_stale`, while
@@ -182,11 +184,59 @@ pub(super) async fn reanchor_bridge_two_message_status_panel_below_answer<
     };
     match gateway.send_message(channel_id, panel_text).await {
         Ok(new_panel_id) => {
+            crate::services::discord::status_panel_orphan_store::enqueue(
+                provider,
+                &shared.token_hash,
+                channel_id.get(),
+                new_panel_id.get(),
+            );
+            let mut updated = inflight_state.clone();
+            updated.status_message_id = Some(new_panel_id.get());
+            // The answer chunk stays the tail; keep the persisted anchor coherent
+            // (idempotent — the loop already advanced it to new_answer_msg_id).
+            updated.current_msg_id = new_answer_msg_id.get();
+            let next_generation = updated.status_panel_generation.saturating_add(1);
+            updated.status_panel_generation = next_generation;
+            if let Err(error) = crate::services::discord::inflight::save_inflight_state(&updated) {
+                tracing::warn!(
+                    "[turn_bridge] #3805 P2 failed to persist re-anchored two-message status panel {} in channel {}: {}",
+                    new_panel_id,
+                    channel_id,
+                    error
+                );
+                if gateway
+                    .delete_message(channel_id, new_panel_id)
+                    .await
+                    .is_ok()
+                {
+                    crate::services::discord::status_panel_orphan_store::remove(
+                        provider,
+                        &shared.token_hash,
+                        channel_id.get(),
+                        new_panel_id.get(),
+                    );
+                }
+                return false;
+            }
+            crate::services::discord::status_panel_orphan_store::remove(
+                provider,
+                &shared.token_hash,
+                channel_id.get(),
+                new_panel_id.get(),
+            );
+            *inflight_state = updated;
+            *status_panel_msg_id = Some(new_panel_id);
+            *status_panel_generation = next_generation;
+            *last_status_panel_text = panel_text.to_string();
             if gateway
                 .delete_message(channel_id, old_panel_id)
                 .await
                 .is_err()
             {
+                // `TurnGateway` only surfaces a string error here, not the HTTP
+                // status. Queueing even a permanent delete failure is
+                // outcome-equivalent to the watcher path: the orphan drain
+                // classifies 403/404/410 and drops the record on its next pass.
                 crate::services::discord::status_panel_orphan_store::enqueue_separate_status_panel_orphan(
                     shared.ui.status_panel_v2_enabled,
                     provider,
@@ -195,15 +245,6 @@ pub(super) async fn reanchor_bridge_two_message_status_panel_below_answer<
                     old_panel_id.get(),
                 );
             }
-            *status_panel_msg_id = Some(new_panel_id);
-            inflight_state.status_message_id = Some(new_panel_id.get());
-            // The answer chunk stays the tail; keep the persisted anchor coherent
-            // (idempotent — the loop already advanced it to new_answer_msg_id).
-            inflight_state.current_msg_id = new_answer_msg_id.get();
-            let next_generation = inflight_state.status_panel_generation.saturating_add(1);
-            inflight_state.status_panel_generation = next_generation;
-            *status_panel_generation = next_generation;
-            *last_status_panel_text = panel_text.to_string();
             true
         }
         Err(error) => {
@@ -278,6 +319,15 @@ mod tests {
             None,
             0,
         )
+    }
+
+    fn make_status_panel_v2_shared_for_tests() -> Arc<SharedData> {
+        let mut shared = super::super::make_shared_data_for_tests();
+        Arc::get_mut(&mut shared)
+            .expect("fresh shared data should be uniquely owned")
+            .ui
+            .status_panel_v2_enabled = true;
+        shared
     }
 
     #[derive(Default)]
@@ -575,7 +625,7 @@ mod tests {
         let old_panel = 20;
         let new_panel = 40;
         let new_answer = MessageId::new(30);
-        let shared = super::super::make_shared_data_for_tests();
+        let shared = make_status_panel_v2_shared_for_tests();
         let gateway = SendTrackingGateway::returning(new_panel);
         let mut inflight = test_inflight(new_answer.get());
         inflight.status_message_id = Some(old_panel);
@@ -614,6 +664,14 @@ mod tests {
         assert!(sent[0].contains("re-anchored panel"));
         let deleted = gateway.deleted.lock().expect("deleted lock");
         assert_eq!(*deleted, vec![old_panel]);
+        let pending = crate::services::discord::status_panel_orphan_store::load_pending(
+            &ProviderKind::Claude,
+            &shared.token_hash,
+        );
+        assert!(
+            !pending.contains(&(777, new_panel)),
+            "new panel orphan pre-registration must be removed after durable save"
+        );
     }
 
     #[tokio::test]
@@ -621,7 +679,7 @@ mod tests {
         // No separate panel (footer / v2-off / synthetic) → nothing to re-anchor;
         // no send, no delete, no epoch bump.
         let _env = isolate_agentdesk_runtime_root();
-        let shared = super::super::make_shared_data_for_tests();
+        let shared = make_status_panel_v2_shared_for_tests();
         let gateway = SendTrackingGateway::returning(40);
         let mut inflight = test_inflight(30);
         inflight.status_panel_generation = 1;
@@ -658,7 +716,7 @@ mod tests {
         // epoch, and NOT repoint the handle — no partial re-anchor.
         let _env = isolate_agentdesk_runtime_root();
         let old_panel = 20;
-        let shared = super::super::make_shared_data_for_tests();
+        let shared = make_status_panel_v2_shared_for_tests();
         let gateway = SendTrackingGateway::failing();
         let mut inflight = test_inflight(30);
         inflight.status_message_id = Some(old_panel);
@@ -689,5 +747,58 @@ mod tests {
         assert_eq!(last_status_panel_text, "old");
         // The old panel was never deleted (no partial re-anchor).
         assert!(gateway.deleted.lock().expect("deleted lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn reanchor_keeps_new_panel_orphan_registration_when_save_and_delete_fail() {
+        let _env = isolate_agentdesk_runtime_root();
+        let old_panel = 20;
+        let new_panel = 40;
+        let shared = make_status_panel_v2_shared_for_tests();
+        let gateway = SendTrackingGateway {
+            send_id: new_panel,
+            fail_delete: true,
+            ..SendTrackingGateway::default()
+        };
+        let mut inflight = test_inflight(30);
+        inflight.provider = "unknown-provider".to_string();
+        inflight.status_message_id = Some(old_panel);
+        inflight.status_panel_generation = 1;
+        let mut status_panel_msg_id: Option<MessageId> = Some(MessageId::new(old_panel));
+        let mut generation = 1;
+        let mut last_status_panel_text = "old".to_string();
+
+        let reanchored = reanchor_bridge_two_message_status_panel_below_answer(
+            &gateway,
+            shared.as_ref(),
+            ChannelId::new(777),
+            &ProviderKind::Claude,
+            "⠸ new",
+            MessageId::new(30),
+            &mut status_panel_msg_id,
+            &mut inflight,
+            &mut generation,
+            &mut last_status_panel_text,
+        )
+        .await;
+
+        assert!(!reanchored);
+        assert_eq!(status_panel_msg_id, Some(MessageId::new(old_panel)));
+        assert_eq!(inflight.status_message_id, Some(old_panel));
+        assert_eq!(inflight.status_panel_generation, 1);
+        assert_eq!(generation, 1);
+        assert_eq!(last_status_panel_text, "old");
+        assert_eq!(
+            *gateway.deleted.lock().expect("deleted lock"),
+            vec![new_panel]
+        );
+        let pending = crate::services::discord::status_panel_orphan_store::load_pending(
+            &ProviderKind::Claude,
+            &shared.token_hash,
+        );
+        assert!(
+            pending.contains(&(777, new_panel)),
+            "new panel must remain durably queued when it was sent but neither persisted nor deleted"
+        );
     }
 }

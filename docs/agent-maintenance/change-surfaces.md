@@ -197,20 +197,24 @@
     late-frame fresh row B is rejected; -576 from #3841 extracting placeholder
     suppression helpers to `tmux_placeholder_suppression.rs`;
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (7227 production lines; +38 from #3805
-    P2 PR-D (watcher rollover re-anchor) — after a mid-turn answer rollover,
-    re-anchor the two-message status panel BELOW the new tail answer; the giant
-    gains only a per-interval rolled-over local + one gated re-anchor call after
-    the rollover loop, all send/rebind/retire logic in the non-giant
-    `tmux_watcher/two_message_panel.rs` (atomic `bind_status_panel` epoch-bump
-    rebind), gated on the default-OFF `two_message_panel_enabled` → OFF
-    byte-identical; +67 from #3805
+  - `src/services/discord/tmux_watcher.rs` (7261 production lines; +34 from #3805
+    P2 PR-D review fixes — watcher re-anchor now reloads the current inflight row
+    and calls the sibling watcher-ownership gate so Managed bridge-owned turns are
+    never watcher-reanchored; watcher panel sends are durably pre-registered in
+    the orphan store and removed only after bind/delete makes them safe; the
+    `bind_status_panel` result supplies the persisted generation from the in-lock
+    bump; +38 from #3805 P2 PR-D (watcher rollover re-anchor) — after a mid-turn
+    answer rollover, re-anchor the two-message status panel BELOW the new tail
+    answer; the giant gains only a per-interval rolled-over local + one gated
+    re-anchor call after the rollover loop, all send/rebind/retire logic in the
+    non-giant `tmux_watcher/two_message_panel.rs` (atomic `bind_status_panel`
+    expected-old-panel + epoch-bump rebind), gated on the default-OFF
+    `two_message_panel_enabled` → OFF byte-identical; +67 from #3805
     P2 PR-C (watcher two-message creation-order parity) — an answer-first
     subcondition on the existing panel-creation gate (defer the panel until the
     answer placeholder exists so it lands BELOW the answer), a per-turn
-    `this_turn_status_panel_generation` local seeded from the inflight snapshot, a
-    `set_status_panel_generation` field on the existing `bind_status_panel` guard
-    (opens the epoch atomically on a fresh bind), and the completion
+    `this_turn_status_panel_generation` local seeded from the inflight snapshot,
+    an in-lock `bind_status_panel` generation bump on fresh binds, and the completion
     `generation_superseded` compute + arg; the pure gate/generation/completion
     predicates and the panel-completion tail (moved verbatim out of the 700-capped
     `single_message_footer.rs`) live in the new non-giant
@@ -1179,9 +1183,10 @@
     from #3805 P2 PR-D (two-message SINK rollover re-anchor) — after a mid-turn
     answer rollover, re-anchor the status panel BELOW the new tail answer; mod.rs
     gains only a per-interval rolled-over local + one gated re-anchor call after
-    the rollover loop, all send/retire/epoch-bump logic in the non-giant
-    `turn_bridge/two_message_panel.rs` (in-memory bump persisted by the loop's
-    `save_inflight_state` flock), gated on the default-OFF
+    the rollover loop, all send/persist/retire/epoch-bump logic in the non-giant
+    `turn_bridge/two_message_panel.rs` (new panel pre-registered in the orphan
+    store, then persisted with `save_inflight_state` before old-panel retirement),
+    gated on the default-OFF
     `two_message_panel_enabled` → OFF byte-identical; +4
     from #3805 P2 PR-C re-exporting `two_message_status_edit_generation_is_stale`
     at `pub(in crate::services::discord)` (one `use` line + comment) so the tmux

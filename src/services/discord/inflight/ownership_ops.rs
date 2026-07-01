@@ -46,20 +46,22 @@ pub(in crate::services::discord) struct StatusPanelBindGuard {
     /// and our send is a duplicate (#3003 reclaim path). Synthetic-headless
     /// ids do not count as "already set".
     pub skip_if_panel_already_set: bool,
-    /// #3805 P2 (PR-C): when `Some(gen)`, ALSO stamp `status_panel_generation`
-    /// to `gen` in the SAME flock as the panel bind — but ONLY on a genuine
-    /// fresh bind (`Bound`), so the generation epoch is opened atomically with
-    /// the panel this turn owns. Mirrors the sink's PR-B create, which persists
-    /// `status_message_id` + `status_panel_generation` together. `None` (the
-    /// default / OFF path) leaves the generation untouched → byte-identical.
-    pub set_status_panel_generation: Option<u64>,
+    /// Bind only when the row currently owns this exact status-panel id. Used
+    /// by the two-message re-anchor path: the old panel id is the CAS compare,
+    /// so overlapping frames cannot silently overwrite each other's newly-bound
+    /// panels.
+    pub require_current_status_message_id: Option<u64>,
+    /// #3805 P2: bump `status_panel_generation` from the on-disk row inside the
+    /// bind flock. Callers must use this instead of precomputing
+    /// `local_generation + 1` outside the lock.
+    pub bump_status_panel_generation: bool,
 }
 
 /// Outcome of a `bind_status_panel` attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) enum StatusPanelBindOutcome {
     /// The row was found, passed the guard, and now carries `msg_id`.
-    Bound,
+    Bound { status_panel_generation: u64 },
     /// The row already carried `msg_id`; nothing was written.
     AlreadyBound,
     /// The row exists but a DIFFERENT real panel id is already set and
@@ -75,6 +77,21 @@ pub(in crate::services::discord) enum StatusPanelBindOutcome {
     GuardMismatch,
     /// Filesystem / serialization failure while persisting the bind.
     IoError,
+}
+
+impl StatusPanelBindOutcome {
+    pub(in crate::services::discord) fn is_bound(self) -> bool {
+        matches!(self, Self::Bound { .. })
+    }
+
+    pub(in crate::services::discord) fn bound_status_panel_generation(self) -> Option<u64> {
+        match self {
+            Self::Bound {
+                status_panel_generation,
+            } => Some(status_panel_generation),
+            _ => None,
+        }
+    }
 }
 
 /// Intentful "this turn now owns status panel `msg_id`" write. Performs the
@@ -123,6 +140,11 @@ pub(super) fn bind_status_panel_in_root(
     {
         return StatusPanelBindOutcome::GuardMismatch;
     }
+    if let Some(expected) = guard.require_current_status_message_id
+        && state.status_message_id != Some(expected)
+    {
+        return StatusPanelBindOutcome::GuardMismatch;
+    }
     // Same-id re-bind is idempotent and must classify as `AlreadyBound`
     // REGARDLESS of `skip_if_panel_already_set` — an idempotent re-bind of the
     // panel this row already owns is a no-op, not a "duplicate skip". Checking
@@ -146,16 +168,19 @@ pub(super) fn bind_status_panel_in_root(
     // with the fresh bind. Only reached on `Bound` (an `AlreadyBound` re-bind
     // returned above without re-opening the epoch). `None` on the OFF path leaves
     // the field untouched (byte-identical).
-    if let Some(generation) = guard.set_status_panel_generation {
-        state.status_panel_generation = generation;
+    if guard.bump_status_panel_generation {
+        state.status_panel_generation = state.status_panel_generation.saturating_add(1);
     }
+    let bound_generation = state.status_panel_generation;
     match persist_under_lock(
         root,
         &path,
         &state,
         "src/services/discord/inflight.rs:bind_status_panel_in_root",
     ) {
-        Ok(()) => StatusPanelBindOutcome::Bound,
+        Ok(()) => StatusPanelBindOutcome::Bound {
+            status_panel_generation: bound_generation,
+        },
         Err(_) => StatusPanelBindOutcome::IoError,
     }
 }

@@ -74,7 +74,7 @@ direct_discord_sends = [
   # #3805 P2 PR-D: the sink rollover re-anchor sends the NEW status panel BELOW
   # the new tail answer chunk via the same TurnGateway used elsewhere in this
   # module. Retires with the #1436 outbound v3 extraction alongside the create.
-  "src/services/discord/turn_bridge/two_message_panel.rs#direct_discord_sends:ee4091b6ccd40acb",
+  "src/services/discord/turn_bridge/two_message_panel.rs#direct_discord_sends:f8d632c52d708490",
   # #3038 turn_bridge S1: status-panel completion direct gateway calls moved
   # verbatim from turn_bridge/mod.rs to turn_bridge/status_panel.rs.
   "src/services/discord/turn_bridge/status_panel.rs#direct_discord_sends:8806b21b9432ae8a",
