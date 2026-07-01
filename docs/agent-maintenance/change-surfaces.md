@@ -1152,7 +1152,10 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6283 lines; production LoC; +35
+  - `src/services/discord/turn_bridge/mod.rs` (6201 lines; production LoC; -82
+    from #3038 extracting the finalization epilogue (finalizing-turns counter
+    decrement + queued-turn drain) verbatim into the `finalize_epilogue.rs`
+    sibling (behavior-preserving decompose); +35
     from #3885 (reworked) gating the Claude TUI follow-up pre-submit requeue on
     INPUT CORRELATION instead of the channel-scoped busy probe: suppress only
     when the recorded prompt anchor for this pane resolves to THIS inflight's

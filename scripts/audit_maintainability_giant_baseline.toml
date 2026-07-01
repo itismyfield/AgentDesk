@@ -211,7 +211,10 @@
 # re-inject dups), else still requeue so a genuinely-unsubmitted follow-up behind
 # a DIFFERENT streaming turn is DEFERRED, not dropped. The pure decisions live in
 # streaming_edit_text.rs; this is the anchor-peek + wiring at the decision site.
-"src/services/discord/turn_bridge/mod.rs" = 6283 # #3607 terminal-UI obligation hook
+# 2026-07-01 #3038: finalize epilogue 추출로 -82 LoC (6283 -> 6201). The
+# finalizing-turns counter decrement + queued-turn drain block moved verbatim to
+# the finalize_epilogue.rs sibling module (behavior-preserving decompose).
+"src/services/discord/turn_bridge/mod.rs" = 6201 # #3607 terminal-UI obligation hook
 # #3038 turn_bridge S1 child modules, frozen at landed production LoC.
 "src/services/discord/turn_bridge/headless_delivery.rs" = 415
 "src/services/discord/turn_bridge/status_panel.rs" = 437
