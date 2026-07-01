@@ -197,7 +197,12 @@
     late-frame fresh row B is rejected; -576 from #3841 extracting placeholder
     suppression helpers to `tmux_placeholder_suppression.rs`;
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (7106 production lines; +10 from #3558
+  - `src/services/discord/tmux_watcher.rs` (7120 production lines; +14 from #3805
+    P1 (footer re-anchor) capturing the tail continuation chunk (id + text) in the
+    terminal in-place edit arm and re-anchoring the completion footer onto it so a
+    2000+ char answer no longer strands the footer in a middle chunk — the anchor
+    struct, out-param plumbing, selection helper and its tests live in the
+    non-giant `formatting.rs`; +10 from #3558
     (codex review follow-up) routing the two remaining session-bound-relay-success
     sites — which still did an unlocked `load_inflight_state` -> mutate ->
     `save_inflight_state` (re-writing a stale `last_offset`/`response_sent_offset`)
@@ -1315,7 +1320,13 @@
     `turn_finalizer/watcher_backstop.rs` (watcher far-backstop tunables +
     terminal-or-defer verdict pair). Bugfix only outside a
     finalizer-decomposition plan).
-  - `src/services/discord/formatting.rs` (2801 lines; #3807 wires semantic
+  - `src/services/discord/formatting.rs` (2860 lines; #3805 P1 adds the watcher
+    completion-footer re-anchor machinery here — the `ReplaceLastChunkAnchor`
+    struct, the `&mut Option<..>` last-chunk out-param on
+    `replace_long_message_raw_with_outcome`, and the pure
+    `watcher_completion_footer_anchor` selection helper + its regression tests —
+    worker-local presentation logic only, no relay ownership/lease change. #3807
+    wires semantic
     sentence-boundary callsites while keeping the shared boundary classifier
     and compact continuation-context helper in `semantic_boundaries.rs`;
     worker-local presentation logic only, no relay ownership/lease change.

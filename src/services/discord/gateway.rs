@@ -626,6 +626,9 @@ impl TurnGateway for DiscordGateway {
                 message_id,
                 content,
                 &self.shared,
+                // #3805 P1: gateway trait returns the outcome only; the last-chunk
+                // footer anchor is consumed exclusively by the tmux watcher.
+                &mut None,
             )
             .await
             .map_err(|e| e.to_string())

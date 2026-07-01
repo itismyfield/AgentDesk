@@ -983,6 +983,9 @@ impl SessionBoundDiscordRelaySink {
                 msg_id,
                 &relay_text,
                 &shared,
+                // #3805 P1: the session-bound relay sink does not append a
+                // completion footer, so the last-chunk anchor is unused here.
+                &mut None,
             )
             .await
             {

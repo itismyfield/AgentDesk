@@ -5010,12 +5010,17 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             )
                             .await;
                         } else {
+                            // #3805 P1: capture the tail continuation chunk (id +
+                            // its own text) so the completion footer re-anchors onto
+                            // it instead of stranding on the edited chunk 0.
+                            let mut last_chunk_anchor = None;
                             match replace_long_message_raw_with_outcome(
                                 &http,
                                 channel_id,
                                 msg_id,
                                 &relay_text,
                                 &shared,
+                                &mut last_chunk_anchor,
                             )
                             .await
                             {
@@ -5026,11 +5031,20 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                         watcher_inflight_represents_external_input(
                                             inflight_before_relay.as_ref(),
                                         );
+                                    // #3805 P1: re-anchor the completion footer to the
+                                    // LAST continuation chunk with the tail chunk's OWN
+                                    // text (single-chunk ⇒ chunk 0 + full body).
+                                    let (footer_target_msg_id, footer_target_text) =
+                                        crate::services::discord::formatting::watcher_completion_footer_anchor(
+                                            last_chunk_anchor.as_ref(),
+                                            msg_id,
+                                            &relay_text,
+                                        );
                                     remember_watcher_completion_footer_terminal_target(
                                         single_message_panel_footer_mode,
                                         &mut completion_footer_terminal_target,
-                                        msg_id,
-                                        &relay_text,
+                                        footer_target_msg_id,
+                                        footer_target_text,
                                     );
                                     placeholder_msg_id = None;
                                     placeholder_from_restored_inflight = false;
