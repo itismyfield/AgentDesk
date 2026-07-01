@@ -173,6 +173,124 @@ pub(in crate::services::discord) async fn complete_watcher_status_panel_v2_with_
     }
 }
 
+/// #3805 P2 (PR-D): re-anchor the watcher's two-message status panel BELOW the
+/// new answer chunk after a mid-turn rollover created a fresh tail message.
+///
+/// Parity with the sink re-anchor (`turn_bridge::two_message_panel`), but the
+/// watcher is NOT turn-scoped, so the msg-id repoint + epoch bump go through the
+/// atomic `bind_status_panel` flock (the same CAS store the create bind uses)
+/// rather than an in-memory snapshot:
+/// 1. Send the NEW panel BELOW the new tail answer (never a zero-panel window).
+/// 2. `bind_status_panel(new_id, skip_if_panel_already_set = false,
+///    set_status_panel_generation = seed+1, require_identity)` — under ONE flock
+///    it overwrites the OLD panel id AND bumps the generation epoch, but only
+///    when the row still belongs to THIS turn (`Bound`). A non-`Bound` outcome
+///    means the row changed turns / disappeared / IO failed: the on-disk row was
+///    NOT advanced (no partial re-anchor), so the just-sent NEW panel is discarded
+///    (durable orphan on transient delete failure) and the OLD panel + epoch are
+///    kept.
+/// 3. On `Bound`: retire the stranded OLD panel above the answer (durable orphan
+///    on transient delete failure) and adopt the new id + epoch into the loop
+///    locals so this turn's own completion proves the SAME (new) epoch while a
+///    stale OLD-epoch completion for the re-anchored panel is stale-skipped.
+///
+/// Pure msg-id / HTTP bookkeeping — the per-channel `StatusPanelState` is never
+/// torn down, so item4's `session_banner` exactly-once claim is untouched. No
+/// live panel (`status_panel_msg_id.is_none()`) → no-op returning `false`.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::services::discord) async fn reanchor_watcher_two_message_status_panel_below_answer(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+    require_identity: Option<crate::services::discord::inflight::InflightTurnIdentity>,
+    panel_text: &str,
+    status_panel_msg_id: &mut Option<serenity::MessageId>,
+    this_turn_status_panel_generation: &mut u64,
+    last_status_panel_text: &mut String,
+) -> bool {
+    let Some(old_panel_id) = *status_panel_msg_id else {
+        return false;
+    };
+    let next_generation = this_turn_status_panel_generation.saturating_add(1);
+
+    rate_limit_wait(shared, channel_id).await;
+    let new_panel =
+        match crate::services::discord::http::send_channel_message(http, channel_id, panel_text)
+            .await
+        {
+            Ok(message) => message,
+            Err(error) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::warn!(
+                    "  [{ts}] ⚠ watcher: #3805 P2 re-anchor panel send failed in channel {}: {}",
+                    channel_id.get(),
+                    error
+                );
+                return false;
+            }
+        };
+
+    let bind_outcome = crate::services::discord::inflight::bind_status_panel(
+        provider,
+        channel_id.get(),
+        new_panel.id.get(),
+        &crate::services::discord::inflight::StatusPanelBindGuard {
+            require_identity,
+            skip_if_panel_already_set: false,
+            set_status_panel_generation: Some(next_generation),
+            ..Default::default()
+        },
+    );
+
+    if bind_outcome != crate::services::discord::inflight::StatusPanelBindOutcome::Bound {
+        let discard = delete_nonterminal_placeholder(
+            http,
+            channel_id,
+            shared,
+            provider,
+            tmux_session_name,
+            new_panel.id,
+            "watcher_two_message_reanchor_bind_unowned",
+        )
+        .await;
+        if !discard.is_committed() && !discard.is_permanent_failure() {
+            enqueue_watcher_status_panel_orphan(
+                shared.as_ref(),
+                provider,
+                channel_id,
+                new_panel.id,
+            );
+        }
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⚠ watcher: #3805 P2 re-anchor bind did not record our panel in channel {} (outcome={:?}); kept the prior panel and discarded the duplicate",
+            channel_id.get(),
+            bind_outcome
+        );
+        return false;
+    }
+
+    let retire = delete_nonterminal_placeholder(
+        http,
+        channel_id,
+        shared,
+        provider,
+        tmux_session_name,
+        old_panel_id,
+        "watcher_two_message_reanchor_old_panel",
+    )
+    .await;
+    if !retire.is_committed() && !retire.is_permanent_failure() {
+        enqueue_watcher_status_panel_orphan(shared.as_ref(), provider, channel_id, old_panel_id);
+    }
+    *status_panel_msg_id = Some(new_panel.id);
+    *this_turn_status_panel_generation = next_generation;
+    *last_status_panel_text = panel_text.to_string();
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,6 +411,71 @@ mod tests {
             1,
             Some(synthetic),
             Some(&on_disk(Some(synthetic.get()), 9)),
+        ));
+    }
+
+    #[test]
+    fn reanchor_bind_bumps_epoch_atomically_and_guard_stale_skips_old_epoch() {
+        // #3805 P2 (PR-D) watcher CAS parity: the re-anchor's atomic rebind
+        // (`bind_status_panel` with `set_status_panel_generation`) overwrites the
+        // OLD panel id AND bumps the epoch under ONE flock. The completion guard
+        // then stale-skips a completion carrying the OLD epoch for the re-anchored
+        // (owned) panel, while this turn's own completion at the NEW epoch passes.
+        let _env = isolate_agentdesk_runtime_root_for_two_message_tests();
+        let provider = ProviderKind::Claude;
+        let old_panel = serenity::MessageId::new(20);
+        let new_panel = serenity::MessageId::new(40);
+
+        // Persist a row that already owns the OLD panel at epoch 1 (as if the
+        // watcher created the two-message panel this turn).
+        let created = on_disk(Some(old_panel.get()), 1);
+        let channel_id = created.channel_id;
+        crate::services::discord::inflight::save_inflight_state(&created)
+            .expect("persist inflight");
+
+        // Simulate the PR-D re-anchor write: rebind to the NEW panel id + bump the
+        // epoch (1 → 2) under the flock, overwriting the OLD id (skip = false).
+        let outcome = crate::services::discord::inflight::bind_status_panel(
+            &provider,
+            channel_id,
+            new_panel.get(),
+            &crate::services::discord::inflight::StatusPanelBindGuard {
+                skip_if_panel_already_set: false,
+                set_status_panel_generation: Some(2),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            outcome,
+            crate::services::discord::inflight::StatusPanelBindOutcome::Bound
+        );
+
+        let after = crate::services::discord::inflight::load_inflight_state(&provider, channel_id)
+            .expect("reload inflight");
+        // The CAS store now owns the NEW panel at the bumped epoch.
+        assert_eq!(after.status_message_id, Some(new_panel.get()));
+        assert_eq!(after.status_panel_generation, 2);
+
+        // A stale completion at the OLD epoch (1) for the re-anchored (owned)
+        // panel is stale-skipped ("이전 위치 stale-skip").
+        assert!(watcher_two_message_status_completion_superseded(
+            1,
+            Some(new_panel),
+            Some(&after),
+        ));
+        // This turn's own completion at the NEW epoch (2) passes ("새 위치 통과").
+        assert!(!watcher_two_message_status_completion_superseded(
+            2,
+            Some(new_panel),
+            Some(&after),
+        ));
+        // A stale completion still pointing at the OLD (now-retired) panel is not
+        // gated by the epoch (the row no longer owns it) — the delete/orphan path
+        // handles it, not the generation guard.
+        assert!(!watcher_two_message_status_completion_superseded(
+            1,
+            Some(old_panel),
+            Some(&after),
         ));
     }
 

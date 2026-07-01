@@ -2332,6 +2332,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         }
                     }
 
+                    // #3805 P2 (PR-D): track whether an answer rollover created a
+                    // fresh tail message this interval, so the two-message status
+                    // panel is re-anchored BELOW it exactly once (not on quiet
+                    // intervals). OFF-inert.
+                    let mut watcher_did_rollover_this_interval = false;
                     loop {
                         let current_portion =
                             full_response.get(response_sent_offset..).unwrap_or("");
@@ -2384,6 +2389,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                         watcher_streaming_rollover_frozen_msg_ids.push(msg_id);
                                         placeholder_msg_id = Some(message.id);
                                         placeholder_from_restored_inflight = false;
+                                        watcher_did_rollover_this_interval = true;
                                         response_sent_offset += plan.split_at;
                                         last_edit_text = status_block;
                                         persist_watcher_stream_progress(
@@ -2434,6 +2440,38 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 break;
                             }
                         }
+                    }
+
+                    // #3805 P2 (PR-D): after a mid-turn answer rollover the live
+                    // status panel is now stranded ABOVE the new tail answer. Under
+                    // the two-message flag, re-anchor it BELOW the new answer (send
+                    // new, atomic epoch-bump rebind under the inflight flock, retire
+                    // old) so it stays pinned to the latest chunk. OFF-inert →
+                    // byte-identical rollover when the flag is off.
+                    if watcher_did_rollover_this_interval
+                        && crate::services::discord::turn_bridge::two_message_should_reanchor_panel_on_rollover(
+                            shared.ui.two_message_panel_enabled,
+                            status_panel_msg_id.is_some(),
+                        )
+                    {
+                        let panel_text = shared.ui.placeholder_live_events.render_status_panel(
+                            channel_id,
+                            &watcher_provider,
+                            status_panel_started_at,
+                        );
+                        reanchor_watcher_two_message_status_panel_below_answer(
+                            &http,
+                            &shared,
+                            channel_id,
+                            &watcher_provider,
+                            &tmux_session_name,
+                            turn_identity_for_panel.clone(),
+                            &panel_text,
+                            &mut status_panel_msg_id,
+                            &mut this_turn_status_panel_generation,
+                            &mut last_status_panel_text,
+                        )
+                        .await;
                     }
 
                     let status_block = build_watcher_single_message_panel_status_block(

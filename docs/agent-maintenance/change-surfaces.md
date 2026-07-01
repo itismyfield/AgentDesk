@@ -197,7 +197,14 @@
     late-frame fresh row B is rejected; -576 from #3841 extracting placeholder
     suppression helpers to `tmux_placeholder_suppression.rs`;
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (7189 production lines; +67 from #3805
+  - `src/services/discord/tmux_watcher.rs` (7227 production lines; +38 from #3805
+    P2 PR-D (watcher rollover re-anchor) — after a mid-turn answer rollover,
+    re-anchor the two-message status panel BELOW the new tail answer; the giant
+    gains only a per-interval rolled-over local + one gated re-anchor call after
+    the rollover loop, all send/rebind/retire logic in the non-giant
+    `tmux_watcher/two_message_panel.rs` (atomic `bind_status_panel` epoch-bump
+    rebind), gated on the default-OFF `two_message_panel_enabled` → OFF
+    byte-identical; +67 from #3805
     P2 PR-C (watcher two-message creation-order parity) — an answer-first
     subcondition on the existing panel-creation gate (defer the panel until the
     answer placeholder exists so it lands BELOW the answer), a per-turn
@@ -1168,7 +1175,14 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6241 lines; production LoC; +4
+  - `src/services/discord/turn_bridge/mod.rs` (6284 lines; production LoC; +43
+    from #3805 P2 PR-D (two-message SINK rollover re-anchor) — after a mid-turn
+    answer rollover, re-anchor the status panel BELOW the new tail answer; mod.rs
+    gains only a per-interval rolled-over local + one gated re-anchor call after
+    the rollover loop, all send/retire/epoch-bump logic in the non-giant
+    `turn_bridge/two_message_panel.rs` (in-memory bump persisted by the loop's
+    `save_inflight_state` flock), gated on the default-OFF
+    `two_message_panel_enabled` → OFF byte-identical; +4
     from #3805 P2 PR-C re-exporting `two_message_status_edit_generation_is_stale`
     at `pub(in crate::services::discord)` (one `use` line + comment) so the tmux
     WATCHER completion guard reuses the SAME sink generation-staleness predicate

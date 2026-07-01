@@ -113,7 +113,9 @@ pub(super) use tmux_runtime::cancel_token_has_tmux_session;
 pub(super) use tmux_runtime::handoff_interrupted_message;
 pub(super) use tmux_runtime::stale_inflight_message;
 pub(super) use tmux_runtime::stop_active_turn;
-pub(in crate::services::discord) use two_message_panel::two_message_status_edit_generation_is_stale;
+pub(in crate::services::discord) use two_message_panel::{
+    two_message_should_reanchor_panel_on_rollover, two_message_status_edit_generation_is_stale,
+};
 pub(super) use watcher_orphan_cleanup::{
     cleanup_or_preserve_watcher_orphan_spinner,
     should_delete_bridge_created_watcher_orphan_response,
@@ -3457,6 +3459,10 @@ pub(super) fn spawn_turn_bridge(
                 status_panel_dirty = false;
             }
             if !watcher_owns_assistant_relay && !standby_relay_owns_output {
+                // #3805 P2 (PR-D): track whether an answer rollover created a fresh
+                // tail message this interval, so the two-message status panel is
+                // re-anchored BELOW it exactly once (not on quiet intervals).
+                let mut rolled_over_this_interval = false;
                 loop {
                     let current_portion =
                         response_portion_after_offset(&full_response, response_sent_offset);
@@ -3508,6 +3514,7 @@ pub(super) fn spawn_turn_bridge(
                                 response_sent_offset = next_response_sent_offset;
                                 streaming_rollover_frozen_msg_ids.push(current_msg_id);
                                 current_msg_id = next_msg_id;
+                                rolled_over_this_interval = true;
                                 last_edit_text = status_block;
                                 last_status_edit = tokio::time::Instant::now() - status_interval;
                                 inflight_state.current_msg_id = current_msg_id.get();
@@ -3575,6 +3582,42 @@ pub(super) fn spawn_turn_bridge(
                             );
                             break;
                         }
+                    }
+                }
+
+                // #3805 P2 (PR-D): after a mid-turn answer rollover the live status
+                // panel is now stranded ABOVE the new tail answer chunk. Under the
+                // two-message flag, re-anchor it BELOW the new answer (send new,
+                // retire old, bump the generation epoch) so it stays pinned to the
+                // latest chunk. Gate is OFF-inert → the rollover path is
+                // byte-identical when the flag is off.
+                if rolled_over_this_interval
+                    && two_message_panel::two_message_should_reanchor_panel_on_rollover(
+                        shared_owned.ui.two_message_panel_enabled,
+                        status_panel_msg_id.is_some(),
+                    )
+                {
+                    let panel_text = shared_owned.ui.placeholder_live_events.render_status_panel(
+                        channel_id,
+                        &provider,
+                        status_panel_started_at,
+                    );
+                    let reanchored =
+                        two_message_panel::reanchor_bridge_two_message_status_panel_below_answer(
+                            gateway.as_ref(),
+                            shared_owned.as_ref(),
+                            channel_id,
+                            &provider,
+                            &panel_text,
+                            current_msg_id,
+                            &mut status_panel_msg_id,
+                            &mut inflight_state,
+                            &mut status_panel_generation,
+                            &mut last_status_panel_text,
+                        )
+                        .await;
+                    if reanchored {
+                        state_dirty = true;
                     }
                 }
 

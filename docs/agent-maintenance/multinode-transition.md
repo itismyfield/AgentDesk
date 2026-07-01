@@ -403,6 +403,23 @@
 
 ### Audited touches
 
+- #3805 P2 PR-D two-message rollover re-anchor: `turn_bridge/mod.rs` (SINK) and
+  `tmux_watcher.rs` (WATCHER) each re-anchor the separate two-message status panel
+  BELOW the new tail answer after a mid-turn answer rollover, gated on the
+  default-OFF `two_message_panel_enabled` flag. All logic lives in the non-giant
+  siblings `{turn_bridge,tmux_watcher}/two_message_panel.rs` (send the new panel,
+  retire the stranded old panel, bump the per-turn `status_panel_generation`
+  epoch); the giants carry only a per-interval `rolled_over` local + one gated
+  re-anchor call after the rollover loop. Classification: worker-local — the
+  epoch bump is persisted through the SAME per-`(provider, channel)` inflight
+  sidecar flock the create already used (sink: in-memory bump + `save_inflight_state`;
+  watcher: atomic `bind_status_panel` with `set_status_panel_generation`), which is
+  worker-local runtime state, not a PG lease / leader gate / cross-node routing
+  field. The generation epoch and `status_message_id` are pre-existing persisted
+  inflight fields (PR-A/B/C); PR-D adds no new field, delivery record, or schema
+  change, and item4's fire-and-forget session banner (`session_banner.rs`) is
+  untouched. Old-panel retirement failures fall back to the existing durable
+  status-panel orphan store (also worker-local). OFF path is byte-identical.
 - #3038 (b) early TUI completion gate extraction: `turn_bridge/mod.rs` moved the
   #2293/#2780 early TUI quiescence gate (the eligibility filter + bounded
   `run_tui_completion_gate` probe + timed-out warning that compute
