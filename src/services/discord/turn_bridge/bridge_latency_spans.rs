@@ -181,6 +181,32 @@ mod tests {
     }
 
     #[test]
+    fn first_output_never_post_dates_first_relay_when_marked_in_order() {
+        // #3813 AC#1 tail invariant: the bridge now marks first_output at the
+        // streaming-loop top — BEFORE any rollover/edit relay dispatch — so
+        // whenever BOTH waypoints are recorded the output timestamp never
+        // post-dates the relay timestamp (no negative first_output→first_relay
+        // delta). This mirrors the fixed call-site ordering in `spawn_turn_bridge`
+        // across every relay ordering (short first chunk, rollover-first long
+        // chunk, multi-iteration rollover): output is observed, THEN delivered.
+        let mut spans = BridgeLatencySpans::starting_at(Instant::now());
+
+        // Relay-owning path: observe output first, then commit the delivery.
+        spans.mark_first_output(true);
+        spans.mark_first_relay(true);
+
+        let output_at = spans.first_output_at.expect("output marked");
+        let relay_at = spans.first_relay_at.expect("relay marked");
+        // Monotonic anchor ordering: the output waypoint precedes (or ties) relay.
+        assert!(output_at <= relay_at);
+
+        // The derived segments preserve the same ordering — a non-negative delta.
+        let output_ms = spans.start_to_first_output_ms().expect("output segment");
+        let relay_ms = spans.start_to_first_relay_ms().expect("relay segment");
+        assert!(output_ms <= relay_ms);
+    }
+
+    #[test]
     fn full_span_renders_every_segment() {
         let line = format_bridge_spans(Some(120), Some(240));
         assert_eq!(line, "turn_start→first_output=120ms →first_relay=240ms");

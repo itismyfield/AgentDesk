@@ -3440,6 +3440,8 @@ pub(super) fn spawn_turn_bridge(
                 loop {
                     let current_portion =
                         response_portion_after_offset(&full_response, response_sent_offset);
+                    // #3813 AC#1 tail: mark first-output pre-rollover (first_output<=first_relay).
+                    bridge_spans.mark_first_output(!current_portion.is_empty());
                     if done || current_portion.is_empty() {
                         break;
                     }
@@ -3558,8 +3560,6 @@ pub(super) fn spawn_turn_bridge(
 
                 let current_portion =
                     response_portion_after_offset(&full_response, response_sent_offset);
-                // #3813 AC#1 tail: first bridge-observed non-empty assistant output.
-                bridge_spans.mark_first_output(!current_portion.is_empty());
                 let status_block = build_bridge_single_message_panel_status_block(
                     shared_owned.as_ref(),
                     channel_id,
