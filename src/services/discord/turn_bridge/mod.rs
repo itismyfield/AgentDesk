@@ -85,9 +85,9 @@ pub(in crate::services::discord) use status_panel::{
 };
 pub(super) use streaming_edit_text::{
     CLAUDE_TUI_FOLLOWUP_REQUEUE_DELIVERY_NOTICE, bridge_claude_tui_followup_requeue_prompt_error,
-    bridge_streaming_rollover_should_skip, bridge_tui_transport_error_should_skip_quiescence,
-    build_turn_bridge_streaming_edit_text, claude_tui_followup_requeue_streaming_aware,
-    claude_tui_followup_same_input_occupies_pane,
+    bridge_streaming_edit_gate_open, bridge_streaming_rollover_should_skip,
+    bridge_tui_transport_error_should_skip_quiescence, build_turn_bridge_streaming_edit_text,
+    claude_tui_followup_requeue_streaming_aware, claude_tui_followup_same_input_occupies_pane,
 };
 pub(super) use task_notification_lifecycle::{
     close_all_tracked_background_children, close_next_tracked_background_child,
@@ -1580,6 +1580,9 @@ pub(super) fn spawn_turn_bridge(
             inflight_state.current_msg_id = current_msg_id.get();
         }
         let mut last_status_edit = tokio::time::Instant::now();
+        // #3813 Phase 1b fast-lane: the first non-empty assistant text chunk may
+        // bypass the status interval once, then normal throttling resumes.
+        let mut first_answer_relayed = false;
         let status_interval = super::status_update_interval();
         let mut last_session_panel_lifecycle_refresh =
             tokio::time::Instant::now() - status_interval;
@@ -3560,7 +3563,11 @@ pub(super) fn spawn_turn_bridge(
                     &stable_display_text,
                 )
                     && !done
-                    && last_status_edit.elapsed() >= status_interval
+                    && bridge_streaming_edit_gate_open(
+                        last_status_edit.elapsed() >= status_interval,
+                        first_answer_relayed,
+                        current_portion.is_empty(),
+                    )
                     && long_running_placeholder_active.is_none()
                     && pending_long_running_open_after_state_save.is_none()
                     && pending_long_running_retarget_after_state_save.is_none()
@@ -3575,6 +3582,7 @@ pub(super) fn spawn_turn_bridge(
                     .is_ok();
                     last_status_edit = tokio::time::Instant::now();
                     if edit_ok {
+                        first_answer_relayed |= !current_portion.is_empty();
                         last_edit_text = stable_display_text;
                         inflight_state.current_msg_id = current_msg_id.get();
                         inflight_state.current_msg_len = last_edit_text.len();

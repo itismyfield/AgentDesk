@@ -1157,7 +1157,17 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6201 lines; production LoC; -82
+  - `src/services/discord/turn_bridge/mod.rs` (6209 lines; production LoC; +8
+    from #3813 Phase 1b adding the first-output fast-lane status-edit gate — the
+    streaming status-edit gate forced the first assistant answer to wait up to
+    `status_interval` (default 5s), so a single-shot fast lane now relays the
+    FIRST non-empty assistant text immediately and then reverts to the normal
+    throttle (at most +1 edit per turn); the pure decision lives in
+    `streaming_edit_text.rs` (`bridge_streaming_edit_gate_open`, 4-case unit
+    test) and mod.rs carries only the thin call-site (a `first_answer_relayed`
+    flag decl, the gate subcondition swap, and the flag set on a successful
+    non-empty edit); flicker suppression / `discord_io` min_gap / ordering /
+    finalize (`!done` guard, rollover, ownership counters) untouched; -82
     from #3038 extracting the finalization epilogue (finalizing-turns counter
     decrement + queued-turn drain) verbatim into the `finalize_epilogue.rs`
     sibling (behavior-preserving decompose); +35

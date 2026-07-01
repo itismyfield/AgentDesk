@@ -403,6 +403,17 @@
 
 ### Audited touches
 
+- #3813 Phase 1b first-output fast-lane status-edit gate: `turn_bridge/mod.rs`
+  streaming loop gained a single-shot fast lane so the FIRST non-empty assistant
+  text is relayed immediately instead of waiting up to `status_interval`
+  (default 5s); a `first_answer_relayed` flag + the pure
+  `bridge_streaming_edit_gate_open` predicate (`streaming_edit_text.rs`) open the
+  gate once for the opening answer, then it reverts to the normal interval
+  throttle (at most +1 edit per turn). Classification: worker-local — this only
+  relaxes the local edit-timing throttle inside the per-node bridge turn loop; it
+  writes no new inflight-row field, delivery record, PG lease, leader gate, or
+  cross-node routing state, and the `!done` guard, rollover, and finalize
+  ownership counters are untouched. No DB/schema change.
 - #3906 voice intake feedback P1+P4: `process_completed_utterance` now plays the
   deterministic Phase-1 intake chime into the active songbird call right before
   `start_voice_turn` (and the redundant non-deterministic foreground-start chime
