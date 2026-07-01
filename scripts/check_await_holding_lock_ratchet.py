@@ -21,7 +21,16 @@ from pathlib import Path
 # Monotonic ceiling: the number of `#[allow(clippy::await_holding_lock)]`
 # attributes permitted across the workspace. Lower this as sites are removed;
 # never raise it casually.
-BASELINE = 34
+#
+# 34 → 36 (#3982): the two backstop regression tests
+# `backstop_orphan_reclaim_downgrades_then_claims` and
+# `backstop_failed_reclaim_falls_back_to_bounded_abort`
+# (src/services/discord/tui_direct_pending_start.rs) hold `worker_test_lock()`
+# across `tokio::time::advance` awaits that drive `run_worker`. The guard
+# serializes tests mutating the process-wide PRESENT index / durable-store root;
+# releasing it before the awaits would let concurrent tests stomp the statics.
+# Both are test-only and cannot deadlock a live task. Justified, reviewable raise.
+BASELINE = 36
 
 ALLOW_RE = re.compile(r"#\[allow\([^)]*\bclippy::await_holding_lock\b")
 

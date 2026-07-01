@@ -1740,8 +1740,15 @@ mod tests {
             let reclaimed = reclaimed_for_view.clone();
             Box::pin(async move {
                 if reclaimed.load(Ordering::SeqCst) {
-                    // Post-downgrade: the now-ownerless orphan is filtered out →
-                    // no prior inflight → finalized.
+                    // Post-downgrade the row is owner=None but KEEPS its old,
+                    // already-stale `updated_at` (#3982 preserves it rather than
+                    // bumping), so the real view builder's
+                    // `ownerless_external_input_inflight_is_stale` filter drops it
+                    // on the very next fresh read → no prior inflight → finalized.
+                    // This mock models that IMMEDIATE, preserved-`updated_at`-driven
+                    // drop (it is immediate BECAUSE the timestamp was not reset; a
+                    // bumped `updated_at` would keep the row ~0 s "fresh" → not
+                    // stale → kept → the turn would abort again).
                     Some(obs(base_view()))
                 } else {
                     Some(PriorTurnObservation {

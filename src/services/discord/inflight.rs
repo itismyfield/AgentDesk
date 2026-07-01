@@ -871,6 +871,33 @@ fn load_inflight_state_unlocked(path: &Path) -> Option<InflightTurnState> {
     parse_inflight_state_content(&data).ok()
 }
 
+/// Shared lock-held persist tail: validate, optionally stamp `updated_at`,
+/// atomic-write. Caller must already hold `lock_inflight_state_path`.
+///
+/// `bump_updated_at` controls whether `updated_at` is reset to now. Real
+/// lifecycle mutations bump it (quiescence clock resets); an owner *correction*
+/// of a proven-dead orphan (#3982) preserves the old, already-stale timestamp so
+/// downstream ownerless-stale filters drop the row immediately on the next read
+/// instead of after another 300 s window.
+fn persist_under_lock_inner(
+    root: &Path,
+    path: &Path,
+    state: &InflightTurnState,
+    caller: &'static str,
+    bump_updated_at: bool,
+) -> Result<(), String> {
+    let mut updated = state.clone();
+    updated.ensure_finalizer_turn_id();
+    if !validate_inflight_state_for_save(root, path, &updated, caller) {
+        return Ok(());
+    }
+    if bump_updated_at {
+        updated.updated_at = now_string();
+    }
+    let json = serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())?;
+    atomic_write(path, &json)
+}
+
 /// Shared lock-held persist tail: validate, stamp `updated_at`, atomic-write.
 /// Caller must already hold `lock_inflight_state_path`.
 fn persist_under_lock(
@@ -879,14 +906,21 @@ fn persist_under_lock(
     state: &InflightTurnState,
     caller: &'static str,
 ) -> Result<(), String> {
-    let mut updated = state.clone();
-    updated.ensure_finalizer_turn_id();
-    if !validate_inflight_state_for_save(root, path, &updated, caller) {
-        return Ok(());
-    }
-    updated.updated_at = now_string();
-    let json = serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())?;
-    atomic_write(path, &json)
+    persist_under_lock_inner(root, path, state, caller, true)
+}
+
+/// Like [`persist_under_lock`] but preserves the row's existing `updated_at`
+/// instead of bumping it to now. Used by the #3982 orphan downgrade: the owner
+/// correction of a confirmed-dead orphan is not new lifecycle activity, so its
+/// quiescence clock must not be reset, or the triggering TUI-direct turn's fresh
+/// re-read would see a "fresh" row and keep aborting.
+fn persist_under_lock_preserving_updated_at(
+    root: &Path,
+    path: &Path,
+    state: &InflightTurnState,
+    caller: &'static str,
+) -> Result<(), String> {
+    persist_under_lock_inner(root, path, state, caller, false)
 }
 
 pub(crate) fn clear_inflight_state(provider: &ProviderKind, channel_id: u64) -> bool {

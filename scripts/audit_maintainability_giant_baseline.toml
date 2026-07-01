@@ -600,7 +600,17 @@
 # changed; only the warm placeholder-sweeper carries the liveness gate (never the
 # boot path) so a freshly-restarted live watcher is never false-classified as dead.
 # Tests live in the excluded `rebind_origin_reap_tests` module.
-"src/services/discord/inflight.rs" = 2275 # #3835: 3077 -> 2275, locked-in win — verbatim decompose moved the status-panel/current-message ownership writes to inflight/ownership_ops.rs and the staleness predicates + orphan-lock/rebind-origin reap helpers to inflight/rebind_reap.rs (zero behavior change, facade re-exports keep inflight::* paths byte-identical)
+# #3982 raised 2275 -> 2309 (+34): the orphan-downgrade efficacy fix splits the
+# shared persist tail `persist_under_lock` into a bump-parameterized
+# `persist_under_lock_inner(..., bump_updated_at: bool)` plus two thin wrappers —
+# `persist_under_lock` (bump=true; ALL existing callers unchanged) and the new
+# `persist_under_lock_preserving_updated_at` (bump=false). The downgrade of a
+# confirmed-dead SessionBoundRelay orphan must NOT reset the quiescence clock, or
+# the triggering TUI-direct turn's fresh re-read sees a "0 s-old" ownerless row →
+# not stale → the view builder keeps it → the deferred claim keeps aborting ~300 s.
+# The split keeps ONE implementation (no duplicated validate/atomic-write) behind
+# the flag. Root-consistent with #3960; smallest possible blast radius.
+"src/services/discord/inflight.rs" = 2309 # #3835: 3077 -> 2275, locked-in win — verbatim decompose moved the status-panel/current-message ownership writes to inflight/ownership_ops.rs and the staleness predicates + orphan-lock/rebind-origin reap helpers to inflight/rebind_reap.rs (zero behavior change, facade re-exports keep inflight::* paths byte-identical); #3982 -> 2309 (+34) persist bump-flag split (see comment above)
 # #3779 extracted relay-recovery auto-heal attempt accounting to a sibling
 # module, dropping relay_recovery.rs below the prod-giant threshold; the ratchet
 # entry is retired instead of raising the baseline.

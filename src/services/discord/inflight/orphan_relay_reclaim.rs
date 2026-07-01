@@ -52,7 +52,7 @@ use super::model::{InflightTurnIdentity, InflightTurnState, RelayOwnerKind, Turn
 use super::{
     INFLIGHT_STALENESS_THRESHOLD_SECS, inflight_runtime_root, inflight_state_is_stale,
     inflight_state_path, load_inflight_state_unlocked, lock_inflight_state_path, now_unix,
-    persist_under_lock,
+    persist_under_lock, persist_under_lock_preserving_updated_at,
 };
 
 /// #3960 — the row SHAPE of a `SessionBoundRelay` TUI-direct synthetic claim
@@ -200,7 +200,15 @@ pub(super) fn downgrade_orphaned_session_bound_relay_owner_locked_in_root(
         return OrphanRelayReclaimOutcome::Skipped;
     }
     state.set_relay_owner_kind(RelayOwnerKind::None);
-    match persist_under_lock(
+    // #3982: preserve the row's existing (already-stale) `updated_at` instead of
+    // bumping it. Downgrading a confirmed-dead orphan to `owner=None` is an owner
+    // *correction*, not new lifecycle activity, so the quiescence clock must not
+    // reset. A fresh bump would make the triggering TUI-direct turn's next
+    // fresh re-read see a "0 s-old" ownerless row → `ownerless_external_input_
+    // inflight_is_stale=false` → the view builder KEEPS it → `inflight_present=true`
+    // → the deferred claim keeps aborting for another ~300 s. Preserving the old
+    // stale timestamp lets the very next read drop the row so the turn claims now.
+    match persist_under_lock_preserving_updated_at(
         root,
         &path,
         &state,
@@ -709,6 +717,105 @@ mod tests {
         assert!(
             round.session_bound_delivered,
             "a serialized delivered marker survives a round-trip"
+        );
+    }
+
+    /// #3982 efficacy regression — the orphan downgrade must PRESERVE the row's
+    /// existing (already-stale) `updated_at` instead of bumping it to now. This is
+    /// what makes the triggering TUI-direct turn claim IMMEDIATELY: after the
+    /// downgrade to `owner=None` the view builder re-reads the row FRESH, and only
+    /// a preserved-old `updated_at` keeps `ownerless_external_input_inflight_is_stale`
+    /// true so the `.filter` drops the row → `inflight_present=false` → the deferred
+    /// claim proceeds on the very next window (no extra ~300 s wait).
+    ///
+    /// Under the old unconditional bump this test is RED at assertions (ii)/(iii):
+    /// the fresh `updated_at` makes the row look ~0 s old → not stale → kept → the
+    /// turn keeps aborting. Root-explicit (no `AGENTDESK_ROOT_DIR` race) and writes
+    /// the fixture verbatim so the stale timestamp survives to disk.
+    #[test]
+    fn downgrade_preserves_updated_at_so_row_stays_ownerless_droppable() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let now_unix = now_unix();
+        let provider = ProviderKind::Claude;
+
+        // Orphan row whose quiescence clock reads T-500 s (well past the 300 s
+        // staleness threshold), stamped verbatim so the stale value hits disk.
+        let mut state = orphan_row(now_unix);
+        let stale_updated_at = to_local(now_unix - 500);
+        state.started_at = stale_updated_at.clone();
+        state.updated_at = stale_updated_at.clone();
+        let channel_id = state.channel_id;
+        write_row_verbatim(root, &state);
+
+        let identity = InflightTurnIdentity::from_state(&state);
+        let outcome = downgrade_orphaned_session_bound_relay_owner_locked_in_root(
+            root,
+            &provider,
+            channel_id,
+            &identity,
+            state.tmux_session_name.as_deref().expect("session"),
+        );
+        assert_eq!(outcome, OrphanRelayReclaimOutcome::Downgraded);
+
+        let path = inflight_state_path(root, &provider, channel_id);
+        let reloaded = load_inflight_state_unlocked(&path).expect("row survives downgrade");
+
+        // (i) owner corrected to the bridge backstop.
+        assert_eq!(
+            reloaded.effective_relay_owner_kind(),
+            RelayOwnerKind::None,
+            "the confirmed-dead orphan is downgraded to owner None"
+        );
+        // (ii) the OLD stale timestamp is preserved — NOT bumped to now.
+        assert_eq!(
+            reloaded.updated_at, stale_updated_at,
+            "the owner correction must NOT reset the quiescence clock"
+        );
+        // (iii) the real view-builder ownerless-stale filter WOULD drop it now, so
+        // the triggering turn's next fresh read yields inflight_present=false.
+        assert!(
+            super::super::ownerless_external_input_inflight_is_stale(&reloaded),
+            "the preserved-stale ownerless row is immediately droppable by the view filter"
+        );
+    }
+
+    /// #3982 guard — the SIBLING `mark_delivered` persist path is a REAL mutation
+    /// (`session_bound_delivered = true`) and must STILL bump `updated_at`. This
+    /// pins that the bump-flag split swapped only the downgrade call site, not this
+    /// one (a mis-swap would silently regress delivery-marker freshness).
+    #[test]
+    fn mark_delivered_still_bumps_updated_at() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let now_unix = now_unix();
+        let provider = ProviderKind::Claude;
+
+        let mut state = orphan_row(now_unix);
+        let stale_updated_at = to_local(now_unix - 500);
+        state.updated_at = stale_updated_at.clone();
+        let channel_id = state.channel_id;
+        write_row_verbatim(root, &state);
+
+        let identity = InflightTurnIdentity::from_state(&state);
+        let outcome = mark_session_bound_relay_delivered_locked_in_root(
+            root,
+            &provider,
+            channel_id,
+            &identity,
+            state.tmux_session_name.as_deref().expect("session"),
+        );
+        assert_eq!(outcome, MarkDeliveredOutcome::Marked);
+
+        let path = inflight_state_path(root, &provider, channel_id);
+        let reloaded = load_inflight_state_unlocked(&path).expect("row survives mark");
+        assert!(
+            reloaded.session_bound_delivered,
+            "the delivery marker is durably stamped"
+        );
+        assert_ne!(
+            reloaded.updated_at, stale_updated_at,
+            "a real delivery mutation still refreshes the quiescence clock"
         );
     }
 }

@@ -808,7 +808,7 @@
     a self-contained helper) and the sibling `idle_transcript_scan.rs` is itself
     giant-capped, so the ratchet baseline was RAISED 4301 -> 4310 (a deliberate,
     reviewable admission per the baseline header) rather than split.
-  - `src/services/discord/tui_direct_pending_start.rs` (1030 production lines;
+  - `src/services/discord/tui_direct_pending_start.rs` (1125 production lines;
     the deferred TUI-direct synthetic turn-start path — the pending-start claim
     queue, the no-evict promote of a stalled inflight, and the deferred-claim
     owner handoff. #3540 added the B′ "no-evict promote" path (a stalled inflight
@@ -1415,7 +1415,7 @@
     2026-08-31, #3036)).
   - `src/services/discord/{commands/text_commands.rs,
     discord_config_audit.rs, router/intake_gate.rs}` (all 1000+ production
-    lines) and `src/services/discord/inflight.rs` (2275 lines; +8 from #3960
+    lines) and `src/services/discord/inflight.rs` (2309 lines; +8 from #3960
     `mod orphan_relay_reclaim` + its re-export — the producer-liveness TOCTOU
     reclaim predicate and the locked owner-downgrade RMW live in their own
     submodule, not this giant file; this is the mod-decl + re-export cost; +1
@@ -1448,7 +1448,11 @@
     staleness predicates + orphan-lock / rebind-origin reap helpers into the
     existing `src/services/discord/inflight/rebind_reap.rs` — pure verbatim move
     (zero behavior change), every externally-referenced symbol re-exported from
-    the facade so `inflight::*` call-site paths stay byte-identical).
+    the facade so `inflight::*` call-site paths stay byte-identical; +34 from #3982
+    splitting `persist_under_lock` into a bump-parameterized `persist_under_lock_inner`
+    plus a `persist_under_lock_preserving_updated_at` wrapper, so the orphan
+    owner-downgrade can persist without resetting the quiescence clock — all
+    existing `persist_under_lock` callers unchanged).
   - `src/services/discord/placeholder_sweeper.rs` (1019 lines; +5 from #3886
     calling the deterministic TimedOut-completion-gate status-panel reconcile
     (`super::tmux::reconcile_timed_out_tui_status_panel`) before the age-based
