@@ -5,22 +5,11 @@ mod race_loss;
 mod turn_watchdog;
 mod voice_intake;
 
-/// #3182: the queue-pending reaction(s) to strip from a user message when its
-/// queued turn is dequeued and promoted to active.
-///
-/// The intake gate reacts a queued user message with `📬` (standalone queue
-/// head) or `➕` (merged into a previous head) via `queue_pending_reaction_for`.
-/// At the normal dequeue/promotion point (`handle_text_message`, `started==true`)
-/// we only know the head `user_msg_id`, not whether it carried `📬` or `➕`, so
-/// we attempt to remove BOTH candidates. Removing a reaction that was never
-/// added is a harmless no-op, and this mirrors the existing live-dispatch
-/// cleanup in `DiscordGateway::dispatch_queued_turn` (gateway.rs) and the
-/// queue-exit drain (mod.rs), both of which remove `📬` and `➕` together.
-///
-/// Returned as a fixed array so the emoji set is unit-testable without driving
-/// the full async intake path.
-pub(super) const fn queue_pending_reactions_to_clear() -> [char; 2] {
-    ['📬', '➕']
+/// Queue-marker reactions to strip when a queued turn is promoted to active.
+/// The promotion point only knows the head message id, so it clears every
+/// marker the queue gate can add (standalone, merged, and reconcile-gate).
+pub(super) const fn queue_pending_reactions_to_clear() -> [char; 3] {
+    super::super::super::queue_reactions::QUEUE_PENDING_REACTION_EMOJIS
 }
 
 /// Bundle of Discord-runtime dependencies that `handle_text_message`
@@ -2827,13 +2816,8 @@ pub(in crate::services::discord) async fn handle_text_message(
 mod queue_pending_reaction_clear_tests {
     use super::*;
 
-    /// #3182: the dequeue cleanup must attempt to remove BOTH queue-pending
-    /// reactions — `📬` (standalone head) and `➕` (merged) — because the
-    /// promotion point only knows the head message id, not which emoji it
-    /// carried. This guards against a regression that drops one (which would
-    /// re-strand the other variant, as in the original bug).
     #[test]
-    fn clears_both_standalone_and_merged_queue_reactions() {
+    fn clears_every_queue_marker_reaction() {
         let emojis = queue_pending_reactions_to_clear();
         assert!(
             emojis.contains(&'📬'),
@@ -2843,10 +2827,14 @@ mod queue_pending_reaction_clear_tests {
             emojis.contains(&'➕'),
             "merged queue ➕ must be cleared on dequeue"
         );
+        assert!(
+            emojis.contains(&'🔄'),
+            "reconcile queue 🔄 must be cleared on dequeue"
+        );
         assert_eq!(
             emojis.len(),
-            2,
-            "exactly the two intake-gate queue-pending emojis are cleared"
+            crate::services::discord::queue_reactions::QUEUE_PENDING_REACTION_EMOJIS.len(),
+            "exactly the shared queue-pending emojis are cleared"
         );
     }
 

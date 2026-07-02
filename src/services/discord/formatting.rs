@@ -25,6 +25,16 @@ const TOOL_STATUS_MAX_BYTES: usize = 300;
 /// with the same handoff header text.
 pub(super) const PLACEHOLDER_PROBE_MARKER: &str = "\u{2063}\u{2062}\u{2063}\u{2062}";
 
+#[cfg(test)]
+pub(super) use super::reaction_lifecycle::reaction_target_channel_for_shared;
+pub(super) use super::reaction_lifecycle::{
+    add_reaction_raw, is_real_discord_message_id, remove_reaction_raw,
+};
+#[cfg(not(test))]
+pub(super) use super::reaction_lifecycle::{
+    try_add_reaction_raw_with_shared, try_remove_reaction_raw_with_shared,
+};
+
 static REPLACE_CONTINUATION_ROLLBACKS: LazyLock<
     Mutex<HashMap<(u64, u64), ReplaceContinuationRollback>>,
 > = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -3272,41 +3282,6 @@ fn build_attachment_inline(text: &str, summary: Option<&str>) -> String {
         "📎 내용이 길어 전문을 파일로 첨부했습니다. ({} bytes)",
         text.len()
     )
-}
-
-/// Add reaction using raw HTTP reference
-pub(super) async fn add_reaction_raw(
-    http: &serenity::Http,
-    channel_id: ChannelId,
-    message_id: serenity::MessageId,
-    emoji: char,
-) {
-    let reaction = serenity::ReactionType::Unicode(emoji.to_string());
-    if let Err(e) = channel_id.create_reaction(http, message_id, reaction).await {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!(
-            "  [{ts}] ⚠ Failed to add reaction '{emoji}' to msg {message_id} in channel {channel_id}: {e}"
-        );
-    }
-}
-
-/// Remove reaction using raw HTTP reference
-pub(super) async fn remove_reaction_raw(
-    http: &serenity::Http,
-    channel_id: ChannelId,
-    message_id: serenity::MessageId,
-    emoji: char,
-) {
-    let reaction = serenity::ReactionType::Unicode(emoji.to_string());
-    if let Err(e) = channel_id
-        .delete_reaction(http, message_id, None, reaction)
-        .await
-    {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!(
-            "  [{ts}] ⚠ Failed to remove reaction '{emoji}' from msg {message_id} in channel {channel_id}: {e}"
-        );
-    }
 }
 
 /// Determine the raw tool status string for Discord status display.

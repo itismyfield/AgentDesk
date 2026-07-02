@@ -296,7 +296,11 @@ pub(super) trait IntakeQueueCommitEffects {
 }
 
 pub(super) fn queue_pending_reaction_for(outcome: &MailboxEnqueueOutcome) -> char {
-    if outcome.merged { '➕' } else { '📬' }
+    if outcome.merged {
+        super::super::queue_reactions::QUEUE_MERGED_PENDING_REACTION
+    } else {
+        super::super::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION
+    }
 }
 
 pub(super) async fn commit_soft_intervention_transaction<E>(
@@ -613,7 +617,9 @@ mod tests {
             ..FakeEffects::default()
         };
         let mut options = IntakeQueueCommitOptions::default();
-        options.pending_reaction = IntakeQueuePendingReactionPolicy::Static('🔄');
+        options.pending_reaction = IntakeQueuePendingReactionPolicy::Static(
+            super::super::super::queue_reactions::QUEUE_RECONCILE_PENDING_REACTION,
+        );
 
         let outcome = commit_soft_intervention_transaction(&mut effects, request(options)).await;
 

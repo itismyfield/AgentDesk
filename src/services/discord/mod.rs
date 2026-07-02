@@ -39,8 +39,10 @@ mod placeholder_live_events;
 mod placeholder_sweeper;
 mod prompt_builder;
 mod queue_io;
+mod queue_reactions;
 mod queued_placeholders_store;
 mod reaction_cleanup;
+mod reaction_lifecycle;
 mod relay_health;
 pub(crate) mod relay_recovery;
 #[cfg(unix)] // #3089 A0: shared ReplaceLongMessageOutcome disposition policy.
@@ -3029,19 +3031,12 @@ async fn apply_queue_exit_feedback(
     }
 
     for event in queue_exit_events {
-        // Clean up the queue-pending reactions on EVERY contributing message:
-        // after #1190 follow-up, merged messages carry ➕ and standalone heads
-        // carry 📬 — remove both so cancel/expiry/supersede leaves only the
-        // exit-state reaction visible. #2044 F9: a standalone head (no merges)
-        // never had a ➕, so skip that removal instead of doubling the
-        // rate-limited HTTP traffic per exit; merged groups (`len() > 1`)
-        // still get both removals (the merge path adds ➕ to every non-head
-        // source).
+        // Clean up every queue marker on contributing messages so exits leave
+        // only the terminal-state reaction visible.
         let is_standalone = event.intervention.source_message_ids.len() <= 1;
         for message_id in &event.intervention.source_message_ids {
-            formatting::remove_reaction_raw(&http, channel_id, *message_id, '📬').await;
-            if !is_standalone {
-                formatting::remove_reaction_raw(&http, channel_id, *message_id, '➕').await;
+            for emoji in queue_reactions::drain_reactions_for_queue_exit(is_standalone) {
+                formatting::remove_reaction_raw(&http, channel_id, *message_id, *emoji).await;
             }
         }
         formatting::add_reaction_raw(
@@ -3878,8 +3873,9 @@ pub(super) async fn kickoff_idle_queues(
         // cases alike. Background-trigger turns never reacted the user message,
         // so a redundant remove on them is a harmless no-op.
         for message_id in &intervention.source_message_ids {
-            formatting::remove_reaction_raw(&ctx.http, channel_id, *message_id, '📬').await;
-            formatting::remove_reaction_raw(&ctx.http, channel_id, *message_id, '➕').await;
+            for emoji in queue_reactions::QUEUE_PENDING_REACTION_EMOJIS {
+                formatting::remove_reaction_raw(&ctx.http, channel_id, *message_id, emoji).await;
+            }
         }
 
         // codex review round-5 P2 (finding 3 — drain merged placeholders on

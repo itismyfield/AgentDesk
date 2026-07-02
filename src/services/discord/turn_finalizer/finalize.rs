@@ -56,6 +56,8 @@ pub(super) async fn do_finalize(
     super::cleanup::ensure_synthetic_claim_marker_before_clear(key, &provider, submit_snapshot);
     let skip_completion_reaction =
         super::cleanup::relay_ownership_only_for_finalize(key, &provider, submit_snapshot);
+    let relay_owner_kind =
+        super::cleanup::relay_owner_kind_for_finalize(key, &provider, submit_snapshot);
 
     // (A) inflight clear. Only the gate-timeout backstop and the immediate
     //     no-owner restored-watcher path set `clear_inflight` (live bridge /
@@ -161,6 +163,16 @@ pub(super) async fn do_finalize(
         }
     }
 
+    super::cleanup::finalized_reaction_lifecycle(
+        key,
+        event,
+        ctx,
+        shared,
+        "finalized",
+        skip_completion_reaction,
+        relay_owner_kind,
+    );
+
     let has_pending_after_voice = if guarded_finish_missed {
         // No-op finalize on a stale terminal: leave the live newer turn's
         // channel state untouched. Report NO backlog (Codex P2): the newer turn
@@ -210,15 +222,6 @@ pub(super) async fn do_finalize(
         }
         has_pending_after_voice
     };
-
-    super::cleanup::finalized_reaction_lifecycle(
-        key,
-        event,
-        ctx,
-        shared,
-        "finalized",
-        skip_completion_reaction,
-    );
 
     // (F) relay-miss observability — emitted from inside the finalizer so the
     //     signal fires exactly once per finalize regardless of submitter.

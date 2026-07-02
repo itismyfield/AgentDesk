@@ -1,3 +1,4 @@
+use super::super::queue_reactions;
 use super::super::*;
 use super::intake_queue_transaction::{
     IntakeQueueAuthorClass, IntakeQueueCommitOptions, IntakeQueueCommitSource,
@@ -1249,7 +1250,9 @@ pub(in crate::services::discord) async fn handle_event(
                             voice_announcement: resolved_voice_announcement.clone(),
                         },
                         options: IntakeQueueCommitOptions {
-                            pending_reaction: IntakeQueuePendingReactionPolicy::Static('🔄'),
+                            pending_reaction: IntakeQueuePendingReactionPolicy::Static(
+                                queue_reactions::QUEUE_RECONCILE_PENDING_REACTION,
+                            ),
                             ..IntakeQueueCommitOptions::default()
                         },
                     },

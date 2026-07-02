@@ -18,8 +18,8 @@ use super::router;
 use super::router::handle_text_message;
 use super::turn_bridge::{auto_retry_with_history, release_retry_pending};
 use super::{
-    Intervention, SharedData, formatting, rate_limit_wait, resolve_discord_bot_provider,
-    validate_live_channel_routing,
+    Intervention, SharedData, formatting, queue_reactions, rate_limit_wait,
+    resolve_discord_bot_provider, validate_live_channel_routing,
 };
 use crate::services::provider::ProviderKind;
 use formatting::ReplaceLongMessageOutcome;
@@ -730,11 +730,13 @@ impl TurnGateway for DiscordGateway {
             };
 
             for message_id in &intervention.source_message_ids {
-                // Both the standalone-queue (📬) and merged-queue (➕) reactions
+                // Every queue marker (standalone 📬, merged ➕, reconcile 🔄)
                 // must be cleaned up — `source_message_ids` collects every
                 // message that contributed to this intervention.
-                formatting::remove_reaction_raw(&self.http, channel_id, *message_id, '📬').await;
-                formatting::remove_reaction_raw(&self.http, channel_id, *message_id, '➕').await;
+                for emoji in queue_reactions::QUEUE_PENDING_REACTION_EMOJIS {
+                    formatting::remove_reaction_raw(&self.http, channel_id, *message_id, emoji)
+                        .await;
+                }
             }
 
             // codex review P2 (#1332 follow-up): merged interventions can carry
