@@ -14,6 +14,8 @@
 //! the root helper `discard_watcher_pending_buffer_after_suppressed_turn` keep
 //! calling them by their original names.
 
+use crate::services::cluster::stream_relay::{RelayDroppedFrame, RelayTurnIdentity};
+
 /// E5 (#2412): forward a freshly-read tmux output chunk into the
 /// supervisor-owned [`StreamRelay`] (if one exists for the session). The
 /// supervisor's [`RelayProducerRegistry`] is the bridge — it hands the
@@ -53,6 +55,7 @@ pub(super) struct SessionBoundRelayAckTarget {
 pub(super) struct SupervisorRelayForward {
     pub(super) mirrored: bool,
     pub(super) ack_target: Option<SessionBoundRelayAckTarget>,
+    pub(super) evicted_frames: Vec<RelayDroppedFrame>,
     /// #3041 P1-3 (codex P1-3 R7): TRUE when this forward SPLIT a result-bearing
     /// physical chunk and a NON-EMPTY trailing tail (a LATER turn's bytes) followed
     /// the just-completed turn's terminal frame. This is the turn-boundary signal:
@@ -72,6 +75,7 @@ impl SupervisorRelayForward {
         Self {
             mirrored: true,
             ack_target: None,
+            evicted_frames: Vec::new(),
             trailing_turn_follows: false,
         }
     }
@@ -80,9 +84,35 @@ impl SupervisorRelayForward {
         Self {
             mirrored: false,
             ack_target: None,
+            evicted_frames: Vec::new(),
             trailing_turn_follows: false,
         }
     }
+}
+
+pub(super) fn supervisor_relay_forward_fully_mirrors_turn(
+    forward: &SupervisorRelayForward,
+    current_turn: Option<&crate::services::discord::inflight::InflightTurnIdentity>,
+) -> bool {
+    if !forward.mirrored {
+        return false;
+    }
+    if forward.evicted_frames.is_empty() {
+        return true;
+    }
+    let Some(current_turn) = current_turn else {
+        return false;
+    };
+    let Some(current_start_offset) = current_turn.turn_start_offset else {
+        return false;
+    };
+    !forward.evicted_frames.iter().any(|evicted| {
+        let victim = &evicted.turn_identity;
+        !victim.has_strict_turn_start_offset()
+            || (victim.turn_user_msg_id == current_turn.user_msg_id
+                && victim.turn_started_at == current_turn.started_at
+                && victim.turn_start_offset == Some(current_start_offset))
+    })
 }
 
 /// #3041 P1-3 (codex P1-3 R6): turn-scope the session-bound terminal ACK target so
@@ -140,6 +170,27 @@ pub(super) fn forward_chunk_to_supervisor_relay(
         registry,
         cached_producer,
         None,
+        None,
+    )
+}
+
+pub(super) fn forward_chunk_to_supervisor_relay_for_turn(
+    tmux_session_name: &str,
+    chunk: &str,
+    registry: &std::sync::Arc<
+        crate::services::cluster::relay_producer_registry::RelayProducerRegistry,
+    >,
+    cached_producer: &mut Option<crate::services::cluster::stream_relay::RelayProducer>,
+    turn_identity: Option<&crate::services::discord::inflight::InflightTurnIdentity>,
+) -> SupervisorRelayForward {
+    let frame_identity = relay_turn_identity_for_session(turn_identity, tmux_session_name);
+    forward_chunk_to_supervisor_relay_inner(
+        tmux_session_name,
+        chunk,
+        registry,
+        cached_producer,
+        None,
+        frame_identity,
     )
 }
 
@@ -165,6 +216,7 @@ pub(super) fn forward_terminal_chunk_to_supervisor_relay(
         registry,
         cached_producer,
         Some(terminal),
+        None,
     )
 }
 
@@ -228,9 +280,14 @@ pub(super) fn forward_terminal_chunk_with_trailing_to_supervisor_relay(
     // satisfy turn A's terminal-ACK and the ACK stays bound to A's terminal frame.
     let tail_forward =
         forward_chunk_to_supervisor_relay(tmux_session_name, tail_part, registry, cached_producer);
+    let mirrored = terminal_forward.mirrored && tail_forward.mirrored;
+    let ack_target = terminal_forward.ack_target;
+    let mut evicted_frames = terminal_forward.evicted_frames;
+    evicted_frames.extend(tail_forward.evicted_frames);
     SupervisorRelayForward {
-        mirrored: terminal_forward.mirrored && tail_forward.mirrored,
-        ack_target: terminal_forward.ack_target,
+        mirrored,
+        ack_target,
+        evicted_frames,
         // #3041 P1-3 (codex P1-3 R7): a NON-EMPTY trailing tail means a LATER turn's
         // bytes followed THIS turn's terminal frame inside ONE physical chunk — a
         // turn-boundary signal. The watcher resets the stored ack AFTER this turn
@@ -286,6 +343,7 @@ pub(super) fn forward_chunk_to_supervisor_relay_inner(
     >,
     cached_producer: &mut Option<crate::services::cluster::stream_relay::RelayProducer>,
     terminal: Option<crate::services::cluster::stream_relay::TerminalCommitFence>,
+    frame_identity: Option<RelayTurnIdentity>,
 ) -> SupervisorRelayForward {
     if chunk.is_empty() {
         return SupervisorRelayForward::mirrored_without_ack();
@@ -309,7 +367,7 @@ pub(super) fn forward_chunk_to_supervisor_relay_inner(
     let ack_turn_start_offset = terminal.as_ref().and_then(|fence| fence.turn_start_offset);
     let outcome = match terminal {
         Some(fence) => producer.try_send_terminal_frame_with_sequence(payload, fence),
-        None => producer.try_send_frame_with_sequence(payload),
+        None => producer.try_send_frame_with_sequence_and_identity(payload, frame_identity),
     };
     if !outcome.is_alive() {
         // Relay was torn down between our registry read and the send —
@@ -319,17 +377,36 @@ pub(super) fn forward_chunk_to_supervisor_relay_inner(
         *cached_producer = None;
         return SupervisorRelayForward::not_mirrored();
     }
+    let ack_target = outcome.sequence.map(|sequence| SessionBoundRelayAckTarget {
+        metrics: producer.metrics().clone(),
+        sequence,
+        turn_start_offset: ack_turn_start_offset,
+    });
+    let evicted_frames = outcome.dropped_oldest.into_iter().collect();
     SupervisorRelayForward {
         mirrored: true,
-        ack_target: outcome.sequence.map(|sequence| SessionBoundRelayAckTarget {
-            metrics: producer.metrics().clone(),
-            sequence,
-            turn_start_offset: ack_turn_start_offset,
-        }),
+        ack_target,
+        evicted_frames,
         // A single forward of one frame never crosses a turn boundary; only the
         // split helper sets this when it forwards a separate trailing tail.
         trailing_turn_follows: false,
     }
+}
+
+fn relay_turn_identity_for_session(
+    identity: Option<&crate::services::discord::inflight::InflightTurnIdentity>,
+    tmux_session_name: &str,
+) -> Option<RelayTurnIdentity> {
+    let identity = identity?;
+    if identity.tmux_session_name.as_deref() != Some(tmux_session_name) {
+        return None;
+    }
+    let turn_start_offset = identity.turn_start_offset?;
+    Some(RelayTurnIdentity {
+        turn_user_msg_id: identity.user_msg_id,
+        turn_started_at: identity.started_at.clone(),
+        turn_start_offset: Some(turn_start_offset),
+    })
 }
 
 pub(super) fn terminal_event_consumed_offset(current_offset: u64, unprocessed_tail: &str) -> u64 {

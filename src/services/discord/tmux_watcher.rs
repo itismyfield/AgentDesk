@@ -1159,11 +1159,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 &mut cached_relay_producer,
                 fence,
             ),
-            None => forward_chunk_to_supervisor_relay(
+            None => forward_chunk_to_supervisor_relay_for_turn(
                 &tmux_session_name,
                 &decoded_data.text,
                 &producer_registry,
                 &mut cached_relay_producer,
+                turn_identity_for_panel.as_ref(),
             ),
         };
         // #3041 P1-3 R6: turn-scope the carried ack target. A fresh `Some` (THIS
@@ -1184,10 +1185,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // forward split a result+next-turn chunk, a later turn follows; reset the ack
         // after THIS turn's terminal ACK wait so the later turn never inherits it.
         split_trailing_turn_follows |= data_mirrored_to_session_relay.trailing_turn_follows;
+        let initial_forward_fully_mirrored = supervisor_relay_forward_fully_mirrors_turn(
+            &data_mirrored_to_session_relay,
+            turn_identity_for_panel.as_ref(),
+        );
         if initial_buffer_was_empty {
-            all_data_fully_mirrored_to_session_relay = data_mirrored_to_session_relay.mirrored;
+            all_data_fully_mirrored_to_session_relay = initial_forward_fully_mirrored;
         } else {
-            all_data_fully_mirrored_to_session_relay &= data_mirrored_to_session_relay.mirrored;
+            all_data_fully_mirrored_to_session_relay &= initial_forward_fully_mirrored;
         }
         let mut session_bound_relay_turn_fully_mirrored =
             all_data_fully_mirrored_to_session_relay && !restored_assistant_text_seen;
@@ -1439,11 +1444,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                     fence,
                                 )
                             }
-                            None => forward_chunk_to_supervisor_relay(
+                            None => forward_chunk_to_supervisor_relay_for_turn(
                                 &tmux_session_name,
                                 &decoded_chunk.text,
                                 &producer_registry,
                                 &mut cached_relay_producer,
+                                turn_identity_for_panel.as_ref(),
                             ),
                         };
                         // #3041 P1-3 R6: turn-scope the carried ack target (see the
@@ -1464,7 +1470,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         split_trailing_turn_follows |=
                             chunk_forwarded_to_session_relay.trailing_turn_follows;
                         let chunk_mirrored_to_session_relay =
-                            chunk_forwarded_to_session_relay.mirrored;
+                            supervisor_relay_forward_fully_mirrors_turn(
+                                &chunk_forwarded_to_session_relay,
+                                turn_identity_for_panel.as_ref(),
+                            );
                         session_bound_relay_turn_fully_mirrored &= chunk_mirrored_to_session_relay;
                         if chunk_buffer_was_empty {
                             all_data_fully_mirrored_to_session_relay =

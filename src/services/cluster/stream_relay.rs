@@ -98,6 +98,42 @@ pub enum DeliveryOutcome {
     Unknown,
 }
 
+/// The turn identity stamped on a relayed frame. Terminal frames use this as the
+/// commit-fence identity gate; non-terminal frames may also carry it so producer
+/// backpressure can attribute an evicted frame to the affected turn.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RelayTurnIdentity {
+    pub turn_user_msg_id: u64,
+    pub turn_started_at: String,
+    pub turn_start_offset: Option<u64>,
+}
+
+impl RelayTurnIdentity {
+    pub fn has_strict_turn_start_offset(&self) -> bool {
+        self.turn_start_offset.is_some()
+    }
+}
+
+/// A frame evicted from the producer queue before the relay task consumed it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelayDroppedFrame {
+    pub sequence: u64,
+    pub turn_identity: RelayTurnIdentity,
+}
+
+impl RelayDroppedFrame {
+    fn from_frame(frame: StreamFrame) -> Self {
+        Self {
+            sequence: frame.sequence,
+            turn_identity: RelayTurnIdentity {
+                turn_user_msg_id: frame.turn_user_msg_id,
+                turn_started_at: frame.turn_started_at,
+                turn_start_offset: frame.turn_start_offset,
+            },
+        }
+    }
+}
+
 /// An opaque stream frame emitted by a provider. Carries enough metadata for
 /// the sink to route + format without re-reading the rollout file.
 ///
@@ -148,7 +184,9 @@ pub struct StreamFrame {
     /// then pass the sink's identity gate for the NEW turn and wrongly advance.
     /// `turn_start_offset` is monotonic per turn (the next turn always begins at a
     /// strictly larger byte offset), so adding it to the IDENTITY GATE makes the
-    /// frame identity UNIQUE per turn. `None` on non-terminal frames.
+    /// frame identity UNIQUE per turn. Non-terminal frames may carry the same
+    /// identity for backpressure attribution, but only frames with
+    /// `terminal_consumed_end` can advance the sink commit fence.
     pub turn_start_offset: Option<u64>,
 }
 
@@ -301,18 +339,18 @@ fn decode_sequence_marker(marker: u64) -> Option<u64> {
     marker.checked_sub(1)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RelaySendOutcome {
     pub sequence: Option<u64>,
-    pub dropped_oldest_sequence: Option<u64>,
+    pub dropped_oldest: Option<RelayDroppedFrame>,
     pub closed: bool,
 }
 
 impl RelaySendOutcome {
-    fn enqueued(sequence: u64, dropped_oldest_sequence: Option<u64>) -> Self {
+    fn enqueued(sequence: u64, dropped_oldest: Option<RelayDroppedFrame>) -> Self {
         Self {
             sequence: Some(sequence),
-            dropped_oldest_sequence,
+            dropped_oldest,
             closed: false,
         }
     }
@@ -320,12 +358,12 @@ impl RelaySendOutcome {
     fn closed() -> Self {
         Self {
             sequence: None,
-            dropped_oldest_sequence: None,
+            dropped_oldest: None,
             closed: true,
         }
     }
 
-    pub fn is_alive(self) -> bool {
+    pub fn is_alive(&self) -> bool {
         !self.closed
     }
 }
@@ -463,6 +501,18 @@ impl RelayProducer {
     /// the sequence to distinguish "handed to relay" from "Discord sink has
     /// actually accepted the terminal frame" before clearing inflight state.
     pub fn try_send_frame_with_sequence(&self, payload: String) -> RelaySendOutcome {
+        self.try_send_frame_with_sequence_and_identity(payload, None)
+    }
+
+    /// Non-blocking enqueue for a non-terminal frame with optional turn identity.
+    /// The identity is inert for sink commits (`terminal_consumed_end` stays None)
+    /// but lets a later backpressure eviction degrade the affected turn's mirror
+    /// state instead of reporting a false fully-mirrored path.
+    pub fn try_send_frame_with_sequence_and_identity(
+        &self,
+        payload: String,
+        frame_identity: Option<RelayTurnIdentity>,
+    ) -> RelaySendOutcome {
         try_send_frame_inner(
             &self.matched,
             &self.queue,
@@ -471,6 +521,7 @@ impl RelayProducer {
             &self.sequence,
             payload,
             None,
+            frame_identity,
         )
     }
 
@@ -492,6 +543,7 @@ impl RelayProducer {
             &self.sequence,
             payload,
             Some(terminal),
+            None,
         )
     }
 }
@@ -507,7 +559,7 @@ impl std::fmt::Debug for RelayProducer {
 
 enum QueuePushResult {
     Enqueued,
-    DroppedOldest(u64),
+    DroppedOldest(RelayDroppedFrame),
     Closed,
 }
 
@@ -546,16 +598,16 @@ impl RelayFrameQueue {
         if inner.closed {
             return QueuePushResult::Closed;
         }
-        let dropped_sequence = if inner.frames.len() >= self.capacity {
-            inner.frames.pop_front().map(|frame| frame.sequence)
+        let dropped = if inner.frames.len() >= self.capacity {
+            inner.frames.pop_front().map(RelayDroppedFrame::from_frame)
         } else {
             None
         };
         inner.frames.push_back(frame);
         drop(inner);
         self.notify.notify_one();
-        if let Some(sequence) = dropped_sequence {
-            QueuePushResult::DroppedOldest(sequence)
+        if let Some(frame) = dropped {
+            QueuePushResult::DroppedOldest(frame)
         } else {
             QueuePushResult::Enqueued
         }
@@ -627,40 +679,42 @@ fn try_send_frame_inner(
     sequence: &Arc<AtomicU64>,
     payload: String,
     terminal: Option<TerminalCommitFence>,
+    frame_identity: Option<RelayTurnIdentity>,
 ) -> RelaySendOutcome {
     if shutdown.load(Ordering::Acquire) {
         return RelaySendOutcome::closed();
     }
     let seq = sequence.fetch_add(1, Ordering::AcqRel);
-    let (terminal_consumed_end, turn_user_msg_id, turn_started_at, turn_start_offset) =
-        match terminal {
-            Some(fence) => (
-                Some(fence.consumed_end),
-                fence.turn_user_msg_id,
-                fence.turn_started_at,
-                fence.turn_start_offset,
-            ),
-            None => (None, 0, String::new(), None),
-        };
+    let (terminal_consumed_end, frame_identity) = match terminal {
+        Some(fence) => (
+            Some(fence.consumed_end),
+            RelayTurnIdentity {
+                turn_user_msg_id: fence.turn_user_msg_id,
+                turn_started_at: fence.turn_started_at,
+                turn_start_offset: fence.turn_start_offset,
+            },
+        ),
+        None => (None, frame_identity.unwrap_or_default()),
+    };
     let frame = StreamFrame {
         session_name: matched.expected_session_name.clone(),
         binding: matched.clone(),
         payload,
         sequence: seq,
         terminal_consumed_end,
-        turn_user_msg_id,
-        turn_started_at,
-        turn_start_offset,
+        turn_user_msg_id: frame_identity.turn_user_msg_id,
+        turn_started_at: frame_identity.turn_started_at,
+        turn_start_offset: frame_identity.turn_start_offset,
     };
     metrics.frames_received.fetch_add(1, Ordering::AcqRel);
     match queue.push_drop_oldest(frame) {
         QueuePushResult::Enqueued => RelaySendOutcome::enqueued(seq, None),
-        QueuePushResult::DroppedOldest(dropped_sequence) => {
+        QueuePushResult::DroppedOldest(dropped) => {
             metrics.dropped_frames.fetch_add(1, Ordering::AcqRel);
             metrics
                 .last_dropped_sequence_plus_one
-                .fetch_max(encode_sequence_marker(dropped_sequence), Ordering::AcqRel);
-            RelaySendOutcome::enqueued(seq, Some(dropped_sequence))
+                .fetch_max(encode_sequence_marker(dropped.sequence), Ordering::AcqRel);
+            RelaySendOutcome::enqueued(seq, Some(dropped))
         }
         QueuePushResult::Closed => RelaySendOutcome::closed(),
     }
@@ -710,6 +764,7 @@ impl StreamRelayHandle {
             &self.metrics,
             &self.sequence,
             payload,
+            None,
             None,
         )
     }
@@ -1117,6 +1172,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn backpressure_eviction_outcome_carries_victim_turn_identity() {
+        let blocking_sink = Arc::new(BlockingSequenceSink {
+            first_started: tokio::sync::Notify::new(),
+            unblock: tokio::sync::Notify::new(),
+            block_first: AtomicBool::new(true),
+        });
+        let handle = spawn_stream_relay_with_buffer(
+            matched_for("c-evicted-identity"),
+            blocking_sink.clone() as Arc<dyn RelaySink>,
+            1,
+        );
+
+        assert_eq!(
+            handle
+                .try_send_frame_with_sequence("blocked-in-sink".into())
+                .sequence,
+            Some(0)
+        );
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            blocking_sink.first_started.notified(),
+        )
+        .await
+        .expect("first frame reaches blocked sink");
+
+        let producer = handle.producer();
+        let victim = producer.try_send_frame_with_sequence_and_identity(
+            "victim".into(),
+            Some(RelayTurnIdentity {
+                turn_user_msg_id: 77,
+                turn_started_at: "2026-06-04T00:00:00Z".to_string(),
+                turn_start_offset: Some(64),
+            }),
+        );
+        let newest = producer.try_send_frame_with_sequence_and_identity(
+            "newest".into(),
+            Some(RelayTurnIdentity {
+                turn_user_msg_id: 88,
+                turn_started_at: "2026-06-04T00:00:01Z".to_string(),
+                turn_start_offset: Some(128),
+            }),
+        );
+
+        assert_eq!(victim.sequence, Some(1));
+        assert_eq!(newest.sequence, Some(2));
+        let dropped = newest
+            .dropped_oldest
+            .as_ref()
+            .expect("overflow should report the evicted victim frame");
+        assert_eq!(dropped.sequence, 1);
+        assert_eq!(dropped.turn_identity.turn_user_msg_id, 77);
+        assert_eq!(
+            dropped.turn_identity.turn_started_at.as_str(),
+            "2026-06-04T00:00:00Z"
+        );
+        assert_eq!(dropped.turn_identity.turn_start_offset, Some(64));
+
+        blocking_sink.unblock.notify_waiters();
+        wait_until(
+            || handle.metrics().snapshot().last_delivered_sequence == Some(2),
+            "newest frame delivered",
+        )
+        .await;
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn sequence_outcome_tracks_delivery_error_and_drop_sequences() {
         let sink = Arc::new(CapturingSink::default());
         sink.fail_next.store(true, Ordering::Release);
@@ -1163,7 +1285,10 @@ mod tests {
         let newest = drop_handle.try_send_frame_with_sequence("newest".into());
         assert_eq!(queued.sequence, Some(1));
         assert_eq!(newest.sequence, Some(2));
-        assert_eq!(newest.dropped_oldest_sequence, Some(1));
+        assert_eq!(
+            newest.dropped_oldest.as_ref().map(|frame| frame.sequence),
+            Some(1)
+        );
         assert_eq!(
             drop_handle.metrics().snapshot().last_dropped_sequence,
             Some(1)
