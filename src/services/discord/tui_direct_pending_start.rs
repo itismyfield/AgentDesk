@@ -717,6 +717,7 @@ async fn submit_stale_foreign_inflight_cancel(
     if !probe.pin.matches_state(&current)
         || mailbox_active_user_msg_id != probe.pin.mailbox_active_user_msg_id
         || current.updated_at != probe.updated_at
+        || current.save_generation != probe.save_generation
     {
         tracing::warn!(
             provider = %provider.as_str(),
@@ -729,6 +730,8 @@ async fn submit_stale_foreign_inflight_cancel(
             current_tmux_session = ?current.tmux_session_name,
             expected_updated_at = %probe.updated_at,
             current_updated_at = %current.updated_at,
+            expected_save_generation = probe.save_generation,
+            current_save_generation = current.save_generation,
             "tui_direct_pending_start: stale FOREIGN cancel no-op; identity/death-evidence pin no longer matches"
         );
         return false;
@@ -755,6 +758,7 @@ async fn submit_stale_foreign_inflight_cancel(
             channel_id.get(),
             &stale_identity,
             &probe.updated_at,
+            probe.save_generation,
         );
 
     let gone_or_changed = !super::inflight::load_inflight_state(provider, channel_id.get())
@@ -1645,9 +1649,18 @@ mod tests {
         let path = inflight_fixture_path(root, provider, state.channel_id);
         std::fs::create_dir_all(path.parent().expect("inflight parent"))
             .expect("create inflight fixture dir");
+        let existing_generation = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|content| {
+                serde_json::from_str::<super::super::inflight::InflightTurnState>(&content).ok()
+            })
+            .map(|state| state.save_generation)
+            .unwrap_or(0);
+        let mut state = state.clone();
+        state.save_generation = existing_generation.saturating_add(1);
         std::fs::write(
             path,
-            serde_json::to_string_pretty(state).expect("serialize inflight fixture"),
+            serde_json::to_string_pretty(&state).expect("serialize inflight fixture"),
         )
         .expect("write inflight fixture");
     }
@@ -1723,6 +1736,12 @@ mod tests {
         use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
         let _guard = worker_test_lock();
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let temp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
         reset_present_for_tests();
         let shared = super::super::make_shared_data_for_tests();
 
@@ -2116,7 +2135,7 @@ mod tests {
             let provider_for_task = provider.clone();
             let mut revived = state.clone();
             let revival = tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                 revived.updated_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
                 write_inflight_fixture(&root_path, &provider_for_task, &revived);
             });
@@ -2129,7 +2148,10 @@ mod tests {
             let current = super::super::inflight::load_inflight_state(&provider, channel_id)
                 .expect("revived inflight must remain");
             assert_eq!(current.user_msg_id, stale_msg);
-            assert_ne!(current.updated_at, state.updated_at);
+            assert!(
+                current.save_generation > state.save_generation,
+                "same-second revival must be observed via save_generation"
+            );
             assert!(
                 !token.cancelled.load(std::sync::atomic::Ordering::Relaxed),
                 "revived same-identity turn must not be canceled"
@@ -2223,6 +2245,12 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
 
         let _guard = worker_test_lock();
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let temp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
         reset_present_for_tests();
         let shared = super::super::make_shared_data_for_tests();
 
@@ -2332,6 +2360,12 @@ mod tests {
         use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
         let _guard = worker_test_lock();
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let temp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
         reset_present_for_tests();
         let shared = super::super::make_shared_data_for_tests();
 
@@ -2457,6 +2491,12 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
 
         let _guard = worker_test_lock();
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let temp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
         reset_present_for_tests();
         let shared = super::super::make_shared_data_for_tests();
 

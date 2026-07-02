@@ -86,6 +86,7 @@ fn save_inflight_state_create_new_in_root(
         "src/services/discord/inflight.rs:save_inflight_state_create_new_in_root",
     );
     updated.updated_at = now_string();
+    bump_save_generation_for_write(&path, &mut updated);
     let json = serde_json::to_string_pretty(&updated)
         .map_err(|e| CreateNewInflightError::Internal(e.to_string()))?;
 
@@ -135,6 +136,7 @@ pub(super) fn save_inflight_state_in_root(
         return Ok(());
     }
     updated.updated_at = now_string();
+    bump_save_generation_for_write(&path, &mut updated);
     let json = serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())?;
     atomic_write(&path, &json)
 }
@@ -185,6 +187,7 @@ fn save_inflight_state_if_absent_in_root(
         "src/services/discord/inflight.rs:save_inflight_state_if_absent_in_root",
     );
     updated.updated_at = now_string();
+    bump_save_generation_for_write(&path, &mut updated);
     let json = serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())?;
     atomic_write(&path, &json)?;
     Ok(true)
@@ -366,6 +369,7 @@ fn save_existing_inflight_rebind_adoption_impl_in_root(
         "src/services/discord/inflight.rs:save_existing_inflight_rebind_adoption_if_matches_identity_in_root",
     );
     updated.updated_at = now_string();
+    bump_save_generation_for_write(&path, &mut updated);
     let Ok(json) = serde_json::to_string_pretty(&updated) else {
         return GuardedSaveOutcome::IoError;
     };
@@ -440,6 +444,7 @@ pub(super) fn save_inflight_state_if_matches_identity_in_root(
         "src/services/discord/inflight.rs:save_inflight_state_if_matches_identity_in_root",
     );
     updated.updated_at = now_string();
+    bump_save_generation_for_write(&path, &mut updated);
     let Ok(json) = serde_json::to_string_pretty(&updated) else {
         return GuardedSaveOutcome::IoError;
     };

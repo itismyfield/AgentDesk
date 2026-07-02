@@ -6,7 +6,14 @@ use poise::serenity_prelude::{ChannelId, MessageId};
 use super::{SharedData, inflight, mailbox_snapshot};
 use crate::services::provider::ProviderKind;
 
-const DESTRUCTIVE_CANCEL_REPROBE_DELAY: Duration = Duration::from_millis(250);
+#[cfg(not(test))]
+const DESTRUCTIVE_CANCEL_REPROBE_DELAY: Duration = Duration::from_secs(1);
+#[cfg(test)]
+const DESTRUCTIVE_CANCEL_REPROBE_DELAY: Duration = Duration::from_millis(10);
+#[cfg(not(test))]
+const DESTRUCTIVE_CANCEL_REPROBE_ATTEMPTS: usize = 3;
+#[cfg(test)]
+const DESTRUCTIVE_CANCEL_REPROBE_ATTEMPTS: usize = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::services::discord) struct DestructiveCancelIdentityPin {
@@ -40,6 +47,7 @@ impl DestructiveCancelIdentityPin {
 pub(in crate::services::discord) struct DestructiveCancelProbeSnapshot {
     pub pin: DestructiveCancelIdentityPin,
     pub updated_at: String,
+    pub save_generation: u64,
     pub output_path: Option<String>,
     pub output_len: Option<u64>,
     pub relay_frontier: Option<u64>,
@@ -64,6 +72,7 @@ impl DestructiveCancelProbeSnapshot {
         Self {
             pin: DestructiveCancelIdentityPin::from_state(state, mailbox_active_user_msg_id),
             updated_at: state.updated_at.clone(),
+            save_generation: state.save_generation,
             output_path,
             output_len,
             relay_frontier,
@@ -88,6 +97,7 @@ impl DestructiveCancelProbeSnapshot {
         Self {
             pin,
             updated_at: state.updated_at.clone(),
+            save_generation: state.save_generation,
             output_path,
             output_len,
             relay_frontier,
@@ -132,55 +142,81 @@ pub(in crate::services::discord) async fn evaluate(
         return DestructiveCancelGate::Denied("missing_finalizer_turn_id");
     }
 
-    if let Some(tmux_session) = snapshot.pin.tmux_session_name.as_deref() {
-        match shared.tmux_watchers.tmux_session_is_stale(tmux_session) {
-            Some(false) => return DestructiveCancelGate::Denied("fresh_watcher_heartbeat"),
-            Some(true) => return DestructiveCancelGate::Allowed("watcher_heartbeat_stale"),
-            None => {}
-        }
-    } else if let Some(watcher) = shared.tmux_watchers.get(&watcher_owner_channel) {
-        if !watcher.heartbeat_stale() {
-            return DestructiveCancelGate::Denied("fresh_watcher_heartbeat");
-        }
-        return DestructiveCancelGate::Allowed("watcher_heartbeat_stale");
-    }
-
     if snapshot.output_path.as_deref().is_some_and(|path| {
         crate::services::tui_turn_state::jsonl_turn_end_terminator_idle(provider, Path::new(path))
     }) {
         return DestructiveCancelGate::Allowed("terminal_envelope_present");
     }
 
-    tokio::time::sleep(DESTRUCTIVE_CANCEL_REPROBE_DELAY).await;
+    let watcher_heartbeat_stale =
+        if let Some(tmux_session) = snapshot.pin.tmux_session_name.as_deref() {
+            match shared.tmux_watchers.tmux_session_is_stale(tmux_session) {
+                Some(false) => return DestructiveCancelGate::Denied("fresh_watcher_heartbeat"),
+                Some(true) => true,
+                None => false,
+            }
+        } else if let Some(watcher) = shared.tmux_watchers.get(&watcher_owner_channel) {
+            if !watcher.heartbeat_stale() {
+                return DestructiveCancelGate::Denied("fresh_watcher_heartbeat");
+            }
+            true
+        } else {
+            false
+        };
 
-    let Some(current) = inflight::load_inflight_state(provider, channel.get()) else {
-        return DestructiveCancelGate::Denied("inflight_missing_on_reprobe");
+    let Some(expected_output_path) = snapshot.output_path.as_deref() else {
+        return DestructiveCancelGate::Denied("halt_evidence_incomplete");
     };
-    let mailbox_active_user_msg_id = mailbox_snapshot(shared, channel)
-        .await
-        .active_user_message_id
-        .map(MessageId::get);
-    if !snapshot.pin.matches_state(&current)
-        || mailbox_active_user_msg_id != snapshot.pin.mailbox_active_user_msg_id
-    {
-        return DestructiveCancelGate::Denied("identity_mismatch_on_reprobe");
-    }
-    if current.updated_at != snapshot.updated_at {
-        return DestructiveCancelGate::Denied("inflight_refreshed_on_reprobe");
+    let Some(expected_output_len) = snapshot.output_len else {
+        return DestructiveCancelGate::Denied("halt_evidence_incomplete");
+    };
+    let Some(expected_relay_frontier) = snapshot.relay_frontier else {
+        return DestructiveCancelGate::Denied("halt_evidence_incomplete");
+    };
+
+    for _ in 0..DESTRUCTIVE_CANCEL_REPROBE_ATTEMPTS {
+        tokio::time::sleep(DESTRUCTIVE_CANCEL_REPROBE_DELAY).await;
+
+        let Some(current) = inflight::load_inflight_state(provider, channel.get()) else {
+            return DestructiveCancelGate::Denied("inflight_missing_on_reprobe");
+        };
+        let mailbox_active_user_msg_id = mailbox_snapshot(shared, channel)
+            .await
+            .active_user_message_id
+            .map(MessageId::get);
+        if !snapshot.pin.matches_state(&current)
+            || mailbox_active_user_msg_id != snapshot.pin.mailbox_active_user_msg_id
+        {
+            return DestructiveCancelGate::Denied("identity_mismatch_on_reprobe");
+        }
+        if current.updated_at != snapshot.updated_at
+            || current.save_generation != snapshot.save_generation
+        {
+            return DestructiveCancelGate::Denied("inflight_refreshed_on_reprobe");
+        }
+        if current
+            .output_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            != Some(expected_output_path)
+        {
+            return DestructiveCancelGate::Denied("output_path_changed_on_reprobe");
+        }
+
+        let output_len_now = std::fs::metadata(expected_output_path)
+            .ok()
+            .map(|metadata| metadata.len());
+        if output_len_now != Some(expected_output_len) {
+            return DestructiveCancelGate::Denied("capture_progress_on_reprobe");
+        }
+        if shared.committed_relay_offset(watcher_owner_channel) != expected_relay_frontier {
+            return DestructiveCancelGate::Denied("relay_frontier_progress_on_reprobe");
+        }
     }
 
-    let output_len_now = snapshot
-        .output_path
-        .as_deref()
-        .and_then(|path| std::fs::metadata(path).ok())
-        .map(|metadata| metadata.len());
-    let output_halted = output_len_now.is_some() && output_len_now == snapshot.output_len;
-    let relay_frontier_halted = snapshot
-        .relay_frontier
-        .is_none_or(|frontier| shared.committed_relay_offset(watcher_owner_channel) == frontier);
-    if output_halted && relay_frontier_halted {
-        return DestructiveCancelGate::Allowed("capture_and_jsonl_halted");
+    if watcher_heartbeat_stale {
+        return DestructiveCancelGate::Allowed("capture_and_jsonl_halted_with_stale_watcher");
     }
-
-    DestructiveCancelGate::Denied("death_evidence_missing")
+    DestructiveCancelGate::Allowed("capture_and_jsonl_halted")
 }

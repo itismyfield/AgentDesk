@@ -3,6 +3,12 @@
 //! This module is intentionally narrow: it turns the read-only relay health
 //! classifier into an operator-facing decision, and only applies local,
 //! idempotent cleanup when the evidence is strong enough.
+//!
+//! Known residual limitations for follow-up issues: a committed-but-leaked
+//! inflight row still has no independent self-heal path here, and stage-3
+//! recovery where `watcher_attached=false` still relies on the pending-start
+//! backstop trigger. Do not broaden those paths inside the #4030 watcher-cancel
+//! fix; they need separate design/review.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -268,12 +274,12 @@ fn eligible_orphan_pending_token(snapshot: &RelayHealthSnapshot) -> bool {
 }
 
 fn eligible_reattach_watcher(snapshot: &RelayHealthSnapshot) -> bool {
-    // #3277 (Defect D): a watcher binding whose handle is provably DEAD
-    // (cancelled or heartbeat-stale — `watcher_attached_stale`) must not
-    // block the bounded reattach the way a genuinely-live watcher does. A
-    // fresh-heartbeat live watcher still makes this ineligible: auto-heal
-    // never replaces a live handle (that case is the finalizer far-backstop's
-    // job, #3277 Defect C).
+    // #3277 (Defect D): a watcher binding whose heartbeat is stale
+    // (`watcher_attached_stale`) must not block bounded reattach the way a
+    // genuinely-live watcher does. A fresh-heartbeat live watcher still makes
+    // this ineligible: auto-heal never replaces a live handle (that case is the
+    // finalizer far-backstop's job, #3277 Defect C). Cancelled handles are
+    // replaced by the watcher claim path, not mislabeled as heartbeat-stale.
     //
     // A mailbox token is strong live-turn evidence, but it is not required for
     // post-restart adoption: a valid inflight row can outlive the in-memory
@@ -625,11 +631,16 @@ fn reattach_apply_status(watcher_spawned: bool) -> &'static str {
 
 fn relay_frontier_dead_reattach_owner(decision: &RelayRecoveryDecision) -> Option<ChannelId> {
     let evidence = &decision.evidence;
+    // Destructive watcher cancel is reserved for the dead-frontier shape. Once
+    // relay delivered any bytes (`last_relay_offset > 0`), the old recovery
+    // invariant applies: keep the turn intact and let rebind restore watcher
+    // coverage instead of cancelling a potentially-live CLI turn.
     if decision.relay_stall_state != RelayStallState::TmuxAliveRelayDead
         || !evidence.desynced
         || evidence.tmux_alive != Some(true)
         || !evidence.watcher_attached
         || !evidence.watcher_owns_live_relay
+        || evidence.last_relay_offset != 0
     {
         return None;
     }
@@ -862,6 +873,13 @@ async fn apply_relay_recovery_decision(
             completion_footer::forget_if_message(channel, decision.affected.bridge_current_msg_id);
             if let Some(tmux_session) = decision.affected.tmux_session.as_deref()
                 && decision.evidence.unread_bytes.unwrap_or(0) == 0
+                // This branch intentionally does not route through
+                // `destructive_cancel_gate`: `idle_tmux_repair_ready_for_input`
+                // is the turn-scope proof that the provider prompt has returned
+                // (structured JSONL ready state, or tmux prompt fallback), and the
+                // following inflight/tail guards prove there is no deliverable
+                // assistant body left to preserve. The cleanup below only retires
+                // stale mailbox/inflight bookkeeping for an already-idle turn.
                 && idle_tmux_repair_ready_for_input(provider, decision.channel_id, tmux_session)
                 && super::inflight::inflight_state_allows_idle_tmux_repair(
                     provider,
@@ -933,61 +951,108 @@ async fn apply_relay_recovery_decision(
                         )
                         .await;
                         if gate.is_allowed() {
-                            let lifecycle_identity = super::inflight::load_inflight_state(
+                            let current = super::inflight::load_inflight_state(
                                 provider,
                                 owner_channel_id.get(),
-                            )
-                            .map(|state| {
-                                (
-                                    super::inflight::InflightTurnIdentity::from_state(&state),
-                                    state.updated_at,
-                                )
+                            );
+                            let mailbox_active_user_msg_id =
+                                mailbox_snapshot(shared, owner_channel_id)
+                                    .await
+                                    .active_user_message_id
+                                    .map(|id| id.get());
+                            let current_matches_probe = current.as_ref().is_some_and(|state| {
+                                probe.pin.matches_state(state)
+                                    && mailbox_active_user_msg_id
+                                        == probe.pin.mailbox_active_user_msg_id
+                                    && state.updated_at == probe.updated_at
+                                    && state.save_generation == probe.save_generation
                             });
-                            let watcher_removed = expected_watcher.as_ref().is_some_and(
-                                |(tmux_session_name, output_path, cancel)| {
+                            if !current_matches_probe {
+                                tracing::warn!(
+                                    target: "agentdesk::discord::relay_recovery",
+                                    provider = provider.as_str(),
+                                    channel_id = decision.channel_id,
+                                    watcher_owner_channel_id = owner_channel_id.get(),
+                                    death_evidence = gate.allowed_reason().unwrap_or("unknown"),
+                                    expected_updated_at = %probe.updated_at,
+                                    current_updated_at = %current.as_ref().map(|state| state.updated_at.as_str()).unwrap_or("<missing>"),
+                                    expected_save_generation = probe.save_generation,
+                                    current_save_generation = current.as_ref().map(|state| state.save_generation).unwrap_or(0),
+                                    expected_mailbox_active_user_msg_id = probe.pin.mailbox_active_user_msg_id.unwrap_or(0),
+                                    mailbox_active_user_msg_id = mailbox_active_user_msg_id.unwrap_or(0),
+                                    "relay recovery skipped destructive watcher cancel after gate; owner row changed during death-evidence reprobe"
+                                );
+                            } else if let Some((tmux_session_name, output_path, cancel)) =
+                                expected_watcher.as_ref()
+                            {
+                                let watcher_removed =
                                     shared.tmux_watchers.cancel_and_remove_channel_if_current(
                                         &owner_channel_id,
                                         tmux_session_name,
                                         output_path,
                                         cancel,
-                                    )
-                                },
-                            );
-                            let finalize_outcome = finalize_cancelled_watcher_owner_turn(
-                                shared,
-                                provider,
-                                decision,
-                                owner_channel_id,
-                            )
-                            .await;
-                            let lifecycle_clear_outcome =
-                                lifecycle_identity.as_ref().map(|(identity, updated_at)| {
-                                    super::inflight::clear_lifecycle_inflight_state_if_matches_identity_after_death_evidence(
+                                    );
+                                if !watcher_removed {
+                                    tracing::warn!(
+                                        target: "agentdesk::discord::relay_recovery",
+                                        provider = provider.as_str(),
+                                        channel_id = decision.channel_id,
+                                        watcher_owner_channel_id = owner_channel_id.get(),
+                                        death_evidence = gate.allowed_reason().unwrap_or("unknown"),
+                                        "relay recovery skipped destructive watcher cancel after gate; expected watcher was not current"
+                                    );
+                                } else {
+                                    let current =
+                                        current.expect("checked by current_matches_probe");
+                                    let lifecycle_identity =
+                                        super::inflight::InflightTurnIdentity::from_state(&current);
+                                    let lifecycle_updated_at = current.updated_at.clone();
+                                    let lifecycle_save_generation = current.save_generation;
+                                    let finalize_outcome = finalize_cancelled_watcher_owner_turn(
+                                        shared,
                                         provider,
-                                        owner_channel_id.get(),
-                                        identity,
-                                        updated_at,
+                                        decision,
+                                        owner_channel_id,
                                     )
-                                });
-                            tracing::warn!(
-                                target: "agentdesk::discord::relay_recovery",
-                                provider = provider.as_str(),
-                                channel_id = decision.channel_id,
-                                watcher_owner_channel_id = owner_channel_id.get(),
-                                last_relay_offset = decision.evidence.last_relay_offset,
-                                last_capture_offset = ?decision.evidence.last_capture_offset,
-                                unread_bytes = ?decision.evidence.unread_bytes,
-                                death_evidence = gate.allowed_reason().unwrap_or("unknown"),
-                                watcher_removed,
-                                lifecycle_clear_outcome = ?lifecycle_clear_outcome,
-                                finalizer_outcome = match finalize_outcome {
-                                    Some(super::turn_finalizer::FinalizeOutcome::Finalized { .. }) => "finalized",
-                                    Some(super::turn_finalizer::FinalizeOutcome::AlreadyFinalized) => "already_finalized",
-                                    Some(super::turn_finalizer::FinalizeOutcome::Deferred) => "deferred",
-                                    None => "missing_identity",
-                                },
-                                "relay recovery cancelled watcher with death evidence before reattach"
-                            );
+                                    .await;
+                                    let lifecycle_clear_outcome =
+                                        super::inflight::clear_lifecycle_inflight_state_if_matches_identity_after_death_evidence(
+                                            provider,
+                                            owner_channel_id.get(),
+                                            &lifecycle_identity,
+                                            &lifecycle_updated_at,
+                                            lifecycle_save_generation,
+                                        );
+                                    tracing::warn!(
+                                        target: "agentdesk::discord::relay_recovery",
+                                        provider = provider.as_str(),
+                                        channel_id = decision.channel_id,
+                                        watcher_owner_channel_id = owner_channel_id.get(),
+                                        last_relay_offset = decision.evidence.last_relay_offset,
+                                        last_capture_offset = ?decision.evidence.last_capture_offset,
+                                        unread_bytes = ?decision.evidence.unread_bytes,
+                                        death_evidence = gate.allowed_reason().unwrap_or("unknown"),
+                                        watcher_removed,
+                                        lifecycle_clear_outcome = ?lifecycle_clear_outcome,
+                                        finalizer_outcome = match finalize_outcome {
+                                            Some(super::turn_finalizer::FinalizeOutcome::Finalized { .. }) => "finalized",
+                                            Some(super::turn_finalizer::FinalizeOutcome::AlreadyFinalized) => "already_finalized",
+                                            Some(super::turn_finalizer::FinalizeOutcome::Deferred) => "deferred",
+                                            None => "missing_identity",
+                                        },
+                                        "relay recovery cancelled watcher with death evidence before reattach"
+                                    );
+                                }
+                            } else {
+                                tracing::warn!(
+                                    target: "agentdesk::discord::relay_recovery",
+                                    provider = provider.as_str(),
+                                    channel_id = decision.channel_id,
+                                    watcher_owner_channel_id = owner_channel_id.get(),
+                                    death_evidence = gate.allowed_reason().unwrap_or("unknown"),
+                                    "relay recovery skipped destructive watcher cancel after gate; no expected watcher identity was captured"
+                                );
+                            }
                         } else {
                             tracing::warn!(
                                 target: "agentdesk::discord::relay_recovery",
@@ -1145,7 +1210,13 @@ mod tests {
 
     fn isolated_agentdesk_root() -> (AgentdeskRootGuard, tempfile::TempDir) {
         let temp = tempfile::TempDir::new().unwrap();
-        let guard = AgentdeskRootGuard(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let guard = AgentdeskRootGuard {
+            previous: std::env::var_os("AGENTDESK_ROOT_DIR"),
+            _lock: lock,
+        };
         unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
         (guard, temp)
     }
@@ -1479,7 +1550,7 @@ mod tests {
     }
 
     #[test]
-    fn watcher_owned_live_relay_with_relay_progress_is_not_classified_dead_but_can_be_gated() {
+    fn watcher_owned_live_relay_with_relay_progress_is_not_destructive_cancel_candidate() {
         let snapshot = RelayHealthSnapshot {
             provider: "claude".to_string(),
             channel_id: 1509350393350459434,
@@ -1511,10 +1582,9 @@ mod tests {
             plan_relay_recovery(&snapshot, RelayStallState::TmuxAliveRelayDead, 1_000);
         assert_eq!(
             relay_frontier_dead_reattach_owner(&forced_dead_decision),
-            Some(ChannelId::new(1509350393350459434)),
-            "Fable 4: once a later snapshot classifies the relay as dead, a nonzero frozen \
-             frontier is a destructive-cancel candidate; the shared death/identity gate, not \
-             absolute-zero math, decides whether cancel is allowed"
+            None,
+            "a nonzero relay frontier is progress evidence; even if a later snapshot is \
+             relay-dead, recovery must use non-destructive rebind instead of destructive cancel"
         );
     }
 
@@ -1723,6 +1793,97 @@ mod tests {
             super::super::inflight::load_inflight_state(&provider, channel.get()).is_none(),
             "finalizer-routed watcher cancel must clear the owning inflight row"
         );
+    }
+
+    #[tokio::test]
+    async fn stale_watcher_with_jsonl_progress_rebinds_without_canceling_turn() {
+        let _guard = auto_heal_test_lock().lock().await;
+        clear_auto_heal_attempts_for_tests();
+        let (_root_guard, root_dir) = isolated_agentdesk_root();
+        let provider = ProviderKind::Codex;
+        let (registry, shared) = registry_with_shared(provider.clone()).await;
+        let channel = ChannelId::new(4_030_004);
+        let user_msg = MessageId::new(4_030_104);
+        let tmux = "AgentDesk-codex-4030-jsonl-progress";
+        let output_path = root_dir.path().join("jsonl-progress.jsonl");
+        std::fs::write(&output_path, "chunk-1").expect("write output fixture");
+        let token = start_test_turn(&shared, channel, user_msg).await;
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+
+        let mut state = super::super::inflight::InflightTurnState::new(
+            provider.clone(),
+            channel.get(),
+            None,
+            1,
+            user_msg.get(),
+            4_030_204,
+            "watcher-owned active turn".to_string(),
+            None,
+            Some(tmux.to_string()),
+            Some(output_path.to_string_lossy().to_string()),
+            None,
+            0,
+        );
+        state.set_relay_owner_kind(super::super::inflight::RelayOwnerKind::Watcher);
+        super::super::inflight::save_inflight_state(&state).expect("save watcher inflight");
+        shared.turn_finalizer.register_start(
+            super::super::turn_finalizer::TurnKey::new(
+                channel,
+                state.effective_finalizer_turn_id(),
+                shared.restart.current_generation,
+            ),
+            provider.clone(),
+            super::super::inflight::RelayOwnerKind::Watcher,
+            &shared,
+        );
+        let (watcher, _) = test_watcher_handle(tmux, &output_path);
+        watcher.last_heartbeat_ts_ms.store(1, Ordering::Release);
+        shared.tmux_watchers.insert(channel, watcher);
+
+        let snapshot = RelayHealthSnapshot {
+            provider: provider.as_str().to_string(),
+            channel_id: channel.get(),
+            active_turn: RelayActiveTurn::Foreground,
+            tmux_session: Some(tmux.to_string()),
+            tmux_alive: Some(true),
+            watcher_attached: true,
+            watcher_owner_channel_id: Some(channel.get()),
+            watcher_owns_live_relay: true,
+            bridge_inflight_present: true,
+            mailbox_has_cancel_token: true,
+            mailbox_active_user_msg_id: Some(user_msg.get()),
+            last_capture_offset: Some(128),
+            last_relay_offset: 0,
+            unread_bytes: Some(128),
+            desynced: true,
+            ..snapshot()
+        };
+        let mut decision =
+            plan_relay_recovery(&snapshot, RelayStallState::TmuxAliveRelayDead, 1_000);
+        decision.affected.finalizer_turn_id = Some(state.effective_finalizer_turn_id());
+
+        let output_for_task = output_path.clone();
+        let progress = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            std::fs::write(&output_for_task, "chunk-1\nchunk-2").expect("append output fixture");
+        });
+        let _ = apply_relay_recovery_decision(
+            &registry,
+            &shared,
+            &provider,
+            &decision,
+            RelayRecoveryApplySource::ProbeAutoHeal,
+        )
+        .await;
+        progress.await.expect("jsonl progress task");
+
+        assert!(
+            !token.cancelled.load(Ordering::Relaxed),
+            "watcher-heartbeat stale plus active JSONL progress is not turn-death evidence"
+        );
+        let current = super::super::inflight::load_inflight_state(&provider, channel.get())
+            .expect("active turn inflight must survive watcher rebind");
+        assert_eq!(current.user_msg_id, user_msg.get());
     }
 
     #[tokio::test]
@@ -2291,10 +2452,13 @@ mod tests {
     // non-empty text the caller skips the destructive clear (rebind fall-
     // through). When the tail is genuinely empty the guard is silent and the
     // existing clear behavior is preserved.
-    struct AgentdeskRootGuard(Option<std::ffi::OsString>);
+    struct AgentdeskRootGuard {
+        previous: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
     impl Drop for AgentdeskRootGuard {
         fn drop(&mut self) {
-            match self.0.take() {
+            match self.previous.take() {
                 Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
                 None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
             }
@@ -2332,12 +2496,7 @@ mod tests {
     #[test]
     fn idle_tmux_repair_guard_detects_tail_answer_after_offset() {
         let _guard = auto_heal_test_lock().blocking_lock();
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let temp = tempfile::TempDir::new().unwrap();
-        let _root_guard = AgentdeskRootGuard(std::env::var_os("AGENTDESK_ROOT_DIR"));
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        let (_root_guard, temp) = isolated_agentdesk_root();
 
         let provider = ProviderKind::Codex;
         let channel_id = 3_668_001;
@@ -2366,12 +2525,7 @@ mod tests {
     #[test]
     fn idle_tmux_repair_guard_silent_when_tail_empty() {
         let _guard = auto_heal_test_lock().blocking_lock();
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let temp = tempfile::TempDir::new().unwrap();
-        let _root_guard = AgentdeskRootGuard(std::env::var_os("AGENTDESK_ROOT_DIR"));
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        let (_root_guard, temp) = isolated_agentdesk_root();
 
         let provider = ProviderKind::Codex;
         let channel_id = 3_668_002;
@@ -2398,12 +2552,7 @@ mod tests {
         // every tick forever (recovery only advances the offset on terminal
         // success). The guard requires success-result completion evidence.
         let _guard = auto_heal_test_lock().blocking_lock();
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let temp = tempfile::TempDir::new().unwrap();
-        let _root_guard = AgentdeskRootGuard(std::env::var_os("AGENTDESK_ROOT_DIR"));
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        let (_root_guard, temp) = isolated_agentdesk_root();
 
         let provider = ProviderKind::Codex;
         let channel_id = 3_668_003;

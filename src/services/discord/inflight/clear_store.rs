@@ -106,6 +106,7 @@ pub(in crate::services::discord) fn clear_lifecycle_inflight_state_if_matches_id
     channel_id: u64,
     expected: &InflightTurnIdentity,
     expected_updated_at: &str,
+    expected_save_generation: u64,
 ) -> GuardedClearOutcome {
     let Some(root) = inflight_runtime_root() else {
         return GuardedClearOutcome::Missing;
@@ -116,6 +117,7 @@ pub(in crate::services::discord) fn clear_lifecycle_inflight_state_if_matches_id
         channel_id,
         expected,
         expected_updated_at,
+        expected_save_generation,
     )
 }
 
@@ -632,6 +634,7 @@ pub(super) fn clear_lifecycle_inflight_state_if_matches_identity_after_death_evi
     channel_id: u64,
     expected: &InflightTurnIdentity,
     expected_updated_at: &str,
+    expected_save_generation: u64,
 ) -> GuardedClearOutcome {
     let path = inflight_state_path(root, provider, channel_id);
     let Ok(_lock) = lock_inflight_state_path(&path) else {
@@ -650,6 +653,9 @@ pub(super) fn clear_lifecycle_inflight_state_if_matches_identity_after_death_evi
         return GuardedClearOutcome::UserMsgMismatch;
     }
     if state.updated_at != expected_updated_at {
+        return GuardedClearOutcome::UserMsgMismatch;
+    }
+    if state.save_generation != expected_save_generation {
         return GuardedClearOutcome::UserMsgMismatch;
     }
     match fs::remove_file(&path) {
@@ -721,6 +727,7 @@ pub(super) fn clear_inflight_state_if_matches_identity_after_delivery_in_root(
     delivered_state.last_offset = last_offset;
     delivered_state.ensure_finalizer_turn_id();
     delivered_state.updated_at = now_string();
+    bump_save_generation_for_write(&path, &mut delivered_state);
 
     let mirrored_delivery = match serde_json::to_string_pretty(&delivered_state)
         .map_err(|error| error.to_string())
@@ -902,6 +909,7 @@ pub(super) fn refresh_inflight_last_offset_if_matches_identity_in_root(
     state.last_offset = last_offset;
     state.ensure_finalizer_turn_id();
     state.updated_at = now_string();
+    bump_save_generation_for_write(&path, &mut state);
     serde_json::to_string_pretty(&state)
         .map_err(|error| error.to_string())
         .and_then(|json| atomic_write(&path, &json))

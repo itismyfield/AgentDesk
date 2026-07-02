@@ -295,6 +295,18 @@ fn now_string() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
+fn bump_save_generation_for_write(path: &Path, state: &mut InflightTurnState) {
+    let existing_generation = fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<InflightTurnState>(&content).ok())
+        .map(|existing| existing.save_generation)
+        .unwrap_or(0);
+    state.save_generation = existing_generation
+        .saturating_add(1)
+        .max(state.save_generation.saturating_add(1))
+        .max(1);
+}
+
 fn turn_id_for_state(state: &InflightTurnState) -> Option<String> {
     (state.user_msg_id != 0).then(|| format!("discord:{}:{}", state.channel_id, state.user_msg_id))
 }
@@ -471,6 +483,7 @@ fn set_inflight_restart_mode_under_lock(path: &Path, restart_mode: InflightResta
     state.set_restart_mode(restart_mode);
     state.ensure_finalizer_turn_id();
     state.updated_at = now_string();
+    bump_save_generation_for_write(path, &mut state);
     match serde_json::to_string_pretty(&state) {
         Ok(json) => atomic_write(path, &json).is_ok(),
         Err(_) => false,

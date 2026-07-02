@@ -468,8 +468,8 @@ pub(super) fn resolve_idle_relay_transcript(
         return Some(transcript_path);
     }
 
-    // #2843 (codex P0): a non-stale watcher may suppress the idle tail ONLY when
-    // the watcher itself is tailing the freshest transcript. Comparing the
+    // #2843 (codex P0): a relay-live watcher may suppress the idle tail ONLY
+    // when the watcher itself is tailing the freshest transcript. Comparing the
     // runtime binding's path is wrong — re-registering the binding does not
     // retarget the running watcher, so the binding can be fresh while the
     // watcher still tails a stale/missing file (then the idle tail would be
@@ -477,8 +477,8 @@ pub(super) fn resolve_idle_relay_transcript(
     // output path.
     let watcher_covers_current_transcript = shared
         .tmux_watchers
-        .tmux_session_is_stale(tmux_session_name)
-        .is_some_and(|stale| !stale)
+        .tmux_session_live_for_relay(tmux_session_name)
+        .is_some_and(|live| live)
         && transcript_path.exists()
         && shared
             .tmux_watchers

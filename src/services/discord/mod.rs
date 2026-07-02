@@ -1110,8 +1110,14 @@ impl TmuxWatcherRegistry {
     }
 
     pub(super) fn tmux_session_is_stale(&self, tmux_session_name: &str) -> Option<bool> {
+        self.by_tmux_session
+            .get(tmux_session_name)
+            .map(|entry| entry.heartbeat_stale())
+    }
+
+    pub(super) fn tmux_session_live_for_relay(&self, tmux_session_name: &str) -> Option<bool> {
         self.by_tmux_session.get(tmux_session_name).map(|entry| {
-            entry.cancel.load(std::sync::atomic::Ordering::Relaxed) || entry.heartbeat_stale()
+            !entry.cancel.load(std::sync::atomic::Ordering::Relaxed) && !entry.heartbeat_stale()
         })
     }
 
@@ -1299,6 +1305,29 @@ mod tmux_watcher_registry_restore_tests {
         ));
         assert_eq!(registry.owner_channel_for_tmux_session(tmux), None);
         assert!(expected_cancel.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn tmux_session_is_stale_does_not_fold_cancel_flag_into_heartbeat() {
+        let registry = TmuxWatcherRegistry::new();
+        let tmux = "AgentDesk-codex-adk-cdx-fresh-cancel";
+        let channel = ChannelId::new(1_504_468_805_772_902_472);
+        let handle = live_watcher_handle(tmux);
+        let cancel = handle.cancel.clone();
+        registry.insert(channel, handle);
+
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+
+        assert_eq!(
+            registry.tmux_session_is_stale(tmux),
+            Some(false),
+            "a fresh heartbeat watcher with an early cancel flag is cancelled, not heartbeat-stale"
+        );
+        assert_eq!(
+            registry.tmux_session_live_for_relay(tmux),
+            Some(false),
+            "the same cancelled handle is still not relay-live; cancel is evaluated separately"
+        );
     }
 }
 

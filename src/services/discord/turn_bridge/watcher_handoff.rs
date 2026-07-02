@@ -95,11 +95,11 @@ pub(super) fn headless_terminal_delivery_should_stay_on_bridge(
 /// #3268 FIX 1 (codex blocker): true ONLY for a GENUINELY-LIVE watcher = a
 /// handle is present AND it is neither cancelled NOR heartbeat-stale.
 ///
-/// The handoff MUST gate on real liveness (`tmux_session_is_stale(name) ==
-/// Some(false)`), NOT on handle-presence + `!cancel` alone. A STALE handle
-/// (heartbeat dead but not yet cancelled by the sweeper, and deliberately kept
-/// by watcher cleanup) has no real authority to finalize: handing off to it
-/// re-strands the turn (the bridge suppresses its own finalize while the
+/// The handoff MUST gate on relay liveness (`tmux_session_live_for_relay(name)
+/// == Some(true)`), NOT on handle-presence alone. A STALE handle (heartbeat dead
+/// but not yet cancelled by the sweeper, and deliberately kept by watcher
+/// cleanup) or a cancelled handle has no real authority to finalize: handing off
+/// to it re-strands the turn (the bridge suppresses its own finalize while the
 /// far-backstop also treats the lingering paused handle as live). When the
 /// watcher is stale / cancelled / absent this returns `false` so the bridge
 /// finalizes exactly as before — never a handoff to a dead watcher.
@@ -110,7 +110,7 @@ pub(super) fn genuinely_live_watcher_for_relay(
     tmux_watchers
         .channel_binding(&owner_channel_id)
         .map(|binding| {
-            tmux_watchers.tmux_session_is_stale(&binding.tmux_session_name) == Some(false)
+            tmux_watchers.tmux_session_live_for_relay(&binding.tmux_session_name) == Some(true)
         })
         .unwrap_or(false)
 }
