@@ -90,8 +90,15 @@ fn reclaim_orphan_inflight_owner(
 /// immediately so the deferred claim proceeds instead of aborting; on `false` it
 /// keeps the existing bounded escalation/abort.
 pub(super) fn pending_start_reclaim_orphan_fn() -> ReclaimOrphanFn {
-    Box::new(|_shared, record| {
+    Box::new(|shared, record| {
         Box::pin(async move {
+            if super::super::tui_direct_pending_start::demote_stale_foreign_inflight_if_current(
+                shared, record,
+            )
+            .await
+            {
+                return true;
+            }
             let Some(provider) = ProviderKind::from_str(&record.provider) else {
                 return false;
             };

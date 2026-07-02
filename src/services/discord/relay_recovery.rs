@@ -641,6 +641,44 @@ fn relay_frontier_dead_reattach_owner(decision: &RelayRecoveryDecision) -> Optio
     ))
 }
 
+fn relay_recovery_cancel_finalize_context() -> super::turn_finalizer::FinalizeContext {
+    super::turn_finalizer::FinalizeContext {
+        clear_inflight: true,
+        allow_completion_cleanup: false,
+        drain_voice: false,
+        kickoff_queue: true,
+    }
+}
+
+async fn finalize_cancelled_watcher_owner_turn(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    decision: &RelayRecoveryDecision,
+) -> Option<super::turn_finalizer::FinalizeOutcome> {
+    let channel = ChannelId::new(decision.channel_id);
+    let finalizer_turn_id = super::inflight::load_inflight_state(provider, decision.channel_id)?
+        .effective_finalizer_turn_id();
+    if finalizer_turn_id == 0 {
+        return None;
+    }
+    Some(
+        shared
+            .turn_finalizer
+            .submit_terminal(
+                super::turn_finalizer::TurnKey::new(
+                    channel,
+                    finalizer_turn_id,
+                    shared.restart.current_generation,
+                ),
+                provider.clone(),
+                super::turn_finalizer::TerminalEvent::Cancel,
+                relay_recovery_cancel_finalize_context(),
+                shared.clone(),
+            )
+            .await,
+    )
+}
+
 fn idle_tmux_repair_ready_for_input(
     provider: &ProviderKind,
     channel_id: u64,
@@ -844,6 +882,8 @@ async fn apply_relay_recovery_decision(
                 && let Some((_, watcher)) = shared.tmux_watchers.remove(&owner_channel_id)
             {
                 watcher.cancel.store(true, Ordering::Relaxed);
+                let finalize_outcome =
+                    finalize_cancelled_watcher_owner_turn(shared, provider, decision).await;
                 tracing::warn!(
                     target: "agentdesk::discord::relay_recovery",
                     provider = provider.as_str(),
@@ -852,6 +892,12 @@ async fn apply_relay_recovery_decision(
                     last_relay_offset = decision.evidence.last_relay_offset,
                     last_capture_offset = ?decision.evidence.last_capture_offset,
                     unread_bytes = ?decision.evidence.unread_bytes,
+                    finalizer_outcome = match finalize_outcome {
+                        Some(super::turn_finalizer::FinalizeOutcome::Finalized { .. }) => "finalized",
+                        Some(super::turn_finalizer::FinalizeOutcome::AlreadyFinalized) => "already_finalized",
+                        Some(super::turn_finalizer::FinalizeOutcome::Deferred) => "deferred",
+                        None => "missing_identity",
+                    },
                     "relay recovery cancelled live-looking watcher with dead relay frontier before reattach"
                 );
             }
@@ -1013,6 +1059,31 @@ mod tests {
         .await;
         assert!(started, "test mailbox turn should start on an idle channel");
         token
+    }
+
+    fn test_watcher_handle(
+        tmux_session_name: &str,
+        output_path: &std::path::Path,
+    ) -> (
+        super::super::TmuxWatcherHandle,
+        Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        (
+            super::super::TmuxWatcherHandle {
+                tmux_session_name: tmux_session_name.to_string(),
+                output_path: output_path.to_string_lossy().to_string(),
+                paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                resume_offset: Arc::new(std::sync::Mutex::new(None)),
+                cancel: cancel.clone(),
+                pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
+                    super::super::tmux_watcher_now_ms(),
+                )),
+            },
+            cancel,
+        )
     }
 
     fn snapshot() -> RelayHealthSnapshot {
@@ -1437,6 +1508,101 @@ mod tests {
         assert_eq!(decision.action, RelayRecoveryActionKind::ReattachWatcher);
         assert!(decision.auto_heal.eligible);
         assert_eq!(decision.auto_heal.skipped_reason, None);
+    }
+
+    #[tokio::test]
+    async fn dead_frontier_watcher_cancel_finalizes_owner_and_releases_inflight() {
+        let _guard = auto_heal_test_lock().lock().await;
+        clear_auto_heal_attempts_for_tests();
+        let (_root_guard, root_dir) = isolated_agentdesk_root();
+        let provider = ProviderKind::Codex;
+        let (registry, shared) = registry_with_shared(provider.clone()).await;
+        let channel = ChannelId::new(4_030_001);
+        let user_msg = MessageId::new(4_030_101);
+        let tmux = "AgentDesk-codex-4030-dead-frontier";
+        let output_path = root_dir.path().join("watcher-output.jsonl");
+        std::fs::write(&output_path, "unrelayed bytes").expect("write output fixture");
+        let token = start_test_turn(&shared, channel, user_msg).await;
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+
+        let mut state = super::super::inflight::InflightTurnState::new(
+            provider.clone(),
+            channel.get(),
+            None,
+            1,
+            user_msg.get(),
+            4_030_201,
+            "watcher-owned turn".to_string(),
+            None,
+            Some(tmux.to_string()),
+            Some(output_path.to_string_lossy().to_string()),
+            None,
+            0,
+        );
+        state.set_relay_owner_kind(super::super::inflight::RelayOwnerKind::Watcher);
+        super::super::inflight::save_inflight_state(&state).expect("save watcher inflight");
+        shared.turn_finalizer.register_start(
+            super::super::turn_finalizer::TurnKey::new(
+                channel,
+                state.effective_finalizer_turn_id(),
+                shared.restart.current_generation,
+            ),
+            provider.clone(),
+            super::super::inflight::RelayOwnerKind::Watcher,
+            &shared,
+        );
+        let (watcher, watcher_cancel) = test_watcher_handle(tmux, &output_path);
+        shared.tmux_watchers.insert(channel, watcher);
+
+        let snapshot = RelayHealthSnapshot {
+            provider: provider.as_str().to_string(),
+            channel_id: channel.get(),
+            active_turn: RelayActiveTurn::Foreground,
+            tmux_session: Some(tmux.to_string()),
+            tmux_alive: Some(true),
+            watcher_attached: true,
+            watcher_owner_channel_id: Some(channel.get()),
+            watcher_owns_live_relay: true,
+            bridge_inflight_present: true,
+            mailbox_has_cancel_token: true,
+            mailbox_active_user_msg_id: Some(user_msg.get()),
+            last_capture_offset: Some(128),
+            last_relay_offset: 0,
+            unread_bytes: Some(128),
+            desynced: true,
+            ..snapshot()
+        };
+        let decision = plan_relay_recovery(&snapshot, RelayStallState::TmuxAliveRelayDead, 1_000);
+
+        let _ = apply_relay_recovery_decision(
+            &registry,
+            &shared,
+            &provider,
+            &decision,
+            RelayRecoveryApplySource::ProbeAutoHeal,
+        )
+        .await;
+
+        assert!(
+            watcher_cancel.load(Ordering::Relaxed),
+            "relay recovery must still cancel the dead-frontier watcher"
+        );
+        assert!(
+            token.cancelled.load(Ordering::Relaxed),
+            "watcher cancel must release the owning mailbox token through the finalizer"
+        );
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+        assert!(
+            super::super::mailbox_snapshot(&shared, channel)
+                .await
+                .cancel_token
+                .is_none(),
+            "finalizer-routed watcher cancel must clear active mailbox ownership"
+        );
+        assert!(
+            super::super::inflight::load_inflight_state(&provider, channel.get()).is_none(),
+            "finalizer-routed watcher cancel must clear the owning inflight row"
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@
 
 - Production Rust modules: `899`
 - Giant-file threshold: `>= 1000` production lines
-- Giant files: `89`
+- Giant files: `90`
 
 > `Prod` excludes lines inside `#[cfg(test)] mod` blocks; the
 > giant-file flag tracks `Prod` so inline test fixtures do not freeze a
@@ -557,7 +557,7 @@
 | `services::discord::recovery_paths::shared` | `src/services/discord/recovery_paths/shared.rs` | 570 | 254 | 316 |  |
 | `services::discord::relay_health` | `src/services/discord/relay_health.rs` | 305 | 185 | 120 |  |
 | `services::discord::relay_owner_observability` | `src/services/discord/relay_owner_observability.rs` | 458 | 343 | 115 |  |
-| `services::discord::relay_recovery` | `src/services/discord/relay_recovery.rs` | 1929 | 969 | 960 |  |
+| `services::discord::relay_recovery` | `src/services/discord/relay_recovery.rs` | 2095 | 1015 | 1080 | giant-file |
 | `services::discord::relay_recovery_auto_heal_attempts` | `src/services/discord/relay_recovery_auto_heal_attempts.rs` | 92 | 92 | 0 |  |
 | `services::discord::relay_recovery_completion_footer` | `src/services/discord/relay_recovery_completion_footer.rs` | 9 | 9 | 0 |  |
 | `services::discord::replace_outcome_policy` | `src/services/discord/replace_outcome_policy.rs` | 263 | 138 | 125 |  |
@@ -677,7 +677,7 @@
 | `services::discord::tui_direct_abort_marker` | `src/services/discord/tui_direct_abort_marker/mod.rs` | 2453 | 818 | 1635 |  |
 | `services::discord::tui_direct_abort_marker::deferred_claim` | `src/services/discord/tui_direct_abort_marker/deferred_claim.rs` | 669 | 265 | 404 |  |
 | `services::discord::tui_direct_abort_marker::store` | `src/services/discord/tui_direct_abort_marker/store.rs` | 348 | 348 | 0 |  |
-| `services::discord::tui_direct_pending_start` | `src/services/discord/tui_direct_pending_start.rs` | 2795 | 1125 | 1670 | giant-file |
+| `services::discord::tui_direct_pending_start` | `src/services/discord/tui_direct_pending_start.rs` | 3115 | 1254 | 1861 | giant-file |
 | `services::discord::tui_prompt_relay` | `src/services/discord/tui_prompt_relay.rs` | 999 | 999 | 0 |  |
 | `services::discord::tui_prompt_relay::anchor_completion` | `src/services/discord/tui_prompt_relay/anchor_completion.rs` | 449 | 213 | 236 |  |
 | `services::discord::tui_prompt_relay::bridge_completion` | `src/services/discord/tui_prompt_relay/bridge_completion.rs` | 167 | 81 | 86 |  |
@@ -692,7 +692,7 @@
 | `services::discord::tui_prompt_relay::launch_script` | `src/services/discord/tui_prompt_relay/launch_script.rs` | 129 | 107 | 22 |  |
 | `services::discord::tui_prompt_relay::rehydration` | `src/services/discord/tui_prompt_relay/rehydration.rs` | 994 | 793 | 201 |  |
 | `services::discord::tui_prompt_relay::relay_ownership` | `src/services/discord/tui_prompt_relay/relay_ownership.rs` | 506 | 506 | 0 |  |
-| `services::discord::tui_prompt_relay::synthetic_orphan_reclaim` | `src/services/discord/tui_prompt_relay/synthetic_orphan_reclaim.rs` | 217 | 116 | 101 |  |
+| `services::discord::tui_prompt_relay::synthetic_orphan_reclaim` | `src/services/discord/tui_prompt_relay/synthetic_orphan_reclaim.rs` | 224 | 123 | 101 |  |
 | `services::discord::tui_prompt_relay::synthetic_start` | `src/services/discord/tui_prompt_relay/synthetic_start.rs` | 1538 | 1039 | 499 | giant-file |
 | `services::discord::tui_prompt_relay::synthetic_start::stale_reclaim` | `src/services/discord/tui_prompt_relay/synthetic_start/stale_reclaim.rs` | 225 | 225 | 0 |  |
 | `services::discord::tui_prompt_relay::synthetic_start_wiring` | `src/services/discord/tui_prompt_relay/synthetic_start_wiring.rs` | 128 | 128 | 0 |  |
