@@ -56,6 +56,10 @@ pub(super) struct SupervisorRelayForward {
     pub(super) mirrored: bool,
     pub(super) ack_target: Option<SessionBoundRelayAckTarget>,
     pub(super) evicted_frames: Vec<RelayDroppedFrame>,
+    /// The first relay sequence assigned by this forward. The watcher carries
+    /// the first sequence for the current accumulation window so resolve-time
+    /// drop checks can degrade `fully_mirrored` without trusting frame identity.
+    pub(super) first_forwarded_sequence: Option<u64>,
     /// #3041 P1-3 (codex P1-3 R7): TRUE when this forward SPLIT a result-bearing
     /// physical chunk and a NON-EMPTY trailing tail (a LATER turn's bytes) followed
     /// the just-completed turn's terminal frame. This is the turn-boundary signal:
@@ -68,6 +72,10 @@ pub(super) struct SupervisorRelayForward {
     /// Only the SPLIT terminal forward sets this; every other forward leaves it
     /// `false` (no boundary crossed).
     pub(super) trailing_turn_follows: bool,
+    /// When `trailing_turn_follows` is true, this is the first sequence assigned
+    /// to the later turn's tail. It becomes the carried first sequence for the
+    /// leftover buffer after the current turn consumes its terminal ACK.
+    pub(super) trailing_first_forwarded_sequence: Option<u64>,
 }
 
 impl SupervisorRelayForward {
@@ -76,7 +84,9 @@ impl SupervisorRelayForward {
             mirrored: true,
             ack_target: None,
             evicted_frames: Vec::new(),
+            first_forwarded_sequence: None,
             trailing_turn_follows: false,
+            trailing_first_forwarded_sequence: None,
         }
     }
 
@@ -85,8 +95,19 @@ impl SupervisorRelayForward {
             mirrored: false,
             ack_target: None,
             evicted_frames: Vec::new(),
+            first_forwarded_sequence: None,
             trailing_turn_follows: false,
+            trailing_first_forwarded_sequence: None,
         }
+    }
+}
+
+pub(super) fn remember_supervisor_relay_first_forwarded_sequence(
+    first_forwarded_sequence: &mut Option<u64>,
+    forward: &SupervisorRelayForward,
+) {
+    if first_forwarded_sequence.is_none() {
+        *first_forwarded_sequence = forward.first_forwarded_sequence;
     }
 }
 
@@ -282,12 +303,17 @@ pub(super) fn forward_terminal_chunk_with_trailing_to_supervisor_relay(
         forward_chunk_to_supervisor_relay(tmux_session_name, tail_part, registry, cached_producer);
     let mirrored = terminal_forward.mirrored && tail_forward.mirrored;
     let ack_target = terminal_forward.ack_target;
+    let first_forwarded_sequence = terminal_forward
+        .first_forwarded_sequence
+        .or(tail_forward.first_forwarded_sequence);
+    let trailing_first_forwarded_sequence = tail_forward.first_forwarded_sequence;
     let mut evicted_frames = terminal_forward.evicted_frames;
     evicted_frames.extend(tail_forward.evicted_frames);
     SupervisorRelayForward {
         mirrored,
         ack_target,
         evicted_frames,
+        first_forwarded_sequence,
         // #3041 P1-3 (codex P1-3 R7): a NON-EMPTY trailing tail means a LATER turn's
         // bytes followed THIS turn's terminal frame inside ONE physical chunk — a
         // turn-boundary signal. The watcher resets the stored ack AFTER this turn
@@ -295,6 +321,7 @@ pub(super) fn forward_terminal_chunk_with_trailing_to_supervisor_relay(
         // finished turn's ACK (R7 black-hole close), regardless of whether
         // `turn_identity_for_panel` has refreshed to the trailing turn yet.
         trailing_turn_follows: true,
+        trailing_first_forwarded_sequence,
     }
 }
 
@@ -387,9 +414,11 @@ pub(super) fn forward_chunk_to_supervisor_relay_inner(
         mirrored: true,
         ack_target,
         evicted_frames,
+        first_forwarded_sequence: outcome.sequence,
         // A single forward of one frame never crosses a turn boundary; only the
         // split helper sets this when it forwards a separate trailing tail.
         trailing_turn_follows: false,
+        trailing_first_forwarded_sequence: None,
     }
 }
 

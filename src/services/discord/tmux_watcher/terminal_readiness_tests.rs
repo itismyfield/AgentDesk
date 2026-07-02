@@ -13,12 +13,14 @@ fn bridge_suppressed_turn_discards_pending_buffer_before_direct_input() {
     let mut all_data_start_offset = 10;
     let mut all_data_fully_mirrored_to_session_relay = false;
     let mut all_data_session_bound_relay_ack = None;
+    let mut all_data_first_forwarded_relay_sequence = Some(7);
 
     discard_watcher_pending_buffer_after_suppressed_turn(
         &mut all_data,
         &mut all_data_start_offset,
         &mut all_data_fully_mirrored_to_session_relay,
         &mut all_data_session_bound_relay_ack,
+        &mut all_data_first_forwarded_relay_sequence,
         42,
     );
 
@@ -26,6 +28,7 @@ fn bridge_suppressed_turn_discards_pending_buffer_before_direct_input() {
     assert_eq!(all_data_start_offset, 42);
     assert!(all_data_fully_mirrored_to_session_relay);
     assert!(all_data_session_bound_relay_ack.is_none());
+    assert!(all_data_first_forwarded_relay_sequence.is_none());
 }
 
 #[test]

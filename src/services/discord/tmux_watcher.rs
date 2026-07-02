@@ -322,6 +322,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
     let mut all_data_start_offset = current_offset;
     let mut all_data_fully_mirrored_to_session_relay = true;
     let mut all_data_session_bound_relay_ack: Option<SessionBoundRelayAckTarget> = None;
+    let mut all_data_first_forwarded_relay_sequence: Option<u64> = None;
     let mut utf8_decoder = Utf8ChunkDecoder::default();
     let mut prompt_too_long_killed = false;
     let mut turn_result_relayed = false;
@@ -1181,6 +1182,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 .as_ref()
                 .and_then(|identity| identity.turn_start_offset),
         );
+        if initial_buffer_was_empty {
+            all_data_first_forwarded_relay_sequence =
+                data_mirrored_to_session_relay.first_forwarded_sequence;
+        } else {
+            remember_supervisor_relay_first_forwarded_sequence(
+                &mut all_data_first_forwarded_relay_sequence,
+                &data_mirrored_to_session_relay,
+            );
+        }
         // #3041 P1-3 (codex P1-3 R7): latch the turn-boundary signal. If this initial
         // forward split a result+next-turn chunk, a later turn follows; reset the ack
         // after THIS turn's terminal ACK wait so the later turn never inherits it.
@@ -1196,8 +1206,16 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         }
         let mut session_bound_relay_turn_fully_mirrored =
             all_data_fully_mirrored_to_session_relay && !restored_assistant_text_seen;
+        let mut session_bound_relay_turn_first_forwarded_sequence =
+            all_data_first_forwarded_relay_sequence;
         all_data_start_offset =
             advance_buffer_start_offset(turn_data_start_offset, initial_buffer_len, all_data.len());
+        if data_mirrored_to_session_relay.trailing_turn_follows {
+            all_data_first_forwarded_relay_sequence =
+                data_mirrored_to_session_relay.trailing_first_forwarded_sequence;
+        } else if all_data.is_empty() {
+            all_data_first_forwarded_relay_sequence = None;
+        }
         let live_events_dirty = flush_placeholder_live_events(&shared, channel_id, &mut tool_state);
         let mut found_result = initial_outcome.found_result;
         let mut terminal_kind = initial_outcome.terminal_kind;
@@ -1267,6 +1285,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 all_data_start_offset = current_offset;
                 all_data_fully_mirrored_to_session_relay = true;
                 all_data_session_bound_relay_ack = None;
+                all_data_first_forwarded_relay_sequence = None;
                 continue;
             }
             ensure_monitor_auto_turn_inflight(
@@ -1301,6 +1320,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             all_data_start_offset = current_offset;
             all_data_fully_mirrored_to_session_relay = true;
             all_data_session_bound_relay_ack = None;
+            all_data_first_forwarded_relay_sequence = None;
             continue;
         }
         if !found_result {
@@ -1464,6 +1484,19 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 .as_ref()
                                 .and_then(|identity| identity.turn_start_offset),
                         );
+                        if chunk_buffer_was_empty {
+                            all_data_first_forwarded_relay_sequence =
+                                chunk_forwarded_to_session_relay.first_forwarded_sequence;
+                        } else {
+                            remember_supervisor_relay_first_forwarded_sequence(
+                                &mut all_data_first_forwarded_relay_sequence,
+                                &chunk_forwarded_to_session_relay,
+                            );
+                        }
+                        remember_supervisor_relay_first_forwarded_sequence(
+                            &mut session_bound_relay_turn_first_forwarded_sequence,
+                            &chunk_forwarded_to_session_relay,
+                        );
                         // #3041 P1-3 (codex P1-3 R7): latch the turn-boundary signal
                         // for the streaming-chunk forward too (a result+next-turn
                         // chunk can arrive mid-stream).
@@ -1488,6 +1521,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             chunk_buffer_len,
                             all_data.len(),
                         );
+                        if chunk_forwarded_to_session_relay.trailing_turn_follows {
+                            all_data_first_forwarded_relay_sequence =
+                                chunk_forwarded_to_session_relay.trailing_first_forwarded_sequence;
+                        } else if all_data.is_empty() {
+                            all_data_first_forwarded_relay_sequence = None;
+                        }
                         if watcher_live_events_dirty_should_force_status_update(
                             flush_placeholder_live_events(&shared, channel_id, &mut tool_state),
                             single_message_panel_footer_mode,
@@ -2671,6 +2710,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     all_data_start_offset = current_offset;
                     all_data_fully_mirrored_to_session_relay = true;
                     all_data_session_bound_relay_ack = None;
+                    all_data_first_forwarded_relay_sequence = None;
                     last_observed_generation_mtime_ns =
                         Some(read_generation_file_mtime_ns(&tmux_session_name));
                     finish_monitor_auto_turn_if_claimed(
@@ -2799,6 +2839,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         all_data_start_offset = current_offset;
                         all_data_fully_mirrored_to_session_relay = true;
                         all_data_session_bound_relay_ack = None;
+                        all_data_first_forwarded_relay_sequence = None;
                         continue;
                     }
                     FreshIdleFinalizeDecision::DeferEmptyUnknown => {
@@ -2813,6 +2854,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         all_data_start_offset = current_offset;
                         all_data_fully_mirrored_to_session_relay = true;
                         all_data_session_bound_relay_ack = None;
+                        all_data_first_forwarded_relay_sequence = None;
                         continue;
                     }
                     FreshIdleFinalizeDecision::AbortFollowupTookOver => {
@@ -2830,6 +2872,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         all_data_start_offset = current_offset;
                         all_data_fully_mirrored_to_session_relay = true;
                         all_data_session_bound_relay_ack = None;
+                        all_data_first_forwarded_relay_sequence = None;
                         continue;
                     }
                     FreshIdleFinalizeDecision::SkipStale { pinned_user_msg_id } => {
@@ -2845,6 +2888,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         all_data_start_offset = current_offset;
                         all_data_fully_mirrored_to_session_relay = true;
                         all_data_session_bound_relay_ack = None;
+                        all_data_first_forwarded_relay_sequence = None;
                         continue;
                     }
                     FreshIdleFinalizeDecision::Finalize { user_msg_id } => {
@@ -2951,6 +2995,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 all_data_start_offset = current_offset;
                 all_data_fully_mirrored_to_session_relay = true;
                 all_data_session_bound_relay_ack = None;
+                all_data_first_forwarded_relay_sequence = None;
                 last_relayed_offset = Some(current_offset);
                 last_observed_generation_mtime_ns =
                     Some(read_generation_file_mtime_ns(&tmux_session_name));
@@ -3299,6 +3344,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             all_data_start_offset = current_offset;
             all_data_fully_mirrored_to_session_relay = true;
             all_data_session_bound_relay_ack = None;
+            all_data_first_forwarded_relay_sequence = None;
             continue;
         }
 
@@ -3766,6 +3812,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 &mut all_data_start_offset,
                 &mut all_data_fully_mirrored_to_session_relay,
                 &mut all_data_session_bound_relay_ack,
+                &mut all_data_first_forwarded_relay_sequence,
                 current_offset,
             );
             continue;
@@ -3835,6 +3882,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 &mut all_data_start_offset,
                 &mut all_data_fully_mirrored_to_session_relay,
                 &mut all_data_session_bound_relay_ack,
+                &mut all_data_first_forwarded_relay_sequence,
                 current_offset,
             );
             continue;
@@ -3897,6 +3945,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     &mut all_data_start_offset,
                     &mut all_data_fully_mirrored_to_session_relay,
                     &mut all_data_session_bound_relay_ack,
+                    &mut all_data_first_forwarded_relay_sequence,
                     current_offset,
                 );
                 continue;
@@ -4535,8 +4584,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     std::time::Duration::from_secs(10),
                 )
                 .await;
+                let ack_outcome = session_bound_ack_outcome_after_resolve_time_mirror_check(
+                    ack_outcome,
+                    &mut session_bound_relay_turn_fully_mirrored,
+                    all_data_session_bound_relay_ack.as_ref(),
+                    session_bound_relay_turn_first_forwarded_sequence,
+                );
                 session_bound_ack_outcome = ack_outcome;
-                let delivered = matches!(ack_outcome, SessionBoundRelayAckOutcome::Delivered);
+                let delivered = session_bound_relay_turn_fully_mirrored
+                    && matches!(ack_outcome, SessionBoundRelayAckOutcome::Delivered);
                 if !delivered {
                     tracing::warn!(
                         provider = watcher_provider.as_str(),
@@ -5556,6 +5612,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 all_data_start_offset = current_offset;
                 all_data_fully_mirrored_to_session_relay = true;
                 all_data_session_bound_relay_ack = None;
+                all_data_first_forwarded_relay_sequence = None;
                 // #2840: release before the backoff sleep (timing preserved);
                 // the guard's Drop is the safety net for non-explicit exits.
                 slot_guard.release();

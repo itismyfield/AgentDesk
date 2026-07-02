@@ -158,7 +158,9 @@ fn per_turn_fully_mirrored_degrades_when_evicted_victim_matches() {
                 turn_start_offset: Some(64),
             },
         }],
+        first_forwarded_sequence: Some(4),
         trailing_turn_follows: false,
+        trailing_first_forwarded_sequence: None,
     };
 
     let mut session_bound_relay_turn_fully_mirrored = true;
