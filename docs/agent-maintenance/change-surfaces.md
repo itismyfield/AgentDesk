@@ -1137,7 +1137,7 @@
     children (`send_target`, `send_gate`, `send_api`, `manual_delivery`) to
     `outbound/` while preserving the `health::` re-export API; #1879
     snapshot/mailbox extraction, and #3082 answer-flush-barrier field).
-  - `src/services/discord/health/recovery.rs` (2439 lines; +13 from #4024 F1
+  - `src/services/discord/health/recovery.rs` (2425 lines; +13 from #4024 F1
     pairing health hard-stop finalize-path `thread_parents` cleanup with parent
     queue kickoffs; +75 from #4019 R2
     round 2 moving explicit-background hard-stop cleanup before finalizer mailbox
