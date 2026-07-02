@@ -16,7 +16,7 @@ use super::*;
 // child module imports them directly to keep the moved bodies byte-identical.
 use super::super::response_sanitizer::subagent_notification_card;
 use super::super::tui_task_card::{
-    strip_terminal_controls, truncate_chars_ascii as truncate_chars,
+    clamp_discord_message_content, strip_terminal_controls, truncate_chars_ascii as truncate_chars,
 };
 
 const LOCAL_COMMAND_STDOUT_OPEN: &str = "<local-command-stdout>";
@@ -271,11 +271,13 @@ pub(super) fn format_ssh_direct_prompt_notification(
     let prompt = strip_terminal_controls(prompt);
     let preview =
         truncate_chars(prompt.trim(), SSH_DIRECT_PROMPT_PREVIEW_LIMIT).replace("```", "` ` `");
-    format!(
+    // #4032: clamp at the source — the card branch clamps internally, so this
+    // SSH-direct formatter is the only unbounded producer feeding `say`.
+    clamp_discord_message_content(&format!(
         "터미널에 직접 주입된 입력 (tmux : `{}`):\n```text\n{}\n```",
         sanitize_inline_code(tmux_session_name),
         preview,
-    )
+    ))
 }
 
 pub(super) fn format_subagent_notification_card(tmux_session_name: &str, prompt: &str) -> String {

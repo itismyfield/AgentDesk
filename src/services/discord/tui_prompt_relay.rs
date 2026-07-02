@@ -643,7 +643,6 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
                 &prompt.prompt,
             )
         };
-        let content = super::tui_task_card::clamp_discord_message_content(&content);
         let anchor_message = match channel_id.say(&*notify_http, content).await {
             Ok(message) => message,
             Err(error) => {

@@ -526,14 +526,3 @@ file = "src/services/discord/tui_task_card.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
 decompose_issue = "#3405"
-
-[[entry]]
-# tui_prompt_relay.rs root crossed back over the giant threshold (exactly 1000
-# prod LoC) after #4037 added the shared injected-prompt decision helper and
-# #4032 added the final say-clamp. #3833 previously decomposed this file below
-# threshold; remaining root clusters (relay_observed_prompt body, decision
-# helpers, notification paths) should move into tui_prompt_relay/ children.
-file = "src/services/discord/tui_prompt_relay.rs"
-owner = "discord-relay"
-deadline = "2026-10-31"
-decompose_issue = "#4040"
