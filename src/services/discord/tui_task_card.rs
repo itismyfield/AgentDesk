@@ -440,7 +440,14 @@ fn markdown_preview(result: &str) -> String {
 
 #[derive(Default)]
 struct MarkdownPreviewState {
-    in_fence: bool,
+    fence: Option<MarkdownFence>,
+}
+
+#[derive(Clone, Copy)]
+struct MarkdownFence {
+    ch: char,
+    len: usize,
+    can_close: bool,
 }
 
 struct MarkdownPreviewLine {
@@ -452,16 +459,27 @@ fn normalize_markdown_preview_line(
     line: &str,
     state: &mut MarkdownPreviewState,
 ) -> Option<MarkdownPreviewLine> {
-    let fence_line = is_markdown_fence_line(line);
-    let inside_fence = state.in_fence;
+    let fence = markdown_fence_marker(line);
+    let inside_fence = state.fence.is_some();
     let line = sanitize_oneline(line).trim().to_string();
-    if fence_line {
-        state.in_fence = !state.in_fence;
+    let mut is_active_fence_line = false;
+    if let Some(fence) = fence {
+        match state.fence {
+            Some(open) if fence.can_close && fence.ch == open.ch && fence.len >= open.len => {
+                state.fence = None;
+                is_active_fence_line = true;
+            }
+            Some(_) => {}
+            None => {
+                state.fence = Some(fence);
+                is_active_fence_line = true;
+            }
+        }
     }
     if line.is_empty() {
         return None;
     }
-    if inside_fence || fence_line {
+    if inside_fence || is_active_fence_line {
         return Some(MarkdownPreviewLine {
             text: line,
             counts_toward_limit: true,
@@ -491,9 +509,15 @@ fn normalize_markdown_preview_line(
     }
 }
 
-fn is_markdown_fence_line(line: &str) -> bool {
+fn markdown_fence_marker(line: &str) -> Option<MarkdownFence> {
     let trimmed = line.trim_start();
-    trimmed.starts_with("```") || trimmed.starts_with("~~~")
+    let ch = trimmed.chars().next()?;
+    if ch != '`' && ch != '~' {
+        return None;
+    }
+    let len = trimmed.chars().take_while(|current| *current == ch).count();
+    let can_close = trimmed[len..].trim().is_empty();
+    (len >= 3).then_some(MarkdownFence { ch, len, can_close })
 }
 
 fn is_markdown_heading_line(line: &str) -> bool {
@@ -1304,6 +1328,92 @@ after fence";
         assert!(
             preview.lines().count() <= RESULT_PREVIEW_LINES + 1,
             "fenced block lines should still consume the content-line budget: {preview}"
+        );
+    }
+
+    #[test]
+    fn markdown_preview_matches_fences_by_opener_length() {
+        let result = "\
+````rust
+fn main() {}
+```rust
+# comment
+- item
+````
+# after fence";
+
+        let preview = markdown_preview(result);
+
+        assert!(preview.contains("# comment"), "{preview}");
+        assert!(preview.contains("- item"), "{preview}");
+        assert!(preview.contains("after fence"), "{preview}");
+        assert!(
+            !preview.contains("# after fence"),
+            "content after the real 4-backtick closer should leave fence mode: {preview}"
+        );
+    }
+
+    #[test]
+    fn markdown_preview_matches_fences_by_opener_character() {
+        let tilde_result = "\
+~~~text
+```rust
+# tilde comment
+- tilde item
+~~~
+- after tilde";
+        let tilde_preview = markdown_preview(tilde_result);
+
+        assert!(tilde_preview.contains("# tilde comment"), "{tilde_preview}");
+        assert!(tilde_preview.contains("- tilde item"), "{tilde_preview}");
+        assert!(tilde_preview.contains("after tilde"), "{tilde_preview}");
+        assert!(
+            !tilde_preview.contains("- after tilde"),
+            "a backtick fence must not close a tilde fence: {tilde_preview}"
+        );
+
+        let backtick_result = "\
+```text
+~~~
+# backtick comment
+- backtick item
+```
+- after backtick";
+        let backtick_preview = markdown_preview(backtick_result);
+
+        assert!(
+            backtick_preview.contains("# backtick comment"),
+            "{backtick_preview}"
+        );
+        assert!(
+            backtick_preview.contains("- backtick item"),
+            "{backtick_preview}"
+        );
+        assert!(
+            backtick_preview.contains("after backtick"),
+            "{backtick_preview}"
+        );
+        assert!(
+            !backtick_preview.contains("- after backtick"),
+            "a tilde fence must not close a backtick fence: {backtick_preview}"
+        );
+    }
+
+    #[test]
+    fn markdown_preview_preserves_plain_three_backtick_fence_behavior() {
+        let result = "\
+```sh
+# comment
+```
+# after fence";
+
+        let preview = markdown_preview(result);
+
+        assert!(preview.contains("# comment"), "{preview}");
+        assert!(preview.contains("after fence"), "{preview}");
+        assert!(
+            !preview.contains("# after fence"),
+            "plain 3-backtick close should still leave fence mode: {preview}"
         );
     }
 
