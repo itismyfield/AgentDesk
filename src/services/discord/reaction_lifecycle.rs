@@ -99,18 +99,7 @@ async fn try_reaction_raw_on_channel(
     emoji: char,
     action: ReactionAction,
 ) -> Result<(), String> {
-    if !is_real_discord_message_id(message_id) {
-        tracing::debug!(
-            channel = channel_id.get(),
-            message = message_id.get(),
-            emoji = %emoji,
-            action = action.label(),
-            "discord reaction skipped for non-Discord/synthetic message id"
-        );
-        return Ok(());
-    }
-
-    match apply_reaction_action(http, channel_id, message_id, emoji, action).await {
+    match try_reaction_raw_once_on_channel(http, channel_id, message_id, emoji, action).await {
         Ok(()) => Ok(()),
         Err(first_error) => {
             if let Some(parent_channel_id) = thread_parent_channel_from_http(http, channel_id)
@@ -126,18 +115,45 @@ async fn try_reaction_raw_on_channel(
                     error = %first_error,
                     "discord reaction retrying against thread parent channel"
                 );
-                apply_reaction_action(http, parent_channel_id, message_id, emoji, action)
-                    .await
-                    .map_err(|second_error| {
-                        format!(
-                            "{first_error}; parent-channel retry in {parent_channel_id} failed: {second_error}"
-                        )
-                    })
+                try_reaction_raw_once_on_channel(
+                    http,
+                    parent_channel_id,
+                    message_id,
+                    emoji,
+                    action,
+                )
+                .await
+                .map_err(|second_error| {
+                    format!(
+                        "{first_error}; parent-channel retry in {parent_channel_id} failed: {second_error}"
+                    )
+                })
             } else {
                 Err(first_error)
             }
         }
     }
+}
+
+async fn try_reaction_raw_once_on_channel(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    message_id: serenity::MessageId,
+    emoji: char,
+    action: ReactionAction,
+) -> Result<(), String> {
+    if !is_real_discord_message_id(message_id) {
+        tracing::debug!(
+            channel = channel_id.get(),
+            message = message_id.get(),
+            emoji = %emoji,
+            action = action.label(),
+            "discord reaction skipped for non-Discord/synthetic message id"
+        );
+        return Ok(());
+    }
+
+    apply_reaction_action(http, channel_id, message_id, emoji, action).await
 }
 
 #[cfg(not(test))]
@@ -149,13 +165,14 @@ async fn try_reaction_raw_with_shared(
     emoji: char,
     action: ReactionAction,
 ) -> Result<(), String> {
-    match try_reaction_raw_on_channel(http, channel_id, message_id, emoji, action).await {
+    let target_channel_id = reaction_target_channel_for_shared(shared, channel_id);
+    if target_channel_id == channel_id {
+        return try_reaction_raw_on_channel(http, channel_id, message_id, emoji, action).await;
+    }
+
+    match try_reaction_raw_once_on_channel(http, channel_id, message_id, emoji, action).await {
         Ok(()) => Ok(()),
         Err(first_error) => {
-            let target_channel_id = reaction_target_channel_for_shared(shared, channel_id);
-            if target_channel_id == channel_id {
-                return Err(first_error);
-            }
             tracing::debug!(
                 channel = channel_id.get(),
                 target_channel = target_channel_id.get(),
@@ -165,7 +182,7 @@ async fn try_reaction_raw_with_shared(
                 error = %first_error,
                 "discord reaction retrying against dispatch thread parent channel"
             );
-            try_reaction_raw_on_channel(http, target_channel_id, message_id, emoji, action)
+            try_reaction_raw_once_on_channel(http, target_channel_id, message_id, emoji, action)
                 .await
                 .map_err(|second_error| {
                     format!(

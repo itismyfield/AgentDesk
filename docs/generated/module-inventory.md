@@ -537,7 +537,7 @@
 | `services::discord::queue_reactions` | `src/services/discord/queue_reactions.rs` | 35 | 25 | 10 |  |
 | `services::discord::queued_placeholders_store` | `src/services/discord/queued_placeholders_store.rs` | 251 | 251 | 0 |  |
 | `services::discord::reaction_cleanup` | `src/services/discord/reaction_cleanup.rs` | 79 | 60 | 19 |  |
-| `services::discord::reaction_lifecycle` | `src/services/discord/reaction_lifecycle.rs` | 312 | 270 | 42 |  |
+| `services::discord::reaction_lifecycle` | `src/services/discord/reaction_lifecycle.rs` | 329 | 287 | 42 |  |
 | `services::discord::recovery_engine` | `src/services/discord/recovery_engine.rs` | 3343 | 2935 | 408 | giant-file |
 | `services::discord::recovery_engine::analytics_transcript` | `src/services/discord/recovery_engine/analytics_transcript.rs` | 112 | 112 | 0 |  |
 | `services::discord::recovery_engine::jsonl_extract` | `src/services/discord/recovery_engine/jsonl_extract.rs` | 137 | 137 | 0 |  |
@@ -733,7 +733,7 @@
 | `services::discord::turn_bridge::watcher_orphan_cleanup` | `src/services/discord/turn_bridge/watcher_orphan_cleanup.rs` | 493 | 233 | 260 |  |
 | `services::discord::turn_end_wip_warning` | `src/services/discord/turn_end_wip_warning.rs` | 344 | 145 | 199 |  |
 | `services::discord::turn_finalizer` | `src/services/discord/turn_finalizer.rs` | 4676 | 1044 | 3632 | giant-file |
-| `services::discord::turn_finalizer::cleanup` | `src/services/discord/turn_finalizer/cleanup.rs` | 1495 | 569 | 926 |  |
+| `services::discord::turn_finalizer::cleanup` | `src/services/discord/turn_finalizer/cleanup.rs` | 1541 | 569 | 972 |  |
 | `services::discord::turn_finalizer::completion_signal` | `src/services/discord/turn_finalizer/completion_signal.rs` | 304 | 48 | 256 |  |
 | `services::discord::turn_finalizer::delivery_lease` | `src/services/discord/turn_finalizer/delivery_lease.rs` | 444 | 87 | 357 |  |
 | `services::discord::turn_finalizer::finalize` | `src/services/discord/turn_finalizer/finalize.rs` | 377 | 249 | 128 |  |

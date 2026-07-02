@@ -1106,6 +1106,52 @@ mod tests {
     }
 
     #[test]
+    fn backstop_reaction_cleanup_without_mapping_keeps_single_failed_attempt() {
+        with_isolated_runtime_root(|| {
+            test_rt().block_on(async {
+                let shared =
+                    super::super::super::make_shared_data_for_tests_with_storage(None, None);
+                let ch = ChannelId::new(3_334_124);
+                let tid = real_message_id(124);
+                shared
+                    .restart
+                    .global_active
+                    .store(1, std::sync::atomic::Ordering::Relaxed);
+                let _token = seed_active_turn(&shared, ch, tid).await;
+                let fin = TurnFinalizer::spawn();
+                let key = TurnKey::new(ch, tid, 0);
+                fin.register_start(key, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
+
+                begin_reaction_cleanup_recording();
+                fail_reaction_cleanup_channel(ch);
+                let deferred = fin
+                    .submit_terminal(
+                        key,
+                        ProviderKind::Claude,
+                        TerminalEvent::GateTimeout {
+                            pane_quiescent: Some(false),
+                        },
+                        FinalizeContext::watcher(),
+                        shared.clone(),
+                    )
+                    .await;
+                assert!(matches!(deferred, FinalizeOutcome::Deferred));
+
+                tokio::time::sleep(GATE_BACKSTOP + RECONCILE_INTERVAL * 3).await;
+                tokio::task::yield_now().await;
+
+                let attempts = take_reaction_cleanup_attempts();
+                assert_eq!(
+                    recorded_actions(&attempts),
+                    vec![(ch.get(), tid, '⏳', false), (ch.get(), tid, '✅', true)],
+                    "unmapped shared cleanup must not invent a dispatch-parent retry"
+                );
+                assert!(take_reaction_cleanup_records().is_empty());
+            });
+        });
+    }
+
+    #[test]
     fn standby_relay_completion_finalizer_removes_hourglass_and_marks_complete() {
         with_isolated_runtime_root(|| {
             test_rt().block_on(async {
