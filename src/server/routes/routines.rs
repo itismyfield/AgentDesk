@@ -1,7 +1,7 @@
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer};
@@ -10,11 +10,12 @@ use serde_json::{Value, json};
 use crate::config::Config;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::services::routines::{
-    NewRoutine, RoutineAgentExecutor, RoutineDiscordLogger, RoutineLifecycleEvent, RoutinePatch,
-    RoutineScriptLoader, RoutineSessionCommand, RoutineSessionController, RoutineStore,
-    execute_claimed_script_run, is_migrated_launchd_script_ref,
-    is_resume_routine_requires_next_due_at, validate_migrated_launchd_activation,
-    validate_routine_runtime_config, validate_routine_schedule,
+    DeleteRoutineResult, NewRoutine, RoutineAgentExecutor, RoutineDiscordLogger,
+    RoutineLifecycleEvent, RoutinePatch, RoutineScriptLoader, RoutineSessionCommand,
+    RoutineSessionController, RoutineStore, execute_claimed_script_run,
+    is_migrated_launchd_script_ref, is_resume_routine_requires_next_due_at,
+    validate_migrated_launchd_activation, validate_routine_runtime_config,
+    validate_routine_schedule,
 };
 use crate::utils::api::clamp_api_limit;
 
@@ -437,6 +438,22 @@ pub async fn detach_routine(
     ))
 }
 
+pub async fn delete_routine(
+    State(state): State<AppState>,
+    Path(routine_id): Path<String>,
+    headers: HeaderMap,
+) -> AppResult<(StatusCode, Json<Value>)> {
+    let store = routine_store(&state)?;
+    let caller_agent_id =
+        crate::services::kanban::resolve_requesting_agent_id_with_pg(store.pool(), &headers).await;
+    let result = store
+        .delete_detached_routine(&routine_id, caller_agent_id.as_deref())
+        .await
+        .map_err(store_error)?;
+    audit_routine_delete(&routine_id, &result);
+    delete_routine_response(&routine_id, result)
+}
+
 pub async fn run_routine_now(
     State(state): State<AppState>,
     Path(routine_id): Path<String>,
@@ -830,6 +847,167 @@ fn routine_health_target(config: &Config) -> Option<String> {
         .map(|value| format!("channel:{value}"))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoutineDeleteAuditLevel {
+    Info,
+    Warn,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RoutineDeleteAuditRecord {
+    outcome: &'static str,
+    routine_id: String,
+    owner: String,
+    caller: String,
+    deleted_runs: Option<u64>,
+    level: RoutineDeleteAuditLevel,
+}
+
+fn audit_agent_label(agent_id: Option<&str>, empty_label: &'static str) -> String {
+    agent_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(empty_label)
+        .to_string()
+}
+
+fn routine_delete_audit_record(
+    routine_id: &str,
+    result: &DeleteRoutineResult,
+) -> RoutineDeleteAuditRecord {
+    match result {
+        DeleteRoutineResult::Deleted {
+            run_history_deleted,
+            routine_agent_id,
+            caller_agent_id,
+        } => RoutineDeleteAuditRecord {
+            outcome: "deleted",
+            routine_id: routine_id.to_string(),
+            owner: audit_agent_label(routine_agent_id.as_deref(), "unowned"),
+            caller: audit_agent_label(caller_agent_id.as_deref(), "unresolved"),
+            deleted_runs: Some(*run_history_deleted),
+            level: RoutineDeleteAuditLevel::Info,
+        },
+        DeleteRoutineResult::NotFound { caller_agent_id } => RoutineDeleteAuditRecord {
+            outcome: "not_found",
+            routine_id: routine_id.to_string(),
+            owner: "unknown".to_string(),
+            caller: audit_agent_label(caller_agent_id.as_deref(), "unresolved"),
+            deleted_runs: None,
+            level: RoutineDeleteAuditLevel::Warn,
+        },
+        DeleteRoutineResult::NotDetached {
+            routine_agent_id,
+            caller_agent_id,
+            ..
+        } => RoutineDeleteAuditRecord {
+            outcome: "not_detached",
+            routine_id: routine_id.to_string(),
+            owner: audit_agent_label(routine_agent_id.as_deref(), "unowned"),
+            caller: audit_agent_label(caller_agent_id.as_deref(), "unresolved"),
+            deleted_runs: None,
+            level: RoutineDeleteAuditLevel::Warn,
+        },
+        DeleteRoutineResult::InFlight {
+            routine_agent_id,
+            caller_agent_id,
+        } => RoutineDeleteAuditRecord {
+            outcome: "in_flight",
+            routine_id: routine_id.to_string(),
+            owner: audit_agent_label(routine_agent_id.as_deref(), "unowned"),
+            caller: audit_agent_label(caller_agent_id.as_deref(), "unresolved"),
+            deleted_runs: None,
+            level: RoutineDeleteAuditLevel::Warn,
+        },
+        DeleteRoutineResult::Forbidden {
+            owner,
+            caller_agent_id,
+        } => RoutineDeleteAuditRecord {
+            outcome: "forbidden",
+            routine_id: routine_id.to_string(),
+            owner: audit_agent_label(Some(owner), "unknown"),
+            caller: audit_agent_label(caller_agent_id.as_deref(), "unresolved"),
+            deleted_runs: None,
+            level: RoutineDeleteAuditLevel::Warn,
+        },
+    }
+}
+
+fn audit_routine_delete(routine_id: &str, result: &DeleteRoutineResult) {
+    let record = routine_delete_audit_record(routine_id, result);
+    match (record.level, record.deleted_runs) {
+        (RoutineDeleteAuditLevel::Info, Some(deleted_runs)) => {
+            tracing::info!(
+                event = "routine_delete_audit",
+                outcome = record.outcome,
+                routine_id = %record.routine_id,
+                owner = %record.owner,
+                caller = %record.caller,
+                deleted_runs = deleted_runs,
+                "routine hard delete audited"
+            );
+        }
+        _ => {
+            tracing::warn!(
+                event = "routine_delete_audit",
+                outcome = record.outcome,
+                routine_id = %record.routine_id,
+                owner = %record.owner,
+                caller = %record.caller,
+                "routine hard delete rejected"
+            );
+        }
+    }
+}
+
+fn delete_routine_response(
+    routine_id: &str,
+    result: DeleteRoutineResult,
+) -> AppResult<(StatusCode, Json<Value>)> {
+    match result {
+        DeleteRoutineResult::Deleted {
+            run_history_deleted,
+            ..
+        } => Ok((
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "routine_id": routine_id,
+                "run_history_deleted": run_history_deleted,
+            })),
+        )),
+        DeleteRoutineResult::NotFound { .. } => Err(AppError::not_found(format!(
+            "routine {routine_id} not found"
+        ))),
+        DeleteRoutineResult::NotDetached { status, .. } => Err(AppError::conflict(format!(
+            "routine {routine_id} must be detached before delete; current status is {status}"
+        ))),
+        DeleteRoutineResult::InFlight { .. } => Err(AppError::conflict(format!(
+            "routine {routine_id} has an in-flight run and cannot be deleted"
+        ))),
+        DeleteRoutineResult::Forbidden {
+            owner,
+            caller_agent_id: Some(caller),
+        } => Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            ErrorCode::Policy,
+            format!(
+                "routine {routine_id} belongs to agent {owner}; caller agent {caller} cannot delete it"
+            ),
+        )),
+        DeleteRoutineResult::Forbidden {
+            owner,
+            caller_agent_id: None,
+        } => Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            ErrorCode::Policy,
+            format!(
+                "routine {routine_id} belongs to agent {owner}; caller agent scope could not be resolved"
+            ),
+        )),
+    }
+}
+
 fn store_error(error: anyhow::Error) -> AppError {
     if is_resume_routine_requires_next_due_at(&error) {
         return AppError::conflict(error.to_string());
@@ -859,11 +1037,13 @@ mod tests {
 
     use super::{
         PARALLEL_SAFE_MIGRATED_LAUNCHD_SCRIPT_REF, PatchRoutineBody, ResumeRoutineBody,
-        ensure_routine_runtime_runnable, initial_attach_status, normalize_script_ref, store_error,
+        RoutineDeleteAuditLevel, delete_routine_response, ensure_routine_runtime_runnable,
+        initial_attach_status, normalize_script_ref, routine_delete_audit_record, store_error,
         validate_distinct_fallback_agent,
     };
     use crate::config::RoutinesConfig;
     use crate::error::ErrorCode;
+    use crate::services::routines::DeleteRoutineResult;
 
     #[test]
     fn run_now_guard_rejects_disabled_routines() {
@@ -1006,6 +1186,176 @@ mod tests {
         assert_eq!(
             err.message(),
             "next_due_at required to resume schedule-less routine"
+        );
+    }
+
+    #[test]
+    fn delete_routine_response_maps_success_and_conflicts() {
+        let (status, body) = delete_routine_response(
+            "routine-1",
+            DeleteRoutineResult::Deleted {
+                run_history_deleted: 2,
+                routine_agent_id: Some("codex".to_string()),
+                caller_agent_id: Some("codex".to_string()),
+            },
+        )
+        .expect("deleted response");
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.0["ok"], true);
+        assert_eq!(body.0["routine_id"], "routine-1");
+        assert_eq!(body.0["run_history_deleted"], 2);
+
+        let err = delete_routine_response(
+            "routine-1",
+            DeleteRoutineResult::NotDetached {
+                status: "paused".to_string(),
+                routine_agent_id: Some("codex".to_string()),
+                caller_agent_id: Some("codex".to_string()),
+            },
+        )
+        .expect_err("non-detached delete must conflict");
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            err.message(),
+            "routine routine-1 must be detached before delete; current status is paused"
+        );
+
+        let err = delete_routine_response(
+            "routine-1",
+            DeleteRoutineResult::InFlight {
+                routine_agent_id: Some("codex".to_string()),
+                caller_agent_id: Some("codex".to_string()),
+            },
+        )
+        .expect_err("in-flight delete must conflict");
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            err.message(),
+            "routine routine-1 has an in-flight run and cannot be deleted"
+        );
+    }
+
+    #[test]
+    fn delete_routine_audit_record_covers_all_outcomes() {
+        let record = routine_delete_audit_record(
+            "routine-1",
+            &DeleteRoutineResult::Deleted {
+                run_history_deleted: 2,
+                routine_agent_id: Some("codex".to_string()),
+                caller_agent_id: Some("codex".to_string()),
+            },
+        );
+        assert_eq!(record.outcome, "deleted");
+        assert_eq!(record.routine_id, "routine-1");
+        assert_eq!(record.owner, "codex");
+        assert_eq!(record.caller, "codex");
+        assert_eq!(record.deleted_runs, Some(2));
+        assert_eq!(record.level, RoutineDeleteAuditLevel::Info);
+
+        let record = routine_delete_audit_record(
+            "routine-1",
+            &DeleteRoutineResult::Forbidden {
+                owner: "codex".to_string(),
+                caller_agent_id: Some("claude".to_string()),
+            },
+        );
+        assert_eq!(record.outcome, "forbidden");
+        assert_eq!(record.owner, "codex");
+        assert_eq!(record.caller, "claude");
+        assert_eq!(record.deleted_runs, None);
+        assert_eq!(record.level, RoutineDeleteAuditLevel::Warn);
+
+        let record = routine_delete_audit_record(
+            "routine-1",
+            &DeleteRoutineResult::NotDetached {
+                status: "paused".to_string(),
+                routine_agent_id: Some("codex".to_string()),
+                caller_agent_id: Some("codex".to_string()),
+            },
+        );
+        assert_eq!(record.outcome, "not_detached");
+        assert_eq!(record.owner, "codex");
+        assert_eq!(record.caller, "codex");
+        assert_eq!(record.deleted_runs, None);
+        assert_eq!(record.level, RoutineDeleteAuditLevel::Warn);
+
+        let record = routine_delete_audit_record(
+            "routine-1",
+            &DeleteRoutineResult::InFlight {
+                routine_agent_id: Some("codex".to_string()),
+                caller_agent_id: None,
+            },
+        );
+        assert_eq!(record.outcome, "in_flight");
+        assert_eq!(record.owner, "codex");
+        assert_eq!(record.caller, "unresolved");
+        assert_eq!(record.deleted_runs, None);
+        assert_eq!(record.level, RoutineDeleteAuditLevel::Warn);
+
+        let record = routine_delete_audit_record(
+            "routine-1",
+            &DeleteRoutineResult::NotFound {
+                caller_agent_id: Some("codex".to_string()),
+            },
+        );
+        assert_eq!(record.outcome, "not_found");
+        assert_eq!(record.owner, "unknown");
+        assert_eq!(record.caller, "codex");
+        assert_eq!(record.deleted_runs, None);
+        assert_eq!(record.level, RoutineDeleteAuditLevel::Warn);
+    }
+
+    #[test]
+    fn delete_routine_scope_rejects_other_agent() {
+        let err = delete_routine_response(
+            "routine-1",
+            DeleteRoutineResult::Forbidden {
+                owner: "codex".to_string(),
+                caller_agent_id: Some("claude".to_string()),
+            },
+        )
+        .expect_err("agent-scoped caller must not delete another agent's routine");
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        assert_eq!(err.code(), ErrorCode::Policy);
+        assert_eq!(
+            err.message(),
+            "routine routine-1 belongs to agent codex; caller agent claude cannot delete it"
+        );
+    }
+
+    #[test]
+    fn delete_routine_scope_rejects_unresolved_declared_scope() {
+        let err = delete_routine_response(
+            "routine-1",
+            DeleteRoutineResult::Forbidden {
+                owner: "codex".to_string(),
+                caller_agent_id: None,
+            },
+        )
+        .expect_err("declared but unresolved scope must fail closed");
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        assert_eq!(err.code(), ErrorCode::Policy);
+        assert_eq!(
+            err.message(),
+            "routine routine-1 belongs to agent codex; caller agent scope could not be resolved"
+        );
+    }
+
+    #[test]
+    fn delete_routine_scope_rejects_absent_header_for_owned_routine() {
+        let err = delete_routine_response(
+            "routine-1",
+            DeleteRoutineResult::Forbidden {
+                owner: "codex".to_string(),
+                caller_agent_id: None,
+            },
+        )
+        .expect_err("absent caller scope must fail closed for owned routines");
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        assert_eq!(err.code(), ErrorCode::Policy);
+        assert_eq!(
+            err.message(),
+            "routine routine-1 belongs to agent codex; caller agent scope could not be resolved"
         );
     }
 
