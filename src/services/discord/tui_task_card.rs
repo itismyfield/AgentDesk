@@ -50,8 +50,7 @@ const RESULT_PREVIEW_CHARS: usize = 1400;
 /// for a free-form Markdown completion report.
 const RESULT_PREVIEW_LINES: usize = 10;
 
-#[cfg(test)]
-const DISCORD_MESSAGE_LIMIT_CHARS: usize = 2000;
+const DISCORD_MESSAGE_LIMIT_CHARS: usize = super::DISCORD_MSG_LIMIT;
 const RESULT_PREVIEW_TRUNCATED_MARKER: &str = "… (truncated)";
 
 /// Structured fields extracted from a `<task-notification>` payload (#3075).
@@ -339,7 +338,7 @@ pub(super) fn format_task_notification_card(note: &TaskNotification, update_coun
         lines.push(format!("-# {}", footer_parts.join(" · ")));
     }
 
-    lines.join("\n")
+    clamp_discord_message_content(&lines.join("\n"))
 }
 
 fn status_icon(status: &str) -> &'static str {
@@ -406,10 +405,27 @@ fn summarize_json_result(result: &str) -> Option<String> {
 fn markdown_preview(result: &str) -> String {
     let mut collected: Vec<String> = Vec::new();
     let mut counted_lines = 0usize;
+    let mut collected_chars = 0usize;
+    let mut state = MarkdownPreviewState::default();
     for line in result.lines() {
-        let Some((line, counts_toward_limit)) = normalize_markdown_preview_line(line) else {
+        let Some(line) = normalize_markdown_preview_line(line, &mut state) else {
             continue;
         };
+        let counts_toward_limit = line.counts_toward_limit;
+        let line = line.text;
+        let line_chars = line.chars().count();
+        let separator_chars = usize::from(!collected.is_empty());
+        if collected_chars + separator_chars + line_chars > RESULT_PREVIEW_CHARS {
+            let remaining = RESULT_PREVIEW_CHARS.saturating_sub(collected_chars + separator_chars);
+            let overflow_sentinel_chars = RESULT_PREVIEW_TRUNCATED_MARKER.chars().count() + 1;
+            collected.push(
+                line.chars()
+                    .take(remaining + overflow_sentinel_chars)
+                    .collect(),
+            );
+            break;
+        }
+        collected_chars += separator_chars + line_chars;
         collected.push(line);
         if counts_toward_limit {
             counted_lines += 1;
@@ -422,9 +438,36 @@ fn markdown_preview(result: &str) -> String {
     truncate_preview_at_boundary(&joined, RESULT_PREVIEW_CHARS)
 }
 
-fn normalize_markdown_preview_line(line: &str) -> Option<(String, bool)> {
+#[derive(Default)]
+struct MarkdownPreviewState {
+    in_fence: bool,
+}
+
+struct MarkdownPreviewLine {
+    text: String,
+    counts_toward_limit: bool,
+}
+
+fn normalize_markdown_preview_line(
+    line: &str,
+    state: &mut MarkdownPreviewState,
+) -> Option<MarkdownPreviewLine> {
+    let fence_line = is_markdown_fence_line(line);
+    let inside_fence = state.in_fence;
     let line = sanitize_oneline(line).trim().to_string();
-    if line.is_empty() || is_markdown_decoration_line(&line) {
+    if fence_line {
+        state.in_fence = !state.in_fence;
+    }
+    if line.is_empty() {
+        return None;
+    }
+    if inside_fence || fence_line {
+        return Some(MarkdownPreviewLine {
+            text: line,
+            counts_toward_limit: true,
+        });
+    }
+    if is_markdown_decoration_line(&line) {
         return None;
     }
     let counts_toward_limit = !is_markdown_heading_line(&line);
@@ -441,8 +484,16 @@ fn normalize_markdown_preview_line(line: &str) -> Option<(String, bool)> {
     if text.is_empty() || is_markdown_decoration_line(&text) {
         None
     } else {
-        Some((text, counts_toward_limit))
+        Some(MarkdownPreviewLine {
+            text,
+            counts_toward_limit,
+        })
     }
+}
+
+fn is_markdown_fence_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("```") || trimmed.starts_with("~~~")
 }
 
 fn is_markdown_heading_line(line: &str) -> bool {
@@ -464,9 +515,14 @@ fn strip_markdown_line_prefix(line: &str) -> &str {
         text = rest.trim_start();
     }
 
-    let heading_trimmed = text.trim_start_matches('#');
-    if heading_trimmed.len() != text.len() {
-        return heading_trimmed.trim_start();
+    let hashes = text.chars().take_while(|ch| *ch == '#').count();
+    if hashes > 0
+        && text[hashes..]
+            .chars()
+            .next()
+            .is_none_or(char::is_whitespace)
+    {
+        return text[hashes..].trim_start();
     }
 
     if let Some(rest) = text
@@ -497,7 +553,7 @@ fn is_markdown_decoration_line(line: &str) -> bool {
 }
 
 fn blockquote_preview(preview: &str, first_line_prefix: &str) -> String {
-    preview
+    let rendered = preview
         .lines()
         .enumerate()
         .map(|(idx, line)| {
@@ -508,7 +564,12 @@ fn blockquote_preview(preview: &str, first_line_prefix: &str) -> String {
             }
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    truncate_preview_at_boundary(&rendered, RESULT_PREVIEW_CHARS)
+}
+
+pub(super) fn clamp_discord_message_content(value: &str) -> String {
+    truncate_preview_at_boundary(value, DISCORD_MESSAGE_LIMIT_CHARS)
 }
 
 fn truncate_preview_at_boundary(value: &str, limit: usize) -> String {
@@ -1194,6 +1255,81 @@ Conclusion reached after the table.";
         assert!(
             preview.ends_with(RESULT_PREVIEW_TRUNCATED_MARKER),
             "long preview should end with explicit marker: {preview}"
+        );
+    }
+
+    #[test]
+    fn task_card_clamps_many_short_headings_under_discord_limit() {
+        let result = (1..=900)
+            .map(|idx| format!("# H{idx}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let note = parse_task_notification(&payload(&[
+            ("task-id", "heading-overflow"),
+            ("status", "completed"),
+            ("summary", "many headings"),
+            ("result", &result),
+        ]));
+        let card = format_task_notification_card(&note, 1);
+
+        assert!(
+            card.chars().count() <= DISCORD_MESSAGE_LIMIT_CHARS,
+            "card must be clamped to Discord's limit, got {} chars",
+            card.chars().count()
+        );
+        assert!(
+            card.contains(RESULT_PREVIEW_TRUNCATED_MARKER),
+            "overflowing heading preview should advertise truncation: {card}"
+        );
+    }
+
+    #[test]
+    fn markdown_preview_preserves_fenced_block_content() {
+        let result = "\
+# Outside heading
+```sh
+# comment
+- rm -rf target
+| table | row |
+> quoted code
+```
+after fence";
+
+        let preview = markdown_preview(result);
+
+        assert!(preview.contains("# comment"), "{preview}");
+        assert!(preview.contains("- rm -rf target"), "{preview}");
+        assert!(preview.contains("| table | row |"), "{preview}");
+        assert!(preview.contains("> quoted code"), "{preview}");
+        assert!(
+            preview.lines().count() <= RESULT_PREVIEW_LINES + 1,
+            "fenced block lines should still consume the content-line budget: {preview}"
+        );
+    }
+
+    #[test]
+    fn markdown_preview_preserves_issue_reference_at_line_start() {
+        let preview = markdown_preview("#3034 stays linked\n# Heading");
+
+        assert!(preview.contains("#3034 stays linked"), "{preview}");
+        assert!(preview.contains("Heading"), "{preview}");
+    }
+
+    #[test]
+    fn markdown_preview_bounds_large_heading_runs() {
+        let result = (1..=50_000)
+            .map(|idx| format!("# Heading {idx}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let preview = markdown_preview(&result);
+
+        assert!(
+            preview.chars().count() <= RESULT_PREVIEW_CHARS,
+            "large heading-only preview must stay char-bounded"
+        );
+        assert!(
+            preview.lines().count() < 500,
+            "heading-only previews must not collect unbounded lines"
         );
     }
 
