@@ -430,11 +430,18 @@ pub enum DeleteRoutineResult {
         routine_agent_id: Option<String>,
         caller_agent_id: Option<String>,
     },
-    NotFound,
+    NotFound {
+        caller_agent_id: Option<String>,
+    },
     NotDetached {
         status: String,
+        routine_agent_id: Option<String>,
+        caller_agent_id: Option<String>,
     },
-    InFlight,
+    InFlight {
+        routine_agent_id: Option<String>,
+        caller_agent_id: Option<String>,
+    },
     Forbidden {
         owner: String,
         caller_agent_id: Option<String>,
@@ -2648,6 +2655,10 @@ impl RoutineStore {
         routine_id: &str,
         caller_agent_id: Option<&str>,
     ) -> Result<DeleteRoutineResult> {
+        let caller_agent_id = caller_agent_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
         let mut tx = self
             .pool
             .begin()
@@ -2668,7 +2679,7 @@ impl RoutineStore {
         .map_err(|e| anyhow!("delete routine {routine_id}: {e}"))?;
 
         let Some(row) = row else {
-            return Ok(DeleteRoutineResult::NotFound);
+            return Ok(DeleteRoutineResult::NotFound { caller_agent_id });
         };
 
         let status: String = row
@@ -2681,7 +2692,7 @@ impl RoutineStore {
             .try_get("agent_id")
             .map_err(|e| anyhow!("delete routine {routine_id}: {e}"))?;
 
-        match routine_delete_scope_gate(routine_agent_id.as_deref(), caller_agent_id) {
+        match routine_delete_scope_gate(routine_agent_id.as_deref(), caller_agent_id.as_deref()) {
             RoutineDeleteScopeGate::Allowed => {}
             RoutineDeleteScopeGate::Unresolved { owner } => {
                 return Ok(DeleteRoutineResult::Forbidden {
@@ -2714,9 +2725,18 @@ impl RoutineStore {
 
         match routine_hard_delete_gate(&status, in_flight_run_id.as_deref(), has_running_run) {
             RoutineHardDeleteGate::Allowed => {}
-            RoutineHardDeleteGate::InFlight => return Ok(DeleteRoutineResult::InFlight),
+            RoutineHardDeleteGate::InFlight => {
+                return Ok(DeleteRoutineResult::InFlight {
+                    routine_agent_id,
+                    caller_agent_id,
+                });
+            }
             RoutineHardDeleteGate::NotDetached { status } => {
-                return Ok(DeleteRoutineResult::NotDetached { status });
+                return Ok(DeleteRoutineResult::NotDetached {
+                    status,
+                    routine_agent_id,
+                    caller_agent_id,
+                });
             }
         }
 
@@ -2755,10 +2775,7 @@ impl RoutineStore {
         Ok(DeleteRoutineResult::Deleted {
             run_history_deleted: deleted_runs.rows_affected(),
             routine_agent_id,
-            caller_agent_id: caller_agent_id
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned),
+            caller_agent_id,
         })
     }
 
