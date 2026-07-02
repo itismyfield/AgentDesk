@@ -321,6 +321,51 @@ fn process_group_exists(pgid: u32) -> bool {
     unsafe { libc::kill(-(pgid as libc::pid_t), 0) == 0 }
 }
 
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn pid_has_process_group(pid: u32) -> bool {
+    unsafe { libc::getpgid(pid as libc::pid_t) >= 0 }
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn pid_is_zombie(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| {
+            parse_linux_proc_stat_after_comm(&stat)
+                .and_then(|rest| rest.split_whitespace().next())
+                .map(str::to_string)
+        })
+        .is_some_and(|state| state == "Z")
+}
+
+#[cfg(all(unix, target_os = "macos"))]
+#[allow(unsafe_code)]
+fn pid_is_zombie(pid: u32) -> bool {
+    use std::mem::MaybeUninit;
+    let mut info: MaybeUninit<libc::proc_bsdinfo> = MaybeUninit::uninit();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let ret = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr() as *mut libc::c_void,
+            size,
+        )
+    };
+    if ret <= 0 || ret < size {
+        return false;
+    }
+    let info = unsafe { info.assume_init() };
+    info.pbi_status == libc::SZOMB
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn pid_is_zombie(_pid: u32) -> bool {
+    false
+}
+
 #[cfg(all(unix, target_os = "linux"))]
 fn parse_linux_proc_stat_after_comm(stat: &str) -> Option<&str> {
     stat.rsplit_once(") ").map(|(_, rest)| rest)
@@ -415,7 +460,8 @@ fn kill_pid_tree_with_identity(pid: u32, identity: ProcessIdentity) -> bool {
             // the leader PID fully disappeared during the grace window but the
             // group remains, the group still belongs to the original
             // cancellation target and needs SIGKILL cleanup.
-            let leader_exists = pid_exists(pid);
+            let leader_exists =
+                pid_exists(pid) && pid_has_process_group(pid) && !pid_is_zombie(pid);
             if should_escalate_process_group_after_grace(
                 leader_exists,
                 leader_exists && identity.matches(pid),
@@ -704,17 +750,7 @@ mod process_group_tests {
 
     #[allow(unsafe_code)]
     fn process_is_running(pid: u32) -> bool {
-        if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
-            return false;
-        }
-        let Ok(output) = Command::new("ps")
-            .args(["-p", &pid.to_string(), "-o", "stat="])
-            .output()
-        else {
-            return true;
-        };
-        let stat = String::from_utf8_lossy(&output.stdout);
-        !stat.trim_start().starts_with('Z')
+        (unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }) && !super::pid_is_zombie(pid)
     }
 }
 
@@ -1099,17 +1135,7 @@ mod simple_cancel_watcher_tests {
 
     #[allow(unsafe_code)]
     fn process_is_running(pid: u32) -> bool {
-        if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
-            return false;
-        }
-        let Ok(output) = Command::new("ps")
-            .args(["-p", &pid.to_string(), "-o", "stat="])
-            .output()
-        else {
-            return true;
-        };
-        let stat = String::from_utf8_lossy(&output.stdout);
-        !stat.trim_start().starts_with('Z')
+        (unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }) && !super::pid_is_zombie(pid)
     }
 
     #[allow(unsafe_code)]

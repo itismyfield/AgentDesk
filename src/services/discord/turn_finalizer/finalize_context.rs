@@ -32,6 +32,10 @@ pub(in crate::services::discord) struct FinalizeContext {
     /// The watcher's `finish_restored_watcher_active_turn` did this; the bridge
     /// branches deferred kickoff to a later site, so they pass `false`.
     pub(in crate::services::discord) kickoff_queue: bool,
+    /// Whether an identity-guard miss is expected/idempotent for this submitter.
+    /// The real reconcile backstop is intentionally quiet on misses; recovery
+    /// submitters with the same side-effect knobs must still warn.
+    pub(in crate::services::discord) expected_idempotent_guard_miss: bool,
 }
 
 impl FinalizeContext {
@@ -44,6 +48,7 @@ impl FinalizeContext {
             allow_completion_cleanup: true,
             drain_voice: true,
             kickoff_queue: false,
+            expected_idempotent_guard_miss: false,
         }
     }
 
@@ -58,6 +63,7 @@ impl FinalizeContext {
             allow_completion_cleanup: false,
             drain_voice: false,
             kickoff_queue: false,
+            expected_idempotent_guard_miss: false,
         }
     }
 
@@ -74,6 +80,7 @@ impl FinalizeContext {
             allow_completion_cleanup: false,
             drain_voice: false,
             kickoff_queue: true,
+            expected_idempotent_guard_miss: false,
         }
     }
 
@@ -87,6 +94,7 @@ impl FinalizeContext {
             allow_completion_cleanup: false,
             drain_voice: false,
             kickoff_queue: true,
+            expected_idempotent_guard_miss: true,
         }
     }
 
@@ -101,13 +109,11 @@ impl FinalizeContext {
             allow_completion_cleanup: false,
             drain_voice: false,
             kickoff_queue: false,
+            expected_idempotent_guard_miss: false,
         }
     }
 
     pub(in crate::services::discord) fn is_backstop_reconcile_path(self) -> bool {
-        self.clear_inflight
-            && self.kickoff_queue
-            && !self.allow_completion_cleanup
-            && !self.drain_voice
+        self.expected_idempotent_guard_miss
     }
 }

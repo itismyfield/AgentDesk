@@ -24,7 +24,7 @@ use super::super::inflight::{
     downgrade_orphaned_session_bound_relay_owner_locked, load_inflight_state,
     session_bound_relay_external_input_orphan_shape,
 };
-use super::super::tui_direct_pending_start::ReclaimOrphanFn;
+use super::super::tui_direct_pending_start::{ReclaimOrphanFn, ReclaimStaleForeignOutcome};
 use crate::services::provider::ProviderKind;
 
 /// #3982: PURE reclaimability predicate — is `state` a producer-dead
@@ -97,10 +97,10 @@ pub(super) fn pending_start_reclaim_orphan_fn() -> ReclaimOrphanFn {
             )
             .await
             {
-                return true;
+                return ReclaimStaleForeignOutcome::StaleForeignDemoted;
             }
             let Some(provider) = ProviderKind::from_str(&record.provider) else {
-                return false;
+                return ReclaimStaleForeignOutcome::None;
             };
             let reclaimed = reclaim_orphan_inflight_owner(
                 &provider,
@@ -116,7 +116,11 @@ pub(super) fn pending_start_reclaim_orphan_fn() -> ReclaimOrphanFn {
                     "tui_direct_pending_start: downgraded a producer-dead SessionBoundRelay orphan to ownerless on the backstop path; the deferred claim can now proceed and ownerless recovery re-delivers the orphan's uncommitted suffix (#3982)"
                 );
             }
-            reclaimed
+            if reclaimed {
+                ReclaimStaleForeignOutcome::SessionBoundOrphanReclaimed
+            } else {
+                ReclaimStaleForeignOutcome::None
+            }
         })
     })
 }
@@ -125,10 +129,57 @@ pub(super) fn pending_start_reclaim_orphan_fn() -> ReclaimOrphanFn {
 mod tests {
     use super::orphan_row_is_reclaimable;
     use crate::services::discord::inflight::{
-        InflightTurnState, RelayOwnerKind, TurnSource,
+        InflightTurnState, RelayOwnerKind, TurnSource, load_inflight_state,
         session_bound_relay_external_input_orphan_shape,
     };
+    use crate::services::discord::tui_direct_pending_start::{
+        PendingStartState, ReclaimStaleForeignOutcome, TuiDirectPendingStart,
+    };
     use crate::services::provider::ProviderKind;
+
+    struct EnvReset(Option<std::ffi::OsString>);
+
+    impl Drop for EnvReset {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
+
+    fn isolated_runtime_root() -> (
+        std::sync::MutexGuard<'static, ()>,
+        tempfile::TempDir,
+        EnvReset,
+    ) {
+        let env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::TempDir::new().expect("runtime root");
+        let env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root.path()) };
+        (env_lock, root, env)
+    }
+
+    fn write_inflight_fixture(
+        root: &std::path::Path,
+        provider: &ProviderKind,
+        state: &InflightTurnState,
+    ) {
+        let path = root
+            .join("runtime")
+            .join("discord_inflight")
+            .join(provider.as_str())
+            .join(format!("{}.json", state.channel_id));
+        std::fs::create_dir_all(path.parent().expect("inflight parent"))
+            .expect("create inflight fixture dir");
+        std::fs::write(
+            path,
+            serde_json::to_string_pretty(state).expect("serialize inflight fixture"),
+        )
+        .expect("write inflight fixture");
+    }
 
     /// A local-time timestamp string in the inflight `updated_at` format, `age`
     /// seconds in the past.
@@ -167,6 +218,25 @@ mod tests {
         state
     }
 
+    fn pending_record(channel_id: u64, tmux: &str) -> TuiDirectPendingStart {
+        TuiDirectPendingStart {
+            provider: "claude".to_string(),
+            channel_id,
+            tmux_session_name: tmux.to_string(),
+            prompt_text: "/loop tick".to_string(),
+            anchor_message_id: 9001,
+            lease_relay_owner: "bridge_adapter".to_string(),
+            lease_runtime_kind: Some("claude_tui".to_string()),
+            lease_turn_id: None,
+            lease_session_key: None,
+            generation: 0,
+            created_at_ms: 0,
+            observed_at_ms: 0,
+            state: PendingStartState::Waiting,
+            attempt_count: 0,
+        }
+    }
+
     /// #3982 (test plan item 3): the pure reclaimability decision matches ONLY a
     /// producer-dead `SessionBoundRelay` orphan on the caller session. This tests
     /// the trigger's DECISION with no I/O; the identity-guarded flock RMW it gates
@@ -175,6 +245,7 @@ mod tests {
     /// `tui_direct_pending_start::tests::backstop_orphan_reclaim_*`.
     #[test]
     fn orphan_row_is_reclaimable_matches_stale_session_bound_orphan_on_caller_session() {
+        let (_env_lock, _root, _env) = isolated_runtime_root();
         let tmux = "AgentDesk-claude-adk-cc";
         let orphan = session_bound_row(4242, tmux, true);
         // Sanity: this is a genuine producer-dead SessionBoundRelay orphan.
@@ -193,6 +264,7 @@ mod tests {
     /// reclaimable. Guards over-reclaim of a slow-but-live turn.
     #[test]
     fn orphan_row_is_reclaimable_skips_fresh_row() {
+        let (_env_lock, _root, _env) = isolated_runtime_root();
         let tmux = "AgentDesk-claude-adk-cc";
         let fresh = session_bound_row(4343, tmux, false);
         assert!(
@@ -211,6 +283,7 @@ mod tests {
     /// otherwise orphan-shaped.
     #[test]
     fn orphan_row_is_reclaimable_skips_foreign_session() {
+        let (_env_lock, _root, _env) = isolated_runtime_root();
         let orphan = session_bound_row(4444, "AgentDesk-claude-adk-cc", true);
         assert!(
             session_bound_relay_external_input_orphan_shape(&orphan),
@@ -220,5 +293,34 @@ mod tests {
             !orphan_row_is_reclaimable(&orphan, "AgentDesk-claude-OTHER"),
             "an orphan on a foreign session must not be reclaimed by this worker (#3982)"
         );
+    }
+
+    #[test]
+    fn pending_start_reclaim_orphan_fn_uses_real_ordering_for_session_bound_orphan() {
+        let (_env_lock, root, _env) = isolated_runtime_root();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let channel_id = 4_030_401;
+            let tmux = "AgentDesk-claude-4030-session-bound-orphan";
+            let state = session_bound_row(channel_id, tmux, true);
+            write_inflight_fixture(root.path(), &ProviderKind::Claude, &state);
+            let record = pending_record(channel_id, tmux);
+
+            let reclaim = super::pending_start_reclaim_orphan_fn();
+            let outcome = reclaim(&shared, &record).await;
+
+            assert_eq!(
+                outcome,
+                ReclaimStaleForeignOutcome::SessionBoundOrphanReclaimed,
+                "SessionBoundRelay must bypass stale-foreign demotion and then reclaim via #3982 orphan downgrade"
+            );
+            let reloaded = load_inflight_state(&ProviderKind::Claude, channel_id)
+                .expect("orphan row remains for ownerless recovery");
+            assert_eq!(reloaded.effective_relay_owner_kind(), RelayOwnerKind::None);
+        });
     }
 }

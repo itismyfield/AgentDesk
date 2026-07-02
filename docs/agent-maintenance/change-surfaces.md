@@ -1023,6 +1023,13 @@
     marker suppression for stop-control transcript envelopes; +62 from #3304:
     slash-command canonical prompt keys for `<command-*>` XML vs
     `/command args` dedupe, plus focused loop skill-expansion regressions).
+  - `src/services/discord/relay_recovery.rs` (1131 production lines; +242 from
+    #4030 fix-round review hardening: destructive watcher-owner Cancel now routes
+    through the shared death-evidence gate (`destructive_cancel_gate.rs`), pins
+    decision-time turn/mailbox/tmux identity before apply-time finalizer submit,
+    and covers frozen nonzero-frontier / empty-capture variants. This admission
+    is bugfix-only for PR #4035; further recovery policy expansion should extract
+    decision/apply helpers instead of growing this file.)
   - `src/services/discord/recovery_engine.rs` (2935 lines; +17 from #3869
     (restart routing-orphan cleanup): the three post-`validate_bot_channel_routing_with_provider_channel`
     sites no longer bare-`continue`-strand a row whose channel was re-bound to a

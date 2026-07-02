@@ -7,6 +7,7 @@ mod answer_flush_barrier;
 // recovery) subsystem extracted verbatim to its own sibling module.
 mod catch_up;
 mod commands;
+mod destructive_cancel_gate;
 mod discord_io;
 mod dispatch_policy;
 pub(crate) mod formatting;
