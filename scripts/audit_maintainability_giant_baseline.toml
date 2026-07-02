@@ -615,7 +615,11 @@
 # TurnCompleted is finalized the moment the turn's JSONL confirms terminal. The
 # reconcile body lives in the new (non-hot) status_panel_timedout_reconcile.rs;
 # this is the minimal sweep-loop call + comment. Bugfix-only.
-"src/services/discord/placeholder_sweeper.rs" = 1019
+# windows-build fix: 1019 -> 1020 (+1) — statement-level #[cfg(unix)] gate on the
+# #3886 reconcile call (the tmux module is cfg-out on windows; E0433 since
+# 733fb9f2d broke main's windows cargo check). Attribute line only, no logic.
+# rustfmt rejects the single-line form, so the +1 is irreducible.
+"src/services/discord/placeholder_sweeper.rs" = 1020
 # #3479: turn_bridge/tmux_runtime.rs decomposed into tmux_runtime/ directory
 # modules (root tmux_runtime.rs 964 prod LoC + sub-1000-LoC
 # tmux_runtime/{interrupt_policy,process_table,pid_exit}.rs) — dropped below the
