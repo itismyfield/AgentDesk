@@ -85,25 +85,11 @@ fn idle_tmux_repair_ready_for_input(
     channel_id: u64,
     tmux_session: &str,
 ) -> bool {
-    let structured_ready = super::super::inflight::load_inflight_state(provider, channel_id)
-        .and_then(|state| {
-            let output_path = state
-                .output_path
-                .as_deref()
-                .map(str::trim)
-                .filter(|path| !path.is_empty())?;
-            crate::services::tui_turn_state::jsonl_ready_for_input(
-                provider,
-                state.runtime_kind,
-                std::path::Path::new(output_path),
-                Some(state.last_offset),
-            )
-        });
-    structured_ready
-        .map(crate::services::tui_turn_state::TuiReadyState::is_ready)
-        .unwrap_or_else(|| {
-            crate::services::provider::tmux_session_ready_for_input(tmux_session, provider)
-        })
+    super::super::relay_recovery::idle_tmux_repair_ready_for_input(
+        provider,
+        channel_id,
+        tmux_session,
+    )
 }
 
 fn preserve_cancel_should_skip_provider_interrupt_for_idle_tui(

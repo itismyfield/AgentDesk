@@ -11,11 +11,17 @@
 //! or points at a deleted file are permanently denied by the destructive cancel
 //! gate because no frozen-capture or terminal-envelope evidence can be re-probed.
 //! Stage-3 recovery where `watcher_attached=false` still relies on the
-//! pending-start backstop trigger. Do not broaden those paths inside the #4030
-//! watcher-cancel fix; they need separate design/review.
+//! pending-start backstop trigger. Frozen-busy JSONL rows remain denied until
+//! the output file has been quiescent for the conservative stale window and the
+//! live pane itself reports ready for input; shorter freezes or busy panes are
+//! intentionally residual. Committed rows coupled to a mismatched `rebind_origin`
+//! are not independently healed here. Do not broaden those paths inside the
+//! #4030 watcher-cancel fix; they need separate design/review.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::{Duration, SystemTime};
 
 use poise::serenity_prelude::ChannelId;
 use serde::Serialize;
@@ -40,6 +46,8 @@ use auto_heal_attempts::{
     AUTO_HEAL_DEFAULT_MAX_ATTEMPTS_PER_WINDOW, AUTO_HEAL_WINDOW_SECS, auto_heal_key,
     max_attempts_per_window_for_snapshot, remaining_auto_heal_attempts, reserve_auto_heal_attempt,
 };
+
+const FROZEN_BUSY_JSONL_READY_FALLBACK_AGE: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -733,25 +741,88 @@ pub(in crate::services::discord) fn idle_tmux_repair_ready_for_input(
     channel_id: u64,
     tmux_session: &str,
 ) -> bool {
-    let structured_ready =
-        super::inflight::load_inflight_state(provider, channel_id).and_then(|state| {
-            let output_path = state
-                .output_path
-                .as_deref()
-                .map(str::trim)
-                .filter(|path| !path.is_empty())?;
-            crate::services::tui_turn_state::jsonl_ready_for_input(
-                provider,
-                state.runtime_kind,
-                std::path::Path::new(output_path),
-                Some(state.last_offset),
-            )
-        });
-    structured_ready
-        .map(crate::services::tui_turn_state::TuiReadyState::is_ready)
-        .unwrap_or_else(|| {
-            crate::services::provider::tmux_session_ready_for_input(tmux_session, provider)
-        })
+    idle_tmux_repair_ready_for_input_with_pane_probe(
+        provider,
+        channel_id,
+        tmux_session,
+        crate::services::provider::tmux_session_ready_for_input,
+    )
+}
+
+fn idle_tmux_repair_ready_for_input_with_pane_probe(
+    provider: &ProviderKind,
+    channel_id: u64,
+    tmux_session: &str,
+    pane_ready_for_input: impl Fn(&str, &ProviderKind) -> bool,
+) -> bool {
+    let Some(state) = super::inflight::load_inflight_state(provider, channel_id) else {
+        return pane_ready_for_input(tmux_session, provider);
+    };
+    let Some(output_path) = state
+        .output_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
+        return pane_ready_for_input(tmux_session, provider);
+    };
+    let output_path = Path::new(output_path);
+    let Some(structured_ready) = crate::services::tui_turn_state::jsonl_ready_for_input(
+        provider,
+        state.runtime_kind,
+        output_path,
+        Some(state.last_offset),
+    ) else {
+        return pane_ready_for_input(tmux_session, provider);
+    };
+
+    match structured_ready {
+        crate::services::tui_turn_state::TuiReadyState::Ready => true,
+        crate::services::tui_turn_state::TuiReadyState::Busy
+            if frozen_busy_jsonl_allows_pane_fallback(output_path) =>
+        {
+            let pane_ready = pane_ready_for_input(tmux_session, provider);
+            if pane_ready {
+                tracing::warn!(
+                    target: "agentdesk::discord::relay_recovery",
+                    provider = provider.as_str(),
+                    channel_id,
+                    tmux_session,
+                    output_path = %output_path.display(),
+                    stale_secs = FROZEN_BUSY_JSONL_READY_FALLBACK_AGE.as_secs(),
+                    "idle-tmux repair accepted pane-ready fallback for frozen Busy JSONL"
+                );
+            }
+            pane_ready
+        }
+        crate::services::tui_turn_state::TuiReadyState::Busy
+        | crate::services::tui_turn_state::TuiReadyState::Unknown => false,
+    }
+}
+
+fn frozen_busy_jsonl_allows_pane_fallback(output_path: &Path) -> bool {
+    output_file_quiescent_for_duration(output_path, FROZEN_BUSY_JSONL_READY_FALLBACK_AGE)
+}
+
+fn output_file_quiescent_for_duration(output_path: &Path, min_age: Duration) -> bool {
+    output_file_quiescent_for_duration_at(output_path, min_age, SystemTime::now())
+}
+
+fn output_file_quiescent_for_duration_at(
+    output_path: &Path,
+    min_age: Duration,
+    now: SystemTime,
+) -> bool {
+    let Ok(metadata) = std::fs::metadata(output_path) else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.len() == 0 {
+        return false;
+    }
+    let Ok(modified) = metadata.modified() else {
+        return false;
+    };
+    now.duration_since(modified).is_ok_and(|age| age >= min_age)
 }
 
 /// #3668 F2: detect tail answer text that the destructive idle-tmux clear would
@@ -2500,6 +2571,60 @@ mod tests {
         // the empty-stream + JSONL-terminal-answer asymmetry exactly.
         assert!(state.full_response.is_empty());
         super::super::inflight::save_inflight_state(&state).expect("save inflight");
+    }
+
+    fn set_output_mtime_age(output_path: &std::path::Path, age: std::time::Duration) {
+        let modified = std::time::SystemTime::now()
+            .checked_sub(age)
+            .expect("mtime before now");
+        filetime::set_file_mtime(output_path, filetime::FileTime::from_system_time(modified))
+            .expect("set output mtime");
+    }
+
+    #[test]
+    fn frozen_busy_jsonl_uses_ready_pane_fallback_after_stale_window() {
+        let _guard = auto_heal_test_lock().blocking_lock();
+        let (_root_guard, temp) = isolated_agentdesk_root();
+
+        let provider = ProviderKind::Claude;
+        let channel_id = 4_030_501;
+        let output_path = temp.path().join("frozen-busy-ready.jsonl");
+        let body = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"streaming tail without terminator\"}]}}\n";
+        write_inflight_with_output(&provider, channel_id, &output_path, body.len() as u64, body);
+        set_output_mtime_age(&output_path, std::time::Duration::from_secs(20 * 60));
+
+        assert!(
+            idle_tmux_repair_ready_for_input_with_pane_probe(
+                &provider,
+                channel_id,
+                "tmux-4030-frozen-ready",
+                |_tmux, _provider| true,
+            ),
+            "a long-frozen Busy JSONL may consume the pane-ready fallback"
+        );
+    }
+
+    #[test]
+    fn frozen_busy_jsonl_keeps_deny_when_pane_still_busy() {
+        let _guard = auto_heal_test_lock().blocking_lock();
+        let (_root_guard, temp) = isolated_agentdesk_root();
+
+        let provider = ProviderKind::Claude;
+        let channel_id = 4_030_502;
+        let output_path = temp.path().join("frozen-busy-pane-busy.jsonl");
+        let body = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"live long-running tool call\"}]}}\n";
+        write_inflight_with_output(&provider, channel_id, &output_path, body.len() as u64, body);
+        set_output_mtime_age(&output_path, std::time::Duration::from_secs(20 * 60));
+
+        assert!(
+            !idle_tmux_repair_ready_for_input_with_pane_probe(
+                &provider,
+                channel_id,
+                "tmux-4030-frozen-busy",
+                |_tmux, _provider| false,
+            ),
+            "a frozen Busy JSONL still denies while the live pane is not ready"
+        );
     }
 
     #[test]
