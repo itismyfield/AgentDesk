@@ -1168,54 +1168,22 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 turn_identity_for_panel.as_ref(),
             ),
         };
-        // #3041 P1-3 R6: turn-scope the carried ack target. A fresh `Some` (THIS
-        // turn forwarded a terminal frame) replaces it; a `None` keeps the stored
-        // ack ONLY when it belongs to THIS turn (`turn_data_start_offset`), so a new
-        // turn processed from leftover bytes never inherits a finished turn's stale
-        // ACK (which would let the prior turn's `Delivered` falsely satisfy this
-        // turn → black-hole). A reset-to-`None` makes this turn reconcile against
-        // the committed offset instead of waiting on a foreign sequence.
-        all_data_session_bound_relay_ack = carry_session_bound_ack_for_turn(
-            all_data_session_bound_relay_ack.take(),
-            data_mirrored_to_session_relay.ack_target.clone(),
-            turn_identity_for_panel
-                .as_ref()
-                .and_then(|identity| identity.turn_start_offset),
-        );
-        if initial_buffer_was_empty {
-            all_data_first_forwarded_relay_sequence =
-                data_mirrored_to_session_relay.first_forwarded_sequence;
-        } else {
-            remember_supervisor_relay_first_forwarded_sequence(
-                &mut all_data_first_forwarded_relay_sequence,
-                &data_mirrored_to_session_relay,
-            );
-        }
-        // #3041 P1-3 (codex P1-3 R7): latch the turn-boundary signal. If this initial
-        // forward split a result+next-turn chunk, a later turn follows; reset the ack
-        // after THIS turn's terminal ACK wait so the later turn never inherits it.
-        split_trailing_turn_follows |= data_mirrored_to_session_relay.trailing_turn_follows;
-        let initial_forward_fully_mirrored = supervisor_relay_forward_fully_mirrors_turn(
+        let supervisor_turn_state = apply_initial_supervisor_relay_forward(
+            &mut all_data_fully_mirrored_to_session_relay,
+            &mut all_data_session_bound_relay_ack,
+            &mut all_data_first_forwarded_relay_sequence,
+            &mut split_trailing_turn_follows,
             &data_mirrored_to_session_relay,
+            initial_buffer_was_empty,
+            all_data.is_empty(),
+            restored_assistant_text_seen,
             turn_identity_for_panel.as_ref(),
         );
-        if initial_buffer_was_empty {
-            all_data_fully_mirrored_to_session_relay = initial_forward_fully_mirrored;
-        } else {
-            all_data_fully_mirrored_to_session_relay &= initial_forward_fully_mirrored;
-        }
-        let mut session_bound_relay_turn_fully_mirrored =
-            all_data_fully_mirrored_to_session_relay && !restored_assistant_text_seen;
+        let mut session_bound_relay_turn_fully_mirrored = supervisor_turn_state.fully_mirrored;
         let mut session_bound_relay_turn_first_forwarded_sequence =
-            all_data_first_forwarded_relay_sequence;
+            supervisor_turn_state.first_forwarded_sequence;
         all_data_start_offset =
             advance_buffer_start_offset(turn_data_start_offset, initial_buffer_len, all_data.len());
-        if data_mirrored_to_session_relay.trailing_turn_follows {
-            all_data_first_forwarded_relay_sequence =
-                data_mirrored_to_session_relay.trailing_first_forwarded_sequence;
-        } else if all_data.is_empty() {
-            all_data_first_forwarded_relay_sequence = None;
-        }
         let live_events_dirty = flush_placeholder_live_events(&shared, channel_id, &mut tool_state);
         let mut found_result = initial_outcome.found_result;
         let mut terminal_kind = initial_outcome.terminal_kind;
@@ -1472,61 +1440,24 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 turn_identity_for_panel.as_ref(),
                             ),
                         };
-                        // #3041 P1-3 R6: turn-scope the carried ack target (see the
-                        // initial-parse site above). A fresh terminal frame's ack
-                        // replaces it; a non-terminal pass keeps the stored ack ONLY
-                        // when it belongs to THIS turn (`turn_data_start_offset`), so
-                        // a later turn never inherits a finished turn's stale ACK.
-                        all_data_session_bound_relay_ack = carry_session_bound_ack_for_turn(
-                            all_data_session_bound_relay_ack.take(),
-                            chunk_forwarded_to_session_relay.ack_target.clone(),
-                            turn_identity_for_panel
-                                .as_ref()
-                                .and_then(|identity| identity.turn_start_offset),
-                        );
-                        if chunk_buffer_was_empty {
-                            all_data_first_forwarded_relay_sequence =
-                                chunk_forwarded_to_session_relay.first_forwarded_sequence;
-                        } else {
-                            remember_supervisor_relay_first_forwarded_sequence(
-                                &mut all_data_first_forwarded_relay_sequence,
-                                &chunk_forwarded_to_session_relay,
-                            );
-                        }
-                        remember_supervisor_relay_first_forwarded_sequence(
+                        apply_streaming_supervisor_relay_forward(
+                            &mut all_data_fully_mirrored_to_session_relay,
+                            &mut all_data_session_bound_relay_ack,
+                            &mut all_data_first_forwarded_relay_sequence,
+                            &mut session_bound_relay_turn_fully_mirrored,
                             &mut session_bound_relay_turn_first_forwarded_sequence,
+                            &mut split_trailing_turn_follows,
                             &chunk_forwarded_to_session_relay,
+                            chunk_buffer_was_empty,
+                            all_data.is_empty(),
+                            turn_identity_for_panel.as_ref(),
                         );
-                        // #3041 P1-3 (codex P1-3 R7): latch the turn-boundary signal
-                        // for the streaming-chunk forward too (a result+next-turn
-                        // chunk can arrive mid-stream).
-                        split_trailing_turn_follows |=
-                            chunk_forwarded_to_session_relay.trailing_turn_follows;
-                        let chunk_mirrored_to_session_relay =
-                            supervisor_relay_forward_fully_mirrors_turn(
-                                &chunk_forwarded_to_session_relay,
-                                turn_identity_for_panel.as_ref(),
-                            );
-                        session_bound_relay_turn_fully_mirrored &= chunk_mirrored_to_session_relay;
-                        if chunk_buffer_was_empty {
-                            all_data_fully_mirrored_to_session_relay =
-                                chunk_mirrored_to_session_relay;
-                        } else {
-                            all_data_fully_mirrored_to_session_relay &=
-                                chunk_mirrored_to_session_relay;
-                        }
                         last_output_at = tokio::time::Instant::now();
                         all_data_start_offset = advance_buffer_start_offset(
                             chunk_buffer_start_offset,
                             chunk_buffer_len,
                             all_data.len(),
                         );
-                        if chunk_forwarded_to_session_relay.trailing_turn_follows {
-                            all_data_first_forwarded_relay_sequence =
-                                chunk_forwarded_to_session_relay.trailing_first_forwarded_sequence;
-                        } else if all_data.is_empty() {
-                            all_data_first_forwarded_relay_sequence = None;
-                        }
                         if watcher_live_events_dirty_should_force_status_update(
                             flush_placeholder_live_events(&shared, channel_id, &mut tool_state),
                             single_message_panel_footer_mode,

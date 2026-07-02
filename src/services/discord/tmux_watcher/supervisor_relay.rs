@@ -102,6 +102,11 @@ impl SupervisorRelayForward {
     }
 }
 
+pub(super) struct SupervisorRelayTurnState {
+    pub(super) fully_mirrored: bool,
+    pub(super) first_forwarded_sequence: Option<u64>,
+}
+
 pub(super) fn remember_supervisor_relay_first_forwarded_sequence(
     first_forwarded_sequence: &mut Option<u64>,
     forward: &SupervisorRelayForward,
@@ -134,6 +139,114 @@ pub(super) fn supervisor_relay_forward_fully_mirrors_turn(
                 && victim.turn_started_at == current_turn.started_at
                 && victim.turn_start_offset == Some(current_start_offset))
     })
+}
+
+pub(super) fn apply_initial_supervisor_relay_forward(
+    all_data_fully_mirrored: &mut bool,
+    all_data_session_bound_relay_ack: &mut Option<SessionBoundRelayAckTarget>,
+    all_data_first_forwarded_sequence: &mut Option<u64>,
+    split_trailing_turn_follows: &mut bool,
+    forward: &SupervisorRelayForward,
+    initial_buffer_was_empty: bool,
+    leftover_is_empty: bool,
+    restored_assistant_text_seen: bool,
+    current_turn: Option<&crate::services::discord::inflight::InflightTurnIdentity>,
+) -> SupervisorRelayTurnState {
+    *all_data_session_bound_relay_ack = carry_session_bound_ack_for_turn(
+        all_data_session_bound_relay_ack.take(),
+        forward.ack_target.clone(),
+        current_turn.and_then(|identity| identity.turn_start_offset),
+    );
+    apply_supervisor_relay_forward_to_accumulated_state(
+        all_data_fully_mirrored,
+        all_data_first_forwarded_sequence,
+        forward,
+        initial_buffer_was_empty,
+        current_turn,
+    );
+    *split_trailing_turn_follows |= forward.trailing_turn_follows;
+    let turn_state = SupervisorRelayTurnState {
+        fully_mirrored: *all_data_fully_mirrored && !restored_assistant_text_seen,
+        first_forwarded_sequence: *all_data_first_forwarded_sequence,
+    };
+    carry_supervisor_relay_trailing_first_forwarded_sequence(
+        all_data_first_forwarded_sequence,
+        forward,
+        leftover_is_empty,
+    );
+    turn_state
+}
+
+pub(super) fn apply_streaming_supervisor_relay_forward(
+    all_data_fully_mirrored: &mut bool,
+    all_data_session_bound_relay_ack: &mut Option<SessionBoundRelayAckTarget>,
+    all_data_first_forwarded_sequence: &mut Option<u64>,
+    session_bound_relay_turn_fully_mirrored: &mut bool,
+    session_bound_relay_turn_first_forwarded_sequence: &mut Option<u64>,
+    split_trailing_turn_follows: &mut bool,
+    forward: &SupervisorRelayForward,
+    chunk_buffer_was_empty: bool,
+    leftover_is_empty: bool,
+    current_turn: Option<&crate::services::discord::inflight::InflightTurnIdentity>,
+) {
+    *all_data_session_bound_relay_ack = carry_session_bound_ack_for_turn(
+        all_data_session_bound_relay_ack.take(),
+        forward.ack_target.clone(),
+        current_turn.and_then(|identity| identity.turn_start_offset),
+    );
+    if session_bound_relay_turn_first_forwarded_sequence.is_none() {
+        *session_bound_relay_turn_first_forwarded_sequence = forward.first_forwarded_sequence;
+    }
+    *split_trailing_turn_follows |= forward.trailing_turn_follows;
+    let forward_fully_mirrored = apply_supervisor_relay_forward_to_accumulated_state(
+        all_data_fully_mirrored,
+        all_data_first_forwarded_sequence,
+        forward,
+        chunk_buffer_was_empty,
+        current_turn,
+    );
+    *session_bound_relay_turn_fully_mirrored &= forward_fully_mirrored;
+    carry_supervisor_relay_trailing_first_forwarded_sequence(
+        all_data_first_forwarded_sequence,
+        forward,
+        leftover_is_empty,
+    );
+}
+
+fn apply_supervisor_relay_forward_to_accumulated_state(
+    all_data_fully_mirrored: &mut bool,
+    all_data_first_forwarded_sequence: &mut Option<u64>,
+    forward: &SupervisorRelayForward,
+    buffer_was_empty: bool,
+    current_turn: Option<&crate::services::discord::inflight::InflightTurnIdentity>,
+) -> bool {
+    if buffer_was_empty {
+        *all_data_first_forwarded_sequence = forward.first_forwarded_sequence;
+    } else {
+        remember_supervisor_relay_first_forwarded_sequence(
+            all_data_first_forwarded_sequence,
+            forward,
+        );
+    }
+    let forward_fully_mirrored = supervisor_relay_forward_fully_mirrors_turn(forward, current_turn);
+    if buffer_was_empty {
+        *all_data_fully_mirrored = forward_fully_mirrored;
+    } else {
+        *all_data_fully_mirrored &= forward_fully_mirrored;
+    }
+    forward_fully_mirrored
+}
+
+fn carry_supervisor_relay_trailing_first_forwarded_sequence(
+    first_forwarded_sequence: &mut Option<u64>,
+    forward: &SupervisorRelayForward,
+    leftover_is_empty: bool,
+) {
+    if forward.trailing_turn_follows {
+        *first_forwarded_sequence = forward.trailing_first_forwarded_sequence;
+    } else if leftover_is_empty {
+        *first_forwarded_sequence = None;
+    }
 }
 
 /// #3041 P1-3 (codex P1-3 R6): turn-scope the session-bound terminal ACK target so
