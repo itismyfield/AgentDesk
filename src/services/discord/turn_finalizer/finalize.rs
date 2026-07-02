@@ -56,6 +56,8 @@ pub(super) async fn do_finalize(
     super::cleanup::ensure_synthetic_claim_marker_before_clear(key, &provider, submit_snapshot);
     let skip_completion_reaction =
         super::cleanup::relay_ownership_only_for_finalize(key, &provider, submit_snapshot);
+    let relay_owner_kind =
+        super::cleanup::relay_owner_kind_for_finalize(key, &provider, submit_snapshot);
 
     // (A) inflight clear. Only the gate-timeout backstop and the immediate
     //     no-owner restored-watcher path set `clear_inflight` (live bridge /
@@ -168,6 +170,7 @@ pub(super) async fn do_finalize(
         shared,
         "finalized",
         skip_completion_reaction,
+        relay_owner_kind,
     );
 
     let has_pending_after_voice = if guarded_finish_missed {

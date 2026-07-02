@@ -149,18 +149,31 @@ async fn try_reaction_raw_with_shared(
     emoji: char,
     action: ReactionAction,
 ) -> Result<(), String> {
-    let target_channel_id = reaction_target_channel_for_shared(shared, channel_id);
-    if target_channel_id != channel_id {
-        tracing::debug!(
-            channel = channel_id.get(),
-            target_channel = target_channel_id.get(),
-            message = message_id.get(),
-            emoji = %emoji,
-            action = action.label(),
-            "discord reaction retargeted from dispatch thread to parent channel"
-        );
+    match try_reaction_raw_on_channel(http, channel_id, message_id, emoji, action).await {
+        Ok(()) => Ok(()),
+        Err(first_error) => {
+            let target_channel_id = reaction_target_channel_for_shared(shared, channel_id);
+            if target_channel_id == channel_id {
+                return Err(first_error);
+            }
+            tracing::debug!(
+                channel = channel_id.get(),
+                target_channel = target_channel_id.get(),
+                message = message_id.get(),
+                emoji = %emoji,
+                action = action.label(),
+                error = %first_error,
+                "discord reaction retrying against dispatch thread parent channel"
+            );
+            try_reaction_raw_on_channel(http, target_channel_id, message_id, emoji, action)
+                .await
+                .map_err(|second_error| {
+                    format!(
+                        "{first_error}; dispatch-parent retry in {target_channel_id} failed: {second_error}"
+                    )
+                })
+        }
     }
-    try_reaction_raw_on_channel(http, target_channel_id, message_id, emoji, action).await
 }
 
 pub(in crate::services::discord) async fn try_add_reaction_raw(

@@ -5,6 +5,7 @@ use crate::services::provider::ProviderKind;
 
 use super::{FinalizeContext, TerminalEvent, TurnKey};
 use crate::services::discord::SharedData;
+use crate::services::discord::inflight::RelayOwnerKind;
 
 #[cfg(not(test))]
 const REACTION_CLEANUP_RETRY_BACKOFF: Duration = Duration::from_millis(250);
@@ -17,8 +18,8 @@ struct ReactionCleanupRequest {
     source: &'static str,
 }
 
-/// Backstop-only reaction cleanup for terminal paths that skipped the normal
-/// watcher `⏳ -> ✅` block.
+/// Finalizer-owned reaction cleanup for terminal paths that skipped the normal
+/// watcher/bridge `⏳ -> ✅` block.
 ///
 /// Reachable production matrix:
 /// * `watcher` / `bridge` / `monitor` submitters pass `clear_inflight = false`,
@@ -32,6 +33,8 @@ struct ReactionCleanupRequest {
 ///   That path also skipped the normal watcher block, so it needs this fallback.
 /// * `AlreadyFinalized` losers only inherit their submitter context, so they
 ///   cannot become the backstop reaction owner after someone else won the gate.
+/// * `StandbyRelay` owns its output outside the bridge-owned delivery path, so
+///   a real completion gets the same idempotent `⏳` removal / `✅` add here.
 pub(super) fn finalized_reaction_lifecycle(
     key: TurnKey,
     event: &TerminalEvent,
@@ -39,23 +42,30 @@ pub(super) fn finalized_reaction_lifecycle(
     shared: &Arc<SharedData>,
     source: &'static str,
     skip_completion_reaction: bool,
+    relay_owner_kind: RelayOwnerKind,
 ) {
-    if !ctx.clear_inflight
-        || !ctx.kickoff_queue
-        || ctx.allow_completion_cleanup
-        || ctx.drain_voice
-        || key.user_msg_id == 0
-        || skip_completion_reaction
-    {
+    if key.user_msg_id == 0 || skip_completion_reaction {
         return;
     }
     let message_id = serenity::model::id::MessageId::new(key.user_msg_id);
+    if !super::super::formatting::is_real_discord_message_id(message_id) {
+        return;
+    }
+    let backstop_cleanup = ctx.clear_inflight
+        && ctx.kickoff_queue
+        && !ctx.allow_completion_cleanup
+        && !ctx.drain_voice;
+    let standby_completion_cleanup = relay_owner_kind == RelayOwnerKind::StandbyRelay
+        && matches!(event, TerminalEvent::Complete);
+    if !backstop_cleanup && !standby_completion_cleanup {
+        return;
+    }
     schedule_reaction_cleanup(
         shared.clone(),
         ReactionCleanupRequest {
             channel_id: key.channel_id,
             message_id,
-            add_checkmark: !matches!(event, TerminalEvent::Cancel),
+            add_checkmark: standby_completion_cleanup || !matches!(event, TerminalEvent::Cancel),
             source,
         },
     );
@@ -106,6 +116,7 @@ pub(in crate::services::discord) struct SyntheticClaimSnapshot {
     pub(in crate::services::discord) tmux_session_name: Option<String>,
     pub(in crate::services::discord) started_at: String,
     pub(in crate::services::discord) relay_ownership_only: bool,
+    pub(in crate::services::discord) relay_owner_kind: RelayOwnerKind,
 }
 
 impl SyntheticClaimSnapshot {
@@ -121,6 +132,7 @@ impl SyntheticClaimSnapshot {
             tmux_session_name: row.tmux_session_name.clone(),
             started_at: row.started_at.clone(),
             relay_ownership_only: row.relay_ownership_only,
+            relay_owner_kind: row.effective_relay_owner_kind(),
         }
     }
 }
@@ -144,6 +156,31 @@ pub(super) fn relay_ownership_only_for_finalize(
         return false;
     };
     row.user_msg_id == key.user_msg_id && row.relay_ownership_only
+}
+
+pub(super) fn relay_owner_kind_for_finalize(
+    key: TurnKey,
+    provider: &ProviderKind,
+    submit_snapshot: Option<&SyntheticClaimSnapshot>,
+) -> RelayOwnerKind {
+    if key.user_msg_id == 0 {
+        return RelayOwnerKind::None;
+    }
+    if let Some(snapshot) = submit_snapshot
+        && snapshot.user_msg_id == key.user_msg_id
+    {
+        return snapshot.relay_owner_kind;
+    }
+    let Some(row) =
+        crate::services::discord::inflight::load_inflight_state(provider, key.channel_id.get())
+    else {
+        return RelayOwnerKind::None;
+    };
+    if row.user_msg_id == key.user_msg_id {
+        row.effective_relay_owner_kind()
+    } else {
+        RelayOwnerKind::None
+    }
 }
 
 /// #3350 ②: `do_finalize` entry hook — whatever submitter (watcher / bridge /
@@ -371,10 +408,27 @@ static REACTION_CLEANUP_RECORDS: std::sync::LazyLock<
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
 #[cfg(test)]
+static REACTION_CLEANUP_ATTEMPTS: std::sync::LazyLock<
+    std::sync::Mutex<Option<Vec<ReactionCleanupRecord>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+#[cfg(test)]
+static REACTION_CLEANUP_FAILED_CHANNELS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<u64>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+#[cfg(test)]
 pub(super) fn begin_reaction_cleanup_recording() {
     *REACTION_CLEANUP_RECORDS
         .lock()
         .expect("reaction cleanup recorder lock") = Some(Vec::new());
+    *REACTION_CLEANUP_ATTEMPTS
+        .lock()
+        .expect("reaction cleanup attempt recorder lock") = Some(Vec::new());
+    REACTION_CLEANUP_FAILED_CHANNELS
+        .lock()
+        .expect("reaction cleanup failed channel lock")
+        .clear();
 }
 
 #[cfg(test)]
@@ -387,20 +441,111 @@ pub(super) fn take_reaction_cleanup_records() -> Vec<ReactionCleanupRecord> {
 }
 
 #[cfg(test)]
+pub(super) fn take_reaction_cleanup_attempts() -> Vec<ReactionCleanupRecord> {
+    REACTION_CLEANUP_ATTEMPTS
+        .lock()
+        .expect("reaction cleanup attempt recorder lock")
+        .take()
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+pub(super) fn fail_reaction_cleanup_channel(channel_id: serenity::model::id::ChannelId) {
+    REACTION_CLEANUP_FAILED_CHANNELS
+        .lock()
+        .expect("reaction cleanup failed channel lock")
+        .insert(channel_id.get());
+}
+
+#[cfg(test)]
 fn schedule_reaction_cleanup(_shared: Arc<SharedData>, request: ReactionCleanupRequest) {
-    let channel_id =
-        super::super::formatting::reaction_target_channel_for_shared(&_shared, request.channel_id);
     if !super::super::formatting::is_real_discord_message_id(request.message_id) {
         return;
     }
-    record_reaction(channel_id, request.message_id, '⏳', false, request.source);
+    record_reaction_with_dispatch_parent_retry(
+        &_shared,
+        request.channel_id,
+        request.message_id,
+        '⏳',
+        false,
+        request.source,
+    );
     if request.add_checkmark {
-        record_reaction(channel_id, request.message_id, '✅', true, request.source);
+        record_reaction_with_dispatch_parent_retry(
+            &_shared,
+            request.channel_id,
+            request.message_id,
+            '✅',
+            true,
+            request.source,
+        );
     }
 }
 
 #[cfg(test)]
-fn record_reaction(
+fn record_reaction_with_dispatch_parent_retry(
+    shared: &SharedData,
+    channel_id: serenity::model::id::ChannelId,
+    message_id: serenity::model::id::MessageId,
+    emoji: char,
+    add: bool,
+    source: &'static str,
+) {
+    if try_record_reaction(channel_id, message_id, emoji, add, source).is_ok() {
+        return;
+    }
+    let target_channel_id =
+        super::super::formatting::reaction_target_channel_for_shared(shared, channel_id);
+    if target_channel_id != channel_id {
+        let _ = try_record_reaction(target_channel_id, message_id, emoji, add, source);
+    }
+}
+
+#[cfg(test)]
+fn try_record_reaction(
+    channel_id: serenity::model::id::ChannelId,
+    message_id: serenity::model::id::MessageId,
+    emoji: char,
+    add: bool,
+    source: &'static str,
+) -> Result<(), ()> {
+    record_reaction_attempt(channel_id, message_id, emoji, add, source);
+    if REACTION_CLEANUP_FAILED_CHANNELS
+        .lock()
+        .expect("reaction cleanup failed channel lock")
+        .contains(&channel_id.get())
+    {
+        return Err(());
+    }
+    record_reaction_success(channel_id, message_id, emoji, add, source);
+    Ok(())
+}
+
+#[cfg(test)]
+fn record_reaction_attempt(
+    channel_id: serenity::model::id::ChannelId,
+    message_id: serenity::model::id::MessageId,
+    emoji: char,
+    add: bool,
+    source: &'static str,
+) {
+    if let Some(records) = REACTION_CLEANUP_ATTEMPTS
+        .lock()
+        .expect("reaction cleanup attempt recorder lock")
+        .as_mut()
+    {
+        records.push(ReactionCleanupRecord {
+            channel_id: channel_id.get(),
+            message_id: message_id.get(),
+            emoji,
+            add,
+            source,
+        });
+    }
+}
+
+#[cfg(test)]
+fn record_reaction_success(
     channel_id: serenity::model::id::ChannelId,
     message_id: serenity::model::id::MessageId,
     emoji: char,
@@ -863,6 +1008,7 @@ mod tests {
                 fin.register_start(key, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
 
                 begin_reaction_cleanup_recording();
+                fail_reaction_cleanup_channel(thread);
                 let deferred = fin
                     .submit_terminal(
                         key,
@@ -879,6 +1025,17 @@ mod tests {
                 tokio::time::sleep(GATE_BACKSTOP + RECONCILE_INTERVAL * 3).await;
                 tokio::task::yield_now().await;
 
+                let attempts = take_reaction_cleanup_attempts();
+                assert_eq!(
+                    recorded_actions(&attempts),
+                    vec![
+                        (thread.get(), tid, '⏳', false),
+                        (parent.get(), tid, '⏳', false),
+                        (thread.get(), tid, '✅', true),
+                        (parent.get(), tid, '✅', true)
+                    ],
+                    "dispatch parent is a retry target only after the original thread channel fails"
+                );
                 let records = take_reaction_cleanup_records();
                 assert_eq!(
                     recorded_actions(&records),
@@ -886,6 +1043,182 @@ mod tests {
                         (parent.get(), tid, '⏳', false),
                         (parent.get(), tid, '✅', true)
                     ]
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn backstop_reaction_cleanup_keeps_thread_origin_when_original_succeeds() {
+        with_isolated_runtime_root(|| {
+            test_rt().block_on(async {
+                let shared =
+                    super::super::super::make_shared_data_for_tests_with_storage(None, None);
+                let parent = ChannelId::new(3_334_122);
+                let thread = ChannelId::new(3_334_123);
+                let tid = real_message_id(123);
+                shared.dispatch.thread_parents.insert(parent, thread);
+                shared
+                    .restart
+                    .global_active
+                    .store(1, std::sync::atomic::Ordering::Relaxed);
+                let _token = seed_active_turn(&shared, thread, tid).await;
+                let fin = TurnFinalizer::spawn();
+                let key = TurnKey::new(thread, tid, 0);
+                fin.register_start(key, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
+
+                begin_reaction_cleanup_recording();
+                let deferred = fin
+                    .submit_terminal(
+                        key,
+                        ProviderKind::Claude,
+                        TerminalEvent::GateTimeout {
+                            pane_quiescent: Some(false),
+                        },
+                        FinalizeContext::watcher(),
+                        shared.clone(),
+                    )
+                    .await;
+                assert!(matches!(deferred, FinalizeOutcome::Deferred));
+
+                tokio::time::sleep(GATE_BACKSTOP + RECONCILE_INTERVAL * 3).await;
+                tokio::task::yield_now().await;
+
+                let attempts = take_reaction_cleanup_attempts();
+                assert_eq!(
+                    recorded_actions(&attempts),
+                    vec![
+                        (thread.get(), tid, '⏳', false),
+                        (thread.get(), tid, '✅', true)
+                    ],
+                    "a live dispatch parent mapping must not retarget a message posted in the thread"
+                );
+                let records = take_reaction_cleanup_records();
+                assert_eq!(
+                    recorded_actions(&records),
+                    vec![
+                        (thread.get(), tid, '⏳', false),
+                        (thread.get(), tid, '✅', true)
+                    ]
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn standby_relay_completion_finalizer_removes_hourglass_and_marks_complete() {
+        with_isolated_runtime_root(|| {
+            test_rt().block_on(async {
+                let shared =
+                    super::super::super::make_shared_data_for_tests_with_storage(None, None);
+                let ch = ChannelId::new(3_334_170);
+                let tid = real_message_id(171);
+                shared
+                    .restart
+                    .global_active
+                    .store(1, std::sync::atomic::Ordering::Relaxed);
+                let _token = seed_active_turn(&shared, ch, tid).await;
+                let fin = TurnFinalizer::spawn();
+                let key = TurnKey::new(ch, tid, 0);
+                fin.register_start(
+                    key,
+                    ProviderKind::Claude,
+                    RelayOwnerKind::StandbyRelay,
+                    &shared,
+                );
+
+                let mut row = InflightTurnState::new(
+                    ProviderKind::Claude,
+                    ch.get(),
+                    None,
+                    0,
+                    tid,
+                    0,
+                    "standby relay completion".to_string(),
+                    None,
+                    Some("tmux-3334-standby".to_string()),
+                    None,
+                    None,
+                    0,
+                );
+                row.set_relay_owner_kind(RelayOwnerKind::StandbyRelay);
+                save_inflight_state(&row).expect("persist standby relay row");
+
+                begin_reaction_cleanup_recording();
+                let outcome = fin
+                    .submit_terminal(
+                        key,
+                        ProviderKind::Claude,
+                        TerminalEvent::Complete,
+                        FinalizeContext::watcher(),
+                        shared.clone(),
+                    )
+                    .await;
+                assert!(matches!(outcome, FinalizeOutcome::Finalized { .. }));
+
+                let records = take_reaction_cleanup_records();
+                assert_eq!(
+                    recorded_actions(&records),
+                    vec![(ch.get(), tid, '⏳', false), (ch.get(), tid, '✅', true)],
+                    "StandbyRelay-owned normal completions skipped bridge delivery, so finalizer cleanup must add the completion reaction"
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn standby_relay_cancel_does_not_mark_complete() {
+        with_isolated_runtime_root(|| {
+            test_rt().block_on(async {
+                let shared =
+                    super::super::super::make_shared_data_for_tests_with_storage(None, None);
+                let ch = ChannelId::new(3_334_180);
+                let tid = real_message_id(181);
+                shared
+                    .restart
+                    .global_active
+                    .store(1, std::sync::atomic::Ordering::Relaxed);
+                let _token = seed_active_turn(&shared, ch, tid).await;
+                let fin = TurnFinalizer::spawn();
+                let key = TurnKey::new(ch, tid, 0);
+                fin.register_start(
+                    key,
+                    ProviderKind::Claude,
+                    RelayOwnerKind::StandbyRelay,
+                    &shared,
+                );
+
+                let mut row = InflightTurnState::new(
+                    ProviderKind::Claude,
+                    ch.get(),
+                    None,
+                    0,
+                    tid,
+                    0,
+                    "standby relay cancel".to_string(),
+                    None,
+                    Some("tmux-3334-standby-cancel".to_string()),
+                    None,
+                    None,
+                    0,
+                );
+                row.set_relay_owner_kind(RelayOwnerKind::StandbyRelay);
+                save_inflight_state(&row).expect("persist standby relay row");
+
+                begin_reaction_cleanup_recording();
+                let outcome = fin
+                    .submit_terminal(
+                        key,
+                        ProviderKind::Claude,
+                        TerminalEvent::Cancel,
+                        FinalizeContext::watcher(),
+                        shared.clone(),
+                    )
+                    .await;
+                assert!(matches!(outcome, FinalizeOutcome::Finalized { .. }));
+                assert!(
+                    take_reaction_cleanup_records().is_empty(),
+                    "StandbyRelay completion reactions are only for real Complete terminals"
                 );
             });
         });
@@ -968,7 +1301,7 @@ mod tests {
                 let shared =
                     super::super::super::make_shared_data_for_tests_with_storage(None, None);
                 let ch = ChannelId::new(3_334_150);
-                let tid = 3_334_151_u64;
+                let tid = real_message_id(151);
                 shared
                     .restart
                     .global_active
@@ -1027,7 +1360,7 @@ mod tests {
                 let shared =
                     super::super::super::make_shared_data_for_tests_with_storage(None, None);
                 let ch = ChannelId::new(3_334_200);
-                let tid = 3_334_201_u64;
+                let tid = real_message_id(201);
                 shared
                     .restart.global_active
                     .store(1, std::sync::atomic::Ordering::Relaxed);
@@ -1075,7 +1408,7 @@ mod tests {
                 let shared =
                     super::super::super::make_shared_data_for_tests_with_storage(None, None);
                 let ch = ChannelId::new(3_334_400);
-                let tid = 3_334_401_u64;
+                let tid = real_message_id(401);
                 shared
                     .restart
                     .global_active
