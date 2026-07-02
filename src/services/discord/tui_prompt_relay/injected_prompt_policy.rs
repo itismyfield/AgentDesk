@@ -294,15 +294,11 @@ pub(super) fn slash_command_control_kind(prompt: &str) -> String {
     if starts_with_complete_local_command_stdout(&normalized) {
         return "local-command-stdout".to_string();
     }
-    if let Some(after) = normalized
-        .find("<command-name>")
-        .map(|idx| &normalized[idx + "<command-name>".len()..])
-    {
-        let name = after.split('<').next().unwrap_or("").trim();
-        let name = name.split_whitespace().next().unwrap_or("");
-        if !name.is_empty() {
-            return name.to_string();
-        }
+    if let Some(name) = first_xml_tag_token(&normalized, "command-name") {
+        return name;
+    }
+    if let Some(name) = first_xml_tag_token(&normalized, "command-message") {
+        return name;
     }
     if normalized.starts_with("/loop ") || normalized.starts_with("/loop\t") {
         return "/loop".to_string();
@@ -319,6 +315,15 @@ pub(super) fn slash_command_control_kind(prompt: &str) -> String {
         }
     }
     "slash".to_string()
+}
+
+fn first_xml_tag_token(text: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let after = text.split_once(&open)?.1;
+    let (body, _) = after.split_once(&close)?;
+    let token = body.split_whitespace().next()?.trim();
+    (!token.is_empty()).then(|| token.to_string())
 }
 
 /// Slash-control note; `/loop` and generic local stdout may include a short body.
