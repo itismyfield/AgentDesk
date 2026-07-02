@@ -271,8 +271,9 @@ pub(super) fn format_ssh_direct_prompt_notification(
     let prompt = strip_terminal_controls(prompt);
     let preview =
         truncate_chars(prompt.trim(), SSH_DIRECT_PROMPT_PREVIEW_LIMIT).replace("```", "` ` `");
-    // #4032: clamp at the source — the card branch clamps internally, so this
-    // SSH-direct formatter is the only unbounded producer feeding `say`.
+    // #4032: clamp at the source — the card branch clamps internally; this
+    // SSH-direct formatter and the slash-control note below are the remaining
+    // producers feeding `say`, each clamped at its own source.
     clamp_discord_message_content(&format!(
         "터미널에 직접 주입된 입력 (tmux : `{}`):\n```text\n{}\n```",
         sanitize_inline_code(tmux_session_name),

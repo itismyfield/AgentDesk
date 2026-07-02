@@ -5,7 +5,7 @@
 
 - Production Rust modules: `899`
 - Giant-file threshold: `>= 1000` production lines
-- Giant files: `88`
+- Giant files: `89`
 
 > `Prod` excludes lines inside `#[cfg(test)] mod` blocks; the
 > giant-file flag tracks `Prod` so inline test fixtures do not freeze a
@@ -688,7 +688,7 @@
 | `services::discord::tui_prompt_relay::codex_idle_rollout` | `src/services/discord/tui_prompt_relay/codex_idle_rollout.rs` | 613 | 613 | 0 |  |
 | `services::discord::tui_prompt_relay::idle_offset_resolution` | `src/services/discord/tui_prompt_relay/idle_offset_resolution.rs` | 100 | 100 | 0 |  |
 | `services::discord::tui_prompt_relay::idle_transcript_scan` | `src/services/discord/tui_prompt_relay/idle_transcript_scan.rs` | 495 | 347 | 148 |  |
-| `services::discord::tui_prompt_relay::injected_prompt_policy` | `src/services/discord/tui_prompt_relay/injected_prompt_policy.rs` | 446 | 446 | 0 |  |
+| `services::discord::tui_prompt_relay::injected_prompt_policy` | `src/services/discord/tui_prompt_relay/injected_prompt_policy.rs` | 462 | 462 | 0 |  |
 | `services::discord::tui_prompt_relay::launch_script` | `src/services/discord/tui_prompt_relay/launch_script.rs` | 129 | 107 | 22 |  |
 | `services::discord::tui_prompt_relay::rehydration` | `src/services/discord/tui_prompt_relay/rehydration.rs` | 994 | 793 | 201 |  |
 | `services::discord::tui_prompt_relay::relay_ownership` | `src/services/discord/tui_prompt_relay/relay_ownership.rs` | 506 | 506 | 0 |  |

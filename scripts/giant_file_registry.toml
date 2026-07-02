@@ -518,6 +518,8 @@ file = "src/server/routes/routines.rs"
 owner = "server-routes"
 deadline = "2026-10-31"
 decompose_issue = "#4039"
+
+[[entry]]
 # Crossed the 1000-prod-LoC giant threshold in #4032 when task completion cards
 # gained Discord-limit hard clamps, fence-aware Markdown preview handling, and
 # regression coverage around result-card readability. Decomposition should lift

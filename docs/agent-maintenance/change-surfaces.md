@@ -687,7 +687,7 @@
     lives in the new `tui_task_card.rs` module, and the shared
     `strip_terminal_controls` + ASCII `truncate_chars` helpers were consolidated
     there too, so this file's surface shrank by one line overall; the new
-    `tui_task_card.rs` module (627 prod LoC, below the giant threshold) hosts the
+    `tui_task_card.rs` module (~1065 prod LoC — crossed the giant threshold in #4032 with Discord-limit clamps, fence-aware preview handling, and regression coverage; registered in the giant-file registry, decompose per #3405) hosts the
     card render/parse/JSON-aggregate/dedupe-store logic; +48 from #3075 codex P1
     #1: a `CardSlot::Pending` variant + `TaskCardOutcome` enum so a repeat that
     races ahead of `record_card_message` drops as a no-op instead of building
