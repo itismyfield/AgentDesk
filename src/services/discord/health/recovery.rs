@@ -1,8 +1,9 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use poise::serenity_prelude::{ChannelId, MessageId};
+use poise::serenity_prelude as serenity;
 use serde::Serialize;
+use serenity::{ChannelId, MessageId};
 
 use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::discord::{self as discord, SharedData};
@@ -67,6 +68,16 @@ async fn shared_for_provider(
     registry
         .shared_for_provider_on_channel(provider, channel_id)
         .await
+}
+
+async fn owning_runtime_http_for_channel(
+    registry: &HealthRegistry,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> Option<Arc<serenity::http::Http>> {
+    shared_for_provider(registry, provider, channel_id)
+        .await
+        .and_then(|shared| shared.serenity_http_or_token_fallback())
 }
 
 fn idle_tmux_repair_ready_for_input(
@@ -1448,7 +1459,8 @@ pub(crate) async fn run_stall_watchdog_pass(
                 }
             }
             if let Some(user_msg_id) = pending_hourglass_user_msg_id
-                && let Ok(http) = super::resolve_bot_http(registry, provider.as_str()).await
+                && let Some(http) =
+                    owning_runtime_http_for_channel(registry, provider, channel_id).await
             {
                 discord::formatting::remove_reaction_raw(
                     &http,
@@ -1711,7 +1723,8 @@ pub(crate) async fn run_stall_watchdog_pass(
             .thread_parents
             .retain(|_, thread_id| *thread_id != channel_id);
         if let Some(user_msg_id) = pending_hourglass_user_msg_id
-            && let Ok(http) = super::resolve_bot_http(registry, provider.as_str()).await
+            && let Some(http) =
+                owning_runtime_http_for_channel(registry, provider, channel_id).await
         {
             discord::formatting::remove_reaction_raw(&http, channel_id, user_msg_id.into(), '⏳')
                 .await;
@@ -1839,9 +1852,8 @@ async fn maybe_recover_completed_stale_leak(
     let mut confirmed_chunks =
         leak_recovery_confirmed_prefix_from_ledger(&ledger_identity).unwrap_or(0);
 
-    let http = match super::resolve_bot_http(registry, provider.as_str()).await {
-        Ok(http) => http,
-        Err(_) => return false,
+    let Some(http) = owning_runtime_http_for_channel(registry, provider, channel_id).await else {
+        return false;
     };
 
     let current_msg_id = MessageId::new(state.current_msg_id);
@@ -3607,5 +3619,55 @@ mod stall_watchdog_auto_heal_tests {
         );
         assert!(token.cancelled.load(Ordering::Relaxed));
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[cfg(test)]
+mod owning_runtime_http_tests {
+    use super::super::HealthRegistry;
+    use crate::services::provider::ProviderKind;
+    use poise::serenity_prelude::ChannelId;
+
+    #[tokio::test]
+    async fn owning_runtime_http_uses_channel_matched_runtime() {
+        let provider = ProviderKind::Claude;
+        let registry = HealthRegistry::new();
+        let first = super::super::super::make_shared_data_for_tests();
+        let second = super::super::super::make_shared_data_for_tests();
+        let first_channel = ChannelId::new(401_900_000_000_001);
+        let second_channel = ChannelId::new(401_900_000_000_002);
+
+        {
+            let mut settings = first.settings.write().await;
+            settings.allowed_channel_ids = vec![first_channel.get()];
+        }
+        {
+            let mut settings = second.settings.write().await;
+            settings.allowed_channel_ids = vec![second_channel.get()];
+        }
+        let _ = second
+            .http
+            .cached_bot_token
+            .set("test-owning-runtime-token".to_string());
+
+        registry
+            .register(provider.as_str().to_string(), first.clone())
+            .await;
+        registry
+            .register(provider.as_str().to_string(), second.clone())
+            .await;
+
+        assert!(
+            super::owning_runtime_http_for_channel(&registry, &provider, second_channel)
+                .await
+                .is_some(),
+            "channel-aware lookup must select the second same-provider runtime"
+        );
+        assert!(
+            super::owning_runtime_http_for_channel(&registry, &provider, first_channel)
+                .await
+                .is_none(),
+            "a first-runtime/name-only lookup would mask this missing owner HTTP"
+        );
     }
 }

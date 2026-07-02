@@ -161,6 +161,15 @@ pub(super) async fn do_finalize(
         }
     }
 
+    super::cleanup::finalized_reaction_lifecycle(
+        key,
+        event,
+        ctx,
+        shared,
+        "finalized",
+        skip_completion_reaction,
+    );
+
     let has_pending_after_voice = if guarded_finish_missed {
         // No-op finalize on a stale terminal: leave the live newer turn's
         // channel state untouched. Report NO backlog (Codex P2): the newer turn
@@ -210,15 +219,6 @@ pub(super) async fn do_finalize(
         }
         has_pending_after_voice
     };
-
-    super::cleanup::finalized_reaction_lifecycle(
-        key,
-        event,
-        ctx,
-        shared,
-        "finalized",
-        skip_completion_reaction,
-    );
 
     // (F) relay-miss observability — emitted from inside the finalizer so the
     //     signal fires exactly once per finalize regardless of submitter.

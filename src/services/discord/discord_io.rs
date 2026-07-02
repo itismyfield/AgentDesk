@@ -365,6 +365,15 @@ pub(super) async fn add_reaction(
     message_id: MessageId,
     emoji: char,
 ) {
+    if !crate::services::discord::formatting::is_real_discord_message_id(message_id) {
+        tracing::debug!(
+            channel = channel_id.get(),
+            message = message_id.get(),
+            emoji = %emoji,
+            "discord reaction add skipped for non-Discord/synthetic message id"
+        );
+        return;
+    }
     let reaction = serenity::ReactionType::Unicode(emoji.to_string());
     if let Err(e) = channel_id.create_reaction(http, message_id, reaction).await {
         let ts = chrono::Local::now().format("%H:%M:%S");

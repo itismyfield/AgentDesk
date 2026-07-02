@@ -1,9 +1,13 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::services::provider::ProviderKind;
 
 use super::{FinalizeContext, TerminalEvent, TurnKey};
 use crate::services::discord::SharedData;
+
+#[cfg(not(test))]
+const REACTION_CLEANUP_RETRY_BACKOFF: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy)]
 struct ReactionCleanupRequest {
@@ -251,7 +255,7 @@ pub(super) async fn already_finalized_active_state(
 #[cfg(not(test))]
 fn schedule_reaction_cleanup(shared: Arc<SharedData>, request: ReactionCleanupRequest) {
     super::super::task_supervisor::spawn_observed("turn_finalizer_reaction_cleanup", async move {
-        apply_reaction(
+        let _ = apply_reaction(
             &shared,
             request.channel_id,
             request.message_id,
@@ -261,7 +265,7 @@ fn schedule_reaction_cleanup(shared: Arc<SharedData>, request: ReactionCleanupRe
         )
         .await;
         if request.add_checkmark {
-            apply_reaction(
+            let _ = apply_reaction(
                 &shared,
                 request.channel_id,
                 request.message_id,
@@ -282,21 +286,72 @@ async fn apply_reaction(
     emoji: char,
     add: bool,
     source: &'static str,
-) {
+) -> bool {
+    match retry_once_after_backoff(
+        || apply_reaction_once(shared, channel_id, message_id, emoji, add),
+        REACTION_CLEANUP_RETRY_BACKOFF,
+    )
+    .await
+    {
+        Ok(()) => true,
+        Err((first_error, second_error)) => {
+            tracing::warn!(
+                channel = channel_id.get(),
+                message = message_id.get(),
+                emoji = %emoji,
+                add,
+                source,
+                first_error = %first_error,
+                error = %second_error,
+                "turn finalizer reaction cleanup failed after retry"
+            );
+            false
+        }
+    }
+}
+
+#[cfg(not(test))]
+async fn apply_reaction_once(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::model::id::ChannelId,
+    message_id: serenity::model::id::MessageId,
+    emoji: char,
+    add: bool,
+) -> Result<(), String> {
     let Some(http) = shared.serenity_http_or_token_fallback() else {
-        tracing::warn!(
-            channel = channel_id.get(),
-            message = message_id.get(),
-            emoji = %emoji,
-            source,
-            "turn finalizer reaction cleanup skipped; provider serenity http unavailable"
-        );
-        return;
+        return Err("provider serenity http unavailable".to_string());
     };
     if add {
-        super::super::formatting::add_reaction_raw(&http, channel_id, message_id, emoji).await;
+        super::super::formatting::try_add_reaction_raw_with_shared(
+            &http, shared, channel_id, message_id, emoji,
+        )
+        .await
     } else {
-        super::super::formatting::remove_reaction_raw(&http, channel_id, message_id, emoji).await;
+        super::super::formatting::try_remove_reaction_raw_with_shared(
+            &http, shared, channel_id, message_id, emoji,
+        )
+        .await
+    }
+}
+
+async fn retry_once_after_backoff<F, Fut, E>(
+    mut operation: F,
+    backoff: Duration,
+) -> Result<(), (E, E)>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<(), E>>,
+{
+    match operation().await {
+        Ok(()) => Ok(()),
+        Err(first_error) => {
+            if !backoff.is_zero() {
+                tokio::time::sleep(backoff).await;
+            }
+            operation()
+                .await
+                .map_err(|second_error| (first_error, second_error))
+        }
     }
 }
 
@@ -333,21 +388,14 @@ pub(super) fn take_reaction_cleanup_records() -> Vec<ReactionCleanupRecord> {
 
 #[cfg(test)]
 fn schedule_reaction_cleanup(_shared: Arc<SharedData>, request: ReactionCleanupRequest) {
-    record_reaction(
-        request.channel_id,
-        request.message_id,
-        '⏳',
-        false,
-        request.source,
-    );
+    let channel_id =
+        super::super::formatting::reaction_target_channel_for_shared(&_shared, request.channel_id);
+    if !super::super::formatting::is_real_discord_message_id(request.message_id) {
+        return;
+    }
+    record_reaction(channel_id, request.message_id, '⏳', false, request.source);
     if request.add_checkmark {
-        record_reaction(
-            request.channel_id,
-            request.message_id,
-            '✅',
-            true,
-            request.source,
-        );
+        record_reaction(channel_id, request.message_id, '✅', true, request.source);
     }
 }
 
@@ -386,6 +434,7 @@ mod tests {
     };
     use crate::services::provider::{CancelToken, ProviderKind};
     use serenity::model::id::{ChannelId, MessageId, UserId};
+    use std::time::Duration;
 
     fn test_rt() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
@@ -393,6 +442,10 @@ mod tests {
             .start_paused(true)
             .build()
             .unwrap()
+    }
+
+    fn real_message_id(offset: u64) -> u64 {
+        940_000_000_000_000 + offset
     }
 
     fn with_isolated_runtime_root(f: impl FnOnce()) {
@@ -753,7 +806,7 @@ mod tests {
                 let shared =
                     super::super::super::make_shared_data_for_tests_with_storage(None, None);
                 let ch = ChannelId::new(3_334_100);
-                let tid = 3_334_101_u64;
+                let tid = real_message_id(101);
                 shared
                     .restart
                     .global_active
@@ -787,6 +840,124 @@ mod tests {
                 );
                 assert!(records.iter().all(|record| record.source == "finalized"));
             });
+        });
+    }
+
+    #[test]
+    fn backstop_reaction_cleanup_targets_dispatch_parent_channel() {
+        with_isolated_runtime_root(|| {
+            test_rt().block_on(async {
+                let shared =
+                    super::super::super::make_shared_data_for_tests_with_storage(None, None);
+                let parent = ChannelId::new(3_334_120);
+                let thread = ChannelId::new(3_334_121);
+                let tid = real_message_id(121);
+                shared.dispatch.thread_parents.insert(parent, thread);
+                shared
+                    .restart
+                    .global_active
+                    .store(1, std::sync::atomic::Ordering::Relaxed);
+                let _token = seed_active_turn(&shared, thread, tid).await;
+                let fin = TurnFinalizer::spawn();
+                let key = TurnKey::new(thread, tid, 0);
+                fin.register_start(key, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
+
+                begin_reaction_cleanup_recording();
+                let deferred = fin
+                    .submit_terminal(
+                        key,
+                        ProviderKind::Claude,
+                        TerminalEvent::GateTimeout {
+                            pane_quiescent: Some(false),
+                        },
+                        FinalizeContext::watcher(),
+                        shared.clone(),
+                    )
+                    .await;
+                assert!(matches!(deferred, FinalizeOutcome::Deferred));
+
+                tokio::time::sleep(GATE_BACKSTOP + RECONCILE_INTERVAL * 3).await;
+                tokio::task::yield_now().await;
+
+                let records = take_reaction_cleanup_records();
+                assert_eq!(
+                    recorded_actions(&records),
+                    vec![
+                        (parent.get(), tid, '⏳', false),
+                        (parent.get(), tid, '✅', true)
+                    ]
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn synthetic_message_ids_skip_backstop_reaction_cleanup() {
+        with_isolated_runtime_root(|| {
+            test_rt().block_on(async {
+                let shared =
+                    super::super::super::make_shared_data_for_tests_with_storage(None, None);
+                let ch = ChannelId::new(3_334_130);
+                let tid = 99_u64;
+                shared
+                    .restart
+                    .global_active
+                    .store(1, std::sync::atomic::Ordering::Relaxed);
+                let _token = seed_active_turn(&shared, ch, tid).await;
+                let fin = TurnFinalizer::spawn();
+                let key = TurnKey::new(ch, tid, 0);
+                fin.register_start(key, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
+
+                begin_reaction_cleanup_recording();
+                let deferred = fin
+                    .submit_terminal(
+                        key,
+                        ProviderKind::Claude,
+                        TerminalEvent::GateTimeout {
+                            pane_quiescent: Some(false),
+                        },
+                        FinalizeContext::watcher(),
+                        shared.clone(),
+                    )
+                    .await;
+                assert!(matches!(deferred, FinalizeOutcome::Deferred));
+
+                tokio::time::sleep(GATE_BACKSTOP + RECONCILE_INTERVAL * 3).await;
+                tokio::task::yield_now().await;
+
+                assert!(take_reaction_cleanup_records().is_empty());
+            });
+        });
+    }
+
+    #[test]
+    fn reaction_cleanup_retries_once_after_failed_attempt() {
+        test_rt().block_on(async {
+            let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let attempts_for_op = attempts.clone();
+            let result = retry_once_after_backoff(
+                move || {
+                    let attempts_for_op = attempts_for_op.clone();
+                    async move {
+                        let attempt =
+                            attempts_for_op.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        if attempt == 0 {
+                            Err("first failure")
+                        } else {
+                            Ok(())
+                        }
+                    }
+                },
+                Duration::ZERO,
+            )
+            .await;
+
+            assert!(result.is_ok());
+            assert_eq!(
+                attempts.load(std::sync::atomic::Ordering::SeqCst),
+                2,
+                "cleanup should make the initial attempt plus one retry"
+            );
         });
     }
 
@@ -937,8 +1108,8 @@ mod tests {
                 let shared =
                     super::super::super::make_shared_data_for_tests_with_storage(None, None);
                 let ch = ChannelId::new(3_334_500);
-                let old_tid = 3_334_501_u64;
-                let newer_tid = 3_334_502_u64;
+                let old_tid = real_message_id(501);
+                let newer_tid = real_message_id(502);
                 shared
                     .restart
                     .global_active

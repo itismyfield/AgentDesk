@@ -740,8 +740,10 @@ src/
 │   │   ├── placeholder_controller.rs
 │   │   ├── placeholder_sweeper.rs
 │   │   ├── queue_io.rs
+│   │   ├── queue_reactions.rs
 │   │   ├── queued_placeholders_store.rs
 │   │   ├── reaction_cleanup.rs
+│   │   ├── reaction_lifecycle.rs
 │   │   ├── recovery_engine.rs
 │   │   ├── relay_health.rs
 │   │   ├── relay_owner_observability.rs
