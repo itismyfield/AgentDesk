@@ -53,6 +53,8 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
             // persisted queue item look "already known" and incorrectly drop it.
             let (restored_queues, restored_overrides) =
                 load_pending_queues(&provider_for_restore, &shared_for_tmux2.token_hash);
+            let restored_dispatch_markers =
+                load_pending_dispatch_markers(&provider_for_restore, &shared_for_tmux2.token_hash);
             let allowed_bot_ids_for_restore: Vec<u64> = {
                 let settings = shared_for_tmux2.settings.read().await;
                 settings.allowed_bot_ids.clone()
@@ -72,6 +74,21 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
                     .dispatch
                     .role_overrides
                     .insert(*thread_channel_id, *alt_channel_id);
+            }
+            for marker in &restored_dispatch_markers {
+                let Some(alt_channel_id) = marker.restored_override else {
+                    continue;
+                };
+                if !matches!(
+                    resolve_runtime_channel_binding_status(&http_for_tmux, marker.channel_id).await,
+                    RuntimeChannelBindingStatus::Owned
+                ) {
+                    continue;
+                }
+                shared_for_tmux2
+                    .dispatch
+                    .role_overrides
+                    .insert(marker.channel_id, alt_channel_id);
             }
             if !restored_overrides.is_empty() {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -148,95 +165,6 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
                     "  [{ts}] 📋 FLUSH: restored {added} pending queue item(s) from disk (skipped {skipped}: unowned={skipped_unowned}, sender={skipped_sender}, duplicate={skipped_duplicate}, persist_error={skipped_persist_error})"
                 );
             }
-
-            // codex review round-3 P2 (#1332): restore the
-            // `queued_placeholders` mapping from disk BEFORE
-            // `kickoff_idle_queues` so the restored mailbox queue
-            // entries pick up the existing `📬 메시지 대기 중`
-            // Discord cards instead of stranding them and posting
-            // duplicate placeholders. Must run AFTER the mailbox
-            // queue is restored (above) and BEFORE
-            // `kickoff_idle_queues` / `restore_inflight_turns` so
-            // the live-queue filter (round-6 P2) can reject any
-            // mapping whose source message id is no longer in any
-            // currently-queued intervention.
-            // codex review round-7 P2 (#1332): collect stale
-            // `📬` card tuples during the filter pass and call
-            // `delete_message` on each AFTER `kickoff_idle_queues`
-            // returns. Inline deletion before kickoff would
-            // gate startup intake on per-card HTTP latency
-            // (and surface 404s for cards posted by an old
-            // bot identity). Best-effort, post-kickoff is
-            // strictly safer.
-            let mut stale_cards_to_delete: Vec<(ChannelId, MessageId, MessageId)> = Vec::new();
-            let restored_queued_placeholders =
-                super::queued_placeholders_store::load_queued_placeholders(
-                    &provider_for_restore,
-                    &shared_for_tmux2.token_hash,
-                );
-            if !restored_queued_placeholders.is_empty() {
-                // codex review round-6 P2 (#1332): when startup
-                // skips/supersedes a restored or catch-up queue
-                // item before this point (channel no longer
-                // owned, sender no longer allowed, duplicate or
-                // cap pruning, …), its persisted queued-
-                // placeholder mapping has no live queue entry to
-                // attach to. Inserting it unconditionally would
-                // strand the `📬` card + sidecar row forever:
-                // no future dispatch or queue-exit event would
-                // reference that user message id. Filter the
-                // loaded mappings against the live mailbox queue
-                // and DELETE the on-disk + in-memory state for
-                // every mapping whose user message id is no
-                // longer queued.
-                let live_queue_ids = collect_live_queue_message_ids(&shared_for_tmux2).await;
-                let filter_outcome = filter_restored_queued_placeholders(
-                    restored_queued_placeholders,
-                    &live_queue_ids,
-                );
-                for (key, placeholder_msg_id) in &filter_outcome.live {
-                    shared_for_tmux2
-                        .queued
-                        .queued_placeholders
-                        .insert(*key, *placeholder_msg_id);
-                }
-                // Re-snapshot every channel that had at least
-                // one stale mapping pruned so the on-disk file
-                // matches the filtered in-memory state. Empty
-                // channels are removed via the snapshot helper
-                // (the `entries.is_empty()` branch deletes the
-                // file). Without this rewrite, the next restart
-                // would re-load the same stale mapping and the
-                // leak would compound across restarts.
-                for channel_id in &filter_outcome.channels_with_stale {
-                    super::queued_placeholders_store::persist_channel_from_map(
-                        &shared_for_tmux2.queued.queued_placeholders,
-                        &shared_for_tmux2.provider,
-                        &shared_for_tmux2.token_hash,
-                        *channel_id,
-                    );
-                }
-                let live_count = filter_outcome.live.len();
-                let stale_count = filter_outcome.stale_count;
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                if stale_count > 0 {
-                    tracing::warn!(
-                        "  [{ts}] 📋 FLUSH: restored {live_count} queued-placeholder mapping(s) from disk; pruned {stale_count} stale mapping(s) with no live queue entry"
-                    );
-                } else {
-                    tracing::info!(
-                        "  [{ts}] 📋 FLUSH: restored {live_count} queued-placeholder mapping(s) from disk"
-                    );
-                }
-                // codex review round-7 P2 (#1332): capture
-                // the visible-card tuples so the post-kickoff
-                // cleanup loop can dismiss them via Discord's
-                // delete_message API. Without this, the
-                // round-6 disk-rewrite leaves the cards
-                // stranded on the channel.
-                stale_cards_to_delete = filter_outcome.stale_cards;
-            }
-
             // #3641: orphan `.json.lock` sidecars are invisible to the `.json`
             // row scans below, so sweep them once per process before inflight
             // recovery starts. The sweep itself enumerates provider subdirs.
@@ -270,6 +198,106 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
             }
 
             restore_inflight_turns(&http_for_tmux, &shared_for_tmux2, &provider_for_restore).await;
+
+            if !restored_dispatch_markers.is_empty() {
+                let mut added = 0usize;
+                let mut skipped_unowned = 0usize;
+                let mut skipped_sender = 0usize;
+                let mut skipped_duplicate = 0usize;
+                let mut skipped_persist_error = 0usize;
+                for marker in restored_dispatch_markers {
+                    if !matches!(
+                        resolve_runtime_channel_binding_status(&http_for_tmux, marker.channel_id)
+                            .await,
+                        RuntimeChannelBindingStatus::Owned
+                    ) {
+                        skipped_unowned += 1;
+                        continue;
+                    }
+                    if !super::is_allowed_turn_sender(
+                        &allowed_bot_ids_for_restore,
+                        announce_bot_id_for_restore,
+                        marker.intervention.author_id.get(),
+                        marker.intervention.author_is_bot,
+                        &marker.intervention.text,
+                    ) {
+                        skipped_sender += 1;
+                        continue;
+                    }
+                    let result = mailbox_merge_restored_dispatch_marker(
+                        &shared_for_tmux2,
+                        &provider_for_restore,
+                        marker.channel_id,
+                        marker.intervention,
+                        marker.restored_override,
+                    )
+                    .await;
+                    if let Some(error) = result.persistence_error {
+                        skipped_persist_error += 1;
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::warn!(
+                            "  [{ts}] 📋 FLUSH: persist failed merging restored dispatch marker for channel {}: {error}",
+                            marker.channel_id
+                        );
+                    } else if result.absorbed == 0 {
+                        skipped_duplicate += 1;
+                    } else {
+                        added += result.absorbed;
+                    }
+                }
+                let skipped =
+                    skipped_unowned + skipped_sender + skipped_duplicate + skipped_persist_error;
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] 📋 FLUSH: restored {added} pending dispatch marker item(s) from disk after inflight recovery (skipped {skipped}: unowned={skipped_unowned}, sender={skipped_sender}, duplicate_or_active={skipped_duplicate}, persist_error={skipped_persist_error})"
+                );
+            }
+
+            // Restore queued placeholder mappings after both queue snapshots and
+            // dispatch markers have been merged. Marker merge must wait for
+            // `restore_inflight_turns` so active turn ids are visible to mailbox
+            // dedup; the placeholder live-queue filter then sees the final
+            // restored queue state before kickoff.
+            let mut stale_cards_to_delete: Vec<(ChannelId, MessageId, MessageId)> = Vec::new();
+            let restored_queued_placeholders =
+                super::queued_placeholders_store::load_queued_placeholders(
+                    &provider_for_restore,
+                    &shared_for_tmux2.token_hash,
+                );
+            if !restored_queued_placeholders.is_empty() {
+                let live_queue_ids = collect_live_queue_message_ids(&shared_for_tmux2).await;
+                let filter_outcome = filter_restored_queued_placeholders(
+                    restored_queued_placeholders,
+                    &live_queue_ids,
+                );
+                for (key, placeholder_msg_id) in &filter_outcome.live {
+                    shared_for_tmux2
+                        .queued
+                        .queued_placeholders
+                        .insert(*key, *placeholder_msg_id);
+                }
+                for channel_id in &filter_outcome.channels_with_stale {
+                    super::queued_placeholders_store::persist_channel_from_map(
+                        &shared_for_tmux2.queued.queued_placeholders,
+                        &shared_for_tmux2.provider,
+                        &shared_for_tmux2.token_hash,
+                        *channel_id,
+                    );
+                }
+                let live_count = filter_outcome.live.len();
+                let stale_count = filter_outcome.stale_count;
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                if stale_count > 0 {
+                    tracing::warn!(
+                        "  [{ts}] 📋 FLUSH: restored {live_count} queued-placeholder mapping(s) from disk; pruned {stale_count} stale mapping(s) with no live queue entry"
+                    );
+                } else {
+                    tracing::info!(
+                        "  [{ts}] 📋 FLUSH: restored {live_count} queued-placeholder mapping(s) from disk"
+                    );
+                }
+                stale_cards_to_delete = filter_outcome.stale_cards;
+            }
 
             // P1-2: Warn about legacy queue files that cannot be restored
             warn_legacy_pending_queue_files(&provider_for_restore);

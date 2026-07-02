@@ -542,71 +542,6 @@ pub(super) fn observe_codex_tui_rollout_state_for_cwd_with_sessions(
     crate::services::tui_turn_state::TuiTurnState::Unknown
 }
 
-/// #3981: a busy JSONL `UserSubmitted` turn-state is only reclaimed as a stale
-/// stranded turn (one stopped before claude could write a terminator or the
-/// `[Request interrupted by user]` marker) once its runtime-activity mtime has
-/// been frozen for at least this long *and* the live pane shows the at-rest
-/// prompt marker (the double-AND in [`user_submitted_is_stale_stranded`]).
-///
-/// Aligned with the proven `DEAD_WATCHER_PROVEN_DEAD_SECS = 600` reclaim floor
-/// (`inflight::rebind_reap`, #3879): both classify "the pane may still be alive,
-/// but runtime activity has gone quiescent past a long inter-activity ceiling".
-/// 600s sits safely above the worst-case live inter-activity gap (long tool
-/// calls / extended thinking), so a genuinely live turn never trips it (INV-3).
-#[cfg(unix)]
-const STALE_USER_SUBMITTED_RECLAIM_SECS: i64 = 600;
-
-/// #3981: decide whether a busy JSONL `UserSubmitted` turn-state is actually a
-/// stale stranded turn (stopped before a terminator / interrupt marker was
-/// written) rather than a live submission still awaiting its first assistant
-/// flush. Pure decision so the gate is unit-testable; the gate fills the two
-/// arguments from fs/tmux.
-///
-/// - INV-1 (Streaming inviolable): only `UserSubmitted` is ever reclaimed.
-///   `Streaming` (an `assistant` envelope already exists) is unconditionally
-///   live and returns `false`.
-/// - INV-2 (double AND): reclaim requires BOTH (a) runtime-activity quiescence
-///   (`activity_age_secs >= STALE_USER_SUBMITTED_RECLAIM_SECS`) AND (b) the live
-///   pane at-rest prompt marker (`prompt_marker_detected`). A live turn fails
-///   (a) — activity keeps advancing — *and* fails (b) — the busy spinner
-///   suppresses the marker — so two independent signals must agree before
-///   release. Never an OR.
-#[cfg(unix)]
-fn user_submitted_is_stale_stranded(
-    state: crate::services::tui_turn_state::TuiTurnState,
-    activity_age_secs: i64,
-    prompt_marker_detected: bool,
-) -> bool {
-    matches!(
-        state,
-        crate::services::tui_turn_state::TuiTurnState::UserSubmitted
-    ) && activity_age_secs >= STALE_USER_SUBMITTED_RECLAIM_SECS
-        && prompt_marker_detected
-}
-
-/// #3981: age in seconds since the most recent runtime-activity mtime
-/// (relay jsonl / `.generation` / rollout) for this tmux session.
-///
-/// Returns `0` (treated as "just active", i.e. live) when no activity is
-/// observable, so the AND gate in [`user_submitted_is_stale_stranded`] never
-/// reclaims a turn without positive quiescence evidence (over-release-safe
-/// default). Read fresh at the call site and consumed immediately — never
-/// cached across an await (INV-4).
-#[cfg(unix)]
-fn runtime_activity_age_secs(tmux_session_name: &str) -> i64 {
-    let activity_nanos =
-        crate::services::dispatched_sessions::latest_runtime_activity_unix_nanos(tmux_session_name);
-    if activity_nanos <= 0 {
-        return 0;
-    }
-    let now_nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|elapsed| i64::try_from(elapsed.as_nanos()).ok())
-        .unwrap_or(0);
-    now_nanos.saturating_sub(activity_nanos) / 1_000_000_000
-}
-
 #[cfg(unix)]
 pub(super) fn tui_busy_followup_diagnostic(
     shared: &Arc<SharedData>,
@@ -700,11 +635,12 @@ pub(super) fn tui_busy_followup_diagnostic(
         if matches!(provider, ProviderKind::Claude)
             && transcript_turn_state == crate::services::tui_turn_state::TuiTurnState::UserSubmitted
         {
-            let activity_age_secs = runtime_activity_age_secs(tmux_session_name);
+            let activity_age_secs =
+                crate::services::tui_turn_state::runtime_activity_age_secs(tmux_session_name);
             let prompt_marker_detected =
                 crate::services::claude_tui::input::prompt_readiness_snapshot(tmux_session_name)
                     .prompt_marker_detected;
-            if user_submitted_is_stale_stranded(
+            if crate::services::tui_turn_state::user_submitted_is_stale_stranded(
                 transcript_turn_state,
                 activity_age_secs,
                 prompt_marker_detected,
@@ -800,77 +736,6 @@ pub(super) fn recapture_inflight_offset_after_successful_busy_wait(
         .and_then(|path| std::fs::metadata(path).ok())
         .map(|metadata| metadata.len())
         .unwrap_or(previous_offset)
-}
-
-#[cfg(all(test, unix))]
-mod stale_user_submitted_tests {
-    use super::STALE_USER_SUBMITTED_RECLAIM_SECS;
-    use super::user_submitted_is_stale_stranded;
-    use crate::services::tui_turn_state::TuiTurnState;
-
-    // INV-1: Streaming (assistant envelope already written) is unconditionally
-    // live — it is NEVER reclaimed, even with old activity and an at-rest marker.
-    #[test]
-    fn streaming_is_never_reclaimed_even_when_old_and_marker_present() {
-        assert!(!user_submitted_is_stale_stranded(
-            TuiTurnState::Streaming,
-            STALE_USER_SUBMITTED_RECLAIM_SECS + 1,
-            true,
-        ));
-    }
-
-    // The reclaim case: UserSubmitted + quiescent activity (>= T) + at-rest pane
-    // marker ⇒ stranded/stopped, release (return true).
-    #[test]
-    fn user_submitted_old_with_marker_is_stale() {
-        assert!(user_submitted_is_stale_stranded(
-            TuiTurnState::UserSubmitted,
-            STALE_USER_SUBMITTED_RECLAIM_SECS,
-            true,
-        ));
-    }
-
-    // INV-2 leg (a): recent activity (< T) means the turn is still advancing —
-    // a live submission awaiting its first assistant flush. Never reclaim.
-    #[test]
-    fn user_submitted_recent_with_marker_is_live() {
-        assert!(!user_submitted_is_stale_stranded(
-            TuiTurnState::UserSubmitted,
-            STALE_USER_SUBMITTED_RECLAIM_SECS - 1,
-            true,
-        ));
-    }
-
-    // INV-2 leg (b): no at-rest prompt marker (busy spinner) means the pane is
-    // mid-turn even if activity looks frozen. Never reclaim on the mtime signal
-    // alone — the gate is an AND, not an OR.
-    #[test]
-    fn user_submitted_old_without_marker_is_live() {
-        assert!(!user_submitted_is_stale_stranded(
-            TuiTurnState::UserSubmitted,
-            STALE_USER_SUBMITTED_RECLAIM_SECS + 10_000,
-            false,
-        ));
-    }
-
-    // Non-busy / non-UserSubmitted states are out of scope for the reclaim path.
-    #[test]
-    fn idle_and_unknown_are_not_reclaimed() {
-        for state in [TuiTurnState::Idle, TuiTurnState::Unknown] {
-            assert!(!user_submitted_is_stale_stranded(
-                state,
-                STALE_USER_SUBMITTED_RECLAIM_SECS + 1,
-                true,
-            ));
-        }
-    }
-
-    // The reclaim floor is aligned with the proven dead-watcher reclaim floor
-    // (#3879) and stays well above worst-case live inter-activity gaps (INV-3).
-    #[test]
-    fn reclaim_floor_aligns_with_dead_watcher_precedent() {
-        assert_eq!(STALE_USER_SUBMITTED_RECLAIM_SECS, 600);
-    }
 }
 
 // #3813 Phase 3 (AC#7 "readiness-wait status rendering"): the compact status a

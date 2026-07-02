@@ -3263,6 +3263,7 @@ mod tests {
                 restart_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 reconcile_done: Arc::new(std::sync::atomic::AtomicBool::new(true)),
                 deferred_hook_backlog: std::sync::atomic::AtomicUsize::new(0),
+                deferred_hook_channels: dashmap::DashMap::new(),
                 recovery_started_at: std::time::Instant::now(),
                 recovery_duration_ms: std::sync::atomic::AtomicU64::new(0),
                 global_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),

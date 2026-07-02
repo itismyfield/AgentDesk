@@ -24,6 +24,7 @@ use gate::{
     should_skip_self_authored_turn_message, should_start_attachment_only_turn,
     strip_leading_bot_mention,
 };
+pub(in crate::services::discord::router) use queue_effects::should_schedule_post_enqueue_idle_drain;
 use queue_effects::{IntakeGateQueueEffects, render_visible_queued_ack};
 use stale_turn::{
     mailbox_has_live_active_turn_or_cleanup_stale_proof, thread_guard_force_clean_stale_thread,
@@ -1138,35 +1139,38 @@ pub(in crate::services::discord) async fn handle_event(
                     .restart
                     .shutting_down
                     .load(std::sync::atomic::Ordering::Relaxed);
-                let mut queue_effects = IntakeGateQueueEffects { ctx, data };
-                let commit = commit_soft_intervention_transaction(
-                    &mut queue_effects,
-                    SoftInterventionCommitRequest {
-                        source: IntakeQueueCommitSource::BusyActiveTurn,
-                        author_class: IntakeQueueAuthorClass::from_flags(
-                            new_message.author.bot,
-                            is_allowed_bot,
-                        ),
-                        intervention: SoftInterventionSpec {
-                            channel_id,
-                            author_id: user_id,
-                            author_is_bot: new_message.author.bot,
-                            message_id: new_message.id,
-                            text: text.to_string(),
-                            reply_context: reply_context.clone(),
-                            has_reply_boundary,
-                            merge_consecutive,
-                            pending_uploads: upload_records.clone(),
-                            // #2266: main busy-active-turn queue path — voice transcripts that
-                            // arrive while a previous turn is running flow through here. Embed the
-                            // announcement so the queued dispatch reinserts it into the store even
-                            // if the >30s in-memory TTL expires first.
-                            voice_announcement: resolved_voice_announcement.clone(),
+                let commit = {
+                    let mut queue_effects = IntakeGateQueueEffects { ctx, data };
+                    commit_soft_intervention_transaction(
+                        &mut queue_effects,
+                        SoftInterventionCommitRequest {
+                            source: IntakeQueueCommitSource::BusyActiveTurn,
+                            author_class: IntakeQueueAuthorClass::from_flags(
+                                new_message.author.bot,
+                                is_allowed_bot,
+                            ),
+                            intervention: SoftInterventionSpec {
+                                channel_id,
+                                author_id: user_id,
+                                author_is_bot: new_message.author.bot,
+                                message_id: new_message.id,
+                                text: text.to_string(),
+                                reply_context: reply_context.clone(),
+                                has_reply_boundary,
+                                merge_consecutive,
+                                pending_uploads: upload_records.clone(),
+                                // #2266: main busy-active-turn queue path — voice transcripts that
+                                // arrive while a previous turn is running flow through here. Embed the
+                                // announcement so the queued dispatch reinserts it into the store even
+                                // if the >30s in-memory TTL expires first.
+                                voice_announcement: resolved_voice_announcement.clone(),
+                            },
+                            options: IntakeQueueCommitOptions::default(),
                         },
-                        options: IntakeQueueCommitOptions::default(),
-                    },
-                )
-                .await;
+                    )
+                    .await
+                };
+                let enqueued = commit.accepted();
 
                 if !commit.accepted() {
                     if commit.failed() {
@@ -1213,6 +1217,19 @@ pub(in crate::services::discord) async fn handle_event(
                         .map(|entry| (entry.key().get(), *entry.value()))
                         .collect();
                     runtime_store::save_all_last_message_ids(data.provider.as_str(), &ids);
+                }
+                let has_blocking = crate::services::discord::mailbox_has_blocking_active_turn(
+                    &data.shared,
+                    channel_id,
+                )
+                .await;
+                if should_schedule_post_enqueue_idle_drain(enqueued, has_blocking) {
+                    crate::services::discord::schedule_deferred_idle_queue_kickoff(
+                        data.shared.clone(),
+                        data.provider.clone(),
+                        channel_id,
+                        "busy-active enqueue idle drain",
+                    );
                 }
                 return Ok(());
             }

@@ -87,30 +87,48 @@ pub(super) async fn finalize_and_drain_queued_turns(
                         error = %error,
                         "QUEUE-GUARD: preserving queued command after pending-queue persistence failure"
                     );
-                } else if let Some((intervention, has_more_queued_turns)) =
+                } else if let Some((intervention, has_more_queued_turns, dispatch_lease)) =
                     next_intervention.into_intervention()
                 {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!("  [{ts}] 📋 Processing next queued command");
-                    if let Err(e) = gateway
+                    let dispatch_result = gateway
                         .dispatch_queued_turn(
                             channel_id,
                             &intervention,
                             &request_owner_name,
                             has_more_queued_turns,
                         )
-                        .await
-                    {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::info!("  [{ts}]   ⚠ queued command failed: {e}");
-                        super::super::mailbox_requeue_intervention_front(
-                            &shared_owned,
-                            &bot_owner_provider,
-                            channel_id,
-                            intervention,
-                        )
                         .await;
+                    match dispatch_result {
+                        Err(e) => {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::info!("  [{ts}]   ⚠ queued command failed: {e}");
+                            super::super::mailbox_requeue_intervention_front(
+                                &shared_owned,
+                                &bot_owner_provider,
+                                channel_id,
+                                intervention,
+                            )
+                            .await;
+                            super::super::schedule_deferred_idle_queue_kickoff(
+                                shared_owned.clone(),
+                                bot_owner_provider.clone(),
+                                channel_id,
+                                "requeue-front after dispatch failure (finalize epilogue)",
+                            );
+                        }
+                        Ok(()) => {
+                            super::super::mailbox_abandon_unclaimed_dispatch_after_success(
+                                &shared_owned,
+                                &bot_owner_provider,
+                                channel_id,
+                                intervention.message_id,
+                            )
+                            .await;
+                        }
                     }
+                    drop(dispatch_lease);
                 }
             }
         } else {
@@ -133,5 +151,174 @@ pub(super) async fn finalize_and_drain_queued_turns(
                 "turn bridge queued backlog",
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::discord::formatting::ReplaceLongMessageOutcome;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    type TestGatewayFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+    struct FailingQueuedDispatchGateway;
+
+    impl TurnGateway for FailingQueuedDispatchGateway {
+        fn send_message<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _content: &'a str,
+        ) -> TestGatewayFuture<'a, Result<MessageId, String>> {
+            Box::pin(async { Ok(MessageId::new(1_500_000_000_001_001)) })
+        }
+
+        fn edit_message<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _content: &'a str,
+        ) -> TestGatewayFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn replace_message_with_outcome<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _content: &'a str,
+        ) -> TestGatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
+            Box::pin(async { Ok(ReplaceLongMessageOutcome::EditedOriginal) })
+        }
+
+        fn add_reaction<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _emoji: char,
+        ) -> TestGatewayFuture<'a, ()> {
+            Box::pin(async {})
+        }
+
+        fn remove_reaction<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _emoji: char,
+        ) -> TestGatewayFuture<'a, ()> {
+            Box::pin(async {})
+        }
+
+        fn schedule_retry_with_history<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _user_message_id: MessageId,
+            _user_text: &'a str,
+        ) -> TestGatewayFuture<'a, ()> {
+            Box::pin(async {})
+        }
+
+        fn dispatch_queued_turn<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _intervention: &'a Intervention,
+            _request_owner_name: &'a str,
+            _has_more_queued_turns: bool,
+        ) -> TestGatewayFuture<'a, Result<(), String>> {
+            Box::pin(async { Err("forced dispatch failure".to_string()) })
+        }
+
+        fn validate_live_routing<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+        ) -> TestGatewayFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn requester_mention(&self) -> Option<String> {
+            None
+        }
+
+        fn can_chain_locally(&self) -> bool {
+            true
+        }
+
+        fn bot_owner_provider(&self) -> Option<ProviderKind> {
+            Some(ProviderKind::Claude)
+        }
+    }
+
+    fn queued_intervention(message_id: u64) -> Intervention {
+        Intervention {
+            author_id: UserId::new(7),
+            author_is_bot: false,
+            message_id: MessageId::new(message_id),
+            source_message_ids: vec![MessageId::new(message_id)],
+            text: "queued dispatch failure".to_string(),
+            mode: InterventionMode::Soft,
+            created_at: std::time::Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+            pending_uploads: Vec::new(),
+            voice_announcement: None,
+        }
+    }
+
+    #[test]
+    fn dispatch_failure_requeue_front_schedules_deferred_kickoff() {
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().expect("runtime root");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let shared = crate::services::discord::make_shared_data_for_tests();
+                shared.restart.finalizing_turns.store(1, Ordering::Relaxed);
+                shared.restart.global_finalizing.store(1, Ordering::Relaxed);
+                let provider = ProviderKind::Claude;
+                let channel_id = ChannelId::new(4_024_280);
+                let intervention = queued_intervention(4_024_281);
+                shared
+                    .mailbox(channel_id)
+                    .replace_queue(
+                        vec![intervention.clone()],
+                        super::super::queue_persistence_context(&shared, &provider, channel_id),
+                    )
+                    .await;
+
+                finalize_and_drain_queued_turns(
+                    shared.clone(),
+                    true,
+                    false,
+                    Arc::new(FailingQueuedDispatchGateway),
+                    channel_id,
+                    provider,
+                    "requester".to_string(),
+                    None,
+                    channel_id,
+                )
+                .await;
+
+                let snapshot = super::super::mailbox_snapshot(&shared, channel_id).await;
+                assert_eq!(snapshot.intervention_queue.len(), 1);
+                assert_eq!(
+                    snapshot.intervention_queue[0].message_id,
+                    intervention.message_id
+                );
+                assert_eq!(
+                    shared.restart.deferred_hook_backlog.load(Ordering::Relaxed),
+                    1,
+                    "requeue-front after dispatch failure must re-arm the drain"
+                );
+            });
+
+        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
     }
 }

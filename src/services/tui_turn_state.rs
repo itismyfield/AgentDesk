@@ -70,6 +70,56 @@ impl TuiReadyState {
     }
 }
 
+/// #3981/#4024: a busy JSONL `UserSubmitted` turn-state is only reclaimed as a
+/// stale stranded turn once runtime activity has been frozen for this long and
+/// the live pane shows the at-rest prompt marker.
+///
+/// Aligned with the proven `DEAD_WATCHER_PROVEN_DEAD_SECS = 600` reclaim floor
+/// (`inflight::rebind_reap`, #3879): both classify "the pane may still be
+/// alive, but runtime activity has gone quiescent past a long inter-activity
+/// ceiling".
+#[cfg(unix)]
+pub(crate) const STALE_USER_SUBMITTED_RECLAIM_SECS: i64 = 600;
+
+/// #3981/#4024: decide whether a busy JSONL `UserSubmitted` turn-state is a
+/// stale stranded turn rather than a live submission still awaiting its first
+/// assistant flush.
+///
+/// Reclaim requires BOTH runtime-activity quiescence and the live pane at-rest
+/// prompt marker. `Streaming` is unconditionally live because an assistant
+/// envelope already exists.
+#[cfg(unix)]
+pub(crate) fn user_submitted_is_stale_stranded(
+    state: TuiTurnState,
+    activity_age_secs: i64,
+    prompt_marker_detected: bool,
+) -> bool {
+    matches!(state, TuiTurnState::UserSubmitted)
+        && activity_age_secs >= STALE_USER_SUBMITTED_RECLAIM_SECS
+        && prompt_marker_detected
+}
+
+/// #3981/#4024: age in seconds since the most recent runtime-activity mtime
+/// (relay jsonl / `.generation` / rollout) for this tmux session.
+///
+/// Returns `0` when no activity is observable, so the AND gate in
+/// [`user_submitted_is_stale_stranded`] never reclaims a turn without positive
+/// quiescence evidence.
+#[cfg(unix)]
+pub(crate) fn runtime_activity_age_secs(tmux_session_name: &str) -> i64 {
+    let activity_nanos =
+        crate::services::dispatched_sessions::latest_runtime_activity_unix_nanos(tmux_session_name);
+    if activity_nanos <= 0 {
+        return 0;
+    }
+    let now_nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| i64::try_from(elapsed.as_nanos()).ok())
+        .unwrap_or(0);
+    now_nanos.saturating_sub(activity_nanos) / 1_000_000_000
+}
+
 pub(crate) trait TuiTurnStateProbe {
     fn observe(&self) -> TuiTurnState;
 }
@@ -519,6 +569,23 @@ pub(crate) fn runtime_binding_ready_for_input(
     )
 }
 
+pub(crate) fn runtime_binding_turn_state(
+    provider: &ProviderKind,
+    binding: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+) -> Option<TuiTurnState> {
+    if !provider_runtime_has_structured_jsonl_turn_state(provider, Some(binding.runtime_kind)) {
+        return None;
+    }
+    let path = match binding.runtime_kind {
+        RuntimeHandoffKind::ClaudeTui => Path::new(binding.relay_output_path()),
+        RuntimeHandoffKind::CodexTui => Path::new(&binding.output_path),
+        RuntimeHandoffKind::LegacyTmuxWrapper
+        | RuntimeHandoffKind::ProcessBackend
+        | RuntimeHandoffKind::ClaudeEAdapter => return None,
+    };
+    Some(observe_provider_jsonl_turn_state(provider, path))
+}
+
 pub(crate) fn observe_claude_jsonl_turn_state(path: &Path) -> TuiTurnState {
     observe_jsonl_turn_state(
         path,
@@ -917,6 +984,64 @@ mod tests {
         file
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn streaming_is_never_reclaimed_even_when_old_and_marker_present() {
+        assert!(!user_submitted_is_stale_stranded(
+            TuiTurnState::Streaming,
+            STALE_USER_SUBMITTED_RECLAIM_SECS + 1,
+            true,
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_submitted_old_with_marker_is_stale() {
+        assert!(user_submitted_is_stale_stranded(
+            TuiTurnState::UserSubmitted,
+            STALE_USER_SUBMITTED_RECLAIM_SECS,
+            true,
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_submitted_recent_with_marker_is_live() {
+        assert!(!user_submitted_is_stale_stranded(
+            TuiTurnState::UserSubmitted,
+            STALE_USER_SUBMITTED_RECLAIM_SECS - 1,
+            true,
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_submitted_old_without_marker_is_live() {
+        assert!(!user_submitted_is_stale_stranded(
+            TuiTurnState::UserSubmitted,
+            STALE_USER_SUBMITTED_RECLAIM_SECS + 10_000,
+            false,
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn idle_and_unknown_are_not_reclaimed() {
+        for state in [TuiTurnState::Idle, TuiTurnState::Unknown] {
+            assert!(!user_submitted_is_stale_stranded(
+                state,
+                STALE_USER_SUBMITTED_RECLAIM_SECS + 1,
+                true,
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reclaim_floor_aligns_with_dead_watcher_precedent() {
+        assert_eq!(STALE_USER_SUBMITTED_RECLAIM_SECS, 600);
+    }
+
     #[test]
     fn claude_result_marks_idle_even_when_pane_scrape_would_be_ambiguous() {
         let file = write_jsonl(&[
@@ -949,7 +1074,7 @@ mod tests {
     // Distinguishing dead (stopped) from live (about to flush) needs runtime
     // evidence (activity mtime + live pane marker) that this pure function does
     // not have — that staleness decision is the busy gate's responsibility
-    // (`tui_followup::user_submitted_is_stale_stranded`), NOT the classifier's.
+    // (`user_submitted_is_stale_stranded`), NOT the classifier's.
     // This test pins the separation of responsibilities: the #3981 fix must not
     // be pushed down into the classifier.
     #[test]

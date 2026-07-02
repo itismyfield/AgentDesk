@@ -728,10 +728,19 @@ async fn apply_relay_recovery_decision(
         RelayRecoveryActionKind::ClearStaleThreadProof => {
             let channel = ChannelId::new(decision.channel_id);
             let before = shared.dispatch.thread_parents.len();
-            shared
-                .dispatch
-                .thread_parents
-                .retain(|parent, thread| *parent != channel && *thread != channel);
+            let mut removed_parents = Vec::new();
+            shared.dispatch.thread_parents.retain(|parent, thread| {
+                let remove = *parent == channel || *thread == channel;
+                if remove {
+                    removed_parents.push(*parent);
+                }
+                !remove
+            });
+            super::turn_finalizer::cleanup::kickoff_thread_parents_after_finalize(
+                shared,
+                provider,
+                removed_parents,
+            );
             RelayRecoveryApplyResult {
                 status: "applied",
                 removed_thread_proofs: before.saturating_sub(shared.dispatch.thread_parents.len()),
@@ -798,10 +807,15 @@ async fn apply_relay_recovery_decision(
                     super::saturating_decrement_global_active(shared);
                 }
                 super::clear_watchdog_deadline_override(channel.get()).await;
-                shared
-                    .dispatch
-                    .thread_parents
-                    .retain(|_, thread| *thread != channel);
+                let thread_parent_kickoffs =
+                    super::turn_finalizer::cleanup::collect_and_clear_thread_parents(
+                        shared, channel,
+                    );
+                super::turn_finalizer::cleanup::kickoff_thread_parents_after_finalize(
+                    shared,
+                    provider,
+                    thread_parent_kickoffs,
+                );
                 shared.restart.recovering_channels.remove(&channel);
                 shared.turn_start_times.remove(&channel);
                 if !finish.has_pending {

@@ -72,6 +72,19 @@ pub(super) struct IntakeGateQueueEffects<'a> {
     pub(super) data: &'a Data,
 }
 
+/// #3903/#4024 — pure verdict for whether a post-enqueue deferred idle-queue
+/// drain must run after an intervention actually landed in the mailbox queue.
+///
+/// Schedule when the enqueue was accepted and no REAL (blocking) turn currently
+/// owns the slot. A background/system-injection turn is intentionally treated as
+/// non-blocking so queued user work does not strand behind it.
+pub(in crate::services::discord::router) fn should_schedule_post_enqueue_idle_drain(
+    enqueued: bool,
+    has_blocking_active_turn: bool,
+) -> bool {
+    enqueued && !has_blocking_active_turn
+}
+
 #[async_trait::async_trait]
 impl IntakeQueueCommitEffects for IntakeGateQueueEffects<'_> {
     async fn enqueue_soft_intervention(
@@ -119,6 +132,27 @@ impl IntakeQueueCommitEffects for IntakeGateQueueEffects<'_> {
             &self.data.provider,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod schedule_post_enqueue_idle_drain_tests {
+    use super::should_schedule_post_enqueue_idle_drain;
+
+    #[test]
+    fn schedules_when_enqueued_and_slot_idle() {
+        assert!(should_schedule_post_enqueue_idle_drain(true, false));
+    }
+
+    #[test]
+    fn skips_when_real_turn_holds_slot() {
+        assert!(!should_schedule_post_enqueue_idle_drain(true, true));
+    }
+
+    #[test]
+    fn skips_when_enqueue_was_refused() {
+        assert!(!should_schedule_post_enqueue_idle_drain(false, false));
+        assert!(!should_schedule_post_enqueue_idle_drain(false, true));
     }
 }
 
