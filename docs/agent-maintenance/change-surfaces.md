@@ -1839,6 +1839,13 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   giant threshold with #3990; decompose per #4039 (lift delete/audit cluster and
   response mappers into `routes/routines/` children) before adding non-bugfix
   behavior.
+- `src/services/discord/tui_task_card.rs` (~1065 prod LoC) — subtask/result
+  card render/parse/JSON-aggregate/dedupe-store logic plus the shared
+  `strip_terminal_controls`/ASCII-truncate helpers. Crossed the giant threshold
+  in #4032 with Discord-limit hard clamps, fence-aware Markdown preview
+  handling, and regression coverage; registered in the giant-file registry,
+  decompose per #3405 (lift preview rendering/budgeting and card-store state
+  into narrower siblings) before adding non-bugfix behavior.
 - `src/services/tmux_common.rs` (~1090 prod LoC) — Claude/Codex TUI pane-capture
   heuristics: ready-for-input, prompt-draft vs idle-suggestion-ghost, active-work
   streaming, MCP-auth banner, and `/effort` selector detection, plus session
