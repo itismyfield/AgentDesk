@@ -1130,7 +1130,9 @@
     children (`send_target`, `send_gate`, `send_api`, `manual_delivery`) to
     `outbound/` while preserving the `health::` re-export API; #1879
     snapshot/mailbox extraction, and #3082 answer-flush-barrier field).
-  - `src/services/discord/health/recovery.rs` (2351 lines; +115 from #4019 R2
+  - `src/services/discord/health/recovery.rs` (2426 lines; +75 from #4019 R2
+    round 2 moving explicit-background hard-stop cleanup before finalizer mailbox
+    release and making watcher stop tmux-session-conditional; +115 from #4019 R2
     watchdog identity revalidation — explicit-background destructive cleanup now
     carries full inflight identity from the snapshot, revalidates under the
     inflight flock immediately before deletion, routes mailbox release through

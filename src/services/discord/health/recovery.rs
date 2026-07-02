@@ -670,18 +670,13 @@ async fn apply_runtime_hard_stop_cleanup(
     runtime_session_cleared
 }
 
-async fn apply_runtime_hard_stop_finalizer_cleanup(
+async fn apply_runtime_hard_stop_finalizer_cleanup_pre_release(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
-    outcome: &discord::turn_finalizer::FinalizeOutcome,
+    has_pending: bool,
+    pinned_tmux_session_name: Option<&str>,
     stop_watcher: bool,
-) -> (bool, bool) {
-    let has_pending = match outcome {
-        discord::turn_finalizer::FinalizeOutcome::Finalized { has_pending, .. } => *has_pending,
-        discord::turn_finalizer::FinalizeOutcome::AlreadyFinalized
-        | discord::turn_finalizer::FinalizeOutcome::Deferred => false,
-    };
-
+) -> bool {
     discord::clear_watchdog_deadline_override(channel_id.get()).await;
     shared
         .dispatch
@@ -694,11 +689,11 @@ async fn apply_runtime_hard_stop_finalizer_cleanup(
         shared.dispatch.role_overrides.remove(&channel_id);
     }
 
-    if stop_watcher && let Some((_, watcher)) = shared.tmux_watchers.remove(&channel_id) {
-        watcher.cancel.store(true, Ordering::Relaxed);
+    if stop_watcher {
+        stop_hard_stop_cleanup_watcher_if_current(shared, channel_id, pinned_tmux_session_name);
     }
 
-    let runtime_session_cleared = {
+    {
         let mut data = shared.core.lock().await;
         if let Some(session) = data.sessions.get_mut(&channel_id) {
             session.clear_provider_session();
@@ -706,9 +701,78 @@ async fn apply_runtime_hard_stop_finalizer_cleanup(
         } else {
             false
         }
+    }
+}
+
+fn stop_hard_stop_cleanup_watcher_if_current(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    pinned_tmux_session_name: Option<&str>,
+) -> bool {
+    let Some(pinned_tmux_session_name) = pinned_tmux_session_name else {
+        tracing::info!(
+            channel_id = channel_id.get(),
+            "STALL-WATCHDOG: skipped hard-stop watcher cleanup because pinned tmux session is missing"
+        );
+        return false;
     };
 
-    (runtime_session_cleared, has_pending)
+    let guard = discord::lock_tmux_watcher_registry();
+    let current_tmux_session_name = shared
+        .tmux_watchers
+        .channel_binding(&channel_id)
+        .map(|binding| binding.tmux_session_name);
+    if current_tmux_session_name.as_deref() != Some(pinned_tmux_session_name) {
+        tracing::info!(
+            channel_id = channel_id.get(),
+            pinned_tmux_session = pinned_tmux_session_name,
+            current_tmux_session = current_tmux_session_name.as_deref(),
+            "STALL-WATCHDOG: skipped hard-stop watcher cleanup because channel watcher identity changed"
+        );
+        return false;
+    }
+    let Some((_, watcher)) = shared.tmux_watchers.remove_locked(&guard, &channel_id) else {
+        return false;
+    };
+    watcher.cancel.store(true, Ordering::Relaxed);
+    true
+}
+
+async fn cleanup_then_submit_explicit_background_watchdog_cancel<Submit, SubmitFuture>(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    revalidated: &ExplicitBackgroundWatchdogClear,
+    pinned_tmux_session_name: Option<&str>,
+    submit_terminal: Submit,
+) -> bool
+where
+    Submit: FnOnce() -> SubmitFuture,
+    SubmitFuture: std::future::Future<Output = discord::turn_finalizer::FinalizeOutcome>,
+{
+    debug_assert_eq!(
+        revalidated.clear_outcome,
+        discord::inflight::GuardedClearOutcome::Cleared
+    );
+    let pre_release_has_pending = !shared
+        .mailbox(channel_id)
+        .snapshot()
+        .await
+        .intervention_queue
+        .is_empty();
+    let _runtime_session_cleared = apply_runtime_hard_stop_finalizer_cleanup_pre_release(
+        shared,
+        channel_id,
+        pre_release_has_pending,
+        pinned_tmux_session_name,
+        true,
+    )
+    .await;
+    let outcome = submit_terminal().await;
+    match outcome {
+        discord::turn_finalizer::FinalizeOutcome::Finalized { has_pending, .. } => has_pending,
+        discord::turn_finalizer::FinalizeOutcome::AlreadyFinalized
+        | discord::turn_finalizer::FinalizeOutcome::Deferred => pre_release_has_pending,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1529,23 +1593,33 @@ pub(crate) async fn run_stall_watchdog_pass(
                 );
                 continue;
             }
-            let outcome = shared
-                .turn_finalizer
-                .submit_terminal(
-                    discord::turn_finalizer::TurnKey::new(
-                        channel_id,
-                        revalidated.finalizer_turn_id,
-                        shared.restart.current_generation,
-                    ),
-                    provider.clone(),
-                    discord::turn_finalizer::TerminalEvent::Cancel,
-                    discord::turn_finalizer::FinalizeContext::monitor(),
-                    shared.clone(),
-                )
-                .await;
-            let (_runtime_session_cleared, has_pending) =
-                apply_runtime_hard_stop_finalizer_cleanup(&shared, channel_id, &outcome, true)
-                    .await;
+            let finalizer_turn_id = revalidated.finalizer_turn_id;
+            let generation = shared.restart.current_generation;
+            let shared_for_submit = shared.clone();
+            let provider_for_submit = provider.clone();
+            let has_pending = cleanup_then_submit_explicit_background_watchdog_cancel(
+                &shared,
+                channel_id,
+                &revalidated,
+                snapshot.tmux_session.as_deref(),
+                move || async move {
+                    shared_for_submit
+                        .turn_finalizer
+                        .submit_terminal(
+                            discord::turn_finalizer::TurnKey::new(
+                                channel_id,
+                                finalizer_turn_id,
+                                generation,
+                            ),
+                            provider_for_submit,
+                            discord::turn_finalizer::TerminalEvent::Cancel,
+                            discord::turn_finalizer::FinalizeContext::monitor(),
+                            shared_for_submit.clone(),
+                        )
+                        .await
+                },
+            )
+            .await;
             if !has_pending {
                 let hydrate = hydrate_pending_queue_from_disk(&shared, provider, channel_id).await;
                 if hydrate.queue_len_after > 0 && hydrate.persistence_error.is_none() {
@@ -3790,6 +3864,151 @@ mod stall_watchdog_auto_heal_tests {
         );
         assert!(token.cancelled.load(Ordering::Relaxed));
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[cfg(test)]
+mod explicit_background_watchdog_cleanup_tests {
+    use super::{
+        ExplicitBackgroundWatchdogClear, cleanup_then_submit_explicit_background_watchdog_cancel,
+        stop_hard_stop_cleanup_watcher_if_current,
+    };
+    use crate::services::discord::inflight::GuardedClearOutcome;
+    use poise::serenity_prelude::ChannelId;
+    use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    fn watcher(
+        tmux_session_name: &str,
+        output_path: &str,
+        cancel: Arc<AtomicBool>,
+    ) -> super::super::super::TmuxWatcherHandle {
+        super::super::super::TmuxWatcherHandle {
+            tmux_session_name: tmux_session_name.to_string(),
+            output_path: output_path.to_string(),
+            paused: Arc::new(AtomicBool::new(false)),
+            resume_offset: Arc::new(std::sync::Mutex::new(None)),
+            cancel,
+            pause_epoch: Arc::new(AtomicU64::new(0)),
+            turn_delivered: Arc::new(AtomicBool::new(false)),
+            last_heartbeat_ts_ms: Arc::new(AtomicI64::new(0)),
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_background_cleanup_precedes_release_and_preserves_new_watcher() {
+        let shared = super::super::super::make_shared_data_for_tests();
+        let channel = ChannelId::new(4_019_402_900);
+        let old_cancel = Arc::new(AtomicBool::new(false));
+        let new_cancel = Arc::new(AtomicBool::new(false));
+        shared.tmux_watchers.insert(
+            channel,
+            watcher(
+                "AgentDesk-codex-old-explicit-background",
+                "/tmp/agentdesk-old-explicit-background.jsonl",
+                old_cancel.clone(),
+            ),
+        );
+        let revalidated = ExplicitBackgroundWatchdogClear {
+            clear_outcome: GuardedClearOutcome::Cleared,
+            pending_hourglass_user_msg_id: Some(4_019_402_901),
+            finalizer_turn_id: 4_019_402_901,
+        };
+        let order = Arc::new(Mutex::new(Vec::new()));
+
+        let has_pending = cleanup_then_submit_explicit_background_watchdog_cancel(
+            &shared,
+            channel,
+            &revalidated,
+            Some("AgentDesk-codex-old-explicit-background"),
+            {
+                let shared = shared.clone();
+                let old_cancel = old_cancel.clone();
+                let new_cancel = new_cancel.clone();
+                let order = order.clone();
+                move || async move {
+                    assert!(
+                        old_cancel.load(Ordering::Relaxed),
+                        "old watcher must be stopped before finalizer release"
+                    );
+                    assert!(
+                        !shared.tmux_watchers.contains_key(&channel),
+                        "old watcher must be removed before finalizer release"
+                    );
+                    order
+                        .lock()
+                        .expect("order lock")
+                        .extend(["cleanup", "finalizer_release"]);
+                    shared.tmux_watchers.insert(
+                        channel,
+                        watcher(
+                            "AgentDesk-codex-new-explicit-background",
+                            "/tmp/agentdesk-new-explicit-background.jsonl",
+                            new_cancel.clone(),
+                        ),
+                    );
+                    super::super::super::turn_finalizer::FinalizeOutcome::Finalized {
+                        removed_token: None,
+                        has_pending: false,
+                        mailbox_online: true,
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert!(!has_pending);
+        assert_eq!(
+            *order.lock().expect("order lock"),
+            ["cleanup", "finalizer_release"]
+        );
+        assert!(
+            shared.tmux_watchers.contains_key(&channel),
+            "watcher registered after finalizer release must survive pass completion"
+        );
+        let binding = shared
+            .tmux_watchers
+            .channel_binding(&channel)
+            .expect("new watcher binding");
+        assert_eq!(
+            binding.tmux_session_name,
+            "AgentDesk-codex-new-explicit-background"
+        );
+        assert!(!new_cancel.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn hard_stop_cleanup_watcher_stop_is_tmux_session_conditional() {
+        let shared = super::super::super::make_shared_data_for_tests();
+        let channel = ChannelId::new(4_019_402_901);
+        let cancel = Arc::new(AtomicBool::new(false));
+        shared.tmux_watchers.insert(
+            channel,
+            watcher(
+                "AgentDesk-codex-current-turn",
+                "/tmp/agentdesk-current-turn.jsonl",
+                cancel.clone(),
+            ),
+        );
+
+        assert!(!stop_hard_stop_cleanup_watcher_if_current(
+            &shared,
+            channel,
+            Some("AgentDesk-codex-stalled-turn"),
+        ));
+        assert!(
+            shared.tmux_watchers.contains_key(&channel),
+            "mismatched current watcher must remain registered"
+        );
+        assert!(!cancel.load(Ordering::Relaxed));
+
+        assert!(stop_hard_stop_cleanup_watcher_if_current(
+            &shared,
+            channel,
+            Some("AgentDesk-codex-current-turn"),
+        ));
+        assert!(!shared.tmux_watchers.contains_key(&channel));
+        assert!(cancel.load(Ordering::Relaxed));
     }
 }
 
