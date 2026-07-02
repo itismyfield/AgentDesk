@@ -215,8 +215,10 @@ pub(crate) use runtime_bootstrap::run_bot;
 
 use crate::services::turn_orchestrator::{
     ActiveTurnKind, CancelActiveTurnResult, CancelQueuedMessageResult, ChannelMailboxSnapshot,
-    ClearChannelResult, FinishTurnResult, HydratePendingQueueResult, QueueExitEvent, QueueExitKind,
-    QueuePersistenceContext, RecoveryKickoffResult, RequeueInterventionResult, TakeNextSoftResult,
+    ClearChannelResult, FinishTurnResult, HydratePendingQueueResult,
+    PENDING_USER_DISPATCH_STALE_AFTER, QueueExitEvent, QueueExitKind, QueuePersistenceContext,
+    RecoveryKickoffResult, RequeueInterventionResult, TakeNextSoftResult,
+    VALVE_CLEARED_DISPATCH_MARKER_GRACE, load_channel_pending_dispatch_marker,
     load_pending_dispatch_markers, load_pending_queues, warn_legacy_pending_queue_files,
 };
 pub(super) use crate::services::turn_orchestrator::{
@@ -2318,7 +2320,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
             restart_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reconcile_done: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             deferred_hook_backlog: std::sync::atomic::AtomicUsize::new(0),
-            deferred_hook_channels: dashmap::DashSet::new(),
+            deferred_hook_channels: dashmap::DashMap::new(),
             recovery_started_at: std::time::Instant::now(),
             recovery_duration_ms: std::sync::atomic::AtomicU64::new(0),
             global_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -2570,6 +2572,42 @@ fn cleanup_retry_inflight_blocks_idle_kickoff(
         .terminal_cleanup_retry_pending(provider, channel_id, MessageId::new(state.current_msg_id))
 }
 
+fn idle_queue_snapshot_has_pending_or_marker_backlog(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    snapshot: &ChannelMailboxSnapshot,
+) -> bool {
+    if !snapshot.intervention_queue.is_empty() {
+        return true;
+    }
+    let Some((marker, _)) =
+        load_channel_pending_dispatch_marker(provider, &shared.token_hash, channel_id)
+    else {
+        return false;
+    };
+    if snapshot
+        .recently_valve_cleared_dispatch
+        .is_some_and(|(cleared_id, cleared_at)| {
+            cleared_id == marker.message_id
+                && cleared_at.elapsed() < VALVE_CLEARED_DISPATCH_MARKER_GRACE
+        })
+    {
+        return false;
+    }
+    match (
+        snapshot.pending_user_dispatch,
+        snapshot.pending_user_dispatch_since,
+    ) {
+        (Some(reserved_id), Some(reserved_at)) => {
+            reserved_id == marker.message_id
+                && reserved_at.elapsed() >= PENDING_USER_DISPATCH_STALE_AFTER
+        }
+        (Some(_), None) => false,
+        (None, _) => true,
+    }
+}
+
 fn idle_queue_snapshot_has_kickable_backlog(
     shared: &SharedData,
     provider: &ProviderKind,
@@ -2587,7 +2625,7 @@ fn idle_queue_snapshot_has_kickable_backlog(
         snapshot.cancel_token.is_some() && !snapshot.active_turn_kind.is_background();
     !blocked_by_real_turn
         && snapshot.recovery_started_at.is_none()
-        && !snapshot.intervention_queue.is_empty()
+        && idle_queue_snapshot_has_pending_or_marker_backlog(shared, provider, channel_id, snapshot)
         && !cleanup_retry_inflight_blocks_idle_kickoff(shared, provider, channel_id)
         // #3154: while a deferred synthetic turn-start is pending for this
         // channel, the per-channel worker is waiting for the prior turn to
@@ -3207,10 +3245,12 @@ async fn mailbox_take_next_soft_intervention(
                 stale.status
             );
             let queue_exit_events = [QueueExitEvent {
-                intervention,
+                intervention: intervention.clone(),
                 kind: stale.queue_exit_kind,
             }];
             apply_queue_exit_feedback(shared, channel_id, &queue_exit_events).await;
+            mailbox_abandon_pending_dispatch(shared, provider, channel_id, intervention.message_id)
+                .await;
             continue;
         }
 
@@ -3308,6 +3348,36 @@ async fn mailbox_requeue_intervention_front(
             "mailbox requeue-front failed durable pending-queue persistence; pending dispatch marker remains the durable backstop"
         );
     }
+}
+
+async fn mailbox_abandon_pending_dispatch(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    user_message_id: MessageId,
+) {
+    shared
+        .mailbox(channel_id)
+        .abandon_pending_dispatch(
+            user_message_id,
+            queue_persistence_context(shared, provider, channel_id),
+        )
+        .await;
+}
+
+async fn mailbox_clear_pending_dispatch_reservation(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    user_message_id: MessageId,
+) {
+    shared
+        .mailbox(channel_id)
+        .clear_pending_dispatch_reservation(
+            user_message_id,
+            queue_persistence_context(shared, provider, channel_id),
+        )
+        .await;
 }
 
 /// Re-queue the inflight message that a claude TUI follow-up could not submit
@@ -3709,6 +3779,142 @@ pub(super) fn mark_reconcile_complete(shared: &SharedData) {
 pub(super) type Error = Box<dyn std::error::Error + Send + Sync>;
 pub(super) type Context<'a> = poise::Context<'a, Data, Error>;
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct IdleQueueKickoffChannelOutcome {
+    pub(super) started: bool,
+    pub(super) dispatch_failed: bool,
+}
+
+async fn kickoff_idle_queue_channel(
+    ctx: &serenity::Context,
+    shared: &Arc<SharedData>,
+    token: &str,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> IdleQueueKickoffChannelOutcome {
+    let settings_snapshot = shared.settings.read().await.clone();
+    if let Err(reason) =
+        validate_live_channel_routing(ctx, provider, &settings_snapshot, channel_id).await
+    {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] ⚠ KICKOFF-GUARD: preserving queued item(s) for channel {} (reason={})",
+            channel_id,
+            reason
+        );
+        return IdleQueueKickoffChannelOutcome::default();
+    }
+
+    let fresh_snapshot = mailbox_snapshot(shared, channel_id).await;
+    if !idle_queue_channel_has_kickable_backlog(shared, provider, channel_id, &fresh_snapshot).await
+    {
+        tracing::info!(
+            channel_id = channel_id.get(),
+            provider = provider.as_str(),
+            "KICKOFF: skipped queued turn after fresh mailbox/TUI guard"
+        );
+        return IdleQueueKickoffChannelOutcome::default();
+    }
+
+    let take_next = idle_queue_take_next_soft_if_ready(shared, provider, channel_id).await;
+    if let Some(error) = take_next.persistence_error.as_ref() {
+        tracing::error!(
+            provider = provider.as_str(),
+            channel_id = channel_id.get(),
+            error = %error,
+            "KICKOFF: preserving queued turn after pending-queue persistence failure"
+        );
+        return IdleQueueKickoffChannelOutcome::default();
+    }
+    let Some((intervention, has_more)) = take_next.into_intervention() else {
+        return IdleQueueKickoffChannelOutcome::default();
+    };
+
+    let owner_name = if intervention.author_id.get() <= 1 {
+        "system".to_string()
+    } else {
+        intervention
+            .author_id
+            .to_user(&ctx.http)
+            .await
+            .map(|u| u.name.clone())
+            .unwrap_or_else(|_| format!("user-{}", intervention.author_id.get()))
+    };
+
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::info!(
+        "  [{ts}] 🚀 KICKOFF: starting queued turn for channel {}",
+        channel_id
+    );
+
+    for message_id in &intervention.source_message_ids {
+        for emoji in queue_reactions::QUEUE_PENDING_REACTION_EMOJIS {
+            formatting::remove_reaction_raw(&ctx.http, channel_id, *message_id, emoji).await;
+        }
+    }
+
+    let drained_cards = gateway::drain_merged_queued_placeholders(
+        shared,
+        channel_id,
+        intervention.message_id,
+        &intervention.source_message_ids,
+    )
+    .await;
+    for placeholder_msg_id in drained_cards {
+        let _ = channel_id
+            .delete_message(&ctx.http, placeholder_msg_id)
+            .await;
+    }
+
+    let deps = router::IntakeDeps {
+        http: &ctx.http,
+        cache: Some(&ctx.cache),
+        ctx_for_chained_dispatch: Some(ctx),
+        shared,
+        token,
+    };
+    if let Some(announcement) = intervention.voice_announcement.as_ref() {
+        crate::voice::announce_meta::global_store()
+            .insert_accepted_replay(intervention.message_id, announcement.clone());
+    }
+    if let Err(e) = router::handle_text_message(
+        &deps,
+        channel_id,
+        intervention.message_id,
+        intervention.author_id,
+        &owner_name,
+        &intervention.text,
+        true,
+        has_more,
+        false,
+        intervention.merge_consecutive,
+        intervention.reply_context.clone(),
+        intervention.has_reply_boundary,
+        None,
+        router::TurnKind::Foreground,
+        intervention.pending_uploads.clone(),
+        None,
+    )
+    .await
+    {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}]   ⚠ KICKOFF: failed to start turn for channel {}: {e}",
+            channel_id
+        );
+        mailbox_requeue_intervention_front(shared, provider, channel_id, intervention).await;
+        IdleQueueKickoffChannelOutcome {
+            started: false,
+            dispatch_failed: true,
+        }
+    } else {
+        IdleQueueKickoffChannelOutcome {
+            started: true,
+            dispatch_failed: false,
+        }
+    }
+}
+
 /// Kick off turns for channels that have queued interventions but no active
 /// turn running. This bridges the gap where restored pending queues or
 /// handoff injections sit idle because no turn-completion event triggers
@@ -3741,159 +3947,8 @@ pub(super) async fn kickoff_idle_queues(
 
     let mut started_count = 0usize;
     for channel_id in channels_to_kick {
-        let settings_snapshot = shared.settings.read().await.clone();
-        if let Err(reason) =
-            validate_live_channel_routing(ctx, provider, &settings_snapshot, channel_id).await
-        {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] ⚠ KICKOFF-GUARD: preserving queued item(s) for channel {} (reason={})",
-                channel_id,
-                reason
-            );
-            continue;
-        }
-
-        let fresh_snapshot = mailbox_snapshot(shared, channel_id).await;
-        if !idle_queue_channel_has_kickable_backlog(shared, provider, channel_id, &fresh_snapshot)
-            .await
-        {
-            tracing::info!(
-                channel_id = channel_id.get(),
-                provider = provider.as_str(),
-                "KICKOFF: skipped queued turn after fresh mailbox/TUI guard"
-            );
-            continue;
-        }
-
-        let take_next = idle_queue_take_next_soft_if_ready(shared, provider, channel_id).await;
-        if let Some(error) = take_next.persistence_error.as_ref() {
-            tracing::error!(
-                provider = provider.as_str(),
-                channel_id = channel_id.get(),
-                error = %error,
-                "KICKOFF: preserving queued turn after pending-queue persistence failure"
-            );
-            continue;
-        }
-        let Some((intervention, has_more)) = take_next.into_intervention() else {
-            continue;
-        };
-
-        let owner_name = if intervention.author_id.get() <= 1 {
-            "system".to_string()
-        } else {
-            intervention
-                .author_id
-                .to_user(&ctx.http)
-                .await
-                .map(|u| u.name.clone())
-                .unwrap_or_else(|_| format!("user-{}", intervention.author_id.get()))
-        };
-
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!(
-            "  [{ts}] 🚀 KICKOFF: starting queued turn for channel {}",
-            channel_id
-        );
-
-        // #3182 codex P1 (idle/restart kickoff leaks queue reactions): the live
-        // dispatch path (`DiscordGateway::dispatch_queued_turn`) clears the
-        // `📬`/`➕` queue-pending REACTIONS on every `source_message_ids` entry
-        // BEFORE re-entering `handle_text_message`, but this idle/restart
-        // kickoff entrypoint only drained the placeholder CARDS below — never
-        // the reactions. So a queued item promoted via `kickoff_idle_queues`
-        // (e.g. one whose visible queued card POST failed, leaving no
-        // `queued_placeholders` mapping for the head, or a merged group whose
-        // non-head sources never get a head hand-off) kept its `📬`/`➕`
-        // alongside the eventual `✅` — the queue version of the #3164 stuck
-        // marker. Mirror `dispatch_queued_turn`'s reaction drain here so both
-        // queued-dispatch entrypoints produce identical post-conditions
-        // regardless of any per-head mapping. `source_message_ids` collects
-        // every contributing message INCLUDING the head, and the removal is
-        // best-effort (`remove_reaction_raw` no-ops on a missing/already-cleared
-        // reaction), so this is safe for standalone, merged, and no-mapping
-        // cases alike. Background-trigger turns never reacted the user message,
-        // so a redundant remove on them is a harmless no-op.
-        for message_id in &intervention.source_message_ids {
-            for emoji in queue_reactions::QUEUE_PENDING_REACTION_EMOJIS {
-                formatting::remove_reaction_raw(&ctx.http, channel_id, *message_id, emoji).await;
-            }
-        }
-
-        // codex review round-5 P2 (finding 3 — drain merged placeholders on
-        // idle kickoff): when a merged-source intervention is restored from
-        // the persisted queue (or scheduled by `schedule_deferred_idle_queue_kickoff`)
-        // and dispatched here directly via `router::handle_text_message`,
-        // only the head id (`intervention.message_id`) is consumed by the
-        // dispatch hand-off. Any non-head `source_message_ids` would leak
-        // both their `queued_placeholders` mappings and their stale `📬`
-        // Discord cards. The live dispatch path (`DiscordGateway::dispatch_queued_turn`)
-        // already calls this same drain helper; round-5 mirrors that
-        // cleanup here so restart-induced kickoff produces identical
-        // post-conditions.
-        let drained_cards = gateway::drain_merged_queued_placeholders(
-            shared,
-            channel_id,
-            intervention.message_id,
-            &intervention.source_message_ids,
-        )
-        .await;
-        for placeholder_msg_id in drained_cards {
-            let _ = channel_id
-                .delete_message(&ctx.http, placeholder_msg_id)
-                .await;
-        }
-
-        let deps = router::IntakeDeps {
-            http: &ctx.http,
-            cache: Some(&ctx.cache),
-            ctx_for_chained_dispatch: Some(ctx),
-            shared,
-            token,
-        };
-        // #2266 compatibility: kickoff_idle_queues is the other queued-dispatch
-        // entrypoint alongside `DiscordGateway::dispatch_queued_turn`. Older
-        // queued interventions may still carry a voice accepted-replay payload,
-        // so reinsert it before re-entering `handle_text_message`. New queue
-        // commits strip that payload and let dispatch claim the durable row
-        // from the readable announcement text.
-        if let Some(announcement) = intervention.voice_announcement.as_ref() {
-            crate::voice::announce_meta::global_store()
-                .insert_accepted_replay(intervention.message_id, announcement.clone());
-        }
-        if let Err(e) = router::handle_text_message(
-            &deps,
-            channel_id,
-            intervention.message_id,
-            intervention.author_id,
-            &owner_name,
-            &intervention.text,
-            true,     // reply_to_user_message
-            has_more, // defer_watcher_resume
-            false,    // wait_for_completion — don't block, let channels run concurrently
-            intervention.merge_consecutive,
-            intervention.reply_context.clone(),
-            intervention.has_reply_boundary,
-            None,
-            // Queued interventions kicked off after a previous turn already
-            // own their own placeholder; they're never racing for it.
-            // Foreground keeps legacy behavior.
-            router::TurnKind::Foreground,
-            intervention.pending_uploads.clone(),
-            // #3905: queued kickoff uses the accepted-replay store reinsert above, not gate carry-forward.
-            None,
-        )
-        .await
-        {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}]   ⚠ KICKOFF: failed to start turn for channel {}: {e}",
-                channel_id
-            );
-            // Requeue so the message is not lost, and persist immediately.
-            mailbox_requeue_intervention_front(shared, provider, channel_id, intervention).await;
-        } else {
+        let outcome = kickoff_idle_queue_channel(ctx, shared, token, provider, channel_id).await;
+        if outcome.started {
             started_count += 1;
         }
     }
@@ -4680,6 +4735,55 @@ mod idle_queue_background_supersede_tests {
             background_token.cancelled.load(Ordering::Relaxed),
             "#3167: the background token must be cancelled so the slot is released"
         );
+    }
+
+    #[test]
+    fn stale_marker_only_dispatch_reservation_is_kickable() {
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let shared = make_shared_data_for_tests();
+                let provider = ProviderKind::Claude;
+                let channel_id = ChannelId::new(3_167_901);
+                let head = user_intervention(901, "task died before claim");
+                shared
+                    .mailbox(channel_id)
+                    .replace_queue(
+                        vec![head],
+                        queue_persistence_context(&shared, &provider, channel_id),
+                    )
+                    .await;
+                let taken = shared
+                    .mailbox(channel_id)
+                    .take_next_soft(queue_persistence_context(&shared, &provider, channel_id))
+                    .await;
+                assert_eq!(
+                    taken.intervention.as_ref().map(|item| item.message_id),
+                    Some(MessageId::new(901))
+                );
+                shared
+                    .mailbox(channel_id)
+                    .age_pending_dispatch_for_test(
+                        PENDING_USER_DISPATCH_STALE_AFTER + std::time::Duration::from_secs(1),
+                    )
+                    .await;
+
+                let snapshot = mailbox_snapshot(&shared, channel_id).await;
+
+                assert!(
+                    idle_queue_snapshot_has_kickable_backlog(
+                        &shared, &provider, channel_id, &snapshot
+                    ),
+                    "stale marker-only reservations must wake the drain loop so TakeNextSoft can self-heal"
+                );
+            });
     }
 }
 

@@ -919,6 +919,7 @@ src/
 │   ├── tui_prompt_dedupe/
 │   │   └── synthetic_prompt.rs
 │   ├── turn_orchestrator/
+│   │   ├── dispatch_reservation.rs
 │   │   ├── pending_queue_persistence.rs
 │   │   └── registry_purge.rs
 │   ├── agent_protocol.rs

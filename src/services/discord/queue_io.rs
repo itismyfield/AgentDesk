@@ -25,6 +25,7 @@ const DEFERRED_IDLE_QUEUE_KICKOFF_SLOW_DELAY: std::time::Duration =
 // because cached ctx/token arrived slightly after the first post-turn kickoff.
 const DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS: usize = 150;
 const DEFERRED_IDLE_QUEUE_ZERO_START_ABANDONED_CLAIM_PROBE_AFTER: usize = 3;
+const DEFERRED_IDLE_QUEUE_MAX_CONSECUTIVE_DISPATCH_FAILURES: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DeferredIdleQueueKickoffProfile {
@@ -61,6 +62,23 @@ impl DeferredIdleQueueKickoffProfile {
             round: self.round_index().saturating_add(1),
         }
     }
+
+    fn wakes_existing_task(self) -> bool {
+        matches!(self, Self::Normal | Self::ImmediateOnce)
+    }
+}
+
+async fn sleep_or_deferred_kick_notify(
+    duration: std::time::Duration,
+    notify: &tokio::sync::Notify,
+) {
+    if duration.is_zero() {
+        return;
+    }
+    tokio::select! {
+        _ = tokio::time::sleep(duration) => {}
+        _ = notify.notified() => {}
+    }
 }
 
 fn should_retry_deferred_idle_queue_kickoff(attempt: usize) -> bool {
@@ -69,15 +87,27 @@ fn should_retry_deferred_idle_queue_kickoff(attempt: usize) -> bool {
 
 fn note_zero_start_deferred_drain(
     consecutive_zero_start_drains: &mut usize,
-    started: usize,
+    target_started: bool,
     target_still_pending: bool,
 ) -> bool {
-    if started == 0 && target_still_pending {
+    if !target_started && target_still_pending {
         *consecutive_zero_start_drains = consecutive_zero_start_drains.saturating_add(1);
     } else {
         *consecutive_zero_start_drains = 0;
     }
     *consecutive_zero_start_drains >= DEFERRED_IDLE_QUEUE_ZERO_START_ABANDONED_CLAIM_PROBE_AFTER
+}
+
+fn note_deferred_dispatch_failure(
+    consecutive_dispatch_failures: &mut usize,
+    dispatch_failed: bool,
+) -> bool {
+    if dispatch_failed {
+        *consecutive_dispatch_failures = consecutive_dispatch_failures.saturating_add(1);
+    } else {
+        *consecutive_dispatch_failures = 0;
+    }
+    *consecutive_dispatch_failures >= DEFERRED_IDLE_QUEUE_MAX_CONSECUTIVE_DISPATCH_FAILURES
 }
 
 /// #3005: pre-sleep before the very first deferred-drain attempt. The
@@ -99,6 +129,14 @@ fn deferred_idle_queue_rearm_profile_after_giveup(
     remaining_queue_len: usize,
 ) -> Option<DeferredIdleQueueKickoffProfile> {
     (remaining_queue_len > 0).then(|| current.next_slow_round())
+}
+
+fn deferred_backlog_units(snapshot: &ChannelMailboxSnapshot, target_still_pending: bool) -> usize {
+    if target_still_pending {
+        snapshot.intervention_queue.len().max(1)
+    } else {
+        0
+    }
 }
 
 impl Drop for DeferredHookBacklogGuard {
@@ -186,20 +224,6 @@ async fn slow_rearm_channel_still_kickable(
         );
         return false;
     }
-    let snapshot = super::mailbox_snapshot(shared, channel_id).await;
-    if !super::idle_queue_channel_has_kickable_backlog(shared, provider, channel_id, &snapshot)
-        .await
-    {
-        tracing::warn!(
-            provider = provider.as_str(),
-            channel_id = channel_id.get(),
-            reason,
-            queue_len = snapshot.intervention_queue.len(),
-            active_user_message_id = snapshot.active_user_message_id.map(|id| id.get()),
-            "Deferred drain: terminating slow re-arm chain because channel is no longer kickable; queue file remains persisted for the next qualifying kickoff"
-        );
-        return false;
-    }
     true
 }
 
@@ -244,16 +268,27 @@ fn schedule_deferred_idle_queue_kickoff_inner(
     reason: &'static str,
     profile: DeferredIdleQueueKickoffProfile,
 ) {
-    if !shared.restart.deferred_hook_channels.insert(channel_id) {
-        tracing::debug!(
-            provider = provider.as_str(),
-            channel_id = channel_id.get(),
-            reason,
-            round = profile.round_index(),
-            "Deferred drain: kickoff already active for channel; coalescing duplicate request"
-        );
-        return;
-    }
+    let task_notify = match shared.restart.deferred_hook_channels.entry(channel_id) {
+        dashmap::mapref::entry::Entry::Occupied(entry) => {
+            if profile.wakes_existing_task() {
+                entry.get().notify_one();
+            }
+            tracing::debug!(
+                provider = provider.as_str(),
+                channel_id = channel_id.get(),
+                reason,
+                round = profile.round_index(),
+                wake_existing = profile.wakes_existing_task(),
+                "Deferred drain: kickoff already active for channel; coalescing duplicate request"
+            );
+            return;
+        }
+        dashmap::mapref::entry::Entry::Vacant(entry) => {
+            let notify = Arc::new(tokio::sync::Notify::new());
+            entry.insert(notify.clone());
+            notify
+        }
+    };
     shared
         .restart
         .deferred_hook_backlog
@@ -271,9 +306,10 @@ fn schedule_deferred_idle_queue_kickoff_inner(
         // after the turn settles; all subsequent attempts keep the 2s cadence.
         let initial_presleep = profile.initial_presleep();
         if !initial_presleep.is_zero() {
-            tokio::time::sleep(initial_presleep).await;
+            sleep_or_deferred_kick_notify(initial_presleep, task_notify.as_ref()).await;
         }
         let mut consecutive_zero_start_drains = 0usize;
+        let mut consecutive_dispatch_failures = 0usize;
         for attempt in 1..=DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS {
             if let (Some(ctx), Some(tok)) = (
                 shared.http.cached_serenity_ctx.get(),
@@ -285,7 +321,9 @@ fn schedule_deferred_idle_queue_kickoff_inner(
                     channel_id,
                     DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS
                 );
-                let started = super::kickoff_idle_queues(ctx, &shared, tok, &provider).await;
+                let outcome =
+                    super::kickoff_idle_queue_channel(ctx, &shared, tok, &provider, channel_id)
+                        .await;
                 // Always re-check the queue on a zero-start drain regardless
                 // of `reason`. The earlier `should_retry_zero_start_*` reason
                 // allowlist gated retry on a single hard-coded reason
@@ -300,13 +338,41 @@ fn schedule_deferred_idle_queue_kickoff_inner(
                 // non-empty within the bounded attempt budget; the
                 // hosted-TUI gate inside `kickoff_idle_queues` is what
                 // keeps us from racing a still-busy pane.
-                let target_still_pending = !super::mailbox_snapshot(shared.as_ref(), channel_id)
-                    .await
-                    .intervention_queue
-                    .is_empty();
+                let target_snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
+                let target_still_pending = super::idle_queue_snapshot_has_kickable_backlog(
+                    shared.as_ref(),
+                    &provider,
+                    channel_id,
+                    &target_snapshot,
+                );
+                if note_deferred_dispatch_failure(
+                    &mut consecutive_dispatch_failures,
+                    outcome.dispatch_failed,
+                ) && target_still_pending
+                {
+                    let remaining_queue_len =
+                        deferred_backlog_units(&target_snapshot, target_still_pending);
+                    if let Some(next_profile) =
+                        deferred_idle_queue_rearm_profile_after_giveup(profile, remaining_queue_len)
+                    {
+                        rearm_slow_deferred_idle_queue_kickoff(
+                            Some(ctx),
+                            &shared,
+                            &provider,
+                            channel_id,
+                            reason,
+                            next_profile,
+                            remaining_queue_len,
+                            &mut backlog_guard,
+                            "after repeated dispatch failures",
+                        )
+                        .await;
+                    }
+                    return;
+                }
                 let should_probe_abandoned_claim = note_zero_start_deferred_drain(
                     &mut consecutive_zero_start_drains,
-                    started,
+                    outcome.started,
                     target_still_pending,
                 );
                 if should_probe_abandoned_claim {
@@ -330,18 +396,21 @@ fn schedule_deferred_idle_queue_kickoff_inner(
                             issue = "#3333",
                             "Deferred drain: cleared abandoned synthetic-start presence after repeated zero-start drains; durable record retained for restart retry"
                         );
-                        let final_started =
-                            super::kickoff_idle_queues(ctx, &shared, tok, &provider).await;
-                        let final_pending = !super::mailbox_snapshot(shared.as_ref(), channel_id)
-                            .await
-                            .intervention_queue
-                            .is_empty();
-                        if final_started == 0 && final_pending {
+                        let final_outcome = super::kickoff_idle_queue_channel(
+                            ctx, &shared, tok, &provider, channel_id,
+                        )
+                        .await;
+                        let final_snapshot =
+                            super::mailbox_snapshot(shared.as_ref(), channel_id).await;
+                        let final_pending = super::idle_queue_snapshot_has_kickable_backlog(
+                            shared.as_ref(),
+                            &provider,
+                            channel_id,
+                            &final_snapshot,
+                        );
+                        if !final_outcome.started && final_pending {
                             let remaining_queue_len =
-                                super::mailbox_snapshot(shared.as_ref(), channel_id)
-                                    .await
-                                    .intervention_queue
-                                    .len();
+                                deferred_backlog_units(&final_snapshot, final_pending);
                             tracing::warn!(
                                 provider = provider.as_str(),
                                 channel_id = channel_id.get(),
@@ -374,7 +443,7 @@ fn schedule_deferred_idle_queue_kickoff_inner(
                     }
                     consecutive_zero_start_drains = 0;
                 }
-                if started == 0
+                if !outcome.started
                     && target_still_pending
                     && should_retry_deferred_idle_queue_kickoff(attempt)
                 {
@@ -383,14 +452,13 @@ fn schedule_deferred_idle_queue_kickoff_inner(
                         channel_id,
                         DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS
                     );
-                    tokio::time::sleep(profile.retry_delay()).await;
+                    sleep_or_deferred_kick_notify(profile.retry_delay(), task_notify.as_ref())
+                        .await;
                     continue;
                 }
-                if started == 0 && target_still_pending {
-                    let remaining_queue_len = super::mailbox_snapshot(shared.as_ref(), channel_id)
-                        .await
-                        .intervention_queue
-                        .len();
+                if !outcome.started && target_still_pending {
+                    let remaining_queue_len =
+                        deferred_backlog_units(&target_snapshot, target_still_pending);
                     if let Some(next_profile) =
                         deferred_idle_queue_rearm_profile_after_giveup(profile, remaining_queue_len)
                     {
@@ -413,10 +481,16 @@ fn schedule_deferred_idle_queue_kickoff_inner(
 
             let ts = chrono::Local::now().format("%H:%M:%S");
             if !should_retry_deferred_idle_queue_kickoff(attempt) {
-                let remaining_queue_len = super::mailbox_snapshot(shared.as_ref(), channel_id)
-                    .await
-                    .intervention_queue
-                    .len();
+                let missing_context_snapshot =
+                    super::mailbox_snapshot(shared.as_ref(), channel_id).await;
+                let missing_context_pending = super::idle_queue_snapshot_has_kickable_backlog(
+                    shared.as_ref(),
+                    &provider,
+                    channel_id,
+                    &missing_context_snapshot,
+                );
+                let remaining_queue_len =
+                    deferred_backlog_units(&missing_context_snapshot, missing_context_pending);
                 tracing::warn!(
                     "  [{ts}] ⚠ Deferred drain: missing cached context for channel {} after {} attempts ({reason}); queued items remain persisted for next kickoff",
                     channel_id,
@@ -445,7 +519,7 @@ fn schedule_deferred_idle_queue_kickoff_inner(
                 channel_id,
                 DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS
             );
-            tokio::time::sleep(profile.retry_delay()).await;
+            sleep_or_deferred_kick_notify(profile.retry_delay(), task_notify.as_ref()).await;
         }
         // Drop guard at end of scope decrements the backlog counter.
     });
@@ -566,30 +640,71 @@ mod presleep_tests {
     #[test]
     fn zero_start_abandoned_claim_probe_fires_on_third_consecutive_pending_zero() {
         let mut consecutive = 0usize;
-        assert!(!note_zero_start_deferred_drain(&mut consecutive, 0, true));
-        assert!(!note_zero_start_deferred_drain(&mut consecutive, 0, true));
-        assert!(note_zero_start_deferred_drain(&mut consecutive, 0, true));
+        assert!(!note_zero_start_deferred_drain(
+            &mut consecutive,
+            false,
+            true
+        ));
+        assert!(!note_zero_start_deferred_drain(
+            &mut consecutive,
+            false,
+            true
+        ));
+        assert!(note_zero_start_deferred_drain(
+            &mut consecutive,
+            false,
+            true
+        ));
         assert_eq!(
             consecutive, DEFERRED_IDLE_QUEUE_ZERO_START_ABANDONED_CLAIM_PROBE_AFTER,
             "the #3333 abandoned-claim probe must fire after 3 zero-start drains, not after the 150-attempt cap"
         );
 
-        assert!(!note_zero_start_deferred_drain(&mut consecutive, 1, true));
+        assert!(!note_zero_start_deferred_drain(
+            &mut consecutive,
+            true,
+            true
+        ));
         assert_eq!(consecutive, 0, "a non-zero drain resets the zero-start run");
-        assert!(!note_zero_start_deferred_drain(&mut consecutive, 0, false));
+        assert!(!note_zero_start_deferred_drain(
+            &mut consecutive,
+            false,
+            false
+        ));
         assert_eq!(consecutive, 0, "an empty target queue is a normal exit");
+    }
+
+    #[test]
+    fn target_channel_zero_start_progress_is_independent_of_other_channels() {
+        let mut consecutive = DEFERRED_IDLE_QUEUE_ZERO_START_ABANDONED_CLAIM_PROBE_AFTER - 1;
+        let other_channel_started = true;
+        assert!(
+            other_channel_started,
+            "document the masked-success scenario"
+        );
+        assert!(note_zero_start_deferred_drain(
+            &mut consecutive,
+            false,
+            true
+        ));
+        assert_eq!(
+            consecutive, DEFERRED_IDLE_QUEUE_ZERO_START_ABANDONED_CLAIM_PROBE_AFTER,
+            "a different channel's success must not reset this target channel"
+        );
+    }
+
+    #[test]
+    fn marker_only_backlog_counts_as_slow_rearm_work() {
+        let snapshot = ChannelMailboxSnapshot::default();
+        assert_eq!(deferred_backlog_units(&snapshot, true), 1);
+        assert_eq!(deferred_backlog_units(&snapshot, false), 0);
     }
 
     #[test]
     fn persistent_dispatch_failure_consumes_bounded_zero_progress_budget_then_rearms_slow() {
         let mut consecutive = 0usize;
         for _ in 1..=DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS {
-            let started_after_failed_dispatch = 0;
-            let _ = note_zero_start_deferred_drain(
-                &mut consecutive,
-                started_after_failed_dispatch,
-                true,
-            );
+            let _ = note_zero_start_deferred_drain(&mut consecutive, false, true);
         }
 
         let next = deferred_idle_queue_rearm_profile_after_giveup(
@@ -601,6 +716,37 @@ mod presleep_tests {
             Some(DeferredIdleQueueKickoffProfile::Slow { round: 1 })
         );
         assert_eq!(DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS, 150);
+    }
+
+    #[test]
+    fn dispatch_failure_fast_phase_exits_after_three_consecutive_failures() {
+        let mut consecutive = 0usize;
+        assert!(!note_deferred_dispatch_failure(&mut consecutive, true));
+        assert!(!note_deferred_dispatch_failure(&mut consecutive, true));
+        assert!(note_deferred_dispatch_failure(&mut consecutive, true));
+        assert_eq!(
+            consecutive,
+            DEFERRED_IDLE_QUEUE_MAX_CONSECUTIVE_DISPATCH_FAILURES
+        );
+        assert!(!note_deferred_dispatch_failure(&mut consecutive, false));
+        assert_eq!(consecutive, 0);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn notify_wakes_deferred_sleep_without_waiting_full_delay() {
+        let notify = tokio::sync::Notify::new();
+        let sleeper = sleep_or_deferred_kick_notify(std::time::Duration::from_secs(60), &notify);
+        tokio::pin!(sleeper);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(1), &mut sleeper)
+                .await
+                .is_err(),
+            "sleep should remain pending before notification"
+        );
+        notify.notify_one();
+        tokio::time::timeout(std::time::Duration::from_millis(1), &mut sleeper)
+            .await
+            .expect("notification should wake the deferred sleep promptly");
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -626,8 +772,53 @@ mod presleep_tests {
             "duplicate deferred kicks for one channel must share one live task"
         );
         assert!(
-            shared.restart.deferred_hook_channels.contains(&channel_id),
+            shared
+                .restart
+                .deferred_hook_channels
+                .contains_key(&channel_id),
             "the live per-channel guard must remain registered while the task is sleeping"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn coalesced_immediate_kick_notifies_existing_slow_task() {
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_024_281);
+        let notify = Arc::new(tokio::sync::Notify::new());
+        shared
+            .restart
+            .deferred_hook_channels
+            .insert(channel_id, notify.clone());
+
+        schedule_deferred_idle_queue_kickoff_immediate(
+            shared,
+            provider,
+            channel_id,
+            "coalesced-immediate-test",
+        );
+
+        tokio::time::timeout(std::time::Duration::from_millis(1), notify.notified())
+            .await
+            .expect("immediate coalesce should wake the existing task");
+    }
+
+    #[tokio::test]
+    async fn slow_rearm_without_routing_context_preserves_transient_backlog_chain() {
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_024_282);
+
+        assert!(
+            slow_rearm_channel_still_kickable(
+                None,
+                &shared,
+                &provider,
+                channel_id,
+                "slow-rearm-transient-guard-test",
+            )
+            .await,
+            "slow rearm must not terminate solely because kickable backlog is temporarily gated"
         );
     }
 

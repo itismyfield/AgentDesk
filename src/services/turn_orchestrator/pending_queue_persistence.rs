@@ -449,7 +449,7 @@ fn pending_queue_item_to_intervention(item: PendingQueueItem, now: Instant) -> I
     }
 }
 
-pub(super) fn load_channel_pending_dispatch_marker(
+pub(crate) fn load_channel_pending_dispatch_marker(
     provider: &ProviderKind,
     token_hash: &str,
     channel_id: ChannelId,

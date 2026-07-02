@@ -165,6 +165,40 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
                     "  [{ts}] 📋 FLUSH: restored {added} pending queue item(s) from disk (skipped {skipped}: unowned={skipped_unowned}, sender={skipped_sender}, duplicate={skipped_duplicate}, persist_error={skipped_persist_error})"
                 );
             }
+            // #3641: orphan `.json.lock` sidecars are invisible to the `.json`
+            // row scans below, so sweep them once per process before inflight
+            // recovery starts. The sweep itself enumerates provider subdirs.
+            let _ = ORPHAN_INFLIGHT_LOCK_SWEEP_ONCE
+                .get_or_init(super::inflight::reap_orphan_inflight_locks);
+
+            // #2437 (#2427 C wire) boot-time generation
+            // invalidate. Remove non-planned-restart inflight
+            // rows whose `restart_generation` does not match
+            // the current generation so recovery does not
+            // revive a row whose tmux session no longer
+            // exists. Must run BEFORE `restore_inflight_turns`
+            // — otherwise recovery would attempt to revive
+            // ghost rows and the placeholder sweeper would
+            // eventually have to time-guess them at 1800s.
+            // Planned-restart / hot-swap rows survive (their
+            // generation gate in `stale_removal_reason`
+            // already handles them with longer retention).
+            let invalidated = super::inflight::invalidate_stale_generation(
+                &provider_for_restore,
+                shared_for_tmux2.restart.current_generation,
+            );
+            if invalidated > 0 {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] 🧹 inflight: invalidated {} stale-generation row(s) for {} (current generation {}) — #2437",
+                    invalidated,
+                    provider_for_restore.as_str(),
+                    shared_for_tmux2.restart.current_generation,
+                );
+            }
+
+            restore_inflight_turns(&http_for_tmux, &shared_for_tmux2, &provider_for_restore).await;
+
             if !restored_dispatch_markers.is_empty() {
                 let mut added = 0usize;
                 let mut skipped_unowned = 0usize;
@@ -215,29 +249,15 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
                     skipped_unowned + skipped_sender + skipped_duplicate + skipped_persist_error;
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
-                    "  [{ts}] 📋 FLUSH: restored {added} pending dispatch marker item(s) from disk (skipped {skipped}: unowned={skipped_unowned}, sender={skipped_sender}, duplicate_or_active={skipped_duplicate}, persist_error={skipped_persist_error})"
+                    "  [{ts}] 📋 FLUSH: restored {added} pending dispatch marker item(s) from disk after inflight recovery (skipped {skipped}: unowned={skipped_unowned}, sender={skipped_sender}, duplicate_or_active={skipped_duplicate}, persist_error={skipped_persist_error})"
                 );
             }
 
-            // codex review round-3 P2 (#1332): restore the
-            // `queued_placeholders` mapping from disk BEFORE
-            // `kickoff_idle_queues` so the restored mailbox queue
-            // entries pick up the existing `📬 메시지 대기 중`
-            // Discord cards instead of stranding them and posting
-            // duplicate placeholders. Must run AFTER the mailbox
-            // queue is restored (above) and BEFORE
-            // `kickoff_idle_queues` / `restore_inflight_turns` so
-            // the live-queue filter (round-6 P2) can reject any
-            // mapping whose source message id is no longer in any
-            // currently-queued intervention.
-            // codex review round-7 P2 (#1332): collect stale
-            // `📬` card tuples during the filter pass and call
-            // `delete_message` on each AFTER `kickoff_idle_queues`
-            // returns. Inline deletion before kickoff would
-            // gate startup intake on per-card HTTP latency
-            // (and surface 404s for cards posted by an old
-            // bot identity). Best-effort, post-kickoff is
-            // strictly safer.
+            // Restore queued placeholder mappings after both queue snapshots and
+            // dispatch markers have been merged. Marker merge must wait for
+            // `restore_inflight_turns` so active turn ids are visible to mailbox
+            // dedup; the placeholder live-queue filter then sees the final
+            // restored queue state before kickoff.
             let mut stale_cards_to_delete: Vec<(ChannelId, MessageId, MessageId)> = Vec::new();
             let restored_queued_placeholders =
                 super::queued_placeholders_store::load_queued_placeholders(
@@ -245,20 +265,6 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
                     &shared_for_tmux2.token_hash,
                 );
             if !restored_queued_placeholders.is_empty() {
-                // codex review round-6 P2 (#1332): when startup
-                // skips/supersedes a restored or catch-up queue
-                // item before this point (channel no longer
-                // owned, sender no longer allowed, duplicate or
-                // cap pruning, …), its persisted queued-
-                // placeholder mapping has no live queue entry to
-                // attach to. Inserting it unconditionally would
-                // strand the `📬` card + sidecar row forever:
-                // no future dispatch or queue-exit event would
-                // reference that user message id. Filter the
-                // loaded mappings against the live mailbox queue
-                // and DELETE the on-disk + in-memory state for
-                // every mapping whose user message id is no
-                // longer queued.
                 let live_queue_ids = collect_live_queue_message_ids(&shared_for_tmux2).await;
                 let filter_outcome = filter_restored_queued_placeholders(
                     restored_queued_placeholders,
@@ -270,14 +276,6 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
                         .queued_placeholders
                         .insert(*key, *placeholder_msg_id);
                 }
-                // Re-snapshot every channel that had at least
-                // one stale mapping pruned so the on-disk file
-                // matches the filtered in-memory state. Empty
-                // channels are removed via the snapshot helper
-                // (the `entries.is_empty()` branch deletes the
-                // file). Without this rewrite, the next restart
-                // would re-load the same stale mapping and the
-                // leak would compound across restarts.
                 for channel_id in &filter_outcome.channels_with_stale {
                     super::queued_placeholders_store::persist_channel_from_map(
                         &shared_for_tmux2.queued.queued_placeholders,
@@ -298,48 +296,8 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
                         "  [{ts}] 📋 FLUSH: restored {live_count} queued-placeholder mapping(s) from disk"
                     );
                 }
-                // codex review round-7 P2 (#1332): capture
-                // the visible-card tuples so the post-kickoff
-                // cleanup loop can dismiss them via Discord's
-                // delete_message API. Without this, the
-                // round-6 disk-rewrite leaves the cards
-                // stranded on the channel.
                 stale_cards_to_delete = filter_outcome.stale_cards;
             }
-
-            // #3641: orphan `.json.lock` sidecars are invisible to the `.json`
-            // row scans below, so sweep them once per process before inflight
-            // recovery starts. The sweep itself enumerates provider subdirs.
-            let _ = ORPHAN_INFLIGHT_LOCK_SWEEP_ONCE
-                .get_or_init(super::inflight::reap_orphan_inflight_locks);
-
-            // #2437 (#2427 C wire) boot-time generation
-            // invalidate. Remove non-planned-restart inflight
-            // rows whose `restart_generation` does not match
-            // the current generation so recovery does not
-            // revive a row whose tmux session no longer
-            // exists. Must run BEFORE `restore_inflight_turns`
-            // — otherwise recovery would attempt to revive
-            // ghost rows and the placeholder sweeper would
-            // eventually have to time-guess them at 1800s.
-            // Planned-restart / hot-swap rows survive (their
-            // generation gate in `stale_removal_reason`
-            // already handles them with longer retention).
-            let invalidated = super::inflight::invalidate_stale_generation(
-                &provider_for_restore,
-                shared_for_tmux2.restart.current_generation,
-            );
-            if invalidated > 0 {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] 🧹 inflight: invalidated {} stale-generation row(s) for {} (current generation {}) — #2437",
-                    invalidated,
-                    provider_for_restore.as_str(),
-                    shared_for_tmux2.restart.current_generation,
-                );
-            }
-
-            restore_inflight_turns(&http_for_tmux, &shared_for_tmux2, &provider_for_restore).await;
 
             // P1-2: Warn about legacy queue files that cannot be restored
             warn_legacy_pending_queue_files(&provider_for_restore);

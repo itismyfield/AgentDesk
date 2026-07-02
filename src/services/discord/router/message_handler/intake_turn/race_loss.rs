@@ -86,6 +86,23 @@ pub(super) async fn handle_race_loss_enqueue(
     )
     .await;
     let enqueued = enqueue_outcome.enqueued;
+    if enqueue_outcome.persistence_error.is_some() {
+        crate::services::discord::mailbox_clear_pending_dispatch_reservation(
+            shared,
+            &bot_owner_provider,
+            channel_id,
+            user_msg_id,
+        )
+        .await;
+    } else {
+        crate::services::discord::mailbox_abandon_pending_dispatch(
+            shared,
+            &bot_owner_provider,
+            channel_id,
+            user_msg_id,
+        )
+        .await;
+    }
 
     // codex review P1: cover the residual race window where the active
     // turn finished between `mailbox_try_start_turn` and the enqueue
