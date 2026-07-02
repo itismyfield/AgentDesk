@@ -1078,6 +1078,14 @@ fn classify_injected_prompt_slash_command_control() {
         classify_injected_prompt("<local-command-stdout>Compacted (12.3k tokens)"),
         InjectedPromptClass::SlashCommandControl,
     );
+    // /model command stdout line: local command output is a machine echo, not
+    // a human TUI-direct prompt that should mint a synthetic turn.
+    assert_eq!(
+        classify_injected_prompt(
+            "<local-command-stdout>Set model to Fable 5</local-command-stdout>"
+        ),
+        InjectedPromptClass::SlashCommandControl,
+    );
     let command_name_first = compact_command_name_first_stub();
     assert_eq!(command_name_first.chars().count(), 134);
     assert_eq!(
@@ -1287,6 +1295,33 @@ fn local_only_slash_prompt_rejects_non_command_text() {
     assert!(is_local_only_slash_command_prompt(model_wrapper));
 }
 
+// #4033: `/model` writes two adjacent transcript user entries. The
+// `<command-name>` half was already local-only (#3500); the stdout half must be
+// local-only too, or the relay mints a fake synthetic inflight and queues the
+// next real user message behind it.
+#[test]
+fn local_only_slash_prompt_skips_model_two_half_transcript() {
+    let command_name_half =
+        "<command-message>x</command-message>\n<command-name>/model</command-name>";
+    let stdout_half = "<local-command-stdout>Set model to Fable 5</local-command-stdout>";
+
+    for half in [command_name_half, stdout_half] {
+        assert_eq!(
+            classify_injected_prompt(half),
+            InjectedPromptClass::SlashCommandControl,
+            "both /model transcript halves must be machine slash-control echoes",
+        );
+        assert!(
+            is_local_only_slash_command_prompt(half),
+            "both /model transcript halves must skip the turn lifecycle",
+        );
+        assert!(
+            !classify_injected_prompt(half).is_human_active_turn(),
+            "neither /model transcript half is human TUI-direct input",
+        );
+    }
+}
+
 // #3178: the machine slash-command control trigger now resolves to a stable
 // command KIND that BOTH the raw `/loop` echo and the expanded `<command-*>`
 // wrapper for the SAME command map to (so the #3153 double-post collapses to
@@ -1307,6 +1342,12 @@ fn slash_command_control_kind_is_stable_across_double_post_halves() {
     assert_eq!(slash_command_control_kind("/compact"), "/compact");
     assert_eq!(
         slash_command_control_kind("<local-command-stdout>Compacted (12.3k tokens)"),
+        "/compact",
+    );
+    assert_eq!(
+        slash_command_control_kind(
+            "<local-command-stdout>Compacted 12 messages</local-command-stdout>"
+        ),
         "/compact",
     );
 
@@ -1382,6 +1423,27 @@ fn slash_command_control_note_loop_shows_body_others_kind_only() {
     assert!(
         !compact_note.contains("Compacted"),
         "note must NOT leak the compact stdout body",
+    );
+}
+
+// #4033 regression guard: broad `<local-command-stdout>...</local-command-stdout>`
+// detection must not disturb the legacy /compact stdout path. Compacted stdout
+// still resolves to `/compact`, remains local-only, and keeps the body hidden.
+#[test]
+fn local_command_stdout_compacted_path_stays_kind_only() {
+    let compact_stdout = "<local-command-stdout>Compacted 12 messages</local-command-stdout>";
+    assert_eq!(
+        classify_injected_prompt(compact_stdout),
+        InjectedPromptClass::SlashCommandControl,
+    );
+    assert_eq!(slash_command_control_kind(compact_stdout), "/compact");
+    assert!(is_local_only_slash_command_prompt(compact_stdout));
+
+    let compact_note = format_slash_command_control_note("sess-a", "/compact", compact_stdout);
+    assert!(compact_note.contains("/compact"));
+    assert!(
+        !compact_note.contains("Compacted"),
+        "legacy /compact stdout note must stay kind-only",
     );
 }
 

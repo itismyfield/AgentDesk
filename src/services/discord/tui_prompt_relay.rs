@@ -30,6 +30,7 @@ use self::injected_prompt_policy::{
     format_system_continuation_note, is_slash_command_control_prompt,
     is_start_anchored_task_notification, should_suppress_local_only_kind_note_after_continuation,
     slash_command_control_kind, slash_command_control_prompt_is_caveat_only,
+    slash_command_control_prompt_is_local_command_stdout,
 };
 
 mod idle_transcript_scan;
@@ -909,6 +910,7 @@ fn is_local_only_slash_command_prompt(prompt: &str) -> bool {
     let kind = slash_command_control_kind(prompt);
     super::commands::is_local_only_slash_command_kind(&kind)
         || slash_command_control_prompt_is_caveat_only(prompt)
+        || slash_command_control_prompt_is_local_command_stdout(prompt)
 }
 
 /// Dedupe the two slash-control halves before lease/anchor/synthetic ownership.

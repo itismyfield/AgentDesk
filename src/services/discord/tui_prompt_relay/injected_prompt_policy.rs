@@ -19,6 +19,10 @@ use super::super::tui_task_card::{
     strip_terminal_controls, truncate_chars_ascii as truncate_chars,
 };
 
+const LOCAL_COMMAND_STDOUT_OPEN: &str = "<local-command-stdout>";
+const LOCAL_COMMAND_STDOUT_CLOSE: &str = "</local-command-stdout>";
+const COMPACTED_LOCAL_COMMAND_STDOUT_PREFIX: &str = "<local-command-stdout>Compacted";
+
 /// Classification of TUI-injected prompt text. Each class drives different
 /// lifecycle handling: human/task turns get active-turn ownership, continuation
 /// banners stay passive, and slash-control echoes use command-kind rendering.
@@ -85,7 +89,8 @@ pub(super) fn is_slash_command_control_prompt(prompt: &str) -> bool {
     }
     if normalized.starts_with("<command-message>")
         || normalized.starts_with("<command-name>")
-        || normalized.starts_with("<local-command-stdout>Compacted")
+        || normalized.starts_with(COMPACTED_LOCAL_COMMAND_STDOUT_PREFIX)
+        || starts_with_complete_local_command_stdout(&normalized)
         || normalized.starts_with("/loop ")
     {
         return true;
@@ -97,6 +102,17 @@ pub(super) fn is_slash_command_control_prompt(prompt: &str) -> bool {
         return rest.is_empty() || rest.starts_with(char::is_whitespace);
     }
     false
+}
+
+fn starts_with_complete_local_command_stdout(normalized: &str) -> bool {
+    normalized
+        .strip_prefix(LOCAL_COMMAND_STDOUT_OPEN)
+        .is_some_and(|rest| rest.contains(LOCAL_COMMAND_STDOUT_CLOSE))
+}
+
+pub(super) fn slash_command_control_prompt_is_local_command_stdout(prompt: &str) -> bool {
+    let (normalized, _peeled_caveat) = normalize_slash_command_control_prompt(prompt);
+    starts_with_complete_local_command_stdout(&normalized)
 }
 
 pub(super) fn normalize_slash_command_control_prompt(prompt: &str) -> (String, bool) {
@@ -263,8 +279,11 @@ pub(super) fn slash_command_control_kind(prompt: &str) -> String {
             return "/compact".to_string();
         }
     }
-    if normalized.starts_with("<local-command-stdout>Compacted") {
+    if normalized.starts_with(COMPACTED_LOCAL_COMMAND_STDOUT_PREFIX) {
         return "/compact".to_string();
+    }
+    if starts_with_complete_local_command_stdout(&normalized) {
+        return "local-command-stdout".to_string();
     }
     if normalized.starts_with('/') {
         let name = normalized.split_whitespace().next().unwrap_or("");
