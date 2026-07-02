@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use poise::serenity_prelude as serenity;
@@ -9,23 +10,30 @@ use super::pending_queue_persistence::{
     remove_channel_pending_dispatch_marker,
 };
 use super::{
-    ChannelMailboxState, HydratePendingQueueResult, Intervention, InterventionMode,
+    ChannelMailboxState, DispatchLease, HydratePendingQueueResult, Intervention, InterventionMode,
     QueuePersistenceContext, TakeNextSoftResult, persist_queue_or_restore,
 };
 
-pub(crate) const PENDING_USER_DISPATCH_STALE_AFTER: Duration = Duration::from_secs(120);
+pub(crate) const PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER: Duration = Duration::from_secs(10);
 pub(crate) const VALVE_CLEARED_DISPATCH_MARKER_GRACE: Duration = Duration::from_secs(600);
 
-pub(super) fn set_pending_user_dispatch(state: &mut ChannelMailboxState, message_id: MessageId) {
+pub(super) fn set_pending_user_dispatch(
+    state: &mut ChannelMailboxState,
+    message_id: MessageId,
+) -> Arc<DispatchLease> {
+    let lease = Arc::new(DispatchLease);
     state.pending_user_dispatch = Some(message_id);
     state.pending_user_dispatch_since = Some(Instant::now());
     state.pending_user_dispatch_yield_count = 0;
+    state.pending_user_dispatch_lease = Some(Arc::clone(&lease));
+    lease
 }
 
 pub(super) fn clear_pending_user_dispatch(state: &mut ChannelMailboxState) -> Option<MessageId> {
     let cleared = state.pending_user_dispatch.take();
     state.pending_user_dispatch_since = None;
     state.pending_user_dispatch_yield_count = 0;
+    state.pending_user_dispatch_lease = None;
     cleared
 }
 
@@ -143,11 +151,17 @@ pub(super) fn clear_stale_pending_dispatch_reservation(
     channel_id: ChannelId,
 ) -> Option<MessageId> {
     let reserved_id = state.pending_user_dispatch?;
+    let Some(stored_lease) = state.pending_user_dispatch_lease.as_ref() else {
+        return None;
+    };
     let reservation_age = state
         .pending_user_dispatch_since
         .map(|since| since.elapsed())
         .unwrap_or_default();
-    if state.cancel_token.is_some() || reservation_age < PENDING_USER_DISPATCH_STALE_AFTER {
+    if state.cancel_token.is_some()
+        || Arc::strong_count(stored_lease) > 1
+        || reservation_age < PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER
+    {
         return None;
     }
     clear_pending_user_dispatch(state);
@@ -155,9 +169,23 @@ pub(super) fn clear_stale_pending_dispatch_reservation(
         channel_id = channel_id.get(),
         user_message_id = reserved_id.get(),
         reservation_age_ms = reservation_age.as_millis(),
-        "cleared stale pending dispatch reservation before marker self-heal"
+        "cleared orphaned pending dispatch reservation before marker self-heal"
     );
     Some(reserved_id)
+}
+
+pub(super) fn pending_dispatch_lease_is_orphaned(state: &ChannelMailboxState) -> bool {
+    let Some(stored_lease) = state.pending_user_dispatch_lease.as_ref() else {
+        return false;
+    };
+    let reservation_age = state
+        .pending_user_dispatch_since
+        .map(|since| since.elapsed())
+        .unwrap_or_default();
+    state.pending_user_dispatch.is_some()
+        && state.cancel_token.is_none()
+        && Arc::strong_count(stored_lease) == 1
+        && reservation_age >= PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER
 }
 
 fn intervention_dedup_ids(item: &Intervention) -> Vec<MessageId> {
@@ -339,6 +367,7 @@ pub(super) fn reconcile_pending_dispatch_marker_before_take_next(
     if state.pending_user_dispatch.is_some() {
         return Some(TakeNextSoftResult {
             intervention: None,
+            dispatch_lease: None,
             has_more: state
                 .intervention_queue
                 .iter()
@@ -388,6 +417,7 @@ pub(super) fn reconcile_pending_dispatch_marker_before_take_next(
     if let Some(error) = marker_result.persistence_error {
         return Some(TakeNextSoftResult {
             intervention: None,
+            dispatch_lease: None,
             has_more: state
                 .intervention_queue
                 .iter()

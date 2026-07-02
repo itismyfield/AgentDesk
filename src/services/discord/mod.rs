@@ -38,6 +38,7 @@ mod placeholder_controller;
 mod placeholder_live_events;
 mod placeholder_sweeper;
 mod prompt_builder;
+mod queue_dispatch;
 mod queue_io;
 mod queue_reactions;
 mod queued_placeholders_store;
@@ -194,6 +195,10 @@ pub(crate) use inflight::clear_inflight_state;
 pub(crate) use inflight::lock_inflight_state_path;
 use inflight::{InflightTurnState, load_inflight_states, save_inflight_state};
 use prompt_builder::{RecoveryContextManifestInput, build_system_prompt_with_manifest};
+pub(in crate::services::discord) use queue_dispatch::MailboxEnqueueOutcome;
+use queue_dispatch::{
+    MailboxTakeNextSoftOutcome, mailbox_abandon_unclaimed_dispatch_after_success,
+};
 use recovery_engine::restore_inflight_turns;
 use restart_report::flush_restart_reports;
 use router::handle_event;
@@ -216,8 +221,8 @@ pub(crate) use runtime_bootstrap::run_bot;
 use crate::services::turn_orchestrator::{
     ActiveTurnKind, CancelActiveTurnResult, CancelQueuedMessageResult, ChannelMailboxSnapshot,
     ClearChannelResult, FinishTurnResult, HydratePendingQueueResult,
-    PENDING_USER_DISPATCH_STALE_AFTER, QueueExitEvent, QueueExitKind, QueuePersistenceContext,
-    RecoveryKickoffResult, RequeueInterventionResult, TakeNextSoftResult,
+    PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER, QueueExitEvent, QueueExitKind,
+    QueuePersistenceContext, RecoveryKickoffResult, RequeueInterventionResult, TakeNextSoftResult,
     VALVE_CLEARED_DISPATCH_MARKER_GRACE, load_channel_pending_dispatch_marker,
     load_pending_dispatch_markers, load_pending_queues, warn_legacy_pending_queue_files,
 };
@@ -2601,7 +2606,8 @@ fn idle_queue_snapshot_has_pending_or_marker_backlog(
     ) {
         (Some(reserved_id), Some(reserved_at)) => {
             reserved_id == marker.message_id
-                && reserved_at.elapsed() >= PENDING_USER_DISPATCH_STALE_AFTER
+                && !snapshot.pending_user_dispatch_lease_held_by_caller
+                && reserved_at.elapsed() >= PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER
         }
         (Some(_), None) => false,
         (None, _) => true,
@@ -2778,35 +2784,6 @@ async fn mailbox_clear_recovery_marker(shared: &SharedData, channel_id: ChannelI
     // selecting on `recovery_done.wait()` proceed immediately; the 60s
     // timeout remains as a hook-miss safety net.
     shared.mailboxes.recovery_done(channel_id).mark_done();
-}
-
-/// Outcome of `mailbox_enqueue_intervention` — exposes both the enqueue
-/// success and whether the incoming intervention was merged into the previous
-/// queue entry, so callers can pick a different reaction emoji for merged
-/// vs standalone queue entries (#1190 follow-up).
-#[derive(Clone, Debug, Default)]
-pub(super) struct MailboxEnqueueOutcome {
-    pub(super) enqueued: bool,
-    pub(super) merged: bool,
-    /// #2728: present iff `enqueued == false`. Identifies which guard
-    /// (source-id dedup / last-item dedup / actor unreachable) produced the
-    /// refusal so callers can surface it in producer-exit diagnostics.
-    pub(super) refusal_reason: Option<crate::services::turn_orchestrator::EnqueueRefusalReason>,
-    pub(super) persistence_error: Option<String>,
-}
-
-#[derive(Debug, Default)]
-pub(super) struct MailboxTakeNextSoftOutcome {
-    pub(super) intervention: Option<Intervention>,
-    pub(super) has_more: bool,
-    pub(super) persistence_error: Option<String>,
-}
-
-impl MailboxTakeNextSoftOutcome {
-    fn into_intervention(self) -> Option<(Intervention, bool)> {
-        self.intervention
-            .map(|intervention| (intervention, self.has_more))
-    }
 }
 
 async fn mailbox_enqueue_intervention(
@@ -3216,6 +3193,7 @@ async fn mailbox_take_next_soft_intervention(
             );
             return MailboxTakeNextSoftOutcome {
                 intervention: None,
+                dispatch_lease: None,
                 has_more: result.has_more,
                 persistence_error: Some(error),
             };
@@ -3229,6 +3207,7 @@ async fn mailbox_take_next_soft_intervention(
         let Some(intervention) = result.intervention else {
             return MailboxTakeNextSoftOutcome {
                 intervention: None,
+                dispatch_lease: None,
                 has_more: result.has_more,
                 persistence_error: None,
             };
@@ -3251,11 +3230,13 @@ async fn mailbox_take_next_soft_intervention(
             apply_queue_exit_feedback(shared, channel_id, &queue_exit_events).await;
             mailbox_abandon_pending_dispatch(shared, provider, channel_id, intervention.message_id)
                 .await;
+            drop(result.dispatch_lease);
             continue;
         }
 
         return MailboxTakeNextSoftOutcome {
             intervention: Some(intervention),
+            dispatch_lease: result.dispatch_lease,
             has_more: result.has_more,
             persistence_error: None,
         };
@@ -3826,7 +3807,7 @@ async fn kickoff_idle_queue_channel(
         );
         return IdleQueueKickoffChannelOutcome::default();
     }
-    let Some((intervention, has_more)) = take_next.into_intervention() else {
+    let Some((intervention, has_more, dispatch_lease)) = take_next.into_intervention() else {
         return IdleQueueKickoffChannelOutcome::default();
     };
 
@@ -3877,7 +3858,7 @@ async fn kickoff_idle_queue_channel(
         crate::voice::announce_meta::global_store()
             .insert_accepted_replay(intervention.message_id, announcement.clone());
     }
-    if let Err(e) = router::handle_text_message(
+    let dispatch_result = router::handle_text_message(
         &deps,
         channel_id,
         intervention.message_id,
@@ -3895,22 +3876,34 @@ async fn kickoff_idle_queue_channel(
         intervention.pending_uploads.clone(),
         None,
     )
-    .await
-    {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!(
-            "  [{ts}]   ⚠ KICKOFF: failed to start turn for channel {}: {e}",
-            channel_id
-        );
-        mailbox_requeue_intervention_front(shared, provider, channel_id, intervention).await;
-        IdleQueueKickoffChannelOutcome {
-            started: false,
-            dispatch_failed: true,
+    .await;
+    match dispatch_result {
+        Err(e) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}]   ⚠ KICKOFF: failed to start turn for channel {}: {e}",
+                channel_id
+            );
+            mailbox_requeue_intervention_front(shared, provider, channel_id, intervention).await;
+            drop(dispatch_lease);
+            IdleQueueKickoffChannelOutcome {
+                started: false,
+                dispatch_failed: true,
+            }
         }
-    } else {
-        IdleQueueKickoffChannelOutcome {
-            started: true,
-            dispatch_failed: false,
+        Ok(()) => {
+            mailbox_abandon_unclaimed_dispatch_after_success(
+                shared,
+                provider,
+                channel_id,
+                intervention.message_id,
+            )
+            .await;
+            drop(dispatch_lease);
+            IdleQueueKickoffChannelOutcome {
+                started: true,
+                dispatch_failed: false,
+            }
         }
     }
 }
@@ -4768,10 +4761,12 @@ mod idle_queue_background_supersede_tests {
                     taken.intervention.as_ref().map(|item| item.message_id),
                     Some(MessageId::new(901))
                 );
+                drop(taken);
                 shared
                     .mailbox(channel_id)
                     .age_pending_dispatch_for_test(
-                        PENDING_USER_DISPATCH_STALE_AFTER + std::time::Duration::from_secs(1),
+                        PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER
+                            + std::time::Duration::from_secs(1),
                     )
                     .await;
 
@@ -4782,6 +4777,93 @@ mod idle_queue_background_supersede_tests {
                         &shared, &provider, channel_id, &snapshot
                     ),
                     "stale marker-only reservations must wake the drain loop so TakeNextSoft can self-heal"
+                );
+            });
+    }
+
+    #[test]
+    fn consume_without_claim_cleanup_clears_marker_and_unblocks_next_head() {
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let shared = make_shared_data_for_tests();
+                let provider = ProviderKind::Claude;
+                let channel_id = ChannelId::new(3_167_902);
+                let consumed = user_intervention(902, "/goal done");
+                let next = user_intervention(903, "next queued user reply");
+                shared
+                    .mailbox(channel_id)
+                    .replace_queue(
+                        vec![consumed.clone(), next.clone()],
+                        queue_persistence_context(&shared, &provider, channel_id),
+                    )
+                    .await;
+                let mut first = shared
+                    .mailbox(channel_id)
+                    .take_next_soft(queue_persistence_context(&shared, &provider, channel_id))
+                    .await;
+                let dispatch_lease = first
+                    .dispatch_lease
+                    .take()
+                    .expect("dequeued consumed head should carry a lease");
+                assert_eq!(
+                    first.intervention.as_ref().map(|item| item.message_id),
+                    Some(consumed.message_id)
+                );
+                assert_eq!(
+                    load_channel_pending_dispatch_marker(&provider, &shared.token_hash, channel_id)
+                        .map(|(marker, _)| marker.message_id),
+                    Some(consumed.message_id)
+                );
+
+                mailbox_abandon_unclaimed_dispatch_after_success(
+                    &shared,
+                    &provider,
+                    channel_id,
+                    consumed.message_id,
+                )
+                .await;
+
+                assert_eq!(
+                    std::sync::Arc::strong_count(&dispatch_lease),
+                    1,
+                    "post-success abandon releases the actor-held lease"
+                );
+                let snapshot = mailbox_snapshot(&shared, channel_id).await;
+                assert_eq!(snapshot.pending_user_dispatch, None);
+                assert!(
+                    load_channel_pending_dispatch_marker(&provider, &shared.token_hash, channel_id)
+                        .is_none(),
+                    "consumed-without-claim head marker must be cleared"
+                );
+                let hydrate = shared
+                    .mailbox(channel_id)
+                    .hydrate_pending_queue_from_disk(queue_persistence_context(
+                        &shared, &provider, channel_id,
+                    ))
+                    .await;
+                assert_eq!(hydrate.absorbed, 0);
+                let second = shared
+                    .mailbox(channel_id)
+                    .take_next_soft(queue_persistence_context(&shared, &provider, channel_id))
+                    .await;
+                assert_eq!(
+                    second.intervention.as_ref().map(|item| item.message_id),
+                    Some(next.message_id),
+                    "next queued head should dispatch instead of starving behind consumed head"
+                );
+                assert_eq!(
+                    load_channel_pending_dispatch_marker(&provider, &shared.token_hash, channel_id)
+                        .map(|(marker, _)| marker.message_id),
+                    Some(next.message_id),
+                    "next head receives the only remaining marker"
                 );
             });
     }

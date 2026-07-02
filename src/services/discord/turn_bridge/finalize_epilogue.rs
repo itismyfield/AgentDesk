@@ -87,36 +87,48 @@ pub(super) async fn finalize_and_drain_queued_turns(
                         error = %error,
                         "QUEUE-GUARD: preserving queued command after pending-queue persistence failure"
                     );
-                } else if let Some((intervention, has_more_queued_turns)) =
+                } else if let Some((intervention, has_more_queued_turns, dispatch_lease)) =
                     next_intervention.into_intervention()
                 {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!("  [{ts}] 📋 Processing next queued command");
-                    if let Err(e) = gateway
+                    let dispatch_result = gateway
                         .dispatch_queued_turn(
                             channel_id,
                             &intervention,
                             &request_owner_name,
                             has_more_queued_turns,
                         )
-                        .await
-                    {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::info!("  [{ts}]   ⚠ queued command failed: {e}");
-                        super::super::mailbox_requeue_intervention_front(
-                            &shared_owned,
-                            &bot_owner_provider,
-                            channel_id,
-                            intervention,
-                        )
                         .await;
-                        super::super::schedule_deferred_idle_queue_kickoff(
-                            shared_owned.clone(),
-                            bot_owner_provider.clone(),
-                            channel_id,
-                            "requeue-front after dispatch failure (finalize epilogue)",
-                        );
+                    match dispatch_result {
+                        Err(e) => {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::info!("  [{ts}]   ⚠ queued command failed: {e}");
+                            super::super::mailbox_requeue_intervention_front(
+                                &shared_owned,
+                                &bot_owner_provider,
+                                channel_id,
+                                intervention,
+                            )
+                            .await;
+                            super::super::schedule_deferred_idle_queue_kickoff(
+                                shared_owned.clone(),
+                                bot_owner_provider.clone(),
+                                channel_id,
+                                "requeue-front after dispatch failure (finalize epilogue)",
+                            );
+                        }
+                        Ok(()) => {
+                            super::super::mailbox_abandon_unclaimed_dispatch_after_success(
+                                &shared_owned,
+                                &bot_owner_provider,
+                                channel_id,
+                                intervention.message_id,
+                            )
+                            .await;
+                        }
                     }
+                    drop(dispatch_lease);
                 }
             }
         } else {

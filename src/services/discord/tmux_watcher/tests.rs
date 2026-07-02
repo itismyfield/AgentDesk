@@ -500,7 +500,7 @@ async fn terminal_delivery_timeout_cleanup_releases_mailbox_and_preserves_follow
     let next = mailbox_take_next_soft_intervention(&shared, &provider, channel_id)
         .await
         .into_intervention()
-        .map(|(intervention, _)| intervention.text);
+        .map(|(intervention, _, _)| intervention.text);
     assert_eq!(next.as_deref(), Some("queued follow-up"));
 }
 
@@ -609,7 +609,7 @@ fn watchdog_timeout_path_releases_mailbox_via_finalizer_and_does_not_double_fina
         let next = mailbox_take_next_soft_intervention(&shared, &provider, channel_id)
             .await
             .into_intervention()
-            .map(|(intervention, _)| intervention.text);
+            .map(|(intervention, _, _)| intervention.text);
         assert_eq!(next.as_deref(), Some("post-timeout follow-up"));
 
         // Once-gate: a subsequent NORMAL-completion submit for the SAME turn must
