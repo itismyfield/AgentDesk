@@ -691,6 +691,28 @@ fn stale_foreign_cancel_finalize_context() -> super::turn_finalizer::FinalizeCon
     }
 }
 
+fn committed_foreign_complete_finalize_context() -> super::turn_finalizer::FinalizeContext {
+    super::turn_finalizer::FinalizeContext {
+        clear_inflight: true,
+        allow_completion_cleanup: false,
+        drain_voice: false,
+        kickoff_queue: true,
+        expected_idempotent_guard_miss: false,
+    }
+}
+
+fn committed_foreign_inflight_is_finalize_clearable(
+    state: &super::inflight::InflightTurnState,
+    record: &TuiDirectPendingStart,
+) -> bool {
+    let is_own_anchor = state.turn_source == super::inflight::TurnSource::ExternalInput
+        && state.tmux_session_name.as_deref() == Some(record.tmux_session_name.as_str())
+        && state.user_msg_id == record.anchor_message_id;
+    !is_own_anchor
+        && state.tmux_session_name.as_deref() == Some(record.tmux_session_name.as_str())
+        && state.terminal_delivery_committed
+}
+
 async fn submit_stale_foreign_inflight_cancel(
     shared: &Arc<SharedData>,
     provider: &crate::services::provider::ProviderKind,
@@ -777,6 +799,88 @@ async fn submit_stale_foreign_inflight_cancel(
     gone_or_changed
 }
 
+async fn submit_committed_foreign_inflight_complete(
+    shared: &Arc<SharedData>,
+    provider: &crate::services::provider::ProviderKind,
+    channel_id: poise::serenity_prelude::ChannelId,
+    probe: &super::destructive_cancel_gate::DestructiveCancelProbeSnapshot,
+) -> bool {
+    let finalizer_turn_id = probe.pin.finalizer_turn_id;
+    if finalizer_turn_id == 0 {
+        return false;
+    }
+    let Some(current) = super::inflight::load_inflight_state(provider, channel_id.get()) else {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel_id = channel_id.get(),
+            finalizer_turn_id,
+            "tui_direct_pending_start: committed FOREIGN complete no-op; inflight disappeared before finalizer submit"
+        );
+        return false;
+    };
+    let mailbox_active_user_msg_id = super::mailbox_snapshot(shared, channel_id)
+        .await
+        .active_user_message_id
+        .map(|id| id.get());
+    if !current.terminal_delivery_committed
+        || !super::destructive_cancel_gate::terminal_envelope_present(provider, probe)
+        || !probe.pin.matches_state(&current)
+        || mailbox_active_user_msg_id != probe.pin.mailbox_active_user_msg_id
+        || current.updated_at != probe.updated_at
+        || current.save_generation != probe.save_generation
+    {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel_id = channel_id.get(),
+            expected_finalizer_turn_id = finalizer_turn_id,
+            current_finalizer_turn_id = current.effective_finalizer_turn_id(),
+            expected_mailbox_active_user_msg_id = probe.pin.mailbox_active_user_msg_id.unwrap_or(0),
+            mailbox_active_user_msg_id = mailbox_active_user_msg_id.unwrap_or(0),
+            expected_tmux_session = ?probe.pin.tmux_session_name,
+            current_tmux_session = ?current.tmux_session_name,
+            terminal_delivery_committed = current.terminal_delivery_committed,
+            expected_updated_at = %probe.updated_at,
+            current_updated_at = %current.updated_at,
+            expected_save_generation = probe.save_generation,
+            current_save_generation = current.save_generation,
+            "tui_direct_pending_start: committed FOREIGN complete no-op; terminal envelope or identity pin no longer matches"
+        );
+        return false;
+    }
+
+    let committed_identity = super::inflight::InflightTurnIdentity::from_state(&current);
+    let outcome = shared
+        .turn_finalizer
+        .submit_terminal(
+            super::turn_finalizer::TurnKey::new(
+                channel_id,
+                finalizer_turn_id,
+                shared.restart.current_generation,
+            ),
+            provider.clone(),
+            super::turn_finalizer::TerminalEvent::Complete,
+            committed_foreign_complete_finalize_context(),
+            shared.clone(),
+        )
+        .await;
+
+    let gone_or_changed = !super::inflight::load_inflight_state(provider, channel_id.get())
+        .is_some_and(|current| {
+            committed_identity == super::inflight::InflightTurnIdentity::from_state(&current)
+                && current.effective_finalizer_turn_id() == finalizer_turn_id
+                && current.save_generation == probe.save_generation
+        });
+    tracing::warn!(
+        provider = %provider.as_str(),
+        channel_id = channel_id.get(),
+        finalizer_turn_id,
+        finalize_outcome = ?std::mem::discriminant(&outcome),
+        gone_or_changed,
+        "tui_direct_pending_start: committed FOREIGN inflight cleared via finalizer Complete under terminal-envelope gate"
+    );
+    gone_or_changed
+}
+
 pub(in crate::services::discord) async fn demote_stale_foreign_inflight_if_current(
     shared: &Arc<SharedData>,
     record: &TuiDirectPendingStart,
@@ -790,6 +894,49 @@ pub(in crate::services::discord) async fn demote_stale_foreign_inflight_if_curre
     };
     let relay_frontier = shared.committed_relay_offset(channel);
     let capture_offset = output_capture_offset(&state);
+    if committed_foreign_inflight_is_finalize_clearable(&state, record) {
+        let mailbox_active_user_msg_id = super::mailbox_snapshot(shared, channel)
+            .await
+            .active_user_message_id
+            .map(|id| id.get());
+        let probe = super::destructive_cancel_gate::DestructiveCancelProbeSnapshot::from_state(
+            &state,
+            mailbox_active_user_msg_id,
+            Some(relay_frontier),
+        );
+        if !super::destructive_cancel_gate::terminal_envelope_present(&provider, &probe) {
+            tracing::warn!(
+                provider = %record.provider,
+                channel_id = record.channel_id,
+                tmux_session_name = %record.tmux_session_name,
+                anchor_message_id = record.anchor_message_id,
+                committed_user_msg_id = state.user_msg_id,
+                committed_started_at = %state.started_at,
+                committed_updated_at = %state.updated_at,
+                relay_frontier,
+                capture_offset = ?capture_offset,
+                "tui_direct_pending_start: skipped committed FOREIGN finalize-clear; terminal envelope evidence missing"
+            );
+            return false;
+        }
+        let cleared =
+            submit_committed_foreign_inflight_complete(shared, &provider, channel, &probe).await;
+        if cleared {
+            tracing::warn!(
+                provider = %record.provider,
+                channel_id = record.channel_id,
+                tmux_session_name = %record.tmux_session_name,
+                anchor_message_id = record.anchor_message_id,
+                committed_user_msg_id = state.user_msg_id,
+                committed_started_at = %state.started_at,
+                committed_updated_at = %state.updated_at,
+                relay_frontier,
+                capture_offset = ?capture_offset,
+                "tui_direct_pending_start: cleared committed FOREIGN inflight with terminal envelope via finalizer Complete; re-evaluating before claiming (#4035)"
+            );
+        }
+        return cleared;
+    }
     if !stale_foreign_inflight_is_reclaimable_at(&state, record, chrono::Utc::now().timestamp()) {
         return false;
     }
@@ -1693,6 +1840,16 @@ mod tests {
         state
     }
 
+    fn stamp_claude_ready_for_input_evidence(
+        state: &mut super::super::inflight::InflightTurnState,
+        output_path: &std::path::Path,
+    ) {
+        state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+        state.last_offset = std::fs::metadata(output_path)
+            .expect("ready output metadata")
+            .len();
+    }
+
     #[test]
     fn stale_foreign_demote_excludes_session_bound_relay_for_orphan_reclaim() {
         let root = tempfile::TempDir::new().expect("runtime root");
@@ -1938,7 +2095,11 @@ mod tests {
             let anchor = 4_030_310;
             let tmux = "tmux-4030-stale-foreign";
             let output_path = root.path().join("stale-foreign.jsonl");
-            std::fs::write(&output_path, "captured but never relayed").expect("write output");
+            std::fs::write(
+                &output_path,
+                r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+            )
+            .expect("write output");
             let token = Arc::new(crate::services::provider::CancelToken::new());
             assert!(
                 super::super::mailbox_try_start_turn(
@@ -1954,8 +2115,9 @@ mod tests {
                 .restart
                 .global_active
                 .store(1, std::sync::atomic::Ordering::Relaxed);
-            let state =
+            let mut state =
                 stale_foreign_state(provider.clone(), channel_id, stale_msg, tmux, &output_path);
+            stamp_claude_ready_for_input_evidence(&mut state, &output_path);
             write_inflight_fixture(root.path(), &provider, &state);
             let mut rec = record("claude", channel_id, anchor);
             rec.tmux_session_name = tmux.to_string();
@@ -1988,6 +2150,192 @@ mod tests {
         });
     }
 
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(start_paused = true)]
+    async fn committed_leaked_foreign_row_clears_then_pending_start_claims() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let _guard = worker_test_lock();
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let temp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        reset_present_for_tests();
+
+        let shared = super::super::make_shared_data_for_tests();
+        let provider = crate::services::provider::ProviderKind::Claude;
+        let channel_id = 4_035_020;
+        let channel = poise::serenity_prelude::ChannelId::new(channel_id);
+        let stale_msg = 4_035_120;
+        let anchor = 4_035_220;
+        let tmux = "tmux-4035-committed-leak";
+        let stale_output = temp.path().join("committed-leak.jsonl");
+        std::fs::write(
+            &stale_output,
+            r#"{"type":"result","result":"delivered","session_id":"s"}"#,
+        )
+        .expect("write terminal jsonl");
+        let stale_token = Arc::new(crate::services::provider::CancelToken::new());
+        assert!(
+            super::super::mailbox_try_start_turn(
+                &shared,
+                channel,
+                stale_token.clone(),
+                poise::serenity_prelude::UserId::new(1),
+                poise::serenity_prelude::MessageId::new(stale_msg),
+            )
+            .await
+        );
+        shared
+            .restart
+            .global_active
+            .store(1, std::sync::atomic::Ordering::Relaxed);
+
+        let mut stale_state =
+            stale_foreign_state(provider.clone(), channel_id, stale_msg, tmux, &stale_output);
+        stale_state.terminal_delivery_committed = true;
+        stale_state.full_response = "delivered".to_string();
+        stale_state.response_sent_offset = stale_state.full_response.len();
+        stale_state.last_offset = std::fs::metadata(&stale_output)
+            .expect("terminal jsonl metadata")
+            .len();
+        write_inflight_fixture(temp.path(), &provider, &stale_state);
+
+        let mut rec = record("claude", channel_id, anchor);
+        rec.tmux_session_name = tmux.to_string();
+        persist(&rec).unwrap();
+        assert!(pending_synthetic_start_present("claude", channel_id));
+
+        let provider_for_view = provider.clone();
+        let view: ViewFn = Box::new(move |_shared, record| {
+            let provider = provider_for_view.clone();
+            Box::pin(async move {
+                let inflight =
+                    super::super::inflight::load_inflight_state(&provider, record.channel_id);
+                let inflight_is_own_anchor = inflight.as_ref().is_some_and(|state| {
+                    state.turn_source == super::super::inflight::TurnSource::ExternalInput
+                        && state.tmux_session_name.as_deref()
+                            == Some(record.tmux_session_name.as_str())
+                        && state.user_msg_id == record.anchor_message_id
+                });
+                let foreign_inflight_identity = inflight
+                    .as_ref()
+                    .filter(|_| !inflight_is_own_anchor)
+                    .map(|state| (state.user_msg_id, state.started_at.clone()));
+                Some(PriorTurnObservation {
+                    view: PriorTurnView {
+                        inflight_present: inflight.is_some(),
+                        inflight_is_own_anchor,
+                        mailbox_blocking_turn_present: false,
+                        mailbox_turn_is_own_anchor: false,
+                        runtime_binding_present: true,
+                    },
+                    foreign_inflight_identity,
+                })
+            })
+        });
+
+        let claim_calls = Arc::new(AtomicU32::new(0));
+        let claim_calls_for_fn = claim_calls.clone();
+        let provider_for_claim = provider.clone();
+        let root_for_claim = temp.path().to_path_buf();
+        let claim: ClaimFn = Box::new(move |shared, record| {
+            let calls = claim_calls_for_fn.clone();
+            let provider = provider_for_claim.clone();
+            let root = root_for_claim.clone();
+            Box::pin(async move {
+                let channel = poise::serenity_prelude::ChannelId::new(record.channel_id);
+                let token = Arc::new(crate::services::provider::CancelToken::new());
+                let started = super::super::mailbox_try_start_turn(
+                    shared,
+                    channel,
+                    token,
+                    poise::serenity_prelude::UserId::new(1),
+                    poise::serenity_prelude::MessageId::new(record.anchor_message_id),
+                )
+                .await;
+                if !started {
+                    return false;
+                }
+                let fresh_output = root.join("fresh-claim.jsonl");
+                std::fs::write(&fresh_output, "").expect("write fresh output");
+                let mut fresh = super::super::inflight::InflightTurnState::new(
+                    provider.clone(),
+                    record.channel_id,
+                    None,
+                    1,
+                    record.anchor_message_id,
+                    record.anchor_message_id + 1,
+                    record.prompt_text.clone(),
+                    None,
+                    Some(record.tmux_session_name.clone()),
+                    Some(fresh_output.to_string_lossy().to_string()),
+                    None,
+                    0,
+                );
+                fresh.turn_source = super::super::inflight::TurnSource::ExternalInput;
+                fresh.injected_prompt_message_id = Some(record.anchor_message_id);
+                fresh.set_relay_owner_kind(super::super::inflight::RelayOwnerKind::Watcher);
+                write_inflight_fixture(&root, &provider, &fresh);
+                calls.fetch_add(1, Ordering::SeqCst);
+                true
+            })
+        });
+        let reclaim: ReclaimOrphanFn = Box::new(|shared, record| {
+            Box::pin(async move {
+                if demote_stale_foreign_inflight_if_current(shared, record).await {
+                    ReclaimStaleForeignOutcome::StaleForeignDemoted
+                } else {
+                    ReclaimStaleForeignOutcome::None
+                }
+            })
+        });
+
+        let (abort_cleanup, abort_cleanup_calls, _) = recording_abort_cleanup();
+        let handle = tokio::spawn(run_worker(
+            shared.clone(),
+            rec,
+            view,
+            claim,
+            abort_cleanup,
+            reclaim,
+        ));
+        tokio::time::advance(PENDING_START_BACKSTOP + PENDING_START_POLL * 2).await;
+        tokio::task::yield_now().await;
+        handle.await.unwrap();
+
+        assert_eq!(
+            claim_calls.load(Ordering::SeqCst),
+            1,
+            "committed leaked row must clear before the new pending start claims"
+        );
+        assert_eq!(
+            abort_cleanup_calls.load(Ordering::SeqCst),
+            0,
+            "committed delivery self-heal is a completion clear, not an abort"
+        );
+        assert!(
+            stale_token
+                .cancelled
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "finalizer Complete must release the stale committed mailbox token"
+        );
+        let current = super::super::inflight::load_inflight_state(&provider, channel_id)
+            .expect("fresh claimed inflight must exist");
+        assert_eq!(current.user_msg_id, anchor);
+        assert_eq!(
+            current.turn_source,
+            super::super::inflight::TurnSource::ExternalInput
+        );
+        assert!(
+            !pending_synthetic_start_present("claude", channel_id),
+            "successful fresh claim must release the pending-start gate"
+        );
+        reset_present_for_tests();
+    }
+
     #[test]
     fn stale_foreign_demote_uses_no_progress_not_absolute_zero_frontier() {
         let _guard = worker_test_lock();
@@ -2005,8 +2353,12 @@ mod tests {
             let stale_msg = 4_030_212;
             let anchor = 4_030_312;
             let tmux = "tmux-4030-nonzero-frontier";
-            let output_path = root.path().join("empty-capture.jsonl");
-            std::fs::write(&output_path, "").expect("write empty output");
+            let output_path = root.path().join("ready-capture.jsonl");
+            std::fs::write(
+                &output_path,
+                r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+            )
+            .expect("write ready output");
             shared
                 .tmux_relay_coord(channel)
                 .confirmed_end_offset
@@ -2026,8 +2378,9 @@ mod tests {
                 .restart
                 .global_active
                 .store(1, std::sync::atomic::Ordering::Relaxed);
-            let state =
+            let mut state =
                 stale_foreign_state(provider.clone(), channel_id, stale_msg, tmux, &output_path);
+            stamp_claude_ready_for_input_evidence(&mut state, &output_path);
             write_inflight_fixture(root.path(), &provider, &state);
             let mut rec = record("claude", channel_id, anchor);
             rec.tmux_session_name = tmux.to_string();
@@ -2035,7 +2388,7 @@ mod tests {
             assert!(demote_stale_foreign_inflight_if_current(&shared, &rec).await);
             assert!(
                 super::super::inflight::load_inflight_state(&provider, channel_id).is_none(),
-                "frozen nonzero relay frontier with unchanged empty capture is death evidence"
+                "frozen nonzero relay frontier with unchanged ready capture is death evidence"
             );
             assert!(token.cancelled.load(std::sync::atomic::Ordering::Relaxed));
         });
@@ -2059,7 +2412,11 @@ mod tests {
             let anchor = 4_030_313;
             let tmux = "tmux-4030-rebind-origin";
             let output_path = root.path().join("rebind-origin.jsonl");
-            std::fs::write(&output_path, "halted").expect("write output");
+            std::fs::write(
+                &output_path,
+                r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+            )
+            .expect("write output");
             let token = Arc::new(crate::services::provider::CancelToken::new());
             assert!(
                 super::super::mailbox_try_start_turn(
@@ -2077,6 +2434,7 @@ mod tests {
                 .store(1, std::sync::atomic::Ordering::Relaxed);
             let mut state =
                 stale_foreign_state(provider.clone(), channel_id, stale_msg, tmux, &output_path);
+            stamp_claude_ready_for_input_evidence(&mut state, &output_path);
             state.rebind_origin = true;
             write_inflight_fixture(root.path(), &provider, &state);
             let mut rec = record("claude", channel_id, anchor);

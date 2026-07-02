@@ -105,6 +105,15 @@ impl DestructiveCancelProbeSnapshot {
     }
 }
 
+pub(in crate::services::discord) fn terminal_envelope_present(
+    provider: &ProviderKind,
+    snapshot: &DestructiveCancelProbeSnapshot,
+) -> bool {
+    snapshot.output_path.as_deref().is_some_and(|path| {
+        crate::services::tui_turn_state::jsonl_turn_end_terminator_idle(provider, Path::new(path))
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::services::discord) enum DestructiveCancelGate {
     Allowed(&'static str),
@@ -142,12 +151,9 @@ pub(in crate::services::discord) async fn evaluate(
         return DestructiveCancelGate::Denied("missing_finalizer_turn_id");
     }
 
-    if snapshot.output_path.as_deref().is_some_and(|path| {
-        crate::services::tui_turn_state::jsonl_turn_end_terminator_idle(provider, Path::new(path))
-    }) {
-        return DestructiveCancelGate::Allowed("terminal_envelope_present");
-    }
-
+    // Fresh watcher heartbeat wins before terminal-envelope evidence. A live
+    // watcher is the safer owner for a just-finished turn; if it disappears, the
+    // next gate pass can still accept the terminal envelope.
     let watcher_heartbeat_stale =
         if let Some(tmux_session) = snapshot.pin.tmux_session_name.as_deref() {
             match shared.tmux_watchers.tmux_session_is_stale(tmux_session) {
@@ -163,6 +169,10 @@ pub(in crate::services::discord) async fn evaluate(
         } else {
             false
         };
+
+    if terminal_envelope_present(provider, snapshot) {
+        return DestructiveCancelGate::Allowed("terminal_envelope_present");
+    }
 
     let Some(expected_output_path) = snapshot.output_path.as_deref() else {
         return DestructiveCancelGate::Denied("halt_evidence_incomplete");
@@ -215,8 +225,164 @@ pub(in crate::services::discord) async fn evaluate(
         }
     }
 
+    let Some(tmux_session) = snapshot.pin.tmux_session_name.as_deref() else {
+        return DestructiveCancelGate::Denied("tmux_readiness_evidence_missing");
+    };
+    if !super::relay_recovery::idle_tmux_repair_ready_for_input(
+        provider,
+        channel.get(),
+        tmux_session,
+    ) {
+        return DestructiveCancelGate::Denied("tmux_pane_not_ready_for_input");
+    }
+
     if watcher_heartbeat_stale {
         return DestructiveCancelGate::Allowed("capture_and_jsonl_halted_with_stale_watcher");
     }
     DestructiveCancelGate::Allowed("capture_and_jsonl_halted")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+
+    struct EnvReset(Option<std::ffi::OsString>);
+
+    impl Drop for EnvReset {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
+
+    fn current_thread_rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime")
+    }
+
+    fn write_jsonl(path: &std::path::Path, lines: &[&str]) -> u64 {
+        let mut body = lines.join("\n");
+        body.push('\n');
+        std::fs::write(path, body).expect("write jsonl");
+        std::fs::metadata(path).expect("jsonl metadata").len()
+    }
+
+    fn save_gate_state(
+        provider: ProviderKind,
+        channel_id: u64,
+        user_msg_id: u64,
+        tmux: &str,
+        output_path: &std::path::Path,
+        last_offset: u64,
+    ) -> inflight::InflightTurnState {
+        let mut state = inflight::InflightTurnState::new(
+            provider.clone(),
+            channel_id,
+            None,
+            1,
+            user_msg_id,
+            user_msg_id + 1,
+            "gate fixture".to_string(),
+            None,
+            Some(tmux.to_string()),
+            Some(output_path.to_string_lossy().to_string()),
+            None,
+            last_offset,
+        );
+        state.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+        state.set_relay_owner_kind(inflight::RelayOwnerKind::Watcher);
+        inflight::save_inflight_state(&state).expect("save inflight state");
+        inflight::load_inflight_state(&provider, channel_id).expect("saved inflight state")
+    }
+
+    #[test]
+    fn busy_pane_reprobe_freeze_denies_destructive_cancel() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::TempDir::new().expect("runtime root");
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root.path()) };
+        current_thread_rt().block_on(async {
+            let shared = super::super::make_shared_data_for_tests();
+            let provider = ProviderKind::Claude;
+            let channel = ChannelId::new(4_035_010);
+            let output_path = root.path().join("busy.jsonl");
+            let len = write_jsonl(
+                &output_path,
+                &[r#"{"type":"assistant","message":{"content":[{"type":"text","text":"tool still running"}]}}"#],
+            );
+            let state = save_gate_state(
+                provider.clone(),
+                channel.get(),
+                4_035_110,
+                "tmux-4035-busy",
+                &output_path,
+                len,
+            );
+            let snapshot = DestructiveCancelProbeSnapshot::from_state(
+                &state,
+                None,
+                Some(shared.committed_relay_offset(channel)),
+            );
+
+            let gate = evaluate(&shared, &provider, channel, channel, &snapshot).await;
+
+            assert_eq!(
+                gate.denied_reason(),
+                Some("tmux_pane_not_ready_for_input"),
+                "a frozen capture/frontier is not death evidence while structured state says the pane is busy"
+            );
+            assert!(
+                inflight::load_inflight_state(&provider, channel.get()).is_some(),
+                "denied destructive gate must preserve the live row"
+            );
+        });
+    }
+
+    #[test]
+    fn ready_pane_reprobe_freeze_allows_destructive_cancel() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::TempDir::new().expect("runtime root");
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root.path()) };
+        current_thread_rt().block_on(async {
+            let shared = super::super::make_shared_data_for_tests();
+            let provider = ProviderKind::Claude;
+            let channel = ChannelId::new(4_035_011);
+            let output_path = root.path().join("ready.jsonl");
+            let len = write_jsonl(
+                &output_path,
+                &[r#"{"type":"system","subtype":"init","session_id":"s"}"#],
+            );
+            let state = save_gate_state(
+                provider.clone(),
+                channel.get(),
+                4_035_111,
+                "tmux-4035-ready",
+                &output_path,
+                len,
+            );
+            let snapshot = DestructiveCancelProbeSnapshot::from_state(
+                &state,
+                None,
+                Some(shared.committed_relay_offset(channel)),
+            );
+
+            let gate = evaluate(&shared, &provider, channel, channel, &snapshot).await;
+
+            assert_eq!(
+                gate.allowed_reason(),
+                Some("capture_and_jsonl_halted"),
+                "ready-for-input evidence plus frozen capture/frontier is sufficient no-progress evidence"
+            );
+        });
+    }
 }

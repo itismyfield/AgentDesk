@@ -5,10 +5,14 @@
 //! idempotent cleanup when the evidence is strong enough.
 //!
 //! Known residual limitations for follow-up issues: a committed-but-leaked
-//! inflight row still has no independent self-heal path here, and stage-3
-//! recovery where `watcher_attached=false` still relies on the pending-start
-//! backstop trigger. Do not broaden those paths inside the #4030 watcher-cancel
-//! fix; they need separate design/review.
+//! inflight row self-heals only when a pending-start backstop can prove the
+//! terminal envelope and complete it through the finalizer; relay recovery still
+//! has no independent sweep for that shape. Rows whose `output_path` is missing
+//! or points at a deleted file are permanently denied by the destructive cancel
+//! gate because no frozen-capture or terminal-envelope evidence can be re-probed.
+//! Stage-3 recovery where `watcher_attached=false` still relies on the
+//! pending-start backstop trigger. Do not broaden those paths inside the #4030
+//! watcher-cancel fix; they need separate design/review.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -724,7 +728,7 @@ async fn finalize_cancelled_watcher_owner_turn(
     )
 }
 
-fn idle_tmux_repair_ready_for_input(
+pub(in crate::services::discord) fn idle_tmux_repair_ready_for_input(
     provider: &ProviderKind,
     channel_id: u64,
     tmux_session: &str,
@@ -1708,7 +1712,11 @@ mod tests {
         let user_msg = MessageId::new(4_030_101);
         let tmux = "AgentDesk-codex-4030-dead-frontier";
         let output_path = root_dir.path().join("watcher-output.jsonl");
-        std::fs::write(&output_path, "unrelayed bytes").expect("write output fixture");
+        std::fs::write(&output_path, r#"{"type":"thread.started","thread_id":"t"}"#)
+            .expect("write output fixture");
+        let output_len = std::fs::metadata(&output_path)
+            .expect("output fixture metadata")
+            .len();
         let token = start_test_turn(&shared, channel, user_msg).await;
         shared.restart.global_active.store(1, Ordering::Relaxed);
 
@@ -1724,8 +1732,9 @@ mod tests {
             Some(tmux.to_string()),
             Some(output_path.to_string_lossy().to_string()),
             None,
-            0,
+            output_len,
         );
+        state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui);
         state.set_relay_owner_kind(super::super::inflight::RelayOwnerKind::Watcher);
         super::super::inflight::save_inflight_state(&state).expect("save watcher inflight");
         shared.turn_finalizer.register_start(
