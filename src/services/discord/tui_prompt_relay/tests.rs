@@ -1500,6 +1500,75 @@ fn local_command_stdout_compacted_path_stays_kind_only() {
 }
 
 #[test]
+fn wrapped_local_command_stdout_is_local_only_slash_control() {
+    let wrapped_stdout = "터미널에 직접 주입된 입력 (tmux : `s`):\n```text\n\
+        <local-command-stdout>Set model to Fable 5</local-command-stdout>\n```";
+
+    assert_eq!(
+        classify_injected_prompt(wrapped_stdout),
+        InjectedPromptClass::SlashCommandControl,
+        "a fence-wrapped stdout echo must classify as machine slash control",
+    );
+    assert_eq!(
+        slash_command_control_kind(wrapped_stdout),
+        "local-command-stdout",
+    );
+    assert!(is_local_only_slash_command_prompt(wrapped_stdout));
+
+    let decision = relay_observed_prompt_injected_prompt_decision(wrapped_stdout);
+    assert_eq!(
+        decision.injected_class,
+        InjectedPromptClass::SlashCommandControl,
+    );
+    assert_eq!(
+        decision.slash_command_kind.as_deref(),
+        Some("local-command-stdout"),
+    );
+    assert!(
+        decision.local_only_slash,
+        "local-only stdout returns before anchor/reaction/synthetic ownership",
+    );
+    assert!(!decision.injected_class.is_human_active_turn());
+}
+
+#[test]
+fn wrapped_compacted_stdout_keeps_prefix_only_kind() {
+    let wrapped_compacted = "터미널에 직접 주입된 입력 (tmux : `s`):\n```text\n\
+        <local-command-stdout>Compacted 12 messages\n```";
+
+    assert_eq!(
+        classify_injected_prompt(wrapped_compacted),
+        InjectedPromptClass::SlashCommandControl,
+        "open-fenced Compacted stdout must keep the legacy prefix-only match",
+    );
+    assert_eq!(slash_command_control_kind(wrapped_compacted), "/compact");
+    assert!(is_local_only_slash_command_prompt(wrapped_compacted));
+
+    let decision = relay_observed_prompt_injected_prompt_decision(wrapped_compacted);
+    assert_eq!(decision.slash_command_kind.as_deref(), Some("/compact"));
+    assert!(decision.local_only_slash);
+}
+
+#[test]
+fn wrapped_local_command_stdout_with_appended_user_text_stays_human() {
+    let wrapped_with_user_text = "터미널에 직접 주입된 입력 (tmux : `s`):\n```text\n\
+        <local-command-stdout>Set model to Fable 5</local-command-stdout>\n```\n\
+        이 출력 설명해줘";
+
+    assert_eq!(
+        classify_injected_prompt(wrapped_with_user_text),
+        InjectedPromptClass::HumanTuiDirect,
+        "human text appended after the stdout echo must not be over-suppressed",
+    );
+    assert!(!is_local_only_slash_command_prompt(wrapped_with_user_text));
+
+    let decision = relay_observed_prompt_injected_prompt_decision(wrapped_with_user_text);
+    assert_eq!(decision.injected_class, InjectedPromptClass::HumanTuiDirect,);
+    assert_eq!(decision.slash_command_kind, None);
+    assert!(!decision.local_only_slash);
+}
+
+#[test]
 fn local_command_stdout_negative_cases_stay_human_direct() {
     let trailing_text = "<local-command-stdout>x</local-command-stdout>\n이 출력 설명해줘";
     let open_tag_only = "<local-command-stdout>Set model to Fable 5";

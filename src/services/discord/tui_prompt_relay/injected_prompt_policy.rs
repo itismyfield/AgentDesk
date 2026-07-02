@@ -244,11 +244,23 @@ pub(super) fn strip_leading_injection_wrapper(text: &str) -> &str {
     let trimmed = after_wrapper_line.trim_start_matches(['\r', '\n']);
     if let Some(rest) = trimmed.strip_prefix("```") {
         if let Some(idx) = rest.find('\n') {
-            return &rest[idx + 1..];
+            return strip_trailing_injection_code_fence(&rest[idx + 1..]);
         }
         return after_wrapper_line;
     }
     after_wrapper_line
+}
+
+fn strip_trailing_injection_code_fence(text: &str) -> &str {
+    let trimmed = text.trim_end();
+    let Some(before_fence) = trimmed.strip_suffix("```") else {
+        return text;
+    };
+    if before_fence.is_empty() || before_fence.ends_with('\r') || before_fence.ends_with('\n') {
+        before_fence
+    } else {
+        text
+    }
 }
 
 pub(super) fn format_ssh_direct_prompt_notification(
