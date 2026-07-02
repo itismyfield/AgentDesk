@@ -1839,6 +1839,12 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   giant threshold with #3990; decompose per #4039 (lift delete/audit cluster and
   response mappers into `routes/routines/` children) before adding non-bugfix
   behavior.
+- `src/services/discord/tui_prompt_relay.rs` (~1000 prod LoC) — injected-prompt
+  relay root: broadcast observer (`relay_observed_prompt`), shared
+  injected-prompt decision helpers (#4037), local-only slash lifecycle skip, and
+  the final say-clamp (#4032). Re-crossed the giant threshold after the #3833
+  decomposition; decompose per #4040 (move remaining root clusters into
+  `tui_prompt_relay/` children) before adding non-bugfix behavior.
 - `src/services/tmux_common.rs` (~1090 prod LoC) — Claude/Codex TUI pane-capture
   heuristics: ready-for-input, prompt-draft vs idle-suggestion-ghost, active-work
   streaming, MCP-auth banner, and `/effort` selector detection, plus session
