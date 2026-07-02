@@ -187,10 +187,13 @@ pub(super) async fn do_finalize(
         //     `mailbox_finish_turn` inline at the bridge/watcher call-sites.
         //     Moved here so they cannot diverge between the routed paths.
         crate::services::discord::clear_watchdog_deadline_override(channel_id.get()).await;
-        shared
-            .dispatch
-            .thread_parents
-            .retain(|_, thread| *thread != channel_id);
+        let thread_parent_kickoffs =
+            super::cleanup::collect_and_clear_thread_parents(shared, channel_id);
+        super::cleanup::kickoff_thread_parents_after_finalize(
+            shared,
+            &provider,
+            thread_parent_kickoffs,
+        );
 
         let voice_deferred_enqueued = if ctx.drain_voice {
             shared
@@ -373,5 +376,148 @@ mod tests {
         );
         assert!(logs.contains("expected_user_msg_id=4018111"), "{logs}");
         assert!(logs.contains("active_user_message_id=4018222"), "{logs}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn thread_finalize_removes_parent_mapping_and_schedules_parent_kickoff() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = EnvGuard::set_root(root.path());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let parent = ChannelId::new(4_024_190);
+        let thread = ChannelId::new(4_024_191);
+        let user_msg_id = 4_024_192;
+        shared.dispatch.thread_parents.insert(parent, thread);
+        assert!(
+            crate::services::discord::mailbox_try_start_turn(
+                &shared,
+                thread,
+                Arc::new(CancelToken::new()),
+                UserId::new(9),
+                MessageId::new(user_msg_id),
+            )
+            .await
+        );
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+
+        let outcome = do_finalize(
+            TurnKey::new(thread, user_msg_id, 0),
+            ProviderKind::Claude,
+            &TerminalEvent::Complete,
+            FinalizeContext::bridge(),
+            None,
+            &shared,
+        )
+        .await;
+
+        assert!(matches!(outcome, FinalizeOutcome::Finalized { .. }));
+        assert!(
+            !shared.dispatch.thread_parents.contains_key(&parent),
+            "finalizing the thread turn must drop its parent mapping"
+        );
+        assert_eq!(
+            shared.restart.deferred_hook_backlog.load(Ordering::Relaxed),
+            1,
+            "dropping the parent mapping must schedule the parent queue kick"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn guarded_miss_preserves_parent_mapping_and_skips_parent_kickoff() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = EnvGuard::set_root(root.path());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let parent = ChannelId::new(4_024_193);
+        let thread = ChannelId::new(4_024_194);
+        let stale_user_msg_id = 4_024_195;
+        let active_user_msg_id = 4_024_196;
+        shared.dispatch.thread_parents.insert(parent, thread);
+        assert!(
+            crate::services::discord::mailbox_try_start_turn(
+                &shared,
+                thread,
+                Arc::new(CancelToken::new()),
+                UserId::new(9),
+                MessageId::new(active_user_msg_id),
+            )
+            .await
+        );
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+
+        let outcome = do_finalize(
+            TurnKey::new(thread, stale_user_msg_id, 0),
+            ProviderKind::Claude,
+            &TerminalEvent::Complete,
+            FinalizeContext::bridge(),
+            None,
+            &shared,
+        )
+        .await;
+
+        assert!(matches!(
+            outcome,
+            FinalizeOutcome::Finalized {
+                removed_token: None,
+                ..
+            }
+        ));
+        assert!(
+            shared
+                .dispatch
+                .thread_parents
+                .get(&parent)
+                .is_some_and(|thread_id| *thread_id == thread),
+            "guarded-miss finalize must leave thread-parent mappings untouched"
+        );
+        assert_eq!(
+            shared.restart.deferred_hook_backlog.load(Ordering::Relaxed),
+            0,
+            "guarded-miss finalize must not schedule a parent kick"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn non_thread_finalize_schedules_no_parent_kickoff() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = EnvGuard::set_root(root.path());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_024_197);
+        let user_msg_id = 4_024_198;
+        assert!(
+            crate::services::discord::mailbox_try_start_turn(
+                &shared,
+                channel_id,
+                Arc::new(CancelToken::new()),
+                UserId::new(9),
+                MessageId::new(user_msg_id),
+            )
+            .await
+        );
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+
+        let outcome = do_finalize(
+            TurnKey::new(channel_id, user_msg_id, 0),
+            ProviderKind::Claude,
+            &TerminalEvent::Complete,
+            FinalizeContext::bridge(),
+            None,
+            &shared,
+        )
+        .await;
+
+        assert!(matches!(outcome, FinalizeOutcome::Finalized { .. }));
+        assert_eq!(
+            shared.restart.deferred_hook_backlog.load(Ordering::Relaxed),
+            0,
+            "no removed thread-parent mapping means no parent kick"
+        );
     }
 }

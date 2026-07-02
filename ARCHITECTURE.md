@@ -793,6 +793,7 @@ src/
 │   │   ├── tmux_restart_handoff.rs
 │   │   ├── tmux_session_files.rs
 │   │   ├── tmux_watcher.rs
+│   │   ├── tui_busy_gate.rs
 │   │   ├── tui_direct_pending_start.rs
 │   │   ├── tui_prompt_relay.rs
 │   │   ├── tui_prompt_relay_controller_cutover.rs
@@ -918,6 +919,7 @@ src/
 │   ├── tui_prompt_dedupe/
 │   │   └── synthetic_prompt.rs
 │   ├── turn_orchestrator/
+│   │   ├── pending_queue_persistence.rs
 │   │   └── registry_purge.rs
 │   ├── agent_protocol.rs
 │   ├── analytics.rs

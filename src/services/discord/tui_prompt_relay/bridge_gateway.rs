@@ -177,7 +177,7 @@ impl TurnGateway for TuiDirectBridgeGateway {
                 self.shared.clone(),
                 self.provider.clone(),
                 channel_id,
-                "tui_direct_bridge_queued_turn",
+                "requeue-front after bridge dispatch failure",
             );
             tracing::info!(
                 provider = %self.provider.as_str(),

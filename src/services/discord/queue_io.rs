@@ -16,11 +16,50 @@ const DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY: std::time::Duration =
     std::time::Duration::from_secs(2);
 const DEFERRED_IDLE_QUEUE_KICKOFF_RETRY_DELAY: std::time::Duration =
     std::time::Duration::from_secs(2);
+const DEFERRED_IDLE_QUEUE_KICKOFF_SLOW_DELAY: std::time::Duration =
+    std::time::Duration::from_secs(60);
 // Keep retrying long enough to cover dcserver/gateway restart windows. A
 // queued user reply should not wait for the next external Discord event just
 // because cached ctx/token arrived slightly after the first post-turn kickoff.
 const DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS: usize = 150;
 const DEFERRED_IDLE_QUEUE_ZERO_START_ABANDONED_CLAIM_PROBE_AFTER: usize = 3;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeferredIdleQueueKickoffProfile {
+    Normal,
+    ImmediateOnce,
+    Slow { round: usize },
+}
+
+impl DeferredIdleQueueKickoffProfile {
+    fn initial_presleep(self) -> std::time::Duration {
+        match self {
+            Self::Normal => DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY,
+            Self::ImmediateOnce => std::time::Duration::ZERO,
+            Self::Slow { .. } => DEFERRED_IDLE_QUEUE_KICKOFF_SLOW_DELAY,
+        }
+    }
+
+    fn retry_delay(self) -> std::time::Duration {
+        match self {
+            Self::Normal | Self::ImmediateOnce => DEFERRED_IDLE_QUEUE_KICKOFF_RETRY_DELAY,
+            Self::Slow { .. } => DEFERRED_IDLE_QUEUE_KICKOFF_SLOW_DELAY,
+        }
+    }
+
+    fn round_index(self) -> usize {
+        match self {
+            Self::Normal | Self::ImmediateOnce => 0,
+            Self::Slow { round } => round,
+        }
+    }
+
+    fn next_slow_round(self) -> Self {
+        Self::Slow {
+            round: self.round_index().saturating_add(1),
+        }
+    }
+}
 
 fn should_retry_deferred_idle_queue_kickoff(attempt: usize) -> bool {
     attempt < DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS
@@ -44,12 +83,20 @@ fn note_zero_start_deferred_drain(
 /// the first kickoff runs without the 2s `INITIAL_DELAY` guard; every other
 /// caller keeps the full delay to avoid spinning during the dcserver/gateway
 /// restart window.
+#[cfg(test)]
 fn deferred_idle_queue_initial_presleep(immediate_once: bool) -> std::time::Duration {
     if immediate_once {
-        std::time::Duration::ZERO
+        DeferredIdleQueueKickoffProfile::ImmediateOnce.initial_presleep()
     } else {
-        DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY
+        DeferredIdleQueueKickoffProfile::Normal.initial_presleep()
     }
+}
+
+fn deferred_idle_queue_rearm_profile_after_giveup(
+    current: DeferredIdleQueueKickoffProfile,
+    remaining_queue_len: usize,
+) -> Option<DeferredIdleQueueKickoffProfile> {
+    (remaining_queue_len > 0).then(|| current.next_slow_round())
 }
 
 impl Drop for DeferredHookBacklogGuard {
@@ -67,7 +114,13 @@ pub(super) fn schedule_deferred_idle_queue_kickoff(
     channel_id: ChannelId,
     reason: &'static str,
 ) {
-    schedule_deferred_idle_queue_kickoff_inner(shared, provider, channel_id, reason, false);
+    schedule_deferred_idle_queue_kickoff_inner(
+        shared,
+        provider,
+        channel_id,
+        reason,
+        DeferredIdleQueueKickoffProfile::Normal,
+    );
 }
 
 /// #3005: variant for the finalize-completed (idle-confirmed) path. When a turn
@@ -85,7 +138,13 @@ pub(super) fn schedule_deferred_idle_queue_kickoff_immediate(
     channel_id: ChannelId,
     reason: &'static str,
 ) {
-    schedule_deferred_idle_queue_kickoff_inner(shared, provider, channel_id, reason, true);
+    schedule_deferred_idle_queue_kickoff_inner(
+        shared,
+        provider,
+        channel_id,
+        reason,
+        DeferredIdleQueueKickoffProfile::ImmediateOnce,
+    );
 }
 
 fn schedule_deferred_idle_queue_kickoff_inner(
@@ -93,7 +152,7 @@ fn schedule_deferred_idle_queue_kickoff_inner(
     provider: ProviderKind,
     channel_id: ChannelId,
     reason: &'static str,
-    immediate_once: bool,
+    profile: DeferredIdleQueueKickoffProfile,
 ) {
     shared
         .restart
@@ -108,7 +167,7 @@ fn schedule_deferred_idle_queue_kickoff_inner(
         // #3005: on the finalize-completed (idle-confirmed) reason the first
         // attempt skips the 2s pre-sleep so a queued follow-up can drain right
         // after the turn settles; all subsequent attempts keep the 2s cadence.
-        let initial_presleep = deferred_idle_queue_initial_presleep(immediate_once);
+        let initial_presleep = profile.initial_presleep();
         if !initial_presleep.is_zero() {
             tokio::time::sleep(initial_presleep).await;
         }
@@ -176,6 +235,11 @@ fn schedule_deferred_idle_queue_kickoff_inner(
                             .intervention_queue
                             .is_empty();
                         if final_started == 0 && final_pending {
+                            let remaining_queue_len =
+                                super::mailbox_snapshot(shared.as_ref(), channel_id)
+                                    .await
+                                    .intervention_queue
+                                    .len();
                             tracing::warn!(
                                 provider = provider.as_str(),
                                 channel_id = channel_id.get(),
@@ -184,6 +248,29 @@ fn schedule_deferred_idle_queue_kickoff_inner(
                                 issue = "#3333",
                                 "Deferred drain: final one-shot drain after abandoned synthetic-start clear started zero turns; stopping bounded retry loop"
                             );
+                            if let Some(next_profile) =
+                                deferred_idle_queue_rearm_profile_after_giveup(
+                                    profile,
+                                    remaining_queue_len,
+                                )
+                            {
+                                let next_round = next_profile.round_index();
+                                tracing::warn!(
+                                    provider = provider.as_str(),
+                                    channel_id = channel_id.get(),
+                                    reason,
+                                    round = next_round,
+                                    queue_len = remaining_queue_len,
+                                    "Deferred drain: re-arming slow deferred kickoff after abandoned synthetic-start give-up"
+                                );
+                                schedule_deferred_idle_queue_kickoff_inner(
+                                    shared.clone(),
+                                    provider.clone(),
+                                    channel_id,
+                                    reason,
+                                    next_profile,
+                                );
+                            }
                         }
                         return;
                     }
@@ -198,19 +285,69 @@ fn schedule_deferred_idle_queue_kickoff_inner(
                         channel_id,
                         DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS
                     );
-                    tokio::time::sleep(DEFERRED_IDLE_QUEUE_KICKOFF_RETRY_DELAY).await;
+                    tokio::time::sleep(profile.retry_delay()).await;
                     continue;
+                }
+                if started == 0 && target_still_pending {
+                    let remaining_queue_len = super::mailbox_snapshot(shared.as_ref(), channel_id)
+                        .await
+                        .intervention_queue
+                        .len();
+                    if let Some(next_profile) =
+                        deferred_idle_queue_rearm_profile_after_giveup(profile, remaining_queue_len)
+                    {
+                        let next_round = next_profile.round_index();
+                        tracing::warn!(
+                            provider = provider.as_str(),
+                            channel_id = channel_id.get(),
+                            reason,
+                            round = next_round,
+                            queue_len = remaining_queue_len,
+                            "Deferred drain: re-arming slow deferred kickoff after bounded zero-start give-up"
+                        );
+                        schedule_deferred_idle_queue_kickoff_inner(
+                            shared.clone(),
+                            provider.clone(),
+                            channel_id,
+                            reason,
+                            next_profile,
+                        );
+                    }
                 }
                 return;
             }
 
             let ts = chrono::Local::now().format("%H:%M:%S");
             if !should_retry_deferred_idle_queue_kickoff(attempt) {
+                let remaining_queue_len = super::mailbox_snapshot(shared.as_ref(), channel_id)
+                    .await
+                    .intervention_queue
+                    .len();
                 tracing::warn!(
                     "  [{ts}] ⚠ Deferred drain: missing cached context for channel {} after {} attempts ({reason}); queued items remain persisted for next kickoff",
                     channel_id,
                     DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS
                 );
+                if let Some(next_profile) =
+                    deferred_idle_queue_rearm_profile_after_giveup(profile, remaining_queue_len)
+                {
+                    let next_round = next_profile.round_index();
+                    tracing::warn!(
+                        provider = provider.as_str(),
+                        channel_id = channel_id.get(),
+                        reason,
+                        round = next_round,
+                        queue_len = remaining_queue_len,
+                        "Deferred drain: re-arming slow deferred kickoff after missing-context give-up"
+                    );
+                    schedule_deferred_idle_queue_kickoff_inner(
+                        shared.clone(),
+                        provider.clone(),
+                        channel_id,
+                        reason,
+                        next_profile,
+                    );
+                }
                 break;
             }
             tracing::info!(
@@ -218,7 +355,7 @@ fn schedule_deferred_idle_queue_kickoff_inner(
                 channel_id,
                 DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS
             );
-            tokio::time::sleep(DEFERRED_IDLE_QUEUE_KICKOFF_RETRY_DELAY).await;
+            tokio::time::sleep(profile.retry_delay()).await;
         }
         // Drop guard at end of scope decrements the backlog counter.
     });
@@ -298,6 +435,41 @@ mod presleep_tests {
         assert_eq!(
             DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY,
             std::time::Duration::from_secs(2)
+        );
+    }
+
+    #[test]
+    fn giveup_with_backlog_rearms_slow_profile() {
+        let next = deferred_idle_queue_rearm_profile_after_giveup(
+            DeferredIdleQueueKickoffProfile::Normal,
+            1,
+        )
+        .expect("non-empty queue should schedule one slow follow-up");
+        assert_eq!(next, DeferredIdleQueueKickoffProfile::Slow { round: 1 });
+        assert_eq!(next.initial_presleep(), std::time::Duration::from_secs(60));
+        assert_eq!(next.retry_delay(), std::time::Duration::from_secs(60));
+        assert_eq!(DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS, 150);
+
+        let chained = deferred_idle_queue_rearm_profile_after_giveup(next, 2)
+            .expect("slow rounds may chain while backlog remains");
+        assert_eq!(chained, DeferredIdleQueueKickoffProfile::Slow { round: 2 });
+    }
+
+    #[test]
+    fn giveup_with_empty_queue_does_not_rearm() {
+        assert_eq!(
+            deferred_idle_queue_rearm_profile_after_giveup(
+                DeferredIdleQueueKickoffProfile::Normal,
+                0,
+            ),
+            None
+        );
+        assert_eq!(
+            deferred_idle_queue_rearm_profile_after_giveup(
+                DeferredIdleQueueKickoffProfile::Slow { round: 3 },
+                0,
+            ),
+            None
         );
     }
 

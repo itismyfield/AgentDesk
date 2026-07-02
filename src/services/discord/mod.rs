@@ -104,6 +104,7 @@ mod tmux_overload_retry;
 mod tmux_reaper;
 #[cfg(unix)]
 mod tmux_restart_handoff;
+mod tui_busy_gate;
 mod tui_direct_abort_marker;
 mod tui_direct_pending_start;
 mod tui_prompt_relay;
@@ -2598,91 +2599,6 @@ fn idle_queue_snapshot_has_kickable_backlog(
         )
 }
 
-#[cfg(unix)]
-fn hosted_tui_ready_state_blocks_idle_queue(
-    ready_state: Option<crate::services::tui_turn_state::TuiReadyState>,
-) -> bool {
-    matches!(
-        ready_state,
-        Some(crate::services::tui_turn_state::TuiReadyState::Busy)
-    )
-}
-
-#[cfg(unix)]
-async fn idle_queue_blocked_by_hosted_tui_busy_pane(
-    shared: &SharedData,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-) -> bool {
-    if !matches!(provider, ProviderKind::Claude | ProviderKind::Codex)
-        || !provider.uses_managed_tmux_backend()
-        || !claude::is_tmux_available()
-    {
-        return false;
-    }
-
-    let selection =
-        crate::services::provider_hosting::resolve_provider_session_selection_with_channel(
-            provider,
-            true,
-            Some(channel_id.get()),
-        );
-    if selection.driver != crate::services::provider_hosting::ProviderSessionDriver::TuiHosting {
-        return false;
-    }
-
-    if matches!(provider, ProviderKind::Claude)
-        && crate::services::claude_tui::hook_server::current_hook_endpoint().is_none()
-    {
-        return false;
-    }
-
-    let tmux_session_name = {
-        let data = shared.core.lock().await;
-        data.sessions
-            .get(&channel_id)
-            .and_then(|session| session.channel_name.clone())
-            .map(|name| provider.build_tmux_session_name(&name))
-    };
-    let Some(tmux_session_name) = tmux_session_name else {
-        return false;
-    };
-    if !crate::services::tmux_diagnostics::tmux_session_has_live_pane(&tmux_session_name) {
-        return false;
-    }
-
-    let ready_state =
-        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&tmux_session_name)
-            .and_then(|binding| {
-                crate::services::tui_turn_state::runtime_binding_ready_for_input(
-                    provider, &binding, true,
-                )
-            });
-
-    let blocked = hosted_tui_ready_state_blocks_idle_queue(ready_state);
-    if blocked {
-        tracing::info!(
-            channel_id = channel_id.get(),
-            provider = provider.as_str(),
-            tmux_session_name = %tmux_session_name,
-            ready_state = ready_state
-                .map(crate::services::tui_turn_state::TuiReadyState::as_str)
-                .unwrap_or("unavailable"),
-            "idle queue kickoff deferred while hosted TUI structured turn state is busy"
-        );
-    }
-    blocked
-}
-
-#[cfg(not(unix))]
-async fn idle_queue_blocked_by_hosted_tui_busy_pane(
-    _shared: &SharedData,
-    _provider: &ProviderKind,
-    _channel_id: ChannelId,
-) -> bool {
-    false
-}
-
 async fn idle_queue_channel_has_kickable_backlog(
     shared: &SharedData,
     provider: &ProviderKind,
@@ -2690,7 +2606,8 @@ async fn idle_queue_channel_has_kickable_backlog(
     snapshot: &ChannelMailboxSnapshot,
 ) -> bool {
     idle_queue_snapshot_has_kickable_backlog(shared, provider, channel_id, snapshot)
-        && !idle_queue_blocked_by_hosted_tui_busy_pane(shared, provider, channel_id).await
+        && !tui_busy_gate::idle_queue_blocked_by_hosted_tui_busy_pane(shared, provider, channel_id)
+            .await
 }
 
 async fn mailbox_try_start_turn(
@@ -3313,7 +3230,8 @@ async fn idle_queue_take_next_soft_if_ready(
     // cleanup-retry and hosted-TUI-busy gates remain unchanged.
     if mailbox_has_blocking_active_turn(shared, channel_id).await
         || cleanup_retry_inflight_blocks_idle_kickoff(shared, provider, channel_id)
-        || idle_queue_blocked_by_hosted_tui_busy_pane(shared, provider, channel_id).await
+        || tui_busy_gate::idle_queue_blocked_by_hosted_tui_busy_pane(shared, provider, channel_id)
+            .await
     {
         return MailboxTakeNextSoftOutcome::default();
     }
@@ -3950,6 +3868,12 @@ pub(super) async fn kickoff_idle_queues(
             );
             // Requeue so the message is not lost, and persist immediately.
             mailbox_requeue_intervention_front(shared, provider, channel_id, intervention).await;
+            schedule_deferred_idle_queue_kickoff(
+                shared.clone(),
+                provider.clone(),
+                channel_id,
+                "requeue-front after kickoff dispatch failure",
+            );
         }
     }
     started_count

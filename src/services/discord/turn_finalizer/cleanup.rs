@@ -71,6 +71,45 @@ pub(super) fn finalized_reaction_lifecycle(
     );
 }
 
+/// #4024 E19: remove every dispatch-thread parent mapping whose thread points
+/// at `channel_id`, returning the parent channels that lost their mapping.
+///
+/// The parent list is collected during `retain`, and callers must perform any
+/// queue kickoffs only after this function returns. That avoids re-entering the
+/// DashMap while a shard ref from the retain walk is live.
+pub(super) fn collect_and_clear_thread_parents(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::model::id::ChannelId,
+) -> Vec<serenity::model::id::ChannelId> {
+    let mut parents = Vec::new();
+    shared.dispatch.thread_parents.retain(|parent, thread| {
+        let remove = *thread == channel_id;
+        if remove {
+            parents.push(*parent);
+        }
+        !remove
+    });
+    parents
+}
+
+/// #4024 E19: a thread-parent mapping removal is exactly the event that can
+/// strand work queued on the parent channel by ThreadGuard, so pair every
+/// removed parent with an immediate deferred idle-queue kickoff.
+pub(super) fn kickoff_thread_parents_after_finalize(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    parents: Vec<serenity::model::id::ChannelId>,
+) {
+    for parent in parents {
+        crate::services::discord::schedule_deferred_idle_queue_kickoff_immediate(
+            shared.clone(),
+            provider.clone(),
+            parent,
+            "thread finalize parent queue kick",
+        );
+    }
+}
+
 /// #3350 ②: pure verdict — must this finalize ENSURE the #3303 DeferredClaim
 /// marker for the row it is finalizing? (Same pure-gate pattern as the
 /// `should_complete_…` helpers.) All six gates must hold:

@@ -111,7 +111,10 @@ pub(super) async fn handle_race_loss_enqueue(
     // finalize owns the dequeue chain (unchanged pre-#3903 behavior).
     let has_blocking_active_turn =
         crate::services::discord::mailbox_has_blocking_active_turn(shared, channel_id).await;
-    if should_schedule_post_enqueue_idle_drain(enqueued, has_blocking_active_turn) {
+    if super::super::super::intake_gate::should_schedule_post_enqueue_idle_drain(
+        enqueued,
+        has_blocking_active_turn,
+    ) {
         crate::services::discord::schedule_deferred_idle_queue_kickoff(
             shared.clone(),
             bot_owner_provider.clone(),
@@ -559,33 +562,9 @@ pub(super) async fn handle_race_loss_enqueue(
     return Ok(());
 }
 
-/// #3903 — pure verdict for whether a race-loss enqueue must schedule a
-/// post-enqueue deferred idle-queue drain.
-///
-/// Schedule the drain when the intervention was actually `enqueued` AND no
-/// REAL (blocking) turn currently holds the channel's active-turn slot:
-///
-/// * slot idle → the active turn finished in the race window and skipped the
-///   dequeue chain (the original codex-P1 reason); the drain prevents a strand.
-/// * slot held by a BACKGROUND turn (a `/loop`/system-injection auto-check, or
-///   a self-paced TUI loop) → that turn's finalize does NOT re-kick the user
-///   queue, and a background turn is non-blocking (#3167). Without the drain
-///   the re-enqueued genuine user message stranded until an external fetch
-///   surfaced it (#3903 user-message loss). The drain is idempotent, gated by
-///   the same kickable/TUI-busy checks, and bounded-retry, so it safely
-///   supersedes the background turn and dispatches the queued user message
-///   exactly once once the pane is idle.
-///
-/// When a REAL (`UserOrAgent`) turn holds the slot we DELIBERATELY skip the
-/// drain: that turn owns the dequeue chain through its own finalize, matching
-/// the pre-#3903 behavior — scheduling here would only spin redundantly.
-fn should_schedule_post_enqueue_idle_drain(enqueued: bool, has_blocking_active_turn: bool) -> bool {
-    enqueued && !has_blocking_active_turn
-}
-
 #[cfg(test)]
 mod schedule_post_enqueue_idle_drain_tests {
-    use super::should_schedule_post_enqueue_idle_drain;
+    use super::super::super::super::intake_gate::should_schedule_post_enqueue_idle_drain;
 
     #[test]
     fn schedules_when_enqueued_and_slot_idle() {
