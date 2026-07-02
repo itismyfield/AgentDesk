@@ -678,7 +678,7 @@
 | `services::discord::tui_direct_abort_marker::deferred_claim` | `src/services/discord/tui_direct_abort_marker/deferred_claim.rs` | 669 | 265 | 404 |  |
 | `services::discord::tui_direct_abort_marker::store` | `src/services/discord/tui_direct_abort_marker/store.rs` | 348 | 348 | 0 |  |
 | `services::discord::tui_direct_pending_start` | `src/services/discord/tui_direct_pending_start.rs` | 2795 | 1125 | 1670 | giant-file |
-| `services::discord::tui_prompt_relay` | `src/services/discord/tui_prompt_relay.rs` | 967 | 967 | 0 |  |
+| `services::discord::tui_prompt_relay` | `src/services/discord/tui_prompt_relay.rs` | 999 | 999 | 0 |  |
 | `services::discord::tui_prompt_relay::anchor_completion` | `src/services/discord/tui_prompt_relay/anchor_completion.rs` | 449 | 213 | 236 |  |
 | `services::discord::tui_prompt_relay::bridge_completion` | `src/services/discord/tui_prompt_relay/bridge_completion.rs` | 167 | 81 | 86 |  |
 | `services::discord::tui_prompt_relay::bridge_gateway` | `src/services/discord/tui_prompt_relay/bridge_gateway.rs` | 211 | 211 | 0 |  |
@@ -688,7 +688,7 @@
 | `services::discord::tui_prompt_relay::codex_idle_rollout` | `src/services/discord/tui_prompt_relay/codex_idle_rollout.rs` | 613 | 613 | 0 |  |
 | `services::discord::tui_prompt_relay::idle_offset_resolution` | `src/services/discord/tui_prompt_relay/idle_offset_resolution.rs` | 100 | 100 | 0 |  |
 | `services::discord::tui_prompt_relay::idle_transcript_scan` | `src/services/discord/tui_prompt_relay/idle_transcript_scan.rs` | 495 | 347 | 148 |  |
-| `services::discord::tui_prompt_relay::injected_prompt_policy` | `src/services/discord/tui_prompt_relay/injected_prompt_policy.rs` | 394 | 394 | 0 |  |
+| `services::discord::tui_prompt_relay::injected_prompt_policy` | `src/services/discord/tui_prompt_relay/injected_prompt_policy.rs` | 432 | 432 | 0 |  |
 | `services::discord::tui_prompt_relay::launch_script` | `src/services/discord/tui_prompt_relay/launch_script.rs` | 129 | 107 | 22 |  |
 | `services::discord::tui_prompt_relay::rehydration` | `src/services/discord/tui_prompt_relay/rehydration.rs` | 994 | 793 | 201 |  |
 | `services::discord::tui_prompt_relay::relay_ownership` | `src/services/discord/tui_prompt_relay/relay_ownership.rs` | 506 | 506 | 0 |  |

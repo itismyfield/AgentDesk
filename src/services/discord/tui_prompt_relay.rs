@@ -340,18 +340,17 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     // turn's lease and its guard would clear that generation, stranding the first
     // bridge tail. Drop the duplicate here, before any lease/anchor/inflight exists;
     // a genuine second /loop / /compact falls outside the 2s window → fresh turn.
-    let injected_class = classify_injected_prompt(&prompt.prompt);
-    // #3305: hoist the slash-command kind so the first-sighting gate AND the
-    // local-only lifecycle-skip below share one computation. `local_only_slash`
-    // is true ONLY for a LOCAL-completing pass-through (/effort /compact /cost
-    // /context) — it posts a guidance note but mints no turn (an allow-list, so
-    // /loop and any unknown command keep full lifecycle, fail-safe).
-    let mut local_only_slash = false;
+    let relay_prompt_decision = relay_observed_prompt_injected_prompt_decision(&prompt.prompt);
+    let injected_class = relay_prompt_decision.injected_class;
+    // #3305/#4033: one pure decision drives dedupe and the local-only lifecycle
+    // skip, so stdout halves use the same allow-list as helper-level checks.
+    let local_only_slash = relay_prompt_decision.local_only_slash;
     if matches!(injected_class, InjectedPromptClass::SlashCommandControl) {
-        let kind = slash_command_control_kind(&prompt.prompt);
-        local_only_slash = super::commands::is_local_only_slash_command_kind(&kind)
-            || slash_command_control_prompt_is_caveat_only(&prompt.prompt);
-        if !slash_command_control_turn_is_first_sighting(&prompt.tmux_session_name, &kind) {
+        let kind = relay_prompt_decision
+            .slash_command_kind
+            .as_deref()
+            .expect("slash command control decisions carry a kind");
+        if !slash_command_control_turn_is_first_sighting(&prompt.tmux_session_name, kind) {
             // #3153 second half within the 2s window: drop before any lease/anchor/
             // inflight exists; the first half already relays via its own bridge tail.
             tracing::info!(
@@ -473,13 +472,15 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         // add≡remove invariant holds trivially: no add, no asymmetry); no
         // `claim_tui_direct_synthetic_turn` → no synthetic inflight → the next
         // injection is not FOREIGN-ABORTed and the #3302 sweeper sees no fake row.
-        let kind = slash_command_control_kind(&prompt.prompt);
+        let kind = relay_prompt_decision
+            .slash_command_kind
+            .as_deref()
+            .expect("local-only slash decisions carry a kind");
         // #3388: in-session /compact rewrites can replay the local command stub
         // seconds after the continuation banner; hide that duplicate note. The
         // real machine-injected /compact (#3262) happens minutes before compaction
         // completes, so it stays outside this narrow replay window.
-        if local_only_kind_note_suppressed_by_recent_continuation(&prompt.tmux_session_name, &kind)
-        {
+        if local_only_kind_note_suppressed_by_recent_continuation(&prompt.tmux_session_name, kind) {
             tracing::info!(
                 provider = %prompt.provider,
                 channel_id = channel_id.get(),
@@ -490,7 +491,7 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             return;
         }
         let note =
-            format_slash_command_control_note(&prompt.tmux_session_name, &kind, &prompt.prompt);
+            format_slash_command_control_note(&prompt.tmux_session_name, kind, &prompt.prompt);
         match channel_id.say(&*notify_http, note).await {
             Ok(message) => tracing::info!(
                 provider = %prompt.provider,
@@ -585,8 +586,11 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         // live card or no-ops; the first sighting posts as the #3099 anchor).
         // HumanTuiDirect keeps the raw render; SystemContinuation handled above (#3100).
         let content = if matches!(injected_class, InjectedPromptClass::SlashCommandControl) {
-            let kind = slash_command_control_kind(&prompt.prompt);
-            format_slash_command_control_note(&prompt.tmux_session_name, &kind, &prompt.prompt)
+            let kind = relay_prompt_decision
+                .slash_command_kind
+                .as_deref()
+                .expect("slash command control decisions carry a kind");
+            format_slash_command_control_note(&prompt.tmux_session_name, kind, &prompt.prompt)
         } else if matches!(injected_class, InjectedPromptClass::TaskNotificationEvent) {
             // #3393: background-task / subagent completions arrive ONLY as this
             // `user`-record `<task-notification>` XML — never the stream-json
@@ -742,8 +746,12 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         // short-circuit here. Only SystemContinuation skips this active-turn block.
         debug_assert!(
             injected_class.is_human_active_turn()
-                || matches!(injected_class, InjectedPromptClass::TaskNotificationEvent),
-            "system-continuation injections must not reach active-turn handling",
+                || matches!(
+                    injected_class,
+                    InjectedPromptClass::TaskNotificationEvent
+                        | InjectedPromptClass::SlashCommandControl
+                ),
+            "passive system injections must not reach active-turn handling",
         );
         // #3154 P1-3 / #4002: run the shared synthetic-start wiring. It reads the
         // prior-turn view and either DEFERS to the detached per-channel worker when
@@ -899,6 +907,30 @@ fn resolve_owner_channel_authoritatively(
             None
         }
         (None, None) => None,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RelayObservedPromptInjectionDecision {
+    injected_class: InjectedPromptClass,
+    slash_command_kind: Option<String>,
+    local_only_slash: bool,
+}
+
+/// Pure classification used before relay lease/ownership side effects.
+fn relay_observed_prompt_injected_prompt_decision(
+    prompt: &str,
+) -> RelayObservedPromptInjectionDecision {
+    let injected_class = classify_injected_prompt(prompt);
+    let slash_command_kind = matches!(injected_class, InjectedPromptClass::SlashCommandControl)
+        .then(|| slash_command_control_kind(prompt));
+    let local_only_slash = matches!(injected_class, InjectedPromptClass::SlashCommandControl)
+        && is_local_only_slash_command_prompt(prompt);
+
+    RelayObservedPromptInjectionDecision {
+        injected_class,
+        slash_command_kind,
+        local_only_slash,
     }
 }
 

@@ -89,7 +89,7 @@ pub(super) fn is_slash_command_control_prompt(prompt: &str) -> bool {
     }
     if normalized.starts_with("<command-message>")
         || normalized.starts_with("<command-name>")
-        || normalized.starts_with(COMPACTED_LOCAL_COMMAND_STDOUT_PREFIX)
+        || starts_with_compacted_local_command_stdout(&normalized)
         || starts_with_complete_local_command_stdout(&normalized)
         || normalized.starts_with("/loop ")
     {
@@ -105,9 +105,21 @@ pub(super) fn is_slash_command_control_prompt(prompt: &str) -> bool {
 }
 
 fn starts_with_complete_local_command_stdout(normalized: &str) -> bool {
+    // Open-only generic stdout falls back to HumanTuiDirect; the line scanner rolls back and retries.
     normalized
         .strip_prefix(LOCAL_COMMAND_STDOUT_OPEN)
-        .is_some_and(|rest| rest.contains(LOCAL_COMMAND_STDOUT_CLOSE))
+        .is_some_and(|rest| rest.trim_end().ends_with(LOCAL_COMMAND_STDOUT_CLOSE))
+}
+
+fn starts_with_compacted_local_command_stdout(normalized: &str) -> bool {
+    if !normalized.starts_with(COMPACTED_LOCAL_COMMAND_STDOUT_PREFIX) {
+        return false;
+    }
+    let trimmed = normalized.trim_end();
+    if trimmed.contains(LOCAL_COMMAND_STDOUT_CLOSE) {
+        return trimmed.ends_with(LOCAL_COMMAND_STDOUT_CLOSE);
+    }
+    !trimmed.contains('\r') && !trimmed.contains('\n')
 }
 
 pub(super) fn slash_command_control_prompt_is_local_command_stdout(prompt: &str) -> bool {
@@ -261,6 +273,12 @@ pub(super) fn format_subagent_notification_card(tmux_session_name: &str, prompt:
 /// Canonical command kind for slash-control dedupe and kind-only notes.
 pub(super) fn slash_command_control_kind(prompt: &str) -> String {
     let (normalized, _peeled_caveat) = normalize_slash_command_control_prompt(prompt);
+    if starts_with_compacted_local_command_stdout(&normalized) {
+        return "/compact".to_string();
+    }
+    if starts_with_complete_local_command_stdout(&normalized) {
+        return "local-command-stdout".to_string();
+    }
     if let Some(after) = normalized
         .find("<command-name>")
         .map(|idx| &normalized[idx + "<command-name>".len()..])
@@ -279,12 +297,6 @@ pub(super) fn slash_command_control_kind(prompt: &str) -> String {
             return "/compact".to_string();
         }
     }
-    if normalized.starts_with(COMPACTED_LOCAL_COMMAND_STDOUT_PREFIX) {
-        return "/compact".to_string();
-    }
-    if starts_with_complete_local_command_stdout(&normalized) {
-        return "local-command-stdout".to_string();
-    }
     if normalized.starts_with('/') {
         let name = normalized.split_whitespace().next().unwrap_or("");
         if name.len() > 1 {
@@ -294,7 +306,7 @@ pub(super) fn slash_command_control_kind(prompt: &str) -> String {
     "slash".to_string()
 }
 
-/// Kind-only slash-control note; `/loop` may include its directive body.
+/// Slash-control note; `/loop` and generic local stdout may include a short body.
 pub(super) fn format_slash_command_control_note(
     tmux_session_name: &str,
     kind: &str,
@@ -312,6 +324,15 @@ pub(super) fn format_slash_command_control_note(
     );
     if kind == "/loop" {
         if let Some(body) = extract_loop_body(raw_prompt) {
+            let preview = truncate_chars(body.trim(), SSH_DIRECT_PROMPT_PREVIEW_LIMIT)
+                .replace("```", "` ` `");
+            if !preview.is_empty() {
+                return format!("{header}:\n```text\n{preview}\n```");
+            }
+        }
+    }
+    if kind == "local-command-stdout" {
+        if let Some(body) = extract_local_command_stdout_body(raw_prompt) {
             let preview = truncate_chars(body.trim(), SSH_DIRECT_PROMPT_PREVIEW_LIMIT)
                 .replace("```", "` ` `");
             if !preview.is_empty() {
@@ -351,6 +372,23 @@ pub(super) fn extract_loop_body(prompt: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn extract_local_command_stdout_body(prompt: &str) -> Option<String> {
+    let (normalized, _peeled_caveat) = normalize_slash_command_control_prompt(prompt);
+    let rest = normalized.strip_prefix(LOCAL_COMMAND_STDOUT_OPEN)?;
+    let rest = rest.trim_end();
+    if !rest.ends_with(LOCAL_COMMAND_STDOUT_CLOSE) {
+        return None;
+    }
+    let body = &rest[..rest.len() - LOCAL_COMMAND_STDOUT_CLOSE.len()];
+    let body = body
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!body.is_empty()).then_some(body)
 }
 
 pub(super) fn should_suppress_local_only_kind_note_after_continuation(
