@@ -468,6 +468,17 @@ deadline = "2026-08-31"
 decompose_issue = "#3540"
 
 [[entry]]
+# Crossed the 1000-prod-LoC giant threshold in #4019 R2: synthetic TUI-direct
+# claim/adoption and idle-tail cleanup now route releases through finalizer
+# authority with identity/session-key guards and preserve the global_active 1:1
+# mailbox-activation invariant. Decomposition would lift claim/adoption,
+# finalizer cleanup, and pending-start glue into narrower siblings.
+file = "src/services/discord/tui_prompt_relay/synthetic_start.rs"
+owner = "discord-relay"
+deadline = "2026-10-31"
+decompose_issue = "#4019"
+
+[[entry]]
 # Crossed the 1000-prod-LoC giant threshold in #3909: the leader-only voice
 # TTS cache/temp sweep (`ProgressTtsCacheSweepJob`) added the 15th MaintenanceJob
 # to the static registry. The file was already a razor-thin near-giant (~976

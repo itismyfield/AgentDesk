@@ -143,6 +143,13 @@ fn pinned_finalizer_turn_id_uses_synthetic_identity_for_zero_user_msg_id() {
 }
 
 #[test]
+fn restored_watcher_finalize_skips_zero_id_submit() {
+    assert!(!should_submit_restored_watcher_finalize(false, 0));
+    assert!(!should_submit_restored_watcher_finalize(true, 777));
+    assert!(should_submit_restored_watcher_finalize(false, 777));
+}
+
+#[test]
 fn pinned_finalize_id_none_returns_zero() {
     // (e) No pre-relay snapshot → 0.
     assert_eq!(

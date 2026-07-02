@@ -548,7 +548,7 @@ pub(super) fn clear_inflight_state_if_matches_identity_in_root(
     if state.rebind_origin {
         return GuardedClearOutcome::RebindOriginSkipped;
     }
-    if expected.user_msg_id == 0 || !expected.matches_state(&state) {
+    if !expected.matches_state(&state) {
         return GuardedClearOutcome::UserMsgMismatch;
     }
     match fs::remove_file(&path) {

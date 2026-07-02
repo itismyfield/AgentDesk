@@ -401,6 +401,7 @@ pub(super) async fn run_claude_idle_response_tail(
                 &ProviderKind::Claude,
                 channel_id,
                 &tmux_session_name,
+                lease.session_key.as_deref(),
                 "claude_tui_direct_tail_panicked",
             )
             .await;
@@ -425,6 +426,7 @@ pub(super) async fn run_claude_idle_response_tail(
             &ProviderKind::Claude,
             channel_id,
             &tmux_session_name,
+            lease.session_key.as_deref(),
             "claude_tui_direct_empty_response",
         )
         .await;
@@ -450,6 +452,7 @@ pub(super) async fn run_claude_idle_response_tail(
             &ProviderKind::Claude,
             channel_id,
             &tmux_session_name,
+            lease.session_key.as_deref(),
             "claude_tui_direct_delivery_failed",
         )
         .await;

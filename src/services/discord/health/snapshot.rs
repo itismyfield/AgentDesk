@@ -95,6 +95,11 @@ pub struct WatcherStateSnapshot {
     /// a false-positive guard so a normally-finished-then-sleeping session is
     /// never force-cleaned as a deadlock.
     pub(in crate::services::discord) inflight_terminal_delivery_committed: bool,
+    #[serde(skip)]
+    pub(in crate::services::discord) inflight_identity:
+        Option<discord::inflight::InflightTurnIdentity>,
+    #[serde(skip)]
+    pub(in crate::services::discord) inflight_finalizer_turn_id: Option<u64>,
     /// #1455: Pure relay-stall classifier output derived from the nested
     /// relay-health snapshot. Read-only diagnostic; no recovery behavior is
     /// triggered from this value.
@@ -562,6 +567,14 @@ async fn watcher_state_snapshot_for_shared(
         has_pending_queue,
         mailbox_active_user_msg_id,
         inflight_terminal_delivery_committed: session.inflight_terminal_delivery_committed(),
+        inflight_identity: session
+            .inflight
+            .as_ref()
+            .map(discord::inflight::InflightTurnIdentity::from_state),
+        inflight_finalizer_turn_id: session
+            .inflight
+            .as_ref()
+            .map(|state| state.effective_finalizer_turn_id()),
         relay_stall_state,
         relay_health,
     })
