@@ -100,7 +100,7 @@
 | `src/services/qwen.rs` | 2196 |
 | `src/services/routines/agent_executor.rs` | 2021 |
 | `src/services/routines/discord_log.rs` | 1589 |
-| `src/services/routines/store.rs` | 3453 |
+| `src/services/routines/store.rs` | 3579 |
 | `src/services/settings.rs` | 1114 |
 | `src/services/tui_prompt_dedupe.rs` | 1824 |
 | `src/services/turn_orchestrator.rs` | 2959 |

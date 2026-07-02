@@ -243,7 +243,7 @@
 | `server::routes::docs::inventory::endpoints::part_03` | `src/server/routes/docs/inventory/endpoints/part_03.rs` | 642 | 642 | 0 |  |
 | `server::routes::docs::inventory::endpoints::part_04` | `src/server/routes/docs/inventory/endpoints/part_04.rs` | 643 | 643 | 0 |  |
 | `server::routes::docs::inventory::endpoints::part_05` | `src/server/routes/docs/inventory/endpoints/part_05.rs` | 655 | 655 | 0 |  |
-| `server::routes::docs::inventory::endpoints::part_06` | `src/server/routes/docs/inventory/endpoints/part_06.rs` | 645 | 645 | 0 |  |
+| `server::routes::docs::inventory::endpoints::part_06` | `src/server/routes/docs/inventory/endpoints/part_06.rs` | 666 | 666 | 0 |  |
 | `server::routes::docs::inventory::endpoints::part_07` | `src/server/routes/docs/inventory/endpoints/part_07.rs` | 659 | 659 | 0 |  |
 | `server::routes::docs::inventory::endpoints::part_08` | `src/server/routes/docs/inventory/endpoints/part_08.rs` | 656 | 656 | 0 |  |
 | `server::routes::docs::inventory::endpoints::part_09` | `src/server/routes/docs/inventory/endpoints/part_09.rs` | 84 | 84 | 0 |  |
@@ -255,7 +255,7 @@
 | `server::routes::domains::integrations` | `src/server/routes/domains/integrations.rs` | 78 | 78 | 0 |  |
 | `server::routes::domains::kanban` | `src/server/routes/domains/kanban.rs` | 87 | 87 | 0 |  |
 | `server::routes::domains::onboarding` | `src/server/routes/domains/onboarding.rs` | 39 | 39 | 0 |  |
-| `server::routes::domains::ops` | `src/server/routes/domains/ops.rs` | 338 | 338 | 0 |  |
+| `server::routes::domains::ops` | `src/server/routes/domains/ops.rs` | 340 | 340 | 0 |  |
 | `server::routes::domains::reviews` | `src/server/routes/domains/reviews.rs` | 33 | 33 | 0 |  |
 | `server::routes::escalation` | `src/server/routes/escalation.rs` | 1641 | 1376 | 265 | giant-file |
 | `server::routes::github` | `src/server/routes/github.rs` | 949 | 680 | 269 |  |
@@ -285,7 +285,7 @@
 | `server::routes::review_verdict::tuning_aggregate` | `src/server/routes/review_verdict/tuning_aggregate.rs` | 14 | 14 | 0 |  |
 | `server::routes::review_verdict::verdict_route` | `src/server/routes/review_verdict/verdict_route.rs` | 705 | 641 | 64 |  |
 | `server::routes::reviews` | `src/server/routes/reviews.rs` | 760 | 671 | 89 |  |
-| `server::routes::routines` | `src/server/routes/routines.rs` | 1039 | 854 | 185 |  |
+| `server::routes::routines` | `src/server/routes/routines.rs` | 1209 | 957 | 252 |  |
 | `server::routes::session_activity` | `src/server/routes/session_activity.rs` | 13 | 13 | 0 |  |
 | `server::routes::settings` | `src/server/routes/settings.rs` | 93 | 93 | 0 |  |
 | `server::routes::skill_usage_analytics` | `src/server/routes/skill_usage_analytics.rs` | 425 | 425 | 0 |  |
@@ -889,7 +889,7 @@
 | `services::routines::runtime` | `src/services/routines/runtime.rs` | 1046 | 870 | 176 |  |
 | `services::routines::runtime_config` | `src/services/routines/runtime_config.rs` | 133 | 64 | 69 |  |
 | `services::routines::session_control` | `src/services/routines/session_control.rs` | 1039 | 895 | 144 |  |
-| `services::routines::store` | `src/services/routines/store.rs` | 4050 | 3453 | 597 | giant-file |
+| `services::routines::store` | `src/services/routines/store.rs` | 4212 | 3579 | 633 | giant-file |
 | `services::service_error` | `src/services/service_error.rs` | 1 | 1 | 0 |  |
 | `services::session_activity` | `src/services/session_activity.rs` | 356 | 277 | 79 |  |
 | `services::session_backend` | `src/services/session_backend.rs` | 611 | 393 | 218 |  |

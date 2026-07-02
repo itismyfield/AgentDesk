@@ -1,7 +1,7 @@
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer};
@@ -10,11 +10,12 @@ use serde_json::{Value, json};
 use crate::config::Config;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::services::routines::{
-    NewRoutine, RoutineAgentExecutor, RoutineDiscordLogger, RoutineLifecycleEvent, RoutinePatch,
-    RoutineScriptLoader, RoutineSessionCommand, RoutineSessionController, RoutineStore,
-    execute_claimed_script_run, is_migrated_launchd_script_ref,
-    is_resume_routine_requires_next_due_at, validate_migrated_launchd_activation,
-    validate_routine_runtime_config, validate_routine_schedule,
+    DeleteRoutineResult, NewRoutine, RoutineAgentExecutor, RoutineDiscordLogger,
+    RoutineLifecycleEvent, RoutinePatch, RoutineScriptLoader, RoutineSessionCommand,
+    RoutineSessionController, RoutineStore, execute_claimed_script_run,
+    is_migrated_launchd_script_ref, is_resume_routine_requires_next_due_at,
+    validate_migrated_launchd_activation, validate_routine_runtime_config,
+    validate_routine_schedule,
 };
 use crate::utils::api::clamp_api_limit;
 
@@ -437,6 +438,32 @@ pub async fn detach_routine(
     ))
 }
 
+pub async fn delete_routine(
+    State(state): State<AppState>,
+    Path(routine_id): Path<String>,
+    headers: HeaderMap,
+) -> AppResult<(StatusCode, Json<Value>)> {
+    let store = routine_store(&state)?;
+    let Some(routine) = store.get_routine(&routine_id).await.map_err(store_error)? else {
+        return Err(AppError::not_found(format!(
+            "routine {routine_id} not found"
+        )));
+    };
+    let caller_agent_id =
+        crate::services::kanban::resolve_requesting_agent_id_with_pg(store.pool(), &headers).await;
+    ensure_routine_delete_scope(
+        &routine_id,
+        routine.agent_id.as_deref(),
+        caller_agent_id.as_deref(),
+        routine_delete_scope_header_present(&headers),
+    )?;
+    let result = store
+        .delete_detached_routine(&routine_id)
+        .await
+        .map_err(store_error)?;
+    delete_routine_response(&routine_id, result)
+}
+
 pub async fn run_routine_now(
     State(state): State<AppState>,
     Path(routine_id): Path<String>,
@@ -830,6 +857,82 @@ fn routine_health_target(config: &Config) -> Option<String> {
         .map(|value| format!("channel:{value}"))
 }
 
+fn ensure_routine_delete_scope(
+    routine_id: &str,
+    routine_agent_id: Option<&str>,
+    caller_agent_id: Option<&str>,
+    caller_scope_header_present: bool,
+) -> AppResult<()> {
+    let Some(owner) = routine_agent_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    let Some(caller) = caller_agent_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        if caller_scope_header_present {
+            return Err(AppError::new(
+                StatusCode::FORBIDDEN,
+                ErrorCode::Policy,
+                format!(
+                    "routine {routine_id} belongs to agent {owner}; caller agent scope could not be resolved"
+                ),
+            ));
+        }
+        return Ok(());
+    };
+    if caller == owner {
+        return Ok(());
+    }
+    Err(AppError::new(
+        StatusCode::FORBIDDEN,
+        ErrorCode::Policy,
+        format!(
+            "routine {routine_id} belongs to agent {owner}; caller agent {caller} cannot delete it"
+        ),
+    ))
+}
+
+fn routine_delete_scope_header_present(headers: &HeaderMap) -> bool {
+    ["x-agent-id", "x-channel-id"].iter().any(|name| {
+        headers
+            .get(*name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+    })
+}
+
+fn delete_routine_response(
+    routine_id: &str,
+    result: DeleteRoutineResult,
+) -> AppResult<(StatusCode, Json<Value>)> {
+    match result {
+        DeleteRoutineResult::Deleted {
+            run_history_deleted,
+        } => Ok((
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "routine_id": routine_id,
+                "run_history_deleted": run_history_deleted,
+            })),
+        )),
+        DeleteRoutineResult::NotFound => Err(AppError::not_found(format!(
+            "routine {routine_id} not found"
+        ))),
+        DeleteRoutineResult::NotDetached { status } => Err(AppError::conflict(format!(
+            "routine {routine_id} must be detached before delete; current status is {status}"
+        ))),
+        DeleteRoutineResult::InFlight => Err(AppError::conflict(format!(
+            "routine {routine_id} has an in-flight run and cannot be deleted"
+        ))),
+    }
+}
+
 fn store_error(error: anyhow::Error) -> AppError {
     if is_resume_routine_requires_next_due_at(&error) {
         return AppError::conflict(error.to_string());
@@ -859,11 +962,12 @@ mod tests {
 
     use super::{
         PARALLEL_SAFE_MIGRATED_LAUNCHD_SCRIPT_REF, PatchRoutineBody, ResumeRoutineBody,
-        ensure_routine_runtime_runnable, initial_attach_status, normalize_script_ref, store_error,
-        validate_distinct_fallback_agent,
+        delete_routine_response, ensure_routine_delete_scope, ensure_routine_runtime_runnable,
+        initial_attach_status, normalize_script_ref, store_error, validate_distinct_fallback_agent,
     };
     use crate::config::RoutinesConfig;
     use crate::error::ErrorCode;
+    use crate::services::routines::DeleteRoutineResult;
 
     #[test]
     fn run_now_guard_rejects_disabled_routines() {
@@ -1006,6 +1110,72 @@ mod tests {
         assert_eq!(
             err.message(),
             "next_due_at required to resume schedule-less routine"
+        );
+    }
+
+    #[test]
+    fn delete_routine_response_maps_success_and_conflicts() {
+        let (status, body) = delete_routine_response(
+            "routine-1",
+            DeleteRoutineResult::Deleted {
+                run_history_deleted: 2,
+            },
+        )
+        .expect("deleted response");
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.0["ok"], true);
+        assert_eq!(body.0["routine_id"], "routine-1");
+        assert_eq!(body.0["run_history_deleted"], 2);
+
+        let err = delete_routine_response(
+            "routine-1",
+            DeleteRoutineResult::NotDetached {
+                status: "paused".to_string(),
+            },
+        )
+        .expect_err("non-detached delete must conflict");
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            err.message(),
+            "routine routine-1 must be detached before delete; current status is paused"
+        );
+
+        let err = delete_routine_response("routine-1", DeleteRoutineResult::InFlight)
+            .expect_err("in-flight delete must conflict");
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            err.message(),
+            "routine routine-1 has an in-flight run and cannot be deleted"
+        );
+    }
+
+    #[test]
+    fn delete_routine_scope_rejects_other_agent() {
+        assert!(
+            ensure_routine_delete_scope("routine-1", Some("codex"), Some("codex"), true).is_ok()
+        );
+        assert!(ensure_routine_delete_scope("routine-1", Some("codex"), None, false).is_ok());
+        assert!(ensure_routine_delete_scope("routine-1", None, Some("claude"), true).is_ok());
+
+        let err = ensure_routine_delete_scope("routine-1", Some("codex"), Some("claude"), true)
+            .expect_err("agent-scoped caller must not delete another agent's routine");
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        assert_eq!(err.code(), ErrorCode::Policy);
+        assert_eq!(
+            err.message(),
+            "routine routine-1 belongs to agent codex; caller agent claude cannot delete it"
+        );
+    }
+
+    #[test]
+    fn delete_routine_scope_rejects_unresolved_declared_scope() {
+        let err = ensure_routine_delete_scope("routine-1", Some("codex"), None, true)
+            .expect_err("declared but unresolved scope must fail closed");
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        assert_eq!(err.code(), ErrorCode::Policy);
+        assert_eq!(
+            err.message(),
+            "routine routine-1 belongs to agent codex; caller agent scope could not be resolved"
         );
     }
 

@@ -423,6 +423,42 @@ pub struct RoutineMetrics {
     pub avg_latency_ms: Option<f64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeleteRoutineResult {
+    Deleted { run_history_deleted: u64 },
+    NotFound,
+    NotDetached { status: String },
+    InFlight,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RoutineHardDeleteGate {
+    Allowed,
+    NotDetached { status: String },
+    InFlight,
+}
+
+fn routine_hard_delete_gate(
+    status: &str,
+    in_flight_run_id: Option<&str>,
+    has_running_run: bool,
+) -> RoutineHardDeleteGate {
+    if in_flight_run_id
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty())
+        || has_running_run
+    {
+        return RoutineHardDeleteGate::InFlight;
+    }
+    if status == "detached" {
+        RoutineHardDeleteGate::Allowed
+    } else {
+        RoutineHardDeleteGate::NotDetached {
+            status: status.to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 pub struct RunningAgentRoutineRun {
     pub run_id: String,
@@ -2562,6 +2598,96 @@ impl RoutineStore {
         Ok(result.rows_affected() == 1)
     }
 
+    pub async fn delete_detached_routine(&self, routine_id: &str) -> Result<DeleteRoutineResult> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| anyhow!("delete routine {routine_id}: {e}"))?;
+
+        let row = sqlx::query(
+            r#"
+            SELECT status, in_flight_run_id
+            FROM routines
+            WHERE id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(routine_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| anyhow!("delete routine {routine_id}: {e}"))?;
+
+        let Some(row) = row else {
+            return Ok(DeleteRoutineResult::NotFound);
+        };
+
+        let status: String = row
+            .try_get("status")
+            .map_err(|e| anyhow!("delete routine {routine_id}: {e}"))?;
+        let in_flight_run_id: Option<String> = row
+            .try_get("in_flight_run_id")
+            .map_err(|e| anyhow!("delete routine {routine_id}: {e}"))?;
+        let has_running_run: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM routine_runs
+                WHERE routine_id = $1
+                  AND status = 'running'
+            )
+            "#,
+        )
+        .bind(routine_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| anyhow!("delete routine {routine_id}: {e}"))?;
+
+        match routine_hard_delete_gate(&status, in_flight_run_id.as_deref(), has_running_run) {
+            RoutineHardDeleteGate::Allowed => {}
+            RoutineHardDeleteGate::InFlight => return Ok(DeleteRoutineResult::InFlight),
+            RoutineHardDeleteGate::NotDetached { status } => {
+                return Ok(DeleteRoutineResult::NotDetached { status });
+            }
+        }
+
+        let deleted_runs = sqlx::query(
+            r#"
+            DELETE FROM routine_runs
+            WHERE routine_id = $1
+            "#,
+        )
+        .bind(routine_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| anyhow!("delete routine run history for {routine_id}: {e}"))?;
+
+        let deleted_routine = sqlx::query(
+            r#"
+            DELETE FROM routines
+            WHERE id = $1
+            "#,
+        )
+        .bind(routine_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| anyhow!("delete routine {routine_id}: {e}"))?;
+
+        if deleted_routine.rows_affected() != 1 {
+            return Err(anyhow!(
+                "delete routine {routine_id}: locked routine row disappeared before delete"
+            ));
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| anyhow!("delete routine {routine_id}: {e}"))?;
+
+        Ok(DeleteRoutineResult::Deleted {
+            run_history_deleted: deleted_runs.rows_affected(),
+        })
+    }
+
     /// Extend the lease for a running routine run.
     ///
     /// Executors must call this periodically while JS execution is active.
@@ -3881,6 +4007,42 @@ mod tests {
         assert!(
             evidence_ref.starts_with("routine_runs:"),
             "evidence_ref must be prefixed with 'routine_runs:'"
+        );
+    }
+
+    #[test]
+    fn routine_hard_delete_gate_allows_only_detached_without_inflight() {
+        assert_eq!(
+            super::routine_hard_delete_gate("detached", None, false),
+            super::RoutineHardDeleteGate::Allowed
+        );
+        assert_eq!(
+            super::routine_hard_delete_gate("paused", None, false),
+            super::RoutineHardDeleteGate::NotDetached {
+                status: "paused".to_string()
+            }
+        );
+        assert_eq!(
+            super::routine_hard_delete_gate("enabled", None, false),
+            super::RoutineHardDeleteGate::NotDetached {
+                status: "enabled".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn routine_hard_delete_gate_rejects_inflight_signals() {
+        assert_eq!(
+            super::routine_hard_delete_gate("detached", Some("run-1"), false),
+            super::RoutineHardDeleteGate::InFlight
+        );
+        assert_eq!(
+            super::routine_hard_delete_gate("detached", Some("  "), true),
+            super::RoutineHardDeleteGate::InFlight
+        );
+        assert_eq!(
+            super::routine_hard_delete_gate("enabled", Some("run-1"), true),
+            super::RoutineHardDeleteGate::InFlight
         );
     }
 
