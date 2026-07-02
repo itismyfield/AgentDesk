@@ -200,8 +200,12 @@
     late-frame fresh row B is rejected; -576 from #3841 extracting placeholder
     suppression helpers to `tmux_placeholder_suppression.rs`;
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (7260 production lines; +33 from #3805
-    P2 PR-D review fixes — watcher re-anchor now reloads the current inflight row
+  - `src/services/discord/tmux_watcher.rs` (7319 production lines; +59 from
+    #4019 R2 identity-guarded watcher exits — the real stall/auth/overload exit
+    release helper lives in `tmux_watcher/stall_exit.rs`, while the root carries
+    only pinned-snapshot capture, three helper calls, monitor-token release before
+    labelled watcher-loop breaks, and the 0-id finalize submit predicate; +33 from
+    #3805 P2 PR-D review fixes — watcher re-anchor now reloads the current inflight row
     and calls the sibling watcher-ownership gate so Managed bridge-owned turns are
     never watcher-reanchored; watcher panel sends are durably pre-registered in
     the orphan store and removed only after bind/delete makes them safe; the
@@ -601,11 +605,20 @@
     tail/runtime/bridge glue moved into `tui_prompt_relay/` child modules while
     the #4018 compact-resume stale-mailbox follow-up stayed in those child
     modules: `tui_prompt_relay/claude_idle_bridge.rs` (662 prod LoC),
-    `tui_prompt_relay/synthetic_start.rs` (985 prod LoC), and
-    `tui_prompt_relay/synthetic_start/stale_reclaim.rs` (225 prod LoC);
+    `tui_prompt_relay/synthetic_start.rs` (1039 prod LoC; crossed the giant
+    threshold in #4019 R2 to route idle-tail synthetic release through the
+    finalizer, add session-key guarded cleanup, and preserve the global_active
+    1:1 mailbox activation invariant under adoption; bugfix only until split),
+    and `tui_prompt_relay/synthetic_start/stale_reclaim.rs` (225 prod LoC);
     worker-local relay lifecycle only, no PG lease/schema. The parent
     spawn/provider wiring surface stays preserved. Historical context:
     #3296
+  - `src/services/discord/tui_prompt_relay/synthetic_start.rs` (1039 prod LoC;
+    synthetic TUI-direct claim/adoption and idle-tail cleanup surface. Crossed
+    the giant threshold in #4019 R2 when idle-tail cleanup moved from direct
+    mailbox finish/counter decrement to finalizer authority, gained session-key
+    guarded release, and stopped incrementing `global_active` when merely
+    adopting an already-active mailbox. Bugfix only until split).
     codex r1+r2: the ABORT cleanup hook pins the foreign prior inflight's
     identity — the live row at the record instant, or the worker's LAST-VIEW
     identity when that row just vanished — and persists the marker via
@@ -1117,8 +1130,12 @@
     children (`send_target`, `send_gate`, `send_api`, `manual_delivery`) to
     `outbound/` while preserving the `health::` re-export API; #1879
     snapshot/mailbox extraction, and #3082 answer-flush-barrier field).
-  - `src/services/discord/health/recovery.rs` (2236 lines; +13 from #4019 R1
-    resolving stale-hourglass cleanup and completed-leak recovery through the
+  - `src/services/discord/health/recovery.rs` (2351 lines; +115 from #4019 R2
+    watchdog identity revalidation — explicit-background destructive cleanup now
+    carries full inflight identity from the snapshot, revalidates under the
+    inflight flock immediately before deletion, routes mailbox release through
+    the turn finalizer, and keeps runtime cleanup separate from token/counter
+    authority; +13 from #4019 R1 resolving stale-hourglass cleanup and completed-leak recovery through the
     channel-owning runtime's Discord HTTP handle instead of the provider's first
     registered runtime; +89 from #3925
     finalizing the inflight turn-state after the out-of-band deadlock-manager leak
@@ -1401,7 +1418,7 @@
     giant-file-registry [[entry]] was removed. #3038 turn_bridge S1 moved
     `advance_tmux_relay_confirmed_end` here; split the remaining lease wiring
     vs delivery helpers before adding behavior).
-  - `src/services/discord/turn_finalizer.rs` (1044 prod lines; single-authority
+  - `src/services/discord/turn_finalizer.rs` (1048 prod lines; single-authority
     turn-finalize state machine — ledger/actor-loop/reconciler. Crossed the
     giant-file threshold when #3041 P1-0 added the dormant `DeliveryLeaseCell`
     finalizer messages/handlers on top of #3143's `FinalizeContext::monitor()` +
@@ -1417,8 +1434,10 @@
     snapshots through terminal submissions so relay-ownership-only passive notes
     skip the backstop reaction fallback, routes stale synthetic release through
     the finalizer, and demotes expected backstop/reconcile guarded misses while
-    preserving WARN for ordinary submitter misses; `turn_finalizer/finalize.rs`
-    is now 246 prod LoC, `turn_finalizer/finalize_context.rs` 113 prod LoC,
+    preserving WARN for ordinary submitter misses; #4019 R2 adds the multi-live
+    refusal for channel-only id-0 collapse so ambiguous terminals return the
+    literal no-match key instead of releasing an arbitrary live entry;
+    `turn_finalizer/finalize.rs` is now 246 prod LoC, `turn_finalizer/finalize_context.rs` 113 prod LoC,
     `turn_finalizer/reconcile.rs` 221 prod LoC, and
     `turn_finalizer/cleanup.rs` 376 prod LoC. No PG lease/schema change.
   - `src/services/discord/formatting.rs` (2835 lines; -25 from #4019 R1 moving

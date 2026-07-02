@@ -792,6 +792,8 @@ mod tests {
             has_pending_queue: false,
             mailbox_active_user_msg_id: Some(9001),
             inflight_terminal_delivery_committed: false,
+            inflight_identity: None,
+            inflight_finalizer_turn_id: None,
             relay_stall_state: RelayStallState::TmuxAliveRelayDead,
             relay_health: RelayHealthSnapshot {
                 provider: ProviderKind::Codex.as_str().to_string(),

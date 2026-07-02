@@ -670,6 +670,88 @@ async fn apply_runtime_hard_stop_cleanup(
     runtime_session_cleared
 }
 
+async fn apply_runtime_hard_stop_finalizer_cleanup(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    outcome: &discord::turn_finalizer::FinalizeOutcome,
+    stop_watcher: bool,
+) -> (bool, bool) {
+    let has_pending = match outcome {
+        discord::turn_finalizer::FinalizeOutcome::Finalized { has_pending, .. } => *has_pending,
+        discord::turn_finalizer::FinalizeOutcome::AlreadyFinalized
+        | discord::turn_finalizer::FinalizeOutcome::Deferred => false,
+    };
+
+    discord::clear_watchdog_deadline_override(channel_id.get()).await;
+    shared
+        .dispatch
+        .thread_parents
+        .retain(|_, thread| *thread != channel_id);
+    shared.restart.recovering_channels.remove(&channel_id);
+    shared.turn_start_times.remove(&channel_id);
+
+    if !has_pending {
+        shared.dispatch.role_overrides.remove(&channel_id);
+    }
+
+    if stop_watcher && let Some((_, watcher)) = shared.tmux_watchers.remove(&channel_id) {
+        watcher.cancel.store(true, Ordering::Relaxed);
+    }
+
+    let runtime_session_cleared = {
+        let mut data = shared.core.lock().await;
+        if let Some(session) = data.sessions.get_mut(&channel_id) {
+            session.clear_provider_session();
+            true
+        } else {
+            false
+        }
+    };
+
+    (runtime_session_cleared, has_pending)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExplicitBackgroundWatchdogClear {
+    clear_outcome: discord::inflight::GuardedClearOutcome,
+    pending_hourglass_user_msg_id: Option<u64>,
+    finalizer_turn_id: u64,
+}
+
+fn revalidate_and_clear_explicit_background_inflight(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    snapshot_identity: Option<&discord::inflight::InflightTurnIdentity>,
+    snapshot_finalizer_turn_id: Option<u64>,
+) -> ExplicitBackgroundWatchdogClear {
+    let Some(snapshot_identity) = snapshot_identity else {
+        return ExplicitBackgroundWatchdogClear {
+            clear_outcome: discord::inflight::GuardedClearOutcome::Missing,
+            pending_hourglass_user_msg_id: None,
+            finalizer_turn_id: 0,
+        };
+    };
+    let finalizer_turn_id = snapshot_finalizer_turn_id.unwrap_or(snapshot_identity.user_msg_id);
+    if finalizer_turn_id == 0 {
+        return ExplicitBackgroundWatchdogClear {
+            clear_outcome: discord::inflight::GuardedClearOutcome::UserMsgMismatch,
+            pending_hourglass_user_msg_id: None,
+            finalizer_turn_id,
+        };
+    }
+    let clear_outcome = discord::inflight::clear_inflight_state_if_matches_identity(
+        provider,
+        channel_id.get(),
+        snapshot_identity,
+    );
+    ExplicitBackgroundWatchdogClear {
+        clear_outcome,
+        pending_hourglass_user_msg_id: (snapshot_identity.user_msg_id != 0)
+            .then_some(snapshot_identity.user_msg_id),
+        finalizer_turn_id,
+    }
+}
+
 pub async fn hard_stop_runtime_turn(
     registry: Option<&HealthRegistry>,
     provider_name: Option<&str>,
@@ -1432,22 +1514,39 @@ pub(crate) async fn run_stall_watchdog_pass(
                 "  [{ts}] ⚡ STALL-WATCHDOG: forced cleanup for orphan explicit background work in channel {}",
                 channel_id
             );
-            let pending_hourglass_user_msg_id =
-                discord::inflight::load_inflight_state(provider, channel_id.get())
-                    .filter(|state| state.user_msg_id != 0)
-                    .map(|state| state.user_msg_id);
-            discord::inflight::delete_inflight_state_file(provider, channel_id.get());
-            let finish = discord::mailbox_finish_turn(&shared, provider, channel_id).await;
-            apply_runtime_hard_stop_cleanup(
-                &shared,
+            let revalidated = revalidate_and_clear_explicit_background_inflight(
                 provider,
                 channel_id,
-                &finish,
-                "2967_orphan_explicit_background_watchdog",
-                true,
-            )
-            .await;
-            if !finish.has_pending {
+                snapshot.inflight_identity.as_ref(),
+                snapshot.inflight_finalizer_turn_id,
+            );
+            if revalidated.clear_outcome != discord::inflight::GuardedClearOutcome::Cleared {
+                tracing::info!(
+                    provider = %provider.as_str(),
+                    channel_id = channel_id.get(),
+                    clear_outcome = ?revalidated.clear_outcome,
+                    "STALL-WATCHDOG: skipped orphan explicit background cleanup because inflight identity changed before the destructive clear"
+                );
+                continue;
+            }
+            let outcome = shared
+                .turn_finalizer
+                .submit_terminal(
+                    discord::turn_finalizer::TurnKey::new(
+                        channel_id,
+                        revalidated.finalizer_turn_id,
+                        shared.restart.current_generation,
+                    ),
+                    provider.clone(),
+                    discord::turn_finalizer::TerminalEvent::Cancel,
+                    discord::turn_finalizer::FinalizeContext::monitor(),
+                    shared.clone(),
+                )
+                .await;
+            let (_runtime_session_cleared, has_pending) =
+                apply_runtime_hard_stop_finalizer_cleanup(&shared, channel_id, &outcome, true)
+                    .await;
+            if !has_pending {
                 let hydrate = hydrate_pending_queue_from_disk(&shared, provider, channel_id).await;
                 if hydrate.queue_len_after > 0 && hydrate.persistence_error.is_none() {
                     discord::schedule_deferred_idle_queue_kickoff(
@@ -1458,7 +1557,23 @@ pub(crate) async fn run_stall_watchdog_pass(
                     );
                 }
             }
-            if let Some(user_msg_id) = pending_hourglass_user_msg_id
+            crate::services::observability::emit_inflight_lifecycle_event(
+                provider.as_str(),
+                channel_id.get(),
+                None,
+                None,
+                Some(&format!(
+                    "discord:{}:{}",
+                    channel_id.get(),
+                    revalidated.finalizer_turn_id
+                )),
+                "cleared_by_explicit_background_watchdog",
+                serde_json::json!({
+                    "clear_outcome": format!("{:?}", revalidated.clear_outcome),
+                    "finalizer_turn_id": revalidated.finalizer_turn_id,
+                }),
+            );
+            if let Some(user_msg_id) = revalidated.pending_hourglass_user_msg_id
                 && let Some(http) =
                     owning_runtime_http_for_channel(registry, provider, channel_id).await
             {
@@ -2403,17 +2518,24 @@ mod stall_watchdog_pure_tests {
         leak_recovery_confirmed_prefix_from_ledger, leak_recovery_record_confirmed_chunk,
         leak_recovery_unrelayed_range, render_leak_recovery_delivery,
     };
-    use super::preserve_cancel_should_skip_provider_interrupt_for_idle_tui;
     use super::watchdog_decisions::{
         STALL_WATCHDOG_THRESHOLD_SECS, completed_stale_no_answer_orphan_should_clean,
         force_clean_should_preserve_resume_selector, inflight_completed_stale_leak_detected,
         stale_idle_foreground_queue_detected, stall_watchdog_should_force_clean,
         stall_watchdog_should_force_clean_orphan_explicit_background_work,
     };
+    use super::{
+        preserve_cancel_should_skip_provider_interrupt_for_idle_tui,
+        revalidate_and_clear_explicit_background_inflight,
+    };
+    use crate::services::discord::inflight::{
+        self, GuardedClearOutcome, InflightTurnIdentity, InflightTurnState,
+    };
     use crate::services::discord::relay_health::{RelayActiveTurn, RelayStallState};
     use crate::services::discord::{InflightRestartMode, TmuxCleanupPolicy};
     use crate::services::provider::ProviderKind;
     use chrono::TimeZone;
+    use poise::serenity_prelude::ChannelId;
     use std::ffi::OsString;
 
     struct EnvVarReset {
@@ -2751,6 +2873,55 @@ mod stall_watchdog_pure_tests {
             .expect("valid local time")
             .format("%Y-%m-%d %H:%M:%S")
             .to_string()
+    }
+
+    #[test]
+    fn explicit_background_watchdog_abort_preserves_new_identity_after_snapshot() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_019_230_001);
+        let mut old = InflightTurnState::new(
+            provider.clone(),
+            channel_id.get(),
+            None,
+            1,
+            4_019_230_101,
+            4_019_230_101,
+            "old explicit background".to_string(),
+            Some("old-session".to_string()),
+            Some("AgentDesk-claude-r2-watchdog".to_string()),
+            Some("/tmp/r2-watchdog-old.jsonl".to_string()),
+            None,
+            10,
+        );
+        old.turn_start_offset = Some(10);
+        inflight::save_inflight_state(&old).expect("save old row");
+        let old_identity = InflightTurnIdentity::from_state(&old);
+        let old_finalizer_turn_id = old.effective_finalizer_turn_id();
+
+        let mut newer_same_message = old.clone();
+        newer_same_message.started_at = "2099-01-01 00:00:00".to_string();
+        newer_same_message.turn_start_offset = Some(99);
+        newer_same_message.session_id = Some("new-session".to_string());
+        inflight::save_inflight_state(&newer_same_message).expect("replace row");
+
+        let outcome = revalidate_and_clear_explicit_background_inflight(
+            &provider,
+            channel_id,
+            Some(&old_identity),
+            Some(old_finalizer_turn_id),
+        );
+
+        assert_eq!(outcome.clear_outcome, GuardedClearOutcome::UserMsgMismatch);
+        let persisted = inflight::load_inflight_state(&provider, channel_id.get())
+            .expect("newer row must survive mismatch");
+        assert_eq!(persisted.started_at, "2099-01-01 00:00:00");
+        assert_eq!(persisted.turn_start_offset, Some(99));
     }
 
     /// #3629: a completed-stale, no-unrelayed-answer row is cleaned ONLY when it

@@ -103,12 +103,16 @@ mod terminal_readiness;
 #[path = "tmux_watcher/utf8_chunk_decoder.rs"]
 mod utf8_chunk_decoder;
 
+#[path = "tmux_watcher/stall_exit.rs"]
+mod stall_exit;
+
 pub(in crate::services::discord) use self::completion_gate::{
     TuiCompletionGateOutcome, run_tui_completion_gate,
 };
 use self::placeholder_reclaim::*;
 use self::session_bound_ack::*;
 use self::single_message_footer::*;
+use self::stall_exit::*;
 use self::supervisor_relay::*;
 use self::terminal_readiness::*;
 use self::utf8_chunk_decoder::*;
@@ -1313,6 +1317,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             let mut tmux_death_observed = false;
             let mut ready_for_input_failure_notice: Option<String> = None;
             let mut ready_for_input_stall_dispatch_id: Option<String> = None;
+            let mut ready_for_input_stall_inflight_snapshot: Option<
+                crate::services::discord::inflight::InflightTurnState,
+            > = None;
             let mut streaming_suppressed_by_recent_stop = false;
             let mut streaming_suppressed_by_missing_inflight = false;
             let mut fresh_ready_for_input_idle = false;
@@ -1678,17 +1685,22 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 }
                                 crate::services::provider::ReadyForInputIdleState::PostWorkIdleTimeout => {
                                     let ts = chrono::Local::now().format("%H:%M:%S");
+                                    let stall_inflight_snapshot =
+                                        crate::services::discord::inflight::load_inflight_state(
+                                            &watcher_provider,
+                                            channel_id.get(),
+                                        );
                                     let dispatch_id = resolve_dispatched_thread_dispatch_from_db(
                                         shared.pg_pool.as_ref(),
                                         watcher_thread_channel_id.unwrap_or_else(|| channel_id.get()),
                                     )
                                     .or_else(|| {
-                                        crate::services::discord::inflight::load_inflight_state(
-                                            &watcher_provider,
-                                            channel_id.get(),
-                                        )
-                                        .and_then(|state| state.dispatch_id)
+                                        stall_inflight_snapshot
+                                            .as_ref()
+                                            .and_then(|state| state.dispatch_id.clone())
                                     });
+                                    ready_for_input_stall_inflight_snapshot =
+                                        stall_inflight_snapshot;
                                     if let Some(dispatch_id) = dispatch_id {
                                         ready_for_input_stall_dispatch_id = Some(dispatch_id);
                                         ready_for_input_failure_notice = Some(format!(
@@ -2969,6 +2981,16 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     ),
                 )
                 .await;
+                finish_monitor_auto_turn_if_claimed(
+                    &shared,
+                    &watcher_provider,
+                    channel_id,
+                    &mut monitor_auto_turn_claimed,
+                    &mut monitor_auto_turn_finished,
+                    &mut monitor_auto_turn_synthetic_msg_id,
+                    &mut monitor_auto_turn_ledger_generation,
+                )
+                .await;
                 break 'watcher_loop;
             }
 
@@ -2982,6 +3004,16 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     shutting_down = shared.restart.shutting_down.load(Ordering::Relaxed),
                     "tmux watcher stopping for #{tmux_session_name}: cancelled/shutdown"
                 );
+                finish_monitor_auto_turn_if_claimed(
+                    &shared,
+                    &watcher_provider,
+                    channel_id,
+                    &mut monitor_auto_turn_claimed,
+                    &mut monitor_auto_turn_finished,
+                    &mut monitor_auto_turn_synthetic_msg_id,
+                    &mut monitor_auto_turn_ledger_generation,
+                )
+                .await;
                 break 'watcher_loop;
             }
 
@@ -3042,11 +3074,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             // with no anchored Discord user message): there is
                             // no message to react against, and
                             // `MessageId::new(0)` would panic.
-                            if let Some(state) =
-                                crate::services::discord::inflight::load_inflight_state(
-                                    &watcher_provider,
-                                    channel_id.get(),
-                                )
+                            if let Some(state) = ready_for_input_stall_inflight_snapshot
+                                .as_ref()
                                 .filter(|state| !state.rebind_origin && state.user_msg_id != 0)
                             {
                                 let user_msg_id = serenity::MessageId::new(state.user_msg_id);
@@ -3065,10 +3094,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 )
                                 .await;
                             }
-                            crate::services::discord::inflight::clear_inflight_state(
+                            finalize_pinned_watcher_exit(
+                                &shared,
                                 &watcher_provider,
-                                channel_id.get(),
-                            );
+                                channel_id,
+                                ready_for_input_stall_inflight_snapshot.as_ref(),
+                                "watcher_ready_for_input_stall",
+                            )
+                            .await;
                         }
                         Err(error) => {
                             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -3436,10 +3469,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 )
                 .await;
             }
-            crate::services::discord::inflight::clear_inflight_state(
+            finalize_pinned_watcher_exit(
+                &shared,
                 &watcher_provider,
-                channel_id.get(),
-            );
+                channel_id,
+                inflight_state.as_ref(),
+                "watcher_auth_error_exit",
+            )
+            .await;
             let failure_text = format!(
                 "authentication expired; re-authentication required: {}",
                 truncate_str(auth_detail, 300)
@@ -3604,10 +3641,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     .await;
                 }
             }
-            crate::services::discord::inflight::clear_inflight_state(
+            finalize_pinned_watcher_exit(
+                &shared,
                 &watcher_provider,
-                channel_id.get(),
-            );
+                channel_id,
+                inflight_state.as_ref(),
+                "watcher_provider_overload_exit",
+            )
+            .await;
 
             match decision {
                 ProviderOverloadDecision::Retry {
@@ -6671,9 +6712,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 &tmux_session_name,
                 current_offset,
             );
-            let same_session_snapshot_present = inflight_before_relay.as_ref().is_some_and(|s| {
-                s.tmux_session_name.as_deref().map(str::trim) == Some(tmux_session_name.trim())
-            });
             // #3016 (codex B1): SKIP the normal-completion finalize ENTIRELY in the
             // stale-newer-turn case — do NOT call it with a channel-only id 0.
             // A 0-id submit is unsafe, not a no-op: `normal_completion = true`
@@ -6693,9 +6731,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // phase-5b2: the legacy `mailbox_finalize_owed` flag is removed — the
             // newer turn finalizes via its own real-id path, and the stale-skip is
             // already kickoff-suppressed by `has_active_turn` (the newer live turn).
-            let watcher_drove_finalize = if !completion_is_stale_for_newer_turn
-                && (restored_finalizer_turn_id != 0 || !same_session_snapshot_present)
-            {
+            let watcher_drove_finalize = if should_submit_restored_watcher_finalize(
+                completion_is_stale_for_newer_turn,
+                restored_finalizer_turn_id,
+            ) {
                 finish_restored_watcher_active_turn(
                     &shared,
                     &provider_kind,
@@ -6799,6 +6838,16 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             "  [{ts}] 👁 watcher: terminal turn finalized; stopping watcher for {} after tmux exit",
                             tmux_session_name
                         );
+                        finish_monitor_auto_turn_if_claimed(
+                            &shared,
+                            &watcher_provider,
+                            channel_id,
+                            &mut monitor_auto_turn_claimed,
+                            &mut monitor_auto_turn_finished,
+                            &mut monitor_auto_turn_synthetic_msg_id,
+                            &mut monitor_auto_turn_ledger_generation,
+                        )
+                        .await;
                         break 'watcher_loop;
                     }
                     WatcherStopDecision::Continue
@@ -6880,6 +6929,16 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     terminal_delivery_observed,
                     turn_delivered.load(Ordering::Acquire),
                 ),
+            )
+            .await;
+            finish_monitor_auto_turn_if_claimed(
+                &shared,
+                &watcher_provider,
+                channel_id,
+                &mut monitor_auto_turn_claimed,
+                &mut monitor_auto_turn_finished,
+                &mut monitor_auto_turn_synthetic_msg_id,
+                &mut monitor_auto_turn_ledger_generation,
             )
             .await;
             break 'watcher_loop;

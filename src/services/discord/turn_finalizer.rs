@@ -184,8 +184,9 @@ fn ledger_has_live_watcher_pending(
 ///
 /// - A real `user_msg_id` uses its exact key.
 /// - A channel-only id collapses onto the single non-terminal entry ONLY when
-///   no terminal entry exists for the same channel/generation (ambiguous
-///   otherwise → route to the literal orphan key, a no-op for the caller).
+///   exactly one live entry exists and no terminal entry exists for the same
+///   channel/generation (ambiguous otherwise → route to the literal orphan key,
+///   a no-op for the caller).
 pub(in crate::services::discord) fn resolve_channel_only<'a>(
     key: TurnKey,
     candidates: impl Iterator<Item = (&'a LedgerKey, bool)> + Clone,
@@ -199,13 +200,16 @@ pub(in crate::services::discord) fn resolve_channel_only<'a>(
     if channel_has_terminal {
         return key.exact_key();
     }
-    candidates
-        .into_iter()
-        .find(|(lk, is_terminal)| {
-            lk.channel_id == key.channel_id && lk.generation == key.generation && !*is_terminal
-        })
-        .map(|(lk, _)| *lk)
-        .unwrap_or_else(|| key.exact_key())
+    let mut live_matches = candidates.into_iter().filter(|(lk, is_terminal)| {
+        lk.channel_id == key.channel_id && lk.generation == key.generation && !*is_terminal
+    });
+    let Some((only_live, _)) = live_matches.next() else {
+        return key.exact_key();
+    };
+    if live_matches.next().is_some() {
+        return key.exact_key();
+    }
+    *only_live
 }
 
 /// Every actor submits ONE of these terminal events. The finalizer's ledger
@@ -3250,6 +3254,33 @@ mod tests {
             zero_key.exact_key(),
             "with a terminal entry present, id-0 routes to the orphan no-op key, \
              not the newer live entry"
+        );
+    }
+
+    #[test]
+    fn channel_only_resolve_refuses_multi_live_collapse() {
+        let ch = ChannelId::new(4243);
+        let generation = 0u64;
+        let live_a = LedgerKey {
+            channel_id: ch,
+            generation,
+            user_msg_id: 1001,
+        };
+        let live_b = LedgerKey {
+            channel_id: ch,
+            generation,
+            user_msg_id: 1002,
+        };
+        let zero_key = TurnKey::new(ch, 0, generation);
+        let candidates = [
+            (&live_a, /* is_terminal */ false),
+            (&live_b, /* is_terminal */ false),
+        ];
+
+        assert_eq!(
+            resolve_channel_only(zero_key, candidates.iter().copied()),
+            zero_key.exact_key(),
+            "an id-0 terminal with multiple live candidates must not pick a HashMap-arbitrary entry"
         );
     }
 

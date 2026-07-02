@@ -225,6 +225,13 @@ pub(super) fn pinned_finalizer_turn_id(
         .unwrap_or(0)
 }
 
+pub(super) fn should_submit_restored_watcher_finalize(
+    completion_is_stale_for_newer_turn: bool,
+    restored_finalizer_turn_id: u64,
+) -> bool {
+    !completion_is_stale_for_newer_turn && restored_finalizer_turn_id != 0
+}
+
 /// #3016 (codex R3): the watcher's `terminal_output_committed &&
 /// !lifecycle_stage_paused` block runs MORE destructive side-effects than the
 /// finalize on a LATE re-read `inflight_state` (loaded AFTER the relay, NOT

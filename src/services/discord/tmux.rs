@@ -1257,6 +1257,27 @@ mod terminal_finalize_liveness_tests {
 mod monitor_auto_turn_signal_tests {
     use super::*;
 
+    struct EnvGuard {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set_root(path: &std::path::Path) -> Self {
+            let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
+            unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", path) };
+            Self { previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.previous.as_ref() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
+
     #[tokio::test]
     async fn monitor_auto_turn_wait_wakes_on_turn_finished_signal() {
         let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
@@ -1274,6 +1295,67 @@ mod monitor_auto_turn_signal_tests {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         signal.mark_done();
         waiter.await.expect("waiter task should not panic");
+    }
+
+    #[tokio::test]
+    async fn finish_monitor_auto_turn_if_claimed_releases_mailbox_token() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = EnvGuard::set_root(root.path());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_019_240);
+        let synthetic_message_id = MessageId::new(4_019_340);
+        let ledger_generation = next_monitor_auto_turn_ledger_generation();
+        let token = Arc::new(crate::services::provider::CancelToken::new());
+        assert!(
+            crate::services::discord::mailbox_try_start_turn_kinded(
+                &shared,
+                channel_id,
+                token.clone(),
+                UserId::new(1),
+                synthetic_message_id,
+                crate::services::turn_orchestrator::ActiveTurnKind::MonitorAutoTurn,
+            )
+            .await
+        );
+        crate::services::discord::increment_global_active(&shared, "test_monitor_auto_turn");
+        shared.turn_finalizer.register_start(
+            crate::services::discord::turn_finalizer::TurnKey::new(
+                channel_id,
+                synthetic_message_id.get(),
+                ledger_generation,
+            ),
+            provider.clone(),
+            crate::services::discord::inflight::RelayOwnerKind::Watcher,
+            &shared,
+        );
+
+        let mut claimed = true;
+        let mut finished = false;
+        let mut claimed_message_id = Some(synthetic_message_id);
+        let mut claimed_generation = Some(ledger_generation);
+        finish_monitor_auto_turn_if_claimed(
+            &shared,
+            &provider,
+            channel_id,
+            &mut claimed,
+            &mut finished,
+            &mut claimed_message_id,
+            &mut claimed_generation,
+        )
+        .await;
+
+        assert!(!claimed);
+        assert!(finished);
+        assert_eq!(claimed_message_id, None);
+        assert_eq!(claimed_generation, None);
+        assert!(token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+        let snapshot = shared.mailbox(channel_id).snapshot().await;
+        assert_eq!(snapshot.active_user_message_id, None);
     }
 }
 
