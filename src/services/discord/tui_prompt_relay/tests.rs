@@ -1078,6 +1078,14 @@ fn classify_injected_prompt_slash_command_control() {
         classify_injected_prompt("<local-command-stdout>Compacted (12.3k tokens)"),
         InjectedPromptClass::SlashCommandControl,
     );
+    // /model command stdout line: local command output is a machine echo, not
+    // a human TUI-direct prompt that should mint a synthetic turn.
+    assert_eq!(
+        classify_injected_prompt(
+            "<local-command-stdout>Set model to Fable 5</local-command-stdout>"
+        ),
+        InjectedPromptClass::SlashCommandControl,
+    );
     let command_name_first = compact_command_name_first_stub();
     assert_eq!(command_name_first.chars().count(), 134);
     assert_eq!(
@@ -1287,6 +1295,75 @@ fn local_only_slash_prompt_rejects_non_command_text() {
     assert!(is_local_only_slash_command_prompt(model_wrapper));
 }
 
+// #4033: `/model` writes two adjacent transcript user entries. The
+// `<command-name>` half was already local-only (#3500); the stdout half must be
+// local-only too, or the relay mints a fake synthetic inflight and queues the
+// next real user message behind it.
+#[test]
+fn local_only_slash_prompt_skips_model_two_half_transcript() {
+    let command_name_half =
+        "<command-message>x</command-message>\n<command-name>/model</command-name>";
+    let stdout_half = "<local-command-stdout>Set model to Fable 5</local-command-stdout>";
+
+    for (half, expected_kind) in [
+        (command_name_half, "/model"),
+        (stdout_half, "local-command-stdout"),
+    ] {
+        assert_eq!(
+            classify_injected_prompt(half),
+            InjectedPromptClass::SlashCommandControl,
+            "both /model transcript halves must be machine slash-control echoes",
+        );
+        assert_eq!(
+            slash_command_control_kind(half),
+            expected_kind,
+            "each /model transcript half keeps the production dedupe kind it really carries",
+        );
+        assert!(
+            is_local_only_slash_command_prompt(half),
+            "both /model transcript halves must skip the turn lifecycle",
+        );
+        assert!(
+            !classify_injected_prompt(half).is_human_active_turn(),
+            "neither /model transcript half is human TUI-direct input",
+        );
+    }
+}
+
+#[test]
+fn relay_prompt_decision_skips_model_two_half_transcript() {
+    let command_name_half =
+        "<command-message>x</command-message>\n<command-name>/model</command-name>";
+    let stdout_half = "<local-command-stdout>Set model to Fable 5</local-command-stdout>";
+
+    let command_decision = relay_observed_prompt_injected_prompt_decision(command_name_half);
+    assert_eq!(
+        command_decision.injected_class,
+        InjectedPromptClass::SlashCommandControl,
+    );
+    assert_eq!(
+        command_decision.slash_command_kind.as_deref(),
+        Some("/model")
+    );
+    assert!(command_decision.local_only_slash);
+
+    let stdout_decision = relay_observed_prompt_injected_prompt_decision(stdout_half);
+    assert_eq!(
+        stdout_decision.injected_class,
+        InjectedPromptClass::SlashCommandControl,
+    );
+    assert_eq!(
+        stdout_decision.slash_command_kind.as_deref(),
+        Some("local-command-stdout"),
+    );
+    assert!(stdout_decision.local_only_slash);
+
+    assert_ne!(
+        command_decision.slash_command_kind, stdout_decision.slash_command_kind,
+        "the two /model transcript halves intentionally carry different dedupe keys; lifecycle skip must not rely on dedupe",
+    );
+}
+
 // #3178: the machine slash-command control trigger now resolves to a stable
 // command KIND that BOTH the raw `/loop` echo and the expanded `<command-*>`
 // wrapper for the SAME command map to (so the #3153 double-post collapses to
@@ -1309,19 +1386,23 @@ fn slash_command_control_kind_is_stable_across_double_post_halves() {
         slash_command_control_kind("<local-command-stdout>Compacted (12.3k tokens)"),
         "/compact",
     );
+    assert_eq!(
+        slash_command_control_kind(
+            "<local-command-stdout>Compacted 12 messages</local-command-stdout>"
+        ),
+        "/compact",
+    );
 
     // A round-tripped SSH-direct envelope still resolves to the same kind.
     let wrapped_loop = "터미널에 직접 주입된 입력 (tmux : `s`):\n```text\n/loop 5m /foo\n```";
     assert_eq!(slash_command_control_kind(wrapped_loop), "/loop");
 }
 
-// The note always names the command KIND + tmux session and marks the
-// injection non-active. `/loop` ALSO carries its directive body (operator
-// wants the recurring loop content visible). Every OTHER machine command
-// (`/compact`, the `Compacted …` stdout) stays kind-only and never leaks its
-// payload.
+// The note always names the command KIND + tmux session and marks the injection
+// non-active. `/loop` carries its directive body, generic stdout carries a short
+// output preview, and `/compact`/`Compacted …` stdout stays kind-only.
 #[test]
-fn slash_command_control_note_loop_shows_body_others_kind_only() {
+fn slash_command_control_note_loop_and_generic_stdout_show_body() {
     let loop_note =
         format_slash_command_control_note("sess-a", "/loop", "/loop 290s relay check directive");
     assert!(
@@ -1383,6 +1464,189 @@ fn slash_command_control_note_loop_shows_body_others_kind_only() {
         !compact_note.contains("Compacted"),
         "note must NOT leak the compact stdout body",
     );
+
+    let stdout_note = format_slash_command_control_note(
+        "sess-a",
+        "local-command-stdout",
+        "<local-command-stdout>Set model to Fable 5</local-command-stdout>",
+    );
+    assert!(stdout_note.contains("머신 슬래시 명령"));
+    assert!(
+        stdout_note.contains("Set model to Fable 5"),
+        "generic stdout notes must include a short body preview",
+    );
+    assert!(stdout_note.contains("```text"));
+}
+
+// #4033 regression guard: broad `<local-command-stdout>...</local-command-stdout>`
+// detection must not disturb the legacy /compact stdout path. Compacted stdout
+// still resolves to `/compact`, remains local-only, and keeps the body hidden.
+#[test]
+fn local_command_stdout_compacted_path_stays_kind_only() {
+    let compact_stdout = "<local-command-stdout>Compacted 12 messages</local-command-stdout>";
+    assert_eq!(
+        classify_injected_prompt(compact_stdout),
+        InjectedPromptClass::SlashCommandControl,
+    );
+    assert_eq!(slash_command_control_kind(compact_stdout), "/compact");
+    assert!(is_local_only_slash_command_prompt(compact_stdout));
+
+    let compact_note = format_slash_command_control_note("sess-a", "/compact", compact_stdout);
+    assert!(compact_note.contains("/compact"));
+    assert!(
+        !compact_note.contains("Compacted"),
+        "legacy /compact stdout note must stay kind-only",
+    );
+}
+
+#[test]
+fn wrapped_local_command_stdout_is_local_only_slash_control() {
+    let wrapped_stdout = "터미널에 직접 주입된 입력 (tmux : `s`):\n```text\n\
+        <local-command-stdout>Set model to Fable 5</local-command-stdout>\n```";
+
+    assert_eq!(
+        classify_injected_prompt(wrapped_stdout),
+        InjectedPromptClass::SlashCommandControl,
+        "a fence-wrapped stdout echo must classify as machine slash control",
+    );
+    assert_eq!(
+        slash_command_control_kind(wrapped_stdout),
+        "local-command-stdout",
+    );
+    assert!(is_local_only_slash_command_prompt(wrapped_stdout));
+
+    let decision = relay_observed_prompt_injected_prompt_decision(wrapped_stdout);
+    assert_eq!(
+        decision.injected_class,
+        InjectedPromptClass::SlashCommandControl,
+    );
+    assert_eq!(
+        decision.slash_command_kind.as_deref(),
+        Some("local-command-stdout"),
+    );
+    assert!(
+        decision.local_only_slash,
+        "local-only stdout returns before anchor/reaction/synthetic ownership",
+    );
+    assert!(!decision.injected_class.is_human_active_turn());
+}
+
+#[test]
+fn wrapped_compacted_stdout_keeps_prefix_only_kind() {
+    let wrapped_compacted = "터미널에 직접 주입된 입력 (tmux : `s`):\n```text\n\
+        <local-command-stdout>Compacted 12 messages\n```";
+
+    assert_eq!(
+        classify_injected_prompt(wrapped_compacted),
+        InjectedPromptClass::SlashCommandControl,
+        "open-fenced Compacted stdout must keep the legacy prefix-only match",
+    );
+    assert_eq!(slash_command_control_kind(wrapped_compacted), "/compact");
+    assert!(is_local_only_slash_command_prompt(wrapped_compacted));
+
+    let decision = relay_observed_prompt_injected_prompt_decision(wrapped_compacted);
+    assert_eq!(decision.slash_command_kind.as_deref(), Some("/compact"));
+    assert!(decision.local_only_slash);
+}
+
+#[test]
+fn wrapped_local_command_stdout_with_appended_user_text_stays_human() {
+    let wrapped_with_user_text = "터미널에 직접 주입된 입력 (tmux : `s`):\n```text\n\
+        <local-command-stdout>Set model to Fable 5</local-command-stdout>\n```\n\
+        이 출력 설명해줘";
+
+    assert_eq!(
+        classify_injected_prompt(wrapped_with_user_text),
+        InjectedPromptClass::HumanTuiDirect,
+        "human text appended after the stdout echo must not be over-suppressed",
+    );
+    assert!(!is_local_only_slash_command_prompt(wrapped_with_user_text));
+
+    let decision = relay_observed_prompt_injected_prompt_decision(wrapped_with_user_text);
+    assert_eq!(decision.injected_class, InjectedPromptClass::HumanTuiDirect,);
+    assert_eq!(decision.slash_command_kind, None);
+    assert!(!decision.local_only_slash);
+}
+
+#[test]
+fn local_command_stdout_negative_cases_stay_human_direct() {
+    let trailing_text = "<local-command-stdout>x</local-command-stdout>\n이 출력 설명해줘";
+    let open_tag_only = "<local-command-stdout>Set model to Fable 5";
+    let mid_body_tag = "please explain this transcript:\n\
+                        <local-command-stdout>x</local-command-stdout>";
+
+    for (prompt, label) in [
+        (
+            trailing_text,
+            "trailing user text after the closing tag is a human prompt",
+        ),
+        (
+            open_tag_only,
+            "open-only non-Compacted stdout is incomplete scanner input",
+        ),
+        (mid_body_tag, "mid-body stdout tags are quoted human text"),
+    ] {
+        assert_eq!(
+            classify_injected_prompt(prompt),
+            InjectedPromptClass::HumanTuiDirect,
+            "{label}",
+        );
+        assert!(
+            !is_local_only_slash_command_prompt(prompt),
+            "{label}: local-only slash detection must stay start-anchored",
+        );
+        let decision = relay_observed_prompt_injected_prompt_decision(prompt);
+        assert_eq!(
+            decision.injected_class,
+            InjectedPromptClass::HumanTuiDirect,
+            "{label}: relay decision must agree with the helper classifier",
+        );
+        assert_eq!(decision.slash_command_kind, None, "{label}");
+        assert!(!decision.local_only_slash, "{label}");
+    }
+
+    let rendered = format_ssh_direct_prompt_notification("claude", "sess-mid-body", mid_body_tag);
+    assert!(
+        rendered.contains("<local-command-stdout>x</local-command-stdout>"),
+        "a mid-body stdout tag should remain part of the human prompt preview",
+    );
+}
+
+#[test]
+fn local_command_stdout_body_command_name_does_not_hijack_kind() {
+    let stdout_with_embedded_command_name = "<local-command-stdout>Set model to Fable 5\n\
+                                            <command-name>/loop</command-name>\n\
+                                            </local-command-stdout>";
+
+    assert_eq!(
+        classify_injected_prompt(stdout_with_embedded_command_name),
+        InjectedPromptClass::SlashCommandControl,
+    );
+    assert_eq!(
+        slash_command_control_kind(stdout_with_embedded_command_name),
+        "local-command-stdout",
+        "a command-name string embedded inside stdout body must not hijack the kind",
+    );
+    assert!(is_local_only_slash_command_prompt(
+        stdout_with_embedded_command_name
+    ));
+
+    let decision =
+        relay_observed_prompt_injected_prompt_decision(stdout_with_embedded_command_name);
+    assert_eq!(
+        decision.slash_command_kind.as_deref(),
+        Some("local-command-stdout"),
+    );
+    assert!(decision.local_only_slash);
+
+    let note = format_slash_command_control_note(
+        "sess-a",
+        "local-command-stdout",
+        stdout_with_embedded_command_name,
+    );
+    assert!(note.contains("머신 슬래시 명령"));
+    assert!(!note.contains("자동 점검(/loop)"));
+    assert!(note.contains("Set model to Fable 5"));
 }
 
 // #3178 CORE (codex fix): the same trigger (a /loop double-post: raw echo +
