@@ -326,6 +326,21 @@ pub(super) fn format_slash_command_control_note(
     kind: &str,
     raw_prompt: &str,
 ) -> String {
+    // #4032: clamp at the source like the SSH-direct formatter — this note is
+    // the third producer feeding the active-turn `say()` and the session name
+    // segment is otherwise unbounded.
+    clamp_discord_message_content(&format_slash_command_control_note_unclamped(
+        tmux_session_name,
+        kind,
+        raw_prompt,
+    ))
+}
+
+fn format_slash_command_control_note_unclamped(
+    tmux_session_name: &str,
+    kind: &str,
+    raw_prompt: &str,
+) -> String {
     let label = match kind {
         "/loop" => "🔁 자동 점검(/loop)",
         "/compact" => "🧹 컨텍스트 정리(/compact)",
