@@ -15,7 +15,12 @@
 //! the output file has been quiescent for the conservative stale window and the
 //! live pane itself reports ready for input; shorter freezes or busy panes are
 //! intentionally residual. Committed rows coupled to a mismatched `rebind_origin`
-//! are not independently healed here. Do not broaden those paths inside the
+//! are not independently healed here. The manual stale-mailbox repair route
+//! additionally requires `unread_bytes == 0` (parity with ReattachWatcher): a
+//! dead relay that leaves capture bytes permanently ahead of the relay offset
+//! keeps that manual path blocked even when the pane is ready — resolving such
+//! rows falls to the destructive cancel gate / pending-start demote instead.
+//! Do not broaden those paths inside the
 //! #4030 watcher-cancel fix; they need separate design/review.
 
 use std::path::Path;
