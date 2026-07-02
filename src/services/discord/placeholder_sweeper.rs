@@ -399,6 +399,7 @@ async fn run_placeholder_sweep_pass(
             // after a TimedOut gate. MUST run before the age-based orphan reclaim
             // below — a committed finalize registers the #3607 terminal anchor the
             // reclaim then skips (DEFECT 3). Self-guards via a fresh same-turn re-read.
+            #[cfg(unix)]
             super::tmux::reconcile_timed_out_tui_status_panel(http, shared, provider, &state).await;
             sweep_orphan_status_panel(
                 http,
