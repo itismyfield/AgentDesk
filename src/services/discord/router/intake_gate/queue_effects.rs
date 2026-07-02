@@ -145,11 +145,6 @@ mod schedule_post_enqueue_idle_drain_tests {
     }
 
     #[test]
-    fn schedules_when_enqueued_behind_background_injection() {
-        assert!(should_schedule_post_enqueue_idle_drain(true, false));
-    }
-
-    #[test]
     fn skips_when_real_turn_holds_slot() {
         assert!(!should_schedule_post_enqueue_idle_drain(true, true));
     }

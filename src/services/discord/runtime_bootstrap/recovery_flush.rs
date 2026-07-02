@@ -53,6 +53,8 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
             // persisted queue item look "already known" and incorrectly drop it.
             let (restored_queues, restored_overrides) =
                 load_pending_queues(&provider_for_restore, &shared_for_tmux2.token_hash);
+            let restored_dispatch_markers =
+                load_pending_dispatch_markers(&provider_for_restore, &shared_for_tmux2.token_hash);
             let allowed_bot_ids_for_restore: Vec<u64> = {
                 let settings = shared_for_tmux2.settings.read().await;
                 settings.allowed_bot_ids.clone()
@@ -72,6 +74,21 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
                     .dispatch
                     .role_overrides
                     .insert(*thread_channel_id, *alt_channel_id);
+            }
+            for marker in &restored_dispatch_markers {
+                let Some(alt_channel_id) = marker.restored_override else {
+                    continue;
+                };
+                if !matches!(
+                    resolve_runtime_channel_binding_status(&http_for_tmux, marker.channel_id).await,
+                    RuntimeChannelBindingStatus::Owned
+                ) {
+                    continue;
+                }
+                shared_for_tmux2
+                    .dispatch
+                    .role_overrides
+                    .insert(marker.channel_id, alt_channel_id);
             }
             if !restored_overrides.is_empty() {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -146,6 +163,59 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
                     "  [{ts}] 📋 FLUSH: restored {added} pending queue item(s) from disk (skipped {skipped}: unowned={skipped_unowned}, sender={skipped_sender}, duplicate={skipped_duplicate}, persist_error={skipped_persist_error})"
+                );
+            }
+            if !restored_dispatch_markers.is_empty() {
+                let mut added = 0usize;
+                let mut skipped_unowned = 0usize;
+                let mut skipped_sender = 0usize;
+                let mut skipped_duplicate = 0usize;
+                let mut skipped_persist_error = 0usize;
+                for marker in restored_dispatch_markers {
+                    if !matches!(
+                        resolve_runtime_channel_binding_status(&http_for_tmux, marker.channel_id)
+                            .await,
+                        RuntimeChannelBindingStatus::Owned
+                    ) {
+                        skipped_unowned += 1;
+                        continue;
+                    }
+                    if !super::is_allowed_turn_sender(
+                        &allowed_bot_ids_for_restore,
+                        announce_bot_id_for_restore,
+                        marker.intervention.author_id.get(),
+                        marker.intervention.author_is_bot,
+                        &marker.intervention.text,
+                    ) {
+                        skipped_sender += 1;
+                        continue;
+                    }
+                    let result = mailbox_merge_restored_dispatch_marker(
+                        &shared_for_tmux2,
+                        &provider_for_restore,
+                        marker.channel_id,
+                        marker.intervention,
+                        marker.restored_override,
+                    )
+                    .await;
+                    if let Some(error) = result.persistence_error {
+                        skipped_persist_error += 1;
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        tracing::warn!(
+                            "  [{ts}] 📋 FLUSH: persist failed merging restored dispatch marker for channel {}: {error}",
+                            marker.channel_id
+                        );
+                    } else if result.absorbed == 0 {
+                        skipped_duplicate += 1;
+                    } else {
+                        added += result.absorbed;
+                    }
+                }
+                let skipped =
+                    skipped_unowned + skipped_sender + skipped_duplicate + skipped_persist_error;
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] 📋 FLUSH: restored {added} pending dispatch marker item(s) from disk (skipped {skipped}: unowned={skipped_unowned}, sender={skipped_sender}, duplicate_or_active={skipped_duplicate}, persist_error={skipped_persist_error})"
                 );
             }
 

@@ -633,10 +633,13 @@ async fn apply_runtime_hard_stop_cleanup(
     }
 
     discord::clear_watchdog_deadline_override(channel_id.get()).await;
-    shared
-        .dispatch
-        .thread_parents
-        .retain(|_, thread| *thread != channel_id);
+    let thread_parent_kickoffs =
+        discord::turn_finalizer::cleanup::collect_and_clear_thread_parents(shared, channel_id);
+    discord::turn_finalizer::cleanup::kickoff_thread_parents_after_finalize(
+        shared,
+        provider,
+        thread_parent_kickoffs,
+    );
     shared.restart.recovering_channels.remove(&channel_id);
     shared.turn_start_times.remove(&channel_id);
 
@@ -672,16 +675,20 @@ async fn apply_runtime_hard_stop_cleanup(
 
 async fn apply_runtime_hard_stop_finalizer_cleanup_pre_release(
     shared: &Arc<SharedData>,
+    provider: &ProviderKind,
     channel_id: ChannelId,
     has_pending: bool,
     pinned_tmux_session_name: Option<&str>,
     stop_watcher: bool,
 ) -> bool {
     discord::clear_watchdog_deadline_override(channel_id.get()).await;
-    shared
-        .dispatch
-        .thread_parents
-        .retain(|_, thread| *thread != channel_id);
+    let thread_parent_kickoffs =
+        discord::turn_finalizer::cleanup::collect_and_clear_thread_parents(shared, channel_id);
+    discord::turn_finalizer::cleanup::kickoff_thread_parents_after_finalize(
+        shared,
+        provider,
+        thread_parent_kickoffs,
+    );
     shared.restart.recovering_channels.remove(&channel_id);
     shared.turn_start_times.remove(&channel_id);
 
@@ -740,6 +747,7 @@ fn stop_hard_stop_cleanup_watcher_if_current(
 
 async fn cleanup_then_submit_explicit_background_watchdog_cancel<Submit, SubmitFuture>(
     shared: &Arc<SharedData>,
+    provider: &ProviderKind,
     channel_id: ChannelId,
     revalidated: &ExplicitBackgroundWatchdogClear,
     pinned_tmux_session_name: Option<&str>,
@@ -761,6 +769,7 @@ where
         .is_empty();
     let _runtime_session_cleared = apply_runtime_hard_stop_finalizer_cleanup_pre_release(
         shared,
+        provider,
         channel_id,
         pre_release_has_pending,
         pinned_tmux_session_name,
@@ -1599,6 +1608,7 @@ pub(crate) async fn run_stall_watchdog_pass(
             let provider_for_submit = provider.clone();
             let has_pending = cleanup_then_submit_explicit_background_watchdog_cancel(
                 &shared,
+                provider,
                 channel_id,
                 &revalidated,
                 snapshot.tmux_session.as_deref(),
@@ -1907,10 +1917,13 @@ pub(crate) async fn run_stall_watchdog_pass(
             now_unix_secs,
         )
         .await;
-        shared
-            .dispatch
-            .thread_parents
-            .retain(|_, thread_id| *thread_id != channel_id);
+        let thread_parent_kickoffs =
+            discord::turn_finalizer::cleanup::collect_and_clear_thread_parents(&shared, channel_id);
+        discord::turn_finalizer::cleanup::kickoff_thread_parents_after_finalize(
+            &shared,
+            provider,
+            thread_parent_kickoffs,
+        );
         if let Some(user_msg_id) = pending_hourglass_user_msg_id
             && let Some(http) =
                 owning_runtime_http_for_channel(registry, provider, channel_id).await
@@ -3802,12 +3815,37 @@ mod stall_watchdog_auto_heal_tests {
     use super::super::HealthRegistry;
     use crate::services::provider::{CancelToken, ProviderKind};
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+    use std::ffi::OsString;
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
     use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64};
 
+    struct EnvVarReset {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarReset {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarReset {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
     #[tokio::test]
     async fn stall_watchdog_cleanup_releases_residual_orphan_pending_token() {
+        let tempdir = tempfile::tempdir().expect("runtime root tempdir");
+        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
         let provider = ProviderKind::Codex;
         let registry = HealthRegistry::new();
         let shared = super::super::super::make_shared_data_for_tests();
@@ -3874,6 +3912,7 @@ mod explicit_background_watchdog_cleanup_tests {
         stop_hard_stop_cleanup_watcher_if_current,
     };
     use crate::services::discord::inflight::GuardedClearOutcome;
+    use crate::services::provider::ProviderKind;
     use poise::serenity_prelude::ChannelId;
     use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
@@ -3918,6 +3957,7 @@ mod explicit_background_watchdog_cleanup_tests {
 
         let has_pending = cleanup_then_submit_explicit_background_watchdog_cancel(
             &shared,
+            &ProviderKind::Codex,
             channel,
             &revalidated,
             Some("AgentDesk-codex-old-explicit-background"),

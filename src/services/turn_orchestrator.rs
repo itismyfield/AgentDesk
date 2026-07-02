@@ -14,18 +14,18 @@ use crate::services::provider::{CancelToken, ProviderKind};
 mod pending_queue_persistence;
 pub(crate) mod registry_purge;
 pub(crate) use pending_queue_persistence::{
-    PendingQueueItem, cleanup_stale_pending_queue_tmp_files_all_tokens, load_pending_queues,
+    PendingQueueItem, cleanup_stale_pending_queue_tmp_files_all_tokens,
+    load_pending_dispatch_markers, load_pending_queues,
     remove_channel_pending_queue_files_all_tokens, save_channel_queue,
     warn_legacy_pending_queue_files,
 };
 #[cfg(test)]
 use pending_queue_persistence::{
     cleanup_stale_pending_queue_tmp_files_in_dir, cleanup_stale_pending_queue_tmp_files_under_root,
-    load_channel_pending_queue,
 };
 use pending_queue_persistence::{
-    load_channel_pending_queue_with_marker_recovery, remove_channel_pending_dispatch_marker,
-    save_channel_pending_dispatch_marker,
+    load_channel_pending_dispatch_marker, load_channel_pending_queue,
+    remove_channel_pending_dispatch_marker, save_channel_pending_dispatch_marker,
 };
 
 pub(crate) const MAX_INTERVENTIONS_PER_CHANNEL: usize = 30;
@@ -1062,6 +1062,24 @@ impl ChannelMailboxHandle {
         .await
     }
 
+    pub(crate) async fn merge_restored_dispatch_marker(
+        &self,
+        marker: Intervention,
+        restored_override: Option<ChannelId>,
+        persistence: QueuePersistenceContext,
+    ) -> HydratePendingQueueResult {
+        self.request(
+            |reply| ChannelMailboxMsg::MergeRestoredDispatchMarker {
+                marker,
+                restored_override,
+                persistence,
+                reply,
+            },
+            HydratePendingQueueResult::default(),
+        )
+        .await
+    }
+
     pub(crate) async fn restart_drain(
         &self,
         persistence: QueuePersistenceContext,
@@ -1594,6 +1612,12 @@ enum ChannelMailboxMsg {
         persistence: QueuePersistenceContext,
         reply: oneshot::Sender<HydratePendingQueueResult>,
     },
+    MergeRestoredDispatchMarker {
+        marker: Intervention,
+        restored_override: Option<ChannelId>,
+        persistence: QueuePersistenceContext,
+        reply: oneshot::Sender<HydratePendingQueueResult>,
+    },
     RestartDrain {
         persistence: QueuePersistenceContext,
         reply: oneshot::Sender<RestartDrainResult>,
@@ -1742,19 +1766,11 @@ fn persist_queue_or_restore(
     }
 }
 
-fn delete_pending_dispatch_marker_for_state(
-    state: &ChannelMailboxState,
+fn delete_pending_dispatch_marker_with_persistence(
+    persistence: &QueuePersistenceContext,
     channel_id: ChannelId,
     operation: &str,
 ) {
-    let Some(persistence) = state.last_persistence.as_ref() else {
-        tracing::warn!(
-            operation,
-            channel_id = channel_id.get(),
-            "pending dispatch marker could not be cleared because mailbox has no persistence context"
-        );
-        return;
-    };
     if let Err(error) = remove_channel_pending_dispatch_marker(
         &persistence.provider,
         &persistence.token_hash,
@@ -1768,6 +1784,33 @@ fn delete_pending_dispatch_marker_for_state(
             error = %error,
             "failed to remove pending dispatch marker"
         );
+    }
+}
+
+fn queued_intervention_contains_message_id(queue: &[Intervention], message_id: MessageId) -> bool {
+    queue
+        .iter()
+        .any(|item| intervention_dedup_ids(item).contains(&message_id))
+}
+
+fn consume_pending_dispatch_marker_if_matches(
+    state: &ChannelMailboxState,
+    channel_id: ChannelId,
+    user_message_id: MessageId,
+    operation: &str,
+) {
+    let Some(persistence) = state.last_persistence.as_ref() else {
+        return;
+    };
+    let Some((marker, _)) = load_channel_pending_dispatch_marker(
+        &persistence.provider,
+        &persistence.token_hash,
+        channel_id,
+    ) else {
+        return;
+    };
+    if marker.message_id == user_message_id {
+        delete_pending_dispatch_marker_with_persistence(persistence, channel_id, operation);
     }
 }
 
@@ -1844,22 +1887,20 @@ fn hydrate_pending_queue_into_state(
     }
 }
 
-fn hydrate_pending_queue_from_disk_if_present(
+fn merge_pending_dispatch_marker_into_state(
     state: &mut ChannelMailboxState,
     channel_id: ChannelId,
-    persistence: &QueuePersistenceContext,
+    marker: Intervention,
+    persistence: QueuePersistenceContext,
+    restored_override: Option<ChannelId>,
+    operation: &'static str,
 ) -> HydratePendingQueueResult {
-    // Boot/recovery loads recover the durable pending-dispatch marker into the
-    // queue. A live actor that already owns the in-memory reservation must not
-    // re-import its own marker during actor-local disk hydrate (#1683).
-    let recover_dispatch_marker = state.pending_user_dispatch.is_none();
-    let (disk_items, restored_override) = load_channel_pending_queue_with_marker_recovery(
-        &persistence.provider,
-        &persistence.token_hash,
-        channel_id,
-        recover_dispatch_marker,
-    );
-    if disk_items.is_empty() {
+    state.last_persistence = Some(persistence.clone());
+    let marker_id = marker.message_id;
+    if queued_intervention_contains_message_id(&state.intervention_queue, marker_id)
+        || state.active_user_message_id == Some(marker_id)
+    {
+        delete_pending_dispatch_marker_with_persistence(&persistence, channel_id, operation);
         return HydratePendingQueueResult {
             absorbed: 0,
             queue_len_after: state.intervention_queue.len(),
@@ -1868,18 +1909,152 @@ fn hydrate_pending_queue_from_disk_if_present(
         };
     }
 
+    let previous_queue = state.intervention_queue.clone();
+    state.intervention_queue.insert(0, marker);
+    if let Err(error) =
+        persist_queue_or_restore(state, channel_id, &persistence, previous_queue, operation)
+    {
+        return HydratePendingQueueResult {
+            absorbed: 0,
+            queue_len_after: state.intervention_queue.len(),
+            restored_override,
+            persistence_error: Some(error),
+        };
+    }
+    delete_pending_dispatch_marker_with_persistence(&persistence, channel_id, operation);
+    HydratePendingQueueResult {
+        absorbed: 1,
+        queue_len_after: state.intervention_queue.len(),
+        restored_override,
+        persistence_error: None,
+    }
+}
+
+fn hydrate_pending_queue_from_disk_if_present(
+    state: &mut ChannelMailboxState,
+    channel_id: ChannelId,
+    persistence: &QueuePersistenceContext,
+) -> HydratePendingQueueResult {
+    let (disk_items, mut restored_override) =
+        load_channel_pending_queue(&persistence.provider, &persistence.token_hash, channel_id);
+
     let mut effective_persistence = persistence.clone();
     if effective_persistence.dispatch_role_override.is_none() {
         effective_persistence.dispatch_role_override =
             restored_override.map(|channel| channel.get());
     }
-    hydrate_pending_queue_into_state(
+    let mut result = if disk_items.is_empty() {
+        HydratePendingQueueResult {
+            absorbed: 0,
+            queue_len_after: state.intervention_queue.len(),
+            restored_override,
+            persistence_error: None,
+        }
+    } else {
+        hydrate_pending_queue_into_state(
+            state,
+            channel_id,
+            disk_items,
+            effective_persistence.clone(),
+            restored_override,
+        )
+    };
+    if result.persistence_error.is_some() || state.pending_user_dispatch.is_some() {
+        return result;
+    }
+    restored_override = result.restored_override;
+    let Some((marker, marker_override)) = load_channel_pending_dispatch_marker(
+        &persistence.provider,
+        &persistence.token_hash,
+        channel_id,
+    ) else {
+        return result;
+    };
+    if restored_override.is_none() {
+        restored_override = marker_override;
+    }
+    if effective_persistence.dispatch_role_override.is_none() {
+        effective_persistence.dispatch_role_override =
+            restored_override.map(|channel| channel.get());
+    }
+    let marker_result = merge_pending_dispatch_marker_into_state(
         state,
         channel_id,
-        disk_items,
+        marker,
         effective_persistence,
         restored_override,
-    )
+        "hydrate_pending_dispatch_marker",
+    );
+    result.absorbed += marker_result.absorbed;
+    result.queue_len_after = marker_result.queue_len_after;
+    result.restored_override = marker_result.restored_override;
+    result.persistence_error = marker_result.persistence_error;
+    result
+}
+
+fn reconcile_pending_dispatch_marker_before_take_next(
+    state: &mut ChannelMailboxState,
+    channel_id: ChannelId,
+    persistence: &QueuePersistenceContext,
+) -> Option<TakeNextSoftResult> {
+    if state.pending_user_dispatch.is_some() {
+        return Some(TakeNextSoftResult {
+            intervention: None,
+            has_more: state
+                .intervention_queue
+                .iter()
+                .any(|item| item.mode == InterventionMode::Soft),
+            queue_len_after: state.intervention_queue.len(),
+            queue_exit_events: Vec::new(),
+            persistence_error: None,
+        });
+    }
+
+    let Some((marker, marker_override)) = load_channel_pending_dispatch_marker(
+        &persistence.provider,
+        &persistence.token_hash,
+        channel_id,
+    ) else {
+        return None;
+    };
+    let marker_id = marker.message_id;
+    let stale_duplicate =
+        queued_intervention_contains_message_id(&state.intervention_queue, marker_id)
+            || state.active_user_message_id == Some(marker_id);
+    if stale_duplicate {
+        delete_pending_dispatch_marker_with_persistence(
+            persistence,
+            channel_id,
+            "take_next_soft_stale_marker",
+        );
+        return None;
+    }
+
+    let mut effective_persistence = persistence.clone();
+    if effective_persistence.dispatch_role_override.is_none() {
+        effective_persistence.dispatch_role_override = marker_override.map(|channel| channel.get());
+    }
+    let marker_result = merge_pending_dispatch_marker_into_state(
+        state,
+        channel_id,
+        marker,
+        effective_persistence,
+        marker_override,
+        "take_next_soft_restore_marker",
+    );
+    if let Some(error) = marker_result.persistence_error {
+        return Some(TakeNextSoftResult {
+            intervention: None,
+            has_more: state
+                .intervention_queue
+                .iter()
+                .any(|item| item.mode == InterventionMode::Soft),
+            queue_len_after: state.intervention_queue.len(),
+            queue_exit_events: Vec::new(),
+            persistence_error: Some(error),
+        });
+    }
+    None
 }
 
 fn finalize_turn_state(
@@ -2306,13 +2481,12 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         // slot satisfies any reserved dequeue→claim window: clear
                         // the reservation and reset the valve counter.
                         if turn_kind == ActiveTurnKind::UserOrAgent {
-                            if state.pending_user_dispatch.is_some() {
-                                delete_pending_dispatch_marker_for_state(
-                                    &state,
-                                    channel_id,
-                                    "try_start_turn",
-                                );
-                            }
+                            consume_pending_dispatch_marker_if_matches(
+                                &state,
+                                channel_id,
+                                user_message_id,
+                                "try_start_turn",
+                            );
                             state.pending_user_dispatch = None;
                             state.pending_user_dispatch_yield_count = 0;
                         }
@@ -2440,6 +2614,14 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                 }
                 ChannelMailboxMsg::TakeNextSoft { persistence, reply } => {
                     state.last_persistence = Some(persistence.clone());
+                    if let Some(result) = reconcile_pending_dispatch_marker_before_take_next(
+                        &mut state,
+                        channel_id,
+                        &persistence,
+                    ) {
+                        let _ = reply.send(result);
+                        continue;
+                    }
                     let previous_queue = state.intervention_queue.clone();
                     let next_result = dequeue_next_soft_intervention(&mut state.intervention_queue);
                     let queue_len_after = state.intervention_queue.len();
@@ -2487,20 +2669,9 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     ) {
                         // Persistence failed → `persist_queue_or_restore` rolled
                         // the dequeue back (head re-inserted); no dispatch happens,
-                        // so do NOT set the reservation.
-                        if let Err(marker_error) = remove_channel_pending_dispatch_marker(
-                            &persistence.provider,
-                            &persistence.token_hash,
-                            channel_id,
-                        ) {
-                            tracing::warn!(
-                                provider = persistence.provider.as_str(),
-                                token_hash = %persistence.token_hash,
-                                channel_id = channel_id.get(),
-                                error = %marker_error,
-                                "failed to remove pending dispatch marker after take_next_soft persistence failure"
-                            );
-                        }
+                        // so do NOT set the reservation. The marker remains the
+                        // durable backstop for this head until the queue-without-head
+                        // write succeeds.
                         TakeNextSoftResult {
                             intervention: None,
                             has_more: state
@@ -2557,9 +2728,10 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         }
                     } else {
                         if requeued_reserved {
-                            delete_pending_dispatch_marker_for_state(
+                            consume_pending_dispatch_marker_if_matches(
                                 &state,
                                 channel_id,
+                                requeued_id,
                                 "requeue_front",
                             );
                             state.pending_user_dispatch = None;
@@ -2604,11 +2776,20 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                 }
                 ChannelMailboxMsg::FinishTurn { persistence, reply } => {
                     state.last_persistence = Some(persistence.clone());
+                    let finished_user_message_id = state.active_user_message_id;
                     let _ = reply.send(finalize_turn_state(
                         &mut state,
                         channel_id,
                         Some(&persistence),
                     ));
+                    if let Some(user_message_id) = finished_user_message_id {
+                        consume_pending_dispatch_marker_if_matches(
+                            &state,
+                            channel_id,
+                            user_message_id,
+                            "finish_turn",
+                        );
+                    }
                     mark_turn_finished_signal_done(channel_id);
                 }
                 ChannelMailboxMsg::FinishTurnIfMatches {
@@ -2630,11 +2811,20 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         .is_some_and(|active| active == expected_user_message_id);
                     if matches {
                         state.last_persistence = Some(persistence.clone());
+                        let finished_user_message_id = state.active_user_message_id;
                         let _ = reply.send(finalize_turn_state(
                             &mut state,
                             channel_id,
                             Some(&persistence),
                         ));
+                        if let Some(user_message_id) = finished_user_message_id {
+                            consume_pending_dispatch_marker_if_matches(
+                                &state,
+                                channel_id,
+                                user_message_id,
+                                "finish_turn_if_matches",
+                            );
+                        }
                         mark_turn_finished_signal_done(channel_id);
                     } else {
                         // No-op: do not touch the active token. Surface the
@@ -2718,6 +2908,13 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             persistence_error: Some(error),
                         }
                     } else {
+                        state.pending_user_dispatch = None;
+                        state.pending_user_dispatch_yield_count = 0;
+                        delete_pending_dispatch_marker_with_persistence(
+                            &persistence,
+                            channel_id,
+                            "clear",
+                        );
                         ClearChannelResult {
                             removed_token,
                             queue_exit_events,
@@ -2764,19 +2961,24 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     state.last_persistence = Some(persistence.clone());
                     let previous_queue = state.intervention_queue.clone();
                     let drained = state.intervention_queue.drain(..).count();
-                    let drained = if persist_queue_or_restore(
+                    let purge_persisted = persist_queue_or_restore(
                         &mut state,
                         channel_id,
                         &persistence,
                         previous_queue,
                         "purge_queue",
                     )
-                    .is_err()
-                    {
-                        0
-                    } else {
-                        drained
-                    };
+                    .is_ok();
+                    let drained = if purge_persisted { drained } else { 0 };
+                    if purge_persisted {
+                        state.pending_user_dispatch = None;
+                        state.pending_user_dispatch_yield_count = 0;
+                        delete_pending_dispatch_marker_with_persistence(
+                            &persistence,
+                            channel_id,
+                            "purge_queue",
+                        );
+                    }
                     if cleared_active_anchor {
                         mark_turn_finished_signal_done(channel_id);
                     }
@@ -2834,6 +3036,27 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         items,
                         persistence,
                         None,
+                    );
+                    let _ = reply.send(result);
+                }
+                ChannelMailboxMsg::MergeRestoredDispatchMarker {
+                    marker,
+                    restored_override,
+                    persistence,
+                    reply,
+                } => {
+                    let mut effective_persistence = persistence.clone();
+                    if effective_persistence.dispatch_role_override.is_none() {
+                        effective_persistence.dispatch_role_override =
+                            restored_override.map(|channel| channel.get());
+                    }
+                    let result = merge_pending_dispatch_marker_into_state(
+                        &mut state,
+                        channel_id,
+                        marker,
+                        effective_persistence,
+                        restored_override,
+                        "merge_restored_dispatch_marker",
                     );
                     let _ = reply.send(result);
                 }
@@ -2946,6 +3169,19 @@ mod actor_hydrate_regression_tests {
             .join(format!("{}.json", channel_id.get()))
     }
 
+    fn marker_file_path(
+        root: &Path,
+        provider: &ProviderKind,
+        token_hash: &str,
+        channel_id: ChannelId,
+    ) -> PathBuf {
+        root.join("runtime")
+            .join("discord_pending_queue")
+            .join(provider.as_str())
+            .join(token_hash)
+            .join(format!("{}.dispatch", channel_id.get()))
+    }
+
     fn make_intervention(message_id: u64, text: &str, created_at: Instant) -> Intervention {
         Intervention {
             author_id: UserId::new(1),
@@ -3006,17 +3242,19 @@ mod actor_hydrate_regression_tests {
         let other_channel_id = ChannelId::new(2709);
         let first = queue_file_path(tmp.path(), &provider, "token-a", channel_id);
         let second = queue_file_path(tmp.path(), &provider, "token-b", channel_id);
+        let first_dispatch = marker_file_path(tmp.path(), &provider, "token-a", channel_id);
         let other = queue_file_path(tmp.path(), &provider, "token-a", other_channel_id);
-        for path in [&first, &second, &other] {
+        for path in [&first, &second, &first_dispatch, &other] {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, "[]").unwrap();
         }
 
         let removed = remove_channel_pending_queue_files_all_tokens(&provider, channel_id);
 
-        assert_eq!(removed, 2);
+        assert_eq!(removed, 3);
         assert!(!first.exists());
         assert!(!second.exists());
+        assert!(!first_dispatch.exists());
         assert!(other.exists());
     }
 
@@ -4629,162 +4867,502 @@ mod persistence_tests {
         }
     }
 
-    #[allow(clippy::await_holding_lock)]
-    #[tokio::test]
-    async fn take_next_soft_writes_pending_dispatch_marker_with_head() {
-        let _lock = lock_test_env();
-        let tmp = tempfile::tempdir().unwrap();
-        let _env_guard = EnvGuard::set_root(tmp.path());
-
-        let provider = ProviderKind::Claude;
-        let token_hash = "dispatch-marker-take";
-        let channel_id = ChannelId::new(4_024_210);
-        let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
-        let registry = ChannelMailboxRegistry::default();
-        let handle = registry.handle(channel_id);
-        let head = make_intervention(4_024_211, "head", None);
-        handle
-            .replace_queue(vec![head.clone()], persistence.clone())
-            .await;
-
-        let taken = handle.take_next_soft(persistence).await;
-
-        assert_eq!(
-            taken.intervention.as_ref().map(|item| item.message_id),
-            Some(head.message_id)
-        );
-        let marker_path = marker_file_path(tmp.path(), &provider, token_hash, channel_id);
-        let marker: PendingQueueItem =
-            serde_json::from_str(&std::fs::read_to_string(marker_path).unwrap()).unwrap();
-        assert_eq!(marker.message_id, head.message_id.get());
-        assert_eq!(marker.text, "head");
-    }
-
-    #[allow(clippy::await_holding_lock)]
-    #[tokio::test]
-    async fn requeue_front_restores_head_and_clears_pending_dispatch_marker() {
-        let _lock = lock_test_env();
-        let tmp = tempfile::tempdir().unwrap();
-        let _env_guard = EnvGuard::set_root(tmp.path());
-
-        let provider = ProviderKind::Claude;
-        let token_hash = "dispatch-marker-requeue";
-        let channel_id = ChannelId::new(4_024_220);
-        let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
-        let registry = ChannelMailboxRegistry::default();
-        let handle = registry.handle(channel_id);
-        let head = make_intervention(4_024_221, "head", None);
-        handle
-            .replace_queue(vec![head.clone()], persistence.clone())
-            .await;
-        let taken = handle.take_next_soft(persistence.clone()).await;
-        let intervention = taken.intervention.expect("head should be dequeued");
-        let marker_path = marker_file_path(tmp.path(), &provider, token_hash, channel_id);
-        assert!(marker_path.exists());
-
-        let requeue = handle.requeue_front(intervention, persistence).await;
-
-        assert!(requeue.persistence_error.is_none());
-        assert!(
-            !marker_path.exists(),
-            "successful requeue-front consumes the pending dispatch marker"
-        );
-        let saved = read_saved_items(tmp.path(), &provider, token_hash, channel_id);
-        assert_eq!(saved.len(), 1);
-        assert_eq!(saved[0].message_id, head.message_id.get());
+    fn run_async<F: std::future::Future>(fut: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(fut)
     }
 
     #[test]
-    fn boot_recovery_restores_marker_into_empty_queue_front() {
+    fn take_next_soft_writes_pending_dispatch_marker_with_head() {
         let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         let _env_guard = EnvGuard::set_root(tmp.path());
 
-        let provider = ProviderKind::Claude;
-        let token_hash = "dispatch-marker-boot-empty";
-        let channel_id = ChannelId::new(4_024_230);
-        let marker = make_intervention(4_024_231, "marker head", None);
-        save_channel_pending_dispatch_marker(&provider, token_hash, channel_id, &marker, None)
-            .unwrap();
+        run_async(async {
+            let provider = ProviderKind::Claude;
+            let token_hash = "dispatch-marker-take";
+            let channel_id = ChannelId::new(4_024_210);
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+            let registry = ChannelMailboxRegistry::default();
+            let handle = registry.handle(channel_id);
+            let head = make_intervention(4_024_211, "head", None);
+            handle
+                .replace_queue(vec![head.clone()], persistence.clone())
+                .await;
 
-        let (loaded, _) = load_channel_pending_queue(&provider, token_hash, channel_id);
+            let taken = handle.take_next_soft(persistence).await;
 
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].message_id, marker.message_id);
-        assert!(
-            !marker_file_path(tmp.path(), &provider, token_hash, channel_id).exists(),
-            "boot recovery deletes marker after queue persist succeeds"
-        );
-        let saved = read_saved_items(tmp.path(), &provider, token_hash, channel_id);
-        assert_eq!(saved[0].message_id, marker.message_id.get());
+            assert_eq!(
+                taken.intervention.as_ref().map(|item| item.message_id),
+                Some(head.message_id)
+            );
+            let marker_path = marker_file_path(tmp.path(), &provider, token_hash, channel_id);
+            let marker: PendingQueueItem =
+                serde_json::from_str(&std::fs::read_to_string(marker_path).unwrap()).unwrap();
+            assert_eq!(marker.message_id, head.message_id.get());
+            assert_eq!(marker.text, "head");
+        });
     }
 
     #[test]
-    fn boot_recovery_drops_marker_when_identity_already_queued() {
+    fn requeue_front_restores_head_and_clears_pending_dispatch_marker() {
         let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         let _env_guard = EnvGuard::set_root(tmp.path());
 
-        let provider = ProviderKind::Claude;
-        let token_hash = "dispatch-marker-boot-duplicate";
-        let channel_id = ChannelId::new(4_024_240);
-        let queued = make_intervention(4_024_241, "queued", None);
-        save_channel_queue(
-            &provider,
-            token_hash,
-            channel_id,
-            std::slice::from_ref(&queued),
-            None,
-        )
-        .unwrap();
-        save_channel_pending_dispatch_marker(&provider, token_hash, channel_id, &queued, None)
-            .unwrap();
+        run_async(async {
+            let provider = ProviderKind::Claude;
+            let token_hash = "dispatch-marker-requeue";
+            let channel_id = ChannelId::new(4_024_220);
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+            let registry = ChannelMailboxRegistry::default();
+            let handle = registry.handle(channel_id);
+            let head = make_intervention(4_024_221, "head", None);
+            handle
+                .replace_queue(vec![head.clone()], persistence.clone())
+                .await;
+            let taken = handle.take_next_soft(persistence.clone()).await;
+            let intervention = taken.intervention.expect("head should be dequeued");
+            let marker_path = marker_file_path(tmp.path(), &provider, token_hash, channel_id);
+            assert!(marker_path.exists());
 
-        let (loaded, _) = load_channel_pending_queue(&provider, token_hash, channel_id);
+            let requeue = handle.requeue_front(intervention, persistence).await;
 
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].message_id, queued.message_id);
-        assert!(
-            !marker_file_path(tmp.path(), &provider, token_hash, channel_id).exists(),
-            "duplicate marker must be dropped instead of duplicating the queue"
-        );
+            assert!(requeue.persistence_error.is_none());
+            assert!(
+                !marker_path.exists(),
+                "successful requeue-front consumes the pending dispatch marker"
+            );
+            let saved = read_saved_items(tmp.path(), &provider, token_hash, channel_id);
+            assert_eq!(saved.len(), 1);
+            assert_eq!(saved[0].message_id, head.message_id.get());
+        });
     }
 
-    #[allow(clippy::await_holding_lock)]
-    #[tokio::test]
-    async fn take_next_soft_persist_failure_restores_queue_and_deletes_marker() {
+    #[test]
+    fn try_start_consumes_only_matching_pending_dispatch_marker() {
         let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         let _env_guard = EnvGuard::set_root(tmp.path());
 
-        let provider = ProviderKind::Claude;
-        let token_hash = "dispatch-marker-persist-fail";
-        let channel_id = ChannelId::new(4_024_250);
-        let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
-        let registry = ChannelMailboxRegistry::default();
-        let handle = registry.handle(channel_id);
-        let head = make_intervention(4_024_251, "head", None);
-        handle
-            .replace_queue(vec![head.clone()], persistence.clone())
-            .await;
+        run_async(async {
+            let provider = ProviderKind::Claude;
+            let token_hash = "dispatch-marker-claim-identity";
+            let channel_id = ChannelId::new(4_024_222);
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+            let registry = ChannelMailboxRegistry::default();
+            let handle = registry.handle(channel_id);
+            let marker_a = make_intervention(4_024_223, "marker-a", None);
+            save_channel_pending_dispatch_marker(
+                &provider, token_hash, channel_id, &marker_a, None,
+            )
+            .unwrap();
+            handle.replace_queue(Vec::new(), persistence.clone()).await;
 
-        let queue_path = queue_file_path(tmp.path(), &provider, token_hash, channel_id);
-        std::fs::remove_file(&queue_path).unwrap();
-        std::fs::create_dir(&queue_path).unwrap();
+            assert!(
+                handle
+                    .try_start_turn(
+                        Arc::new(CancelToken::new()),
+                        UserId::new(7),
+                        MessageId::new(4_024_224),
+                    )
+                    .await,
+                "foreign turn C should claim the idle slot"
+            );
+            assert!(
+                marker_file_path(tmp.path(), &provider, token_hash, channel_id).exists(),
+                "foreign claim must not consume marker A"
+            );
+            let _ = handle.finish_turn(persistence.clone()).await;
+            assert!(
+                marker_file_path(tmp.path(), &provider, token_hash, channel_id).exists(),
+                "foreign finish must not consume marker A"
+            );
 
-        let taken = handle.take_next_soft(persistence).await;
+            assert!(
+                handle
+                    .try_start_turn(
+                        Arc::new(CancelToken::new()),
+                        UserId::new(7),
+                        marker_a.message_id,
+                    )
+                    .await,
+                "matching turn A should claim after C finishes"
+            );
+            assert!(
+                !marker_file_path(tmp.path(), &provider, token_hash, channel_id).exists(),
+                "matching claim consumes marker A"
+            );
+        });
+    }
 
-        assert!(taken.intervention.is_none());
-        assert!(taken.persistence_error.is_some());
-        assert_eq!(handle.snapshot().await.intervention_queue.len(), 1);
-        assert_eq!(
-            handle.snapshot().await.intervention_queue[0].message_id,
-            head.message_id
-        );
-        assert!(
-            !marker_file_path(tmp.path(), &provider, token_hash, channel_id).exists(),
-            "marker must be deleted when queue-without-head persistence fails"
-        );
+    #[test]
+    fn finish_turn_consumes_matching_pending_dispatch_marker_backstop() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvGuard::set_root(tmp.path());
+
+        run_async(async {
+            let provider = ProviderKind::Claude;
+            let token_hash = "dispatch-marker-finish-backstop";
+            let channel_id = ChannelId::new(4_024_225);
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+            let registry = ChannelMailboxRegistry::default();
+            let handle = registry.handle(channel_id);
+            let marker = make_intervention(4_024_226, "marker", None);
+            handle.replace_queue(Vec::new(), persistence.clone()).await;
+            handle
+                .restore_active_turn(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(7),
+                    marker.message_id,
+                )
+                .await;
+            save_channel_pending_dispatch_marker(&provider, token_hash, channel_id, &marker, None)
+                .unwrap();
+
+            let finish = handle.finish_turn(persistence).await;
+
+            assert!(finish.removed_token.is_some());
+            assert!(
+                !marker_file_path(tmp.path(), &provider, token_hash, channel_id).exists(),
+                "finish backstop consumes the marker for its own active turn"
+            );
+        });
+    }
+
+    #[test]
+    fn boot_load_is_read_only_and_actor_restores_marker_into_empty_queue_front() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvGuard::set_root(tmp.path());
+
+        run_async(async {
+            let provider = ProviderKind::Claude;
+            let token_hash = "dispatch-marker-boot-empty";
+            let channel_id = ChannelId::new(4_024_230);
+            let marker = make_intervention(4_024_231, "marker head", None);
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+            save_channel_pending_dispatch_marker(&provider, token_hash, channel_id, &marker, None)
+                .unwrap();
+
+            let (loaded, _) = load_channel_pending_queue(&provider, token_hash, channel_id);
+            assert!(
+                loaded.is_empty(),
+                "queue loader must not import marker rows"
+            );
+            assert!(
+                marker_file_path(tmp.path(), &provider, token_hash, channel_id).exists(),
+                "boot scan must leave marker deletion to the actor"
+            );
+            let markers = load_pending_dispatch_markers(&provider, token_hash);
+            assert_eq!(markers.len(), 1);
+            assert_eq!(markers[0].intervention.message_id, marker.message_id);
+
+            let registry = ChannelMailboxRegistry::default();
+            let handle = registry.handle(channel_id);
+            let result = handle
+                .merge_restored_dispatch_marker(
+                    markers[0].intervention.clone(),
+                    markers[0].restored_override,
+                    persistence,
+                )
+                .await;
+
+            assert_eq!(result.absorbed, 1);
+            assert!(
+                !marker_file_path(tmp.path(), &provider, token_hash, channel_id).exists(),
+                "actor merge deletes marker after queue persist succeeds"
+            );
+            let saved = read_saved_items(tmp.path(), &provider, token_hash, channel_id);
+            assert_eq!(saved[0].message_id, marker.message_id.get());
+        });
+    }
+
+    #[test]
+    fn hydrate_drops_marker_that_matches_active_turn_without_importing() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvGuard::set_root(tmp.path());
+
+        run_async(async {
+            let provider = ProviderKind::Claude;
+            let token_hash = "dispatch-marker-active-hydrate";
+            let channel_id = ChannelId::new(4_024_242);
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+            let registry = ChannelMailboxRegistry::default();
+            let handle = registry.handle(channel_id);
+            let marker = make_intervention(4_024_243, "active marker", None);
+            handle.replace_queue(Vec::new(), persistence.clone()).await;
+            handle
+                .restore_active_turn(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(7),
+                    marker.message_id,
+                )
+                .await;
+            save_channel_pending_dispatch_marker(&provider, token_hash, channel_id, &marker, None)
+                .unwrap();
+
+            let hydrate = handle.hydrate_pending_queue_from_disk(persistence).await;
+
+            assert_eq!(hydrate.absorbed, 0);
+            assert!(handle.snapshot().await.intervention_queue.is_empty());
+            assert!(
+                !marker_file_path(tmp.path(), &provider, token_hash, channel_id).exists(),
+                "hydrate must consume an active-turn duplicate marker instead of importing it"
+            );
+        });
+    }
+
+    #[test]
+    fn boot_actor_drops_marker_when_identity_already_queued() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvGuard::set_root(tmp.path());
+
+        run_async(async {
+            let provider = ProviderKind::Claude;
+            let token_hash = "dispatch-marker-boot-duplicate";
+            let channel_id = ChannelId::new(4_024_240);
+            let queued = make_intervention(4_024_241, "queued", None);
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+            let registry = ChannelMailboxRegistry::default();
+            let handle = registry.handle(channel_id);
+            handle
+                .replace_queue(vec![queued.clone()], persistence.clone())
+                .await;
+            save_channel_pending_dispatch_marker(&provider, token_hash, channel_id, &queued, None)
+                .unwrap();
+            let markers = load_pending_dispatch_markers(&provider, token_hash);
+
+            let result = handle
+                .merge_restored_dispatch_marker(
+                    markers[0].intervention.clone(),
+                    markers[0].restored_override,
+                    persistence,
+                )
+                .await;
+
+            assert_eq!(result.absorbed, 0);
+            assert_eq!(handle.snapshot().await.intervention_queue.len(), 1);
+            assert!(
+                !marker_file_path(tmp.path(), &provider, token_hash, channel_id).exists(),
+                "duplicate marker must be dropped instead of duplicating the queue"
+            );
+        });
+    }
+
+    #[test]
+    fn boot_actor_drops_marker_that_matches_active_turn() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvGuard::set_root(tmp.path());
+
+        run_async(async {
+            let provider = ProviderKind::Claude;
+            let token_hash = "dispatch-marker-boot-active";
+            let channel_id = ChannelId::new(4_024_244);
+            let marker = make_intervention(4_024_245, "active marker", None);
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+            let registry = ChannelMailboxRegistry::default();
+            let handle = registry.handle(channel_id);
+            handle.replace_queue(Vec::new(), persistence.clone()).await;
+            handle
+                .restore_active_turn(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(7),
+                    marker.message_id,
+                )
+                .await;
+            save_channel_pending_dispatch_marker(&provider, token_hash, channel_id, &marker, None)
+                .unwrap();
+            let markers = load_pending_dispatch_markers(&provider, token_hash);
+
+            let result = handle
+                .merge_restored_dispatch_marker(
+                    markers[0].intervention.clone(),
+                    markers[0].restored_override,
+                    persistence,
+                )
+                .await;
+
+            assert_eq!(result.absorbed, 0);
+            assert!(handle.snapshot().await.intervention_queue.is_empty());
+            assert!(
+                !marker_file_path(tmp.path(), &provider, token_hash, channel_id).exists(),
+                "boot marker recovery must consume active-turn duplicate markers"
+            );
+        });
+    }
+
+    #[test]
+    fn take_next_soft_restores_marker_only_head_before_dequeue() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvGuard::set_root(tmp.path());
+
+        run_async(async {
+            let provider = ProviderKind::Claude;
+            let token_hash = "dispatch-marker-take-restore";
+            let channel_id = ChannelId::new(4_024_246);
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+            let registry = ChannelMailboxRegistry::default();
+            let handle = registry.handle(channel_id);
+            let marker_a = make_intervention(4_024_247, "marker only", None);
+            let queued_b = make_intervention(4_024_248, "queued b", None);
+            handle
+                .replace_queue(vec![queued_b.clone()], persistence.clone())
+                .await;
+            save_channel_pending_dispatch_marker(
+                &provider, token_hash, channel_id, &marker_a, None,
+            )
+            .unwrap();
+
+            let taken = handle.take_next_soft(persistence).await;
+
+            assert_eq!(
+                taken.intervention.as_ref().map(|item| item.message_id),
+                Some(marker_a.message_id),
+                "marker-only A is restored to the front before queued B is dequeued"
+            );
+            let saved = read_saved_items(tmp.path(), &provider, token_hash, channel_id);
+            assert_eq!(saved.len(), 1);
+            assert_eq!(saved[0].message_id, queued_b.message_id.get());
+            let marker: PendingQueueItem = serde_json::from_str(
+                &std::fs::read_to_string(marker_file_path(
+                    tmp.path(),
+                    &provider,
+                    token_hash,
+                    channel_id,
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                marker.message_id,
+                marker_a.message_id.get(),
+                "dequeued restored head gets a fresh pending-dispatch marker"
+            );
+        });
+    }
+
+    #[test]
+    fn take_next_soft_returns_busy_while_dispatch_reservation_is_live() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvGuard::set_root(tmp.path());
+
+        run_async(async {
+            let provider = ProviderKind::Claude;
+            let token_hash = "dispatch-marker-single-slot";
+            let channel_id = ChannelId::new(4_024_249);
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+            let registry = ChannelMailboxRegistry::default();
+            let handle = registry.handle(channel_id);
+            let head = make_intervention(4_024_250, "head", None);
+            handle
+                .replace_queue(vec![head.clone()], persistence.clone())
+                .await;
+
+            let first = handle.take_next_soft(persistence.clone()).await;
+            let second = handle.take_next_soft(persistence).await;
+
+            assert_eq!(
+                first.intervention.as_ref().map(|item| item.message_id),
+                Some(head.message_id)
+            );
+            assert!(second.intervention.is_none());
+            assert!(
+                marker_file_path(tmp.path(), &provider, token_hash, channel_id).exists(),
+                "busy reservation keeps the marker as the durable backstop"
+            );
+        });
+    }
+
+    #[test]
+    fn take_next_soft_persist_failure_restores_queue_and_keeps_marker() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvGuard::set_root(tmp.path());
+
+        run_async(async {
+            let provider = ProviderKind::Claude;
+            let token_hash = "dispatch-marker-persist-fail";
+            let channel_id = ChannelId::new(4_024_250);
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+            let registry = ChannelMailboxRegistry::default();
+            let handle = registry.handle(channel_id);
+            let head = make_intervention(4_024_251, "head", None);
+            handle
+                .replace_queue(vec![head.clone()], persistence.clone())
+                .await;
+
+            let queue_path = queue_file_path(tmp.path(), &provider, token_hash, channel_id);
+            std::fs::remove_file(&queue_path).unwrap();
+            std::fs::create_dir(&queue_path).unwrap();
+
+            let taken = handle.take_next_soft(persistence).await;
+
+            assert!(taken.intervention.is_none());
+            assert!(taken.persistence_error.is_some());
+            assert_eq!(handle.snapshot().await.intervention_queue.len(), 1);
+            assert_eq!(
+                handle.snapshot().await.intervention_queue[0].message_id,
+                head.message_id
+            );
+            assert!(
+                marker_file_path(tmp.path(), &provider, token_hash, channel_id).exists(),
+                "marker remains the durable backstop when queue-without-head persistence fails"
+            );
+        });
+    }
+
+    #[test]
+    fn purge_queue_clears_live_dispatch_reservation_and_marker() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvGuard::set_root(tmp.path());
+
+        run_async(async {
+            let provider = ProviderKind::Claude;
+            let token_hash = "dispatch-marker-purge";
+            let channel_id = ChannelId::new(4_024_252);
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+            let registry = ChannelMailboxRegistry::default();
+            let handle = registry.handle(channel_id);
+            let head = make_intervention(4_024_253, "purged draft", None);
+            handle
+                .replace_queue(vec![head.clone()], persistence.clone())
+                .await;
+            let taken = handle.take_next_soft(persistence.clone()).await;
+            assert_eq!(
+                taken.intervention.as_ref().map(|item| item.message_id),
+                Some(head.message_id)
+            );
+            assert!(marker_file_path(tmp.path(), &provider, token_hash, channel_id).exists());
+
+            let purge = handle.purge_queue(persistence.clone(), false).await;
+            let hydrate = handle.hydrate_pending_queue_from_disk(persistence).await;
+            let (boot_queues, _) = load_pending_queues(&provider, token_hash);
+            let boot_markers = load_pending_dispatch_markers(&provider, token_hash);
+
+            assert_eq!(
+                purge.drained, 0,
+                "dequeued reservation already left no queued item"
+            );
+            assert!(
+                !marker_file_path(tmp.path(), &provider, token_hash, channel_id).exists(),
+                "purge must delete the live pending-dispatch marker"
+            );
+            assert_eq!(hydrate.absorbed, 0);
+            assert!(handle.snapshot().await.intervention_queue.is_empty());
+            assert!(!boot_queues.contains_key(&channel_id));
+            assert!(boot_markers.is_empty());
+        });
     }
 
     // SAFETY (await_holding_lock): `TEST_ENV_LOCK` serializes env-mutating tests

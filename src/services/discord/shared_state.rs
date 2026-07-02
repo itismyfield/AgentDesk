@@ -653,6 +653,10 @@ pub(in crate::services) struct RestartLifecycle {
     pub(in crate::services) reconcile_done: Arc<std::sync::atomic::AtomicBool>,
     /// Number of queued deferred idle-queue kickoffs waiting to run.
     pub(in crate::services) deferred_hook_backlog: std::sync::atomic::AtomicUsize,
+    /// Per-channel live deferred idle-queue kickoff guard. A channel may have at
+    /// most one fast/slow deferred drain task active; the task removes its entry
+    /// when its backlog guard drops.
+    pub(in crate::services) deferred_hook_channels: dashmap::DashSet<ChannelId>,
     /// When this provider started reconcile/recovery for the current boot.
     pub(in crate::services) recovery_started_at: std::time::Instant,
     /// Captured reconcile/recovery duration for the current boot in milliseconds.

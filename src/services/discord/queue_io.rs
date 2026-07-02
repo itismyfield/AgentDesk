@@ -10,6 +10,8 @@ use super::*;
 /// "is the deferred backlog empty yet?" decisions.
 struct DeferredHookBacklogGuard {
     shared: Arc<SharedData>,
+    channel_id: ChannelId,
+    active: bool,
 }
 
 const DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY: std::time::Duration =
@@ -101,10 +103,24 @@ fn deferred_idle_queue_rearm_profile_after_giveup(
 
 impl Drop for DeferredHookBacklogGuard {
     fn drop(&mut self) {
+        self.release();
+    }
+}
+
+impl DeferredHookBacklogGuard {
+    fn release(&mut self) {
+        if !self.active {
+            return;
+        }
+        self.shared
+            .restart
+            .deferred_hook_channels
+            .remove(&self.channel_id);
         self.shared
             .restart
             .deferred_hook_backlog
             .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        self.active = false;
     }
 }
 
@@ -147,6 +163,80 @@ pub(super) fn schedule_deferred_idle_queue_kickoff_immediate(
     );
 }
 
+async fn slow_rearm_channel_still_kickable(
+    ctx: Option<&serenity::Context>,
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    reason: &'static str,
+) -> bool {
+    let Some(ctx) = ctx else {
+        return true;
+    };
+    let settings_snapshot = shared.settings.read().await.clone();
+    if let Err(route_reason) =
+        super::validate_live_channel_routing(ctx, provider, &settings_snapshot, channel_id).await
+    {
+        tracing::warn!(
+            provider = provider.as_str(),
+            channel_id = channel_id.get(),
+            reason,
+            route_reason = %route_reason,
+            "Deferred drain: terminating slow re-arm chain for unroutable channel; queue file remains persisted for rebind/boot recovery"
+        );
+        return false;
+    }
+    let snapshot = super::mailbox_snapshot(shared, channel_id).await;
+    if !super::idle_queue_channel_has_kickable_backlog(shared, provider, channel_id, &snapshot)
+        .await
+    {
+        tracing::warn!(
+            provider = provider.as_str(),
+            channel_id = channel_id.get(),
+            reason,
+            queue_len = snapshot.intervention_queue.len(),
+            active_user_message_id = snapshot.active_user_message_id.map(|id| id.get()),
+            "Deferred drain: terminating slow re-arm chain because channel is no longer kickable; queue file remains persisted for the next qualifying kickoff"
+        );
+        return false;
+    }
+    true
+}
+
+async fn rearm_slow_deferred_idle_queue_kickoff(
+    ctx: Option<&serenity::Context>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    reason: &'static str,
+    next_profile: DeferredIdleQueueKickoffProfile,
+    remaining_queue_len: usize,
+    backlog_guard: &mut DeferredHookBacklogGuard,
+    cause: &'static str,
+) {
+    if !slow_rearm_channel_still_kickable(ctx, shared.as_ref(), provider, channel_id, reason).await
+    {
+        return;
+    }
+    let next_round = next_profile.round_index();
+    tracing::warn!(
+        provider = provider.as_str(),
+        channel_id = channel_id.get(),
+        reason,
+        round = next_round,
+        queue_len = remaining_queue_len,
+        "Deferred drain: re-arming slow deferred kickoff {cause}"
+    );
+    backlog_guard.release();
+    schedule_deferred_idle_queue_kickoff_inner(
+        shared.clone(),
+        provider.clone(),
+        channel_id,
+        reason,
+        next_profile,
+    );
+}
+
 fn schedule_deferred_idle_queue_kickoff_inner(
     shared: Arc<SharedData>,
     provider: ProviderKind,
@@ -154,6 +244,16 @@ fn schedule_deferred_idle_queue_kickoff_inner(
     reason: &'static str,
     profile: DeferredIdleQueueKickoffProfile,
 ) {
+    if !shared.restart.deferred_hook_channels.insert(channel_id) {
+        tracing::debug!(
+            provider = provider.as_str(),
+            channel_id = channel_id.get(),
+            reason,
+            round = profile.round_index(),
+            "Deferred drain: kickoff already active for channel; coalescing duplicate request"
+        );
+        return;
+    }
     shared
         .restart
         .deferred_hook_backlog
@@ -161,8 +261,10 @@ fn schedule_deferred_idle_queue_kickoff_inner(
     super::task_supervisor::spawn_observed("deferred_idle_queue_kickoff", async move {
         // #2044 F3: bind the decrement to a Drop guard so it fires on
         // panic-unwind as well as on normal return.
-        let _backlog_guard = DeferredHookBacklogGuard {
+        let mut backlog_guard = DeferredHookBacklogGuard {
             shared: shared.clone(),
+            channel_id,
+            active: true,
         };
         // #3005: on the finalize-completed (idle-confirmed) reason the first
         // attempt skips the 2s pre-sleep so a queued follow-up can drain right
@@ -254,22 +356,18 @@ fn schedule_deferred_idle_queue_kickoff_inner(
                                     remaining_queue_len,
                                 )
                             {
-                                let next_round = next_profile.round_index();
-                                tracing::warn!(
-                                    provider = provider.as_str(),
-                                    channel_id = channel_id.get(),
-                                    reason,
-                                    round = next_round,
-                                    queue_len = remaining_queue_len,
-                                    "Deferred drain: re-arming slow deferred kickoff after abandoned synthetic-start give-up"
-                                );
-                                schedule_deferred_idle_queue_kickoff_inner(
-                                    shared.clone(),
-                                    provider.clone(),
+                                rearm_slow_deferred_idle_queue_kickoff(
+                                    Some(ctx),
+                                    &shared,
+                                    &provider,
                                     channel_id,
                                     reason,
                                     next_profile,
-                                );
+                                    remaining_queue_len,
+                                    &mut backlog_guard,
+                                    "after abandoned synthetic-start give-up",
+                                )
+                                .await;
                             }
                         }
                         return;
@@ -296,22 +394,18 @@ fn schedule_deferred_idle_queue_kickoff_inner(
                     if let Some(next_profile) =
                         deferred_idle_queue_rearm_profile_after_giveup(profile, remaining_queue_len)
                     {
-                        let next_round = next_profile.round_index();
-                        tracing::warn!(
-                            provider = provider.as_str(),
-                            channel_id = channel_id.get(),
-                            reason,
-                            round = next_round,
-                            queue_len = remaining_queue_len,
-                            "Deferred drain: re-arming slow deferred kickoff after bounded zero-start give-up"
-                        );
-                        schedule_deferred_idle_queue_kickoff_inner(
-                            shared.clone(),
-                            provider.clone(),
+                        rearm_slow_deferred_idle_queue_kickoff(
+                            Some(ctx),
+                            &shared,
+                            &provider,
                             channel_id,
                             reason,
                             next_profile,
-                        );
+                            remaining_queue_len,
+                            &mut backlog_guard,
+                            "after bounded zero-start give-up",
+                        )
+                        .await;
                     }
                 }
                 return;
@@ -331,22 +425,18 @@ fn schedule_deferred_idle_queue_kickoff_inner(
                 if let Some(next_profile) =
                     deferred_idle_queue_rearm_profile_after_giveup(profile, remaining_queue_len)
                 {
-                    let next_round = next_profile.round_index();
-                    tracing::warn!(
-                        provider = provider.as_str(),
-                        channel_id = channel_id.get(),
-                        reason,
-                        round = next_round,
-                        queue_len = remaining_queue_len,
-                        "Deferred drain: re-arming slow deferred kickoff after missing-context give-up"
-                    );
-                    schedule_deferred_idle_queue_kickoff_inner(
-                        shared.clone(),
-                        provider.clone(),
+                    rearm_slow_deferred_idle_queue_kickoff(
+                        None,
+                        &shared,
+                        &provider,
                         channel_id,
                         reason,
                         next_profile,
-                    );
+                        remaining_queue_len,
+                        &mut backlog_guard,
+                        "after missing-context give-up",
+                    )
+                    .await;
                 }
                 break;
             }
@@ -488,6 +578,57 @@ mod presleep_tests {
         assert_eq!(consecutive, 0, "a non-zero drain resets the zero-start run");
         assert!(!note_zero_start_deferred_drain(&mut consecutive, 0, false));
         assert_eq!(consecutive, 0, "an empty target queue is a normal exit");
+    }
+
+    #[test]
+    fn persistent_dispatch_failure_consumes_bounded_zero_progress_budget_then_rearms_slow() {
+        let mut consecutive = 0usize;
+        for _ in 1..=DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS {
+            let started_after_failed_dispatch = 0;
+            let _ = note_zero_start_deferred_drain(
+                &mut consecutive,
+                started_after_failed_dispatch,
+                true,
+            );
+        }
+
+        let next = deferred_idle_queue_rearm_profile_after_giveup(
+            DeferredIdleQueueKickoffProfile::Normal,
+            1,
+        );
+        assert_eq!(
+            next,
+            Some(DeferredIdleQueueKickoffProfile::Slow { round: 1 })
+        );
+        assert_eq!(DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS, 150);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn deferred_kickoff_coalesces_per_channel_while_task_is_live() {
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_024_280);
+
+        schedule_deferred_idle_queue_kickoff(
+            shared.clone(),
+            provider.clone(),
+            channel_id,
+            "coalesce-test",
+        );
+        schedule_deferred_idle_queue_kickoff(shared.clone(), provider, channel_id, "coalesce-test");
+
+        assert_eq!(
+            shared
+                .restart
+                .deferred_hook_backlog
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "duplicate deferred kicks for one channel must share one live task"
+        );
+        assert!(
+            shared.restart.deferred_hook_channels.contains(&channel_id),
+            "the live per-channel guard must remain registered while the task is sleeping"
+        );
     }
 
     // Sync test + explicit block_on: the std-mutex test-env guards live only in

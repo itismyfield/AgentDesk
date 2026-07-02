@@ -15,7 +15,7 @@
 | `src/server/maintenance.rs` | 1014 | server-runtime | 2026-10-31 | #3909 |
 | `src/server/worker_registry.rs` | 1267 | server-runtime | 2026-08-31 | #3739 |
 | `src/services/codex_tui/rollout_tail.rs` | 1276 | discord-relay | 2026-10-31 | #3843 |
-| `src/services/discord/health/recovery.rs` | 2426 | discord-relay | 2026-10-31 | #3839 |
+| `src/services/discord/health/recovery.rs` | 2439 | discord-relay | 2026-10-31 | #3839 |
 | `src/services/discord/idle_recap.rs` | 1252 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/placeholder_sweeper.rs` | 1019 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/recovery_engine.rs` | 2935 | discord-relay | 2026-10-31 | #3834 |
@@ -85,7 +85,7 @@
 | `src/services/discord/commands/text_commands.rs` | 1476 |
 | `src/services/discord/formatting.rs` | 2835 |
 | `src/services/discord/meeting_orchestrator.rs` | 3222 |
-| `src/services/discord/mod.rs` | 4079 |
+| `src/services/discord/mod.rs` | 4100 |
 | `src/services/discord/router/message_handler/headless_turn.rs` | 1543 |
 | `src/services/discord_config_audit.rs` | 1288 |
 | `src/services/dispatched_sessions.rs` | 1550 |
@@ -103,5 +103,5 @@
 | `src/services/routines/store.rs` | 3453 |
 | `src/services/settings.rs` | 1114 |
 | `src/services/tui_prompt_dedupe.rs` | 1824 |
-| `src/services/turn_orchestrator.rs` | 2837 |
+| `src/services/turn_orchestrator.rs` | 3060 |
 | `src/voice/receiver.rs` | 1108 |

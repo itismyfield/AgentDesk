@@ -1,11 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
-use super::{Intervention, InterventionMode, intervention_dedup_ids};
+use super::{Intervention, InterventionMode};
 use crate::services::provider::ProviderKind;
 
 const STALE_PENDING_QUEUE_TMP_AGE: Duration = Duration::from_secs(60);
@@ -46,6 +46,13 @@ pub(crate) struct PendingQueueItem {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PendingDispatchMarker {
+    pub(crate) channel_id: ChannelId,
+    pub(crate) intervention: Intervention,
+    pub(crate) restored_override: Option<ChannelId>,
 }
 
 fn pending_queue_root() -> Option<PathBuf> {
@@ -382,25 +389,30 @@ pub(crate) fn remove_channel_pending_queue_files_all_tokens(
     let Ok(entries) = fs::read_dir(&provider_dir) else {
         return 0;
     };
-    let filename = format!("{}.json", channel_id.get());
+    let filenames = [
+        format!("{}.json", channel_id.get()),
+        format!("{}.dispatch", channel_id.get()),
+    ];
     let mut removed = 0;
     for entry in entries.flatten() {
         let token_dir = entry.path();
         if !token_dir.is_dir() {
             continue;
         }
-        let path = token_dir.join(&filename);
-        if !path.is_file() {
-            continue;
-        }
-        match fs::remove_file(&path) {
-            Ok(()) => removed += 1,
-            Err(error) => tracing::warn!(
-                provider = provider.as_str(),
-                channel_id = channel_id.get(),
-                path = %path.display(),
-                "failed to remove pending queue file during force purge: {error}"
-            ),
+        for filename in &filenames {
+            let path = token_dir.join(filename);
+            if !path.is_file() {
+                continue;
+            }
+            match fs::remove_file(&path) {
+                Ok(()) => removed += 1,
+                Err(error) => tracing::warn!(
+                    provider = provider.as_str(),
+                    channel_id = channel_id.get(),
+                    path = %path.display(),
+                    "failed to remove pending queue/dispatch file during force purge: {error}"
+                ),
+            }
         }
     }
     removed
@@ -437,7 +449,7 @@ fn pending_queue_item_to_intervention(item: PendingQueueItem, now: Instant) -> I
     }
 }
 
-fn load_channel_pending_dispatch_marker(
+pub(super) fn load_channel_pending_dispatch_marker(
     provider: &ProviderKind,
     token_hash: &str,
     channel_id: ChannelId,
@@ -447,7 +459,6 @@ fn load_channel_pending_dispatch_marker(
         return None;
     };
     let Ok(item) = serde_json::from_str::<PendingQueueItem>(&content) else {
-        let _ = fs::remove_file(&path);
         return None;
     };
     let restored_override = item.override_channel_id.map(ChannelId::new);
@@ -455,67 +466,6 @@ fn load_channel_pending_dispatch_marker(
         pending_queue_item_to_intervention(item, Instant::now()),
         restored_override,
     ))
-}
-
-fn recover_pending_dispatch_marker_into_queue(
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: ChannelId,
-    queue: &mut Vec<Intervention>,
-    restored_override: &mut Option<ChannelId>,
-) {
-    let Some((marker, marker_override)) =
-        load_channel_pending_dispatch_marker(provider, token_hash, channel_id)
-    else {
-        return;
-    };
-    if restored_override.is_none() {
-        *restored_override = marker_override;
-    }
-    let marker_message_id = marker.message_id;
-    let already_queued = queue
-        .iter()
-        .any(|item| intervention_dedup_ids(item).contains(&marker_message_id));
-    if already_queued {
-        if let Err(error) = remove_channel_pending_dispatch_marker(provider, token_hash, channel_id)
-        {
-            tracing::warn!(
-                provider = provider.as_str(),
-                token_hash,
-                channel_id = channel_id.get(),
-                error = %error,
-                "failed to remove duplicate pending dispatch marker during recovery"
-            );
-        }
-        return;
-    }
-
-    queue.insert(0, marker);
-    if let Err(error) = save_channel_queue(
-        provider,
-        token_hash,
-        channel_id,
-        queue,
-        restored_override.map(|id| id.get()),
-    ) {
-        tracing::warn!(
-            provider = provider.as_str(),
-            token_hash,
-            channel_id = channel_id.get(),
-            error = %error,
-            "failed to persist pending dispatch marker recovery; marker retained for retry"
-        );
-        return;
-    }
-    if let Err(error) = remove_channel_pending_dispatch_marker(provider, token_hash, channel_id) {
-        tracing::warn!(
-            provider = provider.as_str(),
-            token_hash,
-            channel_id = channel_id.get(),
-            error = %error,
-            "failed to remove pending dispatch marker after recovery"
-        );
-    }
 }
 
 fn pending_queue_items_to_interventions(
@@ -554,11 +504,9 @@ pub(crate) fn load_pending_queues(
     let now = Instant::now();
     let mut result: HashMap<ChannelId, Vec<Intervention>> = HashMap::new();
     let mut restored_overrides: HashMap<ChannelId, ChannelId> = HashMap::new();
-    let mut marker_channels = HashSet::new();
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
-        if let Some(channel_id) = pending_dispatch_marker_channel_id(&path) {
-            marker_channels.insert(ChannelId::new(channel_id));
+        if pending_dispatch_marker_channel_id(&path).is_some() {
             continue;
         }
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -576,7 +524,6 @@ pub(crate) fn load_pending_queues(
             continue;
         };
         let Ok(items) = serde_json::from_str::<Vec<PendingQueueItem>>(&content) else {
-            let _ = fs::remove_file(&path);
             continue;
         };
         if let Some(override_id) = items.iter().find_map(|item| item.override_channel_id) {
@@ -587,98 +534,55 @@ pub(crate) fn load_pending_queues(
             result.insert(ChannelId::new(channel_id), interventions);
         }
     }
-    for channel_id in marker_channels {
-        let mut restored_override = restored_overrides.get(&channel_id).copied();
-        let queue = result.entry(channel_id).or_default();
-        recover_pending_dispatch_marker_into_queue(
-            provider,
-            token_hash,
-            channel_id,
-            queue,
-            &mut restored_override,
-        );
-        if let Some(override_id) = restored_override {
-            restored_overrides.insert(channel_id, override_id);
-        } else {
-            restored_overrides.remove(&channel_id);
-        }
-    }
     (result, restored_overrides)
 }
 
-pub(super) fn load_channel_pending_queue_with_marker_recovery(
+pub(crate) fn load_pending_dispatch_markers(
     provider: &ProviderKind,
     token_hash: &str,
-    channel_id: ChannelId,
-    recover_dispatch_marker: bool,
-) -> (Vec<Intervention>, Option<ChannelId>) {
-    let Some(path) = pending_queue_file_path(provider, token_hash, channel_id) else {
-        let mut interventions = Vec::new();
-        let mut restored_override = None;
-        if recover_dispatch_marker {
-            recover_pending_dispatch_marker_into_queue(
-                provider,
-                token_hash,
-                channel_id,
-                &mut interventions,
-                &mut restored_override,
-            );
-        }
-        return (interventions, restored_override);
+) -> Vec<PendingDispatchMarker> {
+    let Some(root) = pending_queue_root() else {
+        return Vec::new();
     };
-    let Ok(content) = fs::read_to_string(&path) else {
-        let mut interventions = Vec::new();
-        let mut restored_override = None;
-        if recover_dispatch_marker {
-            recover_pending_dispatch_marker_into_queue(
-                provider,
-                token_hash,
-                channel_id,
-                &mut interventions,
-                &mut restored_override,
-            );
-        }
-        return (interventions, restored_override);
+    let dir = root.join(provider.as_str()).join(token_hash);
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Vec::new();
     };
-    let Ok(items) = serde_json::from_str::<Vec<PendingQueueItem>>(&content) else {
-        let _ = fs::remove_file(&path);
-        let mut interventions = Vec::new();
-        let mut restored_override = None;
-        if recover_dispatch_marker {
-            recover_pending_dispatch_marker_into_queue(
-                provider,
-                token_hash,
+    entries
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            let channel_id = ChannelId::new(pending_dispatch_marker_channel_id(&path)?);
+            let (intervention, restored_override) =
+                load_channel_pending_dispatch_marker(provider, token_hash, channel_id)?;
+            Some(PendingDispatchMarker {
                 channel_id,
-                &mut interventions,
-                &mut restored_override,
-            );
-        }
-        return (interventions, restored_override);
-    };
-    let mut restored_override = items
-        .iter()
-        .find_map(|item| item.override_channel_id)
-        .map(ChannelId::new);
-    let mut interventions = pending_queue_items_to_interventions(items, Instant::now());
-    if recover_dispatch_marker {
-        recover_pending_dispatch_marker_into_queue(
-            provider,
-            token_hash,
-            channel_id,
-            &mut interventions,
-            &mut restored_override,
-        );
-    }
-    (interventions, restored_override)
+                intervention,
+                restored_override,
+            })
+        })
+        .collect()
 }
 
-#[cfg(test)]
 pub(super) fn load_channel_pending_queue(
     provider: &ProviderKind,
     token_hash: &str,
     channel_id: ChannelId,
 ) -> (Vec<Intervention>, Option<ChannelId>) {
-    load_channel_pending_queue_with_marker_recovery(provider, token_hash, channel_id, true)
+    let Some(path) = pending_queue_file_path(provider, token_hash, channel_id) else {
+        return (Vec::new(), None);
+    };
+    let Ok(content) = fs::read_to_string(&path) else {
+        return (Vec::new(), None);
+    };
+    let Ok(items) = serde_json::from_str::<Vec<PendingQueueItem>>(&content) else {
+        return (Vec::new(), None);
+    };
+    let restored_override = items
+        .iter()
+        .find_map(|item| item.override_channel_id)
+        .map(ChannelId::new);
+    let interventions = pending_queue_items_to_interventions(items, Instant::now());
+    (interventions, restored_override)
 }
 
 /// Log a structured warning for legacy pending queue files at the old flat path.

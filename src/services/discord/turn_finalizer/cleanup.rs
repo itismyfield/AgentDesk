@@ -77,7 +77,7 @@ pub(super) fn finalized_reaction_lifecycle(
 /// The parent list is collected during `retain`, and callers must perform any
 /// queue kickoffs only after this function returns. That avoids re-entering the
 /// DashMap while a shard ref from the retain walk is live.
-pub(super) fn collect_and_clear_thread_parents(
+pub(in crate::services::discord) fn collect_and_clear_thread_parents(
     shared: &Arc<SharedData>,
     channel_id: serenity::model::id::ChannelId,
 ) -> Vec<serenity::model::id::ChannelId> {
@@ -95,7 +95,7 @@ pub(super) fn collect_and_clear_thread_parents(
 /// #4024 E19: a thread-parent mapping removal is exactly the event that can
 /// strand work queued on the parent channel by ThreadGuard, so pair every
 /// removed parent with an immediate deferred idle-queue kickoff.
-pub(super) fn kickoff_thread_parents_after_finalize(
+pub(in crate::services::discord) fn kickoff_thread_parents_after_finalize(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     parents: Vec<serenity::model::id::ChannelId>,
@@ -319,10 +319,8 @@ pub(super) async fn already_finalized_active_state(
         .store(true, std::sync::atomic::Ordering::Relaxed);
     super::super::saturating_decrement_global_active(shared);
     super::super::clear_watchdog_deadline_override(key.channel_id.get()).await;
-    shared
-        .dispatch
-        .thread_parents
-        .retain(|_, thread| *thread != key.channel_id);
+    let thread_parent_kickoffs = collect_and_clear_thread_parents(shared, key.channel_id);
+    kickoff_thread_parents_after_finalize(shared, provider, thread_parent_kickoffs);
     if !finish.has_pending {
         shared.dispatch.role_overrides.remove(&key.channel_id);
     }

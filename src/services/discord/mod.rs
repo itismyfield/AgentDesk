@@ -217,7 +217,7 @@ use crate::services::turn_orchestrator::{
     ActiveTurnKind, CancelActiveTurnResult, CancelQueuedMessageResult, ChannelMailboxSnapshot,
     ClearChannelResult, FinishTurnResult, HydratePendingQueueResult, QueueExitEvent, QueueExitKind,
     QueuePersistenceContext, RecoveryKickoffResult, RequeueInterventionResult, TakeNextSoftResult,
-    load_pending_queues, warn_legacy_pending_queue_files,
+    load_pending_dispatch_markers, load_pending_queues, warn_legacy_pending_queue_files,
 };
 pub(super) use crate::services::turn_orchestrator::{
     ChannelMailboxRegistry, Intervention, InterventionMode, MAX_INTERVENTIONS_PER_CHANNEL,
@@ -2318,6 +2318,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
             restart_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reconcile_done: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             deferred_hook_backlog: std::sync::atomic::AtomicUsize::new(0),
+            deferred_hook_channels: dashmap::DashSet::new(),
             recovery_started_at: std::time::Instant::now(),
             recovery_duration_ms: std::sync::atomic::AtomicU64::new(0),
             global_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -3299,6 +3300,14 @@ async fn mailbox_requeue_intervention_front(
         )
         .await;
     apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
+    if let Some(error) = result.persistence_error.as_ref() {
+        tracing::warn!(
+            provider = provider.as_str(),
+            channel_id = channel_id.get(),
+            error = %error,
+            "mailbox requeue-front failed durable pending-queue persistence; pending dispatch marker remains the durable backstop"
+        );
+    }
 }
 
 /// Re-queue the inflight message that a claude TUI follow-up could not submit
@@ -3602,6 +3611,23 @@ async fn mailbox_merge_restored_queue_items(
         .await
 }
 
+async fn mailbox_merge_restored_dispatch_marker(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    marker: Intervention,
+    restored_override: Option<ChannelId>,
+) -> HydratePendingQueueResult {
+    shared
+        .mailbox(channel_id)
+        .merge_restored_dispatch_marker(
+            marker,
+            restored_override,
+            queue_persistence_context(shared, provider, channel_id),
+        )
+        .await
+}
+
 /// #1683: actor-local disk -> in-memory hydration helper. The mailbox
 /// actor reads the queue file and merges it in one serialized message,
 /// preventing stale out-of-actor disk snapshots from reintroducing an
@@ -3753,7 +3779,6 @@ pub(super) async fn kickoff_idle_queues(
         let Some((intervention, has_more)) = take_next.into_intervention() else {
             continue;
         };
-        started_count += 1;
 
         let owner_name = if intervention.author_id.get() <= 1 {
             "system".to_string()
@@ -3868,12 +3893,8 @@ pub(super) async fn kickoff_idle_queues(
             );
             // Requeue so the message is not lost, and persist immediately.
             mailbox_requeue_intervention_front(shared, provider, channel_id, intervention).await;
-            schedule_deferred_idle_queue_kickoff(
-                shared.clone(),
-                provider.clone(),
-                channel_id,
-                "requeue-front after kickoff dispatch failure",
-            );
+        } else {
+            started_count += 1;
         }
     }
     started_count

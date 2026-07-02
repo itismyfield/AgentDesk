@@ -34,7 +34,7 @@ use super::SharedData;
 // #3041 P1-0: dormant lease types for the *Delivery messages below (mod.rs §2-§3).
 use super::{DeliveryLeaseCell, LeaseHolder, LeaseOutcome};
 
-mod cleanup;
+pub(in crate::services::discord) mod cleanup;
 mod completion_signal;
 mod delivery_lease;
 mod finalize;
@@ -1474,6 +1474,65 @@ mod tests {
                 shared.restart.global_active.load(Ordering::Relaxed),
                 0,
                 "cleanup decrements the active counter exactly when it removes a token"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn already_finalized_loser_removes_thread_parent_and_kicks_parent_queue() {
+        use serenity::model::id::{MessageId, UserId};
+
+        with_isolated_runtime_root(|| async move {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+            let fin = TurnFinalizer::spawn();
+            let parent = ChannelId::new(4_024_260);
+            let thread = ChannelId::new(4_024_261);
+            let turn_id = 4_024_262u64;
+            let key = TurnKey::new(thread, turn_id, 0);
+
+            fin.register_start(key, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
+            let first = fin
+                .submit_terminal(
+                    key,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(matches!(first, FinalizeOutcome::Finalized { .. }));
+
+            shared.dispatch.thread_parents.insert(parent, thread);
+            shared.restart.global_active.store(1, Ordering::Relaxed);
+            shared
+                .mailbox(thread)
+                .restore_active_turn(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(7),
+                    MessageId::new(turn_id),
+                )
+                .await;
+
+            let late = fin
+                .submit_terminal(
+                    key,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+
+            assert!(matches!(late, FinalizeOutcome::AlreadyFinalized));
+            assert!(
+                !shared.dispatch.thread_parents.contains_key(&parent),
+                "AlreadyFinalized cleanup must drop the finalized thread's parent mapping"
+            );
+            assert_eq!(
+                shared.restart.deferred_hook_backlog.load(Ordering::Relaxed),
+                1,
+                "dropping the parent mapping must schedule the parent queue kick"
             );
         })
         .await;
