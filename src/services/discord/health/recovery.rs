@@ -48,6 +48,14 @@ pub struct IdleTmuxStaleTurnRepairResult {
     pub runtime_session_cleared: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct IdleTmuxStaleTurnInflightPin {
+    identity: discord::inflight::InflightTurnIdentity,
+    finalizer_turn_id: u64,
+    updated_at: String,
+    save_generation: u64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct ProviderMailboxState {
     pub channel_id: u64,
@@ -85,25 +93,71 @@ fn idle_tmux_repair_ready_for_input(
     channel_id: u64,
     tmux_session: &str,
 ) -> bool {
-    let structured_ready = super::super::inflight::load_inflight_state(provider, channel_id)
-        .and_then(|state| {
-            let output_path = state
-                .output_path
-                .as_deref()
-                .map(str::trim)
-                .filter(|path| !path.is_empty())?;
-            crate::services::tui_turn_state::jsonl_ready_for_input(
-                provider,
-                state.runtime_kind,
-                std::path::Path::new(output_path),
-                Some(state.last_offset),
-            )
-        });
-    structured_ready
-        .map(crate::services::tui_turn_state::TuiReadyState::is_ready)
-        .unwrap_or_else(|| {
-            crate::services::provider::tmux_session_ready_for_input(tmux_session, provider)
-        })
+    super::super::relay_recovery::idle_tmux_repair_ready_for_input(
+        provider,
+        channel_id,
+        tmux_session,
+    )
+}
+
+fn capture_idle_tmux_stale_turn_inflight_pin(
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> Option<IdleTmuxStaleTurnInflightPin> {
+    let state = discord::inflight::load_inflight_state(provider, channel_id)?;
+    let finalizer_turn_id = state.effective_finalizer_turn_id();
+    (finalizer_turn_id != 0).then(|| IdleTmuxStaleTurnInflightPin {
+        identity: discord::inflight::InflightTurnIdentity::from_state(&state),
+        finalizer_turn_id,
+        updated_at: state.updated_at,
+        save_generation: state.save_generation,
+    })
+}
+
+fn clear_idle_tmux_stale_turn_inflight_if_pinned(
+    provider: &ProviderKind,
+    channel_id: u64,
+    pin: Option<&IdleTmuxStaleTurnInflightPin>,
+) -> bool {
+    let Some(pin) = pin else {
+        return false;
+    };
+    let outcome = discord::inflight::clear_inflight_state_if_matches_identity_generation(
+        provider,
+        channel_id,
+        &pin.identity,
+        pin.finalizer_turn_id,
+        &pin.updated_at,
+        pin.save_generation,
+    );
+    match outcome {
+        discord::inflight::GuardedClearOutcome::Cleared => true,
+        discord::inflight::GuardedClearOutcome::Missing => false,
+        other => {
+            let current = discord::inflight::load_inflight_state(provider, channel_id);
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel_id,
+                clear_outcome = ?other,
+                expected_user_msg_id = pin.identity.user_msg_id,
+                expected_finalizer_turn_id = pin.finalizer_turn_id,
+                expected_updated_at = %pin.updated_at,
+                expected_save_generation = pin.save_generation,
+                current_user_msg_id = current.as_ref().map(|state| state.user_msg_id).unwrap_or(0),
+                current_finalizer_turn_id = current
+                    .as_ref()
+                    .map(|state| state.effective_finalizer_turn_id())
+                    .unwrap_or(0),
+                current_updated_at = %current
+                    .as_ref()
+                    .map(|state| state.updated_at.as_str())
+                    .unwrap_or("<missing>"),
+                current_save_generation = current.as_ref().map(|state| state.save_generation).unwrap_or(0),
+                "idle tmux stale-turn repair skipped persistent inflight clear because the readiness-time pin no longer matches"
+            );
+            false
+        }
+    }
 }
 
 fn preserve_cancel_should_skip_provider_interrupt_for_idle_tui(
@@ -854,6 +908,7 @@ pub async fn clear_idle_tmux_stale_turn(
     if !idle_tmux_repair_ready_for_input(&provider, channel_id, tmux_session) {
         return None;
     }
+    let inflight_pin = capture_idle_tmux_stale_turn_inflight_pin(&provider, channel_id);
 
     let channel_id = ChannelId::new(channel_id);
     let shared = shared_for_provider(registry, &provider, channel_id).await?;
@@ -867,7 +922,11 @@ pub async fn clear_idle_tmux_stale_turn(
         false,
     )
     .await;
-    let persistent_inflight_cleared = discord::clear_inflight_state(&provider, channel_id.get());
+    let persistent_inflight_cleared = clear_idle_tmux_stale_turn_inflight_if_pinned(
+        &provider,
+        channel_id.get(),
+        inflight_pin.as_ref(),
+    );
 
     Some(IdleTmuxStaleTurnRepairResult {
         had_active_turn: finish.removed_token.is_some(),
@@ -2612,6 +2671,7 @@ mod stall_watchdog_pure_tests {
         stall_watchdog_should_force_clean_orphan_explicit_background_work,
     };
     use super::{
+        capture_idle_tmux_stale_turn_inflight_pin, clear_idle_tmux_stale_turn_inflight_if_pinned,
         preserve_cancel_should_skip_provider_interrupt_for_idle_tui,
         revalidate_and_clear_explicit_background_inflight,
     };
@@ -3009,6 +3069,70 @@ mod stall_watchdog_pure_tests {
             .expect("newer row must survive mismatch");
         assert_eq!(persisted.started_at, "2099-01-01 00:00:00");
         assert_eq!(persisted.turn_start_offset, Some(99));
+    }
+
+    #[test]
+    fn idle_tmux_stale_turn_clear_preserves_fresh_inflight_after_finish_window() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_030_601);
+        let tmux_session = "AgentDesk-claude-stale-mailbox-toctou";
+        let mut stale = InflightTurnState::new(
+            provider.clone(),
+            channel_id.get(),
+            None,
+            1,
+            4_030_601_101,
+            4_030_601_102,
+            "stale idle turn".to_string(),
+            Some("stale-session".to_string()),
+            Some(tmux_session.to_string()),
+            Some("/tmp/agentdesk-stale-mailbox-toctou-t1.jsonl".to_string()),
+            None,
+            10,
+        );
+        stale.turn_start_offset = Some(10);
+        inflight::save_inflight_state(&stale).expect("save stale row");
+
+        let pin = capture_idle_tmux_stale_turn_inflight_pin(&provider, channel_id.get())
+            .expect("readiness-time pin");
+        assert_eq!(pin.identity.user_msg_id, 4_030_601_101);
+
+        let mut fresh = InflightTurnState::new(
+            provider.clone(),
+            channel_id.get(),
+            None,
+            1,
+            4_030_601_201,
+            4_030_601_202,
+            "fresh follow-up turn".to_string(),
+            Some("fresh-session".to_string()),
+            Some(tmux_session.to_string()),
+            Some("/tmp/agentdesk-stale-mailbox-toctou-t2.jsonl".to_string()),
+            None,
+            20,
+        );
+        fresh.turn_start_offset = Some(20);
+        inflight::save_inflight_state(&fresh).expect("save fresh row in finish-to-clear window");
+
+        assert!(!clear_idle_tmux_stale_turn_inflight_if_pinned(
+            &provider,
+            channel_id.get(),
+            Some(&pin),
+        ));
+        let persisted = inflight::load_inflight_state(&provider, channel_id.get())
+            .expect("fresh row must survive guarded stale clear");
+        assert_eq!(persisted.user_msg_id, 4_030_601_201);
+        assert_eq!(persisted.session_id.as_deref(), Some("fresh-session"));
+        assert!(
+            persisted.save_generation > pin.save_generation,
+            "fresh row write must advance save_generation past the stale pin"
+        );
     }
 
     /// #3629: a completed-stale, no-unrelayed-answer row is cleaned ONLY when it

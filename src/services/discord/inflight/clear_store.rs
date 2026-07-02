@@ -88,6 +88,28 @@ pub(in crate::services::discord) fn clear_inflight_state_if_matches_identity(
     clear_inflight_state_if_matches_identity_in_root(&root, provider, channel_id, expected)
 }
 
+pub(in crate::services::discord) fn clear_inflight_state_if_matches_identity_generation(
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+    expected_finalizer_turn_id: u64,
+    expected_updated_at: &str,
+    expected_save_generation: u64,
+) -> GuardedClearOutcome {
+    let Some(root) = inflight_runtime_root() else {
+        return GuardedClearOutcome::Missing;
+    };
+    clear_inflight_state_if_matches_identity_generation_in_root(
+        &root,
+        provider,
+        channel_id,
+        expected,
+        expected_finalizer_turn_id,
+        expected_updated_at,
+        expected_save_generation,
+    )
+}
+
 pub(in crate::services::discord) fn clear_rebind_origin_inflight_state_if_matches_identity(
     provider: &ProviderKind,
     channel_id: u64,
@@ -98,6 +120,26 @@ pub(in crate::services::discord) fn clear_rebind_origin_inflight_state_if_matche
     };
     clear_rebind_origin_inflight_state_if_matches_identity_in_root(
         &root, provider, channel_id, expected,
+    )
+}
+
+pub(in crate::services::discord) fn clear_lifecycle_inflight_state_if_matches_identity_after_death_evidence(
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+    expected_updated_at: &str,
+    expected_save_generation: u64,
+) -> GuardedClearOutcome {
+    let Some(root) = inflight_runtime_root() else {
+        return GuardedClearOutcome::Missing;
+    };
+    clear_lifecycle_inflight_state_if_matches_identity_after_death_evidence_in_root(
+        &root,
+        provider,
+        channel_id,
+        expected,
+        expected_updated_at,
+        expected_save_generation,
     )
 }
 
@@ -567,6 +609,56 @@ pub(super) fn clear_inflight_state_if_matches_identity_in_root(
     }
 }
 
+pub(super) fn clear_inflight_state_if_matches_identity_generation_in_root(
+    root: &std::path::Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+    expected_finalizer_turn_id: u64,
+    expected_updated_at: &str,
+    expected_save_generation: u64,
+) -> GuardedClearOutcome {
+    let path = inflight_state_path(root, provider, channel_id);
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return GuardedClearOutcome::IoError;
+    };
+    let Ok(data) = fs::read_to_string(&path) else {
+        return GuardedClearOutcome::Missing;
+    };
+    let Ok(state) = serde_json::from_str::<InflightTurnState>(&data) else {
+        return GuardedClearOutcome::Missing;
+    };
+    if state.restart_mode.is_some() {
+        return GuardedClearOutcome::PlannedRestartSkipped;
+    }
+    if state.rebind_origin {
+        return GuardedClearOutcome::RebindOriginSkipped;
+    }
+    if expected_finalizer_turn_id == 0
+        || !state.matches_finalizer_turn_id(expected_finalizer_turn_id)
+        || !expected.matches_state(&state)
+        || state.updated_at != expected_updated_at
+        || state.save_generation != expected_save_generation
+    {
+        return GuardedClearOutcome::UserMsgMismatch;
+    }
+    match fs::remove_file(&path) {
+        Ok(()) => GuardedClearOutcome::Cleared,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = channel_id,
+                expected_user_msg_id = expected.user_msg_id,
+                expected_finalizer_turn_id,
+                error = %error,
+                "inflight generation-guarded clear remove_file failed; treating as IoError so sweeper retries"
+            );
+            GuardedClearOutcome::IoError
+        }
+    }
+}
+
 pub(super) fn clear_rebind_origin_inflight_state_if_matches_identity_in_root(
     root: &std::path::Path,
     provider: &ProviderKind,
@@ -602,6 +694,52 @@ pub(super) fn clear_rebind_origin_inflight_state_if_matches_identity_in_root(
                 expected_user_msg_id = expected.user_msg_id,
                 error = %error,
                 "rebind-origin inflight guarded-clear remove_file failed; treating as IoError so sweeper retries"
+            );
+            GuardedClearOutcome::IoError
+        }
+    }
+}
+
+pub(super) fn clear_lifecycle_inflight_state_if_matches_identity_after_death_evidence_in_root(
+    root: &std::path::Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+    expected_updated_at: &str,
+    expected_save_generation: u64,
+) -> GuardedClearOutcome {
+    let path = inflight_state_path(root, provider, channel_id);
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return GuardedClearOutcome::IoError;
+    };
+    let Ok(data) = fs::read_to_string(&path) else {
+        return GuardedClearOutcome::Missing;
+    };
+    let Ok(state) = serde_json::from_str::<InflightTurnState>(&data) else {
+        return GuardedClearOutcome::Missing;
+    };
+    if state.restart_mode.is_none() && !state.rebind_origin {
+        return GuardedClearOutcome::UserMsgMismatch;
+    }
+    if !expected.matches_state(&state) {
+        return GuardedClearOutcome::UserMsgMismatch;
+    }
+    if state.updated_at != expected_updated_at {
+        return GuardedClearOutcome::UserMsgMismatch;
+    }
+    if state.save_generation != expected_save_generation {
+        return GuardedClearOutcome::UserMsgMismatch;
+    }
+    match fs::remove_file(&path) {
+        Ok(()) => GuardedClearOutcome::Cleared,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = channel_id,
+                expected_user_msg_id = expected.user_msg_id,
+                error = %error,
+                "lifecycle inflight guarded-clear after death evidence remove_file failed; treating as IoError so sweeper retries"
             );
             GuardedClearOutcome::IoError
         }
@@ -661,6 +799,7 @@ pub(super) fn clear_inflight_state_if_matches_identity_after_delivery_in_root(
     delivered_state.last_offset = last_offset;
     delivered_state.ensure_finalizer_turn_id();
     delivered_state.updated_at = now_string();
+    bump_save_generation_for_write(&path, &mut delivered_state);
 
     let mirrored_delivery = match serde_json::to_string_pretty(&delivered_state)
         .map_err(|error| error.to_string())
@@ -842,6 +981,7 @@ pub(super) fn refresh_inflight_last_offset_if_matches_identity_in_root(
     state.last_offset = last_offset;
     state.ensure_finalizer_turn_id();
     state.updated_at = now_string();
+    bump_save_generation_for_write(&path, &mut state);
     serde_json::to_string_pretty(&state)
         .map_err(|error| error.to_string())
         .and_then(|json| atomic_write(&path, &json))

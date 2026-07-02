@@ -177,6 +177,11 @@ pub(in crate::services::discord) struct InflightTurnState {
     pub task_notification_kind: Option<TaskNotificationKind>,
     pub started_at: String,
     pub updated_at: String,
+    /// Monotonic per-row write generation. `updated_at` is intentionally a
+    /// human-readable second-resolution string for compatibility, so gates that
+    /// must detect same-second liveness use this additive counter instead.
+    #[serde(default)]
+    pub save_generation: u64,
     /// Restart generation at which this turn was born.
     #[serde(default)]
     pub born_generation: u64,
@@ -873,6 +878,7 @@ impl InflightTurnState {
             task_notification_kind: None,
             started_at: now.clone(),
             updated_at: now,
+            save_generation: 0,
             born_generation,
             recovery_relay_attempts: 0,
             // #3918: never reposted / zero send-new attempts at turn birth.

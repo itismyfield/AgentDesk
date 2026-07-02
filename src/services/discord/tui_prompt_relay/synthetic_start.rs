@@ -1266,8 +1266,8 @@ pub(super) fn tui_direct_watcher_can_own_output(
     output_path: Option<&Path>,
 ) -> bool {
     let watcher_alive = watchers
-        .tmux_session_is_stale(tmux_session_name)
-        .is_some_and(|stale| !stale);
+        .tmux_session_live_for_relay(tmux_session_name)
+        .is_some_and(|live| live);
     if !watcher_alive {
         return false;
     }

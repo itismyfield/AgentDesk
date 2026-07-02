@@ -274,6 +274,7 @@ fn persist_under_lock_inner(
     if bump_updated_at {
         updated.updated_at = now_string();
     }
+    bump_save_generation_for_write(path, &mut updated);
     let json = serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())?;
     atomic_write(path, &json)
 }

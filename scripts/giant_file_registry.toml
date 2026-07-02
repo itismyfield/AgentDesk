@@ -392,6 +392,17 @@ decompose_issue = "#3405"
 # removed to avoid a ghost registration.
 
 [[entry]]
+# Re-crossed the 1000-prod-LoC threshold in #4030: watcher-cancel recovery now
+# routes the owning turn through the finalizer Cancel path, and the paired
+# FOREIGN-inflight stale cutoff is covered from the pending-start backstop. Keep
+# future relay recovery orchestration growth honest; split action apply/finalizer
+# glue into child modules once this P0 wedge recovery path stabilizes.
+file = "src/services/discord/relay_recovery.rs"
+owner = "discord-relay"
+deadline = "2026-08-31"
+decompose_issue = "#3405"
+
+[[entry]]
 # Crossed the 1000-prod-LoC threshold in #3739: worker-local LoopOwned Tokio
 # tasks now have registry-owned terminal supervision for unexpected future
 # return/panic. The file already held the bootstrap worker inventory plus

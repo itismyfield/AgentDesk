@@ -11,10 +11,10 @@ pub(super) struct SessionEnrichment {
     pub attached: bool,
     pub watcher_attached: bool,
     /// #3277 (Defect D): the channel HAS a watcher binding, but the bound
-    /// handle is provably dead — cancelled or heartbeat-stale (the registry's
-    /// `tmux_session_is_stale` predicate, shared with the #3268 handoff gate
-    /// and the finalizer far-backstop). `watcher_attached` alone made such a
-    /// dead handle block the relay-recovery reattach auto-heal.
+    /// handle is heartbeat-stale. A set cancel flag is tracked by watcher-claim
+    /// replacement paths, but is intentionally not reported as heartbeat stale:
+    /// otherwise a fresh-heartbeat watcher whose cancel flag was raised first is
+    /// mislabeled as `watcher_attached_stale`.
     pub watcher_attached_stale: bool,
     pub has_relay_coord: bool,
     pub watcher_owner_channel_id: Option<u64>,

@@ -1099,7 +1099,12 @@ pub async fn stale_mailbox_repair_handler(
                             &provider,
                             request.channel_id,
                         );
-                    if inflight_safe && !unrelayed_tail {
+                    let no_unread_bytes = snapshot.unread_bytes.unwrap_or(0) == 0;
+                    // Keep the manual stale-mailbox repair's destructive idle
+                    // clear gate aligned with ReattachWatcher: unread capture bytes
+                    // are live relay evidence, so do not retire mailbox/inflight
+                    // bookkeeping while the watcher still has bytes to consume.
+                    if inflight_safe && no_unread_bytes && !unrelayed_tail {
                         health::clear_idle_tmux_stale_turn(
                             registry,
                             provider.as_str(),
