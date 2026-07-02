@@ -1565,7 +1565,8 @@
   - `src/services/discord/{commands/text_commands.rs,
     discord_config_audit.rs, router/intake_gate.rs}` (all 1000+ production
     lines).
-  - `src/services/discord/placeholder_sweeper.rs` (1019 lines; +5 from #3886
+  - `src/services/discord/placeholder_sweeper.rs` (1020 lines; +1 from the
+    windows-build `#[cfg(unix)]` gate on the #3886 reconcile call; +5 from #3886
     calling the deterministic TimedOut-completion-gate status-panel reconcile
     (`super::tmux::reconcile_timed_out_tui_status_panel`) before the age-based
     orphan-panel reclaim; +10 from #3859
