@@ -52,7 +52,7 @@ direct_discord_sends = [
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:cb8dfde9e6d19e3b",
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:edafac97f164fd68",
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:b4849c24f5cb7d09",
-  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:1c6f6dcd93167903",
+
   # #3560: footer-mode migration reconcile — edits a pre-default-ON *separate*
   # status panel to a migration notice before dropping its handle (behaviorally
   # the same direct resume-notice edit already allowlisted in mod.rs; extracted
@@ -77,7 +77,7 @@ direct_discord_sends = [
   "src/services/discord/turn_bridge/two_message_panel.rs#direct_discord_sends:61cdbec4de2fbc9d",
   # #3038 turn_bridge S1: status-panel completion direct gateway calls moved
   # verbatim from turn_bridge/mod.rs to turn_bridge/status_panel.rs.
-  "src/services/discord/turn_bridge/status_panel.rs#direct_discord_sends:8806b21b9432ae8a",
+
   "src/services/discord/turn_bridge/status_panel.rs#direct_discord_sends:c4f1e0c4fddb4380",
   # #3016 msg_id==0 recovery: bridge creates a fresh placeholder / posts a recovery
   # notice for turns with no anchored Discord message. Consistent with the bridge's
