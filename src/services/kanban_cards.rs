@@ -227,11 +227,18 @@ async fn resolve_agent_id_from_channel_id_with_pg(
     crate::db::kanban_cards::resolve_agent_id_from_channel_id_with_pg(pool, channel_id).await
 }
 
+/// Resolves the caller's requested agent scope from API headers.
+///
+/// This is not authentication: API clients self-assert `x-agent-id` /
+/// `x-channel-id`, and the returned value is spoofable unless a future auth
+/// layer binds the request to a verified principal.
 pub(crate) async fn resolve_requesting_agent_id_with_pg(
     pool: &PgPool,
     headers: &HeaderMap,
 ) -> Option<String> {
     if let Some(agent_id) = trimmed_header_value(headers, "x-agent-id") {
+        // Preserve the repository-wide self-asserted caller model: a raw
+        // `x-agent-id` is accepted even if it does not resolve to an agents row.
         return crate::db::kanban_cards::resolve_existing_agent_id_with_pg(pool, agent_id)
             .await
             .or_else(|| Some(agent_id.to_string()));

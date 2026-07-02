@@ -490,17 +490,17 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "DELETE",
             "/api/routines/{id}",
             "routines",
-            "Hard-delete a detached routine and its routine_runs history. Returns 409 when the routine is not detached or has an in-flight run; agent-scoped callers cannot delete another agent's routine.",
+            "Hard-delete a detached routine and its routine_runs history. Returns 403 when an owned routine's caller agent scope is absent, unresolved, or different; returns 409 when the routine is not detached or has an in-flight run.",
         )
         .with_params([
             ("id", path_param("Routine id")),
             (
                 "x-agent-id",
-                header_param("string", false, "Optional caller agent scope; must match the routine owner when provided"),
+                header_param("string", false, "Self-asserted caller agent scope; required to match the owner for owned routines"),
             ),
             (
                 "x-channel-id",
-                header_param("string", false, "Optional caller channel scope resolved to an agent id"),
+                header_param("string", false, "Self-asserted caller channel scope resolved to an agent id; required for owned routines when x-agent-id is absent"),
             ),
         ])
         .with_example(

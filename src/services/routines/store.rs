@@ -425,10 +425,20 @@ pub struct RoutineMetrics {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeleteRoutineResult {
-    Deleted { run_history_deleted: u64 },
+    Deleted {
+        run_history_deleted: u64,
+        routine_agent_id: Option<String>,
+        caller_agent_id: Option<String>,
+    },
     NotFound,
-    NotDetached { status: String },
+    NotDetached {
+        status: String,
+    },
     InFlight,
+    Forbidden {
+        owner: String,
+        caller_agent_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -436,6 +446,13 @@ enum RoutineHardDeleteGate {
     Allowed,
     NotDetached { status: String },
     InFlight,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RoutineDeleteScopeGate {
+    Allowed,
+    Unresolved { owner: String },
+    OtherAgent { owner: String, caller: String },
 }
 
 fn routine_hard_delete_gate(
@@ -455,6 +472,34 @@ fn routine_hard_delete_gate(
     } else {
         RoutineHardDeleteGate::NotDetached {
             status: status.to_string(),
+        }
+    }
+}
+
+fn routine_delete_scope_gate(
+    routine_agent_id: Option<&str>,
+    caller_agent_id: Option<&str>,
+) -> RoutineDeleteScopeGate {
+    let Some(owner) = routine_agent_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return RoutineDeleteScopeGate::Allowed;
+    };
+    let Some(caller) = caller_agent_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return RoutineDeleteScopeGate::Unresolved {
+            owner: owner.to_string(),
+        };
+    };
+    if caller == owner {
+        RoutineDeleteScopeGate::Allowed
+    } else {
+        RoutineDeleteScopeGate::OtherAgent {
+            owner: owner.to_string(),
+            caller: caller.to_string(),
         }
     }
 }
@@ -2598,7 +2643,11 @@ impl RoutineStore {
         Ok(result.rows_affected() == 1)
     }
 
-    pub async fn delete_detached_routine(&self, routine_id: &str) -> Result<DeleteRoutineResult> {
+    pub async fn delete_detached_routine(
+        &self,
+        routine_id: &str,
+        caller_agent_id: Option<&str>,
+    ) -> Result<DeleteRoutineResult> {
         let mut tx = self
             .pool
             .begin()
@@ -2607,7 +2656,7 @@ impl RoutineStore {
 
         let row = sqlx::query(
             r#"
-            SELECT status, in_flight_run_id
+            SELECT status, in_flight_run_id, agent_id
             FROM routines
             WHERE id = $1
             FOR UPDATE
@@ -2628,6 +2677,26 @@ impl RoutineStore {
         let in_flight_run_id: Option<String> = row
             .try_get("in_flight_run_id")
             .map_err(|e| anyhow!("delete routine {routine_id}: {e}"))?;
+        let routine_agent_id: Option<String> = row
+            .try_get("agent_id")
+            .map_err(|e| anyhow!("delete routine {routine_id}: {e}"))?;
+
+        match routine_delete_scope_gate(routine_agent_id.as_deref(), caller_agent_id) {
+            RoutineDeleteScopeGate::Allowed => {}
+            RoutineDeleteScopeGate::Unresolved { owner } => {
+                return Ok(DeleteRoutineResult::Forbidden {
+                    owner,
+                    caller_agent_id: None,
+                });
+            }
+            RoutineDeleteScopeGate::OtherAgent { owner, caller } => {
+                return Ok(DeleteRoutineResult::Forbidden {
+                    owner,
+                    caller_agent_id: Some(caller),
+                });
+            }
+        }
+
         let has_running_run: bool = sqlx::query_scalar(
             r#"
             SELECT EXISTS (
@@ -2685,6 +2754,11 @@ impl RoutineStore {
 
         Ok(DeleteRoutineResult::Deleted {
             run_history_deleted: deleted_runs.rows_affected(),
+            routine_agent_id,
+            caller_agent_id: caller_agent_id
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned),
         })
     }
 
@@ -4043,6 +4117,31 @@ mod tests {
         assert_eq!(
             super::routine_hard_delete_gate("enabled", Some("run-1"), true),
             super::RoutineHardDeleteGate::InFlight
+        );
+    }
+
+    #[test]
+    fn routine_hard_delete_scope_gate_fails_closed_for_owned_routine() {
+        assert_eq!(
+            super::routine_delete_scope_gate(Some("codex"), Some("codex")),
+            super::RoutineDeleteScopeGate::Allowed
+        );
+        assert_eq!(
+            super::routine_delete_scope_gate(None, None),
+            super::RoutineDeleteScopeGate::Allowed
+        );
+        assert_eq!(
+            super::routine_delete_scope_gate(Some("codex"), None),
+            super::RoutineDeleteScopeGate::Unresolved {
+                owner: "codex".to_string()
+            }
+        );
+        assert_eq!(
+            super::routine_delete_scope_gate(Some("codex"), Some("claude")),
+            super::RoutineDeleteScopeGate::OtherAgent {
+                owner: "codex".to_string(),
+                caller: "claude".to_string()
+            }
         );
     }
 
