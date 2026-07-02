@@ -4,9 +4,10 @@
 //! This sibling module (mirroring `tmux_watcher/{liveness,commit_decisions,..}.rs`)
 //! holds the A4 cutover surface so the FROZEN `tmux_watcher.rs` giant-file ratchet
 //! (8223) absorbs only the small gate `if` + `DiscordGateway::new` construction +
-//! the `mod terminal_send;` line. The flag helper, the `WatcherPostHeartbeat`
-//! adapter, the gateway-generic `deliver_short_replace_via_controller`, and the
-//! pure `watcher_terminal_lease_range` gate all live here.
+//! the `mod terminal_send;` line. The controller heartbeat adapter lives in
+//! `controller_heartbeat.rs`; the flag helper, gateway-generic
+//! `deliver_short_replace_via_controller`, and pure `watcher_terminal_lease_range`
+//! gate all live here.
 
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -19,10 +20,10 @@ use crate::services::discord::outbound::delivery_record as dr;
 use crate::services::discord::outbound::turn_output_controller as toc;
 use crate::services::discord::placeholder_controller::{PlaceholderKey, PlaceholderLifecycle};
 use crate::services::discord::turn_finalizer::TurnKey;
-use crate::services::discord::{
-    DeliveryLeaseCell, DeliveryLeaseHeartbeat, LeaseHolder, SharedData, lease_now_ms,
-};
+use crate::services::discord::{DeliveryLeaseCell, LeaseHolder, SharedData, lease_now_ms};
 use crate::services::provider::ProviderKind;
+
+use super::controller_heartbeat::WatcherPostHeartbeat;
 
 /// #3089 A4: flag gating ONLY the watcher's short-replace terminal delivery branch
 /// (`replace_long_message_raw_with_outcome`) onto the unified
@@ -166,34 +167,6 @@ pub(in crate::services::discord) fn watcher_terminal_lease_range(
 ) -> Option<(u64, u64)> {
     cutover_range.filter(|_| !cutover_short_replace)
 }
-
-/// #3089 A4: adapts the watcher's `DeliveryLeaseHeartbeat` to [`toc::PostHeartbeat`].
-/// Holds the `Arc` (the controller drives the lease behind a borrowed `&cell`) and
-/// spawns the SAME `DeliveryLeaseHeartbeat::spawn` the legacy watcher used
-/// (tmux_watcher.rs:6015, #3041 §3 / #3151 — identical renew cadence); the guard
-/// Drop aborts the renew task BEFORE the inline commit (#3151 ordering). Mirrors
-/// A2b's `SinkPostHeartbeat`.
-pub(in crate::services::discord) struct WatcherPostHeartbeat {
-    pub(in crate::services::discord) cell: Arc<DeliveryLeaseCell>,
-}
-
-impl toc::PostHeartbeat for WatcherPostHeartbeat {
-    fn start(
-        &self,
-        holder: LeaseHolder,
-        key: crate::services::discord::DeliveryLeaseKey,
-    ) -> Box<dyn toc::PostHeartbeatGuard> {
-        Box::new(WatcherPostHeartbeatGuard {
-            _heartbeat: DeliveryLeaseHeartbeat::spawn(self.cell.clone(), holder, key),
-        })
-    }
-}
-
-struct WatcherPostHeartbeatGuard {
-    _heartbeat: DeliveryLeaseHeartbeat,
-}
-
-impl toc::PostHeartbeatGuard for WatcherPostHeartbeatGuard {}
 
 /// #3089 A4: watcher short-replace via the turn-output controller, behaviourally
 /// equal to the legacy `replace_long_message_raw_with_outcome` arm — SAME transport,

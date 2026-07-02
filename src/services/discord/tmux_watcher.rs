@@ -45,6 +45,9 @@ mod commit_decisions;
 
 use self::commit_decisions::*;
 
+#[path = "tmux_watcher/controller_heartbeat.rs"]
+mod controller_heartbeat;
+
 #[path = "tmux_watcher/placeholder_reclaim.rs"]
 mod placeholder_reclaim;
 
@@ -4815,25 +4818,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // below). Acquire is the atomic fast-path (B4); commit/advance/release run INLINE
         // (preserving the pre-P1-1 advance timing, avoiding an actor-deferral duplicate).
         // The actor CommitDelivery/ReleaseDelivery messages remain dormant.
-        let watcher_lease_turn = crate::services::discord::turn_finalizer::TurnKey::new(
-            channel_id,
-            pinned_finalizer_turn_id(
+        let (watcher_lease_turn, watcher_lease_key, watcher_lease_holder) =
+            pinned_watcher_delivery_lease_identity(
+                channel_id,
+                shared.restart.current_generation,
+                watcher_instance_id,
                 inflight_before_relay.as_ref(),
                 &tmux_session_name,
                 current_offset,
-            ),
-            shared.restart.current_generation,
-        );
-        let watcher_lease_key = pinned_delivery_lease_key(
-            channel_id,
-            shared.restart.current_generation,
-            inflight_before_relay.as_ref(),
-            &tmux_session_name,
-            current_offset,
-        );
-        let watcher_lease_holder = crate::services::discord::LeaseHolder::Watcher {
-            instance_id: watcher_instance_id,
-        };
+            );
         let watcher_lease_start = data_start_offset;
         let watcher_lease_end = terminal_event_consumed_offset(current_offset, &all_data);
         // #3610 PR-1d: the legacy long-chunk fallback arm's terminal anchor (last
@@ -4872,25 +4865,20 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 .then_some((watcher_lease_start, watcher_lease_end)),
             cutover_short_replace,
         );
-        let watcher_lease_acquired = if watcher_terminal_lease_range.is_some() {
+        let watcher_lease_acquired = watcher_terminal_lease_range.is_some()
             // #3041 P1-1 (B3, Issue 1): SELF-HEALING acquire — reclaim an ELAPSED
             // `Leased` lease (dead holder that died before commit/release) against the
             // SAME monotonic `lease_now_ms()` clock, so a LIVE holder mid-send (deadline
             // pushed forward by the heartbeat) is NOT reclaimed and still correctly
             // B2-skips (§5.2). PRIMARY black-hole guarantee, bounded to the deadline,
             // no finalizer `SharedData` dependency; reconcile-tick reclaim is secondary.
-            watcher_lease_cell.reclaim_if_expired(crate::services::discord::lease_now_ms());
-            watcher_lease_cell.try_acquire(
-                watcher_lease_key.clone(),
+            && try_acquire_watcher_delivery_lease(
+                &watcher_lease_cell,
                 watcher_lease_holder,
+                &watcher_lease_key,
                 watcher_lease_start,
                 watcher_lease_end,
-                crate::services::discord::lease_now_ms()
-                    .saturating_add(WATCHER_DELIVERY_LEASE_DEADLINE_MS),
-            )
-        } else {
-            false
-        };
+            );
         // B2 skip flag: intended to direct-send but a different holder owns the range →
         // skip arm (no duplicate send). #3089 A4: EXCLUDE the cut-over turn
         // (`!cutover_short_replace`) — its lost-acquire B2-skip is handled INSIDE the
@@ -4918,15 +4906,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // this background heartbeat `renew()`ing every 5s. `stop()`ped BEFORE the inline
         // commit (and aborts on drop), so it never races the commit. Spawned ONLY when we
         // acquired; the B2-skip / no-send / #3089-A4-cutover arms have no lease to renew.
-        let watcher_lease_heartbeat = if watcher_lease_acquired {
-            Some(DeliveryLeaseHeartbeat::spawn(
-                watcher_lease_cell.clone(),
-                watcher_lease_holder,
-                watcher_lease_key.clone(),
-            ))
-        } else {
-            None
-        };
+        let watcher_lease_heartbeat = watcher_delivery_lease_heartbeat(
+            watcher_lease_acquired,
+            watcher_lease_cell.clone(),
+            watcher_lease_holder,
+            &watcher_lease_key,
+        );
 
         let relay_ok = if session_bound_relay_owns_terminal_delivery {
             let ts = chrono::Local::now().format("%H:%M:%S");

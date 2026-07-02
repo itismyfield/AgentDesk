@@ -528,6 +528,22 @@ pub(super) fn bridge_delivery_lease_key_for_inflight(
     )
 }
 
+pub(super) fn bridge_delivery_lease_for_inflight(
+    shared: &SharedData,
+    watcher_owner_channel_id: ChannelId,
+    generation: u64,
+    inflight: &crate::services::discord::inflight::InflightTurnState,
+    target_end: Option<u64>,
+) -> BridgeLeaseAcquire {
+    BridgeDeliveryLease::acquire(
+        shared,
+        watcher_owner_channel_id,
+        bridge_delivery_lease_key_for_inflight(watcher_owner_channel_id, generation, inflight),
+        inflight.turn_start_offset.unwrap_or(0),
+        target_end,
+    )
+}
+
 impl BridgeDeliveryLease {
     /// Acquire the per-channel delivery lease for the bridge's terminal delivery
     /// covering `[start, end)` for `key`. `target_end` is the same end offset the

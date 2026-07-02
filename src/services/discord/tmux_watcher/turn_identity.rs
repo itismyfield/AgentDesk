@@ -246,6 +246,63 @@ pub(super) fn pinned_delivery_lease_key(
     }
 }
 
+pub(super) fn pinned_watcher_delivery_lease_identity(
+    channel_id: ChannelId,
+    generation: u64,
+    watcher_instance_id: u64,
+    inflight_before_relay: Option<&crate::services::discord::inflight::InflightTurnState>,
+    tmux_session_name: &str,
+    current_offset: u64,
+) -> (
+    crate::services::discord::turn_finalizer::TurnKey,
+    crate::services::discord::DeliveryLeaseKey,
+    crate::services::discord::LeaseHolder,
+) {
+    (
+        crate::services::discord::turn_finalizer::TurnKey::new(
+            channel_id,
+            pinned_finalizer_turn_id(inflight_before_relay, tmux_session_name, current_offset),
+            generation,
+        ),
+        pinned_delivery_lease_key(
+            channel_id,
+            generation,
+            inflight_before_relay,
+            tmux_session_name,
+            current_offset,
+        ),
+        crate::services::discord::LeaseHolder::Watcher {
+            instance_id: watcher_instance_id,
+        },
+    )
+}
+
+pub(super) fn try_acquire_watcher_delivery_lease(
+    cell: &crate::services::discord::DeliveryLeaseCell,
+    holder: crate::services::discord::LeaseHolder,
+    key: &crate::services::discord::DeliveryLeaseKey,
+    start: u64,
+    end: u64,
+) -> bool {
+    cell.reclaim_if_expired(crate::services::discord::lease_now_ms());
+    cell.try_acquire(
+        key.clone(),
+        holder,
+        start,
+        end,
+        crate::services::discord::lease_now_ms().saturating_add(WATCHER_DELIVERY_LEASE_DEADLINE_MS),
+    )
+}
+
+pub(super) fn watcher_delivery_lease_heartbeat(
+    acquired: bool,
+    cell: std::sync::Arc<crate::services::discord::DeliveryLeaseCell>,
+    holder: crate::services::discord::LeaseHolder,
+    key: &crate::services::discord::DeliveryLeaseKey,
+) -> Option<DeliveryLeaseHeartbeat> {
+    acquired.then(|| DeliveryLeaseHeartbeat::spawn(cell, holder, key.clone()))
+}
+
 pub(super) fn should_submit_restored_watcher_finalize(
     completion_is_stale_for_newer_turn: bool,
     restored_finalizer_turn_id: u64,

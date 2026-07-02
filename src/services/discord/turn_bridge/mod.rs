@@ -199,7 +199,7 @@ use status_panel::{
     status_panel_completion_ready_after_terminal_body, status_panel_message_id_for_turn,
 };
 use terminal_delivery::{
-    BridgeDeliveryLease, BridgeLeaseAcquire, bridge_delivery_lease_key_for_inflight,
+    BridgeLeaseAcquire, bridge_delivery_lease_for_inflight, bridge_delivery_lease_key_for_inflight,
     bridge_epilogue_clears_inflight, bridge_epilogue_marks_watcher_delivered,
     bridge_epilogue_skip_save_is_identity_guarded, send_ordered_long_terminal_response,
     should_complete_work_dispatch_after_terminal_delivery,
@@ -4667,16 +4667,11 @@ pub(super) fn spawn_turn_bridge(
             // channel the WATCHER uses (a reused watcher can own a channel != this
             // bridge's `channel_id`), so the two CONTEND on one cell (single-holder
             // B2) instead of both delivering = duplicate.
-            let stop_lease_key = bridge_delivery_lease_key_for_inflight(
+            let stop_lease_acquire = bridge_delivery_lease_for_inflight(
+                shared_owned.as_ref(),
                 watcher_owner_channel_id,
                 shared_owned.restart.current_generation,
                 &inflight_state,
-            );
-            let stop_lease_acquire = BridgeDeliveryLease::acquire(
-                shared_owned.as_ref(),
-                watcher_owner_channel_id,
-                stop_lease_key,
-                inflight_state.turn_start_offset.unwrap_or(0),
                 tmux_last_offset,
             );
             if matches!(stop_lease_acquire, BridgeLeaseAcquire::Skip) {
@@ -4770,16 +4765,11 @@ pub(super) fn spawn_turn_bridge(
             // #3041 P1-2 (site 2 — prompt-too-long terminal replace): same lease
             // routing as site 1 — acquire before replace; B2-skip if held. (codex
             // P1-a) lease on `watcher_owner_channel_id` (shared cell + TurnKey).
-            let plt_lease_key = bridge_delivery_lease_key_for_inflight(
+            let plt_lease_acquire = bridge_delivery_lease_for_inflight(
+                shared_owned.as_ref(),
                 watcher_owner_channel_id,
                 shared_owned.restart.current_generation,
                 &inflight_state,
-            );
-            let plt_lease_acquire = BridgeDeliveryLease::acquire(
-                shared_owned.as_ref(),
-                watcher_owner_channel_id,
-                plt_lease_key,
-                inflight_state.turn_start_offset.unwrap_or(0),
                 tmux_last_offset,
             );
             if matches!(plt_lease_acquire, BridgeLeaseAcquire::Skip) {
@@ -5166,16 +5156,11 @@ pub(super) fn spawn_turn_bridge(
                 // `terminal_delivery_committed` is set ONLY when THIS actor resolves
                 // the range (`Held`→commit / `NoRange`); on `Skip` the watcher owns
                 // delivery → NO-OP on completion side-effects, leave the turn retry-able.
-                let silent_lease_key = bridge_delivery_lease_key_for_inflight(
+                let lease_acquire = bridge_delivery_lease_for_inflight(
+                    shared_owned.as_ref(),
                     watcher_owner_channel_id,
                     shared_owned.restart.current_generation,
                     &inflight_state,
-                );
-                let lease_acquire = BridgeDeliveryLease::acquire(
-                    shared_owned.as_ref(),
-                    watcher_owner_channel_id,
-                    silent_lease_key,
-                    inflight_state.turn_start_offset.unwrap_or(0),
                     tmux_last_offset,
                 );
                 // (codex P1-c) one source of truth for "does this acquire outcome
@@ -5252,16 +5237,11 @@ pub(super) fn spawn_turn_bridge(
                         // lease HEARTBEAT keeps it alive mid-send. Acquire BEFORE the
                         // send; B2-skip if another holder owns it. (codex P1-a) lease
                         // on `watcher_owner_channel_id` (shared cell + TurnKey).
-                        let long_send_lease_key = bridge_delivery_lease_key_for_inflight(
+                        let lease_acquire = bridge_delivery_lease_for_inflight(
+                            shared_owned.as_ref(),
                             watcher_owner_channel_id,
                             shared_owned.restart.current_generation,
                             &inflight_state,
-                        );
-                        let lease_acquire = BridgeDeliveryLease::acquire(
-                            shared_owned.as_ref(),
-                            watcher_owner_channel_id,
-                            long_send_lease_key,
-                            inflight_state.turn_start_offset.unwrap_or(0),
                             tmux_last_offset,
                         );
                         if matches!(lease_acquire, BridgeLeaseAcquire::Skip) {
@@ -5367,16 +5347,6 @@ pub(super) fn spawn_turn_bridge(
                         }
                     } else {
                         // #3089 A5/A6b (flags, default OFF): route short-replace through the controller (`terminal_controller_cutover`); OFF → legacy below.
-                        let bridge_turn = super::turn_finalizer::TurnKey::new(
-                            watcher_owner_channel_id,
-                            inflight_state.user_msg_id,
-                            shared_owned.restart.current_generation,
-                        );
-                        let bridge_lease_key = bridge_delivery_lease_key_for_inflight(
-                            watcher_owner_channel_id,
-                            shared_owned.restart.current_generation,
-                            &inflight_state,
-                        );
                         let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
                         let ordered_range = tmux_last_offset.is_some_and(|e| e > bridge_start);
                         // #3089 A5 OR A6b: route short-replace via the controller when A5 is ON (both origins) OR A6b is ON AND this is a TUI external-input turn (closes #3088). The OR-in IS the pure `bridge_short_replace_route_decision` (r2 [Medium]) so the production expression cannot be silently weakened — the `is_external_input_tui_direct &&` scoping is mutation-pinned by `a6b_flag_does_not_route_discord_origin_when_a5_off`.
@@ -5399,6 +5369,16 @@ pub(super) fn spawn_turn_bridge(
                             ),
                         );
                         if cutover_short_replace {
+                            let bridge_turn = super::turn_finalizer::TurnKey::new(
+                                watcher_owner_channel_id,
+                                inflight_state.user_msg_id,
+                                shared_owned.restart.current_generation,
+                            );
+                            let bridge_lease_key = bridge_delivery_lease_key_for_inflight(
+                                watcher_owner_channel_id,
+                                shared_owned.restart.current_generation,
+                                &inflight_state,
+                            );
                             let cell = shared_owned.delivery_lease(watcher_owner_channel_id);
                             terminal_controller_cutover::apply_bridge_short_replace_controller(
                                 gateway.as_ref(),
@@ -5444,11 +5424,11 @@ pub(super) fn spawn_turn_bridge(
                                 Some((bridge_start, tmux_last_offset.unwrap_or(0))),
                                 cutover_short_replace,
                             ) {
-                                Some(_) => BridgeDeliveryLease::acquire(
+                                Some(_) => bridge_delivery_lease_for_inflight(
                                     shared_owned.as_ref(),
                                     watcher_owner_channel_id,
-                                    bridge_lease_key.clone(),
-                                    bridge_start,
+                                    shared_owned.restart.current_generation,
+                                    &inflight_state,
                                     tmux_last_offset,
                                 ),
                                 None => BridgeLeaseAcquire::NoRange,

@@ -1220,7 +1220,7 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6284 lines; production LoC; +43
+  - `src/services/discord/turn_bridge/mod.rs` (6281 lines; production LoC; +43
     from #3805 P2 PR-D (two-message SINK rollover re-anchor) — after a mid-turn
     answer rollover, re-anchor the status panel BELOW the new tail answer; mod.rs
     gains only a per-interval rolled-over local + one gated re-anchor call after
@@ -1431,6 +1431,12 @@
     giant-file-registry [[entry]] was removed. #3038 turn_bridge S1 moved
     `advance_tmux_relay_confirmed_end` here; split the remaining lease wiring
     vs delivery helpers before adding behavior).
+  - `src/services/discord/outbound/turn_output_controller.rs` (1034 prod lines;
+    crossed the giant threshold in #3998 E13 when the controller-facing lease
+    guard moved from `TurnKey` to `DeliveryLeaseKey` for id-0 disambiguation.
+    Tracked decompose target — see `giant-file-registry.md` (owner
+    `discord-relay`, deadline 2026-08-31, issue #3405). Keep further
+    controller growth in narrower outbound/controller helper modules).
   - `src/services/discord/turn_finalizer.rs` (1048 prod lines; single-authority
     turn-finalize state machine — ledger/actor-loop/reconciler. Crossed the
     giant-file threshold when #3041 P1-0 added the dormant `DeliveryLeaseCell`

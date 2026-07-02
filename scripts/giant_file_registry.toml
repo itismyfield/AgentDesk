@@ -372,6 +372,17 @@ deadline = "2026-08-31"
 decompose_issue = "#3405"
 
 [[entry]]
+# Crossed the 1000-prod-LoC threshold in #3998 E13 when the turn-output
+# controller lease guard moved from `TurnKey` to `DeliveryLeaseKey` so id-0
+# delivery leases can use inflight disambiguators. Keep future controller growth
+# in narrower outbound/controller helper modules once the lease-key rollout
+# stabilizes.
+file = "src/services/discord/outbound/turn_output_controller.rs"
+owner = "discord-relay"
+deadline = "2026-08-31"
+decompose_issue = "#3405"
+
+[[entry]]
 # Crossed the 1000-prod-LoC threshold in #3635: the dead-watcher rebind-origin
 # reap added a second reap branch to the rebind-origin arm of the sweep loop
 # (the watcher-owned #897 orphan the #3581 None-owner predicate can never touch).
