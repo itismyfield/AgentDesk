@@ -5,7 +5,7 @@
 
 - Production Rust modules: `899`
 - Giant-file threshold: `>= 1000` production lines
-- Giant files: `87`
+- Giant files: `88`
 
 > `Prod` excludes lines inside `#[cfg(test)] mod` blocks; the
 > giant-file flag tracks `Prod` so inline test fixtures do not freeze a
@@ -285,7 +285,7 @@
 | `server::routes::review_verdict::tuning_aggregate` | `src/server/routes/review_verdict/tuning_aggregate.rs` | 14 | 14 | 0 |  |
 | `server::routes::review_verdict::verdict_route` | `src/server/routes/review_verdict/verdict_route.rs` | 705 | 641 | 64 |  |
 | `server::routes::reviews` | `src/server/routes/reviews.rs` | 760 | 671 | 89 |  |
-| `server::routes::routines` | `src/server/routes/routines.rs` | 1215 | 937 | 278 |  |
+| `server::routes::routines` | `src/server/routes/routines.rs` | 1389 | 1032 | 357 | giant-file |
 | `server::routes::session_activity` | `src/server/routes/session_activity.rs` | 13 | 13 | 0 |  |
 | `server::routes::settings` | `src/server/routes/settings.rs` | 93 | 93 | 0 |  |
 | `server::routes::skill_usage_analytics` | `src/server/routes/skill_usage_analytics.rs` | 425 | 425 | 0 |  |
@@ -889,7 +889,7 @@
 | `services::routines::runtime` | `src/services/routines/runtime.rs` | 1046 | 870 | 176 |  |
 | `services::routines::runtime_config` | `src/services/routines/runtime_config.rs` | 133 | 64 | 69 |  |
 | `services::routines::session_control` | `src/services/routines/session_control.rs` | 1039 | 895 | 144 |  |
-| `services::routines::store` | `src/services/routines/store.rs` | 4311 | 3653 | 658 | giant-file |
+| `services::routines::store` | `src/services/routines/store.rs` | 4328 | 3670 | 658 | giant-file |
 | `services::service_error` | `src/services/service_error.rs` | 1 | 1 | 0 |  |
 | `services::session_activity` | `src/services/session_activity.rs` | 356 | 277 | 79 |  |
 | `services::session_backend` | `src/services/session_backend.rs` | 611 | 393 | 218 |  |

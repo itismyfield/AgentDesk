@@ -507,3 +507,14 @@ file = "src/services/tmux_common.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
 decompose_issue = "#3924"
+
+[[entry]]
+# #3990 hard-delete endpoint + per-outcome audit logging pushed the routines
+# route file past the giant threshold (1032 prod LoC). The file bundles route
+# handlers, response mapping, scope-gate plumbing, and audit helpers;
+# decomposition should lift the delete/audit cluster and response mappers into
+# sibling modules under routes/routines/.
+file = "src/server/routes/routines.rs"
+owner = "server-routes"
+deadline = "2026-10-31"
+decompose_issue = "#4039"
