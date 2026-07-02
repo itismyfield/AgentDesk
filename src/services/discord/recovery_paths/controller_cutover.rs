@@ -219,6 +219,7 @@ where
         gateway,
         toc::TurnOutputCtx {
             turn,
+            lease_key: None,
             // No `Recovery` owner variant exists and the enum lives in a frozen
             // baseline; `StandbyRelay` is cosmetic on the markerless path (no
             // owner-scoped routing fires), so it is reused as the closest

@@ -22,7 +22,7 @@ use super::super::outbound::turn_output_controller as toc;
 use super::super::placeholder_controller::{PlaceholderKey, PlaceholderLifecycle};
 use super::super::turn_finalizer::TurnKey;
 use crate::services::discord::{
-    DeliveryLeaseCell, DeliveryLeaseHeartbeat, LeaseHolder, lease_now_ms,
+    DeliveryLeaseCell, DeliveryLeaseHeartbeat, DeliveryLeaseKey, LeaseHolder, lease_now_ms,
 };
 
 /// #3089 A5: flag gating ONLY the bridge's short-replace terminal-replace branch
@@ -152,9 +152,13 @@ pub(super) struct BridgePostHeartbeat {
 }
 
 impl toc::PostHeartbeat for BridgePostHeartbeat {
-    fn start(&self, holder: LeaseHolder, turn: TurnKey) -> Box<dyn toc::PostHeartbeatGuard> {
+    fn start(
+        &self,
+        holder: LeaseHolder,
+        key: DeliveryLeaseKey,
+    ) -> Box<dyn toc::PostHeartbeatGuard> {
         Box::new(BridgePostHeartbeatGuard {
-            _heartbeat: DeliveryLeaseHeartbeat::spawn(self.cell.clone(), holder, turn),
+            _heartbeat: DeliveryLeaseHeartbeat::spawn(self.cell.clone(), holder, key),
         })
     }
 }
@@ -236,6 +240,7 @@ pub(super) async fn deliver_short_replace_via_controller(
     msg_id: MessageId,
     relay_text: &str,
     turn: TurnKey,
+    lease_key: Option<DeliveryLeaseKey>,
     start: u64,
     end: u64,
 ) -> toc::DeliveryOutcome {
@@ -265,6 +270,7 @@ pub(super) async fn deliver_short_replace_via_controller(
         gateway,
         toc::TurnOutputCtx {
             turn,
+            lease_key,
             // No `Bridge` variant exists on `RelayOwnerKind`; `None` preserves the
             // historical bridge-owned/default shape (observability only).
             owner: RelayOwnerKind::None,
@@ -386,6 +392,7 @@ pub(super) async fn apply_bridge_short_replace_controller(
     dispatch_id: Option<&str>,
     session_key: Option<&str>,
     turn_id: Option<&str>,
+    lease_key: Option<DeliveryLeaseKey>,
     locals: BridgeShortReplaceLocals<'_>,
 ) {
     let outcome = deliver_short_replace_via_controller(
@@ -400,6 +407,7 @@ pub(super) async fn apply_bridge_short_replace_controller(
         msg_id,
         relay_text,
         turn,
+        lease_key,
         start,
         end,
     )
@@ -632,8 +640,8 @@ mod tests {
         use crate::services::discord::outbound::turn_output_controller as toc;
         use crate::services::discord::turn_finalizer::TurnKey;
         use crate::services::discord::{
-            DeliveryLeaseCell, LeaseHolder, LeaseSnapshot, SharedData, lease_now_ms,
-            make_shared_data_for_tests,
+            DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, LeaseSnapshot, SharedData,
+            lease_now_ms, make_shared_data_for_tests,
         };
         use crate::services::provider::ProviderKind;
         use serenity::all::{ChannelId, MessageId};
@@ -657,6 +665,9 @@ mod tests {
         }
         fn turn() -> TurnKey {
             TurnKey::new(ch(), 21, 0)
+        }
+        fn lease_key() -> DeliveryLeaseKey {
+            DeliveryLeaseKey::from_turn_key(turn())
         }
 
         // A fake `TurnGateway` whose `replace_message_with_outcome` returns a fixed
@@ -813,6 +824,7 @@ mod tests {
                 MessageId::new(MSG),
                 "answer body",
                 turn(),
+                Some(lease_key()),
                 START,
                 END,
             )
@@ -951,7 +963,7 @@ mod tests {
             let cell = Arc::new(DeliveryLeaseCell::new(ch()));
             let other = LeaseHolder::Watcher { instance_id: 999 };
             assert!(cell.try_acquire(
-                turn(),
+                lease_key(),
                 other,
                 START,
                 END,
@@ -1009,8 +1021,8 @@ mod tests {
             let cell = Arc::new(DeliveryLeaseCell::new(ch()));
             let holder = LeaseHolder::Bridge;
             let short = lease_now_ms().saturating_add(100);
-            assert!(cell.try_acquire(turn(), holder, START, END, short));
-            let hb = DeliveryLeaseHeartbeat::spawn(cell.clone(), holder, turn());
+            assert!(cell.try_acquire(lease_key(), holder, START, END, short));
+            let hb = DeliveryLeaseHeartbeat::spawn(cell.clone(), holder, lease_key());
             for _ in 0..3 {
                 tokio::time::advance(std::time::Duration::from_millis(
                     DELIVERY_LEASE_HEARTBEAT_MS,
@@ -1028,7 +1040,7 @@ mod tests {
             assert!(
                 cell.commit(
                     holder,
-                    turn(),
+                    lease_key(),
                     START,
                     END,
                     crate::services::discord::LeaseOutcome::Delivered

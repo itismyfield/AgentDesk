@@ -36,8 +36,8 @@ use super::super::placeholder_controller::{
 };
 use super::super::turn_finalizer::TurnKey;
 use super::super::{
-    DELIVERY_LEASE_DEADLINE_MS, DeliveryLeaseCell, LeaseHolder, LeaseOutcome, LeaseSnapshot,
-    lease_now_ms,
+    DELIVERY_LEASE_DEADLINE_MS, DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, LeaseOutcome,
+    LeaseSnapshot, lease_now_ms,
 };
 use super::decision::LengthPolicyDecision;
 
@@ -56,7 +56,7 @@ use super::decision::LengthPolicyDecision;
 pub(in crate::services::discord) trait DeliveryLease {
     fn try_acquire(
         &self,
-        turn: TurnKey,
+        key: DeliveryLeaseKey,
         holder: LeaseHolder,
         start: u64,
         end: u64,
@@ -65,20 +65,20 @@ pub(in crate::services::discord) trait DeliveryLease {
     fn commit(
         &self,
         holder: LeaseHolder,
-        turn: TurnKey,
+        key: DeliveryLeaseKey,
         start: u64,
         end: u64,
         outcome: LeaseOutcome,
     ) -> bool;
-    fn release(&self, holder: LeaseHolder, turn: TurnKey, start: u64, end: u64) -> bool;
-    /// Push this `(holder, turn)`'s lease deadline to `new_deadline_ms` (range is
+    fn release(&self, holder: LeaseHolder, key: DeliveryLeaseKey, start: u64, end: u64) -> bool;
+    /// Push this `(holder, key)` lease deadline to `new_deadline_ms` (range is
     /// not matched — see [`DeliveryLeaseCell::renew`]). A no-op `false` once the
     /// lease is no longer ours (committed / released / reclaimed). The A2a POST
     /// heartbeat ([`PostHeartbeat`]) calls this on a fixed interval so the
     /// `Leased{holder, fresh}` deadline stays ahead of the reconciler while a slow
     /// POST is in flight (#3151) — replacing A1's fixed-TTL acquire.
     #[allow(dead_code)] // #3089 A2a: driven by the owner's PostHeartbeat at A2b cutover.
-    fn renew(&self, holder: LeaseHolder, turn: TurnKey, new_deadline_ms: u64) -> bool;
+    fn renew(&self, holder: LeaseHolder, key: DeliveryLeaseKey, new_deadline_ms: u64) -> bool;
     #[allow(dead_code)] // #3089 A1: read by the controller's own tests only.
     fn read(&self) -> LeaseSnapshot;
 }
@@ -86,29 +86,29 @@ pub(in crate::services::discord) trait DeliveryLease {
 impl DeliveryLease for DeliveryLeaseCell {
     fn try_acquire(
         &self,
-        turn: TurnKey,
+        key: DeliveryLeaseKey,
         holder: LeaseHolder,
         start: u64,
         end: u64,
         deadline_ms: u64,
     ) -> bool {
-        DeliveryLeaseCell::try_acquire(self, turn, holder, start, end, deadline_ms)
+        DeliveryLeaseCell::try_acquire(self, key, holder, start, end, deadline_ms)
     }
     fn commit(
         &self,
         holder: LeaseHolder,
-        turn: TurnKey,
+        key: DeliveryLeaseKey,
         start: u64,
         end: u64,
         outcome: LeaseOutcome,
     ) -> bool {
-        DeliveryLeaseCell::commit(self, holder, turn, start, end, outcome)
+        DeliveryLeaseCell::commit(self, holder, key, start, end, outcome)
     }
-    fn release(&self, holder: LeaseHolder, turn: TurnKey, start: u64, end: u64) -> bool {
-        DeliveryLeaseCell::release(self, holder, turn, start, end)
+    fn release(&self, holder: LeaseHolder, key: DeliveryLeaseKey, start: u64, end: u64) -> bool {
+        DeliveryLeaseCell::release(self, holder, key, start, end)
     }
-    fn renew(&self, holder: LeaseHolder, turn: TurnKey, new_deadline_ms: u64) -> bool {
-        DeliveryLeaseCell::renew(self, holder, turn, new_deadline_ms)
+    fn renew(&self, holder: LeaseHolder, key: DeliveryLeaseKey, new_deadline_ms: u64) -> bool {
+        DeliveryLeaseCell::renew(self, holder, key, new_deadline_ms)
     }
     fn read(&self) -> LeaseSnapshot {
         DeliveryLeaseCell::read(self)
@@ -131,7 +131,7 @@ pub(in crate::services::discord) struct NoLease;
 impl DeliveryLease for NoLease {
     fn try_acquire(
         &self,
-        _turn: TurnKey,
+        _key: DeliveryLeaseKey,
         _holder: LeaseHolder,
         _start: u64,
         _end: u64,
@@ -144,7 +144,7 @@ impl DeliveryLease for NoLease {
     fn commit(
         &self,
         _holder: LeaseHolder,
-        _turn: TurnKey,
+        _key: DeliveryLeaseKey,
         _start: u64,
         _end: u64,
         _outcome: LeaseOutcome,
@@ -153,10 +153,16 @@ impl DeliveryLease for NoLease {
         // a no-op keeps the trait honest.
         false
     }
-    fn release(&self, _holder: LeaseHolder, _turn: TurnKey, _start: u64, _end: u64) -> bool {
+    fn release(
+        &self,
+        _holder: LeaseHolder,
+        _key: DeliveryLeaseKey,
+        _start: u64,
+        _end: u64,
+    ) -> bool {
         false
     }
-    fn renew(&self, _holder: LeaseHolder, _turn: TurnKey, _new_deadline_ms: u64) -> bool {
+    fn renew(&self, _holder: LeaseHolder, _key: DeliveryLeaseKey, _new_deadline_ms: u64) -> bool {
         false
     }
     fn read(&self) -> LeaseSnapshot {
@@ -446,7 +452,7 @@ pub(in crate::services::discord) type ConfirmedAdvance<'a> =
 ///
 /// `release` is full-identity-gated and valid from BOTH `Leased` (failure) and
 /// `Committed` (success), so dropping the guard after a commit clears ONLY our
-/// own `(holder, turn, [start,end))` marker — a newer turn that re-leased the
+/// own `(holder, key, [start,end))` marker — a newer turn that re-leased the
 /// cell survives, exactly as the legacy guard. `disarm` (via `release_and_disarm`)
 /// is called once an explicit release has run so the Drop cannot double-release
 /// (a second release is a no-op under the identity gate, but disarming keeps the
@@ -454,18 +460,18 @@ pub(in crate::services::discord) type ConfirmedAdvance<'a> =
 struct ControllerLeaseGuard<'a, L: DeliveryLease + ?Sized> {
     lease: &'a L,
     holder: LeaseHolder,
-    turn: TurnKey,
+    key: DeliveryLeaseKey,
     start: u64,
     end: u64,
     armed: bool,
 }
 
 impl<'a, L: DeliveryLease + ?Sized> ControllerLeaseGuard<'a, L> {
-    fn arm(lease: &'a L, holder: LeaseHolder, turn: TurnKey, start: u64, end: u64) -> Self {
+    fn arm(lease: &'a L, holder: LeaseHolder, key: DeliveryLeaseKey, start: u64, end: u64) -> Self {
         Self {
             lease,
             holder,
-            turn,
+            key,
             start,
             end,
             armed: true,
@@ -479,7 +485,7 @@ impl<'a, L: DeliveryLease + ?Sized> ControllerLeaseGuard<'a, L> {
         if self.armed {
             self.armed = false;
             self.lease
-                .release(self.holder, self.turn, self.start, self.end);
+                .release(self.holder, self.key.clone(), self.start, self.end);
         }
     }
 }
@@ -488,7 +494,7 @@ impl<L: DeliveryLease + ?Sized> Drop for ControllerLeaseGuard<'_, L> {
     fn drop(&mut self) {
         if self.armed {
             self.lease
-                .release(self.holder, self.turn, self.start, self.end);
+                .release(self.holder, self.key.clone(), self.start, self.end);
         }
     }
 }
@@ -518,11 +524,11 @@ impl<L: DeliveryLease + ?Sized> Drop for ControllerLeaseGuard<'_, L> {
 pub(in crate::services::discord) trait PostHeartbeat:
     Send + Sync
 {
-    /// Begin renewing `(holder, turn)`'s lease deadline for the duration of the
+    /// Begin renewing `(holder, key)`'s lease deadline for the duration of the
     /// POST. Returns an opaque guard; dropping it stops the heartbeat (mirrors
     /// `DeliveryLeaseHeartbeat`'s `Drop`/`stop`). Called ONLY on the held-lease
     /// path (a markerless `ProceedMarkerless` send holds no lease to renew).
-    fn start(&self, holder: LeaseHolder, turn: TurnKey) -> Box<dyn PostHeartbeatGuard>;
+    fn start(&self, holder: LeaseHolder, key: DeliveryLeaseKey) -> Box<dyn PostHeartbeatGuard>;
 }
 
 /// RAII guard returned by [`PostHeartbeat::start`]. Dropping it stops the
@@ -541,7 +547,11 @@ pub(in crate::services::discord) struct TurnOutputCtx<
     'a,
     L: DeliveryLease + ?Sized = DeliveryLeaseCell,
 > {
+    #[allow(dead_code)] // Transport/finalizer metadata; lease identity is `lease_key`.
     pub(in crate::services::discord) turn: TurnKey,
+    /// Canonical delivery-lease identity for real lease owners. `None` is reserved
+    /// for transport-only / markerless paths such as [`NoLease`].
+    pub(in crate::services::discord) lease_key: Option<DeliveryLeaseKey>,
     /// Durable relay-owner identity carried for the durable-lease join (Phase
     /// B) and owner-scoped routing at cutover (A2); not read by the A1
     /// skeleton itself.
@@ -617,9 +627,10 @@ where
     // A2a: acquire with the shared HOLDER-LIVENESS deadline (15s); the POST
     // heartbeat (below) keeps it fresh — no fixed 60s TTL.
     let deadline_ms = lease_now_ms().saturating_add(TURN_OUTPUT_LEASE_TTL_MS);
-    let lease_held = ctx
-        .lease
-        .try_acquire(ctx.turn, ctx.holder, start, end, deadline_ms);
+    let lease_held = ctx.lease_key.as_ref().is_some_and(|key| {
+        ctx.lease
+            .try_acquire(key.clone(), ctx.holder, start, end, deadline_ms)
+    });
     if !lease_held {
         // A2a capability 1: another holder owns this (channel, turn, range).
         match ctx.acquire_failure_mode {
@@ -644,8 +655,17 @@ where
     // `release_and_disarm()` so the release ORDERING stays explicit (after the
     // inline commit + post-send finalize, I1) while the Drop is the cancel/panic
     // safety net only.
-    let mut lease_guard =
-        lease_held.then(|| ControllerLeaseGuard::arm(ctx.lease, ctx.holder, ctx.turn, start, end));
+    let mut lease_guard = lease_held.then(|| {
+        ControllerLeaseGuard::arm(
+            ctx.lease,
+            ctx.holder,
+            ctx.lease_key
+                .clone()
+                .expect("held delivery lease must have a lease key"),
+            start,
+            end,
+        )
+    });
 
     // A2a capability 3: while the POST is in flight, keep the (held) lease
     // deadline fresh. Only the held-lease path has a lease to renew; a
@@ -653,7 +673,14 @@ where
     // early return / panic in `drive_transport` can never leak the renew task;
     // it is also dropped explicitly BEFORE the inline commit (#3151 ordering).
     let heartbeat_guard = if lease_held {
-        ctx.heartbeat.map(|hb| hb.start(ctx.holder, ctx.turn))
+        ctx.heartbeat.map(|hb| {
+            hb.start(
+                ctx.holder,
+                ctx.lease_key
+                    .clone()
+                    .expect("held delivery lease must have a lease key"),
+            )
+        })
     } else {
         None
     };
@@ -725,7 +752,7 @@ where
 /// the acquire LOST: with no lease there is nothing to commit/release, but the
 /// owner's identity-gated advance still runs (the marker only gated the watcher;
 /// the advance authority was always the identity gate, not the lease). The held
-/// path commits through the same `(holder, turn, range)` the guard owns, then
+/// path commits through the same `(holder, key, range)` the guard owns, then
 /// releases via the guard AFTER `post_send_finalize` (so its Drop stays the
 /// cancel/panic safety net without double-releasing).
 async fn commit_and_finalize<G, L>(
@@ -751,7 +778,7 @@ where
         None => true,
     };
 
-    // commit() verifies the full (holder, turn, range) identity and records the
+    // commit() verifies the full (holder, key, range) identity and records the
     // outcome. On the advanced arm the committed frontier moves to `end`; on the
     // refused arm we commit `NotDelivered` so the owner's committed-offset
     // reconciliation re-sends (the sink's `advanced == false` arm). On the
@@ -763,7 +790,15 @@ where
         } else {
             LeaseOutcome::NotDelivered
         };
-        let committed = ctx.lease.commit(ctx.holder, ctx.turn, start, end, outcome);
+        let committed = ctx.lease.commit(
+            ctx.holder,
+            ctx.lease_key
+                .clone()
+                .expect("held delivery lease must have a lease key"),
+            start,
+            end,
+            outcome,
+        );
         debug_assert!(committed, "confirmed commit must match the acquired lease");
     }
 
@@ -1060,19 +1095,18 @@ mod tests {
     impl DeliveryLease for RecordingLease {
         fn try_acquire(
             &self,
-            turn: TurnKey,
+            key: DeliveryLeaseKey,
             holder: LeaseHolder,
             start: u64,
             end: u64,
             deadline_ms: u64,
         ) -> bool {
-            self.inner
-                .try_acquire(turn, holder, start, end, deadline_ms)
+            self.inner.try_acquire(key, holder, start, end, deadline_ms)
         }
         fn commit(
             &self,
             holder: LeaseHolder,
-            turn: TurnKey,
+            key: DeliveryLeaseKey,
             start: u64,
             end: u64,
             outcome: LeaseOutcome,
@@ -1099,15 +1133,21 @@ mod tests {
                 }
                 LeaseOutcome::Unknown => {}
             }
-            self.inner.commit(holder, turn, start, end, outcome)
+            self.inner.commit(holder, key, start, end, outcome)
         }
-        fn release(&self, holder: LeaseHolder, turn: TurnKey, start: u64, end: u64) -> bool {
+        fn release(
+            &self,
+            holder: LeaseHolder,
+            key: DeliveryLeaseKey,
+            start: u64,
+            end: u64,
+        ) -> bool {
             self.release_calls.fetch_add(1, Ordering::SeqCst);
-            self.inner.release(holder, turn, start, end)
+            self.inner.release(holder, key, start, end)
         }
-        fn renew(&self, holder: LeaseHolder, turn: TurnKey, new_deadline_ms: u64) -> bool {
+        fn renew(&self, holder: LeaseHolder, key: DeliveryLeaseKey, new_deadline_ms: u64) -> bool {
             self.renew_calls.fetch_add(1, Ordering::SeqCst);
-            self.inner.renew(holder, turn, new_deadline_ms)
+            self.inner.renew(holder, key, new_deadline_ms)
         }
         fn read(&self) -> LeaseSnapshot {
             self.inner.read()
@@ -1116,6 +1156,10 @@ mod tests {
 
     fn turn_key(channel_id: ChannelId) -> TurnKey {
         TurnKey::new(channel_id, 7, 1)
+    }
+
+    fn lease_key(channel_id: ChannelId) -> DeliveryLeaseKey {
+        DeliveryLeaseKey::from_turn_key(turn_key(channel_id))
     }
 
     fn placeholder_key(channel_id: ChannelId, message_id: MessageId) -> PlaceholderKey {
@@ -1461,6 +1505,7 @@ mod tests {
 
         let ctx = TurnOutputCtx {
             turn: turn_key(channel),
+            lease_key: Some(lease_key(channel)),
             owner: RelayOwnerKind::Watcher,
             holder: LeaseHolder::Sink,
             lease: lease.as_ref(),
@@ -1592,6 +1637,7 @@ mod tests {
 
         let ctx = TurnOutputCtx {
             turn: turn_key(channel),
+            lease_key: Some(lease_key(channel)),
             owner: RelayOwnerKind::Watcher,
             holder: LeaseHolder::Sink,
             lease: lease.as_ref(),
@@ -1778,6 +1824,7 @@ mod tests {
             &gateway,
             TurnOutputCtx {
                 turn,
+                lease_key: Some(DeliveryLeaseKey::from_turn_key(turn)),
                 owner: RelayOwnerKind::SessionBoundRelay,
                 holder: LeaseHolder::Sink,
                 lease: lease.as_ref(),
@@ -1843,7 +1890,7 @@ mod tests {
         // Re-acquirable proof: the cell is genuinely free, not stranded leased.
         assert!(
             lease.try_acquire(
-                turn,
+                DeliveryLeaseKey::from_turn_key(turn),
                 LeaseHolder::Sink,
                 0,
                 body.len() as u64,
@@ -1865,6 +1912,7 @@ mod tests {
 
         let ctx = TurnOutputCtx {
             turn: turn_key(channel),
+            lease_key: Some(lease_key(channel)),
             owner: RelayOwnerKind::None,
             holder: LeaseHolder::Sink,
             lease: lease.as_ref(),
@@ -1919,6 +1967,7 @@ mod tests {
 
         let ctx = TurnOutputCtx {
             turn: turn_key(channel),
+            lease_key: Some(lease_key(channel)),
             owner: RelayOwnerKind::Watcher,
             holder: LeaseHolder::Sink,
             lease: lease.as_ref(),
@@ -1968,6 +2017,7 @@ mod tests {
 
         let ctx = TurnOutputCtx {
             turn: turn_key(channel),
+            lease_key: Some(lease_key(channel)),
             owner: RelayOwnerKind::Watcher,
             holder: LeaseHolder::Sink,
             lease: lease.as_ref(),
@@ -2039,6 +2089,7 @@ mod tests {
 
         let ctx = TurnOutputCtx {
             turn: turn_key(channel),
+            lease_key: Some(lease_key(channel)),
             owner: RelayOwnerKind::Watcher,
             holder: LeaseHolder::Sink,
             lease: lease.as_ref(),
@@ -2105,6 +2156,7 @@ mod tests {
 
         let ctx = TurnOutputCtx {
             turn: turn_key(channel),
+            lease_key: Some(lease_key(channel)),
             owner: RelayOwnerKind::SessionBoundRelay,
             holder: LeaseHolder::Sink,
             lease: lease.as_ref(),
@@ -2179,6 +2231,7 @@ mod tests {
 
         let ctx = TurnOutputCtx {
             turn: turn_key(channel),
+            lease_key: Some(lease_key(channel)),
             // turn_bridge is the watcher-owned terminal-delivery path.
             owner: RelayOwnerKind::Watcher,
             holder: LeaseHolder::Watcher { instance_id: 1 },
@@ -2257,6 +2310,7 @@ mod tests {
             let body = "turn_bridge short-replace body (NoCommitOnFallback)";
             let ctx = TurnOutputCtx {
                 turn: turn_key(channel),
+                lease_key: Some(lease_key(channel)),
                 owner: RelayOwnerKind::None,
                 holder: LeaseHolder::Bridge,
                 lease: lease.as_ref(),
@@ -2352,6 +2406,7 @@ mod tests {
 
         let ctx = TurnOutputCtx {
             turn: turn_key(channel),
+            lease_key: Some(lease_key(channel)),
             owner: RelayOwnerKind::Watcher,
             holder: LeaseHolder::Watcher { instance_id: 1 },
             lease: lease.as_ref(),
@@ -2411,6 +2466,7 @@ mod tests {
 
         let ctx = TurnOutputCtx {
             turn: turn_key(channel),
+            lease_key: Some(lease_key(channel)),
             owner: RelayOwnerKind::SessionBoundRelay,
             holder: LeaseHolder::Sink,
             lease: lease.as_ref(),
@@ -2526,7 +2582,7 @@ mod tests {
     }
 
     impl PostHeartbeat for RecordingHeartbeat {
-        fn start(&self, holder: LeaseHolder, turn: TurnKey) -> Box<dyn PostHeartbeatGuard> {
+        fn start(&self, holder: LeaseHolder, key: DeliveryLeaseKey) -> Box<dyn PostHeartbeatGuard> {
             self.started.fetch_add(1, Ordering::SeqCst);
             *self.started_holder.lock().unwrap() = Some(holder);
             // Fire the renew loop's ticks now: each pushes the deadline forward,
@@ -2534,7 +2590,7 @@ mod tests {
             let mut last = 0u64;
             for i in 1..=self.ticks {
                 last = lease_now_ms().saturating_add(DELIVERY_LEASE_DEADLINE_MS) + i;
-                let renewed = self.lease.renew(holder, turn, last);
+                let renewed = self.lease.renew(holder, key.clone(), last);
                 assert!(
                     renewed,
                     "A2a heartbeat: renew must succeed against the live lease the \
@@ -2553,7 +2609,7 @@ mod tests {
     /// `try_acquire` LOSES — the precondition for both acquire-failure-mode
     /// tests. Returns the foreign holder/turn/range that owns the cell.
     fn occupy_lease_with_foreign_holder(lease: &RecordingLease, channel: ChannelId) {
-        let foreign_turn = TurnKey::new(channel, 99, 1);
+        let foreign_turn = DeliveryLeaseKey::from_turn_key(TurnKey::new(channel, 99, 1));
         let ok = lease.try_acquire(
             foreign_turn,
             LeaseHolder::Watcher { instance_id: 7 },
@@ -2583,6 +2639,7 @@ mod tests {
 
         let ctx = TurnOutputCtx {
             turn: turn_key(channel),
+            lease_key: Some(lease_key(channel)),
             owner: RelayOwnerKind::SessionBoundRelay,
             holder: LeaseHolder::Sink,
             lease: lease.as_ref(),
@@ -2665,6 +2722,7 @@ mod tests {
 
         let ctx = TurnOutputCtx {
             turn: turn_key(channel),
+            lease_key: Some(lease_key(channel)),
             owner: RelayOwnerKind::Watcher,
             holder: LeaseHolder::Watcher { instance_id: 1 },
             lease: lease.as_ref(),
@@ -2734,6 +2792,7 @@ mod tests {
 
         let ctx = TurnOutputCtx {
             turn: turn_key(channel),
+            lease_key: Some(lease_key(channel)),
             owner: RelayOwnerKind::SessionBoundRelay,
             holder: LeaseHolder::Sink,
             lease: lease.as_ref(),
@@ -2815,6 +2874,7 @@ mod tests {
 
         let ctx = TurnOutputCtx {
             turn: turn_key(channel),
+            lease_key: Some(lease_key(channel)),
             owner: RelayOwnerKind::SessionBoundRelay,
             holder: LeaseHolder::Sink,
             lease: lease.as_ref(),
@@ -2883,6 +2943,7 @@ mod tests {
 
         let ctx = TurnOutputCtx {
             turn: turn_key(channel),
+            lease_key: Some(lease_key(channel)),
             owner: RelayOwnerKind::SessionBoundRelay,
             holder: LeaseHolder::Sink,
             lease: lease.as_ref(),
@@ -2946,6 +3007,7 @@ mod tests {
 
         let ctx = TurnOutputCtx {
             turn: turn_key(channel),
+            lease_key: Some(lease_key(channel)),
             owner: RelayOwnerKind::SessionBoundRelay,
             holder: LeaseHolder::Sink,
             lease: lease.as_ref(),

@@ -143,6 +143,65 @@ fn pinned_finalizer_turn_id_uses_synthetic_identity_for_zero_user_msg_id() {
 }
 
 #[test]
+fn pinned_delivery_lease_key_id0_without_offset_acquires_and_commits_delivery() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    struct EnvReset(Option<std::ffi::OsString>);
+    impl Drop for EnvReset {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
+    let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+    let temp = tempfile::TempDir::new().expect("temp runtime root");
+    unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
+    let session = "AgentDesk-codex-adk-cdx";
+    let channel_id = poise::serenity_prelude::ChannelId::new(7_204);
+    let mut state = state_with_offsets(0, session, None, 0);
+    state.started_at = "2026-07-03T06:00:00Z".to_string();
+
+    let key = pinned_delivery_lease_key(channel_id, 33, Some(&state), session, 50);
+    let cell = crate::services::discord::DeliveryLeaseCell::new(channel_id);
+    let holder = crate::services::discord::LeaseHolder::Watcher { instance_id: 77 };
+    let acquired = cell.try_acquire(
+        key.clone(),
+        holder,
+        0,
+        50,
+        crate::services::discord::lease_now_ms().saturating_add(1_000),
+    );
+    let watcher_will_direct_send = true;
+    let cutover_short_replace = false;
+    let watcher_lease_b2_skip =
+        watcher_will_direct_send && 50 > 0 && !acquired && !cutover_short_replace;
+
+    assert!(
+        acquired,
+        "degenerate id-0 watcher key must acquire instead of fail-closing"
+    );
+    assert!(
+        !watcher_lease_b2_skip,
+        "B2-skip must stay false when this watcher acquired the degenerate residual id-0 key"
+    );
+    assert!(
+        cell.commit(
+            holder,
+            key.clone(),
+            0,
+            50,
+            crate::services::discord::LeaseOutcome::Delivered,
+        ),
+        "acquired watcher path can commit the delivered range"
+    );
+    assert!(cell.release(holder, key, 0, 50));
+}
+
+#[test]
 fn restored_watcher_finalize_skips_zero_id_submit() {
     assert!(!should_submit_restored_watcher_finalize(false, 0));
     assert!(!should_submit_restored_watcher_finalize(true, 777));

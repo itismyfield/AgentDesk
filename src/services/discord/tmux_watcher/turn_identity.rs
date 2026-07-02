@@ -225,6 +225,27 @@ pub(super) fn pinned_finalizer_turn_id(
         .unwrap_or(0)
 }
 
+pub(super) fn pinned_delivery_lease_key(
+    channel_id: poise::serenity_prelude::ChannelId,
+    generation: u64,
+    inflight_before_relay: Option<&crate::services::discord::inflight::InflightTurnState>,
+    tmux_session_name: &str,
+    current_offset: u64,
+) -> crate::services::discord::DeliveryLeaseKey {
+    if let Some(state) = inflight_before_relay.filter(|state| {
+        state.tmux_session_name.as_deref().map(str::trim) == Some(tmux_session_name.trim())
+            && state.turn_start_offset.unwrap_or(state.last_offset) < current_offset
+    }) {
+        crate::services::discord::DeliveryLeaseKey::from_inflight_state_for_site(
+            channel_id, generation, state, "watcher",
+        )
+    } else {
+        crate::services::discord::DeliveryLeaseKey::new_for_site(
+            channel_id, generation, 0, None, None, "watcher",
+        )
+    }
+}
+
 pub(super) fn should_submit_restored_watcher_finalize(
     completion_is_stale_for_newer_turn: bool,
     restored_finalizer_turn_id: u64,

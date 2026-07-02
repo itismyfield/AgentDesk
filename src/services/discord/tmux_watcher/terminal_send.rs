@@ -178,9 +178,13 @@ pub(in crate::services::discord) struct WatcherPostHeartbeat {
 }
 
 impl toc::PostHeartbeat for WatcherPostHeartbeat {
-    fn start(&self, holder: LeaseHolder, turn: TurnKey) -> Box<dyn toc::PostHeartbeatGuard> {
+    fn start(
+        &self,
+        holder: LeaseHolder,
+        key: crate::services::discord::DeliveryLeaseKey,
+    ) -> Box<dyn toc::PostHeartbeatGuard> {
         Box::new(WatcherPostHeartbeatGuard {
-            _heartbeat: DeliveryLeaseHeartbeat::spawn(self.cell.clone(), holder, turn),
+            _heartbeat: DeliveryLeaseHeartbeat::spawn(self.cell.clone(), holder, key),
         })
     }
 }
@@ -262,6 +266,7 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
     relay_text: &str,
     cell: &Arc<DeliveryLeaseCell>,
     turn: TurnKey,
+    lease_key: Option<crate::services::discord::DeliveryLeaseKey>,
     instance_id: u64,
     start: u64,
     end: u64,
@@ -294,6 +299,7 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
         gateway,
         toc::TurnOutputCtx {
             turn,
+            lease_key,
             owner: RelayOwnerKind::Watcher,
             holder,
             lease: &**cell,
@@ -420,6 +426,7 @@ pub(in crate::services::discord) async fn apply_watcher_short_replace_controller
     relay_text: &str,
     cell: &Arc<DeliveryLeaseCell>,
     turn: TurnKey,
+    lease_key: Option<crate::services::discord::DeliveryLeaseKey>,
     instance_id: u64,
     range: (u64, u64),
     single_message_panel_footer_mode: bool,
@@ -443,6 +450,7 @@ pub(in crate::services::discord) async fn apply_watcher_short_replace_controller
         relay_text,
         cell,
         turn,
+        lease_key,
         instance_id,
         range.0,
         range.1,

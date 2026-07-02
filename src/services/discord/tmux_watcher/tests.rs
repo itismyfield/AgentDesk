@@ -2147,7 +2147,7 @@ mod delivery_lease_heartbeat {
     };
     use crate::services::discord::turn_finalizer::TurnKey;
     use crate::services::discord::{
-        DeliveryLeaseCell, LeaseHolder, LeaseOutcome, LeaseSnapshot, lease_now_ms,
+        DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, LeaseOutcome, LeaseSnapshot, lease_now_ms,
     };
     use serenity::model::id::ChannelId;
     use std::sync::Arc;
@@ -2163,6 +2163,10 @@ mod delivery_lease_heartbeat {
         }
     }
 
+    fn lease_turn(ch: ChannelId, user_msg_id: u64) -> DeliveryLeaseKey {
+        DeliveryLeaseKey::from_turn_key(TurnKey::new(ch, user_msg_id, 0))
+    }
+
     /// (a) A send that runs LONGER than the (short) deadline, but with the
     /// heartbeat renewing every interval, is NEVER reclaimed mid-send: the
     /// ORIGINAL holder's commit SUCCEEDS and advances the offset exactly once.
@@ -2173,18 +2177,18 @@ mod delivery_lease_heartbeat {
     async fn long_send_heartbeat_renew_prevents_midsend_reclaim() {
         let ch = ChannelId::new(7101);
         let cell = Arc::new(DeliveryLeaseCell::new(ch));
-        let turn = TurnKey::new(ch, 11, 0);
+        let turn = lease_turn(ch, 11);
         let h = watcher(1);
 
         // Acquire with a TINY deadline relative to lease_now_ms(): without a
         // heartbeat it would be reclaimable almost immediately.
         let acquire_now = lease_now_ms();
         let short_deadline = acquire_now.saturating_add(100);
-        assert!(cell.try_acquire(turn, h, 0, 64, short_deadline));
+        assert!(cell.try_acquire(turn.clone(), h, 0, 64, short_deadline));
         assert_eq!(deadline_of(&cell), Some(short_deadline));
 
         // Start the heartbeat (owned by this "watcher" frame).
-        let hb = DeliveryLeaseHeartbeat::spawn(cell.clone(), h, turn);
+        let hb = DeliveryLeaseHeartbeat::spawn(cell.clone(), h, turn.clone());
 
         // Drive the gated clock across SEVERAL heartbeat intervals — i.e. a
         // long multi-chunk send. Each crossed interval fires one renew.
@@ -2237,12 +2241,12 @@ mod delivery_lease_heartbeat {
     async fn dead_holder_no_renew_is_reclaimed_after_short_deadline() {
         let ch = ChannelId::new(7102);
         let cell = Arc::new(DeliveryLeaseCell::new(ch));
-        let turn = TurnKey::new(ch, 22, 0);
+        let turn = lease_turn(ch, 22);
         let dead = watcher(1);
 
         let acquire_now = lease_now_ms();
         let deadline = acquire_now.saturating_add(WATCHER_DELIVERY_LEASE_DEADLINE_MS);
-        assert!(cell.try_acquire(turn, dead, 0, 40, deadline));
+        assert!(cell.try_acquire(turn.clone(), dead, 0, 40, deadline));
 
         // The holder "dies": its heartbeat is dropped immediately (Drop aborts
         // it) WITHOUT ever renewing.
@@ -2259,7 +2263,7 @@ mod delivery_lease_heartbeat {
         );
         // And a replacement (new instance, new turn) can acquire the freed cell.
         let replacement = watcher(2);
-        let turn_b = TurnKey::new(ch, 33, 0);
+        let turn_b = lease_turn(ch, 33);
         assert!(
             cell.try_acquire(
                 turn_b,
@@ -2279,20 +2283,20 @@ mod delivery_lease_heartbeat {
     async fn renew_by_non_holder_or_wrong_turn_is_noop() {
         let ch = ChannelId::new(7103);
         let cell = DeliveryLeaseCell::new(ch);
-        let turn = TurnKey::new(ch, 44, 0);
+        let turn = lease_turn(ch, 44);
         let holder = watcher(1);
 
         let now = lease_now_ms();
         let deadline = now.saturating_add(1_000);
-        assert!(cell.try_acquire(turn, holder, 0, 16, deadline));
+        assert!(cell.try_acquire(turn.clone(), holder, 0, 16, deadline));
 
         // Wrong holder, correct turn → no-op.
         assert!(
-            !cell.renew(watcher(2), turn, now.saturating_add(99_999)),
+            !cell.renew(watcher(2), turn.clone(), now.saturating_add(99_999)),
             "a different holder cannot renew the lease"
         );
         // Correct holder, wrong (stale) turn → no-op.
-        let wrong_turn = TurnKey::new(ch, 45, 0);
+        let wrong_turn = lease_turn(ch, 45);
         assert!(
             !cell.renew(holder, wrong_turn, now.saturating_add(99_999)),
             "a stale/wrong turn cannot renew the lease"
@@ -2306,12 +2310,12 @@ mod delivery_lease_heartbeat {
 
         // The TRUE holder/turn CAN renew → deadline extends.
         let extended = now.saturating_add(WATCHER_DELIVERY_LEASE_DEADLINE_MS);
-        assert!(cell.renew(holder, turn, extended));
+        assert!(cell.renew(holder, turn.clone(), extended));
         assert_eq!(deadline_of(&cell), Some(extended));
 
         // After commit (Committed, not Leased) even the true holder's renew
         // no-ops — a late heartbeat tick after commit cannot disturb the cell.
-        assert!(cell.commit(holder, turn, 0, 16, LeaseOutcome::Delivered));
+        assert!(cell.commit(holder, turn.clone(), 0, 16, LeaseOutcome::Delivered));
         assert!(
             !cell.renew(holder, turn, extended.saturating_add(1)),
             "a renew on a Committed lease (a late tick after commit) is a no-op"
@@ -2339,7 +2343,9 @@ mod watcher_short_replace_controller {
         PlaceholderController, PlaceholderKey, PlaceholderLifecycle,
     };
     use crate::services::discord::turn_finalizer::TurnKey;
-    use crate::services::discord::{DeliveryLeaseCell, LeaseHolder, LeaseSnapshot, lease_now_ms};
+    use crate::services::discord::{
+        DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, LeaseSnapshot, lease_now_ms,
+    };
     use crate::services::provider::ProviderKind;
     use serenity::all::{ChannelId, MessageId};
     use std::sync::Arc;
@@ -2448,6 +2454,9 @@ mod watcher_short_replace_controller {
     fn turn() -> TurnKey {
         TurnKey::new(ch(), 11, 0)
     }
+    fn lease_key() -> DeliveryLeaseKey {
+        DeliveryLeaseKey::from_turn_key(turn())
+    }
     fn watcher() -> LeaseHolder {
         LeaseHolder::Watcher {
             instance_id: INSTANCE,
@@ -2480,6 +2489,7 @@ mod watcher_short_replace_controller {
             "answer",
             cell,
             turn(),
+            Some(lease_key()),
             INSTANCE,
             START,
             END,
@@ -2499,7 +2509,7 @@ mod watcher_short_replace_controller {
         // controller's `try_acquire` loses and `reclaim_if_expired` cannot free it.
         let other = LeaseHolder::Watcher { instance_id: 999 };
         assert!(cell.try_acquire(
-            turn(),
+            lease_key(),
             other,
             START,
             END,
@@ -2699,6 +2709,9 @@ mod watcher_short_replace_controller {
                 &gw,
                 toc::TurnOutputCtx {
                     turn: turn(),
+                    lease_key: Some(crate::services::discord::DeliveryLeaseKey::from_turn_key(
+                        turn(),
+                    )),
                     owner: RelayOwnerKind::Watcher,
                     holder: watcher(),
                     lease: &*cell,
@@ -2754,8 +2767,8 @@ mod watcher_short_replace_controller {
         use crate::services::discord::DeliveryLeaseHeartbeat;
         let cell = Arc::new(DeliveryLeaseCell::new(ch()));
         let short = lease_now_ms().saturating_add(100);
-        assert!(cell.try_acquire(turn(), watcher(), START, END, short));
-        let hb = DeliveryLeaseHeartbeat::spawn(cell.clone(), watcher(), turn());
+        assert!(cell.try_acquire(lease_key(), watcher(), START, END, short));
+        let hb = DeliveryLeaseHeartbeat::spawn(cell.clone(), watcher(), lease_key());
         for _ in 0..3 {
             tokio::time::advance(std::time::Duration::from_millis(
                 WATCHER_DELIVERY_LEASE_HEARTBEAT_MS,
@@ -2779,7 +2792,7 @@ mod watcher_short_replace_controller {
         assert!(
             cell.commit(
                 watcher(),
-                turn(),
+                lease_key(),
                 START,
                 END,
                 crate::services::discord::LeaseOutcome::Delivered

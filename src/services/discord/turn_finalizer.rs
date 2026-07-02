@@ -32,7 +32,7 @@ use crate::services::provider::{CancelToken, ProviderKind};
 
 use super::SharedData;
 // #3041 P1-0: dormant lease types for the *Delivery messages below (mod.rs §2-§3).
-use super::{DeliveryLeaseCell, LeaseHolder, LeaseOutcome};
+use super::{DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, LeaseOutcome};
 
 pub(in crate::services::discord) mod cleanup;
 mod completion_signal;
@@ -339,7 +339,7 @@ enum FinalizeMsg {
     /// sink/bridge wiring.
     #[allow(dead_code)] // #3041: no sender until sink/bridge wiring (P1-2..).
     AcquireDelivery {
-        key: TurnKey,
+        key: DeliveryLeaseKey,
         lease: Arc<DeliveryLeaseCell>,
         holder: LeaseHolder,
         start: u64,
@@ -355,7 +355,7 @@ enum FinalizeMsg {
     /// reopened the #3143 duplicate window; kept for the §5.3 phase.
     #[allow(dead_code)] // #3041: wired in a later phase (ledger-coupled commit, §5.3).
     CommitDelivery {
-        key: TurnKey,
+        key: DeliveryLeaseKey,
         lease: Arc<DeliveryLeaseCell>,
         holder: LeaseHolder,
         start: u64,
@@ -371,7 +371,7 @@ enum FinalizeMsg {
     /// via this awaited actor round-trip. Kept defined for a later phase.
     #[allow(dead_code)] // #3041: wired in a later phase (alongside CommitDelivery).
     ReleaseDelivery {
-        key: TurnKey,
+        key: DeliveryLeaseKey,
         lease: Arc<DeliveryLeaseCell>,
         holder: LeaseHolder,
         start: u64,
@@ -508,7 +508,7 @@ impl TurnFinalizer {
     #[allow(dead_code)] // #3041: wired in a later phase (ledger-coupled commit, §5.3).
     pub(in crate::services::discord) async fn commit_delivery(
         &self,
-        key: TurnKey,
+        key: DeliveryLeaseKey,
         lease: Arc<DeliveryLeaseCell>,
         holder: LeaseHolder,
         start: u64,
@@ -550,7 +550,7 @@ impl TurnFinalizer {
     #[allow(dead_code)] // #3041: wired in a later phase (alongside commit_delivery).
     pub(in crate::services::discord) async fn release_delivery(
         &self,
-        key: TurnKey,
+        key: DeliveryLeaseKey,
         lease: Arc<DeliveryLeaseCell>,
         holder: LeaseHolder,
         start: u64,
@@ -3446,13 +3446,17 @@ mod tests {
         // → discord). `with_isolated_runtime_root` is in the parent `tests` mod.
         use super::super::super::make_shared_data_for_tests_with_storage;
         use super::with_isolated_runtime_root;
-        use crate::services::discord::DeliveryLeaseCell;
+        use crate::services::discord::{DeliveryLeaseCell, DeliveryLeaseKey};
         use crate::services::provider::ProviderKind;
         use serenity::model::id::ChannelId;
         use std::sync::Arc;
 
         fn watcher(id: u64) -> LeaseHolder {
             LeaseHolder::Watcher { instance_id: id }
+        }
+
+        fn lease_key(ch: ChannelId, user_msg_id: u64) -> DeliveryLeaseKey {
+            DeliveryLeaseKey::from_turn_key(TurnKey::new(ch, user_msg_id, 0))
         }
 
         /// Watcher/Delivered: a freshly-acquired lease committed `Delivered`
@@ -3465,12 +3469,12 @@ mod tests {
                 let fin = TurnFinalizer::spawn();
                 let ch = ChannelId::new(7001);
                 let lease = shared.delivery_lease(ch);
-                let turn = TurnKey::new(ch, 11, 0);
+                let turn = lease_key(ch, 11);
                 let h = watcher(1);
 
                 // Acquire on the cell (the watcher fast-path), then commit through
                 // the actor (the path the watcher uses).
-                assert!(lease.try_acquire(turn, h, 0, 64, 1_000));
+                assert!(lease.try_acquire(turn.clone(), h, 0, 64, 1_000));
                 let committed = fin
                     .commit_delivery(
                         turn,
@@ -3503,12 +3507,12 @@ mod tests {
                 let shared = make_shared_data_for_tests_with_storage(None, None);
                 let ch = ChannelId::new(7002);
                 let lease = shared.delivery_lease(ch);
-                let turn = TurnKey::new(ch, 22, 0);
+                let turn = lease_key(ch, 22);
 
                 let w1 = watcher(1);
                 let w2 = watcher(2);
                 // First watcher acquires for [0,32).
-                assert!(lease.try_acquire(turn, w1, 0, 32, 5_000));
+                assert!(lease.try_acquire(turn.clone(), w1, 0, 32, 5_000));
                 // Replacement watcher's acquire for the SAME turn/range loses
                 // while w1 still holds it (B2: it must NOT re-acquire+re-emit).
                 assert!(
@@ -3530,10 +3534,10 @@ mod tests {
                 let fin = TurnFinalizer::spawn();
                 let ch = ChannelId::new(7003);
                 let lease = shared.delivery_lease(ch);
-                let turn = TurnKey::new(ch, 33, 0);
+                let turn = lease_key(ch, 33);
                 let h = watcher(1);
 
-                assert!(lease.try_acquire(turn, h, 0, 48, 1_000));
+                assert!(lease.try_acquire(turn.clone(), h, 0, 48, 1_000));
                 let committed = fin
                     .commit_delivery(
                         turn,
@@ -3567,13 +3571,13 @@ mod tests {
                 let fin = TurnFinalizer::spawn();
                 let ch = ChannelId::new(7004);
                 let lease = shared.delivery_lease(ch);
-                let turn = TurnKey::new(ch, 44, 0);
+                let turn = lease_key(ch, 44);
                 let h = watcher(1);
 
-                assert!(lease.try_acquire(turn, h, 0, 80, 1_000));
+                assert!(lease.try_acquire(turn.clone(), h, 0, 80, 1_000));
                 assert!(
                     fin.commit_delivery(
-                        turn,
+                        turn.clone(),
                         lease.clone(),
                         h,
                         0,
@@ -3623,19 +3627,19 @@ mod tests {
                 let shared = make_shared_data_for_tests_with_storage(None, None);
                 let ch = ChannelId::new(7005);
                 let lease = shared.delivery_lease(ch);
-                let turn_a = TurnKey::new(ch, 55, 0);
+                let turn_a = lease_key(ch, 55);
                 let dead = watcher(1);
 
                 // A holder acquires with deadline 100ms (monotonic units) but never
                 // commits/releases (dead).
-                assert!(lease.try_acquire(turn_a, dead, 0, 16, 100));
+                assert!(lease.try_acquire(turn_a.clone(), dead, 0, 16, 100));
                 // Before the deadline, the sweep is a no-op and the cell stays held.
                 assert_eq!(shared.reclaim_expired_delivery_leases(50), 0);
                 assert!(!lease.try_acquire(turn_a, watcher(2), 0, 16, 100));
                 // Past the deadline, the sweep reclaims exactly this cell.
                 assert_eq!(shared.reclaim_expired_delivery_leases(100), 1);
                 // A later legitimate acquire (new instance, new turn) succeeds.
-                let turn_b = TurnKey::new(ch, 66, 0);
+                let turn_b = lease_key(ch, 66);
                 assert!(
                     lease.try_acquire(turn_b, watcher(3), 16, 32, 1_000),
                     "a reclaimed cell is acquirable again"
@@ -3653,13 +3657,13 @@ mod tests {
                 let fin = TurnFinalizer::spawn();
                 let ch = ChannelId::new(7006);
                 let lease = shared.delivery_lease(ch);
-                let turn1 = TurnKey::new(ch, 77, 0);
+                let turn1 = lease_key(ch, 77);
                 let h = watcher(1);
 
-                assert!(lease.try_acquire(turn1, h, 0, 24, 1_000));
+                assert!(lease.try_acquire(turn1.clone(), h, 0, 24, 1_000));
                 assert!(
                     fin.commit_delivery(
-                        turn1,
+                        turn1.clone(),
                         lease.clone(),
                         h,
                         0,
@@ -3676,7 +3680,7 @@ mod tests {
                     "the holder releases its committed lease"
                 );
                 // Next turn (different range) can now acquire the freed cell.
-                let turn2 = TurnKey::new(ch, 88, 0);
+                let turn2 = lease_key(ch, 88);
                 assert!(
                     lease.try_acquire(turn2, watcher(2), 24, 48, 1_000),
                     "released cell is free for the next turn"
@@ -3700,13 +3704,13 @@ mod tests {
                 let shared = make_shared_data_for_tests_with_storage(None, None);
                 let ch = ChannelId::new(7007);
                 let lease = shared.delivery_lease(ch);
-                let dead_turn = TurnKey::new(ch, 101, 0);
+                let dead_turn = lease_key(ch, 101);
                 let dead = watcher(1);
 
                 // Dead holder acquires with deadline 100 (monotonic units) and
                 // then dies — never commits, never releases. No `SharedData` was
                 // ever cached in any finalizer (we never spawn/route a Terminal).
-                assert!(lease.try_acquire(dead_turn, dead, 0, 40, 100));
+                assert!(lease.try_acquire(dead_turn.clone(), dead, 0, 40, 100));
 
                 // BEFORE the deadline: a NON-expired live lease still B2-skips —
                 // the replacement's acquire-time reclaim is a no-op and the
@@ -3717,7 +3721,7 @@ mod tests {
                     "a non-expired lease must NOT be reclaimed (would reintroduce duplicates)"
                 );
                 assert!(
-                    !lease.try_acquire(dead_turn, live, 0, 40, 100),
+                    !lease.try_acquire(dead_turn.clone(), live, 0, 40, 100),
                     "B2: a replacement cannot acquire while the holder's lease is live (non-expired)"
                 );
 
@@ -3764,10 +3768,10 @@ mod tests {
                 let shared = make_shared_data_for_tests_with_storage(None, None);
                 let ch = ChannelId::new(7008);
                 let lease = shared.delivery_lease(ch);
-                let turn = TurnKey::new(ch, 202, 0);
+                let turn = lease_key(ch, 202);
                 let h = watcher(1);
 
-                assert!(lease.try_acquire(turn, h, 0, 96, 1_000));
+                assert!(lease.try_acquire(turn.clone(), h, 0, 96, 1_000));
                 assert_eq!(
                     shared.committed_relay_offset(ch),
                     0,
@@ -3776,7 +3780,7 @@ mod tests {
 
                 // The INLINE production sequence: synchronous cell commit, then
                 // (on Delivered) the synchronous offset advance — NO actor await.
-                let committed = lease.commit(h, turn, 0, 96, LeaseOutcome::Delivered);
+                let committed = lease.commit(h, turn.clone(), 0, 96, LeaseOutcome::Delivered);
                 assert!(committed, "fresh lease commits");
                 super::super::super::tmux::advance_watcher_confirmed_end(
                     &shared,

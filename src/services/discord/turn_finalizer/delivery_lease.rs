@@ -18,7 +18,7 @@ use super::*;
 #[allow(dead_code)] // #3041: AcquireDelivery actor arm dormant until sink/bridge wiring.
 pub(super) fn handle_acquire_delivery(
     lease: &DeliveryLeaseCell,
-    key: TurnKey,
+    key: DeliveryLeaseKey,
     holder: LeaseHolder,
     start: u64,
     end: u64,
@@ -36,7 +36,7 @@ pub(super) fn handle_acquire_delivery(
 /// terminal must not claim bytes as delivered.
 pub(super) fn handle_commit_delivery(
     lease: &DeliveryLeaseCell,
-    key: TurnKey,
+    key: DeliveryLeaseKey,
     holder: LeaseHolder,
     start: u64,
     end: u64,
@@ -45,7 +45,7 @@ pub(super) fn handle_commit_delivery(
     tmux_session_name: &str,
     shared: &SharedData,
 ) -> bool {
-    let committed = lease.commit(holder, key, start, end, outcome);
+    let committed = lease.commit(holder, key.clone(), start, end, outcome);
     // `mod tmux` is `#[cfg(unix)]`; non-unix commits the lease without an
     // advance and consumes the otherwise-unused unix-only params.
     #[cfg(unix)]
@@ -53,7 +53,7 @@ pub(super) fn handle_commit_delivery(
         crate::services::discord::tmux::advance_watcher_confirmed_end(
             shared,
             provider,
-            key.channel_id,
+            key.channel_id(),
             tmux_session_name,
             end,
             "src/services/discord/turn_finalizer.rs:commit_delivery_advance",
@@ -68,7 +68,7 @@ pub(super) fn handle_commit_delivery(
 #[allow(dead_code)] // #3041 P1-0: dormant, wired in P1-1..
 pub(super) fn handle_release_delivery(
     lease: &DeliveryLeaseCell,
-    key: TurnKey,
+    key: DeliveryLeaseKey,
     holder: LeaseHolder,
     start: u64,
     end: u64,
@@ -87,9 +87,10 @@ pub(super) fn handle_release_delivery(
 // =======================================================================
 #[cfg(test)]
 mod tests {
-    use super::super::TurnKey;
     use super::{handle_acquire_delivery, handle_commit_delivery, handle_release_delivery};
-    use crate::services::discord::{DeliveryLeaseCell, LeaseHolder, LeaseOutcome, LeaseSnapshot};
+    use crate::services::discord::{
+        DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, LeaseOutcome, LeaseSnapshot,
+    };
     use serenity::model::id::ChannelId;
     use std::sync::Arc;
 
@@ -97,8 +98,77 @@ mod tests {
         DeliveryLeaseCell::new(ChannelId::new(42))
     }
 
-    fn turn() -> TurnKey {
-        TurnKey::new(ChannelId::new(42), 7, 0)
+    fn key(channel_id: ChannelId, user_msg_id: u64, generation: u64) -> DeliveryLeaseKey {
+        DeliveryLeaseKey::new(
+            channel_id,
+            generation,
+            user_msg_id,
+            Some("2026-07-03 06:00:00"),
+            Some(0),
+        )
+    }
+
+    fn id0_key(channel_id: ChannelId, started_at: &str, start_offset: u64) -> DeliveryLeaseKey {
+        DeliveryLeaseKey::new(channel_id, 0, 0, Some(started_at), Some(start_offset))
+    }
+
+    fn turn() -> DeliveryLeaseKey {
+        key(ChannelId::new(42), 7, 0)
+    }
+
+    #[test]
+    fn id0_turns_with_distinct_start_offsets_have_distinct_lease_identities() {
+        let ch = ChannelId::new(42);
+        let holder = LeaseHolder::Sink;
+        let turn_a = id0_key(ch, "2026-07-03 06:00:00", 0);
+        let turn_b = id0_key(ch, "2026-07-03 06:00:00", 128);
+        assert_ne!(turn_a, turn_b);
+
+        let c = cell();
+        assert!(c.try_acquire(turn_a.clone(), holder, 0, 64, 10));
+        assert!(c.reclaim_if_expired(10));
+        assert!(c.try_acquire(turn_b.clone(), holder, 0, 64, 1_000));
+
+        assert!(!c.commit(holder, turn_a.clone(), 0, 64, LeaseOutcome::Delivered));
+        assert!(!c.release(holder, turn_a, 0, 64));
+        assert!(matches!(
+            c.read(),
+            LeaseSnapshot::Leased { key, .. } if key == turn_b
+        ));
+        assert!(c.commit(holder, turn_b.clone(), 0, 64, LeaseOutcome::Delivered));
+        assert!(c.release(holder, turn_b, 0, 64));
+    }
+
+    #[test]
+    fn degenerate_id0_keys_match_each_other_but_not_disambiguated_id0() {
+        let ch = ChannelId::new(42);
+        let missing_offset =
+            DeliveryLeaseKey::new_for_site(ch, 0, 0, Some("2026-07-03 06:00:00"), None, "test");
+        let missing_started_at = DeliveryLeaseKey::new_for_site(ch, 0, 0, None, Some(10), "test");
+        let disambiguated =
+            DeliveryLeaseKey::new_for_site(ch, 0, 0, Some("2026-07-03 06:00:00"), Some(10), "test");
+
+        assert_eq!(
+            missing_offset, missing_started_at,
+            "all residual id-0 keys without full disambiguators collapse to the legacy degenerate identity"
+        );
+        assert_ne!(
+            missing_offset, disambiguated,
+            "a fully disambiguated id-0 turn must not alias the degenerate residual class"
+        );
+    }
+
+    #[test]
+    fn nonzero_user_msg_id_lease_identity_ignores_disambiguators() {
+        let ch = ChannelId::new(42);
+        let with_a = DeliveryLeaseKey::new(ch, 9, 123, Some("started-a"), Some(1));
+        let with_b = DeliveryLeaseKey::new(ch, 9, 123, Some("started-b"), Some(2));
+        let from_turn = DeliveryLeaseKey::from_turn_key(
+            crate::services::discord::turn_finalizer::TurnKey::new(ch, 123, 9),
+        );
+
+        assert_eq!(with_a, with_b);
+        assert_eq!(with_a, from_turn);
     }
 
     #[test]
@@ -116,13 +186,13 @@ mod tests {
         match c.read() {
             LeaseSnapshot::Leased {
                 holder,
-                turn,
+                key,
                 deadline_ms,
                 start,
                 end,
             } => {
                 assert_eq!(holder, h);
-                assert_eq!(turn.exact_key(), self::turn().exact_key());
+                assert_eq!(key, self::turn());
                 assert_eq!(deadline_ms, 1_000);
                 assert_eq!((start, end), (10, 20));
             }
@@ -259,34 +329,34 @@ mod tests {
         // only the stored turn identity distinguishes the two.)
         let c = cell();
         let holder = LeaseHolder::Sink; // same holder kind across both turns
-        let turn_a = TurnKey::new(ChannelId::new(42), 100, 0);
-        let turn_b = TurnKey::new(ChannelId::new(42), 200, 0);
+        let turn_a = key(ChannelId::new(42), 100, 0);
+        let turn_b = key(ChannelId::new(42), 200, 0);
 
         // Turn A acquires, then its deadline elapses and it is reclaimed.
-        assert!(c.try_acquire(turn_a, holder, 0, 5, 10));
+        assert!(c.try_acquire(turn_a.clone(), holder, 0, 5, 10));
         assert!(c.reclaim_if_expired(10));
         assert!(matches!(c.read(), LeaseSnapshot::Unleased));
 
         // Turn B reacquires the freed cell (same channel, same holder kind).
-        assert!(c.try_acquire(turn_b, holder, 5, 11, 1_000));
+        assert!(c.try_acquire(turn_b.clone(), holder, 5, 11, 1_000));
 
         // Stale commit from turn A: identity mismatch → no-op, B untouched.
-        assert!(!c.commit(holder, turn_a, 5, 11, LeaseOutcome::Delivered));
-        assert!(!c.commit(holder, turn_a, 0, 5, LeaseOutcome::Delivered));
+        assert!(!c.commit(holder, turn_a.clone(), 5, 11, LeaseOutcome::Delivered));
+        assert!(!c.commit(holder, turn_a.clone(), 0, 5, LeaseOutcome::Delivered));
         // Stale release from turn A: identity mismatch → no-op, B untouched.
-        assert!(!c.release(holder, turn_a, 0, 5));
+        assert!(!c.release(holder, turn_a.clone(), 0, 5));
         match c.read() {
             LeaseSnapshot::Leased {
-                turn, start, end, ..
+                key, start, end, ..
             } => {
-                assert_eq!(turn.exact_key(), turn_b.exact_key(), "B still holds");
+                assert_eq!(key, turn_b, "B still holds");
                 assert_eq!((start, end), (5, 11));
             }
             other => panic!("turn B lease must survive stale A ops, got {other:?}"),
         }
 
         // Turn B's own commit/release with its real key still work.
-        assert!(c.commit(holder, turn_b, 5, 11, LeaseOutcome::Delivered));
+        assert!(c.commit(holder, turn_b.clone(), 5, 11, LeaseOutcome::Delivered));
         assert!(!c.release(holder, turn_a, 5, 11)); // stale release post-commit: no-op
         assert!(c.release(holder, turn_b, 5, 11));
         assert!(matches!(c.read(), LeaseSnapshot::Unleased));
@@ -302,17 +372,17 @@ mod tests {
         // with commit).
         let c = cell();
         let holder = LeaseHolder::Sink;
-        let t = TurnKey::new(ChannelId::new(7), 300, 0);
+        let t = key(ChannelId::new(7), 300, 0);
 
         // Acquire range [0,5), let the deadline elapse, reclaim.
-        assert!(c.try_acquire(t, holder, 0, 5, 10));
+        assert!(c.try_acquire(t.clone(), holder, 0, 5, 10));
         assert!(c.reclaim_if_expired(10));
         // Same turn reacquires a continuation range [5, 12).
-        assert!(c.try_acquire(t, holder, 5, 12, 1_000));
+        assert!(c.try_acquire(t.clone(), holder, 5, 12, 1_000));
 
         // Stale release with the OLD range [0,5): holder+turn match but the
         // range does not → NO-OP, live [5,12) lease survives.
-        assert!(!c.release(holder, t, 0, 5));
+        assert!(!c.release(holder, t.clone(), 0, 5));
         match c.read() {
             LeaseSnapshot::Leased { start, end, .. } => assert_eq!((start, end), (5, 12)),
             other => {
@@ -342,9 +412,10 @@ mod tests {
         let writer = {
             let c = Arc::clone(&c);
             let stop = Arc::clone(&stop);
+            let writer_t = t.clone();
             std::thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
-                    if c.try_acquire(t, LeaseHolder::Sink, 7, 13, 1) {
+                    if c.try_acquire(writer_t.clone(), LeaseHolder::Sink, 7, 13, 1) {
                         // Immediately reclaim (deadline already in the past)
                         // so the cell churns Unleased↔Leased rapidly.
                         let _ = c.reclaim_if_expired(u64::MAX);
@@ -357,11 +428,11 @@ mod tests {
             match c.read() {
                 LeaseSnapshot::Unleased => {}
                 LeaseSnapshot::Leased {
-                    turn, start, end, ..
+                    key, start, end, ..
                 } => {
                     // The payload paired with the Leased state is always the
                     // exact one the writer published — never torn/empty.
-                    assert_eq!(turn.exact_key(), t.exact_key());
+                    assert_eq!(key, t);
                     assert_eq!((start, end), (7, 13));
                 }
                 LeaseSnapshot::Committed { .. } => {

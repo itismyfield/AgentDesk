@@ -300,7 +300,7 @@ impl Drop for SessionBoundExternalInputLeaseGuard {
 /// NOT advanced → watcher SendFull.
 struct SinkDeliveryLeaseGuard {
     cell: Arc<super::DeliveryLeaseCell>,
-    turn: super::turn_finalizer::TurnKey,
+    key: super::DeliveryLeaseKey,
     start: u64,
     end: u64,
     /// The in-flight heartbeat; aborted on Drop (mirrors the watcher's RAII).
@@ -314,7 +314,7 @@ impl SinkDeliveryLeaseGuard {
     /// POST that never blocks delivery (single-winner CAS — no dup, no self-black-hole).
     fn acquire(
         cell: &Arc<super::DeliveryLeaseCell>,
-        turn: super::turn_finalizer::TurnKey,
+        key: super::DeliveryLeaseKey,
         start: u64,
         end: u64,
     ) -> Option<Self> {
@@ -322,7 +322,7 @@ impl SinkDeliveryLeaseGuard {
         // EXPIRED prior holder so a stale dead lease can't lose this acquire.
         cell.reclaim_if_expired(super::lease_now_ms());
         let acquired = cell.try_acquire(
-            turn,
+            key.clone(),
             super::LeaseHolder::Sink,
             start,
             end,
@@ -331,11 +331,14 @@ impl SinkDeliveryLeaseGuard {
         if !acquired {
             return None;
         }
-        let heartbeat =
-            super::DeliveryLeaseHeartbeat::spawn(cell.clone(), super::LeaseHolder::Sink, turn);
+        let heartbeat = super::DeliveryLeaseHeartbeat::spawn(
+            cell.clone(),
+            super::LeaseHolder::Sink,
+            key.clone(),
+        );
         Some(Self {
             cell: cell.clone(),
-            turn,
+            key,
             start,
             end,
             _heartbeat: heartbeat,
@@ -350,7 +353,7 @@ impl SinkDeliveryLeaseGuard {
     fn commit(&self, outcome: super::LeaseOutcome) {
         self.cell.commit(
             super::LeaseHolder::Sink,
-            self.turn,
+            self.key.clone(),
             self.start,
             self.end,
             outcome,
@@ -363,8 +366,12 @@ impl Drop for SinkDeliveryLeaseGuard {
         // Release on EVERY exit. `release` is valid from `Leased` (failure) and `Committed`
         // (success) and full-identity-gated, so it clears ONLY our marker — a newer turn
         // that re-leased this cell survives. (`_heartbeat` Drop aborts the renew task.)
-        self.cell
-            .release(super::LeaseHolder::Sink, self.turn, self.start, self.end);
+        self.cell.release(
+            super::LeaseHolder::Sink,
+            self.key.clone(),
+            self.start,
+            self.end,
+        );
     }
 }
 
@@ -380,10 +387,10 @@ impl toc::PostHeartbeat for SinkPostHeartbeat {
     fn start(
         &self,
         holder: super::LeaseHolder,
-        turn: super::turn_finalizer::TurnKey,
+        key: super::DeliveryLeaseKey,
     ) -> Box<dyn toc::PostHeartbeatGuard> {
         Box::new(SinkPostHeartbeatGuard {
-            _heartbeat: super::DeliveryLeaseHeartbeat::spawn(self.cell.clone(), holder, turn),
+            _heartbeat: super::DeliveryLeaseHeartbeat::spawn(self.cell.clone(), holder, key),
         })
     }
 }
@@ -653,6 +660,8 @@ impl SessionBoundDiscordRelaySink {
             delivery.frame_turn_user_msg_id,
             shared.restart.current_generation,
         );
+        let sink_lease_key =
+            delivery_lease_key_for_frame(channel, shared.restart.current_generation, delivery);
         let cell = shared.delivery_lease(channel);
         // Self-heal (`SinkDeliveryLeaseGuard::acquire`): reclaim an EXPIRED prior holder before acquire (a stale dead lease must not force a markerless POST).
         cell.reclaim_if_expired(super::lease_now_ms());
@@ -673,6 +682,7 @@ impl SessionBoundDiscordRelaySink {
             gateway,
             toc::TurnOutputCtx {
                 turn: sink_turn,
+                lease_key: Some(sink_lease_key),
                 owner: RelayOwnerKind::SessionBoundRelay,
                 holder: super::LeaseHolder::Sink,
                 lease: &*cell,
@@ -891,13 +901,13 @@ impl SessionBoundDiscordRelaySink {
         // `sink_guard_lease_range` encodes that (review-fix Medium-1).
         let sink_lease_guard = sink_guard_lease_range(cutover_range, cutover_short_replace)
             .and_then(|(start, end)| {
-                let sink_turn = super::turn_finalizer::TurnKey::new(
+                let sink_lease_key = delivery_lease_key_for_frame(
                     channel,
-                    delivery.frame_turn_user_msg_id,
                     shared.restart.current_generation,
+                    &delivery,
                 );
                 let cell = shared.delivery_lease(channel);
-                SinkDeliveryLeaseGuard::acquire(&cell, sink_turn, start, end)
+                SinkDeliveryLeaseGuard::acquire(&cell, sink_lease_key, start, end)
             });
 
         if let SessionBoundTerminalDeliveryRoute::PlaceholderEdit(msg_id) = route {
@@ -1618,6 +1628,21 @@ struct SessionRelayDelivery {
     /// part — two `user_msg_id == 0` turns in the same second share `(0, started_at)`; the
     /// monotonic offset disambiguates. `None` on legacy/non-fence frames.
     frame_turn_start_offset: Option<u64>,
+}
+
+fn delivery_lease_key_for_frame(
+    channel: ChannelId,
+    generation: u64,
+    delivery: &SessionRelayDelivery,
+) -> super::DeliveryLeaseKey {
+    super::DeliveryLeaseKey::new_for_site(
+        channel,
+        generation,
+        delivery.frame_turn_user_msg_id,
+        Some(&delivery.frame_turn_started_at),
+        delivery.frame_turn_start_offset,
+        "sink",
+    )
 }
 
 fn ssh_direct_prompt_anchor_for_response(
@@ -2458,6 +2483,53 @@ mod tests {
         }
     }
 
+    #[test]
+    fn same_id0_turn_frame_and_inflight_derive_equal_delivery_lease_key() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        struct EnvReset(Option<std::ffi::OsString>);
+        impl Drop for EnvReset {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+                }
+            }
+        }
+        let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let temp = tempfile::TempDir::new().expect("temp runtime root");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
+        let channel = ChannelId::new(8_041);
+        let generation = 17;
+        let started_at = "2026-07-03T06:00:00Z";
+        let start_offset = 128;
+        let delivery = delivery_with_fence_offset(
+            "AgentDesk-claude-lease-key",
+            Some(256),
+            0,
+            started_at,
+            Some(start_offset),
+        );
+        let inflight = inflight_with_identity_offset(
+            channel.get(),
+            "AgentDesk-claude-lease-key",
+            0,
+            started_at,
+            Some(start_offset),
+        );
+
+        let frame_key = delivery_lease_key_for_frame(channel, generation, &delivery);
+        let inflight_key =
+            super::super::DeliveryLeaseKey::from_inflight_state(channel, generation, &inflight);
+
+        assert_eq!(
+            frame_key, inflight_key,
+            "sink frame fence and bridge/watcher inflight state must derive the same lease identity for the same id-0 turn"
+        );
+    }
+
     // #3089 A2b: minimal `TurnGateway` fake for the short-replace controller-path
     // characterization. Only `replace_message_with_outcome` is exercised (the
     // `Replace { Active }` transport); `post_send_finalize` is a no-op for the
@@ -2561,7 +2633,7 @@ mod tests {
         fn start(
             &self,
             _h: super::super::LeaseHolder,
-            _t: super::super::turn_finalizer::TurnKey,
+            _k: super::super::DeliveryLeaseKey,
         ) -> Box<dyn toc::PostHeartbeatGuard> {
             Box::new(NoopHeartbeatGuard)
         }
@@ -2595,6 +2667,7 @@ mod tests {
             &gateway,
             toc::TurnOutputCtx {
                 turn,
+                lease_key: Some(super::super::DeliveryLeaseKey::from_turn_key(turn)),
                 owner: RelayOwnerKind::SessionBoundRelay,
                 holder: super::super::LeaseHolder::Sink,
                 lease: &*cell,
@@ -2912,6 +2985,7 @@ mod tests {
             &gateway,
             toc::TurnOutputCtx {
                 turn,
+                lease_key: Some(super::super::DeliveryLeaseKey::from_turn_key(turn)),
                 owner: RelayOwnerKind::SessionBoundRelay,
                 holder: super::super::LeaseHolder::Sink,
                 lease: &*cell,
@@ -3980,13 +4054,17 @@ mod tests {
         use super::super::SinkDeliveryLeaseGuard;
         use crate::services::discord::turn_finalizer::TurnKey;
         use crate::services::discord::{
-            DeliveryLeaseCell, LeaseHolder, LeaseOutcome, LeaseSnapshot,
+            DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, LeaseOutcome, LeaseSnapshot,
         };
         use serenity::model::id::ChannelId;
         use std::sync::Arc;
 
         const START: u64 = 100;
         const END: u64 = 200;
+
+        fn lease_key(ch: ChannelId) -> DeliveryLeaseKey {
+            DeliveryLeaseKey::from_turn_key(TurnKey::new(ch, 5, 0))
+        }
 
         /// (a) SLOW SINK IN FLIGHT: acquiring the guard sets the cell to
         /// `Leased{Sink, [start,end)}` — the marker the watcher gate reads as
@@ -3995,7 +4073,7 @@ mod tests {
         async fn acquire_sets_leased_sink_marker() {
             let ch = ChannelId::new(7301);
             let cell = Arc::new(DeliveryLeaseCell::new(ch));
-            let turn = TurnKey::new(ch, 5, 0);
+            let turn = lease_key(ch);
             let guard =
                 SinkDeliveryLeaseGuard::acquire(&cell, turn, START, END).expect("acquire wins");
             match cell.read() {
@@ -4017,7 +4095,7 @@ mod tests {
         async fn commit_then_drop_releases_to_unleased() {
             let ch = ChannelId::new(7302);
             let cell = Arc::new(DeliveryLeaseCell::new(ch));
-            let turn = TurnKey::new(ch, 5, 0);
+            let turn = lease_key(ch);
             {
                 let guard =
                     SinkDeliveryLeaseGuard::acquire(&cell, turn, START, END).expect("acquire wins");
@@ -4048,7 +4126,7 @@ mod tests {
         async fn commit_not_delivered_marks_refused_advance() {
             let ch = ChannelId::new(7306);
             let cell = Arc::new(DeliveryLeaseCell::new(ch));
-            let turn = TurnKey::new(ch, 5, 0);
+            let turn = lease_key(ch);
             {
                 let guard =
                     SinkDeliveryLeaseGuard::acquire(&cell, turn, START, END).expect("acquire wins");
@@ -4080,7 +4158,7 @@ mod tests {
         async fn drop_without_commit_releases_without_committing() {
             let ch = ChannelId::new(7303);
             let cell = Arc::new(DeliveryLeaseCell::new(ch));
-            let turn = TurnKey::new(ch, 5, 0);
+            let turn = lease_key(ch);
             {
                 let _guard =
                     SinkDeliveryLeaseGuard::acquire(&cell, turn, START, END).expect("acquire wins");
@@ -4099,13 +4177,17 @@ mod tests {
         fn acquire_fails_when_another_holder_owns_range() {
             let ch = ChannelId::new(7304);
             let cell = Arc::new(DeliveryLeaseCell::new(ch));
-            let turn = TurnKey::new(ch, 5, 0);
+            let turn = lease_key(ch);
             let now = crate::services::discord::lease_now_ms();
             let watcher_holder = LeaseHolder::Watcher { instance_id: 1 };
             // A watcher already holds the cell for this range (B2).
-            assert!(
-                cell.try_acquire(turn, watcher_holder, START, END, now.saturating_add(10_000),)
-            );
+            assert!(cell.try_acquire(
+                turn.clone(),
+                watcher_holder,
+                START,
+                END,
+                now.saturating_add(10_000),
+            ));
             // The sink's acquire loses → None (markerless POST; no duplicate).
             assert!(
                 SinkDeliveryLeaseGuard::acquire(&cell, turn, START, END).is_none(),
@@ -4125,11 +4207,11 @@ mod tests {
         async fn acquire_self_heals_an_expired_prior_holder() {
             let ch = ChannelId::new(7305);
             let cell = Arc::new(DeliveryLeaseCell::new(ch));
-            let turn = TurnKey::new(ch, 5, 0);
+            let turn = lease_key(ch);
             let now = crate::services::discord::lease_now_ms();
             // A dead prior holder whose deadline is already in the past.
             assert!(cell.try_acquire(
-                turn,
+                turn.clone(),
                 LeaseHolder::Watcher { instance_id: 9 },
                 START,
                 END,

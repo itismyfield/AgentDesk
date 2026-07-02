@@ -396,14 +396,14 @@ static BRIDGE_DELIVERY_LEASE_SEQ: std::sync::atomic::AtomicU64 =
 ///
 /// Lifecycle (mirrors the watcher's inline P1-1 wiring):
 ///   1. [`Self::acquire`] — `reclaim_if_expired` (self-heal a dead holder) then
-///      `try_acquire(turn, Bridge, [start,end), now+deadline)`. On success spawns
+///      `try_acquire(key, Bridge, [start,end), now+deadline)`. On success spawns
 ///      a [`crate::services::discord::DeliveryLeaseHeartbeat`] so a long chunked
 ///      send (which can exceed the 15s deadline) is never reclaimed mid-flight.
 ///      On FAILURE the cell is held by the watcher (or another bridge path) for
 ///      this range/turn → the caller MUST take a B2-style skip (NOT deliver+
 ///      advance); the live holder owns delivery.
 ///   2. caller performs `replace_message_with_outcome` / chunked send.
-///   3. [`Self::commit_and_advance`] — stop the heartbeat, `commit(Bridge, turn,
+///   3. [`Self::commit_and_advance`] — stop the heartbeat, `commit(Bridge, key,
 ///      start, end, outcome)`; on `Delivered` AND a successful commit, advance
 ///      `confirmed_end_offset` (the B6 gate: the advance now ONLY happens via a
 ///      successful lease commit), then `release` so the cell is free for the next
@@ -417,7 +417,7 @@ static BRIDGE_DELIVERY_LEASE_SEQ: std::sync::atomic::AtomicU64 =
 pub(super) struct BridgeDeliveryLease {
     cell: std::sync::Arc<crate::services::discord::DeliveryLeaseCell>,
     holder: crate::services::discord::LeaseHolder,
-    turn: super::super::turn_finalizer::TurnKey,
+    key: crate::services::discord::DeliveryLeaseKey,
     start: u64,
     end: u64,
     heartbeat: Option<crate::services::discord::DeliveryLeaseHeartbeat>,
@@ -515,9 +515,22 @@ pub(super) fn bridge_epilogue_marks_watcher_delivered(
     !preserve_inflight_for_cleanup_retry && !bridge_relay_delegated_to_watcher
 }
 
+pub(super) fn bridge_delivery_lease_key_for_inflight(
+    watcher_owner_channel_id: ChannelId,
+    generation: u64,
+    inflight: &crate::services::discord::inflight::InflightTurnState,
+) -> crate::services::discord::DeliveryLeaseKey {
+    crate::services::discord::DeliveryLeaseKey::from_inflight_state_for_site(
+        watcher_owner_channel_id,
+        generation,
+        inflight,
+        "bridge",
+    )
+}
+
 impl BridgeDeliveryLease {
     /// Acquire the per-channel delivery lease for the bridge's terminal delivery
-    /// covering `[start, end)` for `turn`. `target_end` is the same end offset the
+    /// covering `[start, end)` for `key`. `target_end` is the same end offset the
     /// pre-P1-2 `advance_tmux_relay_confirmed_end` advanced to (the bridge's
     /// `tmux_last_offset`); `start` is the turn's start offset (`turn_start_offset`,
     /// falling back to the same end so an unknown start yields an empty range that
@@ -536,7 +549,7 @@ impl BridgeDeliveryLease {
     pub(super) fn acquire(
         shared: &SharedData,
         channel_id: ChannelId,
-        turn: super::super::turn_finalizer::TurnKey,
+        key: crate::services::discord::DeliveryLeaseKey,
         start: u64,
         target_end: Option<u64>,
     ) -> BridgeLeaseAcquire {
@@ -555,7 +568,7 @@ impl BridgeDeliveryLease {
         // heartbeat, so it is NOT reclaimed and we correctly B2-skip it below.
         cell.reclaim_if_expired(crate::services::discord::lease_now_ms());
         let acquired = cell.try_acquire(
-            turn,
+            key.clone(),
             holder,
             start,
             end,
@@ -569,12 +582,12 @@ impl BridgeDeliveryLease {
         let heartbeat = Some(crate::services::discord::DeliveryLeaseHeartbeat::spawn(
             cell.clone(),
             holder,
-            turn,
+            key.clone(),
         ));
         BridgeLeaseAcquire::Held(BridgeDeliveryLease {
             cell,
             holder,
-            turn,
+            key,
             start,
             end,
             heartbeat,
@@ -607,9 +620,9 @@ impl BridgeDeliveryLease {
         if let Some(hb) = self.heartbeat.take() {
             hb.stop();
         }
-        let committed = self
-            .cell
-            .commit(self.holder, self.turn, self.start, self.end, outcome);
+        let committed =
+            self.cell
+                .commit(self.holder, self.key.clone(), self.start, self.end, outcome);
         debug_assert!(
             committed,
             "bridge must be able to commit its own freshly-acquired delivery lease"
@@ -630,7 +643,7 @@ impl BridgeDeliveryLease {
         // dead) in the meantime.
         let _ = self
             .cell
-            .release(self.holder, self.turn, self.start, self.end);
+            .release(self.holder, self.key.clone(), self.start, self.end);
         committed
     }
 }
@@ -647,7 +660,7 @@ impl Drop for BridgeDeliveryLease {
         self.heartbeat.take();
         let _ = self
             .cell
-            .release(self.holder, self.turn, self.start, self.end);
+            .release(self.holder, self.key.clone(), self.start, self.end);
     }
 }
 
@@ -1140,12 +1153,16 @@ mod tests {
     mod bridge_delivery_lease {
         use crate::services::discord::turn_finalizer::TurnKey;
         use crate::services::discord::{
-            DELIVERY_LEASE_DEADLINE_MS, LeaseHolder, LeaseOutcome, LeaseSnapshot, lease_now_ms,
-            make_shared_data_for_tests,
+            DELIVERY_LEASE_DEADLINE_MS, DeliveryLeaseKey, LeaseHolder, LeaseOutcome, LeaseSnapshot,
+            lease_now_ms, make_shared_data_for_tests,
         };
         use poise::serenity_prelude::ChannelId;
 
-        use super::super::{BridgeDeliveryLease, BridgeLeaseAcquire};
+        use super::super::{
+            BridgeDeliveryLease, BridgeLeaseAcquire, bridge_delivery_lease_key_for_inflight,
+        };
+        use crate::services::discord::inflight::InflightTurnState;
+        use crate::services::provider::ProviderKind;
 
         const CH: u64 = 909_001;
 
@@ -1153,8 +1170,8 @@ mod tests {
             ChannelId::new(CH)
         }
 
-        fn turn(user_msg_id: u64) -> TurnKey {
-            TurnKey::new(channel(), user_msg_id, 1)
+        fn turn(user_msg_id: u64) -> DeliveryLeaseKey {
+            DeliveryLeaseKey::from_turn_key(TurnKey::new(channel(), user_msg_id, 1))
         }
 
         #[tokio::test(start_paused = true)]
@@ -1256,6 +1273,55 @@ mod tests {
                     ..
                 }
             ));
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn bridge_id0_without_offset_acquires_degenerate_key_instead_of_skip() {
+            let _lock = crate::config::shared_test_env_lock()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            struct EnvReset(Option<std::ffi::OsString>);
+            impl Drop for EnvReset {
+                fn drop(&mut self) {
+                    match self.0.take() {
+                        Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                        None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+                    }
+                }
+            }
+            let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+            let temp = tempfile::TempDir::new().expect("temp runtime root");
+            unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
+            let shared = make_shared_data_for_tests();
+            let ch = channel();
+            let mut inflight = InflightTurnState::new(
+                ProviderKind::Codex,
+                ch.get(),
+                Some("agentdesk-test".to_string()),
+                7,
+                0,
+                123,
+                "prompt".to_string(),
+                None,
+                Some("AgentDesk-codex-degenerate-bridge".to_string()),
+                Some("/tmp/out.jsonl".to_string()),
+                Some("/tmp/in.fifo".to_string()),
+                0,
+            );
+            inflight.started_at = "2026-07-03T06:00:00Z".to_string();
+            inflight.turn_start_offset = None;
+
+            let key = bridge_delivery_lease_key_for_inflight(ch, 1, &inflight);
+            let acquire = BridgeDeliveryLease::acquire(&shared, ch, key, 0, Some(64));
+            let lease = match acquire {
+                BridgeLeaseAcquire::Held(lease) => lease,
+                BridgeLeaseAcquire::Skip => panic!("degenerate id-0 bridge key must acquire"),
+                BridgeLeaseAcquire::NoRange => panic!("test range is non-empty"),
+            };
+
+            assert!(lease.commit_and_advance(&shared, ch, None, LeaseOutcome::Delivered));
+            assert_eq!(shared.committed_relay_offset(ch), 64);
         }
 
         #[tokio::test(start_paused = true)]
@@ -1364,7 +1430,7 @@ mod tests {
             // leases on its own `channel_id` == owner).
             let owner_cell = shared.delivery_lease(owner_ch);
             let watcher = LeaseHolder::Watcher { instance_id: 70 };
-            let watcher_turn = TurnKey::new(owner_ch, 99, 1);
+            let watcher_turn = DeliveryLeaseKey::from_turn_key(TurnKey::new(owner_ch, 99, 1));
             assert!(owner_cell.try_acquire(
                 watcher_turn,
                 watcher,
@@ -1375,7 +1441,7 @@ mod tests {
 
             // P1-a fix: the bridge acquires on `watcher_owner_channel_id` (the OWNER
             // channel) → SAME cell → B2-skip (contention detected, NOT both-deliver).
-            let bridge_turn = TurnKey::new(owner_ch, 99, 1);
+            let bridge_turn = DeliveryLeaseKey::from_turn_key(TurnKey::new(owner_ch, 99, 1));
             assert!(
                 matches!(
                     BridgeDeliveryLease::acquire(&shared, owner_ch, bridge_turn, 0, Some(64)),
@@ -1387,7 +1453,7 @@ mod tests {
             // Regression contrast: keying on the unrelated DISPATCH channel hits a
             // DIFFERENT cell → the bridge would WRONGLY acquire (the pre-fix
             // duplicate). This documents WHY the bridge must use the owner channel.
-            let dispatch_turn = TurnKey::new(dispatch_ch, 99, 1);
+            let dispatch_turn = DeliveryLeaseKey::from_turn_key(TurnKey::new(dispatch_ch, 99, 1));
             assert!(
                 matches!(
                     BridgeDeliveryLease::acquire(&shared, dispatch_ch, dispatch_turn, 0, Some(64)),
@@ -1660,7 +1726,9 @@ mod tests {
     mod a0_i2_advance_characterization_tests {
         use super::super::{BridgeDeliveryLease, BridgeLeaseAcquire};
         use crate::services::discord::turn_finalizer::TurnKey;
-        use crate::services::discord::{LeaseOutcome, make_shared_data_for_tests};
+        use crate::services::discord::{
+            DeliveryLeaseKey, LeaseOutcome, make_shared_data_for_tests,
+        };
         use poise::serenity_prelude::ChannelId;
 
         const CH: u64 = 909_777;
@@ -1673,7 +1741,7 @@ mod tests {
             match BridgeDeliveryLease::acquire(
                 shared,
                 ch,
-                TurnKey::new(ch, user_msg_id, 1),
+                DeliveryLeaseKey::from_turn_key(TurnKey::new(ch, user_msg_id, 1)),
                 0,
                 Some(64),
             ) {

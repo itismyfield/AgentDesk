@@ -693,7 +693,11 @@ mod tests {
     struct InertHeartbeat;
     struct InertHeartbeatGuard;
     impl toc::PostHeartbeat for InertHeartbeat {
-        fn start(&self, _h: LeaseHolder, _t: TurnKey) -> Box<dyn toc::PostHeartbeatGuard> {
+        fn start(
+            &self,
+            _h: LeaseHolder,
+            _k: crate::services::discord::DeliveryLeaseKey,
+        ) -> Box<dyn toc::PostHeartbeatGuard> {
             Box::new(InertHeartbeatGuard)
         }
     }
@@ -729,6 +733,9 @@ mod tests {
             gw,
             toc::TurnOutputCtx {
                 turn: turn(),
+                lease_key: Some(crate::services::discord::DeliveryLeaseKey::from_turn_key(
+                    turn(),
+                )),
                 owner: RelayOwnerKind::None,
                 holder: LeaseHolder::Bridge,
                 lease: &**cell,

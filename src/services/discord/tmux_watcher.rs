@@ -4824,6 +4824,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             ),
             shared.restart.current_generation,
         );
+        let watcher_lease_key = pinned_delivery_lease_key(
+            channel_id,
+            shared.restart.current_generation,
+            inflight_before_relay.as_ref(),
+            &tmux_session_name,
+            current_offset,
+        );
         let watcher_lease_holder = crate::services::discord::LeaseHolder::Watcher {
             instance_id: watcher_instance_id,
         };
@@ -4874,7 +4881,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // no finalizer `SharedData` dependency; reconcile-tick reclaim is secondary.
             watcher_lease_cell.reclaim_if_expired(crate::services::discord::lease_now_ms());
             watcher_lease_cell.try_acquire(
-                watcher_lease_turn,
+                watcher_lease_key.clone(),
                 watcher_lease_holder,
                 watcher_lease_start,
                 watcher_lease_end,
@@ -4915,7 +4922,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             Some(DeliveryLeaseHeartbeat::spawn(
                 watcher_lease_cell.clone(),
                 watcher_lease_holder,
-                watcher_lease_turn,
+                watcher_lease_key.clone(),
             ))
         } else {
             None
@@ -5150,6 +5157,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 &relay_text,
                                 &watcher_lease_cell,
                                 watcher_lease_turn,
+                                Some(watcher_lease_key.clone()),
                                 watcher_instance_id,
                                 (watcher_lease_start, watcher_lease_end),
                                 single_message_panel_footer_mode,
@@ -5533,7 +5541,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 if watcher_lease_acquired {
                     watcher_lease_cell.release(
                         watcher_lease_holder,
-                        watcher_lease_turn,
+                        watcher_lease_key.clone(),
                         watcher_lease_start,
                         watcher_lease_end,
                     );
@@ -6045,7 +6053,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             };
             let committed = watcher_lease_cell.commit(
                 watcher_lease_holder,
-                watcher_lease_turn,
+                watcher_lease_key.clone(),
                 watcher_lease_start,
                 watcher_lease_end,
                 commit_outcome,
@@ -6083,7 +6091,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // holder's lease was reclaimed after the deadline elapsed).
             let _ = watcher_lease_cell.release(
                 watcher_lease_holder,
-                watcher_lease_turn,
+                watcher_lease_key.clone(),
                 watcher_lease_start,
                 watcher_lease_end,
             );

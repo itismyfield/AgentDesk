@@ -687,6 +687,7 @@ async fn deliver_short_replace_via_controller<G: super::gateway::TurnGateway + ?
         gateway,
         toc::TurnOutputCtx {
             turn,
+            lease_key: None,
             owner: RelayOwnerKind::StandbyRelay,
             // Reuse `LeaseHolder::Sink` (its doc reads "The standby / output sink
             // relay") — cosmetic on the markerless path; no `Standby` variant
