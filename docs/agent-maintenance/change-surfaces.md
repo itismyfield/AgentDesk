@@ -1137,9 +1137,11 @@
     children (`send_target`, `send_gate`, `send_api`, `manual_delivery`) to
     `outbound/` while preserving the `health::` re-export API; #1879
     snapshot/mailbox extraction, and #3082 answer-flush-barrier field).
-  - `src/services/discord/health/recovery.rs` (2425 lines; +13 from #4024 F1
-    pairing health hard-stop finalize-path `thread_parents` cleanup with parent
-    queue kickoffs; +75 from #4019 R2
+  - `src/services/discord/health/recovery.rs` (2498 lines; +73 from #4035
+    guarding stale-mailbox idle-tmux inflight clear with the readiness-time
+    finalizer/user-message identity plus `updated_at` and `save_generation` pin;
+    +13 from #4024 F1 pairing health hard-stop finalize-path `thread_parents`
+    cleanup with parent queue kickoffs; +75 from #4019 R2
     round 2 moving explicit-background hard-stop cleanup before finalizer mailbox
     release and making watcher stop tmux-session-conditional; +115 from #4019 R2
     watchdog identity revalidation — explicit-background destructive cleanup now

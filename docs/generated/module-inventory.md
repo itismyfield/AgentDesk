@@ -260,7 +260,7 @@
 | `server::routes::escalation` | `src/server/routes/escalation.rs` | 1641 | 1376 | 265 | giant-file |
 | `server::routes::github` | `src/server/routes/github.rs` | 949 | 680 | 269 |  |
 | `server::routes::github_dashboard` | `src/server/routes/github_dashboard.rs` | 188 | 188 | 0 |  |
-| `server::routes::health_api` | `src/server/routes/health_api.rs` | 2386 | 1665 | 721 | giant-file |
+| `server::routes::health_api` | `src/server/routes/health_api.rs` | 2391 | 1670 | 721 | giant-file |
 | `server::routes::home_metrics` | `src/server/routes/home_metrics.rs` | 352 | 352 | 0 |  |
 | `server::routes::hooks` | `src/server/routes/hooks.rs` | 129 | 129 | 0 |  |
 | `server::routes::idle_recap` | `src/server/routes/idle_recap.rs` | 357 | 357 | 0 |  |
@@ -446,7 +446,7 @@
 | `services::discord::health::headless_turn` | `src/services/discord/health/headless_turn.rs` | 369 | 369 | 0 |  |
 | `services::discord::health::mailbox` | `src/services/discord/health/mailbox.rs` | 111 | 111 | 0 |  |
 | `services::discord::health::provider_probe` | `src/services/discord/health/provider_probe.rs` | 246 | 193 | 53 |  |
-| `services::discord::health::recovery` | `src/services/discord/health/recovery.rs` | 4089 | 2425 | 1664 | giant-file |
+| `services::discord::health::recovery` | `src/services/discord/health/recovery.rs` | 4227 | 2498 | 1729 | giant-file |
 | `services::discord::health::recovery::leak_recovery_ledger` | `src/services/discord/health/recovery/leak_recovery_ledger.rs` | 370 | 370 | 0 |  |
 | `services::discord::health::recovery::watchdog_decisions` | `src/services/discord/health/recovery/watchdog_decisions.rs` | 289 | 289 | 0 |  |
 | `services::discord::health::redaction` | `src/services/discord/health/redaction.rs` | 33 | 23 | 10 |  |
@@ -465,10 +465,10 @@
 | `services::discord::idle_recap::scrollback` | `src/services/discord/idle_recap/scrollback.rs` | 279 | 279 | 0 |  |
 | `services::discord::idle_recap_interaction` | `src/services/discord/idle_recap_interaction.rs` | 458 | 424 | 34 |  |
 | `services::discord::idle_relay_drift` | `src/services/discord/idle_relay_drift.rs` | 764 | 529 | 235 |  |
-| `services::discord::inflight` | `src/services/discord/inflight.rs` | 6419 | 928 | 5491 |  |
+| `services::discord::inflight` | `src/services/discord/inflight.rs` | 6420 | 929 | 5491 |  |
 | `services::discord::inflight::anchor_repost` | `src/services/discord/inflight/anchor_repost.rs` | 550 | 189 | 361 |  |
 | `services::discord::inflight::budget` | `src/services/discord/inflight/budget.rs` | 340 | 109 | 231 |  |
-| `services::discord::inflight::clear_store` | `src/services/discord/inflight/clear_store.rs` | 917 | 917 | 0 |  |
+| `services::discord::inflight::clear_store` | `src/services/discord/inflight/clear_store.rs` | 989 | 989 | 0 |  |
 | `services::discord::inflight::finalizer_identity` | `src/services/discord/inflight/finalizer_identity.rs` | 56 | 56 | 0 |  |
 | `services::discord::inflight::model` | `src/services/discord/inflight/model.rs` | 1177 | 861 | 316 |  |
 | `services::discord::inflight::orphan_relay_reclaim` | `src/services/discord/inflight/orphan_relay_reclaim.rs` | 821 | 307 | 514 |  |

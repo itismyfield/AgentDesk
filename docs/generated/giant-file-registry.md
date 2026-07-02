@@ -16,7 +16,7 @@
 | `src/server/routes/routines.rs` | 1032 | server-routes | 2026-10-31 | #4039 |
 | `src/server/worker_registry.rs` | 1267 | server-runtime | 2026-08-31 | #3739 |
 | `src/services/codex_tui/rollout_tail.rs` | 1276 | discord-relay | 2026-10-31 | #3843 |
-| `src/services/discord/health/recovery.rs` | 2425 | discord-relay | 2026-10-31 | #3839 |
+| `src/services/discord/health/recovery.rs` | 2498 | discord-relay | 2026-10-31 | #3839 |
 | `src/services/discord/idle_recap.rs` | 1252 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/placeholder_sweeper.rs` | 1019 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/recovery_engine.rs` | 2935 | discord-relay | 2026-10-31 | #3834 |
@@ -72,7 +72,7 @@
 | `src/server/routes/agents_crud.rs` | 1903 |
 | `src/server/routes/agents_setup.rs` | 1365 |
 | `src/server/routes/escalation.rs` | 1376 |
-| `src/server/routes/health_api.rs` | 1665 |
+| `src/server/routes/health_api.rs` | 1670 |
 | `src/server/routes/kanban.rs` | 2677 |
 | `src/server/routes/meetings.rs` | 1290 |
 | `src/server/routes/resume.rs` | 1260 |
