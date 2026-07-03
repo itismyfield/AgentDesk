@@ -15,6 +15,10 @@
 #     [--codesign-identity="Developer ID Application: ..."]
 #   If no codesign identity is provided, the first available Developer ID
 #   identity will be used automatically when needed.
+#
+# Env:
+#   AGENTDESK_ROUTINES_SRC   operator-private routine source. Defaults to
+#                            $AGENTDESK_HOME/workspaces/agentdesk/routines.
 # ──────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -29,6 +33,7 @@ BIN_DIR="$AD_HOME/bin"
 LIBEXEC_DIR="$AD_HOME/libexec"
 WRAPPER_BIN="$BIN_DIR/agentdesk"
 REAL_BIN="$LIBEXEC_DIR/agentdesk"
+ROUTINES_SOURCE="${AGENTDESK_ROUTINES_SRC:-$AD_HOME/workspaces/agentdesk/routines}"
 HEALTH_PORT="${AGENTDESK_SERVER_PORT:-$ADK_DEFAULT_PORT}"
 LABEL="com.agentdesk.release"
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -505,10 +510,12 @@ if [ -d "$PROJECT_DIR/policies" ]; then
   ok "Policies: $AD_HOME/policies/"
 fi
 
-if [ -d "$PROJECT_DIR/routines" ]; then
+if [ -d "$ROUTINES_SOURCE" ]; then
   mkdir -p "$AD_HOME/routines"
-  rsync -a --delete "$PROJECT_DIR/routines/" "$AD_HOME/routines/"
-  ok "Routines: $AD_HOME/routines/"
+  rsync -a --delete "$ROUTINES_SOURCE/" "$AD_HOME/routines/"
+  ok "Routines: $ROUTINES_SOURCE -> $AD_HOME/routines/"
+else
+  info "Routines source missing: $ROUTINES_SOURCE; retaining existing $AD_HOME/routines/"
 fi
 
 if [ -d "$PROJECT_DIR/skills" ]; then

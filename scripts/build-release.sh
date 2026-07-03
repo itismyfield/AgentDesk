@@ -6,6 +6,12 @@
 #   ./scripts/build-release.sh              # full build + package
 #   ./scripts/build-release.sh --skip-dashboard
 #
+# Env:
+#   AGENTDESK_BUILD_INCLUDE_ROUTINES=1      include operator-private routines
+#                                           from AGENTDESK_ROUTINES_SRC.
+#   AGENTDESK_ROUTINES_SRC                  routine source used only when
+#                                           AGENTDESK_BUILD_INCLUDE_ROUTINES=1.
+#
 # Output:
 #   dist/agentdesk-{os}-{arch}.tar.gz|zip  +  dist/checksums.txt
 #   Contents: agentdesk / agentdesk.exe, dashboard/dist/, policies/, skills/
@@ -17,6 +23,10 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck source=_defaults.sh
 . "$SCRIPT_DIR/_defaults.sh"
 cd "$PROJECT_DIR"
+
+ADK_REL="${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"
+INCLUDE_ROUTINES="${AGENTDESK_BUILD_INCLUDE_ROUTINES:-0}"
+ROUTINES_SOURCE="${AGENTDESK_ROUTINES_SRC:-$ADK_REL/workspaces/agentdesk/routines}"
 
 SKIP_DASHBOARD=false
 for arg in "$@"; do
@@ -168,14 +178,18 @@ if [ -d "policies" ]; then
   fi
 fi
 
-# Routine scripts
-if [ -d "routines" ]; then
+# Operator-private routine scripts are intentionally excluded from public release
+# artifacts unless the operator explicitly opts in.
+if [ "$INCLUDE_ROUTINES" = "1" ] && [ -d "$ROUTINES_SOURCE" ]; then
   mkdir -p "$STAGING/routines"
   if command -v rsync &>/dev/null; then
-    rsync -a --delete "routines/" "$STAGING/routines/"
+    rsync -a --delete "$ROUTINES_SOURCE/" "$STAGING/routines/"
   else
-    cp -R "routines/." "$STAGING/routines/"
+    cp -R "$ROUTINES_SOURCE/." "$STAGING/routines/"
   fi
+elif [ "$INCLUDE_ROUTINES" = "1" ]; then
+  echo "⚠ Routines source missing: $ROUTINES_SOURCE"
+  echo "  Skipping routine bundle."
 fi
 
 # Launchd-migrated shell entrypoints used by bundled routine prompts.

@@ -48,5 +48,7 @@ __pycache__/
 
 # Operator-private routine scripts. Keep local/runtime routines out of public repo history.
 routines/
+!policies/__tests__/fixtures/routines/
+!policies/__tests__/fixtures/routines/**
 !src/server/routes/routines/
 !src/server/routes/routines/*.rs

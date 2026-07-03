@@ -26,6 +26,11 @@ set -euo pipefail
 #                                      offline/emergency deploy.
 #   AGENTDESK_DEPLOY_FAST=1            opt into the release-fast Cargo profile
 #                                      for lower-latency dev-loop deploys.
+#   AGENTDESK_ROUTINES_SRC             operator-private routine script source.
+#                                      Defaults to $AGENTDESK_ROOT_DIR/workspaces/agentdesk/routines
+#                                      so isolated worktree deploys cannot
+#                                      overwrite runtime routines with stale
+#                                      per-worktree ignored files.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=_defaults.sh
@@ -46,6 +51,7 @@ if [ ! -d "$REPO" ]; then
     exit 1
 fi
 REPO="$(cd "$REPO" && pwd)"
+ROUTINES_SOURCE="${AGENTDESK_ROUTINES_SRC:-$ADK_REL/workspaces/agentdesk/routines}"
 REPORT_CHANNEL_ID="${AGENTDESK_REPORT_CHANNEL_ID:-}"
 REPORT_PROVIDER="${AGENTDESK_REPORT_PROVIDER:-}"
 DEPLOY_DETACHED_CHILD="${AGENTDESK_DEPLOY_DETACHED_CHILD:-0}"
@@ -720,6 +726,7 @@ _deploy_peer_env_prelude() {
         AGENTDESK_PLIST_REL \
         AGENTDESK_ROOT_DIR \
         AGENTDESK_REPO_DIR \
+        AGENTDESK_ROUTINES_SRC \
         OBSIDIAN_VAULT_ROOT \
         AGENTDESK_OBSIDIAN_AGENTS_SRC
     do
@@ -861,6 +868,7 @@ sleep $(printf '%q' "$DEPLOY_DELAY_SECS")
 export AGENTDESK_REPORT_CHANNEL_ID=$(printf '%q' "$REPORT_CHANNEL_ID")
 export AGENTDESK_REPORT_PROVIDER=$(printf '%q' "$REPORT_PROVIDER")
 export AGENTDESK_REPO_DIR=$(printf '%q' "$REPO")
+export AGENTDESK_ROUTINES_SRC=$(printf '%q' "$ROUTINES_SOURCE")
 export AGENTDESK_DEPLOY_DETACHED_CHILD=1
 export AGENTDESK_DEPLOY_LOG_PATH=$(printf '%q' "$log_path")
 export AGENTDESK_DEPLOY_TEST_MODE=$(printf '%q' "$DEPLOY_TEST_MODE")
@@ -1064,16 +1072,19 @@ rm -rf "$POLICIES_STAGED"
 mkdir -p "$POLICIES_STAGED"
 rsync -a --delete "$REPO/policies/" "$POLICIES_STAGED/"
 
-# Stage routine scripts before stopping release so the runtime never executes a
-# stale JS asset after a binary deploy.
-if [ -d "$REPO/routines" ]; then
-    echo "▸ Staging routines..."
+# Stage operator-private routine scripts before stopping release so the runtime
+# never executes a stale JS asset after a binary deploy. The source is not the
+# invoking repo/worktree: routines are ignored by Git and live in the canonical
+# release workspace, so isolated worktree deploys must not overwrite runtime
+# routines with stale per-worktree ignored files.
+if [ -d "$ROUTINES_SOURCE" ]; then
+    echo "▸ Staging routines from $ROUTINES_SOURCE..."
     ROUTINES_STAGED="$ADK_REL/routines.new"
     rm -rf "$ROUTINES_STAGED"
     mkdir -p "$ROUTINES_STAGED"
-    rsync -a --delete "$REPO/routines/" "$ROUTINES_STAGED/"
+    rsync -a --delete "$ROUTINES_SOURCE/" "$ROUTINES_STAGED/"
 else
-    echo "⚠ Routines source missing: $REPO/routines"
+    echo "⚠ Routines source missing: $ROUTINES_SOURCE"
     echo "  Skipping routine staging — existing $ADK_REL/routines/ will be retained."
 fi
 
