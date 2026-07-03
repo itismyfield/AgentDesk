@@ -247,10 +247,10 @@
 | `POST` | `/api/routines/{id}/detach` | `routines::detach_routine` | `src/server/routes/routines/handlers.rs:294` | `src/server/routes/domains/ops.rs:242` |
 | `POST` | `/api/routines/{id}/pause` | `routines::pause_routine` | `src/server/routes/routines/handlers.rs:231` | `src/server/routes/domains/ops.rs:240` |
 | `POST` | `/api/routines/{id}/resume` | `routines::resume_routine` | `src/server/routes/routines/handlers.rs:253` | `src/server/routes/domains/ops.rs:241` |
-| `POST` | `/api/routines/{id}/run-now` | `routines::run_routine_now` | `src/server/routes/routines/handlers.rs:339` | `src/server/routes/domains/ops.rs:243` |
+| `POST` | `/api/routines/{id}/run-now` | `routines::run_routine_now` | `src/server/routes/routines/handlers.rs:337` | `src/server/routes/domains/ops.rs:243` |
 | `GET` | `/api/routines/{id}/runs` | `routines::list_routine_runs` | `src/server/routes/routines/handlers.rs:116` | `src/server/routes/domains/ops.rs:239` |
-| `POST` | `/api/routines/{id}/session/kill` | `routines::kill_routine_session` | `src/server/routes/routines/handlers.rs:426` | `src/server/routes/domains/ops.rs:248` |
-| `POST` | `/api/routines/{id}/session/reset` | `routines::reset_routine_session` | `src/server/routes/routines/handlers.rs:419` | `src/server/routes/domains/ops.rs:244` |
+| `POST` | `/api/routines/{id}/session/kill` | `routines::kill_routine_session` | `src/server/routes/routines/handlers.rs:424` | `src/server/routes/domains/ops.rs:248` |
+| `POST` | `/api/routines/{id}/session/reset` | `routines::reset_routine_session` | `src/server/routes/routines/handlers.rs:417` | `src/server/routes/domains/ops.rs:244` |
 | `GET` | `/api/session-termination-events` | `termination_events::list_termination_events` | `src/server/routes/termination_events.rs:23` | `src/server/routes/domains/ops.rs:207` |
 | `GET` | `/api/sessions` | `agents_crud::list_sessions` | `src/server/routes/agents_crud.rs:1831` | `src/server/routes/domains/agents.rs:51` |
 | `GET` | `/api/sessions/{id}/tmux-output` | `dispatched_sessions::tmux_output` | `src/server/routes/dispatched_sessions.rs:93` | `src/server/routes/domains/ops.rs:203` |
