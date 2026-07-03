@@ -518,6 +518,7 @@ src/
 │   │   │   ├── runtime.rs
 │   │   │   ├── state_extractors.rs
 │   │   │   ├── status_panel.rs
+│   │   │   ├── terminal_text_idempotency.rs
 │   │   │   └── terminal_watcher.rs
 │   │   ├── recovery_paths/
 │   │   │   ├── controller_cutover.rs

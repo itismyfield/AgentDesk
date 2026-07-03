@@ -837,7 +837,9 @@ async fn deliver_response(
                     );
                     committed
                 }
-                Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { edit_error }) => {
+                Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
+                    edit_error, ..
+                }) => {
                     // Mirror session_relay_sink #2757: never delete the original
                     // msg_id after fallback delivery — by the time the edit fails
                     // it can already be a live response card, not a disposable
@@ -1517,6 +1519,7 @@ mod tests {
             let (delivered, replace_calls, delete_calls) = run(
                 ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
                     edit_error: "edit failed".to_string(),
+                    replacement_anchor: None,
                 },
                 true,
             );

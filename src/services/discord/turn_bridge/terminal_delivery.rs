@@ -163,7 +163,7 @@ pub(super) fn turn_bridge_replace_outcome_committed(
             );
             true
         }
-        Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { edit_error }) => {
+        Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { edit_error, .. }) => {
             record_turn_bridge_terminal_replace_cleanup(
                 shared,
                 provider,
@@ -979,6 +979,7 @@ mod tests {
     fn sent_fallback_after_edit_failure_does_not_commit_terminal_delivery() {
         let outcome = ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
             edit_error: "edit 500; fallback POST succeeded".to_string(),
+            replacement_anchor: None,
         };
 
         // The commit predicate: a fallback-after-edit-failure is NOT a commit.

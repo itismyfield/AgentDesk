@@ -214,10 +214,11 @@ pub(in crate::services::discord) fn watcher_terminal_lease_range(
 ///   in-place edit → `Delivered` (`relay_ok = true`, `direct_send_delivered = true`).
 ///   The lease outcome only steered the watcher's own re-send gate, which the
 ///   controller already committed.
-/// - `Delivered { FreshFallbackAfterEditFailure { edit_error } }` → confirmed POST via
-///   a FRESH fallback send after the in-place edit failed → `DeliveredFallback`
-///   (#3089 A4 r2). Still delivered/advanced, but the write-back mirrors the legacy
-///   fallback arm (NO footer target, `Failed(edit_error)` cleanup, original preserved).
+/// - `Delivered { FreshFallbackAfterEditFailure { edit_error, .. } }` → confirmed
+///   POST via a FRESH fallback send after the in-place edit failed →
+///   `DeliveredFallback` (#3089 A4 r2). Still delivered/advanced, but the write-back
+///   mirrors the legacy fallback arm (NO footer target, `Failed(edit_error)` cleanup,
+///   original preserved).
 /// - `Transient` → lost acquire (another holder owns the range). The legacy watcher
 ///   would have lost its OWN acquire at :5944 and taken the `watcher_lease_b2_skip` arm
 ///   (:6103), which returns `relay_ok = false` with NO transport (the live holder commits
@@ -337,7 +338,7 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
         // case from the cut-over set, so this is the conservative legacy default).
         toc::DeliveryOutcome::Delivered {
             replace_kind:
-                Some(toc::ReplaceDeliveryKind::FreshFallbackAfterEditFailure { edit_error }),
+                Some(toc::ReplaceDeliveryKind::FreshFallbackAfterEditFailure { edit_error, .. }),
             ..
         } => WatcherShortReplaceResult::DeliveredFallback { edit_error },
         toc::DeliveryOutcome::Delivered { .. } | toc::DeliveryOutcome::NotDelivered { .. } => {

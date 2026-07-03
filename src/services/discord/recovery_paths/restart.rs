@@ -483,7 +483,10 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
     };
 
     // G4: the anchor is gone → send a NEW message (placeholder = None → send-new,
-    // NOT an edit). Repost into the channel the anchor lived in.
+    // NOT an edit). Repost into the channel the anchor lived in. The D1 context
+    // deliberately disables recorded-anchor reuse here because that anchor is the
+    // one just proven gone; it still gates the send on the delivery lease and
+    // records the replacement anchor after a successful POST.
     tracing::warn!(
         provider = %provider.as_str(),
         channel = state.channel_id,
@@ -541,12 +544,22 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
         return refusal;
     }
 
+    let recovery_context =
+        super::super::recovery_engine::RecoveryDeliveryContext::send_new_after_gone_anchor(
+            provider,
+            state,
+            ChannelId::new(anchor.panel_channel_id),
+            Some(anchor.range),
+            shared.restart.current_generation,
+        )
+        .with_record_channel_id(ChannelId::new(record_channel_id));
     let outcome = super::super::recovery_engine::relay_recovered_terminal_text_to_placeholder(
         http,
         shared,
         ChannelId::new(anchor.panel_channel_id),
         None,
         terminal_text,
+        Some(&recovery_context),
     )
     .await;
 

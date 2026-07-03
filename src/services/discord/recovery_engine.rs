@@ -58,6 +58,8 @@ mod state_extractors;
 mod manual_rebind;
 #[path = "recovery_engine/routing_orphan.rs"] // #3869 routing-orphan finalize
 mod routing_orphan;
+#[path = "recovery_engine/terminal_text_idempotency.rs"]
+mod terminal_text_idempotency;
 // #3834: behavior-preserving extraction of the runtime-rediscovery recovery path
 // (`reregister_active_turn_from_inflight` + its private
 // `reseed_watcher_owned_finalizer_ledger` helper and unit tests) into a leaf
@@ -121,6 +123,7 @@ pub(crate) use self::manual_rebind::rebind_inflight_for_channel;
 // byte-identical. Its private `reseed_watcher_owned_finalizer_ledger` helper is
 // not re-exported.
 pub(super) use self::runtime::reregister_active_turn_from_inflight;
+pub(in crate::services::discord) use self::terminal_text_idempotency::RecoveryDeliveryContext;
 // #3479: re-import the analytics + transcript helpers so root call sites stay
 // byte-identical. `recovered_transcript_turn_id` is gated on cfg(test) — the root
 // reaches it only from its unit test (prod calls it inside analytics_transcript).
@@ -353,15 +356,23 @@ fn should_advance_recovery_dispatch_after_relay(relay_ok: bool) -> bool {
 async fn relay_recovery_terminal_notice(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
+    provider: &ProviderKind,
     state: &super::inflight::InflightTurnState,
     text: &str,
 ) -> RecoveryRelayOutcome {
+    let recovery_context = RecoveryDeliveryContext::from_state(
+        provider,
+        state,
+        None,
+        shared.restart.current_generation,
+    );
     relay_recovered_terminal_text_to_placeholder(
         http,
         shared,
         ChannelId::new(state.channel_id),
         super::inflight::optional_message_id(state.current_msg_id),
         text,
+        Some(&recovery_context),
     )
     .await
 }
@@ -381,9 +392,38 @@ pub(in crate::services::discord) async fn relay_recovered_terminal_text_to_place
     channel_id: ChannelId,
     placeholder: Option<MessageId>,
     text: &str,
+    recovery_context: Option<&RecoveryDeliveryContext>,
 ) -> RecoveryRelayOutcome {
+    let mut reused_recorded_anchor = false;
+    let placeholder = match placeholder {
+        Some(placeholder) => Some(placeholder),
+        None => match recovery_context.and_then(RecoveryDeliveryContext::anchor_reuse_decision) {
+            Some(terminal_text_idempotency::RecoveryAnchorReuse::DurableAlreadyDelivered(
+                anchor,
+            )) => {
+                tracing::info!(
+                    channel_id = channel_id.get(),
+                    anchor_msg_id = anchor.get(),
+                    "recovery no-anchor delivery: durable range already delivered; skipping Discord POST"
+                );
+                return RecoveryRelayOutcome::Delivered;
+            }
+            Some(terminal_text_idempotency::RecoveryAnchorReuse::InflightAnchor(anchor)) => {
+                reused_recorded_anchor = true;
+                Some(anchor)
+            }
+            None => None,
+        },
+    };
     if let Some(placeholder) = placeholder {
         smp::completion_footer_forget_registered_target_if_message(channel_id, placeholder);
+        if reused_recorded_anchor {
+            tracing::info!(
+                channel_id = channel_id.get(),
+                anchor_msg_id = placeholder.get(),
+                "recovery no-anchor delivery: reusing recorded anchor"
+            );
+        }
     }
     let delivery = match placeholder {
         Some(placeholder) => {
@@ -391,7 +431,6 @@ pub(in crate::services::discord) async fn relay_recovered_terminal_text_to_place
             // #3089 A6a: anchored short-replace via the unified controller behind a flag
             // (default OFF); the adapter maps the verdict to `RecoveryRelayOutcome` AND
             // re-runs the #3297 probe, returning the legacy path's equal. OFF / None / empty
-            // → verbatim legacy. Provider is cosmetic on the markerless `NoLease` path.
             if cc::recovery_short_replace_should_cutover(
                 cc::recovery_relay_controller_enabled(),
                 true,
@@ -407,13 +446,30 @@ pub(in crate::services::discord) async fn relay_recovered_terminal_text_to_place
                     channel_id,
                     placeholder,
                     text,
+                    recovery_context,
                 )
                 .await;
             }
-            super::formatting::replace_long_message_raw(http, channel_id, placeholder, text, shared)
-                .await
+            terminal_text_idempotency::replace_anchored_terminal_text(
+                http,
+                channel_id,
+                placeholder,
+                text,
+                shared,
+                recovery_context,
+            )
+            .await
         }
-        None => super::formatting::send_long_message_raw(http, channel_id, text, shared).await,
+        None => {
+            return terminal_text_idempotency::relay_no_anchor_terminal_text(
+                http,
+                shared,
+                channel_id,
+                text,
+                recovery_context,
+            )
+            .await;
+        }
     };
     match delivery {
         Ok(()) => RecoveryRelayOutcome::Delivered,
@@ -1274,12 +1330,20 @@ pub(super) async fn restore_inflight_turns(
                 // in-place edit (the helper handles both); `relay_ok` still
                 // reflects actual delivery so recovery never advances without
                 // posting. `MessageId::new(0)` would panic.
+                let recovery_context = RecoveryDeliveryContext::from_state(
+                    provider,
+                    &state,
+                    completed_during_downtime_end
+                        .map(|confirmed_end| (state.last_offset, confirmed_end)),
+                    shared.restart.current_generation,
+                );
                 let relay_ok = relay_recovered_terminal_text_to_placeholder(
                     http,
                     shared,
                     channel_id,
                     optional_message_id(state.current_msg_id),
                     &final_text,
+                    Some(&recovery_context),
                 )
                 .await
                 .delivered();
@@ -1917,12 +1981,19 @@ pub(super) async fn restore_inflight_turns(
             let assistant_response = state.full_response.clone();
             let final_text =
                 super::formatting::format_for_discord_with_provider(&assistant_response, provider);
+            let recovery_context = RecoveryDeliveryContext::from_state(
+                provider,
+                &state,
+                terminal_success_end.map(|confirmed_end| (state.last_offset, confirmed_end)),
+                shared.restart.current_generation,
+            );
             let relay_ok = relay_recovered_terminal_text_to_placeholder(
                 http,
                 shared,
                 channel_id,
                 current_msg_id,
                 &final_text,
+                Some(&recovery_context),
             )
             .await
             .delivered();
@@ -2170,12 +2241,19 @@ pub(super) async fn restore_inflight_turns(
                 super::formatting::format_for_discord_with_provider(&assistant_response, provider)
             };
             // #225 P1-1: Track relay success — only clear inflight if Discord delivery succeeds
+            let recovery_context = RecoveryDeliveryContext::from_state(
+                provider,
+                &state,
+                terminal_success_end.map(|confirmed_end| (state.last_offset, confirmed_end)),
+                shared.restart.current_generation,
+            );
             let relay_ok = relay_recovered_terminal_text_to_placeholder(
                 http,
                 shared,
                 channel_id,
                 current_msg_id,
                 &final_text,
+                Some(&recovery_context),
             )
             .await
             .delivered();
@@ -2442,7 +2520,8 @@ pub(super) async fn restore_inflight_turns(
                     provider,
                 );
                 let outcome =
-                    relay_recovery_terminal_notice(http, shared, &state, &final_text).await;
+                    relay_recovery_terminal_notice(http, shared, provider, &state, &final_text)
+                        .await;
                 // #3293: tmux_alive=true — budget force-clear forbidden here
                 // (pane-alive invariant); only a permanent verdict clears.
                 dispose_recovery_relay_outcome(
@@ -2503,7 +2582,8 @@ pub(super) async fn restore_inflight_turns(
                     best_response.len()
                 );
             }
-            let outcome = relay_recovery_terminal_notice(http, shared, &state, &stale_text).await;
+            let outcome =
+                relay_recovery_terminal_notice(http, shared, provider, &state, &stale_text).await;
             if let Some(ref sk) = state.session_key {
                 crate::services::termination_audit::record_termination_with_handles(
                     None::<&crate::db::Db>,
@@ -2542,7 +2622,8 @@ pub(super) async fn restore_inflight_turns(
                 state.channel_id
             );
             let text = stale_inflight_message("tmux session name missing during recovery");
-            let outcome = relay_recovery_terminal_notice(http, shared, &state, &text).await;
+            let outcome =
+                relay_recovery_terminal_notice(http, shared, provider, &state, &text).await;
             // #3297 finding 4: past the can_recover gate tmux absence is NOT
             // established — tmux_alive=true forbids budget force-clear here.
             dispose_recovery_relay_outcome(
@@ -2566,7 +2647,8 @@ pub(super) async fn restore_inflight_turns(
                 state.channel_id
             );
             let text = stale_inflight_message("output path missing during recovery");
-            let outcome = relay_recovery_terminal_notice(http, shared, &state, &text).await;
+            let outcome =
+                relay_recovery_terminal_notice(http, shared, provider, &state, &text).await;
             // #3297 finding 4: tmux session existence was confirmed above
             // (can_recover consumed the missing-tmux rows) — tmux_alive=true,
             // so the budget can never clear a possibly-live pane here.
@@ -2619,7 +2701,8 @@ pub(super) async fn restore_inflight_turns(
                     runtime_kind.as_str()
                 );
                 let text = stale_inflight_message(reason);
-                let outcome = relay_recovery_terminal_notice(http, shared, &state, &text).await;
+                let outcome =
+                    relay_recovery_terminal_notice(http, shared, provider, &state, &text).await;
                 // #3297 finding 4: tmux existence already confirmed —
                 // tmux_alive=true (budget clear forbidden; permanent only).
                 dispose_recovery_relay_outcome(
@@ -2750,12 +2833,19 @@ pub(super) async fn restore_inflight_turns(
                             recovery_agent_id.as_deref(),
                             "worktree_missing_main_fallback_blocked",
                         );
+                        let recovery_context = RecoveryDeliveryContext::from_state(
+                            provider,
+                            &state,
+                            None,
+                            shared.restart.current_generation,
+                        );
                         let relay_ok = relay_recovered_terminal_text_to_placeholder(
                             http,
                             shared,
                             channel_id,
                             current_msg_id,
                             &format!("❌ {error}\nmain workspace fallback blocked."),
+                            Some(&recovery_context),
                         )
                         .await
                         .delivered();
@@ -2991,12 +3081,19 @@ pub(super) async fn restore_inflight_turns(
                     recovery_agent_id.as_deref(),
                     "worktree_missing_main_fallback_blocked",
                 );
+                let recovery_context = RecoveryDeliveryContext::from_state(
+                    provider,
+                    &state,
+                    None,
+                    shared.restart.current_generation,
+                );
                 let relay_ok = relay_recovered_terminal_text_to_placeholder(
                     http,
                     shared,
                     channel_id,
                     current_msg_id,
                     &format!("❌ {error}\nmain workspace fallback blocked."),
+                    Some(&recovery_context),
                 )
                 .await
                 .delivered();

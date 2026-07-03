@@ -48,6 +48,92 @@ impl std::fmt::Display for CreateNewInflightError {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::provider::ProviderKind;
+
+    struct EnvReset(Option<std::ffi::OsString>);
+
+    impl Drop for EnvReset {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
+
+    fn set_runtime_root() -> (tempfile::TempDir, EnvReset) {
+        let reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        (temp, reset)
+    }
+
+    fn id0_offsetless_state(channel_id: u64) -> InflightTurnState {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Codex,
+            channel_id,
+            Some("adk-test".to_string()),
+            343_742_347_365_974_026,
+            0,
+            77_000,
+            "recover this".to_string(),
+            Some("session".to_string()),
+            Some("AgentDesk-codex-adk-test".to_string()),
+            Some("/tmp/recovery-idempotent.jsonl".to_string()),
+            None,
+            128,
+        );
+        state.turn_start_offset = None;
+        state
+    }
+
+    #[test]
+    fn id0_offsetless_anchor_row_never_matches_for_reuse_or_bind() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let (_temp, _reset) = set_runtime_root();
+        let provider = ProviderKind::Codex;
+        let state = id0_offsetless_state(44_006);
+        let identity = InflightTurnIdentity::from_state(&state);
+        save_inflight_state(&state).expect("save offsetless id-0 row");
+
+        assert_eq!(
+            recovery_anchor_msg_id_if_matches_identity(
+                &provider,
+                state.channel_id,
+                &identity,
+                state.turn_start_offset,
+            ),
+            None,
+            "id-0 anchor reuse must fail closed when the row lacks turn_start_offset"
+        );
+        assert_eq!(
+            bind_recovery_anchor_if_matches_identity(
+                &provider,
+                state.channel_id,
+                &identity,
+                state.turn_start_offset,
+                state.current_msg_id,
+                88_006,
+                11,
+            ),
+            GuardedSaveOutcome::IdentityMismatch,
+            "id-0 anchor bind must fail closed when either side lacks turn_start_offset"
+        );
+        assert_eq!(
+            super::super::load_inflight_state(&provider, state.channel_id)
+                .expect("persisted row")
+                .current_msg_id,
+            state.current_msg_id,
+            "failed bind must not mutate the offsetless id-0 row"
+        );
+    }
+}
+
 pub(in crate::services::discord) fn save_inflight_state_create_new(
     state: &InflightTurnState,
 ) -> Result<(), CreateNewInflightError> {
@@ -208,6 +294,110 @@ pub(in crate::services::discord) enum GuardedSaveOutcome {
     IdentityMismatch,
     /// Filesystem / serialization error during the write.
     IoError,
+}
+
+fn identity_matches_with_offset_guard(
+    expected: &InflightTurnIdentity,
+    expected_turn_start_offset: Option<u64>,
+    state: &InflightTurnState,
+) -> bool {
+    if !expected.matches_state(state) {
+        return false;
+    }
+    // Anchor bind/reuse reads or rewrites another persisted row. For synthetic
+    // id-0 rows, fail closed unless BOTH sides carry the birth offset and it
+    // matches. This is stricter than the delivery-lease id-0 degenerate fallback,
+    // which is transport-level dedup only and never authorizes row mutation.
+    if expected.user_msg_id == 0 {
+        return matches!(
+            (expected_turn_start_offset, state.turn_start_offset),
+            (Some(expected_offset), Some(actual_offset)) if expected_offset == actual_offset
+        );
+    }
+    if let Some(expected_offset) = expected_turn_start_offset {
+        state.turn_start_offset == Some(expected_offset)
+    } else {
+        true
+    }
+}
+
+pub(in crate::services::discord) fn recovery_anchor_msg_id_if_matches_identity(
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+    expected_turn_start_offset: Option<u64>,
+) -> Option<u64> {
+    let root = inflight_runtime_root()?;
+    let path = inflight_state_path(&root, provider, channel_id);
+    let _lock = lock_inflight_state_path(&path).ok()?;
+    let data = fs::read_to_string(&path).ok()?;
+    let state = serde_json::from_str::<InflightTurnState>(&data).ok()?;
+    if !identity_matches_with_offset_guard(expected, expected_turn_start_offset, &state) {
+        return None;
+    }
+    (state.current_msg_id != 0).then_some(state.current_msg_id)
+}
+
+pub(in crate::services::discord) fn bind_recovery_anchor_if_matches_identity(
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+    expected_turn_start_offset: Option<u64>,
+    expected_current_msg_id: u64,
+    anchor_msg_id: u64,
+    anchor_text_len: usize,
+) -> GuardedSaveOutcome {
+    let Some(root) = inflight_runtime_root() else {
+        return GuardedSaveOutcome::IoError;
+    };
+    let path = inflight_state_path(&root, provider, channel_id);
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return GuardedSaveOutcome::IoError;
+    };
+    let data = match fs::read_to_string(&path) {
+        Ok(data) => data,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return GuardedSaveOutcome::Missing;
+        }
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = channel_id,
+                error = %error,
+                "inflight recovery anchor bind could not read on-disk row; blocking durable anchor write"
+            );
+            return GuardedSaveOutcome::IoError;
+        }
+    };
+    let Ok(mut on_disk) = serde_json::from_str::<InflightTurnState>(&data) else {
+        return GuardedSaveOutcome::IdentityMismatch;
+    };
+    if !identity_matches_with_offset_guard(expected, expected_turn_start_offset, &on_disk) {
+        return GuardedSaveOutcome::IdentityMismatch;
+    }
+    if on_disk.current_msg_id != expected_current_msg_id {
+        return GuardedSaveOutcome::IdentityMismatch;
+    }
+    on_disk.current_msg_id = anchor_msg_id;
+    on_disk.current_msg_len = anchor_text_len;
+    on_disk.ensure_finalizer_turn_id();
+    on_disk.updated_at = now_string();
+    bump_save_generation_for_write(&path, &mut on_disk);
+    let Ok(json) = serde_json::to_string_pretty(&on_disk) else {
+        return GuardedSaveOutcome::IoError;
+    };
+    match atomic_write(&path, &json) {
+        Ok(()) => GuardedSaveOutcome::Saved,
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = channel_id,
+                error = %error,
+                "inflight recovery anchor bind failed; leaving on-disk row untouched"
+            );
+            GuardedSaveOutcome::IoError
+        }
+    }
 }
 
 /// #3041 P1-2 (codex P1-2 R3): identity-guarded re-save for the bridge's

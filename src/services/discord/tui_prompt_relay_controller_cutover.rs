@@ -832,6 +832,7 @@ mod tests {
         let gw = ExternalInputFakeGateway::new(
             ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
                 edit_error: "edit 500; fallback POST landed".to_string(),
+                replacement_anchor: None,
             },
             true,
         );

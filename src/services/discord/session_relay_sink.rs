@@ -1040,7 +1040,9 @@ impl SessionBoundDiscordRelaySink {
                     );
                     Ok(SessionRelayDeliveryOutcome::Delivered)
                 }
-                Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { edit_error }) => {
+                Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
+                    edit_error, ..
+                }) => {
                     // #2757 (A0 #3089): never delete msg_id — it is the bridge's
                     // current_msg_id, possibly holding streamed content a transient edit
                     // failure would vacuum. The shared policy pins this preserve decision.
@@ -2743,6 +2745,7 @@ mod tests {
             true,
             super::super::formatting::ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
                 edit_error: "edit failed".to_string(),
+                replacement_anchor: None,
             },
             true,
         ));

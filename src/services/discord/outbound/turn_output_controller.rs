@@ -278,7 +278,10 @@ pub(in crate::services::discord) enum ReplaceDeliveryKind {
     /// The in-place edit failed; the body was delivered via a FRESH send and the
     /// original placeholder is preserved (#2757). `edit_error` (the failing edit's
     /// error) lets the watcher record the legacy `failed(edit_error)` cleanup.
-    FreshFallbackAfterEditFailure { edit_error: String },
+    FreshFallbackAfterEditFailure {
+        edit_error: String,
+        replacement_anchor: Option<MessageId>,
+    },
 }
 
 /// Metadata for a confirmed `SendNewChunks` delivery. Owners use this to mirror
@@ -1041,13 +1044,18 @@ fn classify_replace_outcome(
         // Owner-specific (H1 r3): the edit failed but a fallback POST carried the
         // body. Honour the owner's `FallbackCommitPolicy` (sink/standby advance;
         // turn_bridge does not). On the committing arm carry the
-        // `FreshFallbackAfterEditFailure { edit_error }` identity (#3089 A4 r2) so
-        // the watcher mirrors the legacy fallback cleanup.
-        ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { edit_error } => {
+        // `FreshFallbackAfterEditFailure { edit_error, replacement_anchor }`
+        // identity (#3089 A4 r2 + D1) so the watcher mirrors the legacy fallback
+        // cleanup and recovery can durably bind a stale-anchor fallback POST.
+        ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
+            edit_error,
+            replacement_anchor,
+        } => {
             match fallback_commit_policy {
                 FallbackCommitPolicy::CommitOnFallback => TransportResult::Delivered {
                     replace_kind: Some(ReplaceDeliveryKind::FreshFallbackAfterEditFailure {
                         edit_error: edit_error.clone(),
+                        replacement_anchor: *replacement_anchor,
                     }),
                     new_chunks: None,
                 },
@@ -2457,6 +2465,7 @@ mod tests {
             ObservingGateway::new(lease.clone() as Arc<dyn DeliveryLease + Send + Sync>, true)
                 .with_replace_outcome(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
                     edit_error: "edit 500, fallback POST succeeded".to_string(),
+                    replacement_anchor: None,
                 });
         let controller = PlaceholderController::default();
         prime_active(&controller, &gateway, key.clone()).await;
@@ -2530,6 +2539,7 @@ mod tests {
             ObservingGateway::new(lease.clone() as Arc<dyn DeliveryLease + Send + Sync>, true)
                 .with_replace_outcome(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
                     edit_error: "edit 500, fallback POST succeeded".to_string(),
+                    replacement_anchor: None,
                 });
         let controller = PlaceholderController::default();
         // Prime Active so a wrongful commit would expose itself via the
@@ -2650,6 +2660,7 @@ mod tests {
             55551,
             ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
                 edit_error: "edit 500; fallback POST succeeded".to_string(),
+                replacement_anchor: None,
             },
         )
         .await;

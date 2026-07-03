@@ -122,7 +122,9 @@ pub(super) use self::save_store::{
     save_inflight_state_if_absent,
 };
 pub(in crate::services::discord) use self::save_store::{
-    GuardedSaveOutcome, save_existing_inflight_rebind_adoption_if_matches_identity,
+    GuardedSaveOutcome, bind_recovery_anchor_if_matches_identity,
+    recovery_anchor_msg_id_if_matches_identity,
+    save_existing_inflight_rebind_adoption_if_matches_identity,
     save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_identity,
     save_inflight_state_if_matches_identity,
 };

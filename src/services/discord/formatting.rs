@@ -1885,6 +1885,21 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference(
     shared: &Arc<SharedData>,
     reference: Option<(ChannelId, MessageId)>,
 ) -> Result<(), Error> {
+    send_long_message_raw_with_reference_returning_message_ids(
+        http, channel_id, text, shared, reference,
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Send a long message using raw HTTP and return every created Discord message id.
+pub(in crate::services::discord) async fn send_long_message_raw_with_reference_returning_message_ids(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    text: &str,
+    shared: &Arc<SharedData>,
+    reference: Option<(ChannelId, MessageId)>,
+) -> Result<Vec<MessageId>, Error> {
     let payload_byte_len = text.len();
     if payload_byte_len <= DISCORD_MSG_LIMIT {
         tracing::debug!(
@@ -1900,7 +1915,7 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference(
         rate_limit_wait(shared, channel_id).await;
         match send_channel_message_with_optional_reference(http, channel_id, text, reference).await
         {
-            Ok(_) => {
+            Ok(message) => {
                 tracing::debug!(
                     target: "discord::chunker",
                     path = "send_long_message_raw",
@@ -1910,7 +1925,7 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference(
                     outcome = "ok",
                     "discord send single done"
                 );
-                return Ok(());
+                return Ok(vec![message.id]);
             }
             Err(err) => {
                 tracing::warn!(
@@ -1943,6 +1958,7 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference(
         total_chunks = total,
         "discord send begin"
     );
+    let mut sent_message_ids = Vec::new();
     for (i, chunk) in chunks.iter().enumerate() {
         let is_last = i + 1 == total;
         tracing::debug!(
@@ -1961,11 +1977,12 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference(
             send_channel_message_with_optional_reference(http, channel_id, chunk, chunk_reference)
                 .await;
         match send_result {
-            Ok(_) => {
+            Ok(message) => {
                 // #3082 P1-2: chunk landed — keep the answer-flush barrier's
                 // inactivity window fresh so a long answer never trips the
                 // queued-card wait while it is still making progress.
                 shared.answer_flush_barrier.note_progress(channel_id);
+                sent_message_ids.push(message.id);
                 if is_last {
                     tracing::debug!(
                         target: "discord::chunker",
@@ -1997,7 +2014,7 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference(
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     }
 
-    Ok(())
+    Ok(sent_message_ids)
 }
 
 pub(super) async fn send_long_message_raw_with_rollback(
@@ -2261,7 +2278,9 @@ pub(super) async fn replace_long_message_raw(
     )
 }
 
-fn replace_long_message_outcome_to_result(outcome: ReplaceLongMessageOutcome) -> Result<(), Error> {
+pub(super) fn replace_long_message_outcome_to_result(
+    outcome: ReplaceLongMessageOutcome,
+) -> Result<(), Error> {
     match outcome {
         ReplaceLongMessageOutcome::EditedOriginal => Ok(()),
         ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. } => Ok(()),
@@ -2274,6 +2293,8 @@ pub(super) enum ReplaceLongMessageOutcome {
     EditedOriginal,
     SentFallbackAfterEditFailure {
         edit_error: String,
+        /// First fallback fresh-send message; recovery records it after a stale-anchor edit miss.
+        replacement_anchor: Option<MessageId>,
     },
     PartialContinuationFailure {
         sent_chunks: usize,
@@ -2458,8 +2479,12 @@ pub(super) async fn replace_long_message_raw_with_outcome(
             "discord first-chunk edit failed; falling back to send_long_message_raw (issue #1043)"
         );
         let edit_error = e.to_string();
-        send_long_message_raw_with_rollback(http, channel_id, message_id, text, shared).await?;
-        return Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { edit_error });
+        let replacement_message_ids =
+            send_long_message_raw_with_rollback(http, channel_id, message_id, text, shared).await?;
+        return Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
+            edit_error,
+            replacement_anchor: replacement_message_ids.first().copied(),
+        });
     }
 
     // #3082 P1-2 residual: the FIRST edited chunk also delivers answer payload

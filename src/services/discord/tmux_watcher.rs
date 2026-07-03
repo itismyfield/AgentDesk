@@ -5225,6 +5225,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 }
                                 Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
                                     edit_error,
+                                    ..
                                 }) => {
                                     direct_send_delivered = true;
                                     tui_direct_anchor_terminal_body_visible = true;

@@ -1030,7 +1030,13 @@
     and covers frozen nonzero-frontier / empty-capture variants. This admission
     is bugfix-only for PR #4035; further recovery policy expansion should extract
     decision/apply helpers instead of growing this file.)
-  - `src/services/discord/recovery_engine.rs` (2935 lines; +17 from #3869
+  - `src/services/discord/recovery_engine.rs` (3032 lines; +97 from #3998 D1:
+    threaded recovery turn identity into terminal-text relay call sites and
+    declared the new `recovery_engine/terminal_text_idempotency.rs` leaf; the
+    no-anchor lease/send/anchor-persistence body lives in that leaf, while the
+    root keeps the durable-anchor skip decision and anchored fallback replacement
+    re-record hook needed to preserve terminal relay idempotency.
+    +17 from #3869
     (restart routing-orphan cleanup): the three post-`validate_bot_channel_routing_with_provider_channel`
     sites no longer bare-`continue`-strand a row whose channel was re-bound to a
     different provider while dcserver was down — they delegate to the new leaf
@@ -1459,7 +1465,10 @@
     `turn_finalizer/finalize.rs` is now 246 prod LoC, `turn_finalizer/finalize_context.rs` 113 prod LoC,
     `turn_finalizer/reconcile.rs` 221 prod LoC, and
     `turn_finalizer/cleanup.rs` 376 prod LoC. No PG lease/schema change.
-  - `src/services/discord/formatting.rs` (2835 lines; -25 from #4019 R1 moving
+  - `src/services/discord/formatting.rs` (2860 lines; +25 from #3998 D1 exposing
+    raw long-send created message ids and fallback replacement anchors for
+    recovery anchor persistence while the existing `send_long_message_raw_with_reference`
+    surface remains a unit-returning wrapper; presentation/chunking behavior unchanged. -25 from #4019 R1 moving
     shared reaction lifecycle helpers to `reaction_lifecycle.rs` while keeping
     the formatting re-export surface; #3805 P1 adds the watcher
     completion-footer re-anchor machinery here — the `ReplaceLastChunkAnchor`

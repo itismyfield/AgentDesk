@@ -122,7 +122,7 @@ async fn cleanup_routing_orphaned_inflight(
     // Idempotent when none exists.
     crate::services::discord::restart_report::clear_restart_report(provider, state.channel_id);
     let text = super::interrupted_recovery_message(state, &state.full_response);
-    let outcome = super::relay_recovery_terminal_notice(http, shared, state, &text).await;
+    let outcome = super::relay_recovery_terminal_notice(http, shared, provider, state, &text).await;
     dispose_recovery_relay_outcome(
         shared,
         provider,

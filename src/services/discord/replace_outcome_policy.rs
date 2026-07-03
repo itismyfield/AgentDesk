@@ -172,6 +172,7 @@ mod a0_replace_outcome_policy_tests {
         let fallback: Result<ReplaceLongMessageOutcome, String> =
             Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
                 edit_error: "e".to_string(),
+                replacement_anchor: None,
             });
         let partial: Result<ReplaceLongMessageOutcome, String> = Ok(partial_continuation());
         let err: Result<ReplaceLongMessageOutcome, String> = Err("transport".to_string());

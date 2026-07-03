@@ -1459,6 +1459,7 @@ mod tests {
             let gw = gateway(
                 ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
                     edit_error: "edit 500; fallback POST succeeded".to_string(),
+                    replacement_anchor: None,
                 },
                 true,
             );

@@ -2116,7 +2116,8 @@ fn watcher_terminal_edit_detaches_placeholder_from_later_cleanup() {
     ));
     assert!(!watcher_terminal_edit_consumes_placeholder(
         &ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
-            edit_error: "edit failed".to_string()
+            edit_error: "edit failed".to_string(),
+            replacement_anchor: None,
         }
     ));
 }
@@ -2748,6 +2749,7 @@ mod watcher_short_replace_controller {
                 Box::pin(async move {
                     Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
                         edit_error: "edit failed".to_string(),
+                        replacement_anchor: None,
                     })
                 })
             }
@@ -2979,6 +2981,7 @@ mod watcher_short_replace_controller {
         let gw = gateway(
             ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
                 edit_error: "edit failed".to_string(),
+                replacement_anchor: None,
             },
             true,
         );
