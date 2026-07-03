@@ -218,8 +218,13 @@ pub(in crate::services::discord) enum OutputPlan {
     /// drive the correct terminal placeholder state (recon risk #5).
     Replace { lifecycle: PlaceholderLifecycle },
     /// Send `chunk_count` new chunked messages (Split body over the inline
-    /// limit).
-    SendNewChunks { chunk_count: usize },
+    /// limit). `delete_anchor` is an owner capability bit for terminal arms
+    /// whose legacy long-chunk path deletes the placeholder anchor only after
+    /// every chunk has landed.
+    SendNewChunks {
+        chunk_count: usize,
+        delete_anchor: bool,
+    },
     /// Nothing to deliver (empty / suppressed body).
     NoOp,
 }
@@ -231,7 +236,7 @@ impl OutputPlan {
     ///   place). The replace `lifecycle` is supplied by the caller because the
     ///   length decision alone cannot tell cancel / prompt-too-long / normal
     ///   apart.
-    /// - `Split` → `SendNewChunks { chunk_count }`.
+    /// - `Split` → `SendNewChunks { chunk_count, delete_anchor: false }`.
     /// - `Compact` collapses to its single rendered message → `Replace`.
     /// - `FileAttachment` / `RejectOverLimit` are not turn-body relays through
     ///   this controller → `NoOp` (the owner handles those out of band).
@@ -248,6 +253,7 @@ impl OutputPlan {
             }
             LengthPolicyDecision::Split { chunk_count, .. } => OutputPlan::SendNewChunks {
                 chunk_count: *chunk_count,
+                delete_anchor: false,
             },
             LengthPolicyDecision::FileAttachment { .. }
             | LengthPolicyDecision::RejectOverLimit { .. } => OutputPlan::NoOp,
@@ -275,9 +281,24 @@ pub(in crate::services::discord) enum ReplaceDeliveryKind {
     FreshFallbackAfterEditFailure { edit_error: String },
 }
 
+/// Metadata for a confirmed `SendNewChunks` delivery. Owners use this to mirror
+/// legacy long-terminal side effects after the controller has performed the
+/// transport: durable tail-anchor recording and placeholder-delete cleanup
+/// bookkeeping.
+#[allow(dead_code)] // #3998 S1-d: read by A4/A5 long-chunk cutovers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::services::discord) struct NewChunksDelivery {
+    pub(in crate::services::discord) first_message_id: Option<MessageId>,
+    pub(in crate::services::discord) tail_message_id: Option<MessageId>,
+    pub(in crate::services::discord) anchor_delete_error: Option<String>,
+}
+
 /// The three-way committed result of a delivery attempt. The returned outcome
 /// is ALREADY committed (I1): `Delivered` means the lease was committed
-/// `Delivered` and the offset advanced before any post-send await ran.
+/// `Delivered` and the offset advanced before owner post-send finalization ran.
+/// For the opt-in long-chunk anchor-delete arm, the anchor delete is classified
+/// as part of the transport result so the controller mirrors legacy ordering
+/// (chunks, then best-effort anchor delete, then Delivered/NotDelivered commit).
 ///
 /// `Transient` (and its `retry_from_offset`) is part of the contract owners
 /// consume from A2; A1 (no owner wired) has no transient transport
@@ -287,12 +308,14 @@ pub(in crate::services::discord) enum DeliveryOutcome {
     /// Confirmed delivered to Discord; the committed offset advanced to
     /// `committed_to`. `replace_kind` carries HOW a `Replace` plan's body reached
     /// Discord (edit-in-place vs fresh fallback after an edit failure) so an owner
-    /// can mirror the legacy per-variant post-send cleanup (#3089 A4 r2). `None`
-    /// for non-`Replace` plans / `NewSend` / markerless — those owners are
-    /// unaffected and ignore the field.
+    /// can mirror the legacy per-variant post-send cleanup (#3089 A4 r2).
+    /// `new_chunks` carries long-chunk tail-anchor/delete metadata for owners
+    /// that opt into anchor deletion. `None` values are ignored by owners that
+    /// do not need the corresponding side effect.
     Delivered {
         committed_to: u64,
         replace_kind: Option<ReplaceDeliveryKind>,
+        new_chunks: Option<NewChunksDelivery>,
     },
     /// Transport was confirmed, but the owner's identity-gated advance callback
     /// REFUSED to advance the offset (e.g. the inflight turn was cleared /
@@ -621,7 +644,7 @@ where
     let chunk_count = match &ctx.plan {
         OutputPlan::NoOp => return DeliveryOutcome::Skipped,
         OutputPlan::Replace { .. } => 1usize,
-        OutputPlan::SendNewChunks { chunk_count } => *chunk_count,
+        OutputPlan::SendNewChunks { chunk_count, .. } => *chunk_count,
     };
     if ctx.body.is_empty() {
         return DeliveryOutcome::Skipped;
@@ -679,7 +702,10 @@ where
     let transport = drive_transport(gateway, &ctx, chunk_count).await;
 
     match transport {
-        TransportResult::Delivered(replace_kind) => {
+        TransportResult::Delivered {
+            replace_kind,
+            new_chunks,
+        } => {
             // ---- I1: commit + advance INLINE, before any post-send await --
             // Stop the heartbeat FIRST (#3151) so its renew loop cannot race the
             // commit, THEN run the single commit+advance authority. The advance
@@ -697,8 +723,17 @@ where
                 end,
                 lease_guard.as_mut(),
                 replace_kind,
+                new_chunks,
             )
             .await
+        }
+        TransportResult::NotDelivered => {
+            // Long terminal chunk send failed after the rollback-aware sender
+            // reported a clean failure. Legacy A4/A5 commit `NotDelivered` for
+            // this arm (no advance, anchor preserved) rather than leaving the
+            // range ambiguous.
+            drop(heartbeat_guard);
+            commit_not_delivered_and_release(&ctx, start, end, lease_guard.as_mut())
         }
         TransportResult::Transient => {
             // I2: ambiguous-but-retriable. Do NOT commit/advance — release the
@@ -750,6 +785,7 @@ async fn commit_and_finalize<G, L>(
     end: u64,
     lease_guard: Option<&mut ControllerLeaseGuard<'_, L>>,
     replace_kind: Option<ReplaceDeliveryKind>,
+    new_chunks: Option<NewChunksDelivery>,
 ) -> DeliveryOutcome
 where
     G: TurnGateway + ?Sized,
@@ -801,11 +837,45 @@ where
             // plans. The advance refusal drops `replace_kind` on the floor because
             // the body was NOT committed — there is no delivered original to footer.
             replace_kind,
+            new_chunks,
         }
     } else {
         DeliveryOutcome::NotDelivered {
             committed_from: start,
         }
+    }
+}
+
+/// Commit a clean non-delivery result for rollback-aware long-chunk sends. This
+/// mirrors the legacy terminal long-chunk arms: failed send ⇒ commit
+/// `NotDelivered`, do not advance, do not delete the placeholder anchor.
+fn commit_not_delivered_and_release<L>(
+    ctx: &TurnOutputCtx<'_, L>,
+    start: u64,
+    end: u64,
+    lease_guard: Option<&mut ControllerLeaseGuard<'_, L>>,
+) -> DeliveryOutcome
+where
+    L: DeliveryLease + ?Sized,
+{
+    if let Some(guard) = lease_guard.as_ref() {
+        let committed = ctx.lease.commit(
+            ctx.holder,
+            guard.lease_key(),
+            start,
+            end,
+            LeaseOutcome::NotDelivered,
+        );
+        debug_assert!(
+            committed,
+            "confirmed NotDelivered commit must match the acquired lease"
+        );
+    }
+    if let Some(guard) = lease_guard {
+        guard.release_and_disarm();
+    }
+    DeliveryOutcome::NotDelivered {
+        committed_from: start,
     }
 }
 
@@ -819,8 +889,16 @@ enum TransportResult {
     /// Confirmed delivered. `Option<ReplaceDeliveryKind>` carries the replace
     /// identity (edit-in-place vs fresh fallback) for `Replace` plans so the
     /// owner write-back can mirror the legacy per-variant cleanup (#3089 A4 r2);
-    /// `None` for `NewSend` / chunked / NoOp.
-    Delivered(Option<ReplaceDeliveryKind>),
+    /// `None` for `NewSend` / chunked / NoOp. `new_chunks` carries the tail
+    /// chunk + anchor-delete metadata for confirmed long-chunk sends.
+    Delivered {
+        replace_kind: Option<ReplaceDeliveryKind>,
+        new_chunks: Option<NewChunksDelivery>,
+    },
+    /// Clean non-delivery for rollback-aware long-chunk sends. The owner wants a
+    /// committed `NotDelivered` lease result (retryable, no advance), not an
+    /// ambiguous `Unknown`.
+    NotDelivered,
     Transient,
     /// Ambiguous, never advance (I2). `fell_back` (#3089 A5): see
     /// [`DeliveryOutcome::Unknown`] — true only on NoCommitOnFallback fresh-fallback.
@@ -856,11 +934,14 @@ where
         // (there was no original placeholder to edit) → `None`.
         (OutputPlan::Replace { .. }, PlaceholderSlot::None) => {
             match gateway.send_message(ctx.channel_id, ctx.body).await {
-                Ok(_) => TransportResult::Delivered(None),
+                Ok(_) => TransportResult::Delivered {
+                    replace_kind: None,
+                    new_chunks: None,
+                },
                 Err(_) => transient_or_unknown(ctx),
             }
         }
-        (OutputPlan::SendNewChunks { .. }, slot) => {
+        (OutputPlan::SendNewChunks { delete_anchor, .. }, slot) => {
             let anchor = match slot {
                 PlaceholderSlot::Active { message_id, .. } => *message_id,
                 PlaceholderSlot::None => MessageId::new(1),
@@ -874,14 +955,55 @@ where
                 // send — ambiguous — and must NEVER advance (I2, review-fix H1).
                 // `chunk_count` is always >= 1 (exact-or-more contract). Chunked
                 // sends carry no replace identity → `None`.
-                Ok(ids) if ids.len() >= chunk_count => TransportResult::Delivered(None),
+                Ok(ids) if ids.len() >= chunk_count => {
+                    let anchor_delete_error = if *delete_anchor {
+                        delete_active_anchor_after_chunks(gateway, ctx, slot).await
+                    } else {
+                        None
+                    };
+                    TransportResult::Delivered {
+                        replace_kind: None,
+                        new_chunks: Some(NewChunksDelivery {
+                            first_message_id: ids.first().copied(),
+                            tail_message_id: ids.last().copied(),
+                            anchor_delete_error,
+                        }),
+                    }
+                }
                 // Short chunked write: ambiguous, nothing fell back (#3089 A5).
                 Ok(_) => TransportResult::Unknown { fell_back: false },
+                Err(_) if *delete_anchor => TransportResult::NotDelivered,
                 Err(_) => transient_or_unknown(ctx),
             }
         }
-        (OutputPlan::NoOp, _) => TransportResult::Delivered(None),
+        (OutputPlan::NoOp, _) => TransportResult::Delivered {
+            replace_kind: None,
+            new_chunks: None,
+        },
     }
+}
+
+async fn delete_active_anchor_after_chunks<G, L>(
+    gateway: &G,
+    ctx: &TurnOutputCtx<'_, L>,
+    slot: &PlaceholderSlot,
+) -> Option<String>
+where
+    G: TurnGateway + ?Sized,
+    L: DeliveryLease + ?Sized,
+{
+    if let PlaceholderSlot::Active { message_id, .. } = slot {
+        if let Err(error) = gateway.delete_message(ctx.channel_id, *message_id).await {
+            tracing::warn!(
+                channel = ctx.channel_id.get(),
+                message_id = message_id.get(),
+                error = %error,
+                "long chunk delivery succeeded but anchor delete failed; proceeding as delivered"
+            );
+            return Some(error);
+        }
+    }
+    None
 }
 
 /// Map a `replace_message_with_outcome` success into the controller's transport
@@ -912,9 +1034,10 @@ fn classify_replace_outcome(
     match outcome {
         // Edited in place → carry the `EditedOriginal` replace identity so the
         // owner takes its delivered side-effects (footer register, Succeeded).
-        ReplaceLongMessageOutcome::EditedOriginal => {
-            TransportResult::Delivered(Some(ReplaceDeliveryKind::EditedOriginal))
-        }
+        ReplaceLongMessageOutcome::EditedOriginal => TransportResult::Delivered {
+            replace_kind: Some(ReplaceDeliveryKind::EditedOriginal),
+            new_chunks: None,
+        },
         // Owner-specific (H1 r3): the edit failed but a fallback POST carried the
         // body. Honour the owner's `FallbackCommitPolicy` (sink/standby advance;
         // turn_bridge does not). On the committing arm carry the
@@ -922,11 +1045,12 @@ fn classify_replace_outcome(
         // the watcher mirrors the legacy fallback cleanup.
         ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { edit_error } => {
             match fallback_commit_policy {
-                FallbackCommitPolicy::CommitOnFallback => TransportResult::Delivered(Some(
-                    ReplaceDeliveryKind::FreshFallbackAfterEditFailure {
+                FallbackCommitPolicy::CommitOnFallback => TransportResult::Delivered {
+                    replace_kind: Some(ReplaceDeliveryKind::FreshFallbackAfterEditFailure {
                         edit_error: edit_error.clone(),
-                    },
-                )),
+                    }),
+                    new_chunks: None,
+                },
                 // #3089 A5: edit FAILED but fallback POST landed the body → no
                 // advance + `fell_back = true` (see `DeliveryOutcome::Unknown`).
                 FallbackCommitPolicy::NoCommitOnFallback => {
@@ -1236,6 +1360,9 @@ mod tests {
         edit_fails: AtomicBool,
         /// Count of `delete_message` calls (the DeleteIfProvenStale arm).
         delete_calls: AtomicUsize,
+        delete_step: AtomicUsize,
+        committed_at_delete: AtomicBool,
+        delete_fails: AtomicBool,
     }
 
     impl ObservingGateway {
@@ -1255,6 +1382,9 @@ mod tests {
                 replace_outcome: ReplaceLongMessageOutcome::EditedOriginal,
                 edit_fails: AtomicBool::new(false),
                 delete_calls: AtomicUsize::new(0),
+                delete_step: AtomicUsize::new(0),
+                committed_at_delete: AtomicBool::new(false),
+                delete_fails: AtomicBool::new(false),
             }
         }
 
@@ -1293,6 +1423,10 @@ mod tests {
             self.first_commit_step.store(0, Ordering::SeqCst);
             self.first_commit_was_delivered
                 .store(false, Ordering::SeqCst);
+            self.delete_calls.store(0, Ordering::SeqCst);
+            self.delete_step.store(0, Ordering::SeqCst);
+            self.committed_at_delete.store(false, Ordering::SeqCst);
+            self.delete_fails.store(false, Ordering::SeqCst);
         }
 
         fn lease_is_committed_delivered(&self) -> bool {
@@ -1380,7 +1514,15 @@ mod tests {
         ) -> GatewayFuture<'a, Result<(), String>> {
             Box::pin(async move {
                 self.delete_calls.fetch_add(1, Ordering::SeqCst);
-                Ok(())
+                self.delete_step
+                    .store(self.clock.fetch_add(1, Ordering::SeqCst), Ordering::SeqCst);
+                self.committed_at_delete
+                    .store(self.lease_is_committed_delivered(), Ordering::SeqCst);
+                if self.delete_fails.load(Ordering::SeqCst) {
+                    Err("fake delete failure".to_string())
+                } else {
+                    Ok(())
+                }
             })
         }
 
@@ -1958,7 +2100,10 @@ mod tests {
             placeholder: PlaceholderSlot::None,
             body,
             send_range: (0, body.len() as u64),
-            plan: OutputPlan::SendNewChunks { chunk_count: 3 },
+            plan: OutputPlan::SendNewChunks {
+                chunk_count: 3,
+                delete_anchor: false,
+            },
             edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
             fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
             acquire_failure_mode: AcquireFailureMode::Transient,
@@ -2008,7 +2153,10 @@ mod tests {
             placeholder: PlaceholderSlot::None,
             body,
             send_range: (0, body.len() as u64),
-            plan: OutputPlan::SendNewChunks { chunk_count: 1 },
+            plan: OutputPlan::SendNewChunks {
+                chunk_count: 1,
+                delete_anchor: false,
+            },
             edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
             fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
             acquire_failure_mode: AcquireFailureMode::Transient,
@@ -2035,6 +2183,184 @@ mod tests {
             matches!(lease.read(), LeaseSnapshot::Unleased),
             "delivered split must release the lease"
         );
+    }
+
+    #[tokio::test]
+    async fn split_anchor_delete_runs_after_full_chunk_send_before_commit() {
+        let channel = ChannelId::new(112);
+        let lease = Arc::new(RecordingLease::new(channel));
+        let gateway =
+            ObservingGateway::new(lease.clone() as Arc<dyn DeliveryLease + Send + Sync>, true);
+        let controller = PlaceholderController::default();
+        let placeholder_msg = MessageId::new(4242);
+
+        let outcome = deliver_turn_output(
+            &gateway,
+            TurnOutputCtx {
+                turn: turn_key(channel),
+                lease_key: Some(lease_key(channel)),
+                owner: RelayOwnerKind::Watcher,
+                holder: LeaseHolder::Sink,
+                lease: lease.as_ref(),
+                channel_id: channel,
+                placeholder_controller: &controller,
+                placeholder: PlaceholderSlot::Active {
+                    message_id: placeholder_msg,
+                    key: placeholder_key(channel, placeholder_msg),
+                },
+                body: "single chunk body",
+                send_range: (0, 17),
+                plan: OutputPlan::SendNewChunks {
+                    chunk_count: 1,
+                    delete_anchor: true,
+                },
+                edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
+                fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
+                acquire_failure_mode: AcquireFailureMode::Transient,
+                advance: None,
+                heartbeat: None,
+            },
+        )
+        .await;
+
+        match outcome {
+            DeliveryOutcome::Delivered {
+                committed_to,
+                new_chunks: Some(chunks),
+                ..
+            } => {
+                assert_eq!(committed_to, 17);
+                assert_eq!(chunks.first_message_id, Some(MessageId::new(42)));
+                assert_eq!(chunks.tail_message_id, Some(MessageId::new(42)));
+                assert_eq!(chunks.anchor_delete_error, None);
+            }
+            other => panic!(
+                "expected Delivered with chunk metadata, got {}",
+                debug_outcome(&other)
+            ),
+        }
+        assert_eq!(gateway.delete_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            gateway.send_step.load(Ordering::SeqCst) < gateway.delete_step.load(Ordering::SeqCst),
+            "anchor delete must run after the chunk send"
+        );
+        assert!(
+            !gateway.committed_at_delete.load(Ordering::SeqCst),
+            "legacy long-chunk ordering deletes the anchor before the Delivered commit"
+        );
+        assert_eq!(lease.delivered_commit_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn split_anchor_delete_failure_still_delivers() {
+        let channel = ChannelId::new(113);
+        let lease = Arc::new(RecordingLease::new(channel));
+        let gateway =
+            ObservingGateway::new(lease.clone() as Arc<dyn DeliveryLease + Send + Sync>, true);
+        gateway.delete_fails.store(true, Ordering::SeqCst);
+        let controller = PlaceholderController::default();
+        let placeholder_msg = MessageId::new(4343);
+
+        let outcome = deliver_turn_output(
+            &gateway,
+            TurnOutputCtx {
+                turn: turn_key(channel),
+                lease_key: Some(lease_key(channel)),
+                owner: RelayOwnerKind::Watcher,
+                holder: LeaseHolder::Sink,
+                lease: lease.as_ref(),
+                channel_id: channel,
+                placeholder_controller: &controller,
+                placeholder: PlaceholderSlot::Active {
+                    message_id: placeholder_msg,
+                    key: placeholder_key(channel, placeholder_msg),
+                },
+                body: "single chunk body",
+                send_range: (0, 17),
+                plan: OutputPlan::SendNewChunks {
+                    chunk_count: 1,
+                    delete_anchor: true,
+                },
+                edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
+                fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
+                acquire_failure_mode: AcquireFailureMode::Transient,
+                advance: None,
+                heartbeat: None,
+            },
+        )
+        .await;
+
+        match outcome {
+            DeliveryOutcome::Delivered {
+                new_chunks: Some(chunks),
+                ..
+            } => {
+                assert_eq!(chunks.first_message_id, Some(MessageId::new(42)));
+                assert_eq!(chunks.tail_message_id, Some(MessageId::new(42)));
+                assert_eq!(
+                    chunks.anchor_delete_error.as_deref(),
+                    Some("fake delete failure")
+                );
+            }
+            other => panic!(
+                "delete failure must not un-deliver, got {}",
+                debug_outcome(&other)
+            ),
+        }
+        assert_eq!(gateway.delete_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(lease.delivered_commit_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn split_anchor_send_failure_commits_not_delivered_without_delete() {
+        let channel = ChannelId::new(114);
+        let lease = Arc::new(RecordingLease::new(channel));
+        let gateway =
+            ObservingGateway::new(lease.clone() as Arc<dyn DeliveryLease + Send + Sync>, false);
+        let controller = PlaceholderController::default();
+        let placeholder_msg = MessageId::new(4444);
+
+        let outcome = deliver_turn_output(
+            &gateway,
+            TurnOutputCtx {
+                turn: turn_key(channel),
+                lease_key: Some(lease_key(channel)),
+                owner: RelayOwnerKind::Watcher,
+                holder: LeaseHolder::Sink,
+                lease: lease.as_ref(),
+                channel_id: channel,
+                placeholder_controller: &controller,
+                placeholder: PlaceholderSlot::Active {
+                    message_id: placeholder_msg,
+                    key: placeholder_key(channel, placeholder_msg),
+                },
+                body: "single chunk body",
+                send_range: (0, 17),
+                plan: OutputPlan::SendNewChunks {
+                    chunk_count: 1,
+                    delete_anchor: true,
+                },
+                edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
+                fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
+                acquire_failure_mode: AcquireFailureMode::Transient,
+                advance: None,
+                heartbeat: None,
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, DeliveryOutcome::NotDelivered { committed_from: 0 }),
+            "rollback-aware long-chunk send failure commits NotDelivered"
+        );
+        assert_eq!(
+            gateway.delete_calls.load(Ordering::SeqCst),
+            0,
+            "failed chunk sends must preserve the anchor"
+        );
+        assert_eq!(lease.not_delivered_commit_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(lease.delivered_commit_calls.load(Ordering::SeqCst), 0);
+        assert!(matches!(lease.read(), LeaseSnapshot::Unleased));
     }
 
     /// H2 — a `ReplaceLongMessageOutcome::PartialContinuationFailure` is a
@@ -3100,7 +3426,10 @@ mod tests {
         };
         assert!(matches!(
             OutputPlan::from_length_decision(&split, PlaceholderLifecycle::Completed),
-            OutputPlan::SendNewChunks { chunk_count: 3 }
+            OutputPlan::SendNewChunks {
+                chunk_count: 3,
+                delete_anchor: false
+            }
         ));
 
         let reject = LengthPolicyDecision::RejectOverLimit {

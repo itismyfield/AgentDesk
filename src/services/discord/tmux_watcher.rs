@@ -57,6 +57,9 @@ mod single_message_footer;
 #[path = "tmux_watcher/terminal_send.rs"]
 mod terminal_send;
 
+#[path = "tmux_watcher/terminal_long_chunks.rs"]
+mod terminal_long_chunks;
+
 // #3479 item-2: the watcher-direct orphan status-panel cleanup/completion/refresh
 // cluster extracted to a sibling submodule (pure move, zero logic change). Items
 // are `pub(super)` there and re-imported below so the watcher loop's call sites —
@@ -4845,7 +4848,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // behind a flag (default OFF). When ON the CONTROLLER owns the single lease, so
         // the watcher's own acquire/heartbeat/b2-skip/commit/advance/release are skipped
         // (no double-acquire). OFF is byte-identical (flag short-circuits before
-        // formatting). Long-chunk fallback / empty bodies / TUI-gated turns stay legacy.
+        // formatting). Empty bodies / TUI-gated turns stay legacy; anchored long
+        // chunks route via the controller's anchor-delete plan when the flag is ON.
+        // No-placeholder new-message fresh-send remains legacy: anchor-less
+        // fresh-send is not yet a controller verb (#3998 flip re-evaluation).
         let cutover_short_replace = terminal_send::watcher_short_replace_cutover_decision(
             terminal_send::watcher_terminal_controller_enabled(),
             shared.ui.status_panel_v2_enabled,
@@ -5049,78 +5055,64 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             session_bound_fallback_uses_full_body,
                             &relay_text,
                         ) {
-                            match crate::services::discord::formatting::send_long_message_raw_with_rollback(
-                                &http,
-                                channel_id,
-                                msg_id,
-                                &relay_text,
-                                &shared,
-                            )
-                            .await
-                            {
-                                Ok(message_ids) => {
-                                    direct_send_delivered = true;
-                                    tui_direct_anchor_terminal_body_visible = true;
-                                    external_input_lease_consumed_by_relay =
-                                        watcher_inflight_represents_external_input(
-                                            inflight_before_relay.as_ref(),
-                                        );
-                                    // #3610 PR-1d: the placeholder is DELETED below, so
-                                    // the LAST sent chunk is the durable terminal anchor
-                                    // (the tail carrying the END of the text). Captured
-                                    // here; recorded only after the M4 commit+advance.
-                                    watcher_long_chunk_anchor_msg_id = message_ids.last().copied();
-                                    let cleanup = delete_terminal_placeholder(
-                                        &http,
-                                        channel_id,
-                                        &shared,
-                                        &watcher_provider,
-                                        &tmux_session_name,
-                                        msg_id,
-                                        "watcher_terminal_relay_full_body_fallback_cleanup",
-                                    )
-                                    .await;
-                                    if cleanup.is_committed() {
-                                        placeholder_msg_id = None;
-                                        placeholder_from_restored_inflight = false;
-                                        last_edit_text.clear();
-                                        // #3351 r21 mirror: delete committed.
-                                        drop_placeholder_orphan_record(
-                                            &watcher_provider,
-                                            &shared,
-                                            channel_id,
-                                            msg_id,
-                                        );
-                                    }
-                                    // #3871: the full body was just re-posted as ordered chunks, so the
-                                    // frozen rollover prefixes are now duplicates — delete them.
-                                    delete_watcher_rollover_frozen_prefixes(
-                                        &http,
-                                        channel_id,
-                                        &shared,
-                                        &watcher_provider,
-                                        &tmux_session_name,
-                                        session_bound_fallback_uses_full_body,
-                                        std::mem::take(
-                                            &mut watcher_streaming_rollover_frozen_msg_ids,
-                                        ),
-                                    )
-                                    .await;
-                                    let ts = chrono::Local::now().format("%H:%M:%S");
-                                    tracing::info!(
-                                        "  [{ts}] 👁 ✓ relayed full terminal response after session-bound fallback (ordered chunks) channel {} msg {} ({} chars)",
-                                        channel_id.get(),
-                                        msg_id.get(),
-                                        relay_text.len()
-                                    );
-                                }
-                                Err(e) => {
-                                    let ts = chrono::Local::now().format("%H:%M:%S");
-                                    tracing::info!(
-                                        "  [{ts}] 👁 Failed to relay ordered terminal chunks: {e}"
-                                    );
-                                    relay_ok = false;
-                                }
+                            if cutover_short_replace {
+                                terminal_long_chunks::apply_watcher_long_chunks_controller(
+                                    &http,
+                                    &shared,
+                                    &watcher_provider,
+                                    channel_id,
+                                    &tmux_session_name,
+                                    msg_id,
+                                    &relay_text,
+                                    &watcher_lease_cell,
+                                    watcher_lease_turn,
+                                    Some(watcher_lease_key.clone()),
+                                    watcher_instance_id,
+                                    (watcher_lease_start, watcher_lease_end),
+                                    session_bound_fallback_uses_full_body,
+                                    &mut watcher_streaming_rollover_frozen_msg_ids,
+                                    inflight_before_relay.as_ref(),
+                                    terminal_long_chunks::WatcherLongChunksLocals {
+                                        relay_ok: &mut relay_ok,
+                                        direct_send_delivered: &mut direct_send_delivered,
+                                        tui_direct_anchor_terminal_body_visible:
+                                            &mut tui_direct_anchor_terminal_body_visible,
+                                        external_input_lease_consumed_by_relay:
+                                            &mut external_input_lease_consumed_by_relay,
+                                        placeholder_msg_id: &mut placeholder_msg_id,
+                                        placeholder_from_restored_inflight:
+                                            &mut placeholder_from_restored_inflight,
+                                        last_edit_text: &mut last_edit_text,
+                                    },
+                                )
+                                .await;
+                            } else {
+                                terminal_long_chunks::apply_watcher_long_chunks_legacy(
+                                    &http,
+                                    &shared,
+                                    &watcher_provider,
+                                    channel_id,
+                                    &tmux_session_name,
+                                    msg_id,
+                                    &relay_text,
+                                    session_bound_fallback_uses_full_body,
+                                    &mut watcher_streaming_rollover_frozen_msg_ids,
+                                    inflight_before_relay.as_ref(),
+                                    &mut watcher_long_chunk_anchor_msg_id,
+                                    terminal_long_chunks::WatcherLongChunksLocals {
+                                        relay_ok: &mut relay_ok,
+                                        direct_send_delivered: &mut direct_send_delivered,
+                                        tui_direct_anchor_terminal_body_visible:
+                                            &mut tui_direct_anchor_terminal_body_visible,
+                                        external_input_lease_consumed_by_relay:
+                                            &mut external_input_lease_consumed_by_relay,
+                                        placeholder_msg_id: &mut placeholder_msg_id,
+                                        placeholder_from_restored_inflight:
+                                            &mut placeholder_from_restored_inflight,
+                                        last_edit_text: &mut last_edit_text,
+                                    },
+                                )
+                                .await;
                             }
                         } else if cutover_short_replace {
                             // #3089 A4: route short-replace through the unified controller

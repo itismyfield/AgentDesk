@@ -1220,7 +1220,7 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6281 lines; production LoC; +43
+  - `src/services/discord/turn_bridge/mod.rs` (6261 lines; production LoC; +43
     from #3805 P2 PR-D (two-message SINK rollover re-anchor) — after a mid-turn
     answer rollover, re-anchor the status panel BELOW the new tail answer; mod.rs
     gains only a per-interval rolled-over local + one gated re-anchor call after

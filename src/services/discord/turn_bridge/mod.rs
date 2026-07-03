@@ -5231,119 +5231,99 @@ pub(super) fn spawn_turn_bridge(
                         can_chain_locally,
                         &delivery_response,
                     ) {
-                        // #3041 P1-2 (site 4 — long chunked terminal delivery): the
-                        // one bridge delivery that can run PAST the 15s deadline
-                        // (multi-chunk `send_long_message_with_rollback`), so the
-                        // lease HEARTBEAT keeps it alive mid-send. Acquire BEFORE the
-                        // send; B2-skip if another holder owns it. (codex P1-a) lease
-                        // on `watcher_owner_channel_id` (shared cell + TurnKey).
-                        let lease_acquire = bridge_delivery_lease_for_inflight(
-                            shared_owned.as_ref(),
-                            watcher_owner_channel_id,
-                            shared_owned.restart.current_generation,
-                            &inflight_state,
-                            tmux_last_offset,
-                        );
-                        if matches!(lease_acquire, BridgeLeaseAcquire::Skip) {
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            tracing::warn!(
-                                channel = channel_id.get(),
-                                "  [{ts}] 🌉 #3041 B2: delivery lease held by another holder — bridge skipped duplicate long terminal send (channel {})",
-                                channel_id
+                        let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
+                        let bridge_end = tmux_last_offset.unwrap_or(0);
+                        if terminal_controller_cutover::bridge_long_chunks_cutover_decision(
+                            terminal_controller_cutover::turn_bridge_terminal_controller_enabled(),
+                            can_chain_locally,
+                            &delivery_response,
+                            bridge_end > bridge_start,
+                            true,
+                        ) {
+                            let bridge_turn = super::turn_finalizer::TurnKey::new(
+                                watcher_owner_channel_id,
+                                inflight_state.user_msg_id,
+                                shared_owned.restart.current_generation,
                             );
-                            // #3041 P1-2 (codex P1-c): preserve retry state on a B2
-                            // Skip — the holder owns delivery; do NOT clear inflight
-                            // or mark the watcher delivered. (codex P1-2 R3) holder
-                            // owns the inflight lifecycle → identity-guard the save.
-                            preserve_inflight_for_cleanup_retry = true;
-                            bridge_skip_holder_owns_inflight = true;
-                        } else {
-                            let lease = match lease_acquire {
-                                BridgeLeaseAcquire::Held(lease) => Some(lease),
-                                _ => None,
-                            };
-                            match send_ordered_long_terminal_response(
-                                shared_owned.as_ref(),
+                            let bridge_lease_key = bridge_delivery_lease_key_for_inflight(
+                                watcher_owner_channel_id,
+                                shared_owned.restart.current_generation,
+                                &inflight_state,
+                            );
+                            let cell = shared_owned.delivery_lease(watcher_owner_channel_id);
+                            terminal_controller_cutover::apply_bridge_long_chunks_controller(
                                 gateway.as_ref(),
+                                shared_owned.as_ref(),
                                 &provider,
                                 channel_id,
-                                current_msg_id,
+                                watcher_owner_channel_id,
                                 inflight_state.tmux_session_name.as_deref(),
+                                &cell,
+                                &shared_owned.ui.placeholder_controller,
+                                current_msg_id,
                                 &delivery_response,
+                                full_response.len(),
+                                bridge_turn,
+                                bridge_start,
+                                bridge_end,
+                                single_message_panel_footer_mode,
                                 dispatch_id.as_deref(),
                                 adk_session_key.as_deref(),
                                 Some(turn_id.as_str()),
+                                Some(bridge_lease_key.clone()),
+                                terminal_controller_cutover::BridgeLongChunksLocals {
+                                    terminal_delivery_committed: &mut terminal_delivery_committed,
+                                    terminal_body_visible: &mut terminal_body_visible,
+                                    completion_footer_terminal_text:
+                                        &mut completion_footer_terminal_text,
+                                    preserve_inflight_for_cleanup_retry:
+                                        &mut preserve_inflight_for_cleanup_retry,
+                                    bridge_skip_holder_owns_inflight:
+                                        &mut bridge_skip_holder_owns_inflight,
+                                    response_sent_offset: &mut response_sent_offset,
+                                    inflight_response_sent_offset:
+                                        &mut inflight_state.response_sent_offset,
+                                },
                             )
-                            .await
-                            {
-                                Ok((_first, last_chunk_msg_id)) => {
-                                    terminal_delivery_committed = true;
-                                    terminal_body_visible = true;
-                                    if single_message_panel_footer_mode {
-                                        completion_footer_terminal_text =
-                                            Some(delivery_response.clone());
-                                    }
-                                    response_sent_offset = full_response.len();
-                                    inflight_state.response_sent_offset = response_sent_offset;
-                                    // B6 (codex P1-b): advance ONLY via a successful
-                                    // lease commit (Delivered). `NoRange` has no new
-                                    // bytes to commit → no advance outside the lease.
-                                    // #3610 PR-1c: record the durable terminal anchor
-                                    // (last chunk msg id) on the SAME Delivered commit —
-                                    // frontier keyed by watcher_owner_channel_id, anchor
-                                    // pair in the delivery `channel_id`. Helper body +
-                                    // gating live in outbound/delivery_record.rs.
-                                    if let Some(lease) = lease {
-                                        let lease_range = lease.range();
-                                        // #3610 (codex review): gate the durable
-                                        // anchor record on the commit ACTUALLY
-                                        // succeeding. `commit_and_advance` advances
-                                        // `confirmed_end_offset` IFF its inner
-                                        // `DeliveryLeaseCell::commit` succeeds and
-                                        // returns `true`; a non-Leased / identity-
-                                        // mismatch / reclaimed cell returns `false`
-                                        // and does NOT advance. Recording the durable
-                                        // `delivered_frontier.range = end` without an
-                                        // in-memory advance would violate M4 (durable
-                                        // frontier END must mirror confirmed_end_offset).
-                                        let committed = lease.commit_and_advance(
-                                            shared_owned.as_ref(),
-                                            watcher_owner_channel_id,
-                                            inflight_state.tmux_session_name.as_deref(),
-                                            crate::services::discord::LeaseOutcome::Delivered,
-                                        );
-                                        if committed {
-                                            super::outbound::delivery_record::record_long_chunk_terminal_delivery(
-                                                shared_owned.as_ref(),
-                                                &provider,
-                                                watcher_owner_channel_id,
-                                                channel_id,
-                                                lease_range,
-                                                last_chunk_msg_id.map(|m| m.get()),
-                                            );
-                                        }
-                                    }
-                                }
-                                Err(error) => {
-                                    let ts = chrono::Local::now().format("%H:%M:%S");
-                                    tracing::warn!(
-                                        "  [{ts}] ⚠ terminal long response send failed for channel {}: {} — preserving inflight for retry",
-                                        channel_id,
-                                        error
-                                    );
-                                    // Send failed: NotDelivered → no advance;
-                                    // commit_and_advance records + releases.
-                                    if let Some(lease) = lease {
-                                        lease.commit_and_advance(
-                                            shared_owned.as_ref(),
-                                            watcher_owner_channel_id,
-                                            inflight_state.tmux_session_name.as_deref(),
-                                            crate::services::discord::LeaseOutcome::NotDelivered,
-                                        );
-                                    }
-                                    preserve_inflight_for_cleanup_retry = true;
-                                }
-                            }
+                            .await;
+                        } else {
+                            let lease_acquire = bridge_delivery_lease_for_inflight(
+                                shared_owned.as_ref(),
+                                watcher_owner_channel_id,
+                                shared_owned.restart.current_generation,
+                                &inflight_state,
+                                tmux_last_offset,
+                            );
+                            terminal_controller_cutover::apply_bridge_long_chunks_legacy(
+                                lease_acquire,
+                                gateway.as_ref(),
+                                shared_owned.as_ref(),
+                                &provider,
+                                channel_id,
+                                watcher_owner_channel_id,
+                                inflight_state.tmux_session_name.as_deref(),
+                                current_msg_id,
+                                &delivery_response,
+                                full_response.len(),
+                                single_message_panel_footer_mode,
+                                dispatch_id.as_deref(),
+                                adk_session_key.as_deref(),
+                                Some(turn_id.as_str()),
+                                terminal_controller_cutover::BridgeLongChunksLocals {
+                                    terminal_delivery_committed: &mut terminal_delivery_committed,
+                                    terminal_body_visible: &mut terminal_body_visible,
+                                    completion_footer_terminal_text:
+                                        &mut completion_footer_terminal_text,
+                                    preserve_inflight_for_cleanup_retry:
+                                        &mut preserve_inflight_for_cleanup_retry,
+                                    bridge_skip_holder_owns_inflight:
+                                        &mut bridge_skip_holder_owns_inflight,
+                                    response_sent_offset: &mut response_sent_offset,
+                                    inflight_response_sent_offset:
+                                        &mut inflight_state.response_sent_offset,
+                                },
+                            )
+                            .await;
                         }
                     } else {
                         // #3089 A5/A6b (flags, default OFF): route short-replace through the controller (`terminal_controller_cutover`); OFF → legacy below.
