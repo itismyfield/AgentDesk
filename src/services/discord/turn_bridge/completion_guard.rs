@@ -619,11 +619,7 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
         }
 
         // Extract commit SHA directly from agent output (most reliable method)
-        let mut hints = lookup_dispatch_completion_hints(
-            None::<&crate::db::Db>,
-            shared.pg_pool.as_ref(),
-            dispatch_id,
-        );
+        let mut hints = lookup_dispatch_completion_hints(shared.pg_pool.as_ref(), dispatch_id);
         let repo_dirs = completion_repo_dirs(adk_cwd, &hints);
         if explicit_work_outcome != Some("noop") {
             let turn_output = turn_output.map(str::to_string);
@@ -682,7 +678,6 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
         };
         for attempt in 1..=3u8 {
             match crate::dispatch::finalize_dispatch_with_backends(
-                None::<&crate::db::Db>,
                 engine,
                 dispatch_id,
                 completion_source,
@@ -722,7 +717,6 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
                 completion_result_with_context("turn_bridge_db_fallback", true, adk_cwd, &hints)
             };
             let changed = crate::dispatch::set_dispatch_status_with_backends(
-                None::<&crate::db::Db>,
                 shared.pg_pool.as_ref(),
                 dispatch_id,
                 "completed",
@@ -734,7 +728,6 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
             .unwrap_or(0);
             if changed > 0 {
                 let _ = store_reconcile_marker_with_handles(
-                    None::<&crate::db::Db>,
                     shared.pg_pool.as_ref(),
                     dispatch_id,
                     "turn_bridge_db_fallback",

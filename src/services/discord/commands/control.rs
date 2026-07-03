@@ -467,13 +467,7 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
     if let Some((reason_code, content)) = soft_clear_lifecycle_notify_row(clear_source, notify_mode)
     {
         // Notify bot message for clear paths that have no direct provider reply.
-        let sqlite_runtime_db = if shared.pg_pool.is_some() {
-            None
-        } else {
-            None::<&crate::db::Db>
-        };
         crate::services::message_outbox::enqueue_lifecycle_notification_best_effort(
-            sqlite_runtime_db,
             shared.pg_pool.as_ref(),
             &format!("channel:{}", channel_id.get()),
             session_key.as_deref(),

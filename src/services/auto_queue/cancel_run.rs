@@ -238,7 +238,6 @@ pub(crate) async fn cancel_live_dispatches_for_runs_pg(
     let mut cancelled = 0usize;
     for dispatch_id in dispatch_ids {
         cancelled += crate::dispatch::set_dispatch_status_without_queue_sync_with_backends(
-            None,
             Some(pool),
             &dispatch_id,
             "cancelled",

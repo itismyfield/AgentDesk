@@ -270,7 +270,6 @@ struct ThreadMapValidationOutcome {
 }
 
 pub(crate) async fn validate_channel_thread_maps_on_startup_with_backends(
-    _db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     token: &str,
 ) -> (usize, usize) {
@@ -548,7 +547,6 @@ pub(crate) async fn try_reuse_thread(
     minimal_message: &str,
     dispatch_id: &str,
     card_id: &str,
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
 ) -> Result<
     Option<(bool, Option<super::DispatchMessagePostOutcome>)>,
@@ -741,7 +739,6 @@ pub(crate) async fn try_reuse_thread(
             }
             if let Err(error) =
                 super::persist_dispatch_message_target_and_add_pending_reaction_with_pg(
-                    db,
                     client,
                     token,
                     discord_api_base,

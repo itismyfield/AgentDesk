@@ -3,7 +3,6 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use std::future::Future;
 
-use crate::db::Db;
 use crate::services::discord::settings::{
     MemoryBackendKind, ResolvedMemorySettings, resolve_memory_settings,
 };
@@ -55,12 +54,11 @@ struct RetrospectiveDraft {
 }
 
 pub(crate) fn record_card_retrospective_json(
-    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     card_id: &str,
     terminal_status: &str,
 ) -> String {
-    match record_card_retrospective(db, pg_pool, card_id, terminal_status) {
+    match record_card_retrospective(pg_pool, card_id, terminal_status) {
         Ok(value) => value.to_string(),
         Err(error) => json!({
             "ok": false,
@@ -71,7 +69,6 @@ pub(crate) fn record_card_retrospective_json(
 }
 
 fn record_card_retrospective(
-    _db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     card_id: &str,
     terminal_status: &str,

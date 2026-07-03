@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use crate::{db::Db, engine::PolicyEngine};
+use crate::engine::PolicyEngine;
 
 /// Hard cutoff for "stale inflight" detection in the periodic reconcile.
 /// Anything older than this with no live tmux pane is considered abandoned.
@@ -362,7 +362,6 @@ pub(crate) async fn reconcile_boot_db_pg(
 }
 
 pub(crate) async fn reconcile_boot_runtime(
-    db: Option<&Db>,
     engine: &PolicyEngine,
     pg_pool: Option<&PgPool>,
     current_instance_id: &str,
@@ -376,12 +375,12 @@ pub(crate) async fn reconcile_boot_runtime(
     };
 
     stats.missing_review_dispatches_refired = if let Some(pool) = pg_pool {
-        refire_missing_review_dispatches_pg(pool, db, engine).await?
+        refire_missing_review_dispatches_pg(pool, engine).await?
     } else {
         0
     };
     stats.completed_queue_review_drift_recovered = if let Some(pool) = pg_pool {
-        reconcile_completed_queue_review_drift_pg(pool, db, engine).await?
+        reconcile_completed_queue_review_drift_pg(pool, engine).await?
     } else {
         0
     };
@@ -405,11 +404,10 @@ pub(crate) async fn reconcile_boot_runtime(
 
 pub(crate) async fn reconcile_completed_queue_review_drift_pg(
     pool: &PgPool,
-    db: Option<&Db>,
     engine: &PolicyEngine,
 ) -> Result<usize> {
     let drift_candidates = completed_queue_review_drift_candidates_pg(pool).await?;
-    recover_completed_queue_review_drift_pg(pool, db, engine, drift_candidates).await
+    recover_completed_queue_review_drift_pg(pool, engine, drift_candidates).await
 }
 
 pub(crate) async fn reconcile_dispatch_delivery_events_pg(
@@ -1383,7 +1381,6 @@ async fn requeue_auto_queue_pending_delivery_orphan_notify_pg(
 
 async fn refire_missing_review_dispatches_pg(
     pool: &PgPool,
-    db: Option<&Db>,
     engine: &PolicyEngine,
 ) -> Result<usize> {
     crate::pipeline::ensure_loaded();
@@ -1436,7 +1433,7 @@ async fn refire_missing_review_dispatches_pg(
             );
             continue;
         }
-        crate::kanban::drain_hook_side_effects_with_backends(db, engine);
+        crate::kanban::drain_hook_side_effects_with_backends(engine);
 
         let has_review_dispatch = active_review_dispatch_exists_pg(pool, &card_id).await?;
         if has_review_dispatch {
@@ -1454,7 +1451,6 @@ async fn refire_missing_review_dispatches_pg(
 
 async fn recover_completed_queue_review_drift_pg(
     pool: &PgPool,
-    db: Option<&Db>,
     engine: &PolicyEngine,
     drift_candidates: Vec<String>,
 ) -> Result<usize> {
@@ -1466,7 +1462,6 @@ async fn recover_completed_queue_review_drift_pg(
         }
 
         match crate::kanban::transition_status_with_opts_pg(
-            db,
             pool,
             engine,
             &card_id,
@@ -1477,7 +1472,7 @@ async fn recover_completed_queue_review_drift_pg(
         .await
         {
             Ok(_) => {
-                crate::kanban::drain_hook_side_effects_with_backends(db, engine);
+                crate::kanban::drain_hook_side_effects_with_backends(engine);
             }
             Err(error) => {
                 tracing::warn!(

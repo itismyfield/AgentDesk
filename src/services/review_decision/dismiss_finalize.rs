@@ -17,7 +17,7 @@ use super::adapters::{
 };
 use super::repo_card::{
     load_review_decision_card_context_pg_first, resolve_effective_pipeline_pg_first,
-    review_state_db, transition_status_pg_first,
+    transition_status_pg_first,
 };
 use super::review_state_repo::update_card_review_state;
 use super::tuning_aggregate::record_decision_tuning;
@@ -115,7 +115,6 @@ pub(super) async fn decision_route_finalize(
 ) -> DecisionResponse {
     // #117: Update canonical review state for all decision paths
     if let Err(error) = update_card_review_state(
-        review_state_db(state),
         state.pg_pool_ref(),
         &body.card_id,
         &body.decision,

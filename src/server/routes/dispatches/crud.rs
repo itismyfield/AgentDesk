@@ -316,7 +316,6 @@ pub async fn update_dispatch(
         }
 
         return match crate::dispatch::finalize_dispatch_with_backends(
-            None,
             &state.engine,
             &id,
             "api",
@@ -344,7 +343,6 @@ pub async fn update_dispatch(
             .as_ref()
             .map(|statuses| statuses.iter().map(String::as_str).collect::<Vec<_>>());
         let changed = crate::dispatch::set_dispatch_status_with_backends(
-            None,
             Some(pool),
             &id,
             &status,

@@ -1,12 +1,8 @@
-use crate::db::Db;
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use serde_json::json;
 use sqlx::PgPool;
 
 pub(super) fn register_queue_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> JsResult<()> {
-    let db: Option<Db> = None;
-
-    let _ = &db;
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let queue_obj = Object::new(ctx.clone())?;
 

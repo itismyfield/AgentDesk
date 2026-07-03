@@ -24,15 +24,10 @@ struct CardListFilter {
     limit: Option<usize>,
 }
 
-pub(super) fn register_card_ops<'js>(
-    ctx: &Ctx<'js>,
-    db: Option<crate::db::Db>,
-    pg_pool: Option<PgPool>,
-) -> JsResult<()> {
+pub(super) fn register_card_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let cards_obj = Object::new(ctx.clone())?;
 
-    let _db_get = db.clone();
     let pg_get = pg_pool.clone();
     cards_obj.set(
         "__getRaw",
@@ -46,7 +41,6 @@ pub(super) fn register_card_ops<'js>(
         })?,
     )?;
 
-    let _db_list = db.clone();
     let pg_list = pg_pool.clone();
     cards_obj.set(
         "__listRaw",
@@ -60,7 +54,6 @@ pub(super) fn register_card_ops<'js>(
         })?,
     )?;
 
-    let _db_assign = db.clone();
     let pg_assign = pg_pool.clone();
     cards_obj.set(
         "__assignRaw",
@@ -77,7 +70,6 @@ pub(super) fn register_card_ops<'js>(
         )?,
     )?;
 
-    let _db_priority = db;
     let pg_priority = pg_pool;
     cards_obj.set(
         "__setPriorityRaw",

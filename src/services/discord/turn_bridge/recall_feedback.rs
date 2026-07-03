@@ -43,12 +43,6 @@ pub(super) struct RecallFeedbackTurnAnalysis {
 }
 
 impl RecallFeedbackTurnAnalysis {
-    pub(super) fn covered_recall_count_after(&self, auto_feedback_count: usize) -> usize {
-        self.manual_covered_recall_count
-            .saturating_add(auto_feedback_count)
-            .min(self.recall_count)
-    }
-
     pub(super) fn needs_voluntary_feedback_reminder(&self) -> bool {
         self.recall_count > 0 && !self.pending_feedbacks.is_empty()
     }

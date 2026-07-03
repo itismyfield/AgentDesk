@@ -22,7 +22,7 @@ use super::repo_card::{
     ScopeMismatchCloseError, atomic_finalize_scope_mismatch_close_pg,
     card_lifecycle_snapshot_pg_first, commit_belongs_to_card_issue_pg_first_tri,
     current_card_status_pg_first, load_review_decision_card_context_pg_first,
-    resolve_effective_pipeline_pg_first, review_state_db, transition_status_pg_first,
+    resolve_effective_pipeline_pg_first, transition_status_pg_first,
 };
 use super::repo_dispatch::has_pending_reviewish_dispatch_pg_first;
 use super::review_state_repo::update_card_review_state;
@@ -546,19 +546,14 @@ async fn decision_route_dispute_re_review(
     let dispute_status = current_card_status_pg_first(state, &body.card_id)
         .await
         .unwrap_or_else(|| "review".to_string());
-    crate::kanban::fire_enter_hooks_with_backends(
-        None,
-        &state.engine,
-        &body.card_id,
-        &dispute_status,
-    );
+    crate::kanban::fire_enter_hooks_with_backends(&state.engine, &body.card_id, &dispute_status);
 
     // #108: Drain all pending intents and transitions from OnReviewEnter hooks.
     // drain_hook_side_effects handles both transition processing (e.g. setStatus
     // for review/manual-intervention follow-up on max rounds) and Discord notifications for any
     // dispatches created by the hooks, eliminating the previous manual drain loop
     // that only handled transitions and missed dispatch notifications.
-    crate::kanban::drain_hook_side_effects_with_backends(None, &state.engine);
+    crate::kanban::drain_hook_side_effects_with_backends(&state.engine);
 
     // #229: Safety net — if card is still in a review-like state but no
     // pending review dispatch exists (OnReviewEnter hook may have failed
@@ -587,7 +582,7 @@ async fn decision_route_dispute_re_review(
             let _ = state
                 .engine
                 .fire_hook_by_name_blocking("OnReviewEnter", json!({ "card_id": body.card_id }));
-            crate::kanban::drain_hook_side_effects_with_backends(None, &state.engine);
+            crate::kanban::drain_hook_side_effects_with_backends(&state.engine);
         }
     }
 
@@ -647,7 +642,6 @@ async fn decision_route_dispute_re_review(
 
     // #117: Update canonical review state before returning
     if let Err(error) = update_card_review_state(
-        review_state_db(state),
         state.pg_pool_ref(),
         &body.card_id,
         "dispute",
@@ -664,9 +658,7 @@ async fn decision_route_dispute_re_review(
     }
 
     if !rd_consumed && let Some(rd_id) = pending_rd_id {
-        let status_db = None;
         match crate::dispatch::set_dispatch_status_with_backends(
-            status_db,
             state.pg_pool_ref(),
             rd_id,
             "completed",

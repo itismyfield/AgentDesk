@@ -495,7 +495,6 @@ impl AutoQueueService {
             for (card_id, path) in transition_plan {
                 for step in &path {
                     crate::kanban::transition_status_with_opts_pg(
-                        None,
                         pool,
                         &self.engine,
                         &card_id,

@@ -74,12 +74,12 @@
 | `DELETE` | `/api/departments/{id}` | `departments::delete_department` | `src/server/routes/departments.rs:184` | `src/server/routes/domains/admin.rs:42` |
 | `PATCH` | `/api/departments/{id}` | `departments::update_department` | `src/server/routes/departments.rs:110` | `src/server/routes/domains/admin.rs:42` |
 | `GET` | `/api/discord/bindings` | `discord::list_bindings` | `src/server/routes/discord.rs:18` | `src/server/routes/domains/integrations.rs:34` |
-| `POST` | `/api/discord/bot-tokens/reload` | `health_api::reload_discord_bot_tokens_handler` | `src/server/routes/health_api.rs:1479` | `src/server/routes/domains/ops.rs:32` |
+| `POST` | `/api/discord/bot-tokens/reload` | `health_api::reload_discord_bot_tokens_handler` | `src/server/routes/health_api.rs:1478` | `src/server/routes/domains/ops.rs:32` |
 | `GET` | `/api/discord/channels/{id}` | `discord::channel_info` | `src/server/routes/discord.rs:311` | `src/server/routes/domains/integrations.rs:39` |
 | `GET` | `/api/discord/channels/{id}/messages` | `discord::channel_messages` | `src/server/routes/discord.rs:183` | `src/server/routes/domains/integrations.rs:35` |
 | `POST` | `/api/discord/send` | `health_api::send_handler` | `src/server/routes/health_api.rs:1428` | `src/server/routes/domains/ops.rs:31` |
-| `POST` | `/api/discord/send-dm` | `health_api::senddm_handler` | `src/server/routes/health_api.rs:1619` | `src/server/routes/domains/ops.rs:40` |
-| `POST` | `/api/discord/send-to-agent` | `health_api::send_to_agent_handler` | `src/server/routes/health_api.rs:1578` | `src/server/routes/domains/ops.rs:36` |
+| `POST` | `/api/discord/send-dm` | `health_api::senddm_handler` | `src/server/routes/health_api.rs:1617` | `src/server/routes/domains/ops.rs:40` |
+| `POST` | `/api/discord/send-to-agent` | `health_api::send_to_agent_handler` | `src/server/routes/health_api.rs:1577` | `src/server/routes/domains/ops.rs:36` |
 | `GET` | `/api/dispatch-outbox/failed` | `health_api::list_dispatch_outbox_failures_handler` | `src/server/routes/health_api.rs:749` | `src/server/routes/domains/ops.rs:22` |
 | `POST` | `/api/dispatch-outbox/failed` | `health_api::ack_dispatch_outbox_failures_handler` | `src/server/routes/health_api.rs:774` | `src/server/routes/domains/ops.rs:22` |
 | `GET` | `/api/dispatched-sessions` | `dispatched_sessions::list_dispatched_sessions` | `src/server/routes/dispatched_sessions.rs:16` | `src/server/routes/domains/ops.rs:157` |
@@ -123,7 +123,7 @@
 | `POST` | `/api/hook/reset-status` | `hooks::reset_status` | `src/server/routes/hooks.rs:25` | `src/server/routes/domains/integrations.rs:41` |
 | `DELETE` | `/api/hook/session/{sessionKey}` | `hooks::disconnect_session` | `src/server/routes/hooks.rs:59` | `src/server/routes/domains/integrations.rs:43` |
 | `POST` | `/api/hook/skill-usage` | `hooks::skill_usage` | `src/server/routes/hooks.rs:42` | `src/server/routes/domains/integrations.rs:42` |
-| `POST` | `/api/inflight/rebind` | `health_api::rebind_inflight_handler` | `src/server/routes/health_api.rs:1544` | `src/server/routes/domains/ops.rs:41` |
+| `POST` | `/api/inflight/rebind` | `health_api::rebind_inflight_handler` | `src/server/routes/health_api.rs:1543` | `src/server/routes/domains/ops.rs:41` |
 | `GET` | `/api/internal/card-thread` | `dispatches::get_card_thread` | `src/server/routes/dispatches/thread_reuse.rs:68` | `src/server/routes/domains/ops.rs:117` |
 | `POST` | `/api/internal/escalation/emit` | `escalation::emit_escalation` | `src/server/routes/escalation.rs:1370` | `src/server/routes/domains/admin.rs:72` |
 | `POST` | `/api/internal/link-dispatch-thread` | `dispatches::link_dispatch_thread` | `src/server/routes/dispatches/thread_reuse.rs:44` | `src/server/routes/domains/ops.rs:113` |
@@ -131,7 +131,7 @@
 | `GET` | `/api/kanban-cards` | `kanban::list_cards` | `src/server/routes/kanban.rs:269` | `src/server/routes/domains/kanban.rs:15` |
 | `POST` | `/api/kanban-cards` | `kanban::create_card` | `src/server/routes/kanban.rs:310` | `src/server/routes/domains/kanban.rs:15` |
 | `POST` | `/api/kanban-cards/assign-issue` | `kanban::assign_issue` | `src/server/routes/kanban.rs:1123` | `src/server/routes/domains/kanban.rs:20` |
-| `POST` | `/api/kanban-cards/batch-rereview` | `kanban::batch_rereview` | `src/server/routes/kanban.rs:2040` | `src/server/routes/domains/kanban.rs:29` |
+| `POST` | `/api/kanban-cards/batch-rereview` | `kanban::batch_rereview` | `src/server/routes/kanban.rs:2038` | `src/server/routes/domains/kanban.rs:29` |
 | `GET` | `/api/kanban-cards/stalled` | `kanban::stalled_cards` | `src/server/routes/kanban.rs:1090` | `src/server/routes/domains/kanban.rs:19` |
 | `DELETE` | `/api/kanban-cards/{id}` | `kanban::delete_card` | `src/server/routes/kanban.rs:575` | `src/server/routes/domains/kanban.rs:21` |
 | `GET` | `/api/kanban-cards/{id}` | `kanban::get_card` | `src/server/routes/kanban.rs:288` | `src/server/routes/domains/kanban.rs:21` |
@@ -141,13 +141,13 @@
 | `GET` | `/api/kanban-cards/{id}/comments` | `kanban::card_github_comments` | `src/server/routes/kanban.rs:1353` | `src/server/routes/domains/kanban.rs:48` |
 | `PATCH` | `/api/kanban-cards/{id}/defer-dod` | `kanban::defer_dod` | `src/server/routes/kanban.rs:943` | `src/server/routes/domains/kanban.rs:41` |
 | `POST` | `/api/kanban-cards/{id}/redispatch` | `kanban::redispatch_card` | `src/server/routes/kanban.rs:786` | `src/server/routes/domains/kanban.rs:36` |
-| `POST` | `/api/kanban-cards/{id}/reopen` | `kanban::reopen_card` | `src/server/routes/kanban.rs:2120` | `src/server/routes/domains/kanban.rs:30` |
-| `POST` | `/api/kanban-cards/{id}/rereview` | `kanban::rereview_card` | `src/server/routes/kanban.rs:1789` | `src/server/routes/domains/kanban.rs:28` |
+| `POST` | `/api/kanban-cards/{id}/reopen` | `kanban::reopen_card` | `src/server/routes/kanban.rs:2118` | `src/server/routes/domains/kanban.rs:30` |
+| `POST` | `/api/kanban-cards/{id}/rereview` | `kanban::rereview_card` | `src/server/routes/kanban.rs:1787` | `src/server/routes/domains/kanban.rs:28` |
 | `POST` | `/api/kanban-cards/{id}/resume` | `resume::resume_card` | `src/server/routes/resume.rs:209` | `src/server/routes/domains/kanban.rs:40` |
 | `POST` | `/api/kanban-cards/{id}/retry` | `kanban::retry_card` | `src/server/routes/kanban.rs:610` | `src/server/routes/domains/kanban.rs:35` |
 | `GET` | `/api/kanban-cards/{id}/review-state` | `kanban::get_card_review_state` | `src/server/routes/kanban.rs:1050` | `src/server/routes/domains/kanban.rs:43` |
 | `GET` | `/api/kanban-cards/{id}/reviews` | `kanban::list_card_reviews` | `src/server/routes/kanban.rs:1072` | `src/server/routes/domains/kanban.rs:42` |
-| `POST` | `/api/kanban-cards/{id}/transition` | `kanban::force_transition` | `src/server/routes/kanban.rs:2382` | `src/server/routes/domains/kanban.rs:31` |
+| `POST` | `/api/kanban-cards/{id}/transition` | `kanban::force_transition` | `src/server/routes/kanban.rs:2380` | `src/server/routes/domains/kanban.rs:31` |
 | `GET` | `/api/kanban-repos` | `kanban_repos::list_repos` | `src/server/routes/kanban_repos.rs:29` | `src/server/routes/domains/kanban.rs:52` |
 | `POST` | `/api/kanban-repos` | `kanban_repos::create_repo` | `src/server/routes/kanban_repos.rs:78` | `src/server/routes/domains/kanban.rs:52` |
 | `DELETE` | `/api/kanban-repos/{owner}/{repo}` | `kanban_repos::delete_repo` | `src/server/routes/kanban_repos.rs:234` | `src/server/routes/domains/kanban.rs:56` |
@@ -226,7 +226,7 @@
 | `POST` | `/api/reviews/decision` | `review_verdict::submit_review_decision` | `src/server/routes/review_verdict/decision_route.rs:21` | `src/server/routes/domains/reviews.rs:23` |
 | `POST` | `/api/reviews/recovery` | `reviews::recover_review_target` | `src/server/routes/reviews.rs:609` | `src/server/routes/domains/reviews.rs:21` |
 | `POST` | `/api/reviews/tuning/aggregate` | `review_verdict::aggregate_review_tuning` | `src/server/routes/review_verdict/tuning_aggregate.rs:10` | `src/server/routes/domains/reviews.rs:27` |
-| `POST` | `/api/reviews/verdict` | `review_verdict::submit_verdict` | `src/server/routes/review_verdict/verdict_route.rs:265` | `src/server/routes/domains/reviews.rs:22` |
+| `POST` | `/api/reviews/verdict` | `review_verdict::submit_verdict` | `src/server/routes/review_verdict/verdict_route.rs:257` | `src/server/routes/domains/reviews.rs:22` |
 | `GET` | `/api/round-table-meetings` | `meetings::list_meetings` | `src/server/routes/meetings.rs:519` | `src/server/routes/domains/integrations.rs:47` |
 | `POST` | `/api/round-table-meetings` | `meetings::upsert_meeting` | `src/server/routes/meetings.rs:1012` | `src/server/routes/domains/integrations.rs:47` |
 | `GET` | `/api/round-table-meetings/channels` | `meetings::list_meeting_channels` | `src/server/routes/meetings.rs:537` | `src/server/routes/domains/integrations.rs:51` |
@@ -288,4 +288,4 @@
 | `GET` | `/api/v1/tokens` | `tokens` | `src/server/routes/v1.rs:202` | `src/server/routes/v1.rs:119` |
 | `GET` | `/api/voice/config` | `voice_config::get_voice_config` | `src/server/routes/voice_config.rs:109` | `src/server/routes/domains/admin.rs:68` |
 | `PUT` | `/api/voice/config` | `voice_config::put_voice_config` | `src/server/routes/voice_config.rs:117` | `src/server/routes/domains/admin.rs:68` |
-| `GET` | `/ws` | `ws::ws_handler` | `src/server/ws.rs:24` | `src/server/mod.rs:453` |
+| `GET` | `/ws` | `ws::ws_handler` | `src/server/ws.rs:24` | `src/server/mod.rs:452` |

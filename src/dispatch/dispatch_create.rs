@@ -2,7 +2,6 @@ use anyhow::Result;
 use serde_json::json;
 use sqlx::{PgPool, Postgres, Row};
 
-use crate::db::Db;
 use crate::db::agents::{resolve_agent_channel_for_provider_pg, resolve_agent_dispatch_channel_pg};
 use crate::engine::PolicyEngine;
 
@@ -913,30 +912,7 @@ pub async fn create_dispatch_core_with_id_and_options(
     .await
 }
 
-pub fn create_dispatch(
-    db: &Db,
-    engine: &PolicyEngine,
-    kanban_card_id: &str,
-    to_agent_id: &str,
-    dispatch_type: &str,
-    title: &str,
-    context: &serde_json::Value,
-) -> Result<serde_json::Value> {
-    create_dispatch_with_options(
-        db,
-        engine.pg_pool(),
-        engine,
-        kanban_card_id,
-        to_agent_id,
-        dispatch_type,
-        title,
-        context,
-        DispatchCreateOptions::default(),
-    )
-}
-
 fn create_dispatch_with_options_pg_backed(
-    db: Option<&Db>,
     pool: &PgPool,
     engine: &PolicyEngine,
     kanban_card_id: &str,
@@ -1018,7 +994,6 @@ fn create_dispatch_with_options_pg_backed(
             .to_string())
     })?;
     crate::kanban::fire_state_hooks_with_backends(
-        db,
         engine,
         kanban_card_id,
         &old_status,
@@ -1026,42 +1001,6 @@ fn create_dispatch_with_options_pg_backed(
     );
 
     Ok(dispatch)
-}
-
-pub fn create_dispatch_with_options(
-    db: &Db,
-    pg_pool: Option<&PgPool>,
-    engine: &PolicyEngine,
-    kanban_card_id: &str,
-    to_agent_id: &str,
-    dispatch_type: &str,
-    title: &str,
-    context: &serde_json::Value,
-    options: DispatchCreateOptions,
-) -> Result<serde_json::Value> {
-    let options = DispatchCreateOptions {
-        sidecar_dispatch: options.sidecar_dispatch || dispatch_context_requests_sidecar(context),
-        ..options
-    };
-    if let Some(pool) = pg_pool {
-        return create_dispatch_with_options_pg_backed(
-            Some(db),
-            pool,
-            engine,
-            kanban_card_id,
-            to_agent_id,
-            dispatch_type,
-            title,
-            context,
-            options,
-        );
-    }
-
-    {
-        Err(anyhow::anyhow!(
-            "Postgres pool required for create_dispatch_with_options"
-        ))
-    }
 }
 
 pub fn create_dispatch_pg_only(
@@ -1100,7 +1039,6 @@ pub fn create_dispatch_with_options_pg_only(
         ..options
     };
     create_dispatch_with_options_pg_backed(
-        None,
         pg_pool,
         engine,
         kanban_card_id,

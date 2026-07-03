@@ -117,7 +117,6 @@ pub(crate) fn merged_settings_pg(
 
 /// Resolve the effective escalation owner user id across available backends.
 pub(crate) fn effective_owner_user_id_with_backends(
-    _db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     config: &Config,
 ) -> Option<u64> {

@@ -63,7 +63,6 @@ pub(super) async fn fail_active_dispatch_for_dead_tmux_session(
 }
 
 pub(super) fn resolve_dispatch_tmux_protection(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
     provider: &ProviderKind,
@@ -187,24 +186,5 @@ pub(super) fn resolve_dispatch_tmux_protection(
         .flatten();
     }
 
-    resolve_dispatch_tmux_protection_legacy_fallback(
-        db,
-        provider,
-        &thread_channel_id,
-        &session_keys,
-        &namespaced_session_key_prefix,
-    )
-}
-
-// Production runs PostgreSQL-only (#3035 Phase 0): the legacy sqlite handle is
-// always `None`, so after the PG path above prod has no DB fallback and returns
-// `None` — preserving the historical `let db = db?;` short-circuit semantics.
-fn resolve_dispatch_tmux_protection_legacy_fallback(
-    _db: Option<&crate::db::Db>,
-    _provider: &ProviderKind,
-    _thread_channel_id: &str,
-    _session_keys: &[String; 2],
-    _namespaced_session_key_prefix: &str,
-) -> Option<DispatchTmuxProtection> {
     None
 }

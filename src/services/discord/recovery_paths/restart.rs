@@ -716,7 +716,6 @@ async fn apply_undeliverable_relay_disposition(
             };
             if let Some(ref session_key) = state.session_key {
                 crate::services::termination_audit::record_termination_with_handles(
-                    None::<&crate::db::Db>,
                     shared.pg_pool.as_ref(),
                     session_key,
                     state.dispatch_id.as_deref(),

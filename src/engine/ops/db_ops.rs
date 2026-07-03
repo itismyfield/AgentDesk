@@ -1,4 +1,3 @@
-use crate::db::Db;
 use crate::engine::sql_guard::detect_core_table_write;
 use crate::error::{AppError, ErrorCode};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
@@ -24,48 +23,36 @@ enum JsonColumnMode {
     Typed,
 }
 
-pub(super) fn register_db_ops<'js>(
-    ctx: &Ctx<'js>,
-    legacy_db: Option<Db>,
-    pg_pool: Option<PgPool>,
-) -> JsResult<()> {
+pub(super) fn register_db_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let db_obj = Object::new(ctx.clone())?;
 
     // Internal: __db_query_raw(sql, params_json) → json_string
-    let legacy_q = legacy_db.clone();
     let pg_q = pg_pool.clone();
     let query_raw = Function::new(
         ctx.clone(),
         rquickjs::function::MutFn::from(move |sql: String, params_json: String| -> String {
-            db_query_raw(legacy_q.as_ref(), pg_q.clone(), &sql, &params_json)
+            db_query_raw(pg_q.clone(), &sql, &params_json)
         }),
     )?;
     db_obj.set("__query_raw", query_raw)?;
 
     // Internal: __db_query_json_raw(sql, params_json) → json_string
-    let legacy_q_json = legacy_db.clone();
     let pg_q_json = pg_pool.clone();
     let query_json_raw = Function::new(
         ctx.clone(),
         rquickjs::function::MutFn::from(move |sql: String, params_json: String| -> String {
-            db_query_json_raw(
-                legacy_q_json.as_ref(),
-                pg_q_json.clone(),
-                &sql,
-                &params_json,
-            )
+            db_query_json_raw(pg_q_json.clone(), &sql, &params_json)
         }),
     )?;
     db_obj.set("__query_json_raw", query_json_raw)?;
 
     // Internal: __db_execute_raw(sql, params_json) → json_string
-    let legacy_e = legacy_db.clone();
     let pg_e = pg_pool.clone();
     let execute_raw = Function::new(
         ctx.clone(),
         rquickjs::function::MutFn::from(move |sql: String, params_json: String| -> String {
-            db_execute_raw(legacy_e.as_ref(), pg_e.clone(), &sql, &params_json)
+            db_execute_raw(pg_e.clone(), &sql, &params_json)
         }),
     )?;
     db_obj.set("__execute_raw", execute_raw)?;
@@ -131,14 +118,8 @@ fn db_guard_raw(sql: &str, origin: &str) -> String {
     }
 }
 
-fn db_query_raw(
-    legacy_db: Option<&Db>,
-    pg_pool: Option<PgPool>,
-    sql: &str,
-    params_json: &str,
-) -> String {
+fn db_query_raw(pg_pool: Option<PgPool>, sql: &str, params_json: &str) -> String {
     db_query_raw_with_json_mode(
-        legacy_db,
         pg_pool,
         sql,
         params_json,
@@ -147,14 +128,8 @@ fn db_query_raw(
     )
 }
 
-fn db_query_json_raw(
-    legacy_db: Option<&Db>,
-    pg_pool: Option<PgPool>,
-    sql: &str,
-    params_json: &str,
-) -> String {
+fn db_query_json_raw(pg_pool: Option<PgPool>, sql: &str, params_json: &str) -> String {
     db_query_raw_with_json_mode(
-        legacy_db,
         pg_pool,
         sql,
         params_json,
@@ -164,7 +139,6 @@ fn db_query_json_raw(
 }
 
 fn db_query_raw_with_json_mode(
-    _legacy_db: Option<&Db>,
     pg_pool: Option<PgPool>,
     sql: &str,
     params_json: &str,
@@ -269,12 +243,7 @@ fn db_query_raw_pg_with_json_mode(
     })
 }
 
-fn db_execute_raw(
-    _legacy_db: Option<&Db>,
-    pg_pool: Option<PgPool>,
-    sql: &str,
-    params_json: &str,
-) -> String {
+fn db_execute_raw(pg_pool: Option<PgPool>, sql: &str, params_json: &str) -> String {
     let started = std::time::Instant::now();
     emit_raw_db_audit("agentdesk.db.execute", sql);
     if let Some(violation) = detect_core_table_write(sql) {
@@ -299,7 +268,6 @@ fn db_execute_raw(
 }
 
 pub(crate) fn execute_policy_sql(
-    _db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     sql: &str,
     params: &[serde_json::Value],
@@ -1490,7 +1458,7 @@ mod tests {
         let result: String = ctx.with(|ctx| {
             let ad = rquickjs::Object::new(ctx.clone()).unwrap();
             ctx.globals().set("agentdesk", ad).unwrap();
-            register_db_ops(&ctx, None, Some(pool_for_js)).unwrap();
+            register_db_ops(&ctx, Some(pool_for_js)).unwrap();
             ctx.eval(
                 r#"
                 (function() {

@@ -1,6 +1,5 @@
 //! Terminal-card and managed-worktree cleanup helpers for kanban transitions.
 
-use crate::db::Db;
 use anyhow::Result;
 use sqlx::Row as SqlxRow;
 
@@ -14,28 +13,6 @@ const STALE_WORKTREE_KEYS: &[&str] = &[
 ];
 
 const WORKTREE_PATH_REFERENCE_KEYS: &[&str] = &["worktree_path", "completed_worktree_path"];
-
-// reason: terminal-card-state sync entry; lib-build callers are cfg/test-gated. See #3034.
-#[allow(dead_code)]
-pub(super) fn sync_terminal_card_state(db: &Db, card_id: &str) {
-    sync_terminal_card_state_with_scope(db, card_id, true);
-}
-
-// reason: terminal-transition follow-up sync called from hooks; lib-build callers are cfg/test-gated. See #3034.
-#[allow(dead_code)]
-pub(super) fn sync_terminal_transition_followups(db: &Db, card_id: &str) {
-    sync_terminal_card_state_with_scope(db, card_id, false);
-}
-
-// reason: disabled DB compatibility entrypoint for retired terminal-cleanup sync
-// callers. See #3034 / #3035.
-#[allow(dead_code)]
-fn sync_terminal_card_state_with_scope(db: &Db, card_id: &str, cancel_implementation: bool) {
-    {
-        let _ = (db, card_id, cancel_implementation);
-        return;
-    }
-}
 
 pub(super) async fn sync_terminal_transition_followups_pg(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,

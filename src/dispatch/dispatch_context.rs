@@ -2,7 +2,6 @@ use anyhow::Result;
 use serde_json::json;
 use sqlx::PgPool;
 
-use crate::db::Db;
 use crate::db::agents::AgentChannelBindings;
 use crate::db::agents::load_agent_channel_bindings_pg;
 use crate::services::git::GitCommand;
@@ -562,23 +561,6 @@ fn commit_subject_references_issue(subject: &str, issue_number: i64) -> bool {
     false
 }
 
-// reason: production cfg-arm of the commit/card-issue scope check; live callers
-// and the _pg twin are cfg/test-gated in the default lib build. See #3034.
-#[allow(dead_code)]
-pub(crate) fn commit_belongs_to_card_issue(
-    _db: &Db,
-    card_id: &str,
-    commit_sha: &str,
-    _target_repo: Option<&str>,
-) -> bool {
-    tracing::warn!(
-        "[dispatch] sqlite commit/card validation disabled for card {} commit {}; postgres pool required",
-        card_id,
-        &commit_sha[..8.min(commit_sha.len())]
-    );
-    false
-}
-
 /// #2341 / #2200 sub-3 (carried forward from PR #2336 HIGH 1): tri-state
 /// scope verification. The bool helper above collapses three distinct
 /// outcomes into a single `false`, which is safe for the in-scope dispute
@@ -600,23 +582,6 @@ pub enum ScopeCheck {
     /// failed, commit not reachable, etc.). Callers on the out-of-scope
     /// close path MUST treat this as a refusal.
     Unknown,
-}
-
-// reason: production cfg-arm of the tri-state commit/card-issue scope check;
-// live callers and the _pg_tri twin are cfg/test-gated in the lib build. See #3034.
-#[allow(dead_code)]
-pub(crate) fn commit_belongs_to_card_issue_tri(
-    _db: &Db,
-    card_id: &str,
-    commit_sha: &str,
-    _target_repo: Option<&str>,
-) -> ScopeCheck {
-    tracing::warn!(
-        "[dispatch] sqlite tri-state scope check disabled for card {} commit {}; postgres pool required — Unknown",
-        card_id,
-        &commit_sha[..8.min(commit_sha.len())]
-    );
-    ScopeCheck::Unknown
 }
 
 fn git_commit_exists(dir: &str, commit_sha: &str) -> bool {

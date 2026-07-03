@@ -19,20 +19,20 @@
 | `src/services/discord/idle_recap.rs` | 1252 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/outbound/turn_output_controller.rs` | 1148 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/placeholder_sweeper.rs` | 1020 | discord-relay | 2026-08-31 | #3405 |
-| `src/services/discord/recovery_engine.rs` | 3030 | discord-relay | 2026-10-31 | #3834 |
+| `src/services/discord/recovery_engine.rs` | 3017 | discord-relay | 2026-10-31 | #3834 |
 | `src/services/discord/relay_recovery.rs` | 1287 | discord-relay | 2026-08-31 | #3405 |
-| `src/services/discord/router/intake_gate.rs` | 1611 | discord-relay | 2026-10-31 | #3838 |
+| `src/services/discord/router/intake_gate.rs` | 1605 | discord-relay | 2026-10-31 | #3838 |
 | `src/services/discord/router/message_handler/intake_turn.rs` | 2814 | discord-relay | 2026-10-31 | #3837 |
 | `src/services/discord/session_relay_sink.rs` | 1679 | discord-relay | 2026-08-31 | #3405 |
-| `src/services/discord/tmux.rs` | 1507 | discord-relay | 2026-10-31 | #3841 |
-| `src/services/discord/tmux_watcher.rs` | 7301 | discord-relay | 2026-10-31 | #3832 |
+| `src/services/discord/tmux.rs` | 1501 | discord-relay | 2026-10-31 | #3841 |
+| `src/services/discord/tmux_watcher.rs` | 7291 | discord-relay | 2026-10-31 | #3832 |
 | `src/services/discord/tui_direct_pending_start.rs` | 1490 | discord-relay | 2026-08-31 | #3540 |
 | `src/services/discord/tui_prompt_relay/synthetic_start.rs` | 1039 | discord-relay | 2026-10-31 | #4019 |
 | `src/services/discord/tui_task_card.rs` | 1065 | discord-relay | 2026-10-31 | #3405 |
-| `src/services/discord/turn_bridge/mod.rs` | 6250 | discord-relay | 2026-08-31 | #3038 |
+| `src/services/discord/turn_bridge/mod.rs` | 6213 | discord-relay | 2026-08-31 | #3038 |
 | `src/services/discord/turn_finalizer.rs` | 1048 | discord-finalizer | 2026-08-31 | #3016 |
 | `src/services/discord/voice_barge_in.rs` | 2905 | voice-runtime | 2026-08-31 | #3405 |
-| `src/services/discord/watchers/lifecycle.rs` | 2079 | discord-relay | 2026-10-31 | #3840 |
+| `src/services/discord/watchers/lifecycle.rs` | 2052 | discord-relay | 2026-10-31 | #3840 |
 | `src/services/tmux_common.rs` | 1088 | discord-relay | 2026-10-31 | #3924 |
 | `src/voice/announce_meta.rs` | 1001 | voice-runtime | 2026-08-31 | #3405 |
 
@@ -44,7 +44,7 @@
 | --- | ---: |
 | `src/cli/client.rs` | 2378 |
 | `src/cli/dcserver.rs` | 1633 |
-| `src/cli/direct.rs` | 1813 |
+| `src/cli/direct.rs` | 1812 |
 | `src/cli/doctor/orchestrator.rs` | 4381 |
 | `src/cli/init.rs` | 1444 |
 | `src/cli/migrate/apply.rs` | 3237 |
@@ -57,29 +57,29 @@
 | `src/db/dispatched_sessions.rs` | 1627 |
 | `src/db/dispatches/mod.rs` | 1028 |
 | `src/db/postgres.rs` | 1280 |
-| `src/dispatch/dispatch_context.rs` | 2852 |
-| `src/dispatch/dispatch_create.rs` | 1396 |
-| `src/dispatch/dispatch_status.rs` | 1529 |
+| `src/dispatch/dispatch_context.rs` | 2817 |
+| `src/dispatch/dispatch_create.rs` | 1334 |
+| `src/dispatch/dispatch_status.rs` | 1445 |
 | `src/engine/loader.rs` | 1332 |
-| `src/engine/mod.rs` | 1280 |
-| `src/engine/ops/db_ops.rs` | 1244 |
-| `src/github/sync.rs` | 1513 |
-| `src/pipeline.rs` | 1409 |
+| `src/engine/mod.rs` | 1279 |
+| `src/engine/ops/db_ops.rs` | 1212 |
+| `src/github/sync.rs` | 1508 |
+| `src/pipeline.rs` | 1383 |
 | `src/receipt.rs` | 1842 |
-| `src/reconcile.rs` | 1868 |
-| `src/server/mod.rs` | 2670 |
+| `src/reconcile.rs` | 1863 |
+| `src/server/mod.rs` | 2666 |
 | `src/server/routes/agents.rs` | 1278 |
 | `src/server/routes/agents_crud.rs` | 1903 |
 | `src/server/routes/agents_setup.rs` | 1365 |
 | `src/server/routes/escalation.rs` | 1376 |
-| `src/server/routes/health_api.rs` | 1660 |
-| `src/server/routes/kanban.rs` | 2677 |
+| `src/server/routes/health_api.rs` | 1658 |
+| `src/server/routes/kanban.rs` | 2675 |
 | `src/server/routes/meetings.rs` | 1290 |
 | `src/server/routes/resume.rs` | 1260 |
 | `src/server/routes/v1.rs` | 1857 |
-| `src/services/auto_queue.rs` | 1546 |
+| `src/services/auto_queue.rs` | 1545 |
 | `src/services/auto_queue/activate_command.rs` | 1506 |
-| `src/services/auto_queue/cancel_run.rs` | 1032 |
+| `src/services/auto_queue/cancel_run.rs` | 1031 |
 | `src/services/claude.rs` | 2969 |
 | `src/services/claude_tui/input.rs` | 1932 |
 | `src/services/codex.rs` | 3049 |
@@ -88,12 +88,12 @@
 | `src/services/discord/commands/text_commands.rs` | 1476 |
 | `src/services/discord/formatting.rs` | 2860 |
 | `src/services/discord/meeting_orchestrator.rs` | 3222 |
-| `src/services/discord/mod.rs` | 4153 |
+| `src/services/discord/mod.rs` | 4146 |
 | `src/services/discord/router/message_handler/headless_turn.rs` | 1543 |
 | `src/services/discord_config_audit.rs` | 1288 |
-| `src/services/dispatched_sessions.rs` | 1550 |
-| `src/services/dispatches/discord_delivery/orchestration.rs` | 1538 |
-| `src/services/dispatches/outbox_route.rs` | 1182 |
+| `src/services/dispatched_sessions.rs` | 1546 |
+| `src/services/dispatches/discord_delivery/orchestration.rs` | 1496 |
+| `src/services/dispatches/outbox_route.rs` | 1172 |
 | `src/services/gemini.rs` | 1358 |
 | `src/services/memory/memento.rs` | 1893 |
 | `src/services/onboarding/mod.rs` | 2937 |

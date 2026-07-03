@@ -82,39 +82,8 @@ pub fn record_termination(
     persist_record(runtime.pg_pool.clone(), record);
 }
 
-/// Record a session termination event against an explicit DB handle.
-pub fn record_termination_with_db(
-    _db: &crate::db::Db,
-    session_key: &str,
-    dispatch_id: Option<&str>,
-    killer_component: &str,
-    reason_code: &str,
-    reason_text: Option<&str>,
-    probe_snapshot: Option<&str>,
-    last_offset: Option<u64>,
-    tmux_alive: Option<bool>,
-) {
-    let record = build_record(
-        session_key,
-        dispatch_id,
-        killer_component,
-        reason_code,
-        reason_text,
-        probe_snapshot,
-        last_offset,
-        tmux_alive,
-    );
-    let pg_pool = audit_runtime_slot()
-        .lock()
-        .ok()
-        .and_then(|runtime| runtime.pg_pool.clone());
-    persist_record(pg_pool, record);
-}
-
-/// Record against explicit handles. PostgreSQL is authoritative for #868; the
-/// legacy db handle is accepted only for API compatibility.
+/// Record against explicit handles. PostgreSQL is authoritative for #868.
 pub fn record_termination_with_handles(
-    _db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     session_key: &str,
     dispatch_id: Option<&str>,

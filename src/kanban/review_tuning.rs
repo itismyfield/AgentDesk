@@ -1,23 +1,8 @@
 //! Review tuning outcome recording for kanban lifecycle events.
 
-use crate::db::Db;
 use sqlx::Row as SqlxRow;
 
-/// #119: When a card reaches done after a review pass verdict, record a true_negative
-/// tuning outcome. This confirms the review was correct in not finding issues.
-/// Returns true if a TN was actually inserted.
-// reason: review-tuning TN recorder (#119) called from hooks; lib-build callers are cfg/test-gated. See #3034.
-#[allow(dead_code)]
-pub(super) fn record_true_negative_if_pass(
-    db: &Db,
-    pg_pool: Option<&sqlx::PgPool>,
-    card_id: &str,
-) -> bool {
-    record_true_negative_if_pass_with_backends(Some(db), pg_pool, card_id)
-}
-
 pub(super) fn record_true_negative_if_pass_with_backends(
-    _db: Option<&Db>,
     pg_pool: Option<&sqlx::PgPool>,
     card_id: &str,
 ) -> bool {
@@ -134,7 +119,7 @@ pub(super) fn record_true_negative_if_pass_with_backends(
 /// which is the pass/approved dispatch with empty items. On reopen we look for the
 /// most recent review dispatch that actually reported findings (non-empty items array)
 /// to carry those categories forward into the FN record.
-pub fn correct_tn_to_fn_on_reopen(_db: Option<&Db>, pg_pool: Option<&sqlx::PgPool>, card_id: &str) {
+pub fn correct_tn_to_fn_on_reopen(pg_pool: Option<&sqlx::PgPool>, card_id: &str) {
     if let Some(pool) = pg_pool {
         let card_id = card_id.to_string();
         let log_card_id = card_id.clone();

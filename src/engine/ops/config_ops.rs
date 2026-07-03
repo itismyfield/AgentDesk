@@ -3,16 +3,11 @@ use sqlx::PgPool;
 
 // ── Config ops ───────────────────────────────────────────────────
 
-pub(super) fn register_config_ops<'js>(
-    ctx: &Ctx<'js>,
-    db: Option<crate::db::Db>,
-    pg_pool: Option<PgPool>,
-) -> JsResult<()> {
+pub(super) fn register_config_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let config_obj = Object::new(ctx.clone())?;
 
     // __config_get_raw(key) → JSON string: "null" or "\"value\""
-    let db_c = db;
     let pg_c = pg_pool;
     config_obj.set(
         "__get_raw",
@@ -22,7 +17,6 @@ pub(super) fn register_config_ops<'js>(
                 if let Some(pool) = pg_c.as_ref() {
                     return config_get_raw_pg(pool, &key);
                 }
-                let _ = &db_c;
                 "null".to_string()
             }),
         )?,

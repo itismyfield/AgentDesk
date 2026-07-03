@@ -14,7 +14,6 @@
 use sqlx::PgPool;
 
 use super::send_gate::send_message_with_backends;
-use crate::db::Db;
 use crate::services::discord::health::HealthRegistry;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -66,7 +65,6 @@ pub(crate) fn parse_send_to_agent_body(
 
 pub async fn handle_send_to_agent(
     registry: &HealthRegistry,
-    sqlite: Option<&Db>,
     pg_pool: Option<&PgPool>,
     body: &str,
 ) -> (&'static str, String) {
@@ -83,7 +81,6 @@ pub async fn handle_send_to_agent(
     let target = format!("agent:{}", request.role_id);
     send_message_with_backends(
         registry,
-        sqlite,
         pg_pool,
         &target,
         &request.message,

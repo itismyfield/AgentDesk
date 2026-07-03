@@ -1450,11 +1450,10 @@ pub async fn send_handler(
     let body_str = String::from_utf8_lossy(&body);
     let caller_class = discord_send_caller_class(peer_addr, &headers);
     let (status_str, response_body) = if caller_class == health::SendCallerClass::LoopbackInternal {
-        health::handle_send(registry, None, state.pg_pool_ref(), &body_str).await
+        health::handle_send(registry, state.pg_pool_ref(), &body_str).await
     } else {
         crate::services::discord::outbound::send_api::handle_send_with_caller(
             registry,
-            None,
             state.pg_pool_ref(),
             &body_str,
             caller_class,
@@ -1601,7 +1600,6 @@ pub async fn send_to_agent_handler(
     let (status_str, response_body) =
         crate::services::discord::outbound::send_to_agent::handle_send_to_agent(
             registry,
-            None,
             state.pg_pool_ref(),
             &body_str,
         )

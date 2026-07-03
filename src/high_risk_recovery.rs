@@ -188,7 +188,6 @@ impl RestartGuardTransport {
 impl DispatchTransport for RestartGuardTransport {
     async fn send_dispatch(
         &self,
-        _db: Option<crate::db::Db>,
         _agent_id: String,
         _title: String,
         _card_id: String,
@@ -206,7 +205,6 @@ impl DispatchTransport for RestartGuardTransport {
 
     async fn send_review_followup(
         &self,
-        _db: Option<crate::db::Db>,
         _review_dispatch_id: String,
         _card_id: String,
         _channel_id_num: u64,
@@ -225,14 +223,12 @@ struct RestartGuardNotifier {
 impl OutboxNotifier for RestartGuardNotifier {
     async fn notify_dispatch(
         &self,
-        _db: Option<crate::db::Db>,
         agent_id: String,
         title: String,
         card_id: String,
         dispatch_id: String,
     ) -> Result<DispatchNotifyDeliveryResult, String> {
         send_dispatch_with_delivery_guard(
-            None,
             Some(&self.pool),
             &agent_id,
             &title,
@@ -243,19 +239,11 @@ impl OutboxNotifier for RestartGuardNotifier {
         .await
     }
 
-    async fn handle_followup(
-        &self,
-        _db: Option<crate::db::Db>,
-        _dispatch_id: String,
-    ) -> Result<(), String> {
+    async fn handle_followup(&self, _dispatch_id: String) -> Result<(), String> {
         Ok(())
     }
 
-    async fn sync_status_reaction(
-        &self,
-        _db: Option<crate::db::Db>,
-        _dispatch_id: String,
-    ) -> Result<(), String> {
+    async fn sync_status_reaction(&self, _dispatch_id: String) -> Result<(), String> {
         Ok(())
     }
 }
@@ -365,10 +353,9 @@ async fn boot_reconcile_pg_resets_stale_runtime_rows() {
     .await
     .expect("seed valid auto queue entry");
 
-    let stats =
-        crate::reconcile::reconcile_boot_runtime(None, &engine, Some(&pool), "test-instance")
-            .await
-            .expect("pg boot reconcile succeeds");
+    let stats = crate::reconcile::reconcile_boot_runtime(&engine, Some(&pool), "test-instance")
+        .await
+        .expect("pg boot reconcile succeeds");
 
     assert_eq!(stats.stale_processing_outbox_reset, 1);
     assert_eq!(stats.stale_dispatch_reservations_cleared, 1);
@@ -506,10 +493,9 @@ async fn restart_recovery_does_not_repost_prior_typed_dispatch_delivery() {
     .await
     .expect("seed prior typed sent delivery");
 
-    let stats =
-        crate::reconcile::reconcile_boot_runtime(None, &engine, Some(&pool), "old-dcserver")
-            .await
-            .expect("pg boot reconcile succeeds");
+    let stats = crate::reconcile::reconcile_boot_runtime(&engine, Some(&pool), "old-dcserver")
+        .await
+        .expect("pg boot reconcile succeeds");
     assert_eq!(stats.stale_processing_outbox_reset, 1);
     let (recovered_status, recovered_claim_owner): (String, Option<String>) = sqlx::query_as(
         "SELECT status, claim_owner
@@ -532,7 +518,7 @@ async fn restart_recovery_does_not_repost_prior_typed_dispatch_delivery() {
         transport: transport.clone(),
     };
     let processed =
-        process_outbox_batch_with_pg(None, Some(&pool), &notifier, Some("restart-test")).await;
+        process_outbox_batch_with_pg(Some(&pool), &notifier, Some("restart-test")).await;
     assert_eq!(processed, 1);
     assert_eq!(
         transport.post_count(),
@@ -925,10 +911,9 @@ async fn boot_reconcile_pg_refires_missing_review_dispatch() {
     .await
     .expect("seed completed implementation dispatch");
 
-    let stats =
-        crate::reconcile::reconcile_boot_runtime(None, &engine, Some(&pool), "test-instance")
-            .await
-            .expect("pg boot reconcile succeeds");
+    let stats = crate::reconcile::reconcile_boot_runtime(&engine, Some(&pool), "test-instance")
+        .await
+        .expect("pg boot reconcile succeeds");
 
     assert_eq!(
         stats.missing_review_dispatches_refired, 1,
@@ -1139,10 +1124,9 @@ async fn completed_queue_review_drift_reconcile_promotes_only_stale_done_entries
     .await
     .expect("seed active implementation dispatch");
 
-    let recovered =
-        crate::reconcile::reconcile_completed_queue_review_drift_pg(&pool, None, &engine)
-            .await
-            .expect("review drift reconcile succeeds");
+    let recovered = crate::reconcile::reconcile_completed_queue_review_drift_pg(&pool, &engine)
+        .await
+        .expect("review drift reconcile succeeds");
     assert_eq!(recovered, 1);
 
     let statuses: Vec<(String, String)> = sqlx::query_as(

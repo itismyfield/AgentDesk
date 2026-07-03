@@ -350,7 +350,6 @@ fn dispatch_set_status_raw_pg(
 ) -> String {
     let allowed_from: &[&str] = &["pending", "dispatched"];
     match crate::dispatch::set_dispatch_status_with_backends(
-        None,
         Some(pool),
         dispatch_id,
         to_status,

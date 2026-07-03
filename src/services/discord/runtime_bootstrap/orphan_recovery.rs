@@ -8,7 +8,6 @@ pub(super) fn spawn_startup_thread_map_validation(pg_pool: Option<sqlx::PgPool>,
     tokio::spawn(async move {
         let (checked, cleared) =
             crate::services::dispatches::discord_delivery::validate_channel_thread_maps_on_startup_with_backends(
-                None,
                 pg_pool.as_ref(),
                 &token,
             )

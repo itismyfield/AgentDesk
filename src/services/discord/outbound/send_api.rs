@@ -10,29 +10,19 @@ use super::manual_delivery::{
     deliver_manual_dm_notification, is_reserved_voice_correlation_namespace,
 };
 use super::send_gate::{SendCallerClass, send_message_with_backends_and_delivery_id_for_caller};
-use crate::db::Db;
 use crate::services::discord::health::{HealthRegistry, resolve_bot_http};
 use crate::services::discord::outbound::shared_outbound_deduper;
 
 pub async fn handle_send<'a>(
     registry: &HealthRegistry,
-    sqlite: Option<&Db>,
     pg_pool: Option<&PgPool>,
     body: &str,
 ) -> (&'a str, String) {
-    handle_send_with_caller(
-        registry,
-        sqlite,
-        pg_pool,
-        body,
-        SendCallerClass::LoopbackInternal,
-    )
-    .await
+    handle_send_with_caller(registry, pg_pool, body, SendCallerClass::LoopbackInternal).await
 }
 
 pub async fn handle_send_with_caller<'a>(
     registry: &HealthRegistry,
-    sqlite: Option<&Db>,
     pg_pool: Option<&PgPool>,
     body: &str,
     caller_class: SendCallerClass,
@@ -98,7 +88,6 @@ pub async fn handle_send_with_caller<'a>(
 
     send_message_with_backends_and_delivery_id_for_caller(
         registry,
-        sqlite,
         pg_pool,
         &target,
         content,
@@ -474,8 +463,7 @@ mod handle_send_contract_tests {
         })
         .to_string();
 
-        let (status, body) =
-            handle_send_with_caller(&registry, None, None, &body, caller_class).await;
+        let (status, body) = handle_send_with_caller(&registry, None, &body, caller_class).await;
         assert_eq!(status, expected_status);
         let body: serde_json::Value = serde_json::from_str(&body).unwrap(); // agentdesk-audit: allow-unwrap — test response JSON should parse
         assert_eq!(body["ok"], false);
@@ -485,7 +473,7 @@ mod handle_send_contract_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn invalid_json_body_is_a_400_with_pinned_body() {
         let registry = HealthRegistry::new();
-        let (status, body) = handle_send(&registry, None, None, "not json").await;
+        let (status, body) = handle_send(&registry, None, "not json").await;
         assert_eq!(status, "400 Bad Request");
         assert_eq!(body, r#"{"ok":false,"error":"invalid JSON"}"#);
     }
@@ -494,8 +482,7 @@ mod handle_send_contract_tests {
     async fn missing_content_is_a_400_with_pinned_body() {
         let _runtime_root = TestRuntimeRoot::new();
         let registry = HealthRegistry::new();
-        let (status, body) =
-            handle_send(&registry, None, None, r#"{"target":"channel:123"}"#).await;
+        let (status, body) = handle_send(&registry, None, r#"{"target":"channel:123"}"#).await;
         assert_eq!(status, "400 Bad Request");
         assert_eq!(body, r#"{"ok":false,"error":"content is required"}"#);
     }
@@ -504,7 +491,7 @@ mod handle_send_contract_tests {
     async fn missing_target_is_a_400_invalid_target() {
         let _runtime_root = TestRuntimeRoot::new();
         let registry = HealthRegistry::new();
-        let (status, body) = handle_send(&registry, None, None, r#"{"content":"hi"}"#).await;
+        let (status, body) = handle_send(&registry, None, r#"{"content":"hi"}"#).await;
         assert_eq!(status, "400 Bad Request");
         let body: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(body["ok"], false);
@@ -524,13 +511,11 @@ mod handle_send_contract_tests {
         let (fallback_status, fallback_body) = handle_send(
             &registry,
             None,
-            None,
             r#"{"channel_id":"999999999999999999","content":"hi","source":"system"}"#,
         )
         .await;
         let (explicit_status, explicit_body) = handle_send(
             &registry,
-            None,
             None,
             r#"{"target":"channel:999999999999999999","content":"hi","source":"system"}"#,
         )

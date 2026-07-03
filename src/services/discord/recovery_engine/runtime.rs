@@ -221,7 +221,7 @@ mod reregister_ledger_reseed_tests {
     // the row — so the live pane auto-reconciles WITHOUT a new user turn.
     #[tokio::test(flavor = "current_thread")]
     async fn reattach_reseeds_watcher_owned_ledger_entry() {
-        let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+        let shared = super::super::make_shared_data_for_tests_with_storage(None);
         let ch = ChannelId::new(52_481);
         let state = active_turn_state(ch.get(), 9001);
 
@@ -258,7 +258,7 @@ mod reregister_ledger_reseed_tests {
     // finalized turn. The turn stays a single live Watcher-pending entry.
     #[tokio::test(flavor = "current_thread")]
     async fn repeated_reattach_is_idempotent_single_watcher_entry() {
-        let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+        let shared = super::super::make_shared_data_for_tests_with_storage(None);
         let ch = ChannelId::new(52_482);
         let state = active_turn_state(ch.get(), 9101);
 
@@ -283,7 +283,7 @@ mod reregister_ledger_reseed_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn zero_user_msg_id_reseeds_with_finalizer_turn_id() {
-        let shared = super::super::make_shared_data_for_tests_with_storage(None, None);
+        let shared = super::super::make_shared_data_for_tests_with_storage(None);
         let ch = ChannelId::new(52_483);
         let mut state = active_turn_state(ch.get(), 0);
         state.user_msg_id = 0;

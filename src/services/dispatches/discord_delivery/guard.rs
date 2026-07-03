@@ -95,7 +95,6 @@ const DISPATCH_DELIVERY_RESERVATION_TTL_SECS: i64 = 300;
 const DISPATCH_SEND_DEADLINE_SECS: u64 = 120;
 
 pub(crate) async fn send_dispatch_with_delivery_guard<T: DispatchTransport>(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     agent_id: &str,
     title: &str,
@@ -110,7 +109,6 @@ pub(crate) async fn send_dispatch_with_delivery_guard<T: DispatchTransport>(
 
     let send_result = send_dispatch_within_deadline(
         transport,
-        db.cloned(),
         agent_id.to_string(),
         title.to_string(),
         card_id.to_string(),
@@ -161,7 +159,6 @@ pub(crate) async fn send_dispatch_with_delivery_guard<T: DispatchTransport>(
 /// from a non-delivery).
 async fn send_dispatch_within_deadline<T: DispatchTransport>(
     transport: &T,
-    db: Option<crate::db::Db>,
     agent_id: String,
     title: String,
     card_id: String,
@@ -170,7 +167,7 @@ async fn send_dispatch_within_deadline<T: DispatchTransport>(
 ) -> Result<DispatchNotifyDeliveryResult, String> {
     match tokio::time::timeout(
         deadline,
-        transport.send_dispatch(db, agent_id, title, card_id, dispatch_id.to_string()),
+        transport.send_dispatch(agent_id, title, card_id, dispatch_id.to_string()),
     )
     .await
     {
@@ -726,7 +723,6 @@ mod tests {
     impl DispatchTransport for RecordingDispatchTransport {
         async fn send_dispatch(
             &self,
-            _db: Option<crate::db::Db>,
             _agent_id: String,
             _title: String,
             _card_id: String,
@@ -754,7 +750,6 @@ mod tests {
 
         async fn send_review_followup(
             &self,
-            _db: Option<crate::db::Db>,
             _review_dispatch_id: String,
             _card_id: String,
             _channel_id_num: u64,
@@ -1146,7 +1141,6 @@ mod tests {
             RecordingDispatchTransport::new("1500000000000000010", "1500000000000000011")
                 .with_reservation_assertion(pool.clone());
         let result = send_dispatch_with_delivery_guard(
-            None,
             Some(&pool),
             "agent-1",
             "Expired reservation",
@@ -1204,7 +1198,6 @@ mod tests {
         let transport =
             RecordingDispatchTransport::new("1500000000000000020", "1500000000000000021");
         let first = send_dispatch_with_delivery_guard(
-            None,
             Some(&pool),
             "agent-1",
             "Duplicate replay",
@@ -1217,7 +1210,6 @@ mod tests {
         assert_eq!(first.status, "success");
 
         let second = send_dispatch_with_delivery_guard(
-            None,
             Some(&pool),
             "agent-1",
             "Duplicate replay",
@@ -1424,7 +1416,6 @@ mod tests {
         //    transport's success (it must not re-drive a delivered message).
         block_typed_sent_finalize(&pool).await;
         let first = send_dispatch_with_delivery_guard(
-            None,
             Some(&pool),
             "agent-1",
             "Worker path first send",
@@ -1477,7 +1468,6 @@ mod tests {
         // 4. Stale-outbox reclaim re-drives the SAME entry point. The guard must
         //    short-circuit as a duplicate — the transport call count stays at ONE.
         let redrive = send_dispatch_with_delivery_guard(
-            None,
             Some(&pool),
             "agent-1",
             "Worker path reclaim redrive",
@@ -1579,7 +1569,6 @@ mod tests {
             .with_send_delay(Duration::from_secs(30));
         let timed_out = send_dispatch_within_deadline(
             &slow,
-            None,
             "agent-1".to_string(),
             "Slow send".to_string(),
             "card-slow-send".to_string(),
@@ -1596,7 +1585,6 @@ mod tests {
         let fast = RecordingDispatchTransport::new("1500000000000000062", "1500000000000000063");
         let ok = send_dispatch_within_deadline(
             &fast,
-            None,
             "agent-1".to_string(),
             "Fast send".to_string(),
             "card-fast-send".to_string(),

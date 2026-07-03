@@ -172,7 +172,6 @@ pub(super) fn register_runtime_ops<'js>(
             ctx.clone(),
             move |card_id: String, terminal_status: String| -> String {
                 crate::services::retrospectives::record_card_retrospective_json(
-                    None,
                     pg_for_retrospective.as_ref(),
                     &card_id,
                     &terminal_status,

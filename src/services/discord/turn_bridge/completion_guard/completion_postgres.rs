@@ -513,7 +513,6 @@ pub(in crate::services::discord) async fn queue_dispatch_followup_with_handles(
 }
 
 pub(super) async fn store_reconcile_marker_with_handles(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     dispatch_id: &str,
     source: &str,
@@ -542,8 +541,6 @@ pub(super) async fn store_reconcile_marker_with_handles(
         }
         return true;
     }
-
-    let _ = db;
 
     false
 }

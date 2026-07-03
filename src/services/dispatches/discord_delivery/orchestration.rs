@@ -40,14 +40,9 @@ fn shared_discord_http_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(reqwest::Client::new)
 }
 
-fn resolve_dispatch_thread_owner_user_id(
-    db: Option<&crate::db::Db>,
-    pg_pool: Option<&PgPool>,
-) -> Option<u64> {
+fn resolve_dispatch_thread_owner_user_id(pg_pool: Option<&PgPool>) -> Option<u64> {
     let config = crate::config::load_graceful();
-    crate::services::escalation_settings::effective_owner_user_id_with_backends(
-        db, pg_pool, &config,
-    )
+    crate::services::escalation_settings::effective_owner_user_id_with_backends(pg_pool, &config)
 }
 
 fn context_slot_index(dispatch_context: Option<&serde_json::Value>) -> Option<i64> {
@@ -303,14 +298,11 @@ pub(crate) struct HttpDispatchTransport {
 }
 
 impl HttpDispatchTransport {
-    pub(crate) fn from_runtime_with_pg(
-        db: Option<&crate::db::Db>,
-        pg_pool: Option<PgPool>,
-    ) -> Self {
+    pub(crate) fn from_runtime_with_pg(pg_pool: Option<PgPool>) -> Self {
         Self {
             announce_bot_token: crate::credential::read_bot_token("announce"),
             discord_api_base: discord_api_base_url(),
-            thread_owner_user_id: resolve_dispatch_thread_owner_user_id(db, pg_pool.as_ref()),
+            thread_owner_user_id: resolve_dispatch_thread_owner_user_id(pg_pool.as_ref()),
             pg_pool,
         }
     }
@@ -323,7 +315,6 @@ impl DispatchTransport for HttpDispatchTransport {
 
     fn send_dispatch(
         &self,
-        db: Option<crate::db::Db>,
         agent_id: String,
         title: String,
         card_id: String,
@@ -342,7 +333,6 @@ impl DispatchTransport for HttpDispatchTransport {
                 }
             };
             send_dispatch_to_discord_inner_with_context_pg(
-                db.as_ref(),
                 &agent_id,
                 &title,
                 &card_id,
@@ -358,7 +348,6 @@ impl DispatchTransport for HttpDispatchTransport {
 
     fn send_review_followup(
         &self,
-        db: Option<crate::db::Db>,
         review_dispatch_id: String,
         card_id: String,
         channel_id_num: u64,
@@ -372,7 +361,6 @@ impl DispatchTransport for HttpDispatchTransport {
                 .as_deref()
                 .ok_or_else(|| "no announce bot token".to_string())?;
             send_review_result_message_via_http(
-                db.as_ref(),
                 transport.pg_pool.as_ref(),
                 &review_dispatch_id,
                 &card_id,
@@ -415,7 +403,6 @@ async fn persist_dispatch_message_target_on_pg(
 /// single source of truth. The helper signature is unchanged so callers
 /// don't need to re-thread http client/token availability through.
 pub(crate) async fn persist_dispatch_message_target_and_add_pending_reaction_with_pg(
-    _db: Option<&crate::db::Db>,
     _client: &reqwest::Client,
     _token: &str,
     _base_url: &str,
@@ -451,12 +438,10 @@ pub(crate) async fn persist_dispatch_message_target_and_add_pending_reaction_wit
 /// `pending` / `dispatched` are never enqueued — command bot's ⏳ is the
 /// single ⏳ source.
 pub(crate) async fn sync_dispatch_status_reaction_with_pg(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     dispatch_id: &str,
 ) -> Result<(), String> {
-    let Some((status, context)) = load_dispatch_reaction_row(db, pg_pool, dispatch_id).await?
-    else {
+    let Some((status, context)) = load_dispatch_reaction_row(pg_pool, dispatch_id).await? else {
         return Ok(());
     };
     let target = parse_dispatch_message_target(context.as_deref());
@@ -486,7 +471,6 @@ pub(crate) async fn sync_dispatch_status_reaction_with_pg(
 }
 
 async fn load_dispatch_reaction_row(
-    _db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     dispatch_id: &str,
 ) -> Result<Option<(String, Option<String>)>, String> {
@@ -606,28 +590,18 @@ async fn latest_work_dispatch_thread_pg(
 // so the route layer no longer holds raw SQL strings.
 
 pub(crate) async fn send_dispatch_to_discord_with_pg_result(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     agent_id: &str,
     title: &str,
     card_id: &str,
     dispatch_id: &str,
 ) -> Result<DispatchNotifyDeliveryResult, String> {
-    let transport = HttpDispatchTransport::from_runtime_with_pg(db, pg_pool.cloned());
-    send_dispatch_with_delivery_guard(
-        db,
-        pg_pool,
-        agent_id,
-        title,
-        card_id,
-        dispatch_id,
-        &transport,
-    )
-    .await
+    let transport = HttpDispatchTransport::from_runtime_with_pg(pg_pool.cloned());
+    send_dispatch_with_delivery_guard(pg_pool, agent_id, title, card_id, dispatch_id, &transport)
+        .await
 }
 
 async fn send_dispatch_to_discord_inner_with_context_pg(
-    db: Option<&crate::db::Db>,
     agent_id: &str,
     title: &str,
     card_id: &str,
@@ -744,7 +718,6 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
         .await
         .map_err(|error| error.to_string())?;
         persist_dispatch_message_target_and_add_pending_reaction_with_pg(
-            db,
             &client,
             token,
             &discord_api_base,
@@ -847,7 +820,6 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
             &minimal_message,
             dispatch_id,
             card_id,
-            db,
             Some(pool),
         )
         .await
@@ -990,7 +962,6 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
                                 .await?;
                             }
                             persist_dispatch_message_target_and_add_pending_reaction_with_pg(
-                                db,
                                 &client,
                                 token,
                                 &discord_api_base,
@@ -1063,7 +1034,6 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
             {
                 Ok(outcome) => {
                     persist_dispatch_message_target_and_add_pending_reaction_with_pg(
-                        db,
                         &client,
                         token,
                         &discord_api_base,
@@ -1094,7 +1064,6 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
 }
 
 async fn resolve_review_followup_target_channel(
-    _db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     client: &reqwest::Client,
     token: &str,
@@ -1213,14 +1182,12 @@ async fn resolve_review_followup_target_channel(
 /// pass/unknown verdicts send an immediate message; improve/rework/reject
 /// create a review-decision dispatch whose notify row is delivered by outbox.
 pub(crate) async fn send_review_result_to_primary_with_transport<T: DispatchTransport>(
-    db: Option<&crate::db::Db>,
     card_id: &str,
     review_dispatch_id: &str,
     verdict: &str,
     transport: &T,
 ) -> Result<(), String> {
     send_review_result_to_primary_with_context_and_transport(
-        db,
         card_id,
         review_dispatch_id,
         verdict,
@@ -1234,14 +1201,12 @@ pub(crate) async fn send_review_result_to_primary_with_transport<T: DispatchTran
 pub(crate) async fn send_review_result_to_primary_for_preflight_harness_with_transport<
     T: DispatchTransport,
 >(
-    db: Option<&crate::db::Db>,
     card_id: &str,
     review_dispatch_id: &str,
     verdict: &str,
     transport: &T,
 ) -> Result<(), String> {
     send_review_result_to_primary_with_context_and_transport(
-        db,
         card_id,
         review_dispatch_id,
         verdict,
@@ -1254,7 +1219,6 @@ pub(crate) async fn send_review_result_to_primary_for_preflight_harness_with_tra
 }
 
 async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTransport>(
-    db: Option<&crate::db::Db>,
     card_id: &str,
     review_dispatch_id: &str,
     verdict: &str,
@@ -1333,7 +1297,6 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
             decision_context.insert("target_repo".to_string(), serde_json::json!(target_repo));
         }
         return match create_review_decision_followup_dispatch(
-            db,
             Some(pool),
             card_id,
             &agent_id,
@@ -1349,8 +1312,7 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
                     "last_verdict": verdict,
                 })
                 .to_string();
-                let _ =
-                    crate::engine::ops::review_state_sync_with_backends(db, Some(pool), &payload);
+                let _ = crate::engine::ops::review_state_sync_with_backends(Some(pool), &payload);
                 tracing::info!(
                     "[review-followup] enqueued review-decision dispatch {} for card {}",
                     id,
@@ -1424,7 +1386,6 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
 
     transport
         .send_review_followup(
-            db.cloned(),
             review_dispatch_id.to_string(),
             card_id.to_string(),
             channel_id_num,
@@ -1435,7 +1396,6 @@ async fn send_review_result_to_primary_with_context_and_transport<T: DispatchTra
 }
 
 fn create_review_decision_followup_dispatch(
-    _db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     card_id: &str,
     agent_id: &str,
@@ -1480,7 +1440,6 @@ fn create_review_decision_followup_dispatch(
 }
 
 async fn send_review_result_message_via_http(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     review_dispatch_id: &str,
     card_id: &str,
@@ -1503,7 +1462,6 @@ async fn send_review_result_message_via_http(
 
     let client = reqwest::Client::new();
     let target_channel = resolve_review_followup_target_channel(
-        db,
         pg_pool,
         &client,
         token,

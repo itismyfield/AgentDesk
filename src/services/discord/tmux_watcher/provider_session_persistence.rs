@@ -75,7 +75,6 @@ pub(super) async fn persist_watcher_provider_session_id(
     // (hook_session already sets last_heartbeat; this adds the audit trail and
     // covers any divergent/legacy session_key the upsert did not reach.)
     touch_session_activity(
-        None::<&crate::db::Db>,
         shared.pg_pool.as_ref(),
         &shared.token_hash,
         provider,

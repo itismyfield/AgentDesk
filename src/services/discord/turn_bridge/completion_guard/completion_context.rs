@@ -130,19 +130,7 @@ fn parse_completion_hint_context(
     }
 }
 
-type LegacyCompletionHintColumns = (Option<i64>, Option<String>, Option<String>, Option<String>);
-
-// Production runs PostgreSQL-only (#3035 Phase 0): the legacy sqlite handle is
-// always `None`, so the prod build has no DB fallback after the PG path.
-fn lookup_dispatch_completion_hints_legacy_fallback(
-    _db: Option<&crate::db::Db>,
-    _dispatch_id: &str,
-) -> LegacyCompletionHintColumns {
-    (None, None, None, None)
-}
-
 pub(super) fn lookup_dispatch_completion_hints(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     dispatch_id: &str,
 ) -> DispatchCompletionHints {
@@ -224,14 +212,11 @@ pub(super) fn lookup_dispatch_completion_hints(
         }
     }
 
-    let (issue_number, dispatch_created_at, target_repo, baseline_commit) =
-        lookup_dispatch_completion_hints_legacy_fallback(db, dispatch_id);
-
     DispatchCompletionHints {
-        issue_number,
-        dispatch_created_at,
-        target_repo,
-        baseline_commit,
+        issue_number: None,
+        dispatch_created_at: None,
+        target_repo: None,
+        baseline_commit: None,
         output_commit: None,
         output_commit_repo_dir: None,
     }
@@ -385,7 +370,6 @@ pub(super) fn completion_result_with_context(
 }
 
 pub(crate) fn build_work_dispatch_completion_result(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     dispatch_id: &str,
     source: &str,
@@ -393,7 +377,7 @@ pub(crate) fn build_work_dispatch_completion_result(
     adk_cwd: Option<&str>,
     turn_output: Option<&str>,
 ) -> serde_json::Value {
-    let mut hints = lookup_dispatch_completion_hints(db, pg_pool, dispatch_id);
+    let mut hints = lookup_dispatch_completion_hints(pg_pool, dispatch_id);
     let repo_dirs = completion_repo_dirs(adk_cwd, &hints);
     if let Some((repo_dir, output_commit)) =
         turn_output.and_then(|output| extract_output_commit_from_repo_dirs(output, &repo_dirs))

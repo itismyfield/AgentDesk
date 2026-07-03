@@ -490,7 +490,7 @@ mod tests {
         // #3041 P1-1: the commit handler now takes provider/session/shared so
         // a `Delivered` commit can advance the channel watermark. Supply a
         // throwaway `SharedData`; the advance targets the cell's channel (42).
-        let shared = super::super::super::make_shared_data_for_tests_with_storage(None, None);
+        let shared = super::super::super::make_shared_data_for_tests_with_storage(None);
         assert!(handle_commit_delivery(
             &c,
             turn(),
