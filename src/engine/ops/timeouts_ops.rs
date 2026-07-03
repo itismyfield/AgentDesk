@@ -1,7 +1,12 @@
+use crate::engine::transition::{
+    CardState, GateSnapshot, TransitionContext, TransitionEvent, TransitionIntent,
+    TransitionOutcome, decide_transition,
+};
+use crate::pipeline::PipelineConfig;
 use chrono::{DateTime, Utc};
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::{PgPool, Row as SqlxRow};
 
 // ── Timeout policy typed facade (#3733) ─────────────────────────────
@@ -91,6 +96,13 @@ pub(super) fn register_timeouts_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>
         })?,
     )?;
 
+    obj.set(
+        "__previewTimeoutDecisionRaw",
+        Function::new(ctx.clone(), move |payload_json: String| -> String {
+            preview_timeout_decision_raw(&payload_json)
+        })?,
+    )?;
+
     ad.set("timeouts", obj)?;
 
     ctx.eval::<(), _>(
@@ -131,6 +143,9 @@ pub(super) fn register_timeouts_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>
             };
             agentdesk.timeouts.cleanupDeadlockHistoryBefore = function(cutoffMs) {
                 return unwrap(JSON.parse(agentdesk.timeouts.__cleanupDeadlockHistoryBeforeRaw(cutoffMs || 0)));
+            };
+            agentdesk.timeouts.previewTimeoutDecision = function(payload) {
+                return unwrap(JSON.parse(agentdesk.timeouts.__previewTimeoutDecisionRaw(JSON.stringify(payload || {}))));
             };
         })();
         "#,
@@ -177,6 +192,154 @@ fn format_ts(value: Option<DateTime<Utc>>) -> serde_json::Value {
         Some(value) => json!(value.format("%Y-%m-%d %H:%M:%S").to_string()),
         None => serde_json::Value::Null,
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct TimeoutDecisionPreviewPayload {
+    card_id: Option<String>,
+    status: Option<String>,
+    state: Option<String>,
+    review_status: Option<String>,
+    latest_dispatch_id: Option<String>,
+    attempt: Option<u32>,
+    pipeline: Option<PipelineConfig>,
+}
+
+fn preview_timeout_decision_raw(payload_json: &str) -> String {
+    match preview_timeout_decision(payload_json) {
+        Ok(value) => value.to_string(),
+        Err(error) => json!({ "error": error }).to_string(),
+    }
+}
+
+fn preview_timeout_decision(payload_json: &str) -> Result<Value, String> {
+    let payload: TimeoutDecisionPreviewPayload = serde_json::from_str(payload_json)
+        .map_err(|error| format!("parse timeout decision preview payload: {error}"))?;
+    let attempt = payload.attempt.unwrap_or(0);
+    let card_id = match required_preview_field(payload.card_id, "card_id", attempt) {
+        Ok(value) => value,
+        Err(value) => return Ok(value),
+    };
+    let status = match required_preview_field(payload.status, "status", attempt) {
+        Ok(value) => value,
+        Err(value) => return Ok(value),
+    };
+    let state = match required_preview_field(payload.state, "state", attempt) {
+        Ok(value) => value,
+        Err(value) => return Ok(value),
+    };
+    let Some(pipeline) = payload.pipeline else {
+        return Ok(incomparable_timeout_preview("pipeline missing", attempt));
+    };
+
+    let ctx = TransitionContext {
+        card: CardState {
+            id: card_id,
+            status,
+            review_status: payload.review_status,
+            latest_dispatch_id: payload.latest_dispatch_id,
+        },
+        pipeline,
+        gates: GateSnapshot::default(),
+    };
+    let decision = decide_transition(&ctx, &TransitionEvent::TimeoutExpired { state, attempt });
+    Ok(timeout_preview_json(&decision, attempt))
+}
+
+fn required_preview_field(
+    value: Option<String>,
+    field: &str,
+    attempt: u32,
+) -> Result<String, Value> {
+    match value.map(|value| value.trim().to_string()) {
+        Some(value) if !value.is_empty() => Ok(value),
+        _ => Err(incomparable_timeout_preview(
+            &format!("{field} missing"),
+            attempt,
+        )),
+    }
+}
+
+fn incomparable_timeout_preview(reason: &str, attempt: u32) -> Value {
+    json!({
+        "would_retry": false,
+        "would_exhaust": false,
+        "resolution": "incomparable",
+        "attempt": attempt,
+        "delay": null,
+        "incomparable": true,
+        "reason": reason,
+    })
+}
+
+fn timeout_preview_json(
+    decision: &crate::engine::transition::TransitionDecision,
+    attempt: u32,
+) -> Value {
+    let mut scheduled_attempt = None;
+    let mut delay = None;
+    let mut target_status = None;
+    let mut saw_audit = false;
+
+    for intent in &decision.intents {
+        match intent {
+            TransitionIntent::ScheduleStageRetry {
+                attempt,
+                delay_seconds,
+                ..
+            } => {
+                scheduled_attempt = Some(*attempt);
+                delay = Some(*delay_seconds);
+            }
+            TransitionIntent::UpdateStatus { to, .. } => {
+                target_status = Some(to.clone());
+            }
+            TransitionIntent::AuditLog { .. } => {
+                saw_audit = true;
+            }
+            _ => {}
+        }
+    }
+
+    let would_retry = scheduled_attempt.is_some();
+    let would_exhaust = !would_retry
+        && matches!(decision.outcome, TransitionOutcome::Allowed)
+        && !decision.intents.is_empty();
+    let resolution = if would_retry {
+        "retry".to_string()
+    } else if target_status.is_some() {
+        "transition".to_string()
+    } else if would_exhaust && saw_audit {
+        "audit".to_string()
+    } else if would_exhaust {
+        "exhaust".to_string()
+    } else {
+        match &decision.outcome {
+            TransitionOutcome::Allowed => "allowed".to_string(),
+            TransitionOutcome::NoOp => "noop".to_string(),
+            TransitionOutcome::Blocked(_) => "blocked".to_string(),
+        }
+    };
+    let blocked_reason = match &decision.outcome {
+        TransitionOutcome::Blocked(reason) => Some(reason.clone()),
+        _ => None,
+    };
+
+    json!({
+        "would_retry": would_retry,
+        "would_exhaust": would_exhaust,
+        "resolution": resolution,
+        "attempt": attempt,
+        "next_attempt": scheduled_attempt,
+        "delay": delay,
+        "target_status": target_status,
+        "outcome": match &decision.outcome {
+            TransitionOutcome::Allowed => "allowed",
+            TransitionOutcome::NoOp => "noop",
+            TransitionOutcome::Blocked(_) => "blocked",
+        },
+        "blocked_reason": blocked_reason,
+    })
 }
 
 fn clear_deadlock_counters_for_fresh_sessions_raw(
@@ -525,5 +688,85 @@ mod tests {
             valid_session_key(" provider:tmux ").unwrap(),
             "provider:tmux"
         );
+    }
+
+    #[test]
+    fn preview_timeout_decision_returns_dry_run_retry_shape() {
+        let payload = json!({
+            "card_id": "card-1",
+            "status": "in_progress",
+            "state": "in_progress",
+            "review_status": null,
+            "latest_dispatch_id": "dispatch-1",
+            "attempt": 0,
+            "pipeline": {
+                "name": "test",
+                "version": 1,
+                "states": [
+                    { "id": "in_progress", "label": "In Progress" },
+                    { "id": "escalated", "label": "Escalated" },
+                    { "id": "done", "label": "Done", "terminal": true }
+                ],
+                "transitions": [
+                    { "from": "in_progress", "to": "escalated", "type": "free" }
+                ],
+                "timeouts": {
+                    "in_progress": {
+                        "duration": "1m",
+                        "clock": "started_at",
+                        "max_retries": 2,
+                        "backoff": "exponential",
+                        "on_failure": "retry-with-backoff",
+                        "on_exhaust": "escalated",
+                        "on_exhaust_policy": "escalate"
+                    }
+                }
+            }
+        });
+
+        let raw = preview_timeout_decision_raw(&payload.to_string());
+        let parsed: Value = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(parsed["would_retry"], true);
+        assert_eq!(parsed["would_exhaust"], false);
+        assert_eq!(parsed["resolution"], "retry");
+        assert_eq!(parsed["attempt"], 0);
+        assert_eq!(parsed["next_attempt"], 1);
+        assert_eq!(parsed["delay"], 60);
+    }
+
+    #[test]
+    fn preview_timeout_decision_marks_missing_status_state_incomparable() {
+        let payload = json!({
+            "card_id": "card-retry-1",
+            "status": null,
+            "state": null,
+            "review_status": null,
+            "latest_dispatch_id": "dispatch-failed-1",
+            "attempt": 3,
+            "pipeline": {
+                "name": "test",
+                "version": 1,
+                "states": [
+                    { "id": "requested", "label": "Requested" },
+                    { "id": "in_progress", "label": "In Progress" },
+                    { "id": "done", "label": "Done", "terminal": true }
+                ],
+                "transitions": [
+                    { "from": "requested", "to": "in_progress", "type": "free" },
+                    { "from": "in_progress", "to": "done", "type": "free" }
+                ]
+            }
+        });
+
+        let parsed = preview_timeout_decision(&payload.to_string()).unwrap();
+
+        assert_eq!(parsed["would_retry"], false);
+        assert_eq!(parsed["would_exhaust"], false);
+        assert_eq!(parsed["resolution"], "incomparable");
+        assert_eq!(parsed["attempt"], 3);
+        assert_eq!(parsed["delay"], Value::Null);
+        assert_eq!(parsed["incomparable"], true);
+        assert_eq!(parsed["reason"], "status missing");
     }
 }

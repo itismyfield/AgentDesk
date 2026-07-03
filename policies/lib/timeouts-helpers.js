@@ -7,6 +7,66 @@ function sendDeadlockAlert(message) {
 // Shared constant used by sections [A] and [J]
 var MAX_DISPATCH_RETRIES = 10;
 
+function timeoutReducerDecisionLabel(preview) {
+  if (!preview) return "missing";
+  if (preview.incomparable) return "incomparable";
+  if (preview.would_retry) return "retry";
+  if (preview.would_exhaust) return "exhaust";
+  return preview.resolution || "unknown";
+}
+
+function emitTimeoutShadowLog(record) {
+  try {
+    agentdesk.log.info("[timeout_shadow] " + JSON.stringify(record));
+  } catch(_e) {}
+}
+
+function shadowTimeoutDecision(payload) {
+  var cardId = payload && payload.card_id ? payload.card_id : null;
+  var section = payload && payload.section ? payload.section : null;
+  var jsDecision = payload && payload.js_decision ? payload.js_decision : "unknown";
+  var record = {
+    target: "timeout_shadow",
+    card_id: cardId,
+    section: section,
+    js_decision: jsDecision,
+    reducer_decision: "error",
+    agree: false
+  };
+  try {
+    var previewPayload = {
+      card_id: cardId,
+      status: payload && Object.prototype.hasOwnProperty.call(payload, "status") ? payload.status : null,
+      state: payload && Object.prototype.hasOwnProperty.call(payload, "state") ? payload.state : null,
+      review_status: payload && Object.prototype.hasOwnProperty.call(payload, "review_status") ? payload.review_status : null,
+      latest_dispatch_id: payload && Object.prototype.hasOwnProperty.call(payload, "latest_dispatch_id") ? payload.latest_dispatch_id : null,
+      // Provisional for #3950 slice 1: dispatch retry_count is the shadow
+      // attempt until slice 2 defines durable card/state budget identity.
+      attempt: payload && Object.prototype.hasOwnProperty.call(payload, "attempt") ? payload.attempt : null,
+      pipeline: payload && Object.prototype.hasOwnProperty.call(payload, "pipeline") ? payload.pipeline : null
+    };
+    var preview = agentdesk.timeouts.previewTimeoutDecision(previewPayload);
+    var reducerDecision = timeoutReducerDecisionLabel(preview);
+    record.reducer_decision = reducerDecision;
+    record.agree = reducerDecision === jsDecision && !preview.incomparable;
+    record.reducer_resolution = preview.resolution || null;
+    record.reducer_attempt = Object.prototype.hasOwnProperty.call(preview, "attempt") ? preview.attempt : null;
+    record.reducer_delay = Object.prototype.hasOwnProperty.call(preview, "delay") ? preview.delay : null;
+    record.reducer_would_retry = !!preview.would_retry;
+    record.reducer_would_exhaust = !!preview.would_exhaust;
+    if (preview.incomparable) {
+      record.incomparable = true;
+      record.reason = preview.reason || null;
+    }
+    emitTimeoutShadowLog(record);
+  } catch(e) {
+    record.reducer_decision = "error";
+    record.incomparable = true;
+    record.error = String(e && e.message ? e.message : e);
+    emitTimeoutShadowLog(record);
+  }
+}
+
 // Helper: read timeout config as SQL interval string
 function getTimeoutInterval(key, fallbackMinutes) {
   var val = parseInt(agentdesk.config.get(key), 10);
@@ -327,6 +387,7 @@ function _flushPMDecisions() {
 module.exports = {
   sendDeadlockAlert: sendDeadlockAlert,
   MAX_DISPATCH_RETRIES: MAX_DISPATCH_RETRIES,
+  shadowTimeoutDecision: shadowTimeoutDecision,
   getTimeoutInterval: getTimeoutInterval,
   latestCardActivityExpr: latestCardActivityExpr,
   parseLocalTimestampMs: parseLocalTimestampMs,

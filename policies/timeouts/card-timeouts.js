@@ -3,6 +3,7 @@ var isSidePathDispatch = require("../lib/dispatch-side-path").isSidePathDispatch
 module.exports = function attachCardTimeouts(timeouts, helpers) {
   var sendDeadlockAlert = helpers.sendDeadlockAlert;
   var MAX_DISPATCH_RETRIES = helpers.MAX_DISPATCH_RETRIES;
+  var shadowTimeoutDecision = helpers.shadowTimeoutDecision;
   var getTimeoutInterval = helpers.getTimeoutInterval;
   var latestCardActivityExpr = helpers.latestCardActivityExpr;
   var parseLocalTimestampMs = helpers.parseLocalTimestampMs;
@@ -68,6 +69,18 @@ module.exports = function attachCardTimeouts(timeouts, helpers) {
             continue;
           }
         }
+
+        shadowTimeoutDecision({
+          section: "_section_A",
+          card_id: rc.id,
+          js_decision: rc.retry_count < MAX_DISPATCH_RETRIES ? "retry" : "exhaust",
+          status: aInitial,
+          state: aInitial,
+          review_status: null,
+          latest_dispatch_id: rc.latest_dispatch_id,
+          attempt: rc.retry_count,
+          pipeline: aCfg
+        });
 
         if (rc.retry_count < MAX_DISPATCH_RETRIES) {
           // 재시도 여유 있음 → card 상태 유지 (requested_at 갱신하여 [A] 재트리거 방지)
