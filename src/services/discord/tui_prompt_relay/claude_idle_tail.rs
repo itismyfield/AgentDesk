@@ -350,9 +350,11 @@ pub(super) async fn run_claude_idle_response_tail(
                 start_offset,
                 reader_tx,
                 None,
-                crate::services::provider::SessionProbe::tmux(
+                crate::services::provider::SessionProbe::tmux_with_structured_output(
                     tmux_for_reader,
                     ProviderKind::Claude,
+                    Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui),
+                    transcript_string.clone(),
                 ),
             );
             let offset_result = read_result.map(|result| match result {

@@ -527,11 +527,12 @@ fn terminal_ui_session_ready_for_input(
     {
         return ready.is_ready();
     }
-    crate::services::tui_turn_state::pane_ready_fallback_allowed(provider, runtime_kind)
-        && crate::services::provider::tmux_session_ready_for_input(
-            &snapshot.tmux_session_name,
-            provider,
-        )
+    crate::services::provider::tmux_session_fallback_ready_for_input(
+        &snapshot.tmux_session_name,
+        provider,
+        runtime_kind,
+    )
+    .is_some_and(crate::services::pane_readiness::FallbackPaneReadiness::is_ready)
 }
 
 fn terminal_ui_generation_mtime_for_tmux(tmux_session_name: &str) -> i64 {

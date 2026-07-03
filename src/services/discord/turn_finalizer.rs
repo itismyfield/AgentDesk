@@ -47,7 +47,8 @@ pub(in crate::services::discord) use cleanup::SyntheticClaimSnapshot;
 // the `completion_signal_state` method and the watcher-backstop re-check below
 // reference them unqualified, byte-identical.
 pub(in crate::services::discord) use self::completion_signal::{
-    CompletionSignal, completion_signal_from_transcript,
+    CompletionSignal, CompletionSignalMode, completion_signal_from_transcript,
+    completion_signal_from_transcript_with_mode,
 };
 // #3479 r9: dormant delivery-lease handlers extracted to the child module; the
 // actor-loop call sites below reference them unqualified, byte-identical.

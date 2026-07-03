@@ -142,10 +142,11 @@ fn turn_jsonl_deterministically_terminal(
     if state.last_offset <= turn_start_offset {
         return false;
     }
-    // Mirror the gate's `matched_session_jsonl_turn_state` file guard: a missing
-    // or empty JSONL cannot confirm completion. `jsonl_turn_end_terminator_idle`
-    // already reports Busy on a read error, but we keep the explicit metadata
-    // guard so an absent / zero-byte transcript is rejected before any scan.
+    // Mirror the gate's `matched_session_completion_signal` (GateQuiescence mode)
+    // file guard: a missing or empty JSONL cannot confirm completion.
+    // `jsonl_turn_end_terminator_idle` already reports Busy on a read error, but
+    // we keep the explicit metadata guard so an absent / zero-byte transcript is
+    // rejected before any scan.
     let path = Path::new(output_path);
     match std::fs::metadata(path) {
         Ok(metadata) if metadata.is_file() && metadata.len() > 0 => {}

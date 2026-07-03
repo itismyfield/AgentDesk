@@ -1,6 +1,9 @@
 //! #3038 S1 tmux watcher TUI completion gate decisions.
 
 use super::*;
+use crate::services::discord::turn_finalizer::{
+    CompletionSignal, CompletionSignalMode, completion_signal_from_transcript_with_mode,
+};
 
 /// #2161 — TUI completion gate. Callers ask `run_tui_completion_gate` to
 /// confirm the underlying tmux pane has reached a `Ready for input`
@@ -47,13 +50,15 @@ pub(super) fn inflight_suppresses_tui_completion_lifecycle(
     inflight.is_some_and(|state| state.relay_ownership_only)
 }
 
-/// Source-agnostic terminal probe for a matched session's provider JSONL.
-/// `InflightTurnState::turn_source` is audit metadata only (#2346/#2285).
-pub(super) fn matched_session_jsonl_turn_state(
+/// Source-agnostic terminal probe for a matched session's completion signal
+/// under an explicit acceptance mode. `InflightTurnState::turn_source` is audit
+/// metadata only (#2346/#2285).
+pub(super) fn matched_session_completion_signal(
     provider: &ProviderKind,
     inflight: Option<&crate::services::discord::inflight::InflightTurnState>,
     tmux_session_name: &str,
-) -> Option<crate::services::tui_turn_state::TuiTurnState> {
+    mode: CompletionSignalMode,
+) -> Option<CompletionSignal> {
     let state = inflight?;
     if state.tmux_session_name.as_deref() != Some(tmux_session_name) {
         return None;
@@ -63,36 +68,12 @@ pub(super) fn matched_session_jsonl_turn_state(
         .as_deref()
         .map(str::trim)
         .filter(|path| !path.is_empty())?;
-    let path = std::path::Path::new(output_path);
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return Some(crate::services::tui_turn_state::TuiTurnState::Unknown);
-    };
-    if !metadata.is_file() || metadata.len() == 0 {
-        return Some(crate::services::tui_turn_state::TuiTurnState::Unknown);
-    }
-    Some(crate::services::tui_turn_state::observe_provider_jsonl_turn_state(provider, path))
-}
-
-pub(super) fn matched_session_structured_ready_for_input(
-    provider: &ProviderKind,
-    inflight: Option<&crate::services::discord::inflight::InflightTurnState>,
-    tmux_session_name: &str,
-) -> Option<crate::services::tui_turn_state::TuiReadyState> {
-    let state = inflight?;
-    if state.tmux_session_name.as_deref() != Some(tmux_session_name) {
-        return None;
-    }
-    let output_path = state
-        .output_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|path| !path.is_empty())?;
-    crate::services::tui_turn_state::jsonl_ready_for_input(
+    Some(completion_signal_from_transcript_with_mode(
         provider,
         state.runtime_kind,
         std::path::Path::new(output_path),
-        None,
-    )
+        mode,
+    ))
 }
 
 pub(super) fn jsonl_terminal_can_confirm_completion(
@@ -205,8 +186,12 @@ pub(in crate::services::discord) async fn run_tui_completion_gate(
         return TuiCompletionGateOutcome::TimedOut;
     }
     if jsonl_terminal_can_confirm_completion(inflight.as_ref())
-        && matched_session_jsonl_turn_state(provider, inflight.as_ref(), tmux_session_name)
-            == Some(crate::services::tui_turn_state::TuiTurnState::Idle)
+        && matched_session_completion_signal(
+            provider,
+            inflight.as_ref(),
+            tmux_session_name,
+            CompletionSignalMode::GateQuiescence,
+        ) == Some(CompletionSignal::Done)
     {
         tracing::info!(
             provider = %provider.as_str(),
@@ -230,18 +215,23 @@ pub(in crate::services::discord) async fn run_tui_completion_gate(
         return TuiCompletionGateOutcome::NotGated;
     }
     let tmux_session_for_liveness = tmux_session_name.to_string();
-    let pane_alive = tokio::time::timeout(
+    let pane_liveness = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         tokio::task::spawn_blocking(move || {
-            crate::services::tmux_diagnostics::tmux_session_has_live_pane(
+            crate::services::tmux_diagnostics::tmux_session_pane_liveness(
                 &tmux_session_for_liveness,
             )
         }),
     )
     .await
-    .unwrap_or(Ok(false))
-    .unwrap_or(false);
-    if !pane_alive {
+    .unwrap_or(Ok(
+        crate::services::platform::tmux::PaneLiveness::DeadOrAbsent,
+    ))
+    .unwrap_or(crate::services::platform::tmux::PaneLiveness::DeadOrAbsent);
+    if !matches!(
+        pane_liveness,
+        crate::services::platform::tmux::PaneLiveness::Live
+    ) {
         tracing::info!(
             provider = %provider.as_str(),
             channel = channel_id.get(),
@@ -260,19 +250,19 @@ pub(in crate::services::discord) async fn run_tui_completion_gate(
                 let tmux_session_name = tmux_session_name.to_string();
                 let inflight = inflight.clone();
                 move || {
-                    let jsonl_ready = matched_session_structured_ready_for_input(
+                    let completion_done = matched_session_completion_signal(
                         &provider,
                         inflight.as_ref(),
                         &tmux_session_name,
-                    )
-                    .is_some_and(crate::services::tui_turn_state::TuiReadyState::is_ready);
+                        CompletionSignalMode::GateQuiescence,
+                    ) == Some(CompletionSignal::Done);
                     // #3521: a detached background agent leaves the foreground JSONL idle while
                     // it keeps running; hold the turn (and its live footer panel) open until the
                     // pane no longer shows the `Waiting for N background agent` chrome — otherwise
                     // the turn finalizes and the panel vanishes mid-run. Capture failure => not
                     // pending => complete normally (no stuck turn; STALL-WATCHDOG backstops a
                     // forever-pending agent, completion-footer TTL caps animation at ~1h).
-                    jsonl_ready
+                    completion_done
                         && !crate::services::platform::tmux::capture_pane(&tmux_session_name, 0)
                             .map(|pane| {
                                 crate::services::tmux_common::tmux_capture_indicates_claude_tui_background_agent_pending(&pane)

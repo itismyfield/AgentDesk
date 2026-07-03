@@ -750,7 +750,18 @@ pub(in crate::services::discord) fn idle_tmux_repair_ready_for_input(
         provider,
         channel_id,
         tmux_session,
-        crate::services::provider::tmux_session_ready_for_input,
+        |tmux_session, provider| {
+            // Pre-existing recovery override for long-frozen Busy JSONL. This is
+            // intentionally not `FallbackPaneReadiness`: the override is scoped
+            // by `frozen_busy_jsonl_allows_pane_fallback` below.
+            crate::services::platform::tmux::capture_pane(tmux_session, -80)
+                .map(|pane| {
+                    crate::services::provider::tmux_capture_indicates_ready_for_input(
+                        &pane, provider,
+                    )
+                })
+                .unwrap_or(false)
+        },
     )
 }
 

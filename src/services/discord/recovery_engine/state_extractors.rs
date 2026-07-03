@@ -74,7 +74,12 @@ pub(super) fn inflight_or_legacy_tmux_ready_for_input(
     inflight_ready_for_input_without_tui_pane(provider, state, require_consumed)
         .map(crate::services::tui_turn_state::TuiReadyState::is_ready)
         .unwrap_or_else(|| {
-            crate::services::provider::tmux_session_ready_for_input(tmux_session_name, provider)
+            crate::services::provider::tmux_session_fallback_ready_for_input(
+                tmux_session_name,
+                provider,
+                state.runtime_kind,
+            )
+            .is_some_and(crate::services::pane_readiness::FallbackPaneReadiness::is_ready)
         })
 }
 

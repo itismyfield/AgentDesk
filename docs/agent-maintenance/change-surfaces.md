@@ -523,8 +523,9 @@
     behaviour flag-independently. `watcher_fresh_idle_finalize_decision` now routes a
     NON-empty `Unknown` to the `Finalize` arm (prompt, flag-independent — the intended
     5b1 improvement: the fresh-idle gate already PROVES pane idle via
-    `watcher_session_ready_for_input` — the SAME `pane_ready_fallback_allowed &&
-    tmux_session_ready_for_input` predicate the 5a far-backstop uses for `Unknown`),
+    `watcher_session_ready_for_input` — the SAME `FallbackPaneReadiness` route the
+    5a far-backstop uses for `Unknown` (its constructor enforces
+    `pane_ready_fallback_allowed`)),
     but an EMPTY `Unknown` → new `DeferEmptyUnknown` (preserve inflight). Rationale:
     non-JSONL runtimes (Gemini / OpenCode / Qwen / LegacyTmuxWrapper) have NO
     structured `PausedLive` signal, so a turn awaiting a selector / permission /
@@ -1030,7 +1031,7 @@
     and covers frozen nonzero-frontier / empty-capture variants. This admission
     is bugfix-only for PR #4035; further recovery policy expansion should extract
     decision/apply helpers instead of growing this file.)
-  - `src/services/discord/recovery_engine.rs` (3032 lines; +97 from #3998 D1:
+  - `src/services/discord/recovery_engine.rs` (3034 lines; +97 from #3998 D1:
     threaded recovery turn identity into terminal-text relay call sites and
     declared the new `recovery_engine/terminal_text_idempotency.rs` leaf; the
     no-anchor lease/send/anchor-persistence body lives in that leaf, while the
@@ -1805,8 +1806,8 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   support extracted from the route layer; split before adding non-bugfix
   behavior.
 - `src/services/claude.rs` (2969), `src/services/gemini.rs` (1358),
-  `src/services/qwen.rs` (2196), `src/services/codex.rs` (3049),
-  `src/services/opencode.rs` (2760), `src/services/provider.rs` (1613) —
+  `src/services/qwen.rs` (2198), `src/services/codex.rs` (3049),
+  `src/services/opencode.rs` (2760), `src/services/provider.rs` (1656) —
   provider adapters. (#3034 removed dead non-cancel `execute_command_simple*`
   twins from the claude/codex/gemini adapters and a superseded
   `select_counterpart_from` from provider. #3263 added the Codex max-of-cache
@@ -1829,7 +1830,9 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   stable rollout identity. #3744 retired the unwired generalized envelope and
   fresh-fork dev-role dedup stubs from provider.rs, leaving only the live Codex
   resumed-session compaction path. #3823 adds Codex launch binary/version
-  diagnostics so skills/list failures caused by CLI/app skew are traceable.)
+  diagnostics so skills/list failures caused by CLI/app skew are traceable.
+  #4047 adds typed fallback pane-readiness plumbing so structured JSONL sessions
+  cannot obtain a pane-scrape readiness value.)
 - `src/services/codex_tui/rollout_tail.rs` (1276) — Codex TUI rollout tail
   parsing and resume identity surface; split before adding non-bugfix behavior
   beyond the #2169 session identity fix and the #3343 message-boundary
@@ -1848,7 +1851,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   detector and prompt delivery surface (#2399 hardened the post-turn
   handoff deadline). Treat as giant-file territory; split before adding
   non-bugfix behavior beyond the readiness/cancel contract.
-- `src/services/claude_tui/input.rs` (1930) — Claude TUI input readiness
+- `src/services/claude_tui/input.rs` (1932) — Claude TUI input readiness
   detector, prompt delivery, and cancellation/offset handoff surface. Treat as
   giant-file territory; split before adding non-bugfix behavior beyond the
   readiness/cancel contract. (+191 from the #685/#720 reliability fixes:

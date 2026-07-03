@@ -92,11 +92,12 @@ fn tmux_ready_for_input_without_tui_pane(tmux_session_name: &str, provider: &Pro
     {
         return ready;
     }
-    if crate::services::tui_turn_state::pane_ready_fallback_allowed(provider, runtime_kind) {
-        crate::services::provider::tmux_session_ready_for_input(tmux_session_name, provider)
-    } else {
-        false
-    }
+    crate::services::provider::tmux_session_fallback_ready_for_input(
+        tmux_session_name,
+        provider,
+        runtime_kind,
+    )
+    .is_some_and(crate::services::pane_readiness::FallbackPaneReadiness::is_ready)
 }
 
 pub(in crate::services::discord) async fn interrupt_provider_cli_turn(
