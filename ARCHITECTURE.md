@@ -222,6 +222,11 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── tuning_aggregate.rs
 │   │   │   └── verdict_route.rs
+│   │   ├── routines/
+│   │   │   ├── audit.rs
+│   │   │   ├── handlers.rs
+│   │   │   ├── helpers.rs
+│   │   │   └── responses.rs
 │   │   ├── tests/
 │   │   │   ├── preflight_harness/
 │   │   │   │   ├── types.rs

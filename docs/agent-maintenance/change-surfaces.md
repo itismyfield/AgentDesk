@@ -1862,12 +1862,6 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   fast with an actionable, non-timeout reason instead of false-submitting then
   blind-waiting/retrying the full timeout; gate every ready-return path —
   including the recorded-turn idle-transcript fallbacks — on the MCP-auth check.)
-- `src/server/routes/routines.rs` (~1032 prod LoC) — routines HTTP surface:
-  list/patch/detach/pause plus the #3990 hard-delete endpoint (FOR UPDATE
-  scope-gated delete, per-outcome audit logging, response mapping). Crossed the
-  giant threshold with #3990; decompose per #4039 (lift delete/audit cluster and
-  response mappers into `routes/routines/` children) before adding non-bugfix
-  behavior.
 - `src/services/discord/tui_task_card.rs` (~1065 prod LoC) — subtask/result
   card render/parse/JSON-aggregate/dedupe-store logic plus the shared
   `strip_terminal_controls`/ASCII-truncate helpers. Crossed the giant threshold
