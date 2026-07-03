@@ -145,7 +145,9 @@
     "session ended … start a new session" tmux-death notice and its
     `should_send_session_ended_notice`/`session_ended_notice`/
     `TmuxDeathLifecycleDecision` plumbing).
-  - `src/services/discord/tmux.rs` (1501 lines; -6 from #3874 removing dead
+  - `src/services/discord/tmux.rs` (1489 lines; -12 from #4047 S2-b deleting
+    the GateTimeout submit path and adding the shared bounded
+    background-agent sniff wrapper; -6 from #3874 removing dead
     permanently-None `Option<&Db>` threading from tmux/outbound call paths,
     with no relay or delivery semantics change; +22 from #3871 persisting the
     streamed rollover-prefix ids through the watcher seed/restore + persist path
@@ -1035,7 +1037,10 @@
     and covers frozen nonzero-frontier / empty-capture variants. This admission
     is bugfix-only for PR #4035; further recovery policy expansion should extract
     decision/apply helpers instead of growing this file.)
-  - `src/services/discord/recovery_engine.rs` (3017 lines; +97 from #3998 D1:
+  - `src/services/discord/recovery_engine.rs` (3016 lines; net -1 from #4047
+    S2-b: gate-outcome suppression removed, background_agent_pending producer
+    extracted to `recovery_engine/status_panel_completion_producer.rs`; +97
+    from #3998 D1:
     threaded recovery turn identity into terminal-text relay call sites and
     declared the new `recovery_engine/terminal_text_idempotency.rs` leaf; the
     no-anchor lease/send/anchor-persistence body lives in that leaf, while the
