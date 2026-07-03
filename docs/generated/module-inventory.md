@@ -892,7 +892,7 @@
 | `services::review_decision::worktree_stale` | `src/services/review_decision/worktree_stale.rs` | 728 | 553 | 175 |  |
 | `services::routines` | `src/services/routines/mod.rs` | 33 | 33 | 0 |  |
 | `services::routines::action` | `src/services/routines/action.rs` | 365 | 237 | 128 |  |
-| `services::routines::agent_executor` | `src/services/routines/agent_executor.rs` | 2459 | 2021 | 438 | giant-file |
+| `services::routines::agent_executor` | `src/services/routines/agent_executor.rs` | 2504 | 2021 | 483 | giant-file |
 | `services::routines::discord_log` | `src/services/routines/discord_log.rs` | 2047 | 1589 | 458 | giant-file |
 | `services::routines::fresh_session_reaper` | `src/services/routines/fresh_session_reaper.rs` | 395 | 215 | 180 |  |
 | `services::routines::loader` | `src/services/routines/loader.rs` | 2318 | 670 | 1648 |  |
