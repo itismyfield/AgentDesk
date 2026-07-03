@@ -101,6 +101,7 @@ def cfg_requires_test(predicate: str) -> bool:
     return False
 
 TOP_LEVEL_MODULE_PURPOSES = {
+    "api_caller_observability.rs": "Request-principal classification and uniform log-only API caller attribution records for identity-consuming mutation paths.",
     "bootstrap.rs": "Builds config, database, policy engine, and shared app state before launch.",
     "cli/": "Operator-facing CLI commands, direct API shims, migrations, and Discord send helpers.",
     "compat/": "Centralised home for compatibility/legacy/fallback shims (#1076). Each public item carries a `REMOVE_WHEN` comment so retirement is grep-driven.",

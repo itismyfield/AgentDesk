@@ -3,6 +3,7 @@ use serde_json::json;
 use std::net::SocketAddr;
 
 use super::AppState;
+use crate::api_caller_observability::{AuthStrength, RequestPrincipal};
 
 /// GET /api/auth/session
 /// Returns session status. If auth_token is configured, validates the request.
@@ -71,6 +72,16 @@ fn unauthorized_response() -> axum::response::Response {
         .unwrap_or_default()
 }
 
+async fn run_with_request_principal(
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+    auth_strength: AuthStrength,
+) -> axum::response::Response {
+    let principal = RequestPrincipal::from_headers(req.headers(), auth_strength);
+    req.extensions_mut().insert(principal);
+    next.run(req).await
+}
+
 /// Auth middleware: checks Bearer token against config.server.auth_token.
 /// If auth_token is not set, non-internal requests pass through (local-only
 /// mode). Internal control-plane routes still require loopback peer proof or a
@@ -92,13 +103,14 @@ pub async fn auth_middleware(
     // forgeable from the LAN.
     if is_internal_loopback_path(path) {
         if is_loopback_peer(peer) {
-            return next.run(req).await;
+            return run_with_request_principal(req, next, AuthStrength::Loopback).await;
         }
         if let Some(expected_token) = state.config.server.auth_token.as_deref() {
             if !expected_token.is_empty() {
                 if let Some(token) = extract_bearer(&headers) {
                     if crate::utils::auth::constant_time_token_eq(expected_token, token) {
-                        return next.run(req).await;
+                        return run_with_request_principal(req, next, AuthStrength::ServerAdmin)
+                            .await;
                     }
                 }
             }
@@ -108,17 +120,17 @@ pub async fn auth_middleware(
 
     let Some(expected_token) = state.config.server.auth_token.as_deref() else {
         // No auth configured — pass through
-        return next.run(req).await;
+        return run_with_request_principal(req, next, AuthStrength::None).await;
     };
 
     if expected_token.is_empty() {
-        return next.run(req).await;
+        return run_with_request_principal(req, next, AuthStrength::None).await;
     }
 
     // Truly-public endpoints. These return no privileged data and are safe to
     // expose without authentication on any interface.
     if path == "/health" || path == "/auth/session" {
-        return next.run(req).await;
+        return run_with_request_principal(req, next, AuthStrength::None).await;
     }
 
     // Same-origin bypass (dashboard SPA served from this server). #2047
@@ -132,14 +144,14 @@ pub async fn auth_middleware(
             .map(|v| crate::utils::loopback_url::is_loopback_url(v, Some(state.config.server.port)))
             .unwrap_or(false);
         if is_same_origin {
-            return next.run(req).await;
+            return run_with_request_principal(req, next, AuthStrength::Loopback).await;
         }
     }
 
     // Check Authorization header
     if let Some(token) = extract_bearer(&headers) {
         if crate::utils::auth::constant_time_token_eq(expected_token, token) {
-            return next.run(req).await;
+            return run_with_request_principal(req, next, AuthStrength::ServerAdmin).await;
         }
     }
 
@@ -153,7 +165,8 @@ pub async fn auth_middleware(
             for pair in query.split('&') {
                 if let Some(token) = pair.strip_prefix("token=") {
                     if crate::utils::auth::constant_time_token_eq(expected_token, token) {
-                        return next.run(req).await;
+                        return run_with_request_principal(req, next, AuthStrength::ServerAdmin)
+                            .await;
                     }
                 }
             }

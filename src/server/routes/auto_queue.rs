@@ -1,11 +1,12 @@
 use axum::{
     Json,
     body::Bytes,
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     http::{HeaderMap, StatusCode},
 };
 
 use super::AppState;
+use crate::api_caller_observability::RequestPrincipal;
 use crate::services::auto_queue::route;
 
 #[allow(unused_imports)]
@@ -129,9 +130,10 @@ pub async fn repair_phase_gates(
     state: State<AppState>,
     id: Path<String>,
     headers: HeaderMap,
+    principal: Option<Extension<RequestPrincipal>>,
     body: Bytes,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    route::repair_phase_gates(state, id, headers, body).await
+    route::repair_phase_gates(state, id, headers, principal, body).await
 }
 
 pub async fn cancel(
@@ -152,9 +154,10 @@ pub async fn submit_order(
     state: State<AppState>,
     id: Path<String>,
     headers: HeaderMap,
+    principal: Option<Extension<RequestPrincipal>>,
     body: Json<OrderBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    route::submit_order(state, id, headers, body).await
+    route::submit_order(state, id, headers, principal, body).await
 }
 
 /// GET /api/queue/phase-gates/catalog (#2125)

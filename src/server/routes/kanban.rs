@@ -1,12 +1,15 @@
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     http::{HeaderMap, StatusCode},
 };
 use poise::serenity_prelude::ChannelId;
 use serde_json::json;
 
 use super::AppState;
+use crate::api_caller_observability::{
+    RequestPrincipal, log_identity_consumption, manager_channel_check_relied_on_claimed_header,
+};
 use crate::db::kanban_cards as kanban_db;
 use crate::db::kanban_cards::{IssueCardUpsert, upsert_card_from_issue_pg};
 pub use crate::server::dto::kanban::{
@@ -1780,6 +1783,30 @@ pub async fn pm_decision(
 // below call them through the services facade.
 use crate::services::kanban::{require_explicit_bearer_token, resolve_requesting_agent_id_with_pg};
 
+fn request_principal_ref(
+    principal: &Option<Extension<RequestPrincipal>>,
+) -> Option<&RequestPrincipal> {
+    principal.as_ref().map(|Extension(principal)| principal)
+}
+
+fn log_kanban_identity_consumption(
+    endpoint: &'static str,
+    headers: &HeaderMap,
+    principal: &Option<Extension<RequestPrincipal>>,
+    consumed_agent_id: &str,
+) {
+    let config = crate::config::load_graceful();
+    log_identity_consumption(
+        endpoint,
+        request_principal_ref(principal),
+        Some(consumed_agent_id),
+        manager_channel_check_relied_on_claimed_header(
+            headers,
+            config.kanban.manager_channel_id.as_deref(),
+        ),
+    );
+}
+
 /// POST /api/kanban-cards/:id/rereview
 ///
 /// Recovery endpoint. Forces a card back through counter-model review
@@ -1788,6 +1815,7 @@ pub async fn rereview_card(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    principal: Option<Extension<RequestPrincipal>>,
     Json(body): Json<RereviewBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     if let Err(response) = require_explicit_bearer_token(&headers, "rereview") {
@@ -1825,6 +1853,12 @@ pub async fn rereview_card(
     let caller_source = resolve_requesting_agent_id_with_pg(pool, &headers)
         .await
         .unwrap_or_else(|| "api".to_string());
+    log_kanban_identity_consumption(
+        "POST /api/kanban-cards/{id}/rereview",
+        &headers,
+        &principal,
+        &caller_source,
+    );
 
     let assigned_agent_id = match assigned_agent_id.filter(|value| !value.is_empty()) {
         Some(value) => value,
@@ -2038,6 +2072,7 @@ pub async fn rereview_card(
 pub async fn batch_rereview(
     State(state): State<AppState>,
     headers: HeaderMap,
+    principal: Option<Extension<RequestPrincipal>>,
     Json(body): Json<BatchRereviewBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     if let Err(response) = require_explicit_bearer_token(&headers, "batch rereview") {
@@ -2088,6 +2123,7 @@ pub async fn batch_rereview(
             State(state.clone()),
             Path(card_id),
             headers.clone(),
+            principal.clone(),
             Json(rereview_body),
         )
         .await;
@@ -2119,6 +2155,7 @@ pub async fn reopen_card(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    principal: Option<Extension<RequestPrincipal>>,
     Json(body): Json<ReopenBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let reset_full = body.reset_full.unwrap_or(false);
@@ -2133,6 +2170,12 @@ pub async fn reopen_card(
     let caller_source = resolve_requesting_agent_id_with_pg(pool, &headers)
         .await
         .unwrap_or_else(|| "api".to_string());
+    log_kanban_identity_consumption(
+        "POST /api/kanban-cards/{id}/reopen",
+        &headers,
+        &principal,
+        &caller_source,
+    );
 
     // ── Pre-check: card must be in done state ──
     let current_status: String = match kanban_db::card_status_pg(pool, &id).await {
@@ -2381,6 +2424,7 @@ pub async fn force_transition(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    principal: Option<Extension<RequestPrincipal>>,
     Json(body): Json<ForceTransitionBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     if let Err(response) = require_explicit_bearer_token(&headers, "force-transition") {
@@ -2410,6 +2454,12 @@ pub async fn force_transition(
     let caller_source = resolve_requesting_agent_id_with_pg(pool, &headers)
         .await
         .unwrap_or_else(|| "api".to_string());
+    log_kanban_identity_consumption(
+        "POST /api/kanban-cards/{id}/transition",
+        &headers,
+        &principal,
+        &caller_source,
+    );
     // Snapshot active dispatch IDs before transition so we can report which
     // were cancelled by the cleanup paths (#1442). The cleanup helpers report
     // counts but not IDs; we reconcile by querying the post-transition status

@@ -111,6 +111,7 @@ mod eventbus;
 mod github;
 // Shared HTTP route handler state; lives at crate root (below server+services)
 // so service-layer handlers reference it without a service→server backflow (#3037).
+pub(crate) mod api_caller_observability;
 mod app_state;
 pub(crate) mod kanban;
 mod launch;
