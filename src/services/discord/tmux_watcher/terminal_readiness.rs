@@ -219,12 +219,14 @@ pub(super) fn discard_watcher_pending_buffer_after_suppressed_turn(
     all_data_start_offset: &mut u64,
     all_data_fully_mirrored_to_session_relay: &mut bool,
     all_data_session_bound_relay_ack: &mut Option<SessionBoundRelayAckTarget>,
+    all_data_first_forwarded_relay_sequence: &mut Option<u64>,
     current_offset: u64,
 ) {
     all_data.clear();
     *all_data_start_offset = current_offset;
     *all_data_fully_mirrored_to_session_relay = true;
     *all_data_session_bound_relay_ack = None;
+    *all_data_first_forwarded_relay_sequence = None;
 }
 
 #[cfg(test)]

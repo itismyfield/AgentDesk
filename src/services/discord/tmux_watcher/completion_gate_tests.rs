@@ -625,6 +625,21 @@ async fn split_terminal_forward_signals_trailing_turn_and_keeps_terminal_ack() {
         Some(100),
         "the kept ack is bound to turn A's pinned offset"
     );
+    let terminal_sequence = split_forward
+        .ack_target
+        .as_ref()
+        .map(|ack| ack.sequence)
+        .expect("split terminal forward has terminal sequence");
+    assert_eq!(
+        split_forward.first_forwarded_sequence,
+        Some(terminal_sequence),
+        "the current turn keeps the terminal frame as its first forwarded sequence"
+    );
+    assert_eq!(
+        split_forward.trailing_first_forwarded_sequence,
+        Some(terminal_sequence + 1),
+        "the later turn tail carries its own first forwarded sequence"
+    );
 
     // A single complete turn (no trailing tail) must NOT raise the signal.
     let single_forward = forward_terminal_chunk_with_trailing_to_supervisor_relay(

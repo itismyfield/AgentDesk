@@ -49,6 +49,85 @@ fn relay_slot_guard_release_is_idempotent_and_does_not_clobber_reacquire() {
     );
 }
 
+#[test]
+fn resolve_time_drop_span_degrades_delivered_terminal_ownership() {
+    let metrics =
+        std::sync::Arc::new(crate::services::cluster::stream_relay::RelayMetrics::default());
+    let target = SessionBoundRelayAckTarget {
+        metrics: metrics.clone(),
+        sequence: 12,
+        turn_start_offset: Some(100),
+    };
+    metrics.record_terminal_committed_sequence_for_test(12);
+
+    let mut turn_fully_mirrored = true;
+    let ack_outcome = session_bound_ack_outcome_after_resolve_time_mirror_check(
+        SessionBoundRelayAckOutcome::Delivered,
+        &mut turn_fully_mirrored,
+        Some(&target),
+        Some(9),
+    );
+    assert_eq!(ack_outcome, SessionBoundRelayAckOutcome::Delivered);
+    assert!(turn_fully_mirrored);
+    assert!(
+        turn_fully_mirrored && matches!(ack_outcome, SessionBoundRelayAckOutcome::Delivered),
+        "no drop in the forwarded span leaves the terminal-owning decision unchanged"
+    );
+
+    // Model the ACK-wait window: the sink has already recorded this terminal
+    // frame as Delivered, but a later enqueue evicted an earlier frame from the
+    // same turn before the watcher resolves ownership.
+    metrics.record_dropped_sequence_for_test(10);
+    let mut turn_fully_mirrored = true;
+    let ack_outcome = session_bound_ack_outcome_after_resolve_time_mirror_check(
+        SessionBoundRelayAckOutcome::Delivered,
+        &mut turn_fully_mirrored,
+        Some(&target),
+        Some(9),
+    );
+    assert_eq!(
+        ack_outcome,
+        SessionBoundRelayAckOutcome::Dropped,
+        "a delivered terminal ACK is forced through fallback when the turn span lost a frame"
+    );
+    assert!(
+        !turn_fully_mirrored,
+        "resolve-time span drop degrades fully_mirrored before final ownership"
+    );
+    assert!(
+        !(turn_fully_mirrored && matches!(ack_outcome, SessionBoundRelayAckOutcome::Delivered)),
+        "the session-bound relay must not own terminal delivery after span eviction"
+    );
+}
+
+#[test]
+fn resolve_time_drop_span_ignores_prior_turn_drops() {
+    let metrics =
+        std::sync::Arc::new(crate::services::cluster::stream_relay::RelayMetrics::default());
+    let target = SessionBoundRelayAckTarget {
+        metrics: metrics.clone(),
+        sequence: 12,
+        turn_start_offset: Some(100),
+    };
+    metrics.record_terminal_committed_sequence_for_test(12);
+    metrics.record_dropped_sequence_for_test(8);
+
+    let mut turn_fully_mirrored = true;
+    let ack_outcome = session_bound_ack_outcome_after_resolve_time_mirror_check(
+        SessionBoundRelayAckOutcome::Delivered,
+        &mut turn_fully_mirrored,
+        Some(&target),
+        Some(9),
+    );
+
+    assert_eq!(ack_outcome, SessionBoundRelayAckOutcome::Delivered);
+    assert!(turn_fully_mirrored);
+    assert!(
+        turn_fully_mirrored && matches!(ack_outcome, SessionBoundRelayAckOutcome::Delivered),
+        "a drop before this turn's first forwarded sequence leaves ownership unchanged"
+    );
+}
+
 /// #3579: the `NotAttempted` vs `MissingTarget` sentinel split. `NotAttempted`
 /// is the watcher-owned NON-attempt (the ack-wait block was skipped); it must
 /// stay DISTINCT from the genuine `MissingTarget` failure (the ack-wait ran but

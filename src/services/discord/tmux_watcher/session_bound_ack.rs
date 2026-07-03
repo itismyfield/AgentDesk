@@ -150,6 +150,34 @@ pub(super) fn session_bound_relay_frame_ack_reached(
     sequence_reached(snapshot.last_delivered_sequence, target.sequence)
 }
 
+pub(super) fn session_bound_relay_drop_reached_since_first_forward(
+    target: Option<&SessionBoundRelayAckTarget>,
+    first_forwarded_sequence: Option<u64>,
+) -> bool {
+    let (Some(target), Some(first_forwarded_sequence)) = (target, first_forwarded_sequence) else {
+        return false;
+    };
+    let snapshot = target.metrics.snapshot();
+    sequence_reached(snapshot.last_dropped_sequence, first_forwarded_sequence)
+}
+
+pub(super) fn session_bound_ack_outcome_after_resolve_time_mirror_check(
+    ack_outcome: SessionBoundRelayAckOutcome,
+    turn_fully_mirrored: &mut bool,
+    target: Option<&SessionBoundRelayAckTarget>,
+    first_forwarded_sequence: Option<u64>,
+) -> SessionBoundRelayAckOutcome {
+    if !session_bound_relay_drop_reached_since_first_forward(target, first_forwarded_sequence) {
+        return ack_outcome;
+    }
+    *turn_fully_mirrored = false;
+    if matches!(ack_outcome, SessionBoundRelayAckOutcome::Delivered) {
+        SessionBoundRelayAckOutcome::Dropped
+    } else {
+        ack_outcome
+    }
+}
+
 pub(super) fn watcher_should_direct_send_after_session_bound_ack(
     should_direct_send: bool,
     ack_outcome: SessionBoundRelayAckOutcome,
