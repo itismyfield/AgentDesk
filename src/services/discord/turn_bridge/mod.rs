@@ -3988,9 +3988,9 @@ pub(super) fn spawn_turn_bridge(
             // the submitted prompt's anchor as the synthetic inflight's
             // user_msg_id; a non-consuming peek leaves it for the watcher). A
             // different / absent anchor means the follow-up is genuinely
-            // unsubmitted, so it STILL requeues — the deferred idle-queue kickoff
-            // is itself gated on pane-busy, so a follow-up behind a different
-            // streaming turn is DEFERRED (preserved in the mailbox), not dropped.
+            // unsubmitted, so it STILL requeues and remains preserved in the
+            // mailbox behind the active turn until the completion event kicks the
+            // drain.
             let same_input_occupies_pane = base
                 && claude_tui_followup_same_input_occupies_pane(
                     inflight_state

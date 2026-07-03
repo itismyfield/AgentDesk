@@ -3310,6 +3310,10 @@ mod tests {
             health_registry: std::sync::Weak::new(),
             known_slash_commands: tokio::sync::OnceCell::new(),
             inflight_signals: tokio::sync::broadcast::channel(256).0,
+            turn_completion_events: tokio::sync::broadcast::channel(
+                super::super::turn_completion_events::TURN_COMPLETION_EVENT_BUS_CAPACITY,
+            )
+            .0,
         })
     }
 

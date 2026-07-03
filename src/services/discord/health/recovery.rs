@@ -607,11 +607,40 @@ struct RuntimeChannelMatch {
     channel_id: ChannelId,
 }
 
+#[derive(Clone, Copy)]
+enum RuntimeChannelOwnershipMode {
+    AllowProcessGlobalMailboxFallback,
+    StrictPerRuntime,
+}
+
+async fn has_local_mailbox_ownership_evidence(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    ownership_mode: RuntimeChannelOwnershipMode,
+) -> bool {
+    let Some(handle) = shared.mailbox_peek(channel_id) else {
+        return false;
+    };
+
+    if matches!(
+        ownership_mode,
+        RuntimeChannelOwnershipMode::AllowProcessGlobalMailboxFallback
+    ) {
+        return true;
+    }
+
+    let snapshot = handle.snapshot().await;
+    // Snapshot/observation paths can materialize empty per-runtime mailboxes as
+    // a side effect, so bare local-handle existence is not ownership evidence.
+    snapshot.cancel_token.is_some() || !snapshot.intervention_queue.is_empty()
+}
+
 async fn find_runtime_channel_match(
     registry: &HealthRegistry,
     provider_name: Option<&str>,
     channel_id: Option<ChannelId>,
     tmux_name: Option<&str>,
+    ownership_mode: RuntimeChannelOwnershipMode,
 ) -> Option<RuntimeChannelMatch> {
     let preferred_provider = provider_name.and_then(ProviderKind::from_str);
     let providers: Vec<_> = registry
@@ -637,7 +666,14 @@ async fn find_runtime_channel_match(
                 let data = shared.core.lock().await;
                 data.sessions.contains_key(&channel_id)
             };
-            if has_session || discord::ChannelMailboxRegistry::global_handle(channel_id).is_some() {
+            let has_local_mailbox =
+                has_local_mailbox_ownership_evidence(&shared, channel_id, ownership_mode).await;
+            let has_process_global_mailbox =
+                matches!(
+                    ownership_mode,
+                    RuntimeChannelOwnershipMode::AllowProcessGlobalMailboxFallback
+                ) && discord::ChannelMailboxRegistry::global_handle(channel_id).is_some();
+            if has_session || has_local_mailbox || has_process_global_mailbox {
                 return Some(RuntimeChannelMatch {
                     provider,
                     shared,
@@ -893,6 +929,7 @@ pub async fn hard_stop_runtime_turn(
         tmux_name,
         stop_source,
         true,
+        RuntimeChannelOwnershipMode::AllowProcessGlobalMailboxFallback,
     )
     .await
 }
@@ -963,6 +1000,24 @@ pub async fn stop_runtime_turn_preserving_watcher(
         tmux_name,
         stop_source,
         false,
+        RuntimeChannelOwnershipMode::AllowProcessGlobalMailboxFallback,
+    )
+    .await
+}
+
+pub async fn stop_providerless_runtime_turn_preserving_watcher_strict_ownership(
+    registry: Option<&HealthRegistry>,
+    channel_id: u64,
+    stop_source: &'static str,
+) -> HardStopRuntimeResult {
+    runtime_turn_cleanup_by_lookup(
+        registry,
+        None,
+        Some(channel_id),
+        None,
+        stop_source,
+        false,
+        RuntimeChannelOwnershipMode::StrictPerRuntime,
     )
     .await
 }
@@ -979,8 +1034,14 @@ pub async fn finish_cancelled_provider_channel_mailbox(
     let Some(channel_id) = channel_id.map(ChannelId::new) else {
         return FinishCancelledMailboxResult::default();
     };
-    let Some(runtime) =
-        find_runtime_channel_match(registry, provider_name, Some(channel_id), None).await
+    let Some(runtime) = find_runtime_channel_match(
+        registry,
+        provider_name,
+        Some(channel_id),
+        None,
+        RuntimeChannelOwnershipMode::AllowProcessGlobalMailboxFallback,
+    )
+    .await
     else {
         return FinishCancelledMailboxResult::default();
     };
@@ -1032,12 +1093,19 @@ async fn runtime_turn_cleanup_by_lookup(
     tmux_name: Option<&str>,
     stop_source: &'static str,
     stop_watcher: bool,
+    ownership_mode: RuntimeChannelOwnershipMode,
 ) -> HardStopRuntimeResult {
     let channel_id = channel_id.map(ChannelId::new);
 
     if let Some(registry) = registry
-        && let Some(runtime) =
-            find_runtime_channel_match(registry, provider_name, channel_id, tmux_name).await
+        && let Some(runtime) = find_runtime_channel_match(
+            registry,
+            provider_name,
+            channel_id,
+            tmux_name,
+            ownership_mode,
+        )
+        .await
     {
         let finish =
             discord::mailbox_finish_turn(&runtime.shared, &runtime.provider, runtime.channel_id)
@@ -1067,6 +1135,13 @@ async fn runtime_turn_cleanup_by_lookup(
         && let Some(handle) = discord::ChannelMailboxRegistry::global_handle(channel_id)
     {
         let finish = handle.hard_stop().await;
+        if finish.has_pending {
+            discord::turn_completion_events::warn_unresolvable_hard_stop_pending_backlog(
+                channel_id,
+                finish.has_pending,
+                stop_source,
+            );
+        }
         discord::clear_watchdog_deadline_override(channel_id.get()).await;
         return HardStopRuntimeResult {
             cleanup_path: if finish.mailbox_online {
@@ -4026,6 +4101,423 @@ mod stall_watchdog_auto_heal_tests {
         );
         assert!(token.cancelled.load(Ordering::Relaxed));
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[cfg(test)]
+mod hard_stop_completion_event_tests {
+    use std::future::Future;
+    use std::io::{self, Write};
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+    use tracing_subscriber::fmt::MakeWriter;
+
+    use super::super::HealthRegistry;
+    use crate::services::provider::{CancelToken, ProviderKind};
+    use crate::services::turn_orchestrator::{Intervention, InterventionMode};
+
+    struct EnvVarReset {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarReset {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarReset {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct CapturingWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for CapturingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.buffer
+                .lock()
+                .expect("log buffer lock")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for CapturingWriter {
+        type Writer = CapturingWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    async fn capture_warns_async<F, Fut, T>(f: F) -> (T, String)
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = T>,
+    {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let writer = CapturingWriter {
+            buffer: buffer.clone(),
+        };
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(writer)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        let result = f().await;
+        drop(guard);
+        (
+            result,
+            String::from_utf8_lossy(&buffer.lock().expect("log buffer lock").clone()).into_owned(),
+        )
+    }
+
+    fn intervention(id: u64, text: &str) -> Intervention {
+        Intervention {
+            author_id: UserId::new(id),
+            author_is_bot: false,
+            message_id: MessageId::new(id),
+            source_message_ids: vec![MessageId::new(id)],
+            text: text.to_string(),
+            mode: InterventionMode::Soft,
+            created_at: std::time::Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+            pending_uploads: Vec::new(),
+            voice_announcement: None,
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn providerless_hard_stop_with_runtime_publishes_completion_event_for_pending_queue() {
+        let tempdir = tempfile::tempdir().expect("runtime root tempdir");
+        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+        let provider = ProviderKind::Claude;
+        let registry = HealthRegistry::new();
+        let shared = super::super::super::make_shared_data_for_tests();
+        let channel = ChannelId::new(4_048_230);
+        shared
+            .mailbox(channel)
+            .replace_queue(
+                vec![intervention(4_048_231, "pending after hard stop")],
+                super::super::super::queue_persistence_context(&shared, &provider, channel),
+            )
+            .await;
+        assert!(
+            super::super::super::mailbox_try_start_turn(
+                &shared,
+                channel,
+                Arc::new(CancelToken::new()),
+                UserId::new(4_048_232),
+                MessageId::new(4_048_232),
+            )
+            .await
+        );
+        registry
+            .register(provider.as_str().to_string(), shared.clone())
+            .await;
+        let mut rx =
+            super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+
+        let result = super::stop_runtime_turn_preserving_watcher(
+            Some(&registry),
+            None,
+            Some(channel.get()),
+            None,
+            "hard_stop_completion_event_test",
+        )
+        .await;
+
+        assert!(result.had_active_turn);
+        assert!(result.has_pending_queue);
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("completion event receive should not time out")
+            .expect("completion event bus should remain open");
+        assert_eq!(event.channel_id, channel);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn providerless_stale_repair_uses_strict_per_runtime_mailbox_ownership() {
+        let tempdir = tempfile::tempdir().expect("runtime root tempdir");
+        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+        let provider = ProviderKind::Claude;
+        let registry = HealthRegistry::new();
+        let first = super::super::super::make_shared_data_for_tests();
+        let second = super::super::super::make_shared_data_for_tests();
+        let channel = ChannelId::new(4_048_250);
+        let token = Arc::new(CancelToken::new());
+
+        assert!(
+            first.mailbox_peek(channel).is_none(),
+            "first registered runtime must not own the test channel"
+        );
+        second
+            .mailbox(channel)
+            .replace_queue(
+                vec![intervention(4_048_251, "pending on owning runtime")],
+                super::super::super::queue_persistence_context(&second, &provider, channel),
+            )
+            .await;
+        assert!(
+            super::super::super::mailbox_try_start_turn(
+                &second,
+                channel,
+                token.clone(),
+                UserId::new(4_048_252),
+                MessageId::new(4_048_252),
+            )
+            .await
+        );
+        let global_before =
+            crate::services::turn_orchestrator::ChannelMailboxRegistry::global_handle(channel)
+                .expect("owning runtime should publish global handle");
+        assert_eq!(
+            global_before.snapshot().await.intervention_queue.len(),
+            1,
+            "test setup must leave a queued item on the owning runtime"
+        );
+
+        registry
+            .register(provider.as_str().to_string(), first.clone())
+            .await;
+        registry
+            .register(provider.as_str().to_string(), second.clone())
+            .await;
+        let mut first_rx =
+            super::super::super::turn_completion_events::subscribe_turn_completion_events(&first);
+        let mut second_rx =
+            super::super::super::turn_completion_events::subscribe_turn_completion_events(&second);
+
+        let result = super::stop_providerless_runtime_turn_preserving_watcher_strict_ownership(
+            Some(&registry),
+            channel.get(),
+            "stale_mailbox_repair",
+        )
+        .await;
+
+        assert!(result.had_active_turn);
+        assert!(result.has_pending_queue);
+        assert!(
+            token.cancelled.load(Ordering::Relaxed),
+            "owning runtime's active token should be cancelled by hard-stop cleanup"
+        );
+        let event = tokio::time::timeout(Duration::from_secs(1), second_rx.recv())
+            .await
+            .expect("completion event on owning runtime should not time out")
+            .expect("owning runtime completion bus should remain open");
+        assert_eq!(event.channel_id, channel);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), first_rx.recv())
+                .await
+                .is_err(),
+            "non-owning first runtime must not publish a completion event"
+        );
+        assert!(
+            first.mailbox_peek(channel).is_none(),
+            "strict provider-less repair must not create a mailbox on the first runtime"
+        );
+
+        let second_snapshot = second
+            .mailbox_peek(channel)
+            .expect("owning runtime mailbox should remain registered")
+            .snapshot()
+            .await;
+        assert!(second_snapshot.cancel_token.is_none());
+        assert_eq!(second_snapshot.intervention_queue.len(), 1);
+        let global_after =
+            crate::services::turn_orchestrator::ChannelMailboxRegistry::global_handle(channel)
+                .expect("global handle should still point at the owning mailbox");
+        assert_eq!(
+            global_after.snapshot().await.intervention_queue.len(),
+            1,
+            "global handle must not be overwritten by an empty first-runtime mailbox"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn providerless_strict_repair_ignores_empty_mailbox_created_by_snapshot_scan() {
+        let tempdir = tempfile::tempdir().expect("runtime root tempdir");
+        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+        let provider = ProviderKind::Claude;
+        let registry = HealthRegistry::new();
+        let first = super::super::super::make_shared_data_for_tests();
+        let second = super::super::super::make_shared_data_for_tests();
+        let channel = ChannelId::new(4_048_260);
+        let token = Arc::new(CancelToken::new());
+
+        second
+            .mailbox(channel)
+            .replace_queue(
+                vec![intervention(4_048_261, "pending on second runtime")],
+                super::super::super::queue_persistence_context(&second, &provider, channel),
+            )
+            .await;
+        assert!(
+            super::super::super::mailbox_try_start_turn(
+                &second,
+                channel,
+                token.clone(),
+                UserId::new(4_048_262),
+                MessageId::new(4_048_262),
+            )
+            .await
+        );
+        assert!(
+            first.mailbox_peek(channel).is_none(),
+            "first runtime must begin without local mailbox evidence"
+        );
+
+        registry
+            .register(provider.as_str().to_string(), first.clone())
+            .await;
+        registry
+            .register(provider.as_str().to_string(), second.clone())
+            .await;
+
+        let observed = registry
+            .snapshot_watcher_state(channel.get())
+            .await
+            .expect("providerless pre-repair snapshot should find second runtime's mailbox");
+        assert!(observed.has_pending_queue);
+        let first_snapshot = first
+            .mailbox_peek(channel)
+            .expect("providerless snapshot scan should materialize first runtime mailbox")
+            .snapshot()
+            .await;
+        assert!(first_snapshot.cancel_token.is_none());
+        assert!(first_snapshot.intervention_queue.is_empty());
+        let global_after_observation =
+            crate::services::turn_orchestrator::ChannelMailboxRegistry::global_handle(channel)
+                .expect("snapshot scan should leave a process-global handle");
+        let global_snapshot = global_after_observation.snapshot().await;
+        assert!(global_snapshot.cancel_token.is_none());
+        assert!(
+            global_snapshot.intervention_queue.is_empty(),
+            "pre-repair observation should clobber the global handle to first runtime's empty mailbox"
+        );
+
+        let mut first_rx =
+            super::super::super::turn_completion_events::subscribe_turn_completion_events(&first);
+        let mut second_rx =
+            super::super::super::turn_completion_events::subscribe_turn_completion_events(&second);
+
+        let result = super::stop_providerless_runtime_turn_preserving_watcher_strict_ownership(
+            Some(&registry),
+            channel.get(),
+            "stale_mailbox_repair",
+        )
+        .await;
+
+        assert!(
+            result.had_active_turn,
+            "strict repair must skip first runtime's empty mailbox and finalize second runtime"
+        );
+        assert!(result.has_pending_queue);
+        assert!(
+            token.cancelled.load(Ordering::Relaxed),
+            "second runtime's active token should be cancelled by selected repair"
+        );
+        let event = tokio::time::timeout(Duration::from_secs(1), second_rx.recv())
+            .await
+            .expect("owning second runtime should publish completion event")
+            .expect("owning second runtime completion bus should remain open");
+        assert_eq!(event.channel_id, channel);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), first_rx.recv())
+                .await
+                .is_err(),
+            "empty first runtime must not be selected or publish completion"
+        );
+
+        let first_after = first
+            .mailbox_peek(channel)
+            .expect("empty first runtime mailbox should remain only as observation artifact")
+            .snapshot()
+            .await;
+        assert!(first_after.cancel_token.is_none());
+        assert!(first_after.intervention_queue.is_empty());
+        let second_after = second
+            .mailbox_peek(channel)
+            .expect("owning second runtime mailbox should remain registered")
+            .snapshot()
+            .await;
+        assert!(second_after.cancel_token.is_none());
+        assert_eq!(second_after.intervention_queue.len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unresolvable_raw_hard_stop_warns_about_potentially_stranded_pending_queue() {
+        let tempdir = tempfile::tempdir().expect("runtime root tempdir");
+        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+        let provider = ProviderKind::Claude;
+        let shared = super::super::super::make_shared_data_for_tests();
+        let channel = ChannelId::new(4_048_240);
+        shared
+            .mailbox(channel)
+            .replace_queue(
+                vec![intervention(4_048_241, "pending without runtime")],
+                super::super::super::queue_persistence_context(&shared, &provider, channel),
+            )
+            .await;
+        assert!(
+            super::super::super::mailbox_try_start_turn(
+                &shared,
+                channel,
+                Arc::new(CancelToken::new()),
+                UserId::new(4_048_242),
+                MessageId::new(4_048_242),
+            )
+            .await
+        );
+
+        let (result, logs) = capture_warns_async(|| async {
+            super::stop_runtime_turn_preserving_watcher(
+                None,
+                None,
+                Some(channel.get()),
+                None,
+                "hard_stop_unresolvable_test",
+            )
+            .await
+        })
+        .await;
+
+        assert!(result.had_active_turn);
+        assert!(result.has_pending_queue);
+        assert!(
+            logs.contains("raw hard_stop fallback could not resolve the owning runtime"),
+            "strand warning message missing from logs: {logs}"
+        );
+        assert!(
+            logs.contains(&format!("channel_id={}", channel.get())),
+            "strand warning must include channel_id: {logs}"
+        );
+        assert!(
+            logs.contains("has_pending=true"),
+            "strand warning must include has_pending=true: {logs}"
+        );
     }
 }
 

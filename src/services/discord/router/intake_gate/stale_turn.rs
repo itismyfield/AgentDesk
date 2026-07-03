@@ -275,7 +275,10 @@ pub(super) async fn mailbox_has_live_active_turn_or_cleanup_stale_proof(
 mod thread_guard_stale_pure_tests {
     use super::*;
     use chrono::TimeZone;
-    use poise::serenity_prelude::ChannelId;
+    use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+    use std::sync::{Arc, atomic::Ordering};
+
+    use crate::services::provider::CancelToken;
 
     /// Anchor `now` and produce a stale `updated_at` literal using the
     /// production `now_string` encoding.
@@ -519,6 +522,65 @@ mod thread_guard_stale_pure_tests {
         assert_eq!(
             super::classify_stale_active_turn_proof(&inflight, &snapshot, now_unix),
             super::StaleActiveTurnProofClassification::QueueBlockedOrphan
+        );
+    }
+
+    #[tokio::test]
+    async fn queue_blocked_stale_active_turn_release_publishes_completion_event() {
+        let temp = tempfile::tempdir().expect("create temp runtime root");
+        let _guard = EnvRootGuard::set(temp.path());
+
+        let provider = ProviderKind::Codex;
+        let channel_id = ChannelId::new(900_000_000_000_912);
+        let user_msg_id = MessageId::new(8_001);
+        let now_unix = chrono::Utc::now().timestamp();
+        let stale_at = local_at_offset(
+            now_unix,
+            -(crate::services::discord::inflight::INFLIGHT_STALENESS_THRESHOLD_SECS as i64) - 5,
+        );
+        seed_inflight_with_updated_at(&provider, channel_id.get(), &stale_at);
+
+        let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
+        let mut shared = crate::services::discord::make_shared_data_for_tests();
+        Arc::get_mut(&mut shared)
+            .expect("fresh shared data should be uniquely owned before registry install")
+            .health_registry = Arc::downgrade(&registry);
+        registry
+            .register(provider.as_str().to_string(), shared.clone())
+            .await;
+        assert!(
+            crate::services::discord::mailbox_try_start_turn(
+                &shared,
+                channel_id,
+                Arc::new(CancelToken::new()),
+                UserId::new(7),
+                user_msg_id,
+            )
+            .await,
+            "seed stale active mailbox owner"
+        );
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+
+        let mut rx =
+            crate::services::discord::turn_completion_events::subscribe_turn_completion_events(
+                shared.as_ref(),
+            );
+        assert!(
+            super::release_queue_blocked_stale_active_turn(
+                &shared, &provider, channel_id, now_unix,
+            )
+            .await,
+            "queue-blocked stale active proof should release the mailbox"
+        );
+
+        let event = rx
+            .try_recv()
+            .expect("stale active-turn release must publish a completion event");
+        assert_eq!(event.channel_id, channel_id);
+        assert_eq!(
+            shared.restart.deferred_hook_backlog.load(Ordering::Relaxed),
+            0,
+            "release primitive publishes only; the listener owns immediate drain/backstop policy"
         );
     }
 

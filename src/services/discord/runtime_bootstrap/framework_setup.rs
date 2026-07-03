@@ -48,6 +48,10 @@ pub(super) async fn run_bot_framework_setup(
         .http
         .cached_bot_token
         .set(token_for_ready.clone());
+    super::spawn_turn_completion_idle_queue_listener(
+        shared_for_migrate.clone(),
+        provider_for_setup.clone(),
+    );
     super::drain_pending_queue_exit_placeholder_clears(&shared_for_migrate).await;
     health_registry_for_setup
         .register_http(provider_for_setup.as_str().to_string(), ctx.http.clone())

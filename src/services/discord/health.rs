@@ -65,7 +65,8 @@ pub use recovery::{
     handle_rebind_inflight, handle_relay_recovery, hard_stop_runtime_turn,
     provider_channel_mailbox_state, resolve_tmux_session_for_cancel,
     schedule_pending_queue_drain_after_cancel, snapshot_pending_queue_state, spawn_stall_watchdog,
-    spawn_watchdog, stop_runtime_turn_preserving_watcher,
+    spawn_watchdog, stop_providerless_runtime_turn_preserving_watcher_strict_ownership,
+    stop_runtime_turn_preserving_watcher,
 };
 pub use runtime_resolve::{fetch_channel_name, resolve_bot_http};
 use runtime_resolve::{resolve_direct_meeting_runtime, resolve_direct_meeting_shared};

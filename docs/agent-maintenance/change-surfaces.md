@@ -145,7 +145,9 @@
     "session ended … start a new session" tmux-death notice and its
     `should_send_session_ended_notice`/`session_ended_notice`/
     `TmuxDeathLifecycleDecision` plumbing).
-  - `src/services/discord/tmux.rs` (1489 lines; -12 from #4047 S2-b deleting
+  - `src/services/discord/tmux.rs` (1482 lines; -7 from #4048 S3 removing the
+    restored-watcher direct queue-kickoff path in favor of the finalizer
+    completion-event drain trigger; -12 from #4047 S2-b deleting
     the GateTimeout submit path and adding the shared bounded
     background-agent sniff wrapper; -6 from #3874 removing dead
     permanently-None `Option<&Db>` threading from tmux/outbound call paths,
@@ -1154,7 +1156,14 @@
     children (`send_target`, `send_gate`, `send_api`, `manual_delivery`) to
     `outbound/` while preserving the `health::` re-export API; #1879
     snapshot/mailbox extraction, and #3082 answer-flush-barrier field).
-  - `src/services/discord/health/recovery.rs` (2498 lines; +73 from #4035
+  - `src/services/discord/health/recovery.rs` (2574 lines; +23 from #4048
+    round 4 requiring strict provider-less stale-mailbox repair to verify a
+    peeked local mailbox has an active token or queue before treating it as
+    ownership evidence; +45 from #4048 round 3 scoping provider-less
+    stale-mailbox repair to strict per-runtime ownership evidence before raw
+    global hard-stop fallback; +8 from #4048
+    warning when a raw global-mailbox hard-stop fallback preserves pending
+    backlog without a resolvable runtime completion event; +73 from #4035
     guarding stale-mailbox idle-tmux inflight clear with the readiness-time
     finalizer/user-message identity plus `updated_at` and `save_generation` pin;
     +13 from #4024 F1 pairing health hard-stop finalize-path `thread_parents`
@@ -1922,7 +1931,10 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   surface. #3823 adds macOS Codex.app fallback discovery and all-candidate
   Codex semver probing so AgentDesk prefers the newest compatible Codex binary
   instead of silently launching a stale npm shim.
-- `src/services/discord/mod.rs` (now 4056 prod LoC after #3479 item-3 extracted
+- `src/services/discord/mod.rs` (now 4158 prod LoC after #4048 S3 extracted
+  the mailbox-release completion publish helper to `turn_completion_events.rs`
+  and the post-enqueue idle-drain scheduler to `queue_io.rs` (-46 from 4204,
+  +12 from 4146); 4056 prod LoC after #3479 item-3 extracted
   the dispatch intake/routing cluster (`intake_dedup` + `dispatch_thread_parents`
   + `dispatch_role_overrides`) verbatim to `discord/shared_state.rs` as
   `DispatchRoutingState` (-18; call sites use `shared.dispatch.<field>`); 4074

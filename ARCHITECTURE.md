@@ -805,10 +805,10 @@ src/
 │   │   ├── tmux_restart_handoff.rs
 │   │   ├── tmux_session_files.rs
 │   │   ├── tmux_watcher.rs
-│   │   ├── tui_busy_gate.rs
 │   │   ├── tui_direct_pending_start.rs
 │   │   ├── tui_prompt_relay.rs
 │   │   ├── tui_task_card.rs
+│   │   ├── turn_completion_events.rs
 │   │   ├── turn_end_wip_warning.rs
 │   │   ├── turn_finalizer.rs
 │   │   ├── voice_acknowledgement.rs

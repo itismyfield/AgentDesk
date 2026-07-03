@@ -1217,8 +1217,14 @@ pub async fn stale_mailbox_repair_handler(
         )
         .await
         .had_active_turn
-    } else if let Some(handle) = global_handle.as_ref() {
-        handle.hard_stop().await.removed_token.is_some()
+    } else if global_handle.is_some() {
+        health::stop_providerless_runtime_turn_preserving_watcher_strict_ownership(
+            state.health_registry.as_deref(),
+            request.channel_id,
+            "stale_mailbox_repair",
+        )
+        .await
+        .had_active_turn
     } else {
         false
     };

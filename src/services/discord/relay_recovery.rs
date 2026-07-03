@@ -1892,6 +1892,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reattach_idle_tmux_clear_release_publishes_completion_event() {
+        let _guard = auto_heal_test_lock().lock().await;
+        clear_auto_heal_attempts_for_tests();
+        let (_root_guard, root_dir) = isolated_agentdesk_root();
+        let provider = ProviderKind::Claude;
+        let (registry, shared) = registry_with_shared(provider.clone()).await;
+        let channel = ChannelId::new(4_048_410);
+        let user_msg = MessageId::new(4_048_411);
+        let tmux = "AgentDesk-claude-4048-reattach-idle-clear";
+        let output_path = root_dir.path().join("idle-clear-ready.jsonl");
+        let body = "{\"type\":\"system\",\"subtype\":\"turn_duration\",\"session_id\":\"s\"}\n";
+        std::fs::write(&output_path, body).expect("write ready output fixture");
+        let output_len = std::fs::metadata(&output_path)
+            .expect("output fixture metadata")
+            .len();
+        let token = start_test_turn(&shared, channel, user_msg).await;
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+
+        let mut state = super::super::inflight::InflightTurnState::new(
+            provider.clone(),
+            channel.get(),
+            None,
+            1,
+            user_msg.get(),
+            4_048_412,
+            "idle tmux cleanup".to_string(),
+            None,
+            Some(tmux.to_string()),
+            Some(output_path.to_string_lossy().to_string()),
+            None,
+            output_len,
+        );
+        state.set_relay_owner_kind(super::super::inflight::RelayOwnerKind::Watcher);
+        super::super::inflight::save_inflight_state(&state).expect("save idle-clear inflight");
+
+        let snapshot = RelayHealthSnapshot {
+            provider: provider.as_str().to_string(),
+            channel_id: channel.get(),
+            active_turn: RelayActiveTurn::Foreground,
+            tmux_session: Some(tmux.to_string()),
+            tmux_alive: Some(true),
+            bridge_inflight_present: true,
+            mailbox_has_cancel_token: true,
+            mailbox_active_user_msg_id: Some(user_msg.get()),
+            last_capture_offset: Some(output_len),
+            last_relay_offset: output_len,
+            unread_bytes: Some(0),
+            desynced: true,
+            ..snapshot()
+        };
+        let decision = plan_relay_recovery(&snapshot, RelayStallState::TmuxAliveRelayDead, 1_000);
+        assert_eq!(decision.action, RelayRecoveryActionKind::ReattachWatcher);
+        assert!(idle_tmux_repair_ready_for_input(
+            &provider,
+            channel.get(),
+            tmux
+        ));
+        assert!(
+            !idle_tmux_repair_has_unrelayed_tail_answer(&provider, channel.get()),
+            "consumed-at-EOF terminal JSONL must not block idle-tmux cleanup"
+        );
+
+        let mut rx =
+            super::super::turn_completion_events::subscribe_turn_completion_events(shared.as_ref());
+        let result = apply_relay_recovery_decision(
+            &registry,
+            &shared,
+            &provider,
+            &decision,
+            RelayRecoveryApplySource::ProbeAutoHeal,
+        )
+        .await;
+
+        assert_eq!(result.status, "cleared_idle_tmux_stale_turn");
+        assert!(result.removed_mailbox_token);
+        assert!(token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+        let event = rx
+            .try_recv()
+            .expect("reattach idle-clear mailbox release must publish completion event");
+        assert_eq!(event.channel_id, channel);
+        assert_eq!(
+            shared.restart.deferred_hook_backlog.load(Ordering::Relaxed),
+            0,
+            "release primitive publishes only; the queue listener owns drain/backstop policy"
+        );
+        assert!(
+            super::super::inflight::load_inflight_state(&provider, channel.get()).is_none(),
+            "idle-tmux cleanup must clear stale inflight after publishing the release edge"
+        );
+    }
+
+    #[tokio::test]
     async fn stale_watcher_with_jsonl_progress_rebinds_without_canceling_turn() {
         let _guard = auto_heal_test_lock().lock().await;
         clear_auto_heal_attempts_for_tests();

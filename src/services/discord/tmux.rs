@@ -1837,7 +1837,7 @@ async fn finish_restored_watcher_active_turn(
     // `finish_mailbox_on_completion`. Restore/recovery callers that have NOT
     // confirmed a normal completion pass `false` and keep the restore-gated path.
     normal_completion: bool,
-    kickoff_queue: bool,
+    _kickoff_queue: bool,
     // #3350 codex r1-1: the caller's PRE-CLEAR row snapshot for the #3303
     // DeferredClaim marker ensure — inflight is cleared before this helper
     // (see `finalizer_turn_id`), so a row re-load cannot authenticate the
@@ -1898,7 +1898,7 @@ async fn finish_restored_watcher_active_turn(
             shared.clone(),
         )
         .await;
-    let (mailbox_online, has_pending) = match outcome {
+    let (_mailbox_online, _has_pending) = match outcome {
         super::turn_finalizer::FinalizeOutcome::Finalized {
             has_pending,
             mailbox_online,
@@ -1914,14 +1914,7 @@ async fn finish_restored_watcher_active_turn(
         super::turn_finalizer::FinalizeOutcome::AlreadyFinalized
         | super::turn_finalizer::FinalizeOutcome::Deferred => (false, false),
     };
-    if kickoff_queue && mailbox_online && has_pending {
-        super::schedule_deferred_idle_queue_kickoff(
-            shared.clone(),
-            provider.clone(),
-            channel_id,
-            stop_source,
-        );
-    }
+    let _ = stop_source;
     // Drove the finalize (reached here past the early-return gate).
     true
 }

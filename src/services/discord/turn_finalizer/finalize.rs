@@ -2,7 +2,7 @@
 //!
 //! PURE MOVE (no logic change): `do_finalize`, the single owner of finalize's
 //! side-effects (inflight clear / mailbox token release / `global_active`
-//! decrement / trailing channel cleanup / queue kickoff / relay-miss
+//! decrement / trailing channel cleanup / relay-miss
 //! observability, plus the #3866 in-finalize panic-injection test hook), lifted
 //! verbatim. Re-imported by the parent (`use self::finalize::do_finalize`) so
 //! `handle_terminal` and the reconcile/backstop child call it byte-identically.
@@ -120,7 +120,6 @@ pub(super) async fn do_finalize(
     if finish.removed_token.is_some() {
         crate::services::discord::saturating_decrement_global_active(shared);
     }
-
     // The CHANNEL-SCOPED trailing side-effects (D)/(E) below mutate per-channel
     // routing/watchdog state that belongs to whatever turn is CURRENTLY active
     // in the channel. They are safe to run when this finalize actually finished
@@ -180,7 +179,7 @@ pub(super) async fn do_finalize(
         // here would let the bridge propagate `has_queued_turns` and later drain
         // a queued soft message behind the live turn — concurrently dispatching
         // a follow-up this stale terminal does not own. A guarded miss is a true
-        // no-op: no queue kickoff, no backlog reporting.
+        // no-op: no completion-event queue drain, no backlog reporting.
         false
     } else {
         // (D) trailing terminal side-effects that today follow
@@ -208,21 +207,11 @@ pub(super) async fn do_finalize(
             shared.dispatch.role_overrides.remove(&channel_id);
         }
 
-        // (E) optional deferred queue kickoff (watcher path), gated exactly as
-        //     `finish_restored_watcher_active_turn` did.
-        if ctx.kickoff_queue && finish.mailbox_online && has_pending_after_voice {
-            // #3005: idle has just been confirmed on this finalize, so let the
-            // first kickoff attempt run immediately (skipping the 2s pre-sleep)
-            // instead of waiting the full deferred-drain INITIAL_DELAY before a
-            // queued follow-up can start. Subsequent retries keep the existing
-            // 2s cadence (e.g. if the hosted TUI is still transiently Busy).
-            crate::services::discord::schedule_deferred_idle_queue_kickoff_immediate(
-                shared.clone(),
-                provider.clone(),
-                channel_id,
-                "turn_finalizer terminal completion with queued backlog",
-            );
-        }
+        // (E) Queue kickoff is owned by the #4048 completion-event listener. The
+        // mailbox release primitive publishes the channel event as soon as it
+        // removes the active token, and the listener kicks from a fresh mailbox
+        // snapshot. That keeps completion rendering and queue drain timing
+        // decoupled while preserving the real-turn safety gates.
         has_pending_after_voice
     };
 
@@ -376,6 +365,63 @@ mod tests {
         );
         assert!(logs.contains("expected_user_msg_id=4018111"), "{logs}");
         assert!(logs.contains("active_user_message_id=4018222"), "{logs}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn finalize_chokepoint_publishes_mailbox_release_completion_event() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = EnvGuard::set_root(root.path());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_048_100);
+        let user_msg_id = 4_048_101;
+        let token = Arc::new(CancelToken::new());
+        assert!(
+            crate::services::discord::mailbox_try_start_turn(
+                &shared,
+                channel_id,
+                token,
+                UserId::new(9),
+                MessageId::new(user_msg_id),
+            )
+            .await
+        );
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+        let mut rx =
+            crate::services::discord::turn_completion_events::subscribe_turn_completion_events(
+                shared.as_ref(),
+            );
+
+        let outcome = do_finalize(
+            TurnKey::new(channel_id, user_msg_id, 0),
+            ProviderKind::Claude,
+            &TerminalEvent::Complete,
+            FinalizeContext::bridge(),
+            None,
+            &shared,
+        )
+        .await;
+
+        assert!(matches!(
+            outcome,
+            FinalizeOutcome::Finalized {
+                removed_token: Some(_),
+                ..
+            }
+        ));
+        assert!(
+            crate::services::discord::mailbox_snapshot(&shared, channel_id)
+                .await
+                .cancel_token
+                .is_none(),
+            "completion event is published from the finalize chokepoint after the mailbox token is released"
+        );
+        let event = rx
+            .try_recv()
+            .expect("completion event should publish synchronously");
+        assert_eq!(event.channel_id, channel_id);
     }
 
     #[tokio::test(flavor = "current_thread")]

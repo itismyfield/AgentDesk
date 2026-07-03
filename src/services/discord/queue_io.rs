@@ -14,24 +14,77 @@ struct DeferredHookBacklogGuard {
     active: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct IdleQueueBackstopRearm {
+    backlog_units: usize,
+}
+
 const DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY: std::time::Duration =
     std::time::Duration::from_secs(2);
-const DEFERRED_IDLE_QUEUE_KICKOFF_RETRY_DELAY: std::time::Duration =
-    std::time::Duration::from_secs(2);
-const DEFERRED_IDLE_QUEUE_KICKOFF_SLOW_DELAY: std::time::Duration =
-    std::time::Duration::from_secs(60);
-// Keep retrying long enough to cover dcserver/gateway restart windows. A
-// queued user reply should not wait for the next external Discord event just
-// because cached ctx/token arrived slightly after the first post-turn kickoff.
-const DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS: usize = 150;
-const DEFERRED_IDLE_QUEUE_ZERO_START_ABANDONED_CLAIM_PROBE_AFTER: usize = 3;
-const DEFERRED_IDLE_QUEUE_MAX_CONSECUTIVE_DISPATCH_FAILURES: usize = 3;
+const DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
+const IDLE_QUEUE_BACKSTOP_WARN_TARGET: &str = "agentdesk::discord::idle_queue_backstop";
+
+#[cfg(test)]
+static IDLE_QUEUE_BACKSTOP_FIRES_FOR_TESTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+type IdleQueueKickHookForTests = std::sync::Arc<
+    dyn Fn(
+            Arc<SharedData>,
+            ProviderKind,
+            ChannelId,
+            &'static str,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Option<IdleQueueKickoffChannelOutcome>> + Send>,
+        > + Send
+        + Sync,
+>;
+
+#[cfg(test)]
+static IDLE_QUEUE_KICK_HOOK_FOR_TESTS: std::sync::Mutex<Option<IdleQueueKickHookForTests>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+struct IdleQueueKickHookResetForTests;
+
+#[cfg(test)]
+impl Drop for IdleQueueKickHookResetForTests {
+    fn drop(&mut self) {
+        *IDLE_QUEUE_KICK_HOOK_FOR_TESTS
+            .lock()
+            .expect("idle queue kick hook lock") = None;
+    }
+}
+
+#[cfg(test)]
+fn set_idle_queue_kick_hook_for_tests(
+    hook: IdleQueueKickHookForTests,
+) -> IdleQueueKickHookResetForTests {
+    *IDLE_QUEUE_KICK_HOOK_FOR_TESTS
+        .lock()
+        .expect("idle queue kick hook lock") = Some(hook);
+    IdleQueueKickHookResetForTests
+}
+
+#[cfg(test)]
+async fn idle_queue_kick_hook_outcome_for_tests(
+    shared: Arc<SharedData>,
+    provider: ProviderKind,
+    channel_id: ChannelId,
+    reason: &'static str,
+) -> Option<IdleQueueKickoffChannelOutcome> {
+    let hook = IDLE_QUEUE_KICK_HOOK_FOR_TESTS
+        .lock()
+        .expect("idle queue kick hook lock")
+        .clone();
+    hook?(shared, provider, channel_id, reason).await
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DeferredIdleQueueKickoffProfile {
     Normal,
     ImmediateOnce,
-    Slow { round: usize },
 }
 
 impl DeferredIdleQueueKickoffProfile {
@@ -39,82 +92,17 @@ impl DeferredIdleQueueKickoffProfile {
         match self {
             Self::Normal => DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY,
             Self::ImmediateOnce => std::time::Duration::ZERO,
-            Self::Slow { .. } => DEFERRED_IDLE_QUEUE_KICKOFF_SLOW_DELAY,
-        }
-    }
-
-    fn retry_delay(self) -> std::time::Duration {
-        match self {
-            Self::Normal | Self::ImmediateOnce => DEFERRED_IDLE_QUEUE_KICKOFF_RETRY_DELAY,
-            Self::Slow { .. } => DEFERRED_IDLE_QUEUE_KICKOFF_SLOW_DELAY,
-        }
-    }
-
-    fn round_index(self) -> usize {
-        match self {
-            Self::Normal | Self::ImmediateOnce => 0,
-            Self::Slow { round } => round,
-        }
-    }
-
-    fn next_slow_round(self) -> Self {
-        Self::Slow {
-            round: self.round_index().saturating_add(1),
         }
     }
 
     fn wakes_existing_task(self) -> bool {
-        matches!(self, Self::Normal | Self::ImmediateOnce)
+        matches!(self, Self::ImmediateOnce)
     }
 }
 
-async fn sleep_or_deferred_kick_notify(
-    duration: std::time::Duration,
-    notify: &tokio::sync::Notify,
-) {
-    if duration.is_zero() {
-        return;
-    }
-    tokio::select! {
-        _ = tokio::time::sleep(duration) => {}
-        _ = notify.notified() => {}
-    }
-}
-
-fn should_retry_deferred_idle_queue_kickoff(attempt: usize) -> bool {
-    attempt < DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS
-}
-
-fn note_zero_start_deferred_drain(
-    consecutive_zero_start_drains: &mut usize,
-    target_started: bool,
-    target_still_pending: bool,
-) -> bool {
-    if !target_started && target_still_pending {
-        *consecutive_zero_start_drains = consecutive_zero_start_drains.saturating_add(1);
-    } else {
-        *consecutive_zero_start_drains = 0;
-    }
-    *consecutive_zero_start_drains >= DEFERRED_IDLE_QUEUE_ZERO_START_ABANDONED_CLAIM_PROBE_AFTER
-}
-
-fn note_deferred_dispatch_failure(
-    consecutive_dispatch_failures: &mut usize,
-    dispatch_failed: bool,
-) -> bool {
-    if dispatch_failed {
-        *consecutive_dispatch_failures = consecutive_dispatch_failures.saturating_add(1);
-    } else {
-        *consecutive_dispatch_failures = 0;
-    }
-    *consecutive_dispatch_failures >= DEFERRED_IDLE_QUEUE_MAX_CONSECUTIVE_DISPATCH_FAILURES
-}
-
-/// #3005: pre-sleep before the very first deferred-drain attempt. The
-/// finalize-completed (idle-confirmed) path passes `immediate_once = true` so
-/// the first kickoff runs without the 2s `INITIAL_DELAY` guard; every other
-/// caller keeps the full delay to avoid spinning during the dcserver/gateway
-/// restart window.
+/// #3005/#4048: pre-sleep before the one non-event deferred-drain attempt.
+/// Completion events bypass this helper and kick their channel immediately.
+/// Every other caller keeps the 2s delay to avoid restart-window spin.
 #[cfg(test)]
 fn deferred_idle_queue_initial_presleep(immediate_once: bool) -> std::time::Duration {
     if immediate_once {
@@ -124,14 +112,7 @@ fn deferred_idle_queue_initial_presleep(immediate_once: bool) -> std::time::Dura
     }
 }
 
-fn deferred_idle_queue_rearm_profile_after_giveup(
-    current: DeferredIdleQueueKickoffProfile,
-    remaining_queue_len: usize,
-) -> Option<DeferredIdleQueueKickoffProfile> {
-    (remaining_queue_len > 0).then(|| current.next_slow_round())
-}
-
-fn deferred_rearm_backlog_units(
+fn idle_queue_backstop_backlog_units(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -194,15 +175,9 @@ pub(super) fn schedule_deferred_idle_queue_kickoff(
     );
 }
 
-/// #3005: variant for the finalize-completed (idle-confirmed) path. When a turn
-/// has just finalized with a confirmed-idle pane and a queued backlog remains,
-/// the first kickoff attempt skips the 2s `INITIAL_DELAY` pre-sleep and tries
-/// `kickoff_idle_queues` immediately, falling back to the existing 2s retry
-/// cadence if that first attempt cannot drain (e.g. cached ctx/token not yet
-/// available, or the hosted TUI is still transiently `Busy`). The
-/// `INITIAL_DELAY` constant is intentionally left untouched — it still guards
-/// the restart-window spin for every other caller — so this only narrows the
-/// post-finalize latency where idle has already been confirmed.
+/// #3005/#4048: variant for already-confirmed non-finalizer paths. Turn
+/// completion now bypasses this helper through the completion-event listener;
+/// this remains for internal paths that have an independent idle signal.
 pub(super) fn schedule_deferred_idle_queue_kickoff_immediate(
     shared: Arc<SharedData>,
     provider: ProviderKind,
@@ -218,93 +193,347 @@ pub(super) fn schedule_deferred_idle_queue_kickoff_immediate(
     );
 }
 
-async fn slow_rearm_channel_still_kickable(
-    ctx: Option<&serenity::Context>,
-    shared: &SharedData,
-    provider: &ProviderKind,
+pub(super) fn schedule_post_enqueue_idle_queue_kick(
+    shared: Arc<SharedData>,
+    provider: ProviderKind,
     channel_id: ChannelId,
-    reason: &'static str,
-) -> bool {
-    let Some(ctx) = ctx else {
-        return true;
-    };
-    let settings_snapshot = shared.settings.read().await.clone();
-    if let Err(route_reason) =
-        super::validate_live_channel_routing(ctx, provider, &settings_snapshot, channel_id).await
-    {
-        tracing::warn!(
-            provider = provider.as_str(),
-            channel_id = channel_id.get(),
-            reason,
-            route_reason = %route_reason,
-            "Deferred drain: terminating slow re-arm chain for unroutable channel; queue file remains persisted for rebind/boot recovery"
-        );
-        return false;
-    }
-    true
+) {
+    // #4048 S3 enqueue-then-check closes the lost-wakeup window that remains
+    // after subscribe-then-snapshot on the completion listener: a turn can
+    // publish/release before this enqueue is durable, so the event listener's
+    // snapshot legitimately sees an empty queue. Once persistence succeeds, the
+    // spawned task mirrors the listener by taking a fresh mailbox snapshot and
+    // kicking immediately when no real active turn owns the channel. Spawning
+    // keeps the dispatch future acyclic: the kick path can re-enter
+    // `handle_text_message`, whose race-loss branch can enqueue again. The drain
+    // is idempotent: actor-serialized dequeue plus the foreground guard prevent
+    // double-starts when older race-loss compensation also schedules a kick.
+    super::task_supervisor::spawn_observed("post_enqueue_idle_queue_kick", async move {
+        let snapshot = super::mailbox_snapshot(&shared, channel_id).await;
+        if idle_queue_snapshot_has_kickable_backlog(&shared, &provider, channel_id, &snapshot) {
+            let outcome = kick_idle_queue_channel_if_context_available(
+                &shared,
+                &provider,
+                channel_id,
+                "post_enqueue_idle_snapshot",
+            )
+            .await;
+            arm_event_backstop_after_no_start_if_queue_nonempty(
+                &shared,
+                &provider,
+                channel_id,
+                outcome,
+                "post_enqueue_idle_snapshot",
+            )
+            .await;
+        }
+    });
 }
 
-async fn rearm_slow_deferred_idle_queue_kickoff(
-    ctx: Option<&serenity::Context>,
+pub(super) async fn kick_idle_queue_channel_if_context_available(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
     reason: &'static str,
-    next_profile: DeferredIdleQueueKickoffProfile,
-    remaining_queue_len: usize,
-    backlog_guard: &mut DeferredHookBacklogGuard,
-    cause: &'static str,
-) {
-    if !slow_rearm_channel_still_kickable(ctx, shared.as_ref(), provider, channel_id, reason).await
+) -> IdleQueueKickoffChannelOutcome {
+    #[cfg(test)]
+    if let Some(outcome) =
+        idle_queue_kick_hook_outcome_for_tests(shared.clone(), provider.clone(), channel_id, reason)
+            .await
     {
-        return;
+        return outcome;
     }
-    let next_round = next_profile.round_index();
-    tracing::warn!(
-        provider = provider.as_str(),
-        channel_id = channel_id.get(),
-        reason,
-        round = next_round,
-        queue_len = remaining_queue_len,
-        "Deferred drain: re-arming slow deferred kickoff {cause}"
+
+    let (Some(ctx), Some(tok)) = (
+        shared.http.cached_serenity_ctx.get(),
+        shared.http.cached_bot_token.get(),
+    ) else {
+        tracing::debug!(
+            provider = provider.as_str(),
+            channel_id = channel_id.get(),
+            reason,
+            "Deferred drain: cached Discord context/token unavailable; preserving queued work for the slow backstop"
+        );
+        return IdleQueueKickoffChannelOutcome::default();
+    };
+
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::info!(
+        "  [{ts}] 🚀 Deferred drain: one-shot kick for channel {} ({reason})",
+        channel_id
     );
-    backlog_guard.release();
-    schedule_deferred_idle_queue_kickoff_inner(
+    super::kickoff_idle_queue_channel(ctx, shared, tok, provider, channel_id).await
+}
+
+fn idle_queue_snapshot_blocked_by_real_turn(snapshot: &ChannelMailboxSnapshot) -> bool {
+    snapshot.cancel_token.is_some() && !snapshot.active_turn_kind.is_background()
+}
+
+pub(super) async fn arm_event_backstop_after_no_start_if_queue_nonempty(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    outcome: IdleQueueKickoffChannelOutcome,
+    reason: &'static str,
+) -> bool {
+    if outcome.started {
+        return false;
+    }
+    let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
+    let backlog_units =
+        idle_queue_backstop_backlog_units(shared.as_ref(), provider, channel_id, &snapshot);
+    if backlog_units == 0 {
+        return false;
+    }
+    schedule_single_slow_idle_queue_backstop(
         shared.clone(),
         provider.clone(),
         channel_id,
         reason,
-        next_profile,
+        backlog_units,
+    )
+}
+
+fn emit_idle_queue_backstop_warn(
+    provider: &ProviderKind,
+    channel_id: Option<ChannelId>,
+    reason: &'static str,
+    backlog_units: usize,
+    cause: &'static str,
+) {
+    #[cfg(test)]
+    IDLE_QUEUE_BACKSTOP_FIRES_FOR_TESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    tracing::warn!(
+        target: IDLE_QUEUE_BACKSTOP_WARN_TARGET,
+        provider = provider.as_str(),
+        channel_id = channel_id.map(|id| id.get()).unwrap_or(0),
+        all_channels = channel_id.is_none(),
+        reason,
+        backlog_units,
+        cause,
+        "Idle queue slow backstop fired; the turn-completion event path should normally drain before this"
     );
 }
 
-async fn finish_deferred_idle_queue_kickoff(
+async fn idle_queue_backstop_backlog_units_all(
+    shared: &SharedData,
+    provider: &ProviderKind,
+) -> usize {
+    shared
+        .mailboxes
+        .snapshot_all()
+        .await
+        .into_iter()
+        .map(|(channel_id, snapshot)| {
+            idle_queue_backstop_backlog_units(shared, provider, channel_id, &snapshot)
+        })
+        .sum()
+}
+
+async fn run_single_slow_idle_queue_backstop(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
     reason: &'static str,
-    backlog_guard: &mut DeferredHookBacklogGuard,
-) {
-    if !backlog_guard.release() {
-        return;
-    }
+) -> Option<IdleQueueBackstopRearm> {
+    tokio::time::sleep(DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY).await;
     let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
-    if super::idle_queue_channel_has_kickable_backlog(
-        shared.as_ref(),
-        provider,
-        channel_id,
-        &snapshot,
-    )
-    .await
-    {
-        schedule_deferred_idle_queue_kickoff_inner(
-            shared.clone(),
-            provider.clone(),
-            channel_id,
-            reason,
-            DeferredIdleQueueKickoffProfile::Normal,
-        );
+    let backlog_units =
+        idle_queue_backstop_backlog_units(shared.as_ref(), provider, channel_id, &snapshot);
+    if backlog_units == 0 {
+        return None;
     }
+
+    emit_idle_queue_backstop_warn(
+        provider,
+        Some(channel_id),
+        reason,
+        backlog_units,
+        "channel_backstop",
+    );
+    let outcome =
+        kick_idle_queue_channel_if_context_available(shared, provider, channel_id, reason).await;
+    if outcome.started {
+        return None;
+    }
+
+    let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
+    let backlog_units =
+        idle_queue_backstop_backlog_units(shared.as_ref(), provider, channel_id, &snapshot);
+    if backlog_units == 0 || idle_queue_snapshot_blocked_by_real_turn(&snapshot) {
+        return None;
+    }
+
+    Some(IdleQueueBackstopRearm { backlog_units })
+}
+
+fn schedule_single_slow_idle_queue_backstop(
+    shared: Arc<SharedData>,
+    provider: ProviderKind,
+    channel_id: ChannelId,
+    reason: &'static str,
+    backlog_units: usize,
+) -> bool {
+    match shared.restart.deferred_hook_channels.entry(channel_id) {
+        dashmap::mapref::entry::Entry::Occupied(_) => {
+            tracing::debug!(
+                provider = provider.as_str(),
+                channel_id = channel_id.get(),
+                reason,
+                backlog_units,
+                "Idle queue slow backstop already active for channel; coalescing event-path no-start"
+            );
+            return false;
+        }
+        dashmap::mapref::entry::Entry::Vacant(entry) => {
+            entry.insert(Arc::new(tokio::sync::Notify::new()));
+        }
+    };
+    shared
+        .restart
+        .deferred_hook_backlog
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    super::task_supervisor::spawn_observed("event_idle_queue_backstop", async move {
+        let mut backlog_guard = DeferredHookBacklogGuard {
+            shared: shared.clone(),
+            channel_id,
+            active: true,
+        };
+        let rearm =
+            run_single_slow_idle_queue_backstop(&shared, &provider, channel_id, reason).await;
+        backlog_guard.release();
+        if let Some(rearm) = rearm {
+            schedule_single_slow_idle_queue_backstop(
+                shared,
+                provider,
+                channel_id,
+                reason,
+                rearm.backlog_units,
+            );
+        }
+    });
+    true
+}
+
+async fn reconcile_all_ready_idle_queues(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    reason: &'static str,
+) -> usize {
+    let (Some(ctx), Some(tok)) = (
+        shared.http.cached_serenity_ctx.get(),
+        shared.http.cached_bot_token.get(),
+    ) else {
+        tracing::debug!(
+            provider = provider.as_str(),
+            reason,
+            "Idle queue completion listener: cached Discord context/token unavailable; full reconcile deferred to slow backstop"
+        );
+        return 0;
+    };
+
+    tracing::debug!(
+        provider = provider.as_str(),
+        reason,
+        "Idle queue completion listener: reconciling all queued channels from mailbox snapshots"
+    );
+    super::kickoff_idle_queues(ctx, shared, tok, provider).await
+}
+
+pub(in crate::services::discord) fn spawn_turn_completion_idle_queue_listener(
+    shared: Arc<SharedData>,
+    provider: ProviderKind,
+) {
+    // #4048 S3 lost-wakeup ordering: subscribe/register the broadcast receiver
+    // synchronously first, then the task's first action is a mailbox snapshot
+    // reconcile through `kickoff_idle_queues`. A completion racing this
+    // registration is either delivered to `rx` or observed by that snapshot.
+    let mut rx = super::turn_completion_events::subscribe_turn_completion_events(shared.as_ref());
+    super::task_supervisor::spawn_observed("turn_completion_idle_queue_listener", async move {
+        let _ =
+            reconcile_all_ready_idle_queues(&shared, &provider, "turn_completion_listener_start")
+                .await;
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    tracing::debug!(
+                        target: "agentdesk::discord::turn_completion_events",
+                        provider = provider.as_str(),
+                        channel_id = event.channel_id.get(),
+                        "turn completion event received; kicking idle queue channel"
+                    );
+                    let outcome = kick_idle_queue_channel_if_context_available(
+                        &shared,
+                        &provider,
+                        event.channel_id,
+                        "turn_completion_event",
+                    )
+                    .await;
+                    arm_event_backstop_after_no_start_if_queue_nonempty(
+                        &shared,
+                        &provider,
+                        event.channel_id,
+                        outcome,
+                        "turn_completion_event",
+                    )
+                    .await;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    emit_idle_queue_backstop_warn(
+                        &provider,
+                        None,
+                        "turn_completion_event_lagged",
+                        skipped as usize,
+                        "broadcast_lagged_full_reconcile",
+                    );
+                    let _ = reconcile_all_ready_idle_queues(
+                        &shared,
+                        &provider,
+                        "turn_completion_event_lagged",
+                    )
+                    .await;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tracing::error!(
+                        target: IDLE_QUEUE_BACKSTOP_WARN_TARGET,
+                        provider = provider.as_str(),
+                        "Turn-completion event bus closed; idle queue listener is falling back to the slow reconcile backstop"
+                    );
+                    loop {
+                        tokio::time::sleep(DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY).await;
+                        let backlog_units =
+                            idle_queue_backstop_backlog_units_all(shared.as_ref(), &provider).await;
+                        if backlog_units > 0 {
+                            emit_idle_queue_backstop_warn(
+                                &provider,
+                                None,
+                                "turn_completion_event_bus_closed",
+                                backlog_units,
+                                "broadcast_closed_full_reconcile",
+                            );
+                        }
+                        let _ = reconcile_all_ready_idle_queues(
+                            &shared,
+                            &provider,
+                            "turn_completion_event_bus_closed",
+                        )
+                        .await;
+                    }
+                }
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+fn idle_queue_backstop_fires_for_tests() -> usize {
+    IDLE_QUEUE_BACKSTOP_FIRES_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(test)]
+fn idle_queue_backstop_delay_for_tests() -> std::time::Duration {
+    DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY
 }
 
 fn schedule_deferred_idle_queue_kickoff_inner(
@@ -314,7 +543,7 @@ fn schedule_deferred_idle_queue_kickoff_inner(
     reason: &'static str,
     profile: DeferredIdleQueueKickoffProfile,
 ) {
-    let task_notify = match shared.restart.deferred_hook_channels.entry(channel_id) {
+    match shared.restart.deferred_hook_channels.entry(channel_id) {
         dashmap::mapref::entry::Entry::Occupied(entry) => {
             if profile.wakes_existing_task() {
                 entry.get().notify_one();
@@ -323,16 +552,14 @@ fn schedule_deferred_idle_queue_kickoff_inner(
                 provider = provider.as_str(),
                 channel_id = channel_id.get(),
                 reason,
-                round = profile.round_index(),
+                immediate = matches!(profile, DeferredIdleQueueKickoffProfile::ImmediateOnce),
                 wake_existing = profile.wakes_existing_task(),
                 "Deferred drain: kickoff already active for channel; coalescing duplicate request"
             );
             return;
         }
         dashmap::mapref::entry::Entry::Vacant(entry) => {
-            let notify = Arc::new(tokio::sync::Notify::new());
-            entry.insert(notify.clone());
-            notify
+            entry.insert(Arc::new(tokio::sync::Notify::new()));
         }
     };
     shared
@@ -347,239 +574,28 @@ fn schedule_deferred_idle_queue_kickoff_inner(
             channel_id,
             active: true,
         };
-        'drain: {
-            // #3005: on the finalize-completed (idle-confirmed) reason the first
-            // attempt skips the 2s pre-sleep so a queued follow-up can drain right
-            // after the turn settles; all subsequent attempts keep the 2s cadence.
-            let initial_presleep = profile.initial_presleep();
-            if !initial_presleep.is_zero() {
-                sleep_or_deferred_kick_notify(initial_presleep, task_notify.as_ref()).await;
-            }
-            let mut consecutive_zero_start_drains = 0usize;
-            let mut consecutive_dispatch_failures = 0usize;
-            for attempt in 1..=DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS {
-                if let (Some(ctx), Some(tok)) = (
-                    shared.http.cached_serenity_ctx.get(),
-                    shared.http.cached_bot_token.get(),
-                ) {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::info!(
-                        "  [{ts}] 🚀 Deferred drain: kicking off idle queues for channel {} ({reason}, attempt {attempt}/{})",
-                        channel_id,
-                        DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS
-                    );
-                    let outcome =
-                        super::kickoff_idle_queue_channel(ctx, &shared, tok, &provider, channel_id)
-                            .await;
-                    // Always re-check the queue on a zero-start drain regardless
-                    // of `reason`. The earlier `should_retry_zero_start_*` reason
-                    // allowlist gated retry on a single hard-coded reason
-                    // (`hosted_tui_busy_pre_submit_pending`) so every other
-                    // caller (monitor turn completion, placeholder_sweeper,
-                    // catch-up retry, tmux stop, …) silently abandoned the
-                    // queue when kickoff returned 0 — usually because the
-                    // hosted TUI was still `Busy` for the few seconds after a
-                    // turn finished. The blocker is the TUI ready state, not
-                    // the reason string, so any reason can hit the same
-                    // transient window. Retry whenever the queue is still
-                    // non-empty within the bounded attempt budget; the
-                    // hosted-TUI gate inside `kickoff_idle_queues` is what
-                    // keeps us from racing a still-busy pane.
-                    let target_snapshot =
-                        super::mailbox_snapshot(shared.as_ref(), channel_id).await;
-                    let target_still_pending = super::idle_queue_snapshot_has_kickable_backlog(
-                        shared.as_ref(),
-                        &provider,
-                        channel_id,
-                        &target_snapshot,
-                    );
-                    let target_rearm_units = deferred_rearm_backlog_units(
-                        shared.as_ref(),
-                        &provider,
-                        channel_id,
-                        &target_snapshot,
-                    );
-                    if note_deferred_dispatch_failure(
-                        &mut consecutive_dispatch_failures,
-                        outcome.dispatch_failed,
-                    ) && target_rearm_units > 0
-                    {
-                        if let Some(next_profile) = deferred_idle_queue_rearm_profile_after_giveup(
-                            profile,
-                            target_rearm_units,
-                        ) {
-                            rearm_slow_deferred_idle_queue_kickoff(
-                                Some(ctx),
-                                &shared,
-                                &provider,
-                                channel_id,
-                                reason,
-                                next_profile,
-                                target_rearm_units,
-                                &mut backlog_guard,
-                                "after repeated dispatch failures",
-                            )
-                            .await;
-                        }
-                        break 'drain;
-                    }
-                    let should_probe_abandoned_claim = note_zero_start_deferred_drain(
-                        &mut consecutive_zero_start_drains,
-                        outcome.started,
-                        target_still_pending,
-                    );
-                    if should_probe_abandoned_claim {
-                        let abandoned_claim =
-                            super::tui_direct_pending_start::pending_synthetic_start_abandoned(
-                                provider.as_str(),
-                                channel_id.get(),
-                            );
-                        if abandoned_claim
-                        && super::tui_direct_pending_start::clear_abandoned_synthetic_start_presence(
-                            provider.as_str(),
-                            channel_id.get(),
-                        )
-                    {
-                        tracing::warn!(
-                            provider = provider.as_str(),
-                            channel_id = channel_id.get(),
-                            reason,
-                            attempt,
-                            consecutive_zero_start_drains,
-                            issue = "#3333",
-                            "Deferred drain: cleared abandoned synthetic-start presence after repeated zero-start drains; durable record retained for restart retry"
-                        );
-                        let final_outcome = super::kickoff_idle_queue_channel(
-                            ctx, &shared, tok, &provider, channel_id,
-                        )
-                        .await;
-                        let final_snapshot =
-                            super::mailbox_snapshot(shared.as_ref(), channel_id).await;
-                        let final_rearm_units = deferred_rearm_backlog_units(
-                            shared.as_ref(),
-                            &provider,
-                            channel_id,
-                            &final_snapshot,
-                        );
-                        if !final_outcome.started && final_rearm_units > 0 {
-                            let remaining_queue_len = final_rearm_units;
-                            tracing::warn!(
-                                provider = provider.as_str(),
-                                channel_id = channel_id.get(),
-                                reason,
-                                attempt,
-                                issue = "#3333",
-                                "Deferred drain: final one-shot drain after abandoned synthetic-start clear started zero turns; stopping bounded retry loop"
-                            );
-                            if let Some(next_profile) =
-                                deferred_idle_queue_rearm_profile_after_giveup(
-                                    profile,
-                                    remaining_queue_len,
-                                )
-                            {
-                                rearm_slow_deferred_idle_queue_kickoff(
-                                    Some(ctx),
-                                    &shared,
-                                    &provider,
-                                    channel_id,
-                                    reason,
-                                    next_profile,
-                                    remaining_queue_len,
-                                    &mut backlog_guard,
-                                    "after abandoned synthetic-start give-up",
-                                )
-                                .await;
-                            }
-                        }
-                        break 'drain;
-                    }
-                        consecutive_zero_start_drains = 0;
-                    }
-                    if !outcome.started
-                        && target_still_pending
-                        && should_retry_deferred_idle_queue_kickoff(attempt)
-                    {
-                        tracing::info!(
-                            "  [{ts}] ⏳ Deferred drain: channel {} still queued after zero-start drain ({reason}, attempt {attempt}/{}); retrying",
-                            channel_id,
-                            DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS
-                        );
-                        sleep_or_deferred_kick_notify(profile.retry_delay(), task_notify.as_ref())
-                            .await;
-                        continue;
-                    }
-                    if !outcome.started && target_rearm_units > 0 {
-                        let remaining_queue_len = target_rearm_units;
-                        if let Some(next_profile) = deferred_idle_queue_rearm_profile_after_giveup(
-                            profile,
-                            remaining_queue_len,
-                        ) {
-                            rearm_slow_deferred_idle_queue_kickoff(
-                                Some(ctx),
-                                &shared,
-                                &provider,
-                                channel_id,
-                                reason,
-                                next_profile,
-                                remaining_queue_len,
-                                &mut backlog_guard,
-                                "after bounded zero-start give-up",
-                            )
-                            .await;
-                        }
-                    }
-                    break 'drain;
-                }
 
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                if !should_retry_deferred_idle_queue_kickoff(attempt) {
-                    let missing_context_snapshot =
-                        super::mailbox_snapshot(shared.as_ref(), channel_id).await;
-                    let remaining_queue_len = deferred_rearm_backlog_units(
-                        shared.as_ref(),
-                        &provider,
-                        channel_id,
-                        &missing_context_snapshot,
-                    );
-                    tracing::warn!(
-                        "  [{ts}] ⚠ Deferred drain: missing cached context for channel {} after {} attempts ({reason}); queued items remain persisted for next kickoff",
-                        channel_id,
-                        DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS
-                    );
-                    if let Some(next_profile) =
-                        deferred_idle_queue_rearm_profile_after_giveup(profile, remaining_queue_len)
-                    {
-                        rearm_slow_deferred_idle_queue_kickoff(
-                            None,
-                            &shared,
-                            &provider,
-                            channel_id,
-                            reason,
-                            next_profile,
-                            remaining_queue_len,
-                            &mut backlog_guard,
-                            "after missing-context give-up",
-                        )
-                        .await;
-                    }
-                    break;
-                }
-                tracing::info!(
-                    "  [{ts}] ⚠ Deferred drain: missing cached context for channel {} ({reason}, attempt {attempt}/{}); retrying",
-                    channel_id,
-                    DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS
-                );
-                sleep_or_deferred_kick_notify(profile.retry_delay(), task_notify.as_ref()).await;
-            }
+        let initial_presleep = profile.initial_presleep();
+        if !initial_presleep.is_zero() {
+            tokio::time::sleep(initial_presleep).await;
         }
-        finish_deferred_idle_queue_kickoff(
-            &shared,
-            &provider,
-            channel_id,
-            reason,
-            &mut backlog_guard,
-        )
-        .await;
+
+        let _ =
+            kick_idle_queue_channel_if_context_available(&shared, &provider, channel_id, reason)
+                .await;
+
+        let rearm =
+            run_single_slow_idle_queue_backstop(&shared, &provider, channel_id, reason).await;
+        backlog_guard.release();
+        if let Some(rearm) = rearm {
+            schedule_single_slow_idle_queue_backstop(
+                shared,
+                provider,
+                channel_id,
+                reason,
+                rearm.backlog_units,
+            );
+        }
     });
 }
 
@@ -637,6 +653,54 @@ mod presleep_tests {
         }
     }
 
+    async fn yield_backstop_tasks() {
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    fn cleanup_retry_inflight_state(
+        provider: &ProviderKind,
+        channel_id: ChannelId,
+        message_id: MessageId,
+    ) -> super::super::inflight::InflightTurnState {
+        super::super::inflight::InflightTurnState::new(
+            provider.clone(),
+            channel_id.get(),
+            None,
+            4_048_210,
+            4_048_211,
+            message_id.get(),
+            "cleanup retry gate".to_string(),
+            Some("cleanup-retry-session".to_string()),
+            Some(format!("tmux-cleanup-retry-{}", channel_id.get())),
+            Some(format!("/tmp/cleanup-retry-{}.jsonl", channel_id.get())),
+            None,
+            0,
+        )
+    }
+
+    fn record_terminal_cleanup_outcome(
+        shared: &SharedData,
+        provider: ProviderKind,
+        channel_id: ChannelId,
+        message_id: MessageId,
+        outcome: super::super::placeholder_cleanup::PlaceholderCleanupOutcome,
+    ) {
+        shared.ui.placeholder_cleanup.record(
+            super::super::placeholder_cleanup::PlaceholderCleanupRecord {
+                provider,
+                channel_id,
+                message_id,
+                tmux_session_name: Some(format!("tmux-cleanup-retry-{}", channel_id.get())),
+                operation:
+                    super::super::placeholder_cleanup::PlaceholderCleanupOperation::DeleteTerminal,
+                outcome,
+                source: "queue_io_test",
+            },
+        );
+    }
+
     /// #3005: the finalize-completed immediate path must skip the 2s
     /// INITIAL_DELAY pre-sleep on the first attempt, while every other caller
     /// keeps the full delay (restart-window spin guard). The INITIAL_DELAY
@@ -661,98 +725,16 @@ mod presleep_tests {
     }
 
     #[test]
-    fn giveup_with_backlog_rearms_slow_profile() {
-        let next = deferred_idle_queue_rearm_profile_after_giveup(
-            DeferredIdleQueueKickoffProfile::Normal,
-            1,
-        )
-        .expect("non-empty queue should schedule one slow follow-up");
-        assert_eq!(next, DeferredIdleQueueKickoffProfile::Slow { round: 1 });
-        assert_eq!(next.initial_presleep(), std::time::Duration::from_secs(60));
-        assert_eq!(next.retry_delay(), std::time::Duration::from_secs(60));
-        assert_eq!(DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS, 150);
-
-        let chained = deferred_idle_queue_rearm_profile_after_giveup(next, 2)
-            .expect("slow rounds may chain while backlog remains");
-        assert_eq!(chained, DeferredIdleQueueKickoffProfile::Slow { round: 2 });
-    }
-
-    #[test]
-    fn giveup_with_empty_queue_does_not_rearm() {
+    fn single_backstop_profile_is_the_only_slow_cycle() {
         assert_eq!(
-            deferred_idle_queue_rearm_profile_after_giveup(
-                DeferredIdleQueueKickoffProfile::Normal,
-                0,
-            ),
-            None
-        );
-        assert_eq!(
-            deferred_idle_queue_rearm_profile_after_giveup(
-                DeferredIdleQueueKickoffProfile::Slow { round: 3 },
-                0,
-            ),
-            None
+            idle_queue_backstop_delay_for_tests(),
+            std::time::Duration::from_secs(60),
+            "the deferred path keeps exactly one slow-cycle backstop"
         );
     }
 
     #[test]
-    fn zero_start_abandoned_claim_probe_fires_on_third_consecutive_pending_zero() {
-        let mut consecutive = 0usize;
-        assert!(!note_zero_start_deferred_drain(
-            &mut consecutive,
-            false,
-            true
-        ));
-        assert!(!note_zero_start_deferred_drain(
-            &mut consecutive,
-            false,
-            true
-        ));
-        assert!(note_zero_start_deferred_drain(
-            &mut consecutive,
-            false,
-            true
-        ));
-        assert_eq!(
-            consecutive, DEFERRED_IDLE_QUEUE_ZERO_START_ABANDONED_CLAIM_PROBE_AFTER,
-            "the #3333 abandoned-claim probe must fire after 3 zero-start drains, not after the 150-attempt cap"
-        );
-
-        assert!(!note_zero_start_deferred_drain(
-            &mut consecutive,
-            true,
-            true
-        ));
-        assert_eq!(consecutive, 0, "a non-zero drain resets the zero-start run");
-        assert!(!note_zero_start_deferred_drain(
-            &mut consecutive,
-            false,
-            false
-        ));
-        assert_eq!(consecutive, 0, "an empty target queue is a normal exit");
-    }
-
-    #[test]
-    fn target_channel_zero_start_progress_is_independent_of_other_channels() {
-        let mut consecutive = DEFERRED_IDLE_QUEUE_ZERO_START_ABANDONED_CLAIM_PROBE_AFTER - 1;
-        let other_channel_started = true;
-        assert!(
-            other_channel_started,
-            "document the masked-success scenario"
-        );
-        assert!(note_zero_start_deferred_drain(
-            &mut consecutive,
-            false,
-            true
-        ));
-        assert_eq!(
-            consecutive, DEFERRED_IDLE_QUEUE_ZERO_START_ABANDONED_CLAIM_PROBE_AFTER,
-            "a different channel's success must not reset this target channel"
-        );
-    }
-
-    #[test]
-    fn marker_only_backlog_counts_as_slow_rearm_work() {
+    fn marker_only_backlog_counts_as_backstop_work() {
         let shared = make_shared_data_for_tests();
         let provider = ProviderKind::Claude;
         let channel_id = ChannelId::new(4_024_283);
@@ -761,11 +743,11 @@ mod presleep_tests {
             ..ChannelMailboxSnapshot::default()
         };
         assert_eq!(
-            deferred_rearm_backlog_units(&shared, &provider, channel_id, &snapshot),
+            idle_queue_backstop_backlog_units(&shared, &provider, channel_id, &snapshot),
             1
         );
         assert_eq!(
-            deferred_rearm_backlog_units(
+            idle_queue_backstop_backlog_units(
                 &shared,
                 &provider,
                 channel_id,
@@ -776,7 +758,7 @@ mod presleep_tests {
     }
 
     #[test]
-    fn transient_gate_backlog_counts_for_slow_rearm() {
+    fn transient_gate_backlog_counts_for_backstop() {
         let shared = make_shared_data_for_tests();
         let provider = ProviderKind::Claude;
         let channel_id = ChannelId::new(4_024_285);
@@ -791,59 +773,26 @@ mod presleep_tests {
             "recovery gate still blocks the actual dequeue attempt"
         );
         assert_eq!(
-            deferred_rearm_backlog_units(&shared, &provider, channel_id, &snapshot),
+            idle_queue_backstop_backlog_units(&shared, &provider, channel_id, &snapshot),
             1,
-            "recovery gate must not suppress the slow rearm decision"
+            "recovery gate must not suppress the slow backstop decision"
         );
     }
 
     #[test]
-    fn persistent_dispatch_failure_consumes_bounded_zero_progress_budget_then_rearms_slow() {
-        let mut consecutive = 0usize;
-        for _ in 1..=DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS {
-            let _ = note_zero_start_deferred_drain(&mut consecutive, false, true);
-        }
-
-        let next = deferred_idle_queue_rearm_profile_after_giveup(
-            DeferredIdleQueueKickoffProfile::Normal,
+    fn backstop_warn_metric_counter_exists_for_soak() {
+        let before = idle_queue_backstop_fires_for_tests();
+        emit_idle_queue_backstop_warn(
+            &ProviderKind::Claude,
+            Some(ChannelId::new(4_024_289)),
+            "metric-test",
             1,
+            "unit_test",
         );
-        assert_eq!(
-            next,
-            Some(DeferredIdleQueueKickoffProfile::Slow { round: 1 })
-        );
-        assert_eq!(DEFERRED_IDLE_QUEUE_KICKOFF_MAX_ATTEMPTS, 150);
-    }
-
-    #[test]
-    fn dispatch_failure_fast_phase_exits_after_three_consecutive_failures() {
-        let mut consecutive = 0usize;
-        assert!(!note_deferred_dispatch_failure(&mut consecutive, true));
-        assert!(!note_deferred_dispatch_failure(&mut consecutive, true));
-        assert!(note_deferred_dispatch_failure(&mut consecutive, true));
-        assert_eq!(
-            consecutive,
-            DEFERRED_IDLE_QUEUE_MAX_CONSECUTIVE_DISPATCH_FAILURES
-        );
-        assert!(!note_deferred_dispatch_failure(&mut consecutive, false));
-        assert_eq!(consecutive, 0);
-    }
-
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn notify_wakes_deferred_sleep_without_waiting_full_delay() {
-        let notify = tokio::sync::Notify::new();
-        let sleeper = sleep_or_deferred_kick_notify(std::time::Duration::from_secs(60), &notify);
-        tokio::pin!(sleeper);
         assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(1), &mut sleeper)
-                .await
-                .is_err(),
-            "sleep should remain pending before notification"
+            idle_queue_backstop_fires_for_tests() > before,
+            "warn target has a test-visible counter for soak assertions"
         );
-        notify.notify_one();
-        tokio::time::timeout(std::time::Duration::from_millis(1), &mut sleeper)
-            .await
-            .expect("notification should wake the deferred sleep promptly");
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -900,22 +849,514 @@ mod presleep_tests {
             .expect("immediate coalesce should wake the existing task");
     }
 
-    #[tokio::test]
-    async fn slow_rearm_without_routing_context_preserves_transient_backlog_chain() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn completion_event_empty_queue_does_not_arm_backstop() {
         let shared = make_shared_data_for_tests();
         let provider = ProviderKind::Claude;
-        let channel_id = ChannelId::new(4_024_282);
+        let channel_id = ChannelId::new(4_048_200);
+
+        spawn_turn_completion_idle_queue_listener(shared.clone(), provider);
+        super::super::turn_completion_events::publish_turn_completion_event(
+            shared.as_ref(),
+            super::super::turn_completion_events::TurnCompletionEvent::new(channel_id),
+        );
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            shared
+                .restart
+                .deferred_hook_backlog
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "completion-event drain path arms no backstop when the channel queue is empty"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn event_kick_no_start_with_nonempty_queue_arms_single_backstop() {
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_048_201);
+        shared
+            .mailbox(channel_id)
+            .replace_queue(
+                vec![user_intervention(4_048_202, "queued after no-start event")],
+                queue_persistence_context(&shared, &provider, channel_id),
+            )
+            .await;
+
+        spawn_turn_completion_idle_queue_listener(shared.clone(), provider);
+        super::super::turn_completion_events::publish_turn_completion_event(
+            shared.as_ref(),
+            super::super::turn_completion_events::TurnCompletionEvent::new(channel_id),
+        );
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            shared
+                .restart
+                .deferred_hook_backlog
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "event kick that cannot start and leaves a non-empty queue must arm the single slow backstop"
+        );
+        assert!(
+            shared
+                .restart
+                .deferred_hook_channels
+                .contains_key(&channel_id),
+            "the armed backstop is channel-scoped and coalescible"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn event_kick_started_does_not_arm_backstop_even_if_queue_snapshot_remains() {
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_048_203);
+        shared
+            .mailbox(channel_id)
+            .replace_queue(
+                vec![user_intervention(4_048_204, "queued but start won")],
+                queue_persistence_context(&shared, &provider, channel_id),
+            )
+            .await;
+
+        let armed = arm_event_backstop_after_no_start_if_queue_nonempty(
+            &shared,
+            &provider,
+            channel_id,
+            IdleQueueKickoffChannelOutcome { started: true },
+            "started-event-test",
+        )
+        .await;
 
         assert!(
-            slow_rearm_channel_still_kickable(
-                None,
+            !armed,
+            "a started event kick owns progress and needs no slow backstop"
+        );
+        assert_eq!(
+            shared
+                .restart
+                .deferred_hook_backlog
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "started event path must not arm the single slow backstop"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn backstop_rearms_after_cleanup_retry_gate_then_next_fire_starts_queue() {
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let tmp = tempfile::tempdir().expect("temp runtime root");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_048_210);
+        let cleanup_msg = MessageId::new(4_048_211);
+        shared
+            .mailbox(channel_id)
+            .replace_queue(
+                vec![user_intervention(4_048_212, "queued behind cleanup retry")],
+                queue_persistence_context(&shared, &provider, channel_id),
+            )
+            .await;
+        let inflight = cleanup_retry_inflight_state(&provider, channel_id, cleanup_msg);
+        super::super::inflight::save_inflight_state(&inflight).expect("save inflight gate");
+        record_terminal_cleanup_outcome(
+            &shared,
+            provider.clone(),
+            channel_id,
+            cleanup_msg,
+            super::super::placeholder_cleanup::PlaceholderCleanupOutcome::failed("http 500"),
+        );
+        let snapshot = mailbox_snapshot(&shared, channel_id).await;
+        assert!(
+            !idle_queue_snapshot_has_kickable_backlog(&shared, &provider, channel_id, &snapshot),
+            "the failed terminal-cleanup retry record blocks the actual kickoff"
+        );
+
+        let kick_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook_calls = kick_calls.clone();
+        let _hook = set_idle_queue_kick_hook_for_tests(std::sync::Arc::new(
+            move |shared, provider, channel, _reason| {
+                let hook_calls = hook_calls.clone();
+                Box::pin(async move {
+                    if channel != channel_id {
+                        return None;
+                    }
+                    let call = hook_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let snapshot = mailbox_snapshot(&shared, channel).await;
+                    if call == 0 {
+                        assert!(
+                            !idle_queue_snapshot_has_kickable_backlog(
+                                &shared, &provider, channel, &snapshot,
+                            ),
+                            "the first fire sees the cleanup retry gate and cannot start"
+                        );
+                        return Some(IdleQueueKickoffChannelOutcome { started: false });
+                    }
+
+                    assert!(
+                        idle_queue_snapshot_has_kickable_backlog(
+                            &shared, &provider, channel, &snapshot,
+                        ),
+                        "the successor fire runs after the cleanup gate clears"
+                    );
+                    shared
+                        .mailbox(channel)
+                        .replace_queue(
+                            Vec::new(),
+                            queue_persistence_context(&shared, &provider, channel),
+                        )
+                        .await;
+                    let started = mailbox_try_start_turn(
+                        &shared,
+                        channel,
+                        std::sync::Arc::new(CancelToken::new()),
+                        UserId::new(4_048_213),
+                        MessageId::new(4_048_212),
+                    )
+                    .await;
+                    Some(IdleQueueKickoffChannelOutcome { started })
+                })
+            },
+        ));
+        let before_warns = idle_queue_backstop_fires_for_tests();
+
+        let armed = arm_event_backstop_after_no_start_if_queue_nonempty(
+            &shared,
+            &provider,
+            channel_id,
+            IdleQueueKickoffChannelOutcome { started: false },
+            "cleanup-retry-gate-test",
+        )
+        .await;
+        assert!(armed, "the event no-start path arms the first backstop");
+
+        yield_backstop_tasks().await;
+        tokio::time::advance(idle_queue_backstop_delay_for_tests()).await;
+        yield_backstop_tasks().await;
+
+        assert_eq!(
+            kick_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the first backstop fire attempts exactly one kick"
+        );
+        assert!(
+            shared
+                .restart
+                .deferred_hook_channels
+                .contains_key(&channel_id),
+            "release-before-rearm must leave a successor backstop registered"
+        );
+        assert_eq!(
+            shared
+                .restart
+                .deferred_hook_backlog
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the successor backstop replaces the fired guard instead of coalescing away"
+        );
+
+        record_terminal_cleanup_outcome(
+            &shared,
+            provider.clone(),
+            channel_id,
+            cleanup_msg,
+            super::super::placeholder_cleanup::PlaceholderCleanupOutcome::Succeeded,
+        );
+        let snapshot = mailbox_snapshot(&shared, channel_id).await;
+        assert!(
+            idle_queue_snapshot_has_kickable_backlog(&shared, &provider, channel_id, &snapshot),
+            "committing the cleanup record clears the transient retry gate without publishing a wake edge"
+        );
+
+        tokio::time::advance(idle_queue_backstop_delay_for_tests()).await;
+        yield_backstop_tasks().await;
+
+        assert_eq!(
+            kick_calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the successor backstop fires and kicks the channel"
+        );
+        let snapshot = mailbox_snapshot(&shared, channel_id).await;
+        assert!(
+            snapshot.cancel_token.is_some(),
+            "the successor kick starts the queued foreground work"
+        );
+        assert!(
+            snapshot.intervention_queue.is_empty(),
+            "the queued work is consumed by the successor kick"
+        );
+        assert!(
+            !shared
+                .restart
+                .deferred_hook_channels
+                .contains_key(&channel_id),
+            "a successful successor kick does not arm another backstop"
+        );
+        assert_eq!(
+            shared
+                .restart
+                .deferred_hook_backlog
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "no backstop guard remains after the successor starts work"
+        );
+        assert!(
+            idle_queue_backstop_fires_for_tests() >= before_warns + 2,
+            "each backstop fire emits the slow-path warn"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn backstop_no_rearm_when_fire_observes_real_foreground_turn() {
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let tmp = tempfile::tempdir().expect("temp runtime root");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_048_220);
+        shared
+            .mailbox(channel_id)
+            .replace_queue(
+                vec![user_intervention(4_048_221, "queued behind real turn")],
+                queue_persistence_context(&shared, &provider, channel_id),
+            )
+            .await;
+
+        let kick_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook_calls = kick_calls.clone();
+        let _hook = set_idle_queue_kick_hook_for_tests(std::sync::Arc::new(
+            move |_shared, _provider, channel, _reason| {
+                let hook_calls = hook_calls.clone();
+                Box::pin(async move {
+                    if channel != channel_id {
+                        return None;
+                    }
+                    hook_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Some(IdleQueueKickoffChannelOutcome { started: false })
+                })
+            },
+        ));
+
+        assert!(
+            arm_event_backstop_after_no_start_if_queue_nonempty(
                 &shared,
                 &provider,
                 channel_id,
-                "slow-rearm-transient-guard-test",
+                IdleQueueKickoffChannelOutcome { started: false },
+                "real-turn-no-rearm-test",
+            )
+            .await
+        );
+
+        yield_backstop_tasks().await;
+        assert!(
+            mailbox_try_start_turn(
+                &shared,
+                channel_id,
+                std::sync::Arc::new(CancelToken::new()),
+                UserId::new(4_048_222),
+                MessageId::new(4_048_222),
             )
             .await,
-            "slow rearm must not terminate solely because kickable backlog is temporarily gated"
+            "a real foreground turn becomes the future wake edge before the backstop fires"
+        );
+
+        tokio::time::advance(idle_queue_backstop_delay_for_tests()).await;
+        yield_backstop_tasks().await;
+
+        assert_eq!(
+            kick_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the fired backstop still emits and attempts its single kick"
+        );
+        assert!(
+            !shared
+                .restart
+                .deferred_hook_channels
+                .contains_key(&channel_id),
+            "a real foreground active turn suppresses the successor backstop"
+        );
+        assert_eq!(
+            shared
+                .restart
+                .deferred_hook_backlog
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "no successor guard remains while a real foreground turn owns the wake edge"
+        );
+        let snapshot = mailbox_snapshot(&shared, channel_id).await;
+        assert!(snapshot.cancel_token.is_some());
+        assert_eq!(snapshot.intervention_queue.len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn enqueue_after_finalize_kicks_immediately_from_generic_helper() {
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_048_205);
+        let live_msg = MessageId::new(4_048_206);
+        let token = Arc::new(CancelToken::new());
+        assert!(
+            mailbox_try_start_turn(&shared, channel_id, token, UserId::new(1), live_msg).await,
+            "steering window starts with a live turn observed before enqueue"
+        );
+        let _ = mailbox_finish_turn(&shared, &provider, channel_id).await;
+
+        let enqueue = mailbox_enqueue_intervention(
+            &shared,
+            &provider,
+            channel_id,
+            user_intervention(4_048_207, "steer after completion event already fired"),
+        )
+        .await;
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        assert!(enqueue.enqueued, "the steering intervention is persisted");
+        assert_eq!(
+            shared
+                .restart
+                .deferred_hook_backlog
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "a no-context unit kick still leaves the single slow backstop armed for the queued channel"
+        );
+        assert!(
+            shared
+                .restart
+                .deferred_hook_channels
+                .contains_key(&channel_id),
+            "generic enqueue helper must kick immediately enough to arm the channel backstop without advancing time"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lagged_completion_receiver_warns_and_full_reconciles() {
+        let before = idle_queue_backstop_fires_for_tests();
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        spawn_turn_completion_idle_queue_listener(shared.clone(), provider);
+
+        for offset in 0..=super::super::turn_completion_events::TURN_COMPLETION_EVENT_BUS_CAPACITY {
+            super::super::turn_completion_events::publish_turn_completion_event(
+                shared.as_ref(),
+                super::super::turn_completion_events::TurnCompletionEvent::new(ChannelId::new(
+                    4_048_300 + offset as u64,
+                )),
+            );
+        }
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            idle_queue_backstop_fires_for_tests() > before,
+            "lagged broadcast receive must emit the warn target before full snapshot reconcile"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn dropped_completion_event_slow_backstop_rearms_if_no_start_leaves_queue() {
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_024_290);
+        shared
+            .mailbox(channel_id)
+            .replace_queue(
+                vec![user_intervention(4_024_291, "event dropped")],
+                queue_persistence_context(&shared, &provider, channel_id),
+            )
+            .await;
+
+        schedule_deferred_idle_queue_kickoff_immediate(
+            shared.clone(),
+            provider,
+            channel_id,
+            "dropped-event-test",
+        );
+
+        tokio::task::yield_now().await;
+        assert!(
+            shared
+                .restart
+                .deferred_hook_channels
+                .contains_key(&channel_id),
+            "the single slow backstop is armed before the 60s delay"
+        );
+        tokio::time::advance(idle_queue_backstop_delay_for_tests()).await;
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            shared
+                .restart
+                .deferred_hook_channels
+                .contains_key(&channel_id),
+            "a fired backstop that still cannot start queued work must arm a successor"
+        );
+        assert_eq!(
+            shared
+                .restart
+                .deferred_hook_backlog
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the successor backstop replaces the fired guard after release"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn normal_event_path_drains_before_backstop_records_zero_fires() {
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_024_292);
+        shared
+            .mailbox(channel_id)
+            .replace_queue(
+                vec![user_intervention(4_024_293, "event drains")],
+                queue_persistence_context(&shared, &provider, channel_id),
+            )
+            .await;
+
+        schedule_deferred_idle_queue_kickoff_immediate(
+            shared.clone(),
+            provider.clone(),
+            channel_id,
+            "normal-event-test",
+        );
+        tokio::task::yield_now().await;
+        shared
+            .mailbox(channel_id)
+            .replace_queue(
+                Vec::new(),
+                queue_persistence_context(&shared, &provider, channel_id),
+            )
+            .await;
+
+        tokio::time::advance(idle_queue_backstop_delay_for_tests()).await;
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            !shared
+                .restart
+                .deferred_hook_channels
+                .contains_key(&channel_id),
+            "normal completion-event drain should leave no channel backstop guard after the delay"
+        );
+        assert_eq!(
+            shared
+                .restart
+                .deferred_hook_backlog
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "normal completion-event drain should leave no live backstop task"
         );
     }
 
@@ -978,68 +1419,5 @@ mod presleep_tests {
         });
 
         super::super::tui_direct_pending_start::reset_present_for_tests();
-    }
-
-    #[test]
-    fn exit_window_backlog_after_guard_release_schedules_successor() {
-        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
-        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
-        let tmp = tempfile::tempdir().expect("temp runtime root");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
-
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("test runtime");
-        rt.block_on(async {
-            let shared = make_shared_data_for_tests();
-            let provider = ProviderKind::Claude;
-            let channel_id = ChannelId::new(4_024_287);
-            shared
-                .mailbox(channel_id)
-                .replace_queue(
-                    vec![user_intervention(4_024_288, "arrived in exit window")],
-                    queue_persistence_context(&shared, &provider, channel_id),
-                )
-                .await;
-            shared
-                .restart
-                .deferred_hook_channels
-                .insert(channel_id, std::sync::Arc::new(tokio::sync::Notify::new()));
-            shared
-                .restart
-                .deferred_hook_backlog
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let mut guard = DeferredHookBacklogGuard {
-                shared: shared.clone(),
-                channel_id,
-                active: true,
-            };
-
-            finish_deferred_idle_queue_kickoff(
-                &shared,
-                &provider,
-                channel_id,
-                "exit-window-test",
-                &mut guard,
-            )
-            .await;
-
-            assert!(
-                shared
-                    .restart
-                    .deferred_hook_channels
-                    .contains_key(&channel_id),
-                "post-release backlog check must schedule a successor guard"
-            );
-            assert_eq!(
-                shared
-                    .restart
-                    .deferred_hook_backlog
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                1,
-                "old guard release plus successor schedule leaves one live deferred task"
-            );
-        });
     }
 }
