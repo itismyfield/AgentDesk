@@ -5,7 +5,7 @@ use axum::{
 };
 use serde_json::{Value, json};
 
-use crate::api_caller_observability::{RequestPrincipal, log_identity_consumption};
+use crate::api_caller_observability::RequestPrincipal;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::services::routines::{
     NewRoutine, RoutineLifecycleEvent, RoutineScriptLoader, RoutineSessionCommand,
@@ -323,14 +323,12 @@ pub async fn delete_routine(
     let store = routine_store(&state)?;
     let caller_agent_id =
         crate::services::kanban::resolve_requesting_agent_id_with_pg(store.pool(), &headers).await;
-    log_identity_consumption(
-        "DELETE /api/routines/{id}",
-        principal.as_ref().map(|Extension(principal)| principal),
-        caller_agent_id.as_deref(),
-        false,
-    );
     let result = store
-        .delete_detached_routine(&routine_id, caller_agent_id.as_deref())
+        .delete_detached_routine(
+            &routine_id,
+            caller_agent_id.as_deref(),
+            principal.as_ref().map(|Extension(principal)| principal),
+        )
         .await
         .map_err(store_error)?;
     audit_routine_delete(&routine_id, &result);
