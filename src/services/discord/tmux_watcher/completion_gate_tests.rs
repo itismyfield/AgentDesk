@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::discord::turn_finalizer::completion_signal::CompletionSignalMode;
 
 fn state_for_matched_session(
     provider: ProviderKind,
@@ -67,7 +68,7 @@ fn matched_gate_signal_for_file(
         &provider,
         Some(&state),
         &tmux_session_name,
-        crate::services::discord::turn_finalizer::CompletionSignalMode::GateQuiescence,
+        CompletionSignalMode::GateQuiescence,
     )
     .expect("matched session should produce a signal")
 }
@@ -87,7 +88,7 @@ fn matched_session_terminal_jsonl_confirms_idle_without_turn_source_branch() {
             &ProviderKind::Claude,
             Some(&state),
             tmux_session_name,
-            crate::services::discord::turn_finalizer::CompletionSignalMode::GateQuiescence,
+            CompletionSignalMode::GateQuiescence,
         ),
         Some(crate::services::discord::turn_finalizer::CompletionSignal::Done)
     );
@@ -109,7 +110,7 @@ fn turn_source_does_not_affect_jsonl_completion_probe() {
             &ProviderKind::Claude,
             Some(&state),
             tmux_session_name,
-            crate::services::discord::turn_finalizer::CompletionSignalMode::GateQuiescence,
+            CompletionSignalMode::GateQuiescence,
         ),
         Some(crate::services::discord::turn_finalizer::CompletionSignal::Done)
     );
@@ -1564,7 +1565,7 @@ fn missing_structured_matched_session_jsonl_is_paused_live_for_existing_inflight
             &ProviderKind::Claude,
             Some(&state),
             tmux_session_name,
-            crate::services::discord::turn_finalizer::CompletionSignalMode::GateQuiescence,
+            CompletionSignalMode::GateQuiescence,
         ),
         Some(crate::services::discord::turn_finalizer::CompletionSignal::PausedLive)
     );

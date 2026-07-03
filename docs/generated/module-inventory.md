@@ -662,7 +662,7 @@
 | `services::discord::tmux_session_files` | `src/services/discord/tmux_session_files.rs` | 586 | 554 | 32 |  |
 | `services::discord::tmux_watcher` | `src/services/discord/tmux_watcher.rs` | 7302 | 7302 | 0 | giant-file |
 | `services::discord::tmux_watcher::commit_decisions` | `src/services/discord/tmux_watcher/commit_decisions.rs` | 287 | 165 | 122 |  |
-| `services::discord::tmux_watcher::completion_gate` | `src/services/discord/tmux_watcher/completion_gate.rs` | 297 | 297 | 0 |  |
+| `services::discord::tmux_watcher::completion_gate` | `src/services/discord/tmux_watcher/completion_gate.rs` | 295 | 295 | 0 |  |
 | `services::discord::tmux_watcher::controller_heartbeat` | `src/services/discord/tmux_watcher/controller_heartbeat.rs` | 34 | 34 | 0 |  |
 | `services::discord::tmux_watcher::liveness` | `src/services/discord/tmux_watcher/liveness.rs` | 403 | 321 | 82 |  |
 | `services::discord::tmux_watcher::orphan_status_panel_cleanup` | `src/services/discord/tmux_watcher/orphan_status_panel_cleanup.rs` | 236 | 236 | 0 |  |
@@ -742,7 +742,7 @@
 | `services::discord::turn_bridge::watcher_handoff` | `src/services/discord/turn_bridge/watcher_handoff.rs` | 729 | 526 | 203 |  |
 | `services::discord::turn_bridge::watcher_orphan_cleanup` | `src/services/discord/turn_bridge/watcher_orphan_cleanup.rs` | 493 | 233 | 260 |  |
 | `services::discord::turn_end_wip_warning` | `src/services/discord/turn_end_wip_warning.rs` | 344 | 145 | 199 |  |
-| `services::discord::turn_finalizer` | `src/services/discord/turn_finalizer.rs` | 4771 | 1049 | 3722 | giant-file |
+| `services::discord::turn_finalizer` | `src/services/discord/turn_finalizer.rs` | 4770 | 1048 | 3722 | giant-file |
 | `services::discord::turn_finalizer::cleanup` | `src/services/discord/turn_finalizer/cleanup.rs` | 1578 | 606 | 972 |  |
 | `services::discord::turn_finalizer::completion_signal` | `src/services/discord/turn_finalizer/completion_signal.rs` | 358 | 102 | 256 |  |
 | `services::discord::turn_finalizer::delivery_lease` | `src/services/discord/turn_finalizer/delivery_lease.rs` | 515 | 87 | 428 |  |

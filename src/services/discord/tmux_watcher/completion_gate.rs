@@ -1,9 +1,7 @@
 //! #3038 S1 tmux watcher TUI completion gate decisions.
 
 use super::*;
-use crate::services::discord::turn_finalizer::{
-    CompletionSignal, CompletionSignalMode, completion_signal_from_transcript_with_mode,
-};
+use crate::services::discord::turn_finalizer::{CompletionSignal, completion_signal as cs};
 
 /// #2161 — TUI completion gate. Callers ask `run_tui_completion_gate` to
 /// confirm the underlying tmux pane has reached a `Ready for input`
@@ -57,7 +55,7 @@ pub(super) fn matched_session_completion_signal(
     provider: &ProviderKind,
     inflight: Option<&crate::services::discord::inflight::InflightTurnState>,
     tmux_session_name: &str,
-    mode: CompletionSignalMode,
+    mode: cs::CompletionSignalMode,
 ) -> Option<CompletionSignal> {
     let state = inflight?;
     if state.tmux_session_name.as_deref() != Some(tmux_session_name) {
@@ -68,7 +66,7 @@ pub(super) fn matched_session_completion_signal(
         .as_deref()
         .map(str::trim)
         .filter(|path| !path.is_empty())?;
-    Some(completion_signal_from_transcript_with_mode(
+    Some(cs::completion_signal_from_transcript_with_mode(
         provider,
         state.runtime_kind,
         std::path::Path::new(output_path),
@@ -190,7 +188,7 @@ pub(in crate::services::discord) async fn run_tui_completion_gate(
             provider,
             inflight.as_ref(),
             tmux_session_name,
-            CompletionSignalMode::GateQuiescence,
+            cs::CompletionSignalMode::GateQuiescence,
         ) == Some(CompletionSignal::Done)
     {
         tracing::info!(
@@ -254,7 +252,7 @@ pub(in crate::services::discord) async fn run_tui_completion_gate(
                         &provider,
                         inflight.as_ref(),
                         &tmux_session_name,
-                        CompletionSignalMode::GateQuiescence,
+                        cs::CompletionSignalMode::GateQuiescence,
                     ) == Some(CompletionSignal::Done);
                     // #3521: a detached background agent leaves the foreground JSONL idle while
                     // it keeps running; hold the turn (and its live footer panel) open until the
