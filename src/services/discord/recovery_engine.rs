@@ -428,9 +428,9 @@ pub(in crate::services::discord) async fn relay_recovered_terminal_text_to_place
     let delivery = match placeholder {
         Some(placeholder) => {
             use super::recovery_paths::controller_cutover as cc;
-            // #3089 A6a: anchored short-replace via the unified controller behind a flag
-            // (default OFF); the adapter maps the verdict to `RecoveryRelayOutcome` AND
-            // re-runs the #3297 probe, returning the legacy path's equal. OFF / None / empty
+            // #3089 A6a: anchored short-replace via the default-ON unified controller
+            // flag; the adapter maps the verdict to `RecoveryRelayOutcome` AND re-runs
+            // the #3297 probe. Explicit opt-out / None / empty
             if cc::recovery_short_replace_should_cutover(
                 cc::recovery_relay_controller_enabled(),
                 true,

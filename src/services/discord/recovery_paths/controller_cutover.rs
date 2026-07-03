@@ -1,6 +1,6 @@
 //! #3089 A6a: route the recovery engine's anchored short-replace delivery
 //! through the unified turn-output controller (`deliver_turn_output`), behind a
-//! flag (default OFF). This is an A3-clone — recovery's anchored relay, like
+//! flag (default ON with `=0|false` rollback opt-out). This is an A3-clone — recovery's anchored relay, like
 //! standby, is TRANSPORT-ONLY: it never held a `DeliveryLeaseCell`, never
 //! advanced an offset, and ran no heartbeat — so the controller is driven with
 //! [`toc::NoLease`] (acquire always fails → `ProceedMarkerless`: no lease held,
@@ -68,23 +68,19 @@ use super::shared::{RecoveryRelayOutcome, escalate_transient_relay_outcome_with_
 use crate::services::provider::ProviderKind;
 
 /// #3089 A6a: flag gating ONLY the recovery anchored short-replace branch onto
-/// the turn-output controller (`deliver_turn_output`). Default OFF → the legacy
-/// `formatting::replace_long_message_raw` path runs byte-identically (including
-/// the #3297 probe escalation); ON → that branch routes through the controller
-/// as a transport-only `ProceedMarkerless` delivery (recovery holds no lease,
-/// advances no offset, runs no heartbeat — see [`toc::NoLease`]). OnceLock+env,
-/// mirroring `standby_relay_controller_enabled`. The `None` (TUI-direct
-/// fresh-send) branch stays legacy.
+/// the turn-output controller (`deliver_turn_output`). Default ON → that branch
+/// routes through the controller as a transport-only `ProceedMarkerless` delivery
+/// (recovery holds no lease, advances no offset, runs no heartbeat — see
+/// [`toc::NoLease`]); `AGENTDESK_RECOVERY_RELAY_CONTROLLER=0|false` is the
+/// rollback opt-out. OnceLock+env, mirroring `standby_relay_controller_enabled`.
+/// The `None` (TUI-direct fresh-send) branch stays legacy.
 pub(in crate::services::discord) fn recovery_relay_controller_enabled() -> bool {
     static CACHED: OnceLock<bool> = OnceLock::new();
     *CACHED.get_or_init(|| {
-        let on = std::env::var("AGENTDESK_RECOVERY_RELAY_CONTROLLER")
-            .ok()
-            .map(|v| v.trim().to_ascii_lowercase())
-            .is_some_and(|v| v == "1" || v == "true");
-        // Telemetry ONLY when ENABLED — the default-OFF first evaluation must
-        // have NO observable side effect (byte-identical / deploy no-op),
-        // matching the A3 standby cutover.
+        let on = crate::services::discord::controller_rollout_flag::enabled_from_env(
+            "AGENTDESK_RECOVERY_RELAY_CONTROLLER",
+        );
+        // Telemetry remains emitted only when the controller path is enabled.
         if on {
             tracing::info!("  ✓ recovery_relay_controller: enabled");
         }
@@ -97,7 +93,7 @@ pub(in crate::services::discord) fn recovery_relay_controller_enabled() -> bool 
 /// an anchored placeholder exists **and** the body is non-empty.
 ///
 /// Each exclusion is LOAD-BEARING (a controller divergence the gate guards):
-/// - `enabled` OFF → byte-identical legacy (deploy no-op).
+/// - `enabled` false (explicit opt-out) → byte-identical legacy.
 /// - `has_placeholder` false (`placeholder == None`) → the legacy `None` arm
 ///   sends a NEW message via `send_long_message_raw`; the controller's
 ///   `Replace { Active }` plan edits the anchor `MessageId` in place. With no
@@ -322,7 +318,7 @@ mod tests {
 
     #[test]
     fn should_cutover_truth_table() {
-        // (false, *, *) → false (flag OFF defers, byte-identical legacy).
+        // (false, *, *) → false (explicit opt-out defers, byte-identical legacy).
         assert!(!recovery_short_replace_should_cutover(false, true, "x"));
         assert!(!recovery_short_replace_should_cutover(false, false, ""));
         // (true, false, _) → false: None defers to the legacy fresh-send branch.
@@ -694,20 +690,27 @@ mod tests {
     }
 
     #[test]
-    fn flag_off_predicate_defers_no_side_effect() {
-        // Predicate OFF → the production gate never calls the controller adapter,
-        // so the legacy path runs with no telemetry side-effect.
+    fn zero_optout_predicate_defers_and_env_absent_defaults_on() {
+        // Explicit opt-out → the production gate never calls the controller adapter,
+        // so the legacy path runs.
         assert!(!recovery_short_replace_should_cutover(false, true, "x"));
-        // Default OFF when the env var is unset (deploy no-op). Only assert when
-        // truly unset, since `OnceLock` caches the first observation and the
-        // flag-ON gate run sets `AGENTDESK_RECOVERY_RELAY_CONTROLLER=1`.
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        assert!(
+            !crate::services::discord::controller_rollout_flag::enabled_from_raw(Some("0")),
+            "AGENTDESK_RECOVERY_RELAY_CONTROLLER=0 is the rollback opt-out"
+        );
+        assert!(
+            !crate::services::discord::controller_rollout_flag::enabled_from_raw(Some("false")),
+            "AGENTDESK_RECOVERY_RELAY_CONTROLLER=false is the rollback opt-out"
+        );
+        // Default ON when the env var is unset. Only assert when truly unset, since
+        // `OnceLock` caches the first observation.
         if std::env::var_os("AGENTDESK_RECOVERY_RELAY_CONTROLLER").is_none() {
             assert!(
-                !recovery_relay_controller_enabled(),
-                "flag defaults OFF (deploy no-op / byte-identical legacy)"
+                recovery_relay_controller_enabled(),
+                "flag defaults ON (controller path when absent)"
             );
         }
     }

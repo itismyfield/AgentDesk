@@ -2,10 +2,10 @@
 //!
 //! Mirrors the #3746 `delivery_record_rollout` health slice
 //! ([`super::delivery_record::delivery_record_rollout_health_json`]): a
-//! side-effect-free JSON snapshot of the six `AGENTDESK_*_CONTROLLER` rollout
-//! flags (#3089 A2b/A3/A4/A5/A6a/A6b) so an operator can see, per node, which
-//! delivery authority is effective for each owner — the unified turn-output
-//! controller vs the legacy per-owner delivery path.
+//! read-only JSON snapshot of the six `AGENTDESK_*_CONTROLLER` rollout flags
+//! (#3089 A2b/A3/A4/A5/A6a/A6b) so an operator can see, per node, which delivery
+//! authority is effective for each owner — the unified turn-output controller vs
+//! the legacy per-owner delivery path.
 //!
 //! ## Why this reads the process env directly (not the `*_controller_enabled()`
 //! getters)
@@ -17,12 +17,12 @@
 //! two most deeply-nested getters (`watcher_terminal` under
 //! `tmux::tmux_watcher::terminal_send`, `turn_bridge_terminal` under
 //! `turn_bridge::terminal_controller_cutover`), which are `#3016` finalize
-//! hotfiles. So health instead takes a **side-effect-free** snapshot of the same
-//! process env with the EXACT predicate the getters use ([`controller_flag_enabled`]).
+//! hotfiles. So health instead takes a read-only snapshot of the same process env
+//! with the EXACT predicate the getters use ([`controller_flag_enabled`]).
 //! The launchd env is written once at process start and is immutable for the
 //! process lifetime, so this snapshot equals the effective state the
-//! `OnceLock` getters observe. Purely observational — it touches no getter, no
-//! `OnceLock`, and no delivery path.
+//! `OnceLock` getters observe. It touches no getter, no owner `OnceLock`, and no
+//! delivery path.
 
 /// The six turn-output controller rollout flags (#3089), each paired with the
 /// owner label surfaced in the health JSON and the env var its getter reads.
@@ -49,14 +49,13 @@ const CONTROLLER_FLAGS: [(&str, &str); 6] = [
 ];
 
 /// Parse one controller flag from the process env with the EXACT predicate the
-/// six `*_controller_enabled()` getters use (`== "1"` / `== "true"`, trimmed,
-/// ASCII-lowercased). Read-only: unlike the getters this does NOT touch their
-/// `OnceLock` and never emits telemetry.
+/// six `*_controller_enabled()` getters use (default ON; `0` / `false`, trimmed
+/// and case-insensitive, are the documented opt-out values). Read-only: unlike
+/// the getters this does NOT touch their `OnceLock` or emit enabled `info!`
+/// telemetry; invalid present values still use the shared parser's deduped
+/// operator warning.
 fn controller_flag_enabled(var: &str) -> bool {
-    std::env::var(var)
-        .ok()
-        .map(|v| v.trim().to_ascii_lowercase())
-        .is_some_and(|v| v == "1" || v == "true")
+    crate::services::discord::controller_rollout_flag::enabled_from_env(var)
 }
 
 /// Read-only health JSON for the turn-output controller rollout. Snapshots the
@@ -77,8 +76,8 @@ pub(super) fn turn_output_controller_rollout_health_json() -> serde_json::Value 
 ///
 /// `effective_authority` classifies the node's delivery authority:
 /// - `"controller"` — all six owners route the unified controller.
-/// - `"legacy"`     — no owner routes the controller (compiled default; the env
-///   rollback lever is engaged for every owner).
+/// - `"legacy"`     — no owner routes the controller (the env rollback opt-out
+///   is engaged for every owner).
 /// - `"mixed"`      — some owners route the controller, the rest still legacy.
 fn turn_output_controller_rollout_health_json_for_flags(
     enabled: [bool; CONTROLLER_FLAGS.len()],
@@ -108,7 +107,7 @@ fn turn_output_controller_rollout_health_json_for_flags(
     let mut configuration_warnings = Vec::new();
     if enabled_count == 0 {
         configuration_warnings.push(serde_json::json!(
-            "turn_output_controller_all_disabled: every owner routes the legacy per-owner delivery path (compiled default; env rollback lever engaged)"
+            "turn_output_controller_all_disabled: every owner routes the legacy per-owner delivery path (env rollback opt-out engaged)"
         ));
     } else if enabled_count < owner_count {
         configuration_warnings.push(serde_json::json!(format!(
@@ -130,6 +129,40 @@ fn turn_output_controller_rollout_health_json_for_flags(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+
+    struct EnvReset {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl Drop for EnvReset {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    fn guard_all_controller_env() -> Vec<EnvReset> {
+        CONTROLLER_FLAGS
+            .iter()
+            .map(|(_, var)| EnvReset {
+                key: *var,
+                previous: std::env::var_os(var),
+            })
+            .collect()
+    }
+
+    fn set_all_controller_env(value: Option<&str>) {
+        for (_, var) in CONTROLLER_FLAGS {
+            match value {
+                Some(value) => unsafe { std::env::set_var(var, value) },
+                None => unsafe { std::env::remove_var(var) },
+            }
+        }
+    }
 
     #[test]
     fn all_disabled_is_legacy_authority_with_observable_warning() {
@@ -165,6 +198,34 @@ mod tests {
         for (label, _) in CONTROLLER_FLAGS {
             assert_eq!(json["owners"][label]["enabled"], true);
         }
+    }
+
+    #[test]
+    fn env_snapshot_defaults_on_and_zero_opts_out() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _guards = guard_all_controller_env();
+
+        set_all_controller_env(None);
+        let default_on = turn_output_controller_rollout_health_json();
+        assert_eq!(default_on["enabled_count"], 6);
+        assert_eq!(default_on["effective_authority"], "controller");
+
+        set_all_controller_env(Some("0"));
+        let zero_optout = turn_output_controller_rollout_health_json();
+        assert_eq!(zero_optout["enabled_count"], 0);
+        assert_eq!(zero_optout["effective_authority"], "legacy");
+
+        set_all_controller_env(Some("false"));
+        let false_optout = turn_output_controller_rollout_health_json();
+        assert_eq!(false_optout["enabled_count"], 0);
+        assert_eq!(false_optout["effective_authority"], "legacy");
+
+        set_all_controller_env(Some("1"));
+        let explicit_on = turn_output_controller_rollout_health_json();
+        assert_eq!(explicit_on["enabled_count"], 6);
+        assert_eq!(explicit_on["effective_authority"], "controller");
     }
 
     #[test]

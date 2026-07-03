@@ -1,5 +1,5 @@
 //! #3089 A4 watcher terminal cutover to the unified turn-output controller
-//! (flag-gated, default OFF).
+//! (flag-gated, default ON with `=0|false` rollback opt-out).
 //!
 //! This sibling module (mirroring `tmux_watcher/{liveness,commit_decisions,..}.rs`)
 //! holds the A4 cutover surface so the FROZEN `tmux_watcher.rs` giant-file ratchet
@@ -26,21 +26,19 @@ use crate::services::provider::ProviderKind;
 use super::controller_heartbeat::WatcherPostHeartbeat;
 
 /// #3089 A4/#3998 S1-d: flag gating the watcher's terminal delivery cutover
-/// onto the unified [`toc::deliver_turn_output`]. Default OFF → the legacy
-/// terminal arms run byte-identically; ON → eligible anchored short-replace and
-/// anchored long-chunk deliveries use the controller on the SAME
+/// onto the unified [`toc::deliver_turn_output`]. Default ON → eligible anchored
+/// short-replace and anchored long-chunk deliveries use the controller on the SAME
 /// `(channel, turn, [start,end))` lease as `LeaseHolder::Watcher`. OnceLock+env,
 /// mirroring `sink_short_replace_controller_enabled` (A2b) /
-/// `standby_relay_controller_enabled` (A3).
+/// `standby_relay_controller_enabled` (A3). `AGENTDESK_WATCHER_TERMINAL_CONTROLLER=0|false`
+/// is the rollback opt-out.
 pub(in crate::services::discord) fn watcher_terminal_controller_enabled() -> bool {
     static CACHED: OnceLock<bool> = OnceLock::new();
     *CACHED.get_or_init(|| {
-        let on = std::env::var("AGENTDESK_WATCHER_TERMINAL_CONTROLLER")
-            .ok()
-            .map(|v| v.trim().to_ascii_lowercase())
-            .is_some_and(|v| v == "1" || v == "true");
-        // Telemetry ONLY when ENABLED — the default-OFF first evaluation must have
-        // NO observable side effect (byte-identical / deploy no-op), matching A2b/A3.
+        let on = crate::services::discord::controller_rollout_flag::enabled_from_env(
+            "AGENTDESK_WATCHER_TERMINAL_CONTROLLER",
+        );
+        // Telemetry remains emitted only when the controller path is enabled.
         if on {
             tracing::info!("  ✓ watcher_terminal_controller: enabled");
         }
@@ -53,9 +51,9 @@ pub(in crate::services::discord) fn watcher_terminal_controller_enabled() -> boo
 /// commit/advance/release can be gated behind `!cutover` (the controller owns the
 /// single lease when cut over — no double-acquire).
 ///
-/// The flag is checked FIRST so OFF short-circuits before any work (the `formatted`
-/// body is only computed by the caller's flag-gated closure) — byte-identical /
-/// deploy no-op on the default-OFF path.
+/// The flag is checked FIRST so explicit opt-out short-circuits before any work
+/// (the `formatted` body is only computed by the caller's flag-gated closure) —
+/// byte-identical legacy on the `=0|false` path.
 ///
 /// Terms (mirroring the legacy short-replace branch arm at tmux_watcher.rs:6153-6394):
 /// - `will_direct_send` — the watcher will run the direct-send arm
@@ -103,8 +101,8 @@ pub(in crate::services::discord) fn watcher_short_replace_cutover(
 }
 
 /// #3089 A4: the full short-replace cut-over decision at the watcher lease-acquire
-/// site. The flag is checked FIRST so OFF short-circuits before formatting the body
-/// — byte-identical / deploy no-op. When ON it formats the body EXACTLY as the send
+/// site. The flag is checked FIRST so explicit opt-out short-circuits before
+/// formatting the body — byte-identical legacy. When ON it formats the body EXACTLY as the send
 /// arm (tmux_watcher.rs:6173-6187: `format_for_discord_with[_status_panel]` then the
 /// optional `prepend_monitor_auto_turn_origin`) so the `should_send_ordered_new_chunks`
 /// (length) and `formatted_is_empty` terms match what the send arm sees, then applies

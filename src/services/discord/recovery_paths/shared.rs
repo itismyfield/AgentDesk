@@ -235,9 +235,8 @@ pub(in crate::services::discord) fn anchor_repost_send_new_permitted(
 /// [`super::restart::try_recover_anchor_repost`], which short-circuits to `None`
 /// before reading any record / probing / relaying, so the recovery loop is a
 /// byte-for-byte no-op (the committed-branch call site is skipped entirely).
-/// Telemetry is emitted ONLY when ENABLED, matching the A3 standby / recovery
-/// controller cutovers — the default-OFF first evaluation must have NO observable
-/// side effect.
+/// Telemetry is emitted ONLY when this anchor-repost flag is ENABLED, so the
+/// default-OFF first evaluation has no observable side effect.
 pub(in crate::services::discord) fn recovery_anchor_repost_enabled() -> bool {
     static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {

@@ -1125,7 +1125,8 @@
     `recovery_engine/status_panel.rs`; +6 from #3089 completion-footer round 2
     forgetting registered completion-footer targets when recovery takes ownership
     of a channel's terminal message; net ±0 from #3089 A6a routing the anchored
-    short-replace through the unified controller behind a flag (default OFF) — the
+    short-replace through the unified controller behind a flag (default ON as of
+    #3998 S1-f1; `=0|false` opt-out) — the
     one-arm gate at `relay_recovered_terminal_text_to_placeholder` is offset by
     non-#-tag prose-comment compaction in the same root, the cutover body lives in
     the sub-1000-prod-LoC sibling `recovery_paths/controller_cutover.rs`; +4 from

@@ -66,22 +66,18 @@
 use std::sync::OnceLock;
 
 /// #3089 A6b: flag gating the TUI external-input idle relay onto the unified
-/// turn-output controller, INDEPENDENTLY of the A5 turn-bridge flag. Default OFF →
-/// external-input delivery is byte-identical legacy (it only joins the controller
-/// when the A5 flag is ON, exactly as today). ON → external-input short-replace
-/// routes through the controller even with the A5 flag OFF (scoped strictly to
-/// external-input by the explicit `is_external_input_tui_direct` bool on
-/// `TurnBridgeContext`). OnceLock+env, mirroring A6a `recovery_relay_controller_enabled`.
-///
-/// Telemetry ONLY when ENABLED — the default-OFF first evaluation has NO observable
-/// side effect (byte-identical / deploy no-op).
+/// turn-output controller, INDEPENDENTLY of the A5 turn-bridge flag. Default ON →
+/// external-input short-replace routes through the controller even with the A5
+/// flag OFF (scoped strictly to external-input by the explicit
+/// `is_external_input_tui_direct` bool on `TurnBridgeContext`);
+/// `AGENTDESK_TUI_PROMPT_RELAY_CONTROLLER=0|false` is the rollback opt-out.
+/// OnceLock+env, mirroring A6a `recovery_relay_controller_enabled`.
 pub(in crate::services::discord) fn tui_prompt_relay_controller_enabled() -> bool {
     static CACHED: OnceLock<bool> = OnceLock::new();
     *CACHED.get_or_init(|| {
-        let on = std::env::var("AGENTDESK_TUI_PROMPT_RELAY_CONTROLLER")
-            .ok()
-            .map(|v| v.trim().to_ascii_lowercase())
-            .is_some_and(|v| v == "1" || v == "true");
+        let on = crate::services::discord::controller_rollout_flag::enabled_from_env(
+            "AGENTDESK_TUI_PROMPT_RELAY_CONTROLLER",
+        );
         if on {
             tracing::info!("  ✓ tui_prompt_relay_controller: enabled");
         }
@@ -99,7 +95,7 @@ pub(in crate::services::discord) fn tui_prompt_relay_controller_enabled() -> boo
 /// range). Each conjunct is LOAD-BEARING — dropping any one wrongly routes a case
 /// that must stay legacy:
 ///
-/// - `enabled` OFF → byte-identical legacy (deploy no-op).
+/// - `enabled` false (explicit opt-out) → byte-identical legacy.
 /// - `is_external_input` false → a NON-external-input bridge turn (Discord-origin)
 ///   must NOT be routed by the A6b flag; it follows the A5 decision ONLY. Dropping
 ///   this conjunct would let A6b-ON/A5-OFF wrongly route Discord-origin turns
@@ -138,8 +134,8 @@ pub(in crate::services::discord) fn tui_prompt_relay_short_replace_should_cutove
 /// — `will_short_replace` (NOT the long-chunk `SendNewChunks` arm; the controller's
 /// `Replace` cannot delete the anchor) and `body_non_empty` — so the A6b route and
 /// the A5 route agree EXACTLY on which body is a "short replace" and only diverge on
-/// the flag/origin. The flag is checked FIRST so OFF short-circuits before the
-/// length predicate (byte-identical / deploy no-op). Kept here so the frozen
+/// the flag/origin. The flag is checked FIRST so explicit opt-out short-circuits
+/// before the length predicate (byte-identical legacy). Kept here so the frozen
 /// `turn_bridge/mod.rs` OR-in stays a single expression. `has_anchor_card` is `true`
 /// at site 5 (it always edits `current_msg_id`); kept explicit in the pure predicate
 /// for symmetry, hardwired `true` here.
@@ -279,7 +275,7 @@ mod tests {
         assert!(tui_prompt_relay_short_replace_should_cutover(
             true, true, true, true, true
         ));
-        // flag OFF → false (byte-identical legacy / deploy no-op).
+        // flag OFF via explicit opt-out → false (byte-identical legacy).
         assert!(!tui_prompt_relay_short_replace_should_cutover(
             false, true, true, true, true
         ));
@@ -386,7 +382,7 @@ mod tests {
             bridge_short_replace_route_decision(true, false, false, false),
             "A5-ON routes regardless of the A6b conjuncts"
         );
-        // (d) all flags OFF → no route (byte-identical legacy / deploy no-op).
+        // (d) all flags OFF via explicit opt-out → no route (byte-identical legacy).
         assert!(
             !bridge_short_replace_route_decision(false, false, false, false),
             "all-OFF defers to legacy"
@@ -400,7 +396,7 @@ mod tests {
     }
 
     // #3089 A6b r2 [High]: the codex external-input bridge frame builder is flag-gated
-    // and OFF-safe. OFF (the default / deploy state) emits `[Text, Done]` —
+    // and opt-out-safe. OFF (`=0|false`) emits `[Text, Done]` —
     // byte-identical legacy, NO `OutputOffset`, so the bridge's `tmux_last_offset`
     // stays at `start_offset == bridge_start`, `ordered_range` is false, and the legacy
     // site-5 lease takes the `NoRange` no-advance arm. ON emits
@@ -409,11 +405,11 @@ mod tests {
     // `apply_bridge_short_replace_controller`.
     //
     // The flag is a process-cached `OnceLock` set ONLY via the env var, so this test
-    // is env-DRIVEN (NOT env-mutating): the suite runs once OFF and once with
-    // `AGENTDESK_TUI_PROMPT_RELAY_CONTROLLER=1`, and this asserts the shape that
-    // CORRESPONDS to whichever state the OnceLock observed — proving BOTH halves
-    // across the two runs (the OFF run pins byte-identical legacy; the ON run pins the
-    // controller-reaching `OutputOffset`). The shared env lock keeps the read coherent.
+    // is env-DRIVEN (NOT env-mutating): the suite may run with default-ON, explicit
+    // `=1`, or explicit `=0`, and this asserts the shape that CORRESPONDS to whichever
+    // state the OnceLock observed — proving BOTH halves across opt-out/default runs
+    // (the opt-out run pins byte-identical legacy; the ON run pins the controller-reaching
+    // `OutputOffset`). The shared env lock keeps the read coherent.
     #[cfg(unix)]
     #[test]
     fn codex_bridge_stream_offset_is_flag_gated_off_safe() {
@@ -920,25 +916,33 @@ mod tests {
         assert!(matches!(cell.read(), LeaseSnapshot::Unleased));
     }
 
-    // (6) flag OFF → the predicate defers (no controller call) — and the flag
-    // defaults OFF when the env var is unset (deploy no-op), under the shared test
-    // env lock so the OnceLock observation is deterministic across the ON/OFF gate.
+    // (6) explicit opt-out → the predicate defers (no controller call) — and the
+    // flag defaults ON when the env var is unset, under the shared test env lock so
+    // the OnceLock observation is deterministic across the ON/OFF gate.
     #[test]
-    fn flag_off_predicate_defers_no_side_effect() {
-        // Predicate OFF → the production OR-in never routes to the controller.
+    fn zero_optout_predicate_defers_and_env_absent_defaults_on() {
+        // Predicate false from explicit opt-out → the production OR-in never routes
+        // to the controller.
         assert!(!tui_prompt_relay_short_replace_should_cutover(
             false, true, true, true, true
         ));
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        // Only assert default-OFF when truly unset: the OnceLock caches the first
-        // observation, and the flag-ON gate run sets
-        // AGENTDESK_TUI_PROMPT_RELAY_CONTROLLER=1.
+        assert!(
+            !crate::services::discord::controller_rollout_flag::enabled_from_raw(Some("0")),
+            "AGENTDESK_TUI_PROMPT_RELAY_CONTROLLER=0 is the rollback opt-out"
+        );
+        assert!(
+            !crate::services::discord::controller_rollout_flag::enabled_from_raw(Some("false")),
+            "AGENTDESK_TUI_PROMPT_RELAY_CONTROLLER=false is the rollback opt-out"
+        );
+        // Only assert default-ON when truly unset: the OnceLock caches the first
+        // observation.
         if std::env::var_os("AGENTDESK_TUI_PROMPT_RELAY_CONTROLLER").is_none() {
             assert!(
-                !tui_prompt_relay_controller_enabled(),
-                "flag defaults OFF (deploy no-op / byte-identical legacy)"
+                tui_prompt_relay_controller_enabled(),
+                "flag defaults ON (controller path when absent)"
             );
         }
     }

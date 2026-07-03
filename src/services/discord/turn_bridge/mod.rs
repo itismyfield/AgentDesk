@@ -5326,7 +5326,7 @@ pub(super) fn spawn_turn_bridge(
                             .await;
                         }
                     } else {
-                        // #3089 A5/A6b (flags, default OFF): route short-replace through the controller (`terminal_controller_cutover`); OFF → legacy below.
+                        // #3089 A5/A6b (default-ON flags): route short-replace through the controller (`terminal_controller_cutover`); explicit opt-out → legacy below.
                         let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
                         let ordered_range = tmux_last_offset.is_some_and(|e| e > bridge_start);
                         // #3089 A5 OR A6b: route short-replace via the controller when A5 is ON (both origins) OR A6b is ON AND this is a TUI external-input turn (closes #3088). The OR-in IS the pure `bridge_short_replace_route_decision` (r2 [Medium]) so the production expression cannot be silently weakened — the `is_external_input_tui_direct &&` scoping is mutation-pinned by `a6b_flag_does_not_route_discord_origin_when_a5_off`.

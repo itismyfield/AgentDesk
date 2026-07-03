@@ -51,20 +51,18 @@ pub(in crate::services::discord) fn session_bound_discord_delivery_enabled() -> 
 }
 
 /// #3089 A2b: flag gating ONLY the short-replace branch onto the turn-output
-/// controller (`deliver_turn_output`). Default OFF → legacy short-replace runs
-/// byte-identically; ON → the controller drives acquire→POST→commit→release on the
-/// SAME `(channel, turn, [start,end))` lease. OnceLock+env, mirroring
-/// `single_message_panel::enabled()`. The long-chunk/new-message branches stay
-/// legacy (not expressible through `TurnGateway` — A2 analysis).
+/// controller (`deliver_turn_output`). Default ON → the controller drives
+/// acquire→POST→commit→release on the SAME `(channel, turn, [start,end))` lease;
+/// `AGENTDESK_SINK_SHORT_REPLACE_CONTROLLER=0|false` is the rollback opt-out.
+/// OnceLock+env, mirroring `single_message_panel::enabled()`. The long-chunk/new-message
+/// branches stay legacy (not expressible through `TurnGateway` — A2 analysis).
 pub(in crate::services::discord) fn sink_short_replace_controller_enabled() -> bool {
     static CACHED: OnceLock<bool> = OnceLock::new();
     *CACHED.get_or_init(|| {
-        let on = std::env::var("AGENTDESK_SINK_SHORT_REPLACE_CONTROLLER")
-            .ok()
-            .map(|v| v.trim().to_ascii_lowercase())
-            .is_some_and(|v| v == "1" || v == "true");
-        // review-fix L1: telemetry ONLY when ENABLED — the default-OFF first evaluation
-        // must have NO observable side effect (byte-identical / deploy no-op).
+        let on = crate::services::discord::controller_rollout_flag::enabled_from_env(
+            "AGENTDESK_SINK_SHORT_REPLACE_CONTROLLER",
+        );
+        // Telemetry remains emitted only when the controller path is enabled.
         if on {
             tracing::info!("  ✓ sink_short_replace_controller: enabled");
         }
@@ -2961,6 +2959,19 @@ mod tests {
         assert_eq!(sink_guard_lease_range(None, true), None);
     }
 
+    #[test]
+    fn zero_optout_byte_identical_legacy_guard_path() {
+        assert!(
+            !crate::services::discord::controller_rollout_flag::enabled_from_raw(Some("0")),
+            "AGENTDESK_SINK_SHORT_REPLACE_CONTROLLER=0 is the rollback opt-out"
+        );
+        assert_eq!(
+            sink_guard_lease_range(Some((0, 256)), false),
+            Some((0, 256)),
+            "explicit opt-out keeps the short-replace delivery on the legacy guarded path"
+        );
+    }
+
     // #3089 A2b (review-fix M2): an EMPTY body diverges between the controller and
     // legacy, so the cut-over gate (`!relay_text.is_empty()`) MUST keep empty bodies
     // on the legacy path. This proves the divergence the gate guards against: the
@@ -3048,7 +3059,7 @@ mod tests {
 
         assert!(
             gate_src.contains("sink_short_replace_controller_enabled()"),
-            "A2b flag ON must be only one term in the gate, not enough to cut over retained arms"
+            "A2b default-ON flag must still be only one term in the gate, not enough to cut over retained arms"
         );
         assert!(
             gate_src.contains(&format!("&& {}.is_some()", "cutover_range")),

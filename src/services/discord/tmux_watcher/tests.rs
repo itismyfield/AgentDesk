@@ -3189,14 +3189,20 @@ mod watcher_short_replace_controller {
         assert!(!cut(true, true, false, true, false, false, false));
     }
 
-    // (8) OFF byte-identical characterization: with the flag default-OFF the cut-over
-    // decision is false regardless of the other terms, so the legacy
+    // (8) Explicit opt-out byte-identical characterization: with
+    // `AGENTDESK_WATCHER_TERMINAL_CONTROLLER=0`, the cut-over decision is false
+    // regardless of the other terms, so the legacy
     // `replace_long_message_raw_with_outcome` arm runs verbatim. (Pure: the flag
-    // helper short-circuits before formatting, so OFF has no observable side effect.)
+    // helper short-circuits before formatting, so opt-out has no observable side effect.)
     #[test]
-    fn off_byte_identical() {
+    fn zero_optout_byte_identical() {
         use super::super::terminal_send::watcher_short_replace_cutover_decision as decide;
-        // controller_enabled = false → false even with every other term cut-over-true.
+        assert!(
+            !crate::services::discord::controller_rollout_flag::enabled_from_raw(Some("0")),
+            "AGENTDESK_WATCHER_TERMINAL_CONTROLLER=0 is the rollback opt-out"
+        );
+        // controller_enabled = false (from explicit opt-out) → false even with
+        // every other term cut-over-true.
         assert!(!decide(
             false,
             false,

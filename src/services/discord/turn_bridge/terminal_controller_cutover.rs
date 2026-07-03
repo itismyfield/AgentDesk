@@ -1,5 +1,5 @@
 //! #3089 A5 turn_bridge terminal cutover to the unified turn-output controller
-//! (flag-gated, default OFF).
+//! (flag-gated, default ON with `=0|false` rollback opt-out).
 //!
 //! Sibling of `turn_bridge/terminal_delivery.rs` (which owns `BridgeDeliveryLease`,
 //! `advance_tmux_relay_confirmed_end`, and `turn_bridge_replace_outcome_committed`).
@@ -25,21 +25,20 @@ use crate::services::discord::{
 };
 
 /// #3089 A5/#3998 S1-d: flag gating the bridge terminal cutover onto the unified
-/// [`toc::deliver_turn_output`]. Default OFF → the legacy terminal arms run
-/// byte-identically; ON → eligible short-replace and long-chunk deliveries use
-/// the controller on the SAME `(channel, turn, [start,end))` lease as
-/// `LeaseHolder::Bridge`. OnceLock+env, mirroring
+/// [`toc::deliver_turn_output`]. Default ON → eligible short-replace and
+/// long-chunk deliveries use the controller on the SAME `(channel, turn,
+/// [start,end))` lease as `LeaseHolder::Bridge`;
+/// `AGENTDESK_TURN_BRIDGE_TERMINAL_CONTROLLER=0|false` is the rollback opt-out.
+/// OnceLock+env, mirroring
 /// `watcher_terminal_controller_enabled` (A4) / `sink_short_replace_controller_enabled`
 /// (A2b) / `standby_relay_controller_enabled` (A3).
 pub(super) fn turn_bridge_terminal_controller_enabled() -> bool {
     static CACHED: OnceLock<bool> = OnceLock::new();
     *CACHED.get_or_init(|| {
-        let on = std::env::var("AGENTDESK_TURN_BRIDGE_TERMINAL_CONTROLLER")
-            .ok()
-            .map(|v| v.trim().to_ascii_lowercase())
-            .is_some_and(|v| v == "1" || v == "true");
-        // Telemetry ONLY when ENABLED — the default-OFF first evaluation must have
-        // NO observable side effect (byte-identical / deploy no-op), matching A4.
+        let on = crate::services::discord::controller_rollout_flag::enabled_from_env(
+            "AGENTDESK_TURN_BRIDGE_TERMINAL_CONTROLLER",
+        );
+        // Telemetry remains emitted only when the controller path is enabled.
         if on {
             tracing::info!("  ✓ turn_bridge_terminal_controller: enabled");
         }
@@ -48,9 +47,9 @@ pub(super) fn turn_bridge_terminal_controller_enabled() -> bool {
 }
 
 /// #3089 A5: the bridge short-replace cut-over decision, computed at the site-5
-/// lease-acquire site (mod.rs ~6134). The flag is checked FIRST so OFF
-/// short-circuits before any work — byte-identical / deploy no-op on the
-/// default-OFF path.
+/// lease-acquire site (mod.rs ~6134). The flag is checked FIRST so explicit
+/// opt-out short-circuits before any work — byte-identical legacy on the
+/// `=0|false` path.
 ///
 /// Terms (mirroring the legacy short-replace branch arm at mod.rs:6126-6245):
 /// - `will_short_replace` — we are in the `can_chain_locally` short-replace arm
@@ -90,8 +89,8 @@ pub(super) fn bridge_short_replace_cutover(
 }
 
 /// #3089 A5: the full short-replace cut-over decision at the site-5 lease-acquire
-/// site. The flag is checked FIRST so OFF short-circuits before computing the
-/// length predicate — byte-identical / deploy no-op. When ON it derives
+/// site. The flag is checked FIRST so explicit opt-out short-circuits before
+/// computing the length predicate — byte-identical legacy. When ON it derives
 /// `will_short_replace` EXACTLY as the send arm (mod.rs:6024:
 /// `!super::terminal_delivery::terminal_delivery_should_send_new_chunks`) so the cutover and the legacy arm
 /// agree on which body is "short". Kept here (not inlined) so the frozen
@@ -1904,16 +1903,21 @@ mod tests {
             ));
         }
 
-        // (9) OFF byte-identical: `controller_enabled = false` makes the decision
-        // false (the legacy arm runs) EVEN with every other cut-over term true, so
-        // the flag is the sole gate (mirrors A4). Passes `false` explicitly (not the
-        // env-read flag) so it is robust whether the harness runs OFF or forces ON —
-        // the predicate's flag-first short-circuit is what default-OFF relies on.
+        // (9) Explicit opt-out byte-identical: `controller_enabled = false` makes
+        // the decision false (the legacy arm runs) EVEN with every other cut-over
+        // term true, so the flag is the sole gate (mirrors A4). Passes `false`
+        // explicitly (not the env-read flag) so it is robust whether the harness
+        // runs default-ON or opt-out — the predicate's flag-first short-circuit is
+        // what `=0|false` rollback relies on.
         #[test]
-        fn off_byte_identical() {
+        fn zero_optout_byte_identical() {
+            assert!(
+                !crate::services::discord::controller_rollout_flag::enabled_from_raw(Some("0")),
+                "AGENTDESK_TURN_BRIDGE_TERMINAL_CONTROLLER=0 is the rollback opt-out"
+            );
             assert!(
                 !bridge_short_replace_cutover_decision(false, true, "short", true, true),
-                "controller_enabled=false → the cut-over decision is false → legacy arm"
+                "controller_enabled=false from explicit opt-out → the cut-over decision is false → legacy arm"
             );
             // The env helper itself is callable (no panic / side-effect contract).
             let _ = turn_bridge_terminal_controller_enabled();

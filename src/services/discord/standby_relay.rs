@@ -40,23 +40,21 @@ use super::placeholder_controller::{PlaceholderKey, PlaceholderLifecycle};
 use crate::services::provider::ProviderKind;
 
 /// #3089 A3: flag gating ONLY the standby short-replace branch onto the
-/// turn-output controller (`deliver_turn_output`). Default OFF → the legacy
-/// `replace_long_message_raw_with_outcome` short-replace path runs
-/// byte-identically; ON → that branch routes through the controller as a
-/// transport-only `ProceedMarkerless` delivery (standby holds no lease, advances
-/// no offset, runs no heartbeat — see [`NoLease`](toc::NoLease)). OnceLock+env,
-/// mirroring `sink_short_replace_controller_enabled`. The long-chunk (send new
-/// chunks + delete original) and new-message branches stay legacy (deferred,
-/// exactly like the A2b sink cutover).
+/// turn-output controller (`deliver_turn_output`). Default ON → that branch routes
+/// through the controller as a transport-only `ProceedMarkerless` delivery
+/// (standby holds no lease, advances no offset, runs no heartbeat — see
+/// [`NoLease`](toc::NoLease)); `AGENTDESK_STANDBY_RELAY_CONTROLLER=0|false` is
+/// the rollback opt-out. OnceLock+env, mirroring
+/// `sink_short_replace_controller_enabled`. The long-chunk (send new chunks +
+/// delete original) and new-message branches stay legacy (deferred, exactly like
+/// the A2b sink cutover).
 pub(in crate::services::discord) fn standby_relay_controller_enabled() -> bool {
     static CACHED: OnceLock<bool> = OnceLock::new();
     *CACHED.get_or_init(|| {
-        let on = std::env::var("AGENTDESK_STANDBY_RELAY_CONTROLLER")
-            .ok()
-            .map(|v| v.trim().to_ascii_lowercase())
-            .is_some_and(|v| v == "1" || v == "true");
-        // Telemetry ONLY when ENABLED — the default-OFF first evaluation must have
-        // NO observable side effect (byte-identical / deploy no-op), matching A2b.
+        let on = crate::services::discord::controller_rollout_flag::enabled_from_env(
+            "AGENTDESK_STANDBY_RELAY_CONTROLLER",
+        );
+        // Telemetry remains emitted only when the controller path is enabled.
         if on {
             tracing::info!("  ✓ standby_relay_controller: enabled");
         }
@@ -793,11 +791,11 @@ async fn deliver_response(
                 return true;
             }
             // #3089 A3: route the short-replace branch through the unified
-            // controller behind a flag (default OFF). The cut-over decision —
-            // including the load-bearing non-empty-body exclusion — lives in the
-            // single-sourced pure fn `standby_short_replace_should_cutover` (see
-            // its doc comment for the empty-body true→false divergence the gate
-            // guards against). OFF or empty body → the verbatim legacy path below.
+            // controller behind a default-ON flag. The cut-over decision — including
+            // the load-bearing non-empty-body exclusion — lives in the single-sourced
+            // pure fn `standby_short_replace_should_cutover` (see its doc comment for
+            // the empty-body true→false divergence the gate guards against). Explicit
+            // opt-out (`=0|false`) or empty body → the verbatim legacy path below.
             if standby_short_replace_should_cutover(standby_relay_controller_enabled(), &formatted)
             {
                 let gateway = super::gateway::DiscordGateway::new(
@@ -953,39 +951,41 @@ mod tests {
 
     #[test]
     fn standby_inflight_match_requires_same_output_and_placeholder() {
-        let mut state = InflightTurnState::new(
-            ProviderKind::Codex,
-            1234,
-            None,
-            42,
-            100,
-            5678,
-            "test".to_string(),
-            None,
-            Some("tmux".to_string()),
-            Some("/tmp/out.jsonl".to_string()),
-            None,
-            0,
-        );
+        with_isolated_runtime_root(|| {
+            let mut state = InflightTurnState::new(
+                ProviderKind::Codex,
+                1234,
+                None,
+                42,
+                100,
+                5678,
+                "test".to_string(),
+                None,
+                Some("tmux".to_string()),
+                Some("/tmp/out.jsonl".to_string()),
+                None,
+                0,
+            );
 
-        assert!(standby_inflight_matches(
-            &state,
-            "/tmp/out.jsonl",
-            Some(MessageId::new(5678)),
-        ));
-        assert!(!standby_inflight_matches(
-            &state,
-            "/tmp/other.jsonl",
-            Some(MessageId::new(5678)),
-        ));
-        assert!(!standby_inflight_matches(
-            &state,
-            "/tmp/out.jsonl",
-            Some(MessageId::new(9999)),
-        ));
+            assert!(standby_inflight_matches(
+                &state,
+                "/tmp/out.jsonl",
+                Some(MessageId::new(5678)),
+            ));
+            assert!(!standby_inflight_matches(
+                &state,
+                "/tmp/other.jsonl",
+                Some(MessageId::new(5678)),
+            ));
+            assert!(!standby_inflight_matches(
+                &state,
+                "/tmp/out.jsonl",
+                Some(MessageId::new(9999)),
+            ));
 
-        state.current_msg_id = 0;
-        assert!(standby_inflight_matches(&state, "/tmp/out.jsonl", None));
+            state.current_msg_id = 0;
+            assert!(standby_inflight_matches(&state, "/tmp/out.jsonl", None));
+        });
     }
 
     /// #2448 acceptance — confirm the relay-side broadcast filter:
@@ -1565,29 +1565,38 @@ mod tests {
             assert_eq!(replace_calls, 1, "the single POST was attempted and failed");
         }
 
-        // #3089 A3 (review-fix r2): characterizes the two BEHAVIOURS the production
-        // cut-over gate relies on — (a) the flag defaults OFF (deploy no-op) and
-        // (b) the controller diverges from legacy on an empty body (controller →
-        // Skipped → false; legacy zero-chunk → EditedOriginal → true). NOTE: this
-        // test calls `deliver_short_replace_via_controller` DIRECTLY, so it does NOT
-        // exercise the production guard at `deliver_response`; it merely proves WHY
-        // the guard's `!formatted.is_empty()` half must exist. The guard logic
-        // itself (both conditions) is single-sourced in the pure fn
+        // #3089 A3 (review-fix r2): characterizes the behaviours the production
+        // cut-over gate relies on — (a) the flag defaults ON when absent, while
+        // `=0|false` remains the legacy rollback opt-out, and (b) the controller
+        // diverges from legacy on an empty body (controller → Skipped → false;
+        // legacy zero-chunk → EditedOriginal → true). NOTE: this test calls
+        // `deliver_short_replace_via_controller` DIRECTLY, so it does NOT exercise
+        // the production guard at `deliver_response`; it merely proves WHY the
+        // guard's `!formatted.is_empty()` half must exist. The guard logic itself
+        // (both conditions) is single-sourced in the pure fn
         // `standby_short_replace_should_cutover` and mutation-pinned by
         // `standby_short_replace_should_cutover_pins_both_conditions` below.
         #[test]
-        fn flag_default_off_and_empty_body_diverges_from_legacy() {
+        fn flag_default_on_zero_optout_and_empty_body_diverges_from_legacy() {
             let _lock = crate::config::shared_test_env_lock()
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            // (a) Default OFF when the env var is unset (deploy no-op). Only assert
-            // when truly unset, since `OnceLock` caches the first observation.
+            // (a) Default ON when the env var is unset. Only assert when truly unset,
+            // since `OnceLock` caches the first observation.
             if std::env::var_os("AGENTDESK_STANDBY_RELAY_CONTROLLER").is_none() {
                 assert!(
-                    !standby_relay_controller_enabled(),
-                    "flag default OFF (byte-identical legacy path)"
+                    standby_relay_controller_enabled(),
+                    "flag default ON (controller path when absent)"
                 );
             }
+            assert!(
+                !crate::services::discord::controller_rollout_flag::enabled_from_raw(Some("0")),
+                "AGENTDESK_STANDBY_RELAY_CONTROLLER=0 is the rollback opt-out"
+            );
+            assert!(
+                !crate::services::discord::controller_rollout_flag::enabled_from_raw(Some("false")),
+                "AGENTDESK_STANDBY_RELAY_CONTROLLER=false is the rollback opt-out"
+            );
             // (b) Empty body → controller Skipped → false (legacy would return true),
             // proving the nonempty gate must keep empty bodies on the legacy path.
             let shared = make_shared_data_for_tests();
@@ -1632,7 +1641,7 @@ mod tests {
         fn standby_short_replace_should_cutover_pins_both_conditions() {
             assert!(
                 !standby_short_replace_should_cutover(false, "x"),
-                "flag OFF → never cut over (byte-identical legacy path)"
+                "explicit opt-out → never cut over (byte-identical legacy path)"
             );
             assert!(
                 !standby_short_replace_should_cutover(true, ""),
