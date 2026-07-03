@@ -478,6 +478,10 @@ impl<'a, L: DeliveryLease + ?Sized> ControllerLeaseGuard<'a, L> {
         }
     }
 
+    fn lease_key(&self) -> DeliveryLeaseKey {
+        self.key.clone()
+    }
+
     /// Release now and disarm so the Drop is a no-op. Used by the normal arms so
     /// the release ORDERING (AFTER `post_send_finalize`, I1) stays explicit while
     /// the Drop is the cancel/panic safety net only.
@@ -627,11 +631,14 @@ where
     // A2a: acquire with the shared HOLDER-LIVENESS deadline (15s); the POST
     // heartbeat (below) keeps it fresh — no fixed 60s TTL.
     let deadline_ms = lease_now_ms().saturating_add(TURN_OUTPUT_LEASE_TTL_MS);
-    let lease_held = ctx.lease_key.as_ref().is_some_and(|key| {
-        ctx.lease
+    let held_lease_key = match ctx.lease_key.as_ref() {
+        Some(key) => ctx
+            .lease
             .try_acquire(key.clone(), ctx.holder, start, end, deadline_ms)
-    });
-    if !lease_held {
+            .then_some(key),
+        _ => None,
+    };
+    if held_lease_key.is_none() {
         // A2a capability 1: another holder owns this (channel, turn, range).
         match ctx.acquire_failure_mode {
             AcquireFailureMode::Transient => {
@@ -655,35 +662,16 @@ where
     // `release_and_disarm()` so the release ORDERING stays explicit (after the
     // inline commit + post-send finalize, I1) while the Drop is the cancel/panic
     // safety net only.
-    let mut lease_guard = lease_held.then(|| {
-        ControllerLeaseGuard::arm(
-            ctx.lease,
-            ctx.holder,
-            ctx.lease_key
-                .clone()
-                .expect("held delivery lease must have a lease key"),
-            start,
-            end,
-        )
-    });
+    let mut lease_guard = held_lease_key
+        .map(|key| ControllerLeaseGuard::arm(ctx.lease, ctx.holder, key.clone(), start, end));
 
     // A2a capability 3: while the POST is in flight, keep the (held) lease
     // deadline fresh. Only the held-lease path has a lease to renew; a
     // markerless send holds none. The guard's Drop stops the heartbeat, so an
     // early return / panic in `drive_transport` can never leak the renew task;
     // it is also dropped explicitly BEFORE the inline commit (#3151 ordering).
-    let heartbeat_guard = if lease_held {
-        ctx.heartbeat.map(|hb| {
-            hb.start(
-                ctx.holder,
-                ctx.lease_key
-                    .clone()
-                    .expect("held delivery lease must have a lease key"),
-            )
-        })
-    } else {
-        None
-    };
+    let heartbeat_guard =
+        held_lease_key.and_then(|key| ctx.heartbeat.map(|hb| hb.start(ctx.holder, key.clone())));
 
     // ---- send (transport) ------------------------------------------------
     // Any post-send work (placeholder terminal transition, fallback cleanup,
@@ -784,21 +772,15 @@ where
     // reconciliation re-sends (the sink's `advanced == false` arm). On the
     // markerless path there is no lease to commit — the advance bool alone
     // decides the outcome. Runs synchronously here, BEFORE the post-send awaits.
-    if lease_guard.is_some() {
+    if let Some(guard) = lease_guard.as_ref() {
         let outcome = if advanced {
             LeaseOutcome::Delivered
         } else {
             LeaseOutcome::NotDelivered
         };
-        let committed = ctx.lease.commit(
-            ctx.holder,
-            ctx.lease_key
-                .clone()
-                .expect("held delivery lease must have a lease key"),
-            start,
-            end,
-            outcome,
-        );
+        let committed = ctx
+            .lease
+            .commit(ctx.holder, guard.lease_key(), start, end, outcome);
         debug_assert!(committed, "confirmed commit must match the acquired lease");
     }
 
