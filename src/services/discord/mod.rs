@@ -2302,15 +2302,13 @@ impl SharedData {
 
 #[cfg(test)]
 pub(super) fn make_shared_data_for_tests() -> Arc<SharedData> {
-    make_shared_data_for_tests_with_storage(None, None)
+    make_shared_data_for_tests_with_storage(None)
 }
 
 #[cfg(test)]
 pub(super) fn make_shared_data_for_tests_with_storage(
-    sqlite: Option<crate::db::Db>,
     pg_pool: Option<sqlx::PgPool>,
 ) -> Arc<SharedData> {
-    let _ = &sqlite;
     Arc::new(SharedData {
         core: tokio::sync::Mutex::new(CoreState {
             sessions: std::collections::HashMap::new(),
@@ -4321,7 +4319,7 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
             // Clean up worktree if session had one
             if let Some(session) = data.sessions.get(&ch) {
                 if let Some(ref wt) = session.worktree {
-                    cleanup_git_worktree(None::<&crate::db::Db>, shared.pg_pool.as_ref(), wt);
+                    cleanup_git_worktree(shared.pg_pool.as_ref(), wt);
                 }
             }
             data.sessions.remove(&ch);
@@ -4346,18 +4344,14 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
     // Record termination audit for cleaned-up sessions
     for expired_session in &expired {
         if let Some(session_key) = expired_session.session_key.as_deref() {
-            let should_record = mark_session_disconnected_for_idle_cleanup(
-                None::<&crate::db::Db>,
-                shared.pg_pool.as_ref(),
-                session_key,
-            )
-            .await;
+            let should_record =
+                mark_session_disconnected_for_idle_cleanup(shared.pg_pool.as_ref(), session_key)
+                    .await;
             if !should_record {
                 continue;
             }
 
             crate::services::termination_audit::record_termination_with_handles(
-                None::<&crate::db::Db>,
                 shared.pg_pool.as_ref(),
                 session_key,
                 None,
@@ -4374,7 +4368,6 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
 }
 
 async fn mark_session_disconnected_for_idle_cleanup(
-    _db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     session_key: &str,
 ) -> bool {
@@ -4516,7 +4509,7 @@ mod idle_cleanup_selector_tests {
         .await
         .unwrap();
 
-        assert!(mark_session_disconnected_for_idle_cleanup(None, Some(&pool), session_key).await);
+        assert!(mark_session_disconnected_for_idle_cleanup(Some(&pool), session_key).await);
 
         let row = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>)>(
             "SELECT status, active_dispatch_id, claude_session_id, raw_provider_session_id

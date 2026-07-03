@@ -539,13 +539,11 @@ async fn archive_dispatch_thread(
 /// Send Discord notifications for a completed dispatch (review verdicts, etc.).
 /// Callers of `finalize_dispatch` should spawn this after the sync call returns.
 pub(crate) async fn handle_completed_dispatch_followups_with_pg(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     dispatch_id: &str,
 ) -> Result<(), String> {
-    let transport = HttpDispatchTransport::from_runtime_with_pg(db, pg_pool.cloned());
+    let transport = HttpDispatchTransport::from_runtime_with_pg(pg_pool.cloned());
     handle_completed_dispatch_followups_internal(
-        db,
         pg_pool,
         dispatch_id,
         &DispatchFollowupConfig::from_runtime(),
@@ -555,14 +553,13 @@ pub(crate) async fn handle_completed_dispatch_followups_with_pg(
 }
 
 async fn handle_completed_dispatch_followups_internal<T: DispatchTransport>(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     dispatch_id: &str,
     config: &DispatchFollowupConfig,
     transport: &T,
 ) -> Result<(), String> {
     let pg_pool = pg_pool.or_else(|| transport.pg_pool());
-    let info = load_completed_dispatch_info(db, pg_pool, dispatch_id).await?;
+    let info = load_completed_dispatch_info(pg_pool, dispatch_id).await?;
 
     let Some(mut info) = info else {
         return Err(format!("dispatch {dispatch_id} not found"));
@@ -586,7 +583,6 @@ async fn handle_completed_dispatch_followups_internal<T: DispatchTransport>(
         // submitted via the verdict API — these have a real "verdict" field in the result.
         if verdict != "unknown" {
             send_review_result_to_primary_with_transport(
-                db,
                 &info.card_id,
                 dispatch_id,
                 &verdict,
@@ -616,7 +612,7 @@ async fn handle_completed_dispatch_followups_internal<T: DispatchTransport>(
     // Archive thread on dispatch completion — but only if the card is done.
     // When the card has an active lifecycle (not done), keep the thread open for reuse
     // by subsequent dispatches (rework, review-decision, etc.).
-    let card_status = load_card_status(db, pg_pool, &info.card_id).await?;
+    let card_status = load_card_status(pg_pool, &info.card_id).await?;
     let should_archive = card_status.as_deref() == Some("done");
 
     if should_archive {
@@ -649,7 +645,7 @@ async fn handle_completed_dispatch_followups_internal<T: DispatchTransport>(
                 );
             }
         }
-        clear_all_dispatch_threads(db, pg_pool, &info.card_id).await?;
+        clear_all_dispatch_threads(pg_pool, &info.card_id).await?;
     }
 
     // Generic resend removed — dispatch Discord notification is handled by:
@@ -661,7 +657,6 @@ async fn handle_completed_dispatch_followups_internal<T: DispatchTransport>(
 }
 
 async fn load_completed_dispatch_info(
-    _db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     dispatch_id: &str,
 ) -> Result<Option<CompletedDispatchInfo>, String> {
@@ -674,7 +669,6 @@ async fn load_completed_dispatch_info(
 }
 
 async fn load_card_status(
-    _db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     card_id: &str,
 ) -> Result<Option<String>, String> {
@@ -693,11 +687,7 @@ async fn should_defer_done_card_thread_archive(
     crate::services::discord::should_defer_thread_archive_pg(pg_pool, thread_id).await
 }
 
-async fn clear_all_dispatch_threads(
-    _db: Option<&crate::db::Db>,
-    pg_pool: Option<&PgPool>,
-    card_id: &str,
-) -> Result<(), String> {
+async fn clear_all_dispatch_threads(pg_pool: Option<&PgPool>, card_id: &str) -> Result<(), String> {
     if let Some(pool) = pg_pool {
         return crate::db::dispatches::outbox::clear_all_dispatch_threads_pg(pool, card_id).await;
     }

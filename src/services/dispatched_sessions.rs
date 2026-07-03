@@ -106,7 +106,6 @@ async fn hook_session_pg(
             let dispatch_id = body.dispatch_id.clone();
 
             crate::kanban::fire_event_hooks_with_backends(
-                None,
                 &state.engine,
                 "on_session_status_change",
                 "OnSessionStatusChange",
@@ -813,7 +812,6 @@ async fn force_kill_session_impl_with_reason_and_forwarding(
 
     if tmux_killed && !lifecycle.termination_recorded {
         crate::services::termination_audit::record_termination_with_handles(
-            None,
             state.pg_pool_ref(),
             session_key,
             active_dispatch_id.as_deref(),
@@ -1431,7 +1429,6 @@ async fn kill_tmux_session_impl(
                 session_key
             );
             crate::services::termination_audit::record_termination_with_handles(
-                None,
                 state.pg_pool_ref(),
                 session_key,
                 None,
@@ -1448,7 +1445,6 @@ async fn kill_tmux_session_impl(
     if tmux_killed {
         let termination_reason_code = classify_session_termination_reason(reason);
         crate::services::termination_audit::record_termination_with_handles(
-            None,
             state.pg_pool_ref(),
             session_key,
             active_dispatch_id.as_deref(),

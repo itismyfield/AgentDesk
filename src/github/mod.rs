@@ -1,7 +1,6 @@
 pub mod sync;
 pub mod triage;
 
-use crate::db::Db;
 use crate::services::platform::binary_resolver::{
     apply_runtime_path, resolve_binary_with_login_shell,
 };
@@ -669,14 +668,6 @@ fn parse_issue_number_from_url(url: &str) -> Option<i64> {
         .and_then(|value| value.as_str().parse::<i64>().ok())
 }
 
-// reason: production-build twin of the removed SQLite list_repos path; the live
-// path is list_repos_pg, this stub keeps the symbol present for non-test builds.
-// See #3034 (M2 dead-twin).
-#[allow(dead_code)]
-pub fn list_repos(_db: &Db) -> Result<Vec<RepoRow>, String> {
-    Err("sqlite github repo registry is unavailable in production".to_string())
-}
-
 pub async fn list_repos_pg(pool: &PgPool) -> Result<Vec<RepoRow>, String> {
     let rows = sqlx::query(
         "SELECT id, display_name, sync_enabled, last_synced_at::text AS last_synced_at
@@ -706,16 +697,6 @@ pub async fn list_repos_pg(pool: &PgPool) -> Result<Vec<RepoRow>, String> {
                 .flatten(),
         })
         .collect())
-}
-
-// reason: production-build twin of the removed SQLite register_repo path; the
-// live path is db::postgres::register_repo, this stub keeps the symbol present
-// for non-test builds. See #3034 (M2 dead-twin).
-#[allow(dead_code)]
-pub fn register_repo(_db: &Db, repo_id: &str) -> Result<RepoRow, String> {
-    Err(format!(
-        "sqlite github repo registry is unavailable in production for {repo_id}"
-    ))
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

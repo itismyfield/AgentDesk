@@ -143,7 +143,6 @@ pub(super) async fn send_codex_goal_lifecycle_notice(
         let target = format!("channel:{}", channel_id.get());
         let session_key = build_adk_session_key(shared, channel_id, &ProviderKind::Codex).await;
         crate::services::message_outbox::enqueue_lifecycle_notification_best_effort(
-            None::<&crate::db::Db>,
             shared.pg_pool.as_ref(),
             &target,
             session_key.as_deref(),

@@ -659,7 +659,6 @@ pub(super) fn extract_result_error_text(value: &serde_json::Value) -> String {
 /// `channel_id` rows are intentionally NOT reused (that is exactly the hazard
 /// being closed — reuse self-heals on the next turn once the row is stamped).
 pub(super) fn load_restored_session_cwd(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     session_keys: &[String],
     channel_id: u64,
@@ -694,7 +693,7 @@ pub(super) fn load_restored_session_cwd(
         .flatten();
     }
 
-    let _ = (db, session_keys, channel_id);
+    let _ = (session_keys, channel_id);
     None
 }
 
@@ -749,7 +748,6 @@ pub(super) fn inflight_duration_ms(started_at: Option<&str>) -> Option<i64> {
 }
 
 pub(super) fn load_restored_provider_session_id(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
     provider: &ProviderKind,
@@ -791,20 +789,12 @@ pub(super) fn load_restored_provider_session_id(
         .flatten();
     }
 
-    let _ = (db, session_keys);
+    let _ = session_keys;
     None
 }
 
 pub(super) fn recovery_handled_channel_key(channel_id: u64) -> String {
     format!("recovery_handled_channel:{channel_id}")
-}
-
-pub(super) fn sqlite_runtime_db(shared: &SharedData) -> Option<&crate::db::Db> {
-    if shared.pg_pool.is_some() {
-        None
-    } else {
-        None::<&crate::db::Db>
-    }
 }
 
 pub(super) fn watcher_has_post_work_ready_evidence(
@@ -1216,7 +1206,6 @@ pub(in crate::services::discord) async fn fail_dispatch_for_ready_for_input_stal
         "tmux_session_name": tmux_session_name,
     });
     let changed = crate::dispatch::set_dispatch_status_with_backends(
-        sqlite_runtime_db(shared.as_ref()),
         shared.pg_pool.as_ref(),
         dispatch_id,
         "failed",
@@ -1233,11 +1222,6 @@ pub(in crate::services::discord) async fn fail_dispatch_for_ready_for_input_stal
         card_marked = if let Some(pool) = shared.pg_pool.as_ref() {
             update_card_ready_failure_marker_pg(pool, card_id_ref, READY_FOR_INPUT_STUCK_REASON)
                 .await?
-        } else if let Some(db) = sqlite_runtime_db(shared.as_ref()) {
-            {
-                let _ = db;
-                false
-            }
         } else {
             false
         };
@@ -1250,7 +1234,6 @@ pub(in crate::services::discord) async fn fail_dispatch_for_ready_for_input_stal
                 "자동큐 safety-net 발동: dispatch {dispatch_id} / card {card_label} / session {tmux_session_name} / {READY_FOR_INPUT_STUCK_REASON}"
             );
             enqueue_lifecycle_notification_best_effort(
-                sqlite_runtime_db(shared.as_ref()),
                 shared.pg_pool.as_ref(),
                 &target,
                 Some(dispatch_id),
@@ -2219,12 +2202,8 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             &provider,
             session_name,
         );
-        let restored_cwd = load_restored_session_cwd(
-            None::<&crate::db::Db>,
-            shared.pg_pool.as_ref(),
-            &session_keys,
-            channel_id.get(),
-        );
+        let restored_cwd =
+            load_restored_session_cwd(shared.pg_pool.as_ref(), &session_keys, channel_id.get());
 
         let mut selected_claude_tui_fallback_transcript: Option<std::path::PathBuf> = None;
         let mut codex_direct_resume_fallback = None;
@@ -2447,7 +2426,6 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                 channel_id.get(),
             );
             let persisted_session_id = load_restored_provider_session_id(
-                None::<&crate::db::Db>,
                 shared.pg_pool.as_ref(),
                 &shared.token_hash,
                 &provider,
@@ -2461,12 +2439,8 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                 &provider,
                 &tmux_name,
             );
-            let db_cwd = load_restored_session_cwd(
-                None::<&crate::db::Db>,
-                shared.pg_pool.as_ref(),
-                &session_keys,
-                channel_id.get(),
-            );
+            let db_cwd =
+                load_restored_session_cwd(shared.pg_pool.as_ref(), &session_keys, channel_id.get());
 
             let session =
                 data.sessions
@@ -2638,7 +2612,6 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         for dc in &dead_cleanups {
             let dispatch_protection =
                 super::super::tmux_lifecycle::resolve_dispatch_tmux_protection(
-                    None::<&crate::db::Db>,
                     shared.pg_pool.as_ref(),
                     &shared.token_hash,
                     &provider,
@@ -2814,7 +2787,7 @@ mod restored_session_cwd_channel_isolation_tests {
         .await;
 
         // Owner channel recovers its own cwd.
-        let owner = load_restored_session_cwd(None, Some(&pool), &session_keys, channel_a);
+        let owner = load_restored_session_cwd(Some(&pool), &session_keys, channel_a);
         assert_eq!(
             owner.as_deref(),
             Some(owner_cwd.as_str()),
@@ -2823,7 +2796,7 @@ mod restored_session_cwd_channel_isolation_tests {
 
         // The colliding (different-id) channel must NOT recover channel A's cwd
         // (RED before the P0-b `channel_id = $2` fix).
-        let cross = load_restored_session_cwd(None, Some(&pool), &session_keys, channel_b);
+        let cross = load_restored_session_cwd(Some(&pool), &session_keys, channel_b);
         assert_eq!(
             cross, None,
             "a different channel sharing the same session_key must NOT recover \
@@ -2856,7 +2829,7 @@ mod restored_session_cwd_channel_isolation_tests {
         // A row written before the channel_id column existed has NULL channel_id.
         seed_session(&pool, &session_key, None, &cwd).await;
 
-        let resolved = load_restored_session_cwd(None, Some(&pool), &session_keys, channel_id);
+        let resolved = load_restored_session_cwd(Some(&pool), &session_keys, channel_id);
         assert_eq!(
             resolved, None,
             "a legacy NULL-channel_id row must not be reused for watcher recovery"

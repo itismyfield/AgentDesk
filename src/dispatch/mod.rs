@@ -25,9 +25,8 @@ pub use dispatch_channel::{
 #[allow(unused_imports)]
 pub(crate) use dispatch_context::{
     DispatchSessionStrategy, REVIEW_QUALITY_CHECKLIST, REVIEW_QUALITY_SCOPE_REMINDER,
-    REVIEW_VERDICT_IMPROVE_GUIDANCE, ScopeCheck, commit_belongs_to_card_issue,
-    commit_belongs_to_card_issue_pg, commit_belongs_to_card_issue_pg_tri,
-    commit_belongs_to_card_issue_tri, dispatch_session_strategy_from_context,
+    REVIEW_VERDICT_IMPROVE_GUIDANCE, ScopeCheck, commit_belongs_to_card_issue_pg,
+    commit_belongs_to_card_issue_pg_tri, dispatch_session_strategy_from_context,
     dispatch_type_force_new_session_default, dispatch_type_requires_fresh_worktree,
     dispatch_type_session_strategy_default, dispatch_type_uses_thread_routing,
     ensure_card_worktree, inject_review_dispatch_identifiers, resolve_card_worktree,
@@ -39,9 +38,9 @@ pub(crate) use dispatch_create::{
 };
 #[allow(unused_imports)]
 pub use dispatch_create::{
-    create_dispatch, create_dispatch_core, create_dispatch_core_with_id,
-    create_dispatch_core_with_id_and_options, create_dispatch_core_with_options,
-    create_dispatch_pg_only, create_dispatch_with_options, create_dispatch_with_options_pg_only,
+    create_dispatch_core, create_dispatch_core_with_id, create_dispatch_core_with_id_and_options,
+    create_dispatch_core_with_options, create_dispatch_pg_only,
+    create_dispatch_with_options_pg_only,
 };
 pub(crate) use dispatch_query::query_dispatch_row_pg;
 #[allow(unused_imports)]
@@ -49,9 +48,8 @@ pub(crate) use dispatch_status::set_dispatch_status_without_queue_sync_with_back
 pub(crate) use dispatch_status::{VALID_DISPATCH_STATUSES, is_valid_dispatch_status};
 #[allow(unused_imports)]
 pub use dispatch_status::{
-    finalize_dispatch_with_backends, load_dispatch_row_pg_first, load_dispatch_row_with_backends,
-    mark_dispatch_completed_pg_first, set_dispatch_status_on_pg_async,
-    set_dispatch_status_pg_first, set_dispatch_status_with_backends,
+    finalize_dispatch_with_backends, load_dispatch_row_with_backends,
+    set_dispatch_status_on_pg_async, set_dispatch_status_with_backends,
 };
 pub(crate) use dispatch_summary::{summarize_dispatch_from_text, summarize_dispatch_result};
 pub use types::{DispatchCreateOptions, Source};

@@ -3,7 +3,6 @@ use sqlx::PgPool;
 use super::markers::ApiFrictionReport;
 use super::memory_sync::sync_event_memory_pg;
 use super::storage::store_api_friction_events_pg;
-use crate::db::Db;
 use crate::services::discord::settings::ResolvedMemorySettings;
 use crate::services::memory::TokenUsage;
 
@@ -24,7 +23,6 @@ pub(crate) struct ApiFrictionRecordResult {
 }
 
 pub(crate) async fn record_api_friction_reports(
-    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     memory_settings: &ResolvedMemorySettings,
     context: ApiFrictionRecordContext<'_>,
@@ -34,7 +32,6 @@ pub(crate) async fn record_api_friction_reports(
         return Ok(ApiFrictionRecordResult::default());
     }
 
-    let _ = db;
     let pg_pool = pg_pool.ok_or_else(|| {
         "postgres pool is required for API friction capture; sqlite fallback is unavailable"
             .to_string()

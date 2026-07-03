@@ -28,7 +28,6 @@ use std::sync::Arc;
 pub(crate) trait OutboxNotifier: Send + Sync {
     fn notify_dispatch(
         &self,
-        db: Option<crate::db::Db>,
         agent_id: String,
         title: String,
         card_id: String,
@@ -37,13 +36,11 @@ pub(crate) trait OutboxNotifier: Send + Sync {
 
     fn handle_followup(
         &self,
-        db: Option<crate::db::Db>,
         dispatch_id: String,
     ) -> impl std::future::Future<Output = Result<(), String>> + Send;
 
     fn sync_status_reaction(
         &self,
-        db: Option<crate::db::Db>,
         dispatch_id: String,
     ) -> impl std::future::Future<Output = Result<(), String>> + Send;
 }
@@ -62,14 +59,12 @@ impl RealOutboxNotifier {
 impl OutboxNotifier for RealOutboxNotifier {
     async fn notify_dispatch(
         &self,
-        db: Option<crate::db::Db>,
         agent_id: String,
         title: String,
         card_id: String,
         dispatch_id: String,
     ) -> Result<DispatchNotifyDeliveryResult, String> {
         crate::services::dispatches::discord_delivery::send_dispatch_to_discord_with_pg_result(
-            db.as_ref(),
             Some(self.pg_pool.as_ref()),
             &agent_id,
             &title,
@@ -79,26 +74,16 @@ impl OutboxNotifier for RealOutboxNotifier {
         .await
     }
 
-    async fn handle_followup(
-        &self,
-        db: Option<crate::db::Db>,
-        dispatch_id: String,
-    ) -> Result<(), String> {
+    async fn handle_followup(&self, dispatch_id: String) -> Result<(), String> {
         crate::services::dispatches::outbox_route::handle_completed_dispatch_followups_with_pg(
-            db.as_ref(),
             Some(self.pg_pool.as_ref()),
             &dispatch_id,
         )
         .await
     }
 
-    async fn sync_status_reaction(
-        &self,
-        db: Option<crate::db::Db>,
-        dispatch_id: String,
-    ) -> Result<(), String> {
+    async fn sync_status_reaction(&self, dispatch_id: String) -> Result<(), String> {
         crate::services::dispatches::discord_delivery::sync_dispatch_status_reaction_with_pg(
-            db.as_ref(),
             Some(self.pg_pool.as_ref()),
             &dispatch_id,
         )
@@ -184,12 +169,11 @@ fn generic_outbox_delivery_result(
 /// - On max retry exceeded: mark as 'failed' (permanent failure)
 /// - For 'notify' actions: manages dispatch_notified reservation atomically
 pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     notifier: &N,
     claim_owner: Option<&str>,
 ) -> usize {
-    let _ = (db, notifier);
+    let _ = notifier;
     let Some(pool) = pg_pool else {
         return 0;
     };
@@ -244,14 +228,14 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
                     // Two-phase delivery guard (reservation + notified marker) is handled
                     // inside send_dispatch_to_discord, protecting all callers uniformly.
                     notifier
-                        .notify_dispatch(db.cloned(), aid, t, cid, dispatch_id.clone())
+                        .notify_dispatch(aid, t, cid, dispatch_id.clone())
                         .await
                 } else {
                     Err("missing agent_id, card_id, or title for notify action".into())
                 }
             }
             "followup" => notifier
-                .handle_followup(db.cloned(), dispatch_id.clone())
+                .handle_followup(dispatch_id.clone())
                 .await
                 .map(|()| {
                     generic_outbox_delivery_result(
@@ -266,7 +250,7 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
                 // ⏳/✅). Drains legacy rows correctly and covers repair paths
                 // that bypass turn_bridge (queue/API cancel, orphan recovery).
                 notifier
-                    .sync_status_reaction(db.cloned(), dispatch_id.clone())
+                    .sync_status_reaction(dispatch_id.clone())
                     .await
                     .map(|()| {
                         generic_outbox_delivery_result(
@@ -440,7 +424,6 @@ pub(crate) async fn dispatch_outbox_loop(
         }
 
         let processed = process_outbox_batch_with_pg(
-            None,
             Some(notifier.pg_pool.as_ref()),
             &notifier,
             Some(&claim_owner),

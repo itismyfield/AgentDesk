@@ -261,7 +261,6 @@ pub(super) fn resolve_exact_completion_usage(
 }
 
 pub(in crate::services::discord) fn persist_turn_analytics_row_with_handles(
-    _db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     provider: &ProviderKind,
     channel_id: ChannelId,

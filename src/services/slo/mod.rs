@@ -18,8 +18,6 @@ use anyhow::Result;
 use serde::Serialize;
 use sqlx::{PgPool, Row};
 
-use crate::db::Db;
-
 /// Window length applied by the aggregation tick (5 minutes).
 pub const DEFAULT_WINDOW_MS: i64 = 5 * 60 * 1000;
 /// Per-(metric, channel) cooldown so back-to-back tick ticks do not spam.
@@ -410,7 +408,6 @@ pub async fn enqueue_alert_pg(pool: &PgPool, target: &str, content: &str) -> Res
 /// cooldown elapsed) enqueues a Discord alert. Returns the list of aggregates
 /// computed so callers / tests can inspect them.
 pub async fn run_aggregation_tick(
-    _db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     now_ms: i64,
 ) -> Vec<SloWindowAggregate> {

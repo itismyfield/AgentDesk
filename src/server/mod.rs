@@ -212,7 +212,7 @@ async fn run_slo_api_friction_aggregation_tick(
     // #1072 turn-lifecycle SLO aggregation (Epic #905 Phase 1):
     // compute + persist + alert on threshold breach.
     let now_ms = chrono::Utc::now().timestamp_millis();
-    let aggregates = crate::services::slo::run_aggregation_tick(None, pool, now_ms).await;
+    let aggregates = crate::services::slo::run_aggregation_tick(pool, now_ms).await;
     tracing::debug!(
         reason,
         aggregate_count = aggregates.len(),
@@ -379,7 +379,6 @@ pub(crate) async fn run(
     };
     let startup_pool = startup_pg_pool.as_ref().or(pg_pool.as_ref());
     crate::reconcile::reconcile_boot_runtime(
-        None,
         boot_reconcile_engine.as_ref().unwrap_or(&engine),
         startup_pool,
         &cluster_instance_id,
@@ -678,10 +677,8 @@ async fn policy_tick_loop(
             }
             let slo_pool = pg_pool.as_deref().or_else(|| engine.pg_pool());
             if let Some(pool) = slo_pool {
-                match crate::reconcile::reconcile_completed_queue_review_drift_pg(
-                    pool, None, &engine,
-                )
-                .await
+                match crate::reconcile::reconcile_completed_queue_review_drift_pg(pool, &engine)
+                    .await
                 {
                     Ok(recovered) if recovered > 0 => {
                         tracing::info!(
@@ -738,7 +735,7 @@ async fn fire_tick_hook_by_name_with_pg(
     if let Some(pool) = pg_pool.or_else(|| engine.pg_pool()) {
         record_tick_hook_execution_pg(pool, label, &execution).await;
     }
-    crate::kanban::drain_hook_side_effects_with_backends(None, engine);
+    crate::kanban::drain_hook_side_effects_with_backends(engine);
 }
 
 async fn fire_tick_hook_by_name_with_timeout(
@@ -2592,7 +2589,6 @@ async fn message_outbox_loop(pg_pool: Arc<PgPool>, health_registry: Option<Arc<H
                     let (status, err_text) =
                         crate::services::discord::health::send_message_with_backends_and_delivery_options(
                             &health_registry,
-                            None,
                             Some(pg_pool.as_ref()),
                             &row.target,
                             &row.content,
@@ -2651,7 +2647,7 @@ async fn dm_reply_retry_loop(pg_pool: Arc<PgPool>) {
     interval.tick().await; // skip immediate first tick
     loop {
         interval.tick().await;
-        crate::services::discord::retry_failed_dm_notifications(None, Some(pg_pool.as_ref())).await;
+        crate::services::discord::retry_failed_dm_notifications(Some(pg_pool.as_ref())).await;
     }
 }
 

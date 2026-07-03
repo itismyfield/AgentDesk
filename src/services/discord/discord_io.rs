@@ -63,7 +63,6 @@ pub(super) async fn check_owner(user_id: UserId, shared: &Arc<SharedData>) -> bo
 /// in the consumed row's context (as `_answer`), and a notification is sent
 /// to the source agent's Discord channel so its session can process the reply.
 pub(super) async fn try_handle_pending_dm_reply(
-    _db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     msg: &serenity::Message,
 ) -> bool {
@@ -206,10 +205,7 @@ fn resolve_channel_to_u64(raw: &str) -> Result<u64, String> {
 
 /// Retry DM reply notifications that previously failed (`_notify_failed` in context).
 /// Called from the 5-min tick loop.
-pub async fn retry_failed_dm_notifications(
-    _db: Option<&crate::db::Db>,
-    pg_pool: Option<&sqlx::PgPool>,
-) {
+pub async fn retry_failed_dm_notifications(pg_pool: Option<&sqlx::PgPool>) {
     let entries =
         match crate::services::discord_dm_reply_store::load_failed_consumed_dm_replies_db(pg_pool)
             .await

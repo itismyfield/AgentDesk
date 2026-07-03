@@ -578,11 +578,9 @@ async fn run_review_paths(
 
     let transport =
         crate::services::dispatches::discord_delivery::HttpDispatchTransport::from_runtime_with_pg(
-            None,
             Some(pool.clone()),
         );
     crate::services::dispatches::discord_delivery::send_review_result_to_primary_for_preflight_harness_with_transport(
-        None,
         card_id,
         &review_dispatch_id,
         "improve",
@@ -757,11 +755,9 @@ async fn exercise_review_rework_loop(
 
     let transport =
         crate::services::dispatches::discord_delivery::HttpDispatchTransport::from_runtime_with_pg(
-            None,
             Some(pool.clone()),
         );
     crate::services::dispatches::discord_delivery::send_review_result_to_primary_for_preflight_harness_with_transport(
-        None,
         card_id,
         &review_dispatch_id,
         "improve",

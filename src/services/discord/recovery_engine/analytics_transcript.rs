@@ -64,7 +64,6 @@ pub(super) fn recovered_transcript_turn_id(
 }
 
 pub(super) async fn persist_recovered_transcript(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     provider: &ProviderKind,
     state: &inflight::InflightTurnState,
@@ -85,7 +84,6 @@ pub(super) async fn persist_recovered_transcript(
     );
     let channel_id_text = state.channel_id.to_string();
     match crate::db::session_transcripts::persist_turn_db(
-        db,
         pg_pool,
         crate::db::session_transcripts::PersistSessionTranscript {
             turn_id: &turn_id,

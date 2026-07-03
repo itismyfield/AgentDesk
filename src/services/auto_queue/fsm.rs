@@ -644,7 +644,6 @@ pub(super) fn create_activate_dispatch_for_entry_prefer_pg(
 }
 
 pub(crate) async fn activate_with_bridge_pg(
-    _db: Option<crate::db::Db>,
     engine: crate::engine::PolicyEngine,
     body: ActivateBody,
 ) -> (StatusCode, Json<serde_json::Value>) {

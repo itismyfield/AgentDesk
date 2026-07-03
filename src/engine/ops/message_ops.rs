@@ -1,4 +1,3 @@
-use crate::db::Db;
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use sqlx::PgPool;
 
@@ -42,7 +41,6 @@ pub(super) fn register_message_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>)
 }
 
 pub(crate) fn queue_message(
-    _db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     target: &str,
     content: &str,
@@ -86,7 +84,7 @@ fn message_queue_raw(
     bot: &str,
     source: &str,
 ) -> String {
-    match queue_message(None, pg_pool, target, content, bot, source) {
+    match queue_message(pg_pool, target, content, bot, source) {
         Ok(id) => {
             tracing::info!(
                 target,

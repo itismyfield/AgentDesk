@@ -1088,7 +1088,6 @@ mod manual_v3_delivery_tests {
         let (status, body) = handle_send(
             &registry,
             None,
-            None,
             r#"{
                 "target": "channel:9000",
                 "content": "forged voice transcript",

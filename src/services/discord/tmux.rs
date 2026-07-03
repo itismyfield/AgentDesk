@@ -390,7 +390,6 @@ async fn emit_context_compacted_lifecycle_from_watcher(
             .notification_content()
             .unwrap_or_else(|| "📦 컨텍스트 자동 압축".to_string());
         enqueue_lifecycle_notification_best_effort(
-            sqlite_runtime_db(shared.as_ref()),
             shared.pg_pool.as_ref(),
             target.as_str(),
             None,
@@ -558,7 +557,6 @@ pub(super) fn consume_monitor_auto_turn_preamble_once(injected: &mut bool) -> Op
 
 fn enqueue_monitor_auto_turn_suppressed_notification(
     pg_pool: Option<&sqlx::PgPool>,
-    db: Option<&crate::db::Db>,
     channel_id: ChannelId,
     tmux_session_name: &str,
     data_start_offset: u64,
@@ -570,7 +568,6 @@ fn enqueue_monitor_auto_turn_suppressed_notification(
     let label = monitor_auto_turn_label(tmux_session_name);
     let content = monitor_auto_turn_completion_notice(&label, event_count, entry_keys);
     enqueue_lifecycle_notification_best_effort(
-        db,
         pg_pool,
         target.as_str(),
         Some(session_key.as_str()),
@@ -581,7 +578,6 @@ fn enqueue_monitor_auto_turn_suppressed_notification(
 
 fn enqueue_monitor_auto_turn_deferred_notification(
     pg_pool: Option<&sqlx::PgPool>,
-    db: Option<&crate::db::Db>,
     channel_id: ChannelId,
     data_start_offset: u64,
 ) -> bool {
@@ -592,7 +588,6 @@ fn enqueue_monitor_auto_turn_deferred_notification(
         data_start_offset
     );
     enqueue_lifecycle_notification_best_effort(
-        db,
         pg_pool,
         target.as_str(),
         Some(session_key.as_str()),
@@ -713,7 +708,6 @@ async fn start_monitor_auto_turn_when_available(
             deferred = true;
             let _ = enqueue_monitor_auto_turn_deferred_notification(
                 shared.pg_pool.as_ref(),
-                sqlite_runtime_db(shared),
                 channel_id,
                 data_start_offset,
             );

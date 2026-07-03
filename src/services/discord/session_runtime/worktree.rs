@@ -242,11 +242,7 @@ fn worktree_is_squash_merged(
     Ok(false)
 }
 
-fn disconnect_sessions_for_worktree_path(
-    _db: Option<&crate::db::Db>,
-    pg_pool: Option<&sqlx::PgPool>,
-    worktree_path: &str,
-) {
+fn disconnect_sessions_for_worktree_path(pg_pool: Option<&sqlx::PgPool>, worktree_path: &str) {
     if let Some(pool) = pg_pool {
         let worktree_path_owned = worktree_path.to_string();
         match crate::utils::async_bridge::block_on_pg_result(
@@ -311,7 +307,6 @@ fn worktree_has_unmerged_commits(wt_info: &WorktreeInfo) -> Result<bool, String>
 
 /// Clean up a git worktree after session ends.
 pub(in crate::services::discord) fn cleanup_git_worktree(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     wt_info: &WorktreeInfo,
 ) {
@@ -372,7 +367,7 @@ pub(in crate::services::discord) fn cleanup_git_worktree(
             .arg(&wt_info.branch_name)
             .run_output();
         let _ = std::fs::remove_dir_all(&wt_info.worktree_path);
-        disconnect_sessions_for_worktree_path(db, pg_pool, &wt_info.worktree_path);
+        disconnect_sessions_for_worktree_path(pg_pool, &wt_info.worktree_path);
         if let Err(err) = branch_delete {
             tracing::warn!(
                 "  [{ts}] ⚠ Removed worktree {} but could not delete branch {}: {}",

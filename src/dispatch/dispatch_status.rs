@@ -2,7 +2,6 @@ use anyhow::Result;
 use serde_json::json;
 use sqlx::{PgPool, Row};
 
-use crate::db::Db;
 use crate::engine::PolicyEngine;
 
 use super::dispatch_query::query_dispatch_row_pg;
@@ -268,7 +267,6 @@ async fn dispatch_exists_pg(pool: &PgPool, dispatch_id: &str) -> Result<bool> {
 
 async fn validate_dispatch_completion_evidence_on_pg(
     pool: &PgPool,
-    db: Option<&Db>,
     dispatch_id: &str,
     result: &serde_json::Value,
 ) -> Result<()> {
@@ -313,7 +311,6 @@ async fn validate_dispatch_completion_evidence_on_pg(
 
     if result_has_work_completion_evidence
         || crate::db::session_transcripts::dispatch_has_assistant_response_db(
-            db,
             Some(pool),
             dispatch_id,
         )?
@@ -332,7 +329,6 @@ async fn validate_dispatch_completion_evidence_on_pg(
     for delay_ms in [50_u64, 150_u64] {
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
         if crate::db::session_transcripts::dispatch_has_assistant_response_db(
-            db,
             Some(pool),
             dispatch_id,
         )? {
@@ -1054,7 +1050,6 @@ async fn maybe_inject_phase_gate_verdict_pg(
 ///   4. Safety-net re-fire of OnReviewEnter (#139)
 // reason: pub dispatch-completion authority (#143) re-exported via dispatch::*;
 pub fn finalize_dispatch_with_backends(
-    db: Option<&Db>,
     engine: &PolicyEngine,
     dispatch_id: &str,
     completion_source: &str,
@@ -1073,62 +1068,10 @@ pub fn finalize_dispatch_with_backends(
         }
         None => json!({ "completion_source": completion_source }),
     };
-    complete_dispatch_inner_with_backends(db, engine, dispatch_id, &result)
-}
-
-/// #143: DB-only dispatch completion — marks status='completed' without firing hooks.
-///
-/// Used by specialized paths (review_verdict, pm-decision) that fire their own
-/// domain-specific hooks instead of the generic OnDispatchCompleted.
-/// Returns the number of rows updated (0 = already completed/cancelled/not found).
-// reason: pub pg-first completion API for review_verdict/pm-decision paths,
-// re-exported via dispatch::*; lib-build callers are cfg/test-gated. See #3034.
-#[allow(dead_code)]
-pub fn mark_dispatch_completed_pg_first(
-    db: &Db,
-    pg_pool: Option<&PgPool>,
-    dispatch_id: &str,
-    result: &serde_json::Value,
-) -> Result<usize> {
-    set_dispatch_status_pg_first(
-        db,
-        pg_pool,
-        dispatch_id,
-        "completed",
-        Some(result),
-        "mark_dispatch_completed",
-        Some(&["pending", "dispatched"]),
-        true,
-    )
-}
-
-// reason: pub pg-first status setter re-exported via dispatch::*; lib-build
-// callers are cfg/test-gated. See #3034.
-#[allow(dead_code)]
-pub fn set_dispatch_status_pg_first(
-    db: &Db,
-    pg_pool: Option<&PgPool>,
-    dispatch_id: &str,
-    to_status: &str,
-    result: Option<&serde_json::Value>,
-    transition_source: &str,
-    allowed_from: Option<&[&str]>,
-    touch_completed_at: bool,
-) -> Result<usize> {
-    set_dispatch_status_with_backends(
-        Some(db),
-        pg_pool,
-        dispatch_id,
-        to_status,
-        result,
-        transition_source,
-        allowed_from,
-        touch_completed_at,
-    )
+    complete_dispatch_inner_with_backends(engine, dispatch_id, &result)
 }
 
 pub fn set_dispatch_status_with_backends(
-    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     dispatch_id: &str,
     to_status: &str,
@@ -1138,7 +1081,6 @@ pub fn set_dispatch_status_with_backends(
     touch_completed_at: bool,
 ) -> Result<usize> {
     set_dispatch_status_with_backends_and_sync(
-        db,
         pg_pool,
         dispatch_id,
         to_status,
@@ -1182,7 +1124,6 @@ pub async fn set_dispatch_status_on_pg_async(
 }
 
 fn set_dispatch_status_with_backends_and_sync(
-    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     dispatch_id: &str,
     to_status: &str,
@@ -1193,7 +1134,6 @@ fn set_dispatch_status_with_backends_and_sync(
     sync_auto_queue_terminal_entries: bool,
 ) -> Result<usize> {
     let Some(pool) = pg_pool else {
-        let _ = db;
         return Err(anyhow::anyhow!(
             "Postgres pool required to set dispatch status for {dispatch_id}"
         ));
@@ -1232,7 +1172,6 @@ fn set_dispatch_status_with_backends_and_sync(
 }
 
 pub(crate) fn set_dispatch_status_without_queue_sync_with_backends(
-    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     dispatch_id: &str,
     to_status: &str,
@@ -1242,7 +1181,6 @@ pub(crate) fn set_dispatch_status_without_queue_sync_with_backends(
     touch_completed_at: bool,
 ) -> Result<usize> {
     set_dispatch_status_with_backends_and_sync(
-        db,
         pg_pool,
         dispatch_id,
         to_status,
@@ -1254,24 +1192,11 @@ pub(crate) fn set_dispatch_status_without_queue_sync_with_backends(
     )
 }
 
-// reason: pub pg-first dispatch-row loader re-exported via dispatch::*; lib-build
-// callers are cfg/test-gated. See #3034.
-#[allow(dead_code)]
-pub fn load_dispatch_row_pg_first(
-    db: &Db,
-    pg_pool: Option<&PgPool>,
-    dispatch_id: &str,
-) -> Result<Option<serde_json::Value>> {
-    load_dispatch_row_with_backends(Some(db), pg_pool, dispatch_id)
-}
-
 pub fn load_dispatch_row_with_backends(
-    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     dispatch_id: &str,
 ) -> Result<Option<serde_json::Value>> {
     let Some(pool) = pg_pool else {
-        let _ = db;
         return Err(anyhow::anyhow!(
             "Postgres pool required to load dispatch row {dispatch_id}"
         ));
@@ -1286,7 +1211,6 @@ pub fn load_dispatch_row_with_backends(
 }
 
 fn complete_dispatch_inner_with_backends(
-    db: Option<&Db>,
     engine: &PolicyEngine,
     dispatch_id: &str,
     result: &serde_json::Value,
@@ -1295,12 +1219,10 @@ fn complete_dispatch_inner_with_backends(
         crate::logging::dispatch_span("complete_dispatch", Some(dispatch_id), None, None);
     let _guard = dispatch_span.enter();
     let Some(pool) = engine.pg_pool() else {
-        let _ = db;
         return Err(anyhow::anyhow!(
             "Postgres pool required to complete dispatch {dispatch_id}"
         ));
     };
-    let db_owned = db.cloned();
     let dispatch_id_owned = dispatch_id.to_string();
     let input_result = result.clone();
     let (
@@ -1310,13 +1232,8 @@ fn complete_dispatch_inner_with_backends(
         effective_result,
         skip_dispatch_completed_hooks,
     ) = block_on_dispatch_pg(pool, move |pool| async move {
-        validate_dispatch_completion_evidence_on_pg(
-            &pool,
-            db_owned.as_ref(),
-            &dispatch_id_owned,
-            &input_result,
-        )
-        .await?;
+        validate_dispatch_completion_evidence_on_pg(&pool, &dispatch_id_owned, &input_result)
+            .await?;
 
         let result_owned =
             maybe_inject_phase_gate_verdict_pg(&pool, &dispatch_id_owned, &input_result).await;
@@ -1391,7 +1308,6 @@ fn complete_dispatch_inner_with_backends(
     }
 
     crate::kanban::fire_event_hooks_with_backends(
-        db,
         engine,
         "on_dispatch_completed",
         "OnDispatchCompleted",
@@ -1402,7 +1318,7 @@ fn complete_dispatch_inner_with_backends(
         }),
     );
 
-    crate::kanban::drain_hook_side_effects_with_backends(db, engine);
+    crate::kanban::drain_hook_side_effects_with_backends(engine);
 
     if needs_review_dispatch {
         let cid = kanban_card_id.as_deref().unwrap_or("unknown");
@@ -1411,7 +1327,7 @@ fn complete_dispatch_inner_with_backends(
             cid
         );
         let _ = engine.fire_hook_by_name_blocking("OnReviewEnter", json!({ "card_id": cid }));
-        crate::kanban::drain_hook_side_effects_with_backends(db, engine);
+        crate::kanban::drain_hook_side_effects_with_backends(engine);
     }
 
     Ok(dispatch)

@@ -5,7 +5,6 @@ use sqlx::PgPool;
 
 pub(super) fn register_auto_queue_ops<'js>(
     ctx: &Ctx<'js>,
-    db: Option<crate::db::Db>,
     pg_pool: Option<PgPool>,
     bridge: BridgeHandle,
 ) -> JsResult<()> {
@@ -31,83 +30,51 @@ pub(super) fn register_auto_queue_ops<'js>(
             activate_raw(pg_activate.as_ref(), &bridge_activate, &body_json)
         })?,
     )?;
-    let db_pause_run = db.clone();
     let pg_pause_run = pg_pool.clone();
     auto_queue_obj.set(
         "__pauseRunRaw",
         Function::new(
             ctx.clone(),
             move |run_id: String, source: String| -> String {
-                pause_run_raw(
-                    db_pause_run.as_ref(),
-                    pg_pause_run.as_ref(),
-                    &run_id,
-                    &source,
-                )
+                pause_run_raw(pg_pause_run.as_ref(), &run_id, &source)
             },
         )?,
     )?;
-    let db_resume_run = db.clone();
     let pg_resume_run = pg_pool.clone();
     auto_queue_obj.set(
         "__resumeRunRaw",
         Function::new(
             ctx.clone(),
             move |run_id: String, source: String| -> String {
-                resume_run_raw(
-                    db_resume_run.as_ref(),
-                    pg_resume_run.as_ref(),
-                    &run_id,
-                    &source,
-                )
+                resume_run_raw(pg_resume_run.as_ref(), &run_id, &source)
             },
         )?,
     )?;
-    let db_complete_run = db.clone();
     let pg_complete_run = pg_pool.clone();
     auto_queue_obj.set(
         "__completeRunRaw",
         Function::new(
             ctx.clone(),
             move |run_id: String, source: String, opts_json: String| -> String {
-                complete_run_raw(
-                    db_complete_run.as_ref(),
-                    pg_complete_run.as_ref(),
-                    &run_id,
-                    &source,
-                    &opts_json,
-                )
+                complete_run_raw(pg_complete_run.as_ref(), &run_id, &source, &opts_json)
             },
         )?,
     )?;
-    let db_save_phase_gate = db.clone();
     let pg_save_phase_gate = pg_pool.clone();
     auto_queue_obj.set(
         "__savePhaseGateStateRaw",
         Function::new(
             ctx.clone(),
             move |run_id: String, phase: i64, state_json: String| -> String {
-                save_phase_gate_state_raw(
-                    db_save_phase_gate.as_ref(),
-                    pg_save_phase_gate.as_ref(),
-                    &run_id,
-                    phase,
-                    &state_json,
-                )
+                save_phase_gate_state_raw(pg_save_phase_gate.as_ref(), &run_id, phase, &state_json)
             },
         )?,
     )?;
-    let db_clear_phase_gate = db;
     let pg_clear_phase_gate = pg_pool.clone();
     auto_queue_obj.set(
         "__clearPhaseGateStateRaw",
         Function::new(ctx.clone(), move |run_id: String, phase: i64| -> String {
-            clear_phase_gate_state_raw(
-                db_clear_phase_gate.as_ref(),
-                pg_clear_phase_gate.as_ref(),
-                &run_id,
-                phase,
-            )
+            clear_phase_gate_state_raw(pg_clear_phase_gate.as_ref(), &run_id, phase)
         })?,
     )?;
     let pg_record_consultation = pg_pool.clone();
@@ -313,8 +280,7 @@ fn activate_raw(pg_pool: Option<&PgPool>, bridge: &BridgeHandle, body_json: &str
             let engine = engine.clone();
             move |_bridge_pool| async move {
                 let (_status, response) =
-                    crate::server::routes::auto_queue::activate_with_bridge_pg(None, engine, body)
-                        .await;
+                    crate::server::routes::auto_queue::activate_with_bridge_pg(engine, body).await;
                 Ok(response.0.to_string())
             }
         },
@@ -332,18 +298,12 @@ fn should_defer_activate(bridge: &BridgeHandle) -> bool {
         .unwrap_or(false)
 }
 
-fn pause_run_raw(
-    db: Option<&crate::db::Db>,
-    pg_pool: Option<&PgPool>,
-    run_id: &str,
-    source: &str,
-) -> String {
+fn pause_run_raw(pg_pool: Option<&PgPool>, run_id: &str, source: &str) -> String {
     if source.trim().is_empty() {
         return r#"{"error":"source is required"}"#.to_string();
     }
 
     let Some(pool) = pg_pool else {
-        let _ = db;
         return r#"{"error":"postgres backend is required for autoQueue.pauseRun"}"#.to_string();
     };
     let run_id_owned = run_id.to_string();
@@ -364,18 +324,12 @@ fn pause_run_raw(
     }
 }
 
-fn resume_run_raw(
-    db: Option<&crate::db::Db>,
-    pg_pool: Option<&PgPool>,
-    run_id: &str,
-    source: &str,
-) -> String {
+fn resume_run_raw(pg_pool: Option<&PgPool>, run_id: &str, source: &str) -> String {
     if source.trim().is_empty() {
         return r#"{"error":"source is required"}"#.to_string();
     }
 
     let Some(pool) = pg_pool else {
-        let _ = db;
         return r#"{"error":"postgres backend is required for autoQueue.resumeRun"}"#.to_string();
     };
     let run_id_owned = run_id.to_string();
@@ -397,7 +351,6 @@ fn resume_run_raw(
 }
 
 fn complete_run_raw(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     run_id: &str,
     source: &str,
@@ -422,7 +375,6 @@ fn complete_run_raw(
         .unwrap_or(false);
 
     let Some(pool) = pg_pool else {
-        let _ = db;
         return r#"{"error":"postgres backend is required for autoQueue.completeRun"}"#.to_string();
     };
     let run_id_owned = run_id.to_string();
@@ -471,7 +423,6 @@ struct PhaseGateStatePayload {
 }
 
 fn save_phase_gate_state_raw(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&PgPool>,
     run_id: &str,
     phase: i64,
@@ -502,7 +453,6 @@ fn save_phase_gate_state_raw(
     };
 
     let Some(pool) = pg_pool else {
-        let _ = db;
         return r#"{"error":"postgres backend is required for autoQueue.savePhaseGateState"}"#
             .to_string();
     };
@@ -526,14 +476,8 @@ fn save_phase_gate_state_raw(
     }
 }
 
-fn clear_phase_gate_state_raw(
-    db: Option<&crate::db::Db>,
-    pg_pool: Option<&PgPool>,
-    run_id: &str,
-    phase: i64,
-) -> String {
+fn clear_phase_gate_state_raw(pg_pool: Option<&PgPool>, run_id: &str, phase: i64) -> String {
     let Some(pool) = pg_pool else {
-        let _ = db;
         return r#"{"error":"postgres backend is required for autoQueue.clearPhaseGateState"}"#
             .to_string();
     };

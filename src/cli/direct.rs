@@ -284,7 +284,6 @@ pub(crate) async fn cmd_send(
             .ok_or_else(|| "Discord health registry not available".to_string())?;
         let (status, response) = crate::services::discord::health::send_message_with_backends(
             registry,
-            None,
             state.pg_pool_ref(),
             target,
             content,

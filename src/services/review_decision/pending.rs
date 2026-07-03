@@ -14,7 +14,7 @@ use super::adapters::{dismiss_review_cleanup_pg_first, emit_card_updated};
 use super::repo_card::{
     card_exists_pg_first, card_lifecycle_snapshot_pg_first,
     load_review_decision_card_context_pg_first, normalize_optional_commit_sha,
-    recent_scope_mismatch_finalized_pg_first, resolve_effective_pipeline_pg_first, review_state_db,
+    recent_scope_mismatch_finalized_pg_first, resolve_effective_pipeline_pg_first,
     transition_status_pg_first,
 };
 use super::repo_dispatch::{
@@ -393,7 +393,6 @@ async fn decision_route_resolve_pending_scope_mismatch_resume(
                 resumed_steps.push("dismiss_cleanup");
 
                 if let Err(error) = update_card_review_state(
-                    review_state_db(state),
                     state.pg_pool_ref(),
                     &body.card_id,
                     "dispute_scope_mismatch_closed",

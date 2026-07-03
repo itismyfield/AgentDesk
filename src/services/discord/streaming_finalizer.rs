@@ -84,7 +84,6 @@ fn watcher_completion_context(
     full_response: &str,
 ) -> serde_json::Value {
     let mut context = super::turn_bridge::build_work_dispatch_completion_result(
-        None::<&crate::db::Db>,
         pg_pool,
         dispatch_id,
         source,

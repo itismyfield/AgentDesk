@@ -73,7 +73,7 @@ pub(super) fn register_kv_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> J
     {
         let pg_rs = pg_pool.clone();
         let sync_raw = Function::new(ctx.clone(), move |json_str: String| -> String {
-            crate::engine::ops::review_state_sync_with_backends(None, pg_rs.as_ref(), &json_str)
+            crate::engine::ops::review_state_sync_with_backends(pg_rs.as_ref(), &json_str)
         })?;
 
         let _: rquickjs::Value = ctx.eval(

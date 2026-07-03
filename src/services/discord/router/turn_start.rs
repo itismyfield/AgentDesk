@@ -168,7 +168,6 @@ pub(super) fn take_session_retry_context(
     turn_id: Option<&str>,
 ) -> Option<FormattedSessionRetryContext> {
     let context = super::super::turn_bridge::take_session_retry_context_for_turn_with_audit(
-        None::<&crate::db::Db>,
         shared.pg_pool.as_ref(),
         channel_id.get(),
         turn_id,

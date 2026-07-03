@@ -4,15 +4,10 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Row as SqlxRow};
 
 pub(crate) const ADVANCE_REVIEW_ROUND_HINT_KEY: &str = "advance_review_round_on_next_review";
 
-pub(super) fn register_review_ops<'js>(
-    ctx: &Ctx<'js>,
-    db: Option<crate::db::Db>,
-    pg_pool: Option<PgPool>,
-) -> JsResult<()> {
+pub(super) fn register_review_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let review_obj = Object::new(ctx.clone())?;
 
-    let _db_verdict = db.clone();
     let pg_verdict = pg_pool.clone();
     review_obj.set(
         "__getVerdictRaw",
@@ -27,7 +22,6 @@ pub(super) fn register_review_ops<'js>(
         })?,
     )?;
 
-    let _db_entry = db.clone();
     let pg_entry = pg_pool.clone();
     review_obj.set(
         "__entryContextRaw",
@@ -42,7 +36,6 @@ pub(super) fn register_review_ops<'js>(
         })?,
     )?;
 
-    let _db_record = db.clone();
     let pg_record = pg_pool.clone();
     review_obj.set(
         "__recordEntryRaw",
@@ -60,7 +53,6 @@ pub(super) fn register_review_ops<'js>(
         )?,
     )?;
 
-    let _db_active_work = db;
     let pg_active_work = pg_pool;
     review_obj.set(
         "__hasActiveWorkRaw",

@@ -1389,42 +1389,39 @@ pub(super) async fn restore_inflight_turns(
                 let role_binding = resolve_role_binding(channel_id, state.channel_name.as_deref());
                 let duration_ms =
                     recovered_turn_duration_ms(Some(state.started_at.as_str())).unwrap_or(0);
-                let has_completion_evidence =
-                    if None::<&crate::db::Db>.is_some() || shared.pg_pool.is_some() {
-                        if let Some(user_msg_id) = user_msg_id {
-                            super::turn_bridge::persist_turn_analytics_row_with_handles(
-                                None::<&crate::db::Db>,
-                                shared.pg_pool.as_ref(),
-                                provider,
-                                channel_id,
-                                user_msg_id,
-                                role_binding.as_ref(),
-                                recovered_dispatch_id
-                                    .as_deref()
-                                    .or(state.dispatch_id.as_deref()),
-                                state.session_key.as_deref(),
-                                recovered_session_id
-                                    .as_deref()
-                                    .or(state.session_id.as_deref()),
-                                &state,
-                                recovered_usage.unwrap_or_default(),
-                                duration_ms,
-                            );
-                        }
-                        persist_recovered_transcript(
-                            None::<&crate::db::Db>,
+                let has_completion_evidence = if shared.pg_pool.is_some() {
+                    if let Some(user_msg_id) = user_msg_id {
+                        super::turn_bridge::persist_turn_analytics_row_with_handles(
                             shared.pg_pool.as_ref(),
                             provider,
-                            &state,
+                            channel_id,
+                            user_msg_id,
+                            role_binding.as_ref(),
                             recovered_dispatch_id
                                 .as_deref()
                                 .or(state.dispatch_id.as_deref()),
-                            &assistant_response,
-                        )
-                        .await
-                    } else {
-                        !assistant_response.trim().is_empty()
-                    };
+                            state.session_key.as_deref(),
+                            recovered_session_id
+                                .as_deref()
+                                .or(state.session_id.as_deref()),
+                            &state,
+                            recovered_usage.unwrap_or_default(),
+                            duration_ms,
+                        );
+                    }
+                    persist_recovered_transcript(
+                        shared.pg_pool.as_ref(),
+                        provider,
+                        &state,
+                        recovered_dispatch_id
+                            .as_deref()
+                            .or(state.dispatch_id.as_deref()),
+                        &assistant_response,
+                    )
+                    .await
+                } else {
+                    !assistant_response.trim().is_empty()
+                };
                 let completion_context = has_completion_evidence
                     .then(|| serde_json::json!({ "agent_response_present": true }));
                 let fallback_result = completion_context
@@ -1459,7 +1456,6 @@ pub(super) async fn restore_inflight_turns(
                         // #143: Use finalize_dispatch directly with retry.
                         for attempt in 1..=3u8 {
                             match crate::dispatch::finalize_dispatch_with_backends(
-                                None::<&crate::db::Db>,
                                 engine,
                                 did,
                                 "recovery_completed_during_downtime",
@@ -2028,43 +2024,40 @@ pub(super) async fn restore_inflight_turns(
             let role_binding = resolve_role_binding(channel_id, state.channel_name.as_deref());
             let duration_ms =
                 recovered_turn_duration_ms(Some(state.started_at.as_str())).unwrap_or(0);
-            let has_completion_evidence =
-                if None::<&crate::db::Db>.is_some() || shared.pg_pool.is_some() {
-                    // No user message (user_msg_id == 0) → no analytics row to
-                    // key (`discord:<channel>:0` would be bogus); skip the
-                    // analytics persist but still write the transcript.
-                    if let Some(user_msg_id) = user_msg_id {
-                        super::turn_bridge::persist_turn_analytics_row_with_handles(
-                            None::<&crate::db::Db>,
-                            shared.pg_pool.as_ref(),
-                            provider,
-                            channel_id,
-                            user_msg_id,
-                            role_binding.as_ref(),
-                            recovered_dispatch_id
-                                .as_deref()
-                                .or(state.dispatch_id.as_deref()),
-                            state.session_key.as_deref(),
-                            state.session_id.as_deref(),
-                            &state,
-                            TurnTokenUsage::default(),
-                            duration_ms,
-                        );
-                    }
-                    persist_recovered_transcript(
-                        None::<&crate::db::Db>,
+            let has_completion_evidence = if shared.pg_pool.is_some() {
+                // No user message (user_msg_id == 0) → no analytics row to
+                // key (`discord:<channel>:0` would be bogus); skip the
+                // analytics persist but still write the transcript.
+                if let Some(user_msg_id) = user_msg_id {
+                    super::turn_bridge::persist_turn_analytics_row_with_handles(
                         shared.pg_pool.as_ref(),
                         provider,
-                        &state,
+                        channel_id,
+                        user_msg_id,
+                        role_binding.as_ref(),
                         recovered_dispatch_id
                             .as_deref()
                             .or(state.dispatch_id.as_deref()),
-                        &assistant_response,
-                    )
-                    .await
-                } else {
-                    !assistant_response.trim().is_empty()
-                };
+                        state.session_key.as_deref(),
+                        state.session_id.as_deref(),
+                        &state,
+                        TurnTokenUsage::default(),
+                        duration_ms,
+                    );
+                }
+                persist_recovered_transcript(
+                    shared.pg_pool.as_ref(),
+                    provider,
+                    &state,
+                    recovered_dispatch_id
+                        .as_deref()
+                        .or(state.dispatch_id.as_deref()),
+                    &assistant_response,
+                )
+                .await
+            } else {
+                !assistant_response.trim().is_empty()
+            };
             let completion_context = has_completion_evidence
                 .then(|| serde_json::json!({ "agent_response_present": true }));
             let fallback_result = completion_context
@@ -2104,7 +2097,6 @@ pub(super) async fn restore_inflight_turns(
                         } else if let Some(engine) = &shared.policy.engine {
                             for attempt in 1..=3u8 {
                                 match crate::dispatch::finalize_dispatch_with_backends(
-                                    None::<&crate::db::Db>,
                                     engine,
                                     did,
                                     "recovery_captured_full_response",
@@ -2293,45 +2285,42 @@ pub(super) async fn restore_inflight_turns(
             let role_binding = resolve_role_binding(channel_id, state.channel_name.as_deref());
             let duration_ms =
                 recovered_turn_duration_ms(Some(state.started_at.as_str())).unwrap_or(0);
-            let has_completion_evidence =
-                if None::<&crate::db::Db>.is_some() || shared.pg_pool.is_some() {
-                    // No user message (user_msg_id == 0) → no analytics row to
-                    // key (`discord:<channel>:0` would be bogus); skip the
-                    // analytics persist but still write the transcript.
-                    if let Some(user_msg_id) = user_msg_id {
-                        super::turn_bridge::persist_turn_analytics_row_with_handles(
-                            None::<&crate::db::Db>,
-                            shared.pg_pool.as_ref(),
-                            provider,
-                            channel_id,
-                            user_msg_id,
-                            role_binding.as_ref(),
-                            recovered_dispatch_id
-                                .as_deref()
-                                .or(state.dispatch_id.as_deref()),
-                            state.session_key.as_deref(),
-                            recovered_session_id
-                                .as_deref()
-                                .or(state.session_id.as_deref()),
-                            &state,
-                            recovered_usage.unwrap_or_default(),
-                            duration_ms,
-                        );
-                    }
-                    persist_recovered_transcript(
-                        None::<&crate::db::Db>,
+            let has_completion_evidence = if shared.pg_pool.is_some() {
+                // No user message (user_msg_id == 0) → no analytics row to
+                // key (`discord:<channel>:0` would be bogus); skip the
+                // analytics persist but still write the transcript.
+                if let Some(user_msg_id) = user_msg_id {
+                    super::turn_bridge::persist_turn_analytics_row_with_handles(
                         shared.pg_pool.as_ref(),
                         provider,
-                        &state,
+                        channel_id,
+                        user_msg_id,
+                        role_binding.as_ref(),
                         recovered_dispatch_id
                             .as_deref()
                             .or(state.dispatch_id.as_deref()),
-                        &assistant_response,
-                    )
-                    .await
-                } else {
-                    !assistant_response.trim().is_empty()
-                };
+                        state.session_key.as_deref(),
+                        recovered_session_id
+                            .as_deref()
+                            .or(state.session_id.as_deref()),
+                        &state,
+                        recovered_usage.unwrap_or_default(),
+                        duration_ms,
+                    );
+                }
+                persist_recovered_transcript(
+                    shared.pg_pool.as_ref(),
+                    provider,
+                    &state,
+                    recovered_dispatch_id
+                        .as_deref()
+                        .or(state.dispatch_id.as_deref()),
+                    &assistant_response,
+                )
+                .await
+            } else {
+                !assistant_response.trim().is_empty()
+            };
             let completion_context = has_completion_evidence
                 .then(|| serde_json::json!({ "agent_response_present": true }));
             let fallback_result = completion_context
@@ -2369,7 +2358,6 @@ pub(super) async fn restore_inflight_turns(
                         } else if let Some(engine) = &shared.policy.engine {
                             for attempt in 1..=3u8 {
                                 match crate::dispatch::finalize_dispatch_with_backends(
-                                    None::<&crate::db::Db>,
                                     engine,
                                     did,
                                     "recovery_output_completed",
@@ -2582,7 +2570,6 @@ pub(super) async fn restore_inflight_turns(
                 relay_recovery_terminal_notice(http, shared, provider, &state, &stale_text).await;
             if let Some(ref sk) = state.session_key {
                 crate::services::termination_audit::record_termination_with_handles(
-                    None::<&crate::db::Db>,
                     shared.pg_pool.as_ref(),
                     sk,
                     state.dispatch_id.as_deref(),

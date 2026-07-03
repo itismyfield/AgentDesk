@@ -2,7 +2,6 @@ use std::borrow::Cow;
 
 use sqlx::PgPool;
 
-use crate::db::Db;
 use crate::services::provider::{CancelToken, cancel_requested};
 
 pub(crate) const LIFECYCLE_NOTIFY_DEDUPE_TTL_SECS: i64 = 5 * 60;
@@ -232,7 +231,6 @@ fn warn_lifecycle_enqueue_failure(
 }
 
 pub(crate) fn enqueue_lifecycle_notification_best_effort(
-    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     target: &str,
     session_key: Option<&str>,
@@ -276,140 +274,7 @@ pub(crate) fn enqueue_lifecycle_notification_best_effort(
         }
     }
 
-    if let Some(db) = db {
-        return match enqueue_lifecycle_notification_sqlite(
-            db,
-            target,
-            session_key,
-            reason_code,
-            content,
-        ) {
-            Ok(enqueued) => enqueued,
-            Err(error) => {
-                warn_lifecycle_enqueue_failure("sqlite", target, session_key, reason_code, &error);
-                false
-            }
-        };
-    }
-
     false
-}
-
-fn enqueue_lifecycle_notification_sqlite(
-    db: &Db,
-    target: &str,
-    session_key: Option<&str>,
-    reason_code: &str,
-    content: &str,
-) -> Result<bool, String> {
-    let reason_code = normalized_reason_code(Some(reason_code));
-    let Some(session_key) = normalized_session_key(target, session_key) else {
-        return Ok(false);
-    };
-    let ttl_secs = LIFECYCLE_NOTIFY_DEDUPE_TTL_SECS.to_string();
-    let dedupe_key =
-        dedupe_key_for_message(target, content, reason_code, Some(session_key.as_str()));
-
-    let conn = db
-        .lock()
-        .map_err(|error| format!("db lock failed: {error}"))?;
-    if let Some(dedupe_key) = dedupe_key.as_deref() {
-        conn.execute(
-            "UPDATE message_outbox
-                SET dedupe_key = NULL,
-                    dedupe_expires_at = NULL
-              WHERE dedupe_key = ?1
-                AND status != 'failed'
-                AND dedupe_expires_at <= datetime('now')",
-            [dedupe_key],
-        )
-        .map_err(|error| format!("expire lifecycle notification sqlite dedupe key: {error}"))?;
-    }
-    let duplicate_id = if let Some(reason_code) = reason_code {
-        conn.query_row(
-            "SELECT id
-             FROM message_outbox
-             WHERE target = ?1
-               AND reason_code = ?2
-               AND session_key = ?3
-               AND status != 'failed'
-               AND created_at >= datetime('now', '-' || ?4 || ' seconds')
-             ORDER BY id DESC
-             LIMIT 1",
-            [target, reason_code, session_key.as_str(), ttl_secs.as_str()],
-            |row| row.get::<_, i64>(0),
-        )
-        .ok()
-    } else {
-        conn.query_row(
-            "SELECT id
-             FROM message_outbox
-             WHERE target = ?1
-               AND reason_code IS NULL
-               AND content = ?2
-               AND session_key = ?3
-               AND status != 'failed'
-               AND created_at >= datetime('now', '-' || ?4 || ' seconds')
-             ORDER BY id DESC
-             LIMIT 1",
-            [target, content, session_key.as_str(), ttl_secs.as_str()],
-            |row| row.get::<_, i64>(0),
-        )
-        .ok()
-    };
-
-    if duplicate_id.is_some() {
-        return Ok(false);
-    }
-
-    if let Some(reason_code) = reason_code {
-        let inserted = conn
-            .execute(
-                "INSERT INTO message_outbox
-             (target, content, bot, source, reason_code, session_key, dedupe_key, dedupe_expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now', '+' || ?8 || ' seconds'))
-             ON CONFLICT(dedupe_key) WHERE dedupe_key IS NOT NULL AND status != 'failed'
-             DO NOTHING",
-                [
-                    target,
-                    content,
-                    "notify",
-                    LIFECYCLE_NOTIFIER_SOURCE,
-                    reason_code,
-                    session_key.as_str(),
-                    dedupe_key.as_deref().unwrap_or(""),
-                    ttl_secs.as_str(),
-                ],
-            )
-            .map_err(|error| format!("insert lifecycle notification sqlite: {error}"))?;
-        if inserted == 0 {
-            return Ok(false);
-        }
-    } else {
-        let inserted = conn
-            .execute(
-                "INSERT INTO message_outbox
-             (target, content, bot, source, reason_code, session_key, dedupe_key, dedupe_expires_at)
-             VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, datetime('now', '+' || ?7 || ' seconds'))
-             ON CONFLICT(dedupe_key) WHERE dedupe_key IS NOT NULL AND status != 'failed'
-             DO NOTHING",
-                [
-                    target,
-                    content,
-                    "notify",
-                    LIFECYCLE_NOTIFIER_SOURCE,
-                    session_key.as_str(),
-                    dedupe_key.as_deref().unwrap_or(""),
-                    ttl_secs.as_str(),
-                ],
-            )
-            .map_err(|error| format!("insert lifecycle notification sqlite: {error}"))?;
-        if inserted == 0 {
-            return Ok(false);
-        }
-    }
-
-    Ok(true)
 }
 
 async fn find_duplicate_outbox_message_pg(
@@ -638,7 +503,6 @@ pub(crate) async fn enqueue_outbox_pg(
 // undrained legacy row.
 pub(crate) async fn enqueue_outbox_best_effort(
     pg_pool: Option<&PgPool>,
-    db: Option<&Db>,
     message: OutboxMessage<'_>,
 ) -> bool {
     if let Some(pool) = pg_pool {
@@ -651,7 +515,6 @@ pub(crate) async fn enqueue_outbox_best_effort(
         };
     }
 
-    let _ = db;
     false
 }
 

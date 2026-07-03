@@ -171,7 +171,6 @@ fn mainline_issue_numbers_for_repo(repo: &str) -> Vec<i64> {
 ///
 /// Returns (closed_count, inconsistency_count).
 pub fn sync_github_issues_for_repo(
-    _db: &crate::db::Db,
     engine: &crate::engine::PolicyEngine,
     repo: &str,
     issues: &[GhIssue],
@@ -1381,11 +1380,7 @@ pub(crate) async fn sync_review_state_on_pg(
 
 /// Sync all registered repos (orchestration function).
 #[allow(dead_code)]
-pub fn sync_all_repos(
-    db: &crate::db::Db,
-    engine: &crate::engine::PolicyEngine,
-) -> Result<SyncResult, String> {
-    let _ = db;
+pub fn sync_all_repos(engine: &crate::engine::PolicyEngine) -> Result<SyncResult, String> {
     let pool = engine
         .pg_pool()
         .ok_or_else(|| "postgres backend required for GitHub repo sync".to_string())?;
@@ -1402,7 +1397,7 @@ pub fn sync_all_repos(
         }
 
         match fetch_issues(&repo.id) {
-            Ok(issues) => match sync_github_issues_for_repo(db, engine, &repo.id, &issues) {
+            Ok(issues) => match sync_github_issues_for_repo(engine, &repo.id, &issues) {
                 Ok(r) => {
                     total.closed_count += r.closed_count;
                     total.inconsistency_count += r.inconsistency_count;

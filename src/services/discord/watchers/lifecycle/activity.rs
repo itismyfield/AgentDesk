@@ -31,7 +31,6 @@ impl HeartbeatRefreshOutcome {
 // Tmux watcher output is activity, but reusing hook_session here would also
 // overwrite status/tokens defaults. Touch only last_heartbeat instead.
 pub(in crate::services::discord) fn refresh_session_heartbeat_from_tmux_output(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
     provider: &ProviderKind,
@@ -39,7 +38,6 @@ pub(in crate::services::discord) fn refresh_session_heartbeat_from_tmux_output(
     thread_channel_id: Option<u64>,
 ) -> bool {
     refresh_session_heartbeat_from_tmux_output_detailed(
-        db,
         pg_pool,
         token_hash,
         provider,
@@ -53,7 +51,6 @@ pub(in crate::services::discord) fn refresh_session_heartbeat_from_tmux_output(
 /// candidate key matched and how many rows were touched, so callers can emit
 /// auditable activity logs (#3053).
 pub(in crate::services::discord) fn refresh_session_heartbeat_from_tmux_output_detailed(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
     provider: &ProviderKind,
@@ -121,7 +118,7 @@ pub(in crate::services::discord) fn refresh_session_heartbeat_from_tmux_output_d
         });
     }
 
-    let _ = (db, provider, thread_channel_id, session_keys);
+    let _ = (provider, thread_channel_id, session_keys);
     HeartbeatRefreshOutcome {
         matched: HeartbeatRefreshMatch::NoMatch,
         rows_affected: 0,
@@ -136,7 +133,6 @@ pub(in crate::services::discord) fn refresh_session_heartbeat_from_tmux_output_d
 /// a silent no-op refresh of a non-matching row, after which idle-kill killed
 /// the live session. Returns true when at least one row was touched.
 pub(in crate::services::discord) fn touch_session_activity(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
     provider: &ProviderKind,
@@ -151,7 +147,6 @@ pub(in crate::services::discord) fn touch_session_activity(
         tmux_session_name,
     );
     let outcome = refresh_session_heartbeat_from_tmux_output_detailed(
-        db,
         pg_pool,
         token_hash,
         provider,
@@ -191,7 +186,6 @@ pub(in crate::services::discord) fn touch_session_activity(
 }
 
 pub(in crate::services::discord::tmux) fn maybe_refresh_watcher_activity_heartbeat(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
     provider: &ProviderKind,
@@ -207,7 +201,6 @@ pub(in crate::services::discord::tmux) fn maybe_refresh_watcher_activity_heartbe
     }
 
     if refresh_session_heartbeat_from_tmux_output(
-        db,
         pg_pool,
         token_hash,
         provider,

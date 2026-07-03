@@ -923,7 +923,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // (e.g. provider selector continuation) never refreshed its
             // idle-kill heartbeat and was killed as "idle". Touch it here too.
             touch_session_activity(
-                None::<&crate::db::Db>,
                 shared.pg_pool.as_ref(),
                 &shared.token_hash,
                 &watcher_provider,
@@ -936,7 +935,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             continue;
         }
         maybe_refresh_watcher_activity_heartbeat(
-            None::<&crate::db::Db>,
             shared.pg_pool.as_ref(),
             &shared.token_hash,
             &watcher_provider,
@@ -1373,7 +1371,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     Ok(Ok(Ok((chunk, off)))) if !chunk.is_empty() => {
                         current_offset = off;
                         maybe_refresh_watcher_activity_heartbeat(
-                            None::<&crate::db::Db>,
                             shared.pg_pool.as_ref(),
                             &shared.token_hash,
                             &watcher_provider,
@@ -5566,7 +5563,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             ) {
                 let _ = enqueue_monitor_auto_turn_suppressed_notification(
                     shared.pg_pool.as_ref(),
-                    sqlite_runtime_db(shared.as_ref()),
                     channel_id,
                     &tmux_session_name,
                     data_start_offset,
@@ -6378,9 +6374,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             )
             .await;
 
-            if has_assistant_response
-                && (None::<&crate::db::Db>.is_some() || shared.pg_pool.is_some())
-            {
+            if has_assistant_response && shared.pg_pool.is_some() {
                 let turn_id = format!("discord:{}:{}", channel_id.get(), state.user_msg_id);
                 let channel_id_text = channel_id.get().to_string();
                 let resolved_did = inflight_state
@@ -6403,7 +6397,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         )
                     });
                 if let Err(e) = crate::db::session_transcripts::persist_turn_db(
-                    None::<&crate::db::Db>,
                     shared.pg_pool.as_ref(),
                     crate::db::session_transcripts::PersistSessionTranscript {
                         turn_id: &turn_id,
@@ -6427,7 +6420,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 }
 
                 crate::services::discord::turn_bridge::persist_turn_analytics_row_with_handles(
-                    None::<&crate::db::Db>,
                     shared.pg_pool.as_ref(),
                     &provider_kind,
                     channel_id,
@@ -7053,7 +7045,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 let content = format!("🗜️ 자동 컨텍스트 압축 (사용률: {pct}%)");
                 let _ = enqueue_outbox_best_effort(
                     shared.pg_pool.as_ref(),
-                    sqlite_runtime_db(shared.as_ref()),
                     OutboxMessage {
                         target: target.as_str(),
                         content: content.as_str(),
@@ -7089,7 +7080,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
     };
     let dispatch_protection =
         crate::services::discord::tmux_lifecycle::resolve_dispatch_tmux_protection(
-            None::<&crate::db::Db>,
             shared.pg_pool.as_ref(),
             &shared.token_hash,
             &provider,

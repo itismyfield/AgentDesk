@@ -64,20 +64,20 @@ fn register_globals_pg_only(
         ad.set("__generateId", gen_id)?;
     }
 
-    db_ops::register_db_ops(ctx, None, pg_pool.clone())?;
-    cards_ops::register_card_ops(ctx, None, pg_pool.clone())?;
+    db_ops::register_db_ops(ctx, pg_pool.clone())?;
+    cards_ops::register_card_ops(ctx, pg_pool.clone())?;
     log_ops::register_log_ops(ctx)?;
     quality_ops::register_quality_ops(ctx)?;
-    config_ops::register_config_ops(ctx, None, pg_pool.clone())?;
+    config_ops::register_config_ops(ctx, pg_pool.clone())?;
     http_ops::register_http_ops(ctx)?;
     dispatch_ops::register_dispatch_ops(ctx, pg_pool.clone())?;
-    kanban_ops::register_kanban_ops(ctx, None, pg_pool.clone())?;
+    kanban_ops::register_kanban_ops(ctx, pg_pool.clone())?;
     ci_recovery_ops::register_ci_recovery_ops(ctx, pg_pool.clone())?;
     kv_ops::register_kv_ops(ctx, pg_pool.clone())?;
-    review_ops::register_review_ops(ctx, None, pg_pool.clone())?;
+    review_ops::register_review_ops(ctx, pg_pool.clone())?;
     review_automation_ops::register_review_automation_ops(ctx, pg_pool.clone())?;
     queue_ops::register_queue_ops(ctx, pg_pool.clone())?;
-    auto_queue_ops::register_auto_queue_ops(ctx, None, pg_pool.clone(), supervisor_bridge.clone())?;
+    auto_queue_ops::register_auto_queue_ops(ctx, pg_pool.clone(), supervisor_bridge.clone())?;
     runtime_ops::register_runtime_ops(ctx, pg_pool.clone(), supervisor_bridge)?;
     message_ops::register_message_ops(ctx, pg_pool.clone())?;
     exec_ops::register_exec_ops(ctx)?;
@@ -90,10 +90,6 @@ fn register_globals_pg_only(
     Ok(())
 }
 
-pub fn review_state_sync_with_backends(
-    db: Option<&crate::db::Db>,
-    pg_pool: Option<&sqlx::PgPool>,
-    json_str: &str,
-) -> String {
-    kanban_ops::review_state_sync_with_backends(db, pg_pool, json_str)
+pub fn review_state_sync_with_backends(pg_pool: Option<&sqlx::PgPool>, json_str: &str) -> String {
+    kanban_ops::review_state_sync_with_backends(pg_pool, json_str)
 }

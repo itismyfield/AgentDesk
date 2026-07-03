@@ -1,4 +1,3 @@
-use crate::db::Db;
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use serde_json::json;
 use sqlx::{PgPool, Row as SqlxRow};
@@ -9,9 +8,6 @@ use sqlx::{PgPool, Row as SqlxRow};
 // query legacy columns directly.
 
 pub(super) fn register_agent_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> JsResult<()> {
-    let db: Option<Db> = None;
-
-    let _ = &db;
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let agents_obj = Object::new(ctx.clone())?;
 

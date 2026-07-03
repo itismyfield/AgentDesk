@@ -144,7 +144,6 @@ fn take_session_retry_context_runtime_pg(key: &str) -> Option<String> {
 }
 
 fn store_session_retry_context_impl(
-    _db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     channel_id: u64,
     history: &str,
@@ -186,13 +185,12 @@ fn store_session_retry_context_impl(
 /// enqueue was dropped; the audit-bearing store path is retained so the
 /// prompt manifest sha256 validation keeps working.
 pub(in crate::services::discord) fn store_session_retry_context_with_audit(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     channel_id: u64,
     history: &str,
     session_key: Option<&str>,
 ) -> Result<(), String> {
-    store_session_retry_context_impl(db, pg_pool, channel_id, history, session_key)
+    store_session_retry_context_impl(pg_pool, channel_id, history, session_key)
 }
 
 fn mark_recovery_audit_consumed_pg(
@@ -215,7 +213,6 @@ fn mark_recovery_audit_consumed_pg(
 }
 
 pub(in crate::services::discord) fn take_session_retry_context_for_turn_with_audit(
-    _db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     channel_id: u64,
     consumed_by_turn_id: Option<&str>,
@@ -485,7 +482,6 @@ pub(in crate::services::discord) async fn auto_retry_with_history(
                 .await
                 .unwrap_or_else(|| format!("channel:{}", channel_id.get()));
         let stored = store_session_retry_context_with_audit(
-            None::<&crate::db::Db>,
             shared.pg_pool.as_ref(),
             channel_id.get(),
             hist,

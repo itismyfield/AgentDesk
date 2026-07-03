@@ -5,8 +5,6 @@
 use poise::serenity_prelude::ChannelId;
 use sqlx::PgPool;
 
-use crate::db::Db;
-
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum SendTargetResolutionError {
     BadRequest(&'static str),
@@ -127,7 +125,6 @@ fn resolve_channel_target(target: &str) -> Result<u64, SendTargetResolutionError
 }
 
 pub(super) async fn resolve_send_target_channel_id_with_backends(
-    db: Option<&Db>,
     pg_pool: Option<&PgPool>,
     target: &str,
 ) -> Result<u64, SendTargetResolutionError> {
@@ -137,12 +134,9 @@ pub(super) async fn resolve_send_target_channel_id_with_backends(
                 return resolve_agent_target_channel_id_pg(pg_pool, agent_id).await;
             }
 
-            {
-                let _ = db;
-                Err(SendTargetResolutionError::Internal(
-                    "postgres pool unavailable during agent lookup".to_string(),
-                ))
-            }
+            Err(SendTargetResolutionError::Internal(
+                "postgres pool unavailable during agent lookup".to_string(),
+            ))
         }
         None => resolve_channel_target(target),
     }

@@ -1,7 +1,6 @@
 /// #117: Update the canonical card_review_state record after a review-decision action.
 /// #158: Routes through the unified review_state_sync entrypoint.
 pub(super) fn update_card_review_state(
-    db: Option<&crate::db::Db>,
     pg_pool: Option<&sqlx::PgPool>,
     card_id: &str,
     decision: &str,
@@ -19,8 +18,7 @@ pub(super) fn update_card_review_state(
         "state": state,
         "last_decision": last_decision,
     });
-    let raw =
-        crate::engine::ops::review_state_sync_with_backends(db, pg_pool, &payload.to_string());
+    let raw = crate::engine::ops::review_state_sync_with_backends(pg_pool, &payload.to_string());
     let parsed = serde_json::from_str::<serde_json::Value>(&raw).map_err(|error| {
         format!("parse review_state_sync response for {card_id}: {error}: {raw}")
     })?;

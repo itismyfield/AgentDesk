@@ -20,7 +20,7 @@ use super::repo_card::{
     ActiveAcceptFollowups, active_accept_followups_pg_first, current_card_status_pg_first,
     evaluate_accept_skip_rework, load_review_decision_card_context_pg_first,
     resolve_effective_pipeline_pg_first, restamp_latest_active_review_target_pg_first,
-    review_state_db, transition_status_pg_first,
+    transition_status_pg_first,
 };
 use super::repo_dispatch::{
     dispatch_status_and_result_pg_first, mark_next_review_round_advance_pg_first,
@@ -272,7 +272,6 @@ pub(super) async fn decision_route_accept(
     // rework_pending override that would conflict with the live review dispatch.
     if !direct_review_created && !terminal_auto_approved {
         if let Err(error) = update_card_review_state(
-            review_state_db(state),
             state.pg_pool_ref(),
             &body.card_id,
             "accept",
@@ -410,10 +409,7 @@ async fn decision_route_accept_direct_review_reentry(
                             // OnReviewEnter (for example, single-provider
                             // auto-approval to terminal) before checking
                             // whether a live review dispatch exists.
-                            crate::kanban::drain_hook_side_effects_with_backends(
-                                None,
-                                &state.engine,
-                            );
+                            crate::kanban::drain_hook_side_effects_with_backends(&state.engine);
                             let followups =
                                 active_accept_followups_pg_first(state, &body.card_id).await;
                             if followups.review > 0 {
@@ -608,9 +604,7 @@ async fn decision_route_accept_finalize_pending_dispatch(
     followups: ActiveAcceptFollowups,
 ) -> Result<(), DecisionResponse> {
     if !rd_consumed && let Some(rd_id) = pending_rd_id {
-        let status_db = None;
         match crate::dispatch::set_dispatch_status_with_backends(
-            status_db,
             state.pg_pool_ref(),
             rd_id,
             "completed",

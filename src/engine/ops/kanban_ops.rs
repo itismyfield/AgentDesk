@@ -1,4 +1,3 @@
-use crate::db::Db;
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row as SqlxRow};
 
@@ -45,11 +44,8 @@ async fn auto_queue_review_disabled_for_card_on_pg(
     .map_err(|error| format!("load auto-queue review_mode for {card_id}: {error}"))
 }
 
-pub(super) fn register_kanban_ops<'js>(
-    ctx: &Ctx<'js>,
-    db: Option<Db>,
-    pg_pool: Option<PgPool>,
-) -> JsResult<()> {
+pub(super) fn register_kanban_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> JsResult<()> {
+    let _ = ctx;
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let kanban_obj = Object::new(ctx.clone())?;
 
@@ -113,7 +109,6 @@ pub(super) fn register_kanban_ops<'js>(
     // #155: setReviewStatus — controlled path for review_status + clock updates.
     // Replaces direct SQL UPDATEs so the ExecuteSQL guard can block bare review_status writes.
     let pg_review = pg_pool.clone();
-    let _db_review = db;
     kanban_obj.set(
         "__setReviewStatusRaw",
         Function::new(
@@ -560,9 +555,8 @@ fn reopen_raw_pg(pool: &PgPool, card_id: &str, new_status: &str) -> String {
             .await
             .map_err(|error| format!("commit postgres kanban reopen for {card_id}: {error}"))?;
 
-        // crate::kanban::correct_tn_to_fn_on_reopen still requires the SQLite Db handle
-        // to bridge into the legacy reopen audit path. The PG-only path defers that
-        // bookkeeping; a follow-up will port the audit to PG once #839 closes.
+        // The old SQLite reopen audit hook is intentionally skipped on the PG-only
+        // path; a follow-up will port that bookkeeping to PostgreSQL once #839 closes.
 
         Ok(serde_json::json!({
             "ok": true,
@@ -811,15 +805,10 @@ where
     crate::utils::async_bridge::block_on_pg_result(pool, future_factory, |error| error)
 }
 
-pub(super) fn review_state_sync_with_backends(
-    db: Option<&Db>,
-    pg_pool: Option<&PgPool>,
-    json_str: &str,
-) -> String {
+pub(super) fn review_state_sync_with_backends(pg_pool: Option<&PgPool>, json_str: &str) -> String {
     if let Some(pool) = pg_pool {
         return review_state_sync_pg(pool, json_str);
     }
-    let _ = db;
     r#"{"error":"postgres backend is required for review_state_sync"}"#.to_string()
 }
 

@@ -152,32 +152,6 @@ impl PipelineOverrideHealthReport {
     }
 }
 
-// reason: postgres override-health loader exercised by pipeline tests; the live
-// refresh path persists via refresh_override_health_report, so this read-back
-// helper has no production caller yet.
-#[allow(dead_code)]
-pub async fn load_persisted_override_health_report(
-    _db: &crate::db::Db,
-    pg_pool: Option<&PgPool>,
-) -> Option<PipelineOverrideHealthReport> {
-    if let Some(pool) = pg_pool {
-        match sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1")
-            .bind(PIPELINE_OVERRIDE_HEALTH_KV_KEY)
-            .fetch_optional(pool)
-            .await
-        {
-            Ok(Some(raw)) => return serde_json::from_str(&raw).ok(),
-            Ok(None) => {}
-            Err(error) => {
-                tracing::warn!(
-                    "[pipeline] failed to load persisted postgres override health report: {error}"
-                );
-            }
-        }
-    }
-    None
-}
-
 pub async fn refresh_override_health_report(
     pg_pool: Option<&PgPool>,
 ) -> PipelineOverrideHealthReport {

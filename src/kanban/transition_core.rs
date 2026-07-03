@@ -9,7 +9,6 @@ use super::transition_cleanup::{
     AllowedOnConnMutation, PgTransitionCleanupCounts, clear_escalation_alert_state_on_pg_tx,
     execute_allowed_cleanup_on_pg_tx,
 };
-use crate::db::Db;
 use crate::dispatch::DispatchCreateOptions;
 use crate::engine::PolicyEngine;
 use anyhow::Result;
@@ -232,7 +231,6 @@ async fn ensure_review_dispatch_after_review_enter_pg(
 }
 
 async fn transition_status_with_opts_pg_inner(
-    db: Option<&Db>,
     pg_pool: &sqlx::PgPool,
     engine: &PolicyEngine,
     card_id: &str,
@@ -534,7 +532,7 @@ async fn transition_status_with_opts_pg_inner(
     }
 
     if effective.is_terminal(new_status)
-        && record_true_negative_if_pass_with_backends(db, Some(pg_pool), card_id)
+        && record_true_negative_if_pass_with_backends(Some(pg_pool), card_id)
     {
         crate::server::routes::review_verdict::spawn_aggregate_if_needed_with_pg(Some(
             pg_pool.clone(),
@@ -560,7 +558,6 @@ pub async fn transition_status_with_opts_pg_only(
     force_intent: crate::engine::transition::ForceIntent,
 ) -> Result<TransitionResult> {
     transition_status_with_opts_pg_inner(
-        None,
         pg_pool,
         engine,
         card_id,
@@ -574,7 +571,6 @@ pub async fn transition_status_with_opts_pg_only(
 }
 
 pub async fn transition_status_with_opts_pg(
-    db: Option<&Db>,
     pg_pool: &sqlx::PgPool,
     engine: &PolicyEngine,
     card_id: &str,
@@ -583,7 +579,6 @@ pub async fn transition_status_with_opts_pg(
     force_intent: crate::engine::transition::ForceIntent,
 ) -> Result<TransitionResult> {
     transition_status_with_opts_pg_inner(
-        db,
         pg_pool,
         engine,
         card_id,
@@ -635,7 +630,6 @@ pub async fn transition_status_with_opts_and_allowed_cleanup_pg_only(
     on_pg_policy: AllowedOnConnMutation,
 ) -> Result<(TransitionResult, PgTransitionCleanupCounts)> {
     transition_status_with_opts_pg_inner(
-        None,
         pg_pool,
         engine,
         card_id,
@@ -651,7 +645,6 @@ pub async fn transition_status_with_opts_and_allowed_cleanup_pg_only(
 // point not wired by the default lib build. See #3034.
 #[allow(dead_code)]
 pub async fn transition_status_with_opts_and_allowed_cleanup_pg(
-    db: Option<&Db>,
     pg_pool: &sqlx::PgPool,
     engine: &PolicyEngine,
     card_id: &str,
@@ -661,7 +654,6 @@ pub async fn transition_status_with_opts_and_allowed_cleanup_pg(
     on_pg_policy: AllowedOnConnMutation,
 ) -> Result<(TransitionResult, PgTransitionCleanupCounts)> {
     transition_status_with_opts_pg_inner(
-        db,
         pg_pool,
         engine,
         card_id,
