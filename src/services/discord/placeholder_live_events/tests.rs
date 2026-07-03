@@ -354,7 +354,13 @@ fn status_panel_turn_completed_renders_foreground_completion() {
         channel_id,
         status_events_from_tool_use("Bash", &json!({"command": "cargo test"}).to_string()),
     );
-    events.push_status_event(channel_id, StatusEvent::TurnCompleted { background: false });
+    events.push_status_event(
+        channel_id,
+        StatusEvent::TurnCompleted {
+            background: false,
+            background_agent_pending: false,
+        },
+    );
 
     assert_eq!(
         status_for(&events, channel_id),
@@ -394,34 +400,16 @@ fn status_panel_absorbs_stale_and_final_into_the_activity_emoji() {
     );
 
     // Completion → `✅ 완료` (final absorbed into the emoji).
-    events.push_status_event(channel_id, StatusEvent::TurnCompleted { background: false });
+    events.push_status_event(
+        channel_id,
+        StatusEvent::TurnCompleted {
+            background: false,
+            background_agent_pending: false,
+        },
+    );
     let done = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
     assert!(done.starts_with("✅ 완료"), "final activity: {done:?}");
     assert!(!done.contains("신뢰도"));
-
-    // Answer relayed but session-end unconfirmed → `🟡 응답 지연 · 조사 권장`.
-    let stale = events.render_terminal_ui_obligation_panel(
-        channel_id,
-        &ProviderKind::Claude,
-        1_700_000_000,
-        TerminalUiObligationPanelStatus::Deadline,
-    );
-    assert!(
-        stale.starts_with("🟡 응답 지연 · 조사 권장"),
-        "stale is absorbed into the 🟡 activity emoji: {stale:?}"
-    );
-
-    // Delivery done, termination still confirming → the pending `↻` activity.
-    let pending = events.render_terminal_ui_obligation_panel(
-        channel_id,
-        &ProviderKind::Claude,
-        1_700_000_000,
-        TerminalUiObligationPanelStatus::Pending,
-    );
-    assert!(
-        pending.starts_with("↻ 응답 전달됨 · 세션 종료 확인 중"),
-        "pending activity: {pending:?}"
-    );
 }
 
 #[test]
@@ -495,7 +483,13 @@ fn status_panel_turn_completed_after_monitor_wait_renders_background_completion(
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(172);
     events.push_status_event(channel_id, StatusEvent::MonitorWait);
-    events.push_status_event(channel_id, StatusEvent::TurnCompleted { background: true });
+    events.push_status_event(
+        channel_id,
+        StatusEvent::TurnCompleted {
+            background: true,
+            background_agent_pending: false,
+        },
+    );
 
     assert_eq!(
         status_for(&events, channel_id),
@@ -520,7 +514,13 @@ fn status_panel_turn_completed_after_aborted_tool_renders_terminal_completion() 
         channel_id,
         status_events_from_tool_result(Some("Task"), true),
     );
-    events.push_status_event(channel_id, StatusEvent::TurnCompleted { background: false });
+    events.push_status_event(
+        channel_id,
+        StatusEvent::TurnCompleted {
+            background: false,
+            background_agent_pending: false,
+        },
+    );
 
     assert_eq!(
         status_for(&events, channel_id),
@@ -1818,6 +1818,33 @@ fn completion_footer_context_only_has_no_spinner_and_stops_scheduling() {
     assert!(block.contains("Context   📦 154.6k / 1.0M tokens (15%) · auto-compact 60%"));
     assert!(!block.contains('⠸'));
     assert!(!rendered.has_unfinished_entries);
+}
+
+#[test]
+fn completion_footer_keeps_background_agent_pending_payload_open() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(1901);
+    events.push_status_event(
+        channel_id,
+        StatusEvent::TurnCompleted {
+            background: false,
+            background_agent_pending: true,
+        },
+    );
+
+    assert_eq!(
+        status_for(&events, channel_id),
+        DerivedStatus::Completed {
+            kind: CompletedKind::Foreground
+        },
+        "the turn still finalizes even when background agents remain pending"
+    );
+    let rendered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let block = rendered.block.expect("pending background agent line");
+
+    assert!(rendered.has_unfinished_entries);
+    assert!(block.contains("Background agents"));
+    assert!(block.contains("Waiting for background agents ⠸"));
 }
 
 #[test]

@@ -7,7 +7,7 @@
 //!
 //! The footer header is a fixed two-line block:
 //! - line 1 is the derived-status ACTIVITY label alone (`🟢 진행 중` /
-//!   `🔧 도구 실행 중 (…)` / `✅ 완료` / `🟡 응답 지연 · 조사 권장`). The spinner
+//!   `🔧 도구 실행 중 (…)` / `✅ 완료`). The spinner
 //!   merge (`single_message_panel::merged_footer_header_line`) swaps the leading
 //!   status emoji for the animated spinner, so the marker set there must stay in
 //!   sync with the emojis this label can start with.
@@ -52,9 +52,9 @@ pub(super) fn render_time_line(last_activity_unix: Option<i64>, started_at_unix:
 }
 
 /// #3983: the panel's first (activity) line — the derived-status label alone (no
-/// provider, no timestamp; those moved to the time line). The stale/final
-/// confidence classes are absorbed into the emoji here (item B): a stalled
-/// answer-relayed turn reads `🟡 응답 지연 · 조사 권장`, a clean completion `✅ 완료`.
+/// provider, no timestamp; those moved to the time line). The final confidence
+/// class is absorbed into the emoji here (item B): a clean completion reads
+/// `✅ 완료`.
 pub(super) fn render_activity_line(status: &DerivedStatus) -> String {
     match status {
         DerivedStatus::Running => "🟢 진행 중".to_string(),
@@ -63,10 +63,6 @@ pub(super) fn render_activity_line(status: &DerivedStatus) -> String {
             format!("⏰ scheduled wakeup ({eta_secs}s 후)")
         }
         DerivedStatus::ScheduleWakeup(None) => "⏰ scheduled wakeup".to_string(),
-        DerivedStatus::TerminalDeliveryPending => "↻ 응답 전달됨 · 세션 종료 확인 중".to_string(),
-        // #3983 item B: the corroborated stall (answer relayed, session-end
-        // unconfirmed) reads as the `stale` class right in the activity emoji.
-        DerivedStatus::TerminalDeliveryUnconfirmed => "🟡 응답 지연 · 조사 권장".to_string(),
         DerivedStatus::Completed {
             kind: CompletedKind::Background,
         } => "✅ 백그라운드 완료".to_string(),
@@ -131,15 +127,6 @@ mod tests {
     }
 
     #[test]
-    fn unconfirmed_delivery_renders_stale_activity_label() {
-        // #3983 item B: the corroborated stall reads as `🟡 응답 지연 · 조사 권장`.
-        assert_eq!(
-            render_activity_line(&DerivedStatus::TerminalDeliveryUnconfirmed),
-            "🟡 응답 지연 · 조사 권장"
-        );
-    }
-
-    #[test]
     fn activity_labels_lead_with_a_spinner_swap_marker() {
         // Every actively-rendered label must lead with a status emoji so the
         // spinner-merge swaps it for the animation cleanly (spinner-prefix parity).
@@ -160,12 +147,11 @@ mod tests {
             DerivedStatus::Completed {
                 kind: CompletedKind::Foreground,
             },
-            DerivedStatus::TerminalDeliveryUnconfirmed,
         ] {
             let line = render_activity_line(&status);
             let first = line.chars().next().expect("non-empty label");
             assert!(
-                ['🟢', '💤', '⏰', '🔧', '🧵', '🧬', '✅', '🟡'].contains(&first),
+                ['🟢', '💤', '⏰', '🔧', '🧵', '🧬', '✅'].contains(&first),
                 "label {line:?} must lead with a spinner-swap marker"
             );
         }

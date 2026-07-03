@@ -258,12 +258,6 @@ pub(super) fn should_fail_dispatch_after_terminal_delivery(
     fail_candidate && terminal_delivery_committed && !preserve_inflight_for_cleanup_retry
 }
 
-pub(super) fn tui_quiescence_timeout_requires_inflight_retry(
-    terminal_delivery_committed: bool,
-) -> bool {
-    !terminal_delivery_committed
-}
-
 pub(super) fn warn_preserved_uncommitted(
     terminal_delivery_committed: bool,
     preserve_inflight_for_cleanup_retry: bool,
@@ -687,7 +681,6 @@ mod tests {
         bridge_epilogue_skip_save_is_identity_guarded, replace_outcome_commits_terminal_delivery,
         send_ordered_long_terminal_chunks, should_complete_work_dispatch_after_terminal_delivery,
         should_fail_dispatch_after_terminal_delivery, terminal_delivery_should_send_new_chunks,
-        tui_quiescence_timeout_requires_inflight_retry,
     };
     use crate::services::discord::formatting;
     use crate::services::discord::formatting::ReplaceLongMessageOutcome;
@@ -894,15 +887,6 @@ mod tests {
             false,
             "final response delivered",
         ));
-    }
-
-    #[test]
-    fn tui_quiescence_timeout_preserves_inflight_only_before_terminal_delivery() {
-        assert!(tui_quiescence_timeout_requires_inflight_retry(false));
-        assert!(
-            !tui_quiescence_timeout_requires_inflight_retry(true),
-            "after Discord terminal delivery commits, timeout may suppress visible completion but must not preserve stale inflight ownership"
-        );
     }
 
     // #3041 P1-2 (codex P1-c): every bridge skip arm sets

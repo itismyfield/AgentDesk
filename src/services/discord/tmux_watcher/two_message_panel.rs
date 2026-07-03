@@ -178,6 +178,7 @@ pub(in crate::services::discord) async fn complete_watcher_status_panel_v2_with_
     status_panel_msg_id: Option<serenity::MessageId>,
     last_status_panel_text: &mut String,
     completion_background: bool,
+    background_agent_pending: bool,
     status_panel_completion_user_msg_id: Option<u64>,
     turn_is_external_input_for_session: bool,
     generation_superseded: bool,
@@ -199,6 +200,7 @@ pub(in crate::services::discord) async fn complete_watcher_status_panel_v2_with_
             started_at_unix,
             last_status_panel_text,
             completion_background,
+            background_agent_pending,
             status_panel_completion_user_msg_id,
         )
         .await

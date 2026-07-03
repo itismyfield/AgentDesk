@@ -24,20 +24,6 @@ pub(in crate::services::discord) enum CompletionSignal {
     Unknown,
 }
 
-/// Acceptance mode for the shared JSONL completion scan.
-///
-/// `FinalizeAuthority` is the strict turn-finalizer authority and accepts only
-/// definitive turn-end terminators as `Done`. `GateQuiescence` is a temporary
-/// S2-a compatibility mode for the watcher completion gate; it preserves the
-/// pre-S2-a observer-style gate acceptance semantics byte-for-byte, including
-/// the source-agnostic matched-session JSONL shortcut. S2-b should delete
-/// `GateQuiescence` together with the completion-gate `TimedOut` suppression.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(in crate::services::discord) enum CompletionSignalMode {
-    FinalizeAuthority,
-    GateQuiescence,
-}
-
 /// #3016 S1 (PURE) — the structural completion signal derived solely from the
 /// provider's on-disk JSONL transcript. Shared by the public
 /// `completion_signal_state` (see it for the Done/PausedLive/Unknown
@@ -47,32 +33,10 @@ pub(in crate::services::discord) fn completion_signal_from_transcript(
     runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
     transcript_path: &std::path::Path,
 ) -> CompletionSignal {
-    completion_signal_from_transcript_with_mode(
+    if !crate::services::tui_turn_state::provider_runtime_has_structured_jsonl_turn_state(
         provider,
         runtime_kind,
-        transcript_path,
-        CompletionSignalMode::FinalizeAuthority,
-    )
-}
-
-pub(in crate::services::discord) fn completion_signal_from_transcript_with_mode(
-    provider: &ProviderKind,
-    runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
-    transcript_path: &std::path::Path,
-    mode: CompletionSignalMode,
-) -> CompletionSignal {
-    let structured_jsonl_available = match mode {
-        CompletionSignalMode::FinalizeAuthority => {
-            crate::services::tui_turn_state::provider_runtime_has_structured_jsonl_turn_state(
-                provider,
-                runtime_kind,
-            )
-        }
-        CompletionSignalMode::GateQuiescence => {
-            matches!(provider, ProviderKind::Claude | ProviderKind::Codex)
-        }
-    };
-    if !structured_jsonl_available {
+    ) {
         return CompletionSignal::Unknown;
     }
     let Ok(metadata) = std::fs::metadata(transcript_path) else {
@@ -81,19 +45,7 @@ pub(in crate::services::discord) fn completion_signal_from_transcript_with_mode(
     if !metadata.is_file() || metadata.len() == 0 {
         return CompletionSignal::PausedLive;
     }
-    let scan_mode = match mode {
-        CompletionSignalMode::FinalizeAuthority => {
-            crate::services::tui_turn_state::JsonlCompletionScanMode::FinalizeAuthority
-        }
-        CompletionSignalMode::GateQuiescence => {
-            crate::services::tui_turn_state::JsonlCompletionScanMode::GateQuiescence
-        }
-    };
-    if crate::services::tui_turn_state::jsonl_completion_scan_idle(
-        provider,
-        transcript_path,
-        scan_mode,
-    ) {
+    if crate::services::tui_turn_state::jsonl_completion_scan_idle(provider, transcript_path) {
         CompletionSignal::Done
     } else {
         CompletionSignal::PausedLive

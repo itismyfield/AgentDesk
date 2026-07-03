@@ -324,11 +324,15 @@ pub(super) async fn complete_bridge_single_message_completion_footer(
     terminal_text: &str,
     indicator: &str,
     background: bool,
+    background_agent_pending: bool,
 ) -> bool {
-    shared
-        .ui
-        .placeholder_live_events
-        .push_status_event(channel_id, StatusEvent::TurnCompleted { background });
+    shared.ui.placeholder_live_events.push_status_event(
+        channel_id,
+        StatusEvent::TurnCompleted {
+            background,
+            background_agent_pending,
+        },
+    );
     let rendered = shared
         .ui
         .placeholder_live_events
@@ -498,7 +502,62 @@ pub(super) async fn complete_bridge_terminal_footer_or_status_panel<G: TurnGatew
     terminal_text: Option<&str>,
     indicator: &str,
     this_turn_status_panel_generation: u64,
+    tmux_session_name: Option<&str>,
 ) -> bool {
+    complete_bridge_terminal_footer_or_status_panel_with_sniffer(
+        shared,
+        gateway,
+        channel_id,
+        current_msg_id,
+        user_msg_id,
+        status_panel_msg_id,
+        provider,
+        started_at_unix,
+        last_status_panel_text,
+        single_message_panel_footer_mode,
+        is_external_input_tui_direct,
+        terminal_text,
+        indicator,
+        this_turn_status_panel_generation,
+        tmux_session_name.map(str::to_string),
+        |tmux_session_name| async move {
+            super::super::tmux::sniff_background_agent_pending_for_completion(
+                tmux_session_name.as_deref(),
+            )
+            .await
+        },
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn complete_bridge_terminal_footer_or_status_panel_with_sniffer<
+    G,
+    S,
+    SniffFuture,
+>(
+    shared: &SharedData,
+    gateway: &G,
+    channel_id: ChannelId,
+    current_msg_id: MessageId,
+    user_msg_id: Option<MessageId>,
+    status_panel_msg_id: Option<MessageId>,
+    provider: &ProviderKind,
+    started_at_unix: i64,
+    last_status_panel_text: &mut String,
+    single_message_panel_footer_mode: bool,
+    is_external_input_tui_direct: bool,
+    terminal_text: Option<&str>,
+    indicator: &str,
+    this_turn_status_panel_generation: u64,
+    tmux_session_name: Option<String>,
+    sniff_background_agent_pending: S,
+) -> bool
+where
+    G: TurnGateway + ?Sized,
+    S: FnOnce(Option<String>) -> SniffFuture,
+    SniffFuture: std::future::Future<Output = bool>,
+{
     let this_turn_user_msg_id = user_msg_id.map(|id| id.get()).unwrap_or(0);
     // #3805 P2: a completion edit is skipped when EITHER a different real turn
     // now owns this panel (identity aliasing, unchanged) OR — under the
@@ -540,6 +599,7 @@ pub(super) async fn complete_bridge_terminal_footer_or_status_panel<G: TurnGatew
         );
         return true;
     }
+    let background_agent_pending = sniff_background_agent_pending(tmux_session_name).await;
     if single_message_panel_footer_mode {
         let owner = super::single_message_panel::CompletionFooterOwner::new(
             this_turn_user_msg_id,
@@ -571,6 +631,7 @@ pub(super) async fn complete_bridge_terminal_footer_or_status_panel<G: TurnGatew
                         text,
                         indicator,
                         false,
+                        background_agent_pending,
                     )
                     .await
                 }
@@ -587,6 +648,7 @@ pub(super) async fn complete_bridge_terminal_footer_or_status_panel<G: TurnGatew
         started_at_unix,
         last_status_panel_text,
         false,
+        background_agent_pending,
         "turn_terminal_delivery",
         this_turn_user_msg_id,
     )
@@ -599,6 +661,40 @@ mod tests {
     use crate::services::discord::DISCORD_MSG_LIMIT;
 
     const PANEL: &str = "🟢 진행 중 — Claude (<t:1700000000:R>)\n\nSubagents\n└ review inspect";
+
+    struct RuntimeRootGuard {
+        previous: Option<std::ffi::OsString>,
+        _root: tempfile::TempDir,
+    }
+
+    impl RuntimeRootGuard {
+        fn new() -> Self {
+            let root = tempfile::tempdir().expect("runtime root");
+            let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
+            unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root.path()) };
+            Self {
+                previous,
+                _root: root,
+            }
+        }
+    }
+
+    impl Drop for RuntimeRootGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
+
+    fn isolate_agentdesk_runtime_root() -> (std::sync::MutexGuard<'static, ()>, RuntimeRootGuard) {
+        let lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = RuntimeRootGuard::new();
+        (lock, root)
+    }
 
     #[test]
     fn bridge_footer_mode_requires_both_flags() {
@@ -642,6 +738,101 @@ mod tests {
             bridge_status_panel_msg_id_for_footer_mode(footer_mode, Some(MessageId::new(42))),
             None,
         );
+    }
+
+    #[tokio::test]
+    async fn bridge_single_message_completion_footer_emits_background_agent_pending_payload() {
+        let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
+        let shared = super::super::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_047_201);
+        let provider = ProviderKind::Claude;
+        let owner =
+            super::single_message_panel::CompletionFooterOwner::new(4_047_202, 1_700_000_000);
+
+        let _ = complete_bridge_single_message_completion_footer(
+            shared.as_ref(),
+            channel_id,
+            MessageId::new(4_047_203),
+            owner,
+            &provider,
+            1_700_000_000,
+            "Final answer",
+            "⠸",
+            false,
+            true,
+        )
+        .await;
+
+        let rendered = shared
+            .ui
+            .placeholder_live_events
+            .render_completion_footer(channel_id, &provider, "⠸");
+        let block = rendered.block.expect("background-agent pending footer");
+
+        assert!(rendered.has_unfinished_entries);
+        assert!(block.contains("Background agents"));
+        assert!(block.contains("Waiting for background agents ⠸"));
+    }
+
+    #[tokio::test]
+    async fn bridge_single_message_completion_footer_producer_threads_sniffed_background_agent_pending()
+     {
+        let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
+        for (pending, channel_raw) in [(true, 4_047_211), (false, 4_047_212)] {
+            let shared = super::super::make_shared_data_for_tests();
+            let gateway = crate::services::discord::gateway::HeadlessGateway;
+            let channel_id = ChannelId::new(channel_raw);
+            let provider = ProviderKind::Claude;
+            let observed_tmux_session = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let sniffer_observed_tmux_session = observed_tmux_session.clone();
+            let mut last_status_panel_text = String::new();
+
+            let _committed = complete_bridge_terminal_footer_or_status_panel_with_sniffer(
+                shared.as_ref(),
+                &gateway,
+                channel_id,
+                MessageId::new(channel_raw + 1),
+                Some(MessageId::new(channel_raw + 2)),
+                None,
+                &provider,
+                1_700_000_000,
+                &mut last_status_panel_text,
+                true,
+                false,
+                Some("Final answer"),
+                "⠸",
+                0,
+                Some("AgentDesk-claude-background-test".to_string()),
+                move |tmux_session_name| async move {
+                    sniffer_observed_tmux_session
+                        .lock()
+                        .expect("observed tmux session lock")
+                        .push(tmux_session_name);
+                    pending
+                },
+            )
+            .await;
+
+            assert_eq!(
+                observed_tmux_session
+                    .lock()
+                    .expect("observed tmux session lock")
+                    .as_slice(),
+                &[Some("AgentDesk-claude-background-test".to_string())]
+            );
+
+            let rendered = shared
+                .ui
+                .placeholder_live_events
+                .render_completion_footer(channel_id, &provider, "⠸");
+            let block_has_background_agents = rendered
+                .block
+                .as_deref()
+                .is_some_and(|block| block.contains("Background agents"));
+
+            assert_eq!(rendered.has_unfinished_entries, pending);
+            assert_eq!(block_has_background_agents, pending);
+        }
     }
 
     #[test]

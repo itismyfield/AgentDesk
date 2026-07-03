@@ -35,7 +35,9 @@ use recent_events::render_compact_events;
 #[cfg(test)]
 use recent_events::render_events;
 use session_panel::SessionPanelSnapshot;
-use status_panel::{CompletedKind, DerivedStatus, StatusPanelState, render_status_panel};
+#[cfg(test)]
+use status_panel::{CompletedKind, DerivedStatus};
+use status_panel::{StatusPanelState, render_status_panel};
 pub(in crate::services::discord) use task_panel::TaskPanelInfo;
 use task_panel::{TaskPanelSnapshot, clean_task_panel_value};
 
@@ -93,13 +95,6 @@ pub(in crate::services::discord) struct LiveContextPanelSnapshot {
     pub(in crate::services::discord) provider_session_id: Option<String>,
     pub(in crate::services::discord) used_tokens: u64,
     pub(in crate::services::discord) context_window_tokens: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::services::discord) enum TerminalUiObligationPanelStatus {
-    Pending,
-    Completed,
-    Deadline,
 }
 
 impl PlaceholderLiveEvents {
@@ -247,21 +242,6 @@ impl PlaceholderLiveEvents {
         for event in events {
             self.push_status_event(channel_id, event);
         }
-    }
-
-    /// #3886: `true` iff this channel's live panel still holds a non-terminal
-    /// (`진행 중`) state. The TimedOut-completion-gate reconcile gates on this to
-    /// finalize a stuck panel AT MOST ONCE (preserves #3477/#3812 byte-stability).
-    pub(in crate::services::discord) fn status_panel_is_unfinished(
-        &self,
-        channel_id: ChannelId,
-    ) -> bool {
-        self.status_by_channel
-            .get(&channel_id)
-            .is_some_and(|entry| {
-                let guard = entry.lock().unwrap_or_else(|p| p.into_inner());
-                !matches!(guard.status, DerivedStatus::Completed { .. })
-            })
     }
 
     /// #3393: bridge an observed `<task-notification>` XML user-record into the
@@ -559,35 +539,6 @@ impl PlaceholderLiveEvents {
             started_at_unix,
             chrono::Utc::now().timestamp(),
         )
-    }
-
-    pub(in crate::services::discord) fn render_terminal_ui_obligation_panel(
-        &self,
-        channel_id: ChannelId,
-        provider: &ProviderKind,
-        started_at_unix: i64,
-        status: TerminalUiObligationPanelStatus,
-    ) -> String {
-        let mut snapshot = self
-            .status_by_channel
-            .get(&channel_id)
-            .map(|entry| {
-                entry
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .clone()
-            })
-            .unwrap_or_default();
-        snapshot.status = match status {
-            TerminalUiObligationPanelStatus::Pending => DerivedStatus::TerminalDeliveryPending,
-            TerminalUiObligationPanelStatus::Completed => DerivedStatus::Completed {
-                kind: CompletedKind::Foreground,
-            },
-            TerminalUiObligationPanelStatus::Deadline => DerivedStatus::TerminalDeliveryUnconfirmed,
-        };
-        let turn_trigger_line = self.request_anchor_line(channel_id, &snapshot);
-        let time_line = self.panel_time_line(channel_id, started_at_unix);
-        render_status_panel(snapshot, provider, time_line, turn_trigger_line)
     }
 
     // True when the live-panel compaction counts for this channel differ from

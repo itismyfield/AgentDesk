@@ -48,8 +48,6 @@ pub(super) enum DerivedStatus {
     Running,
     MonitorWait,
     ScheduleWakeup(Option<u64>),
-    TerminalDeliveryPending,
-    TerminalDeliveryUnconfirmed,
     Completed {
         kind: CompletedKind,
     },
@@ -95,6 +93,7 @@ pub(super) struct StatusPanelState {
     // #3477 item 3: instant the turn entered `Completed` (None until then); vs the
     // store's `last_recent_event_at` it gates the late-batch 🖥️ Recent freshness.
     pub(super) completed_at: Option<std::time::Instant>,
+    pub(super) background_agent_pending: bool,
     // #3811: intake-set original-request user_msg_id; drives the `요청:` deeplink
     // (`None` for headless/synthetic/voice/id-0 — no real Discord message).
     pub(super) request_user_msg_id: Option<u64>,
@@ -122,6 +121,7 @@ impl StatusPanelState {
         self.subagents.clear();
         self.workflows.clear();
         self.completed_at = None; // #3477 item 3: drop the stale freshness gate.
+        self.background_agent_pending = false;
         self.request_user_msg_id = None; // #3811: new session = new request context.
     }
 
@@ -176,6 +176,7 @@ impl StatusPanelState {
         *self = StatusPanelState {
             tasks,
             subagents,
+            background_agent_pending: self.background_agent_pending,
             // #3391: carry the counter so a residual ordinal is never reissued.
             next_slot_ordinal: self.next_slot_ordinal,
             request_user_msg_id: self.request_user_msg_id, // #3811: survive turn reset
@@ -443,12 +444,15 @@ impl StatusPanelState {
                     self.status = DerivedStatus::Running;
                 }
             }
-            StatusEvent::TurnCompleted { background } => {
+            StatusEvent::TurnCompleted {
+                background,
+                background_agent_pending,
+            } => {
                 self.status = DerivedStatus::Completed {
                     kind: CompletedKind::from_background(background),
                 };
-                // #3477 item 3: stamp the late-batch freshness gate.
-                self.completed_at = Some(std::time::Instant::now());
+                self.background_agent_pending = background_agent_pending;
+                self.completed_at = Some(std::time::Instant::now()); // #3477 item 3
             }
             StatusEvent::Heartbeat => {
                 if matches!(self.status, DerivedStatus::Running) {

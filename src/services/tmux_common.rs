@@ -302,6 +302,17 @@ pub(crate) fn tmux_capture_indicates_claude_tui_background_agent_pending(capture
     })
 }
 
+/// Shared producer for the Claude TUI background-agent pending bit.
+///
+/// Capture failures and dead sessions return `false`: treating an unknown pane
+/// as not-pending keeps completion unblocked, and the footer TTL/watchdog bounds
+/// the damage from a wrong false.
+pub(crate) fn sniff_background_agent_pending(tmux_session_name: &str) -> bool {
+    crate::services::platform::tmux::capture_pane(tmux_session_name, 0)
+        .map(|pane| tmux_capture_indicates_claude_tui_background_agent_pending(&pane))
+        .unwrap_or(false)
+}
+
 /// `true` when `line` is a Claude TUI spinner progress footer: a leading spinner
 /// glyph (the rotating set the TUI cycles through) directly followed by a work
 /// verb. Anchoring the verb to the spinner glyph is what distinguishes the TUI
