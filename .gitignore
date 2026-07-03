@@ -48,3 +48,5 @@ __pycache__/
 
 # Per-user routine scripts — individual user config space (#3081 follow-up; keeps already-tracked shared routines, ignores new local ones)
 routines/
+!src/server/routes/routines/
+!src/server/routes/routines/*.rs
