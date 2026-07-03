@@ -1,4 +1,9 @@
 use super::*;
+use axum::extract::Extension;
+
+use crate::api_caller_observability::{
+    RequestPrincipal, log_identity_consumption, manager_channel_check_relied_on_claimed_header,
+};
 
 /// PATCH /api/queue/runs/{id}
 pub async fn update_run(
@@ -426,15 +431,41 @@ fn require_phase_gate_repair_operator_auth(
     Ok(())
 }
 
+fn log_phase_gate_repair_identity_consumption(
+    headers: &HeaderMap,
+    config: &crate::config::Config,
+    principal: &Option<Extension<RequestPrincipal>>,
+    caller: &RepairCaller,
+    manager_channel_check_relied: bool,
+) {
+    let (_, expected_channel_id) = configured_repair_operator_auth(config);
+    let caller_label = caller.audit_label();
+    log_identity_consumption(
+        "POST /api/queue/runs/{id}/phase-gates/repair",
+        principal.as_ref().map(|Extension(principal)| principal),
+        Some(caller_label.as_str()),
+        manager_channel_check_relied
+            && manager_channel_check_relied_on_claimed_header(headers, expected_channel_id),
+    );
+}
+
 /// POST /api/queue/runs/{id}/phase-gates/repair
 pub async fn repair_phase_gates(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    principal: Option<Extension<RequestPrincipal>>,
     body: Bytes,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let mut caller = RepairCaller::from_headers(&headers);
     if let Err(response) = require_phase_gate_repair_operator_auth(&state.config, &headers) {
+        log_phase_gate_repair_identity_consumption(
+            &headers,
+            &state.config,
+            &principal,
+            &caller,
+            false,
+        );
         // Unverified caller — explicitly mark the audit field so a spoofed
         // `x-agent-id` doesn't masquerade as a real principal in logs.
         audit_phase_gate_repair_rejected(&id, &caller, "unauthorized", "authorization failed");
@@ -453,11 +484,25 @@ pub async fn repair_phase_gates(
     let parsed_body: RepairPhaseGateBody = match parse_json_body(body, "phase-gates/repair") {
         Ok(parsed) => parsed,
         Err(error) => {
+            log_phase_gate_repair_identity_consumption(
+                &headers,
+                &state.config,
+                &principal,
+                &caller,
+                true,
+            );
             audit_phase_gate_repair_rejected(&id, &caller, "bad_request", &error);
             return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
         }
     };
     let Some(pool) = state.pg_pool_ref() else {
+        log_phase_gate_repair_identity_consumption(
+            &headers,
+            &state.config,
+            &principal,
+            &caller,
+            true,
+        );
         audit_phase_gate_repair_rejected(
             &id,
             &caller,
@@ -469,6 +514,7 @@ pub async fn repair_phase_gates(
 
     caller
         .verify(crate::services::kanban::resolve_requesting_agent_id_with_pg(pool, &headers).await);
+    log_phase_gate_repair_identity_consumption(&headers, &state.config, &principal, &caller, true);
 
     // #2257 concern 5 / #3318: Stripe-style idempotency-key handling.
     // Inventory: this is currently the only route using the table-backed
