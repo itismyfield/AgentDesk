@@ -1231,6 +1231,7 @@ mod tests {
         assert!(outcome_is_shadow_delivered(&DeliveryOutcome::Delivered {
             committed_to: 5,
             replace_kind: None,
+            new_chunks: None,
         }));
         assert!(!outcome_is_shadow_delivered(
             &DeliveryOutcome::NotDelivered { committed_from: 5 }

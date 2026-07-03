@@ -1,12 +1,11 @@
-//! #3089 A5 turn_bridge short-replace cutover to the unified turn-output
-//! controller (flag-gated, default OFF).
+//! #3089 A5 turn_bridge terminal cutover to the unified turn-output controller
+//! (flag-gated, default OFF).
 //!
 //! Sibling of `turn_bridge/terminal_delivery.rs` (which owns `BridgeDeliveryLease`,
 //! `advance_tmux_relay_confirmed_end`, and `turn_bridge_replace_outcome_committed`).
 //! This module holds the A5 cutover surface — the flag helper, the pure cut-over
 //! decision + `bridge_terminal_lease_range` gate, the `BridgePostHeartbeat`
-//! adapter, the gateway-generic `deliver_short_replace_via_controller`, and the
-//! `apply_bridge_short_replace_controller` write-back — extracted here so
+//! adapter, and the short-replace/long-chunk controller write-backs — extracted here so
 //! `terminal_delivery.rs` stays below the 1000-prod giant-file threshold (mirrors
 //! A4's `tmux_watcher/terminal_send.rs` sibling).
 
@@ -25,11 +24,10 @@ use crate::services::discord::{
     DeliveryLeaseCell, DeliveryLeaseHeartbeat, DeliveryLeaseKey, LeaseHolder, lease_now_ms,
 };
 
-/// #3089 A5: flag gating ONLY the bridge's short-replace terminal-replace branch
-/// (mod.rs site 5, `replace_message_with_outcome`) onto the unified
-/// [`toc::deliver_turn_output`]. Default OFF → the legacy short-replace arm runs
-/// byte-identically; ON → the controller drives acquire→POST→commit→advance→
-/// release on the SAME `(channel, turn, [start,end))` lease as
+/// #3089 A5/#3998 S1-d: flag gating the bridge terminal cutover onto the unified
+/// [`toc::deliver_turn_output`]. Default OFF → the legacy terminal arms run
+/// byte-identically; ON → eligible short-replace and long-chunk deliveries use
+/// the controller on the SAME `(channel, turn, [start,end))` lease as
 /// `LeaseHolder::Bridge`. OnceLock+env, mirroring
 /// `watcher_terminal_controller_enabled` (A4) / `sink_short_replace_controller_enabled`
 /// (A2b) / `standby_relay_controller_enabled` (A3).
@@ -57,9 +55,8 @@ pub(super) fn turn_bridge_terminal_controller_enabled() -> bool {
 /// Terms (mirroring the legacy short-replace branch arm at mod.rs:6126-6245):
 /// - `will_short_replace` — we are in the `can_chain_locally` short-replace arm
 ///   (NOT the long-chunk send-new-chunks arm; mod.rs:6023/6024). I.e.
-///   `can_chain_locally && !should_send_new_chunks`. The long-chunk arm
-///   (send-new-chunks + placeholder delete) is NOT expressible via the
-///   controller's `SendNewChunks` (it does not delete the anchor) → EXCLUDED.
+///   `can_chain_locally && !should_send_new_chunks`. The long-chunk arm is routed
+///   by [`bridge_long_chunks_cutover_decision`] when the A5 flag is ON.
 /// - `ordered_range` — `tmux_last_offset > turn_start_offset` (a real `[start,end)`).
 ///   The legacy `NoRange` arm (deliver-without-advance) is NOT expressible (the
 ///   controller commits IFF the lease advances) → EXCLUDED (stays legacy via the
@@ -125,6 +122,30 @@ pub(super) fn bridge_short_replace_cutover_decision(
     )
 }
 
+/// #3998 S1-d: bridge long-chunk cut-over decision. This is the same owner flag
+/// as A5 short-replace, but applies to the legacy send-new-chunks + placeholder
+/// delete arm now that `SendNewChunks { delete_anchor: true }` exists.
+///
+/// Retained exclusions: `NoRange` (no advance authority; #4048), headless (no
+/// direct Discord POST), and empty body (consistent with A2b/A3 skip parity).
+pub(super) fn bridge_long_chunks_cutover_decision(
+    controller_enabled: bool,
+    can_chain_locally: bool,
+    formatted_response: &str,
+    ordered_range: bool,
+    has_placeholder: bool,
+) -> bool {
+    controller_enabled
+        && can_chain_locally
+        && super::terminal_delivery::terminal_delivery_should_send_new_chunks(
+            can_chain_locally,
+            formatted_response,
+        )
+        && ordered_range
+        && has_placeholder
+        && !formatted_response.is_empty()
+}
+
 /// #3089 A5: pure no-double-acquire gate. The legacy site-5 arm acquires its OWN
 /// `BridgeDeliveryLease` over `cutover_range` (mod.rs ~6134). When the
 /// short-replace branch is cut over, the CONTROLLER owns that single lease, so
@@ -132,8 +153,8 @@ pub(super) fn bridge_short_replace_cutover_decision(
 /// turn. Extracted so the invariant is testable: dropping `!cutover_short_replace`
 /// fails `cutover_skips_bridge_lease_acquire`. Mirrors A4's
 /// `watcher_terminal_lease_range`. Scoped to site 5 ONLY — the other four bridge
-/// lease-acquire sites (silent-turn, long-chunk, cancel/stop/prompt-too-long)
-/// are byte-identical (they never call this).
+/// lease-acquire sites (silent-turn, cancel/stop/prompt-too-long) are
+/// byte-identical (they never call this); long-chunk has its own S1-d route.
 pub(super) fn bridge_terminal_lease_range(
     cutover_range: Option<(u64, u64)>,
     cutover_short_replace: bool,
@@ -178,7 +199,7 @@ impl toc::PostHeartbeatGuard for BridgePostHeartbeatGuard {}
 ///
 /// #2757 byte-identical: `EditFailPlaceholderPolicy::PreserveAlways`. The bridge
 /// short-replace NEVER deletes the original on edit-fail fallback (only the
-/// EXCLUDED long-chunk site-4 deletes the anchor), so the cutover passes
+/// separate long-chunk site-4 deletes the anchor), so the cutover passes
 /// `PreserveAlways`; `DeleteIfProvenStale` stays dormant.
 ///
 /// `FallbackCommitPolicy::NoCommitOnFallback` is the bridge's DISTINGUISHING
@@ -302,7 +323,7 @@ pub(super) async fn deliver_short_replace_via_controller(
                 lifecycle: PlaceholderLifecycle::Active,
             },
             // #2757: the bridge short-replace NEVER deletes the original on
-            // edit-fail fallback (only the EXCLUDED long-chunk site deletes).
+            // edit-fail fallback (only the separate long-chunk site deletes).
             edit_fail_policy: toc::EditFailPlaceholderPolicy::PreserveAlways,
             // The bridge's distinguishing policy: a fallback edit failure does NOT
             // commit → leave the offset un-advanced (terminal_delivery.rs:143).
@@ -344,6 +365,357 @@ pub(super) async fn deliver_short_replace_via_controller(
         Some(channel_id.get()),
     );
     outcome
+}
+
+/// #3998 S1-d: bridge long-chunk delivery via the turn-output controller. Mirrors
+/// legacy site 4: acquire bridge lease, send all chunks with rollback, delete the
+/// placeholder anchor best-effort after full chunk success, commit Delivered and
+/// advance only on success; send failure commits NotDelivered and preserves the
+/// anchor for retry.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn deliver_long_chunks_via_controller(
+    gateway: &dyn TurnGateway,
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    watcher_owner_channel_id: ChannelId,
+    tmux_session_name: Option<&str>,
+    cell: &Arc<DeliveryLeaseCell>,
+    placeholder_controller: &super::super::placeholder_controller::PlaceholderController,
+    msg_id: MessageId,
+    relay_text: &str,
+    turn: TurnKey,
+    lease_key: Option<DeliveryLeaseKey>,
+    start: u64,
+    end: u64,
+) -> toc::DeliveryOutcome {
+    let holder = LeaseHolder::Bridge;
+    cell.reclaim_if_expired(lease_now_ms());
+    let heartbeat = BridgePostHeartbeat { cell: cell.clone() };
+    let advance = |range: (u64, u64)| -> bool {
+        debug_assert_eq!(range, (start, end));
+        super::terminal_delivery::advance_tmux_relay_confirmed_end(
+            shared,
+            watcher_owner_channel_id,
+            Some(end),
+            tmux_session_name,
+        );
+        true
+    };
+    let chunk_count = super::super::formatting::split_message(relay_text).len();
+    let outcome = toc::deliver_turn_output(
+        gateway,
+        toc::TurnOutputCtx {
+            turn,
+            lease_key,
+            owner: RelayOwnerKind::None,
+            holder,
+            lease: &**cell,
+            channel_id,
+            placeholder_controller,
+            placeholder: toc::PlaceholderSlot::Active {
+                message_id: msg_id,
+                key: PlaceholderKey {
+                    provider: provider.clone(),
+                    channel_id,
+                    message_id: msg_id,
+                },
+            },
+            body: relay_text,
+            send_range: (start, end),
+            plan: toc::OutputPlan::SendNewChunks {
+                chunk_count,
+                delete_anchor: true,
+            },
+            edit_fail_policy: toc::EditFailPlaceholderPolicy::PreserveAlways,
+            fallback_commit_policy: toc::FallbackCommitPolicy::NoCommitOnFallback,
+            acquire_failure_mode: toc::AcquireFailureMode::Transient,
+            advance: Some(&advance),
+            heartbeat: Some(&heartbeat),
+        },
+    )
+    .await;
+    if let toc::DeliveryOutcome::Delivered {
+        new_chunks: Some(chunks),
+        ..
+    } = &outcome
+    {
+        dr::record_long_chunk_terminal_delivery(
+            shared,
+            provider,
+            watcher_owner_channel_id,
+            channel_id,
+            (start, end),
+            chunks.tail_message_id.map(|m| m.get()),
+        );
+    }
+    outcome
+}
+
+/// #3998 S1-d: borrowed long-chunk locals the controller path writes back into.
+pub(super) struct BridgeLongChunksLocals<'a> {
+    pub(super) terminal_delivery_committed: &'a mut bool,
+    pub(super) terminal_body_visible: &'a mut bool,
+    pub(super) completion_footer_terminal_text: &'a mut Option<String>,
+    pub(super) preserve_inflight_for_cleanup_retry: &'a mut bool,
+    pub(super) bridge_skip_holder_owns_inflight: &'a mut bool,
+    pub(super) response_sent_offset: &'a mut usize,
+    pub(super) inflight_response_sent_offset: &'a mut usize,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn apply_bridge_long_chunks_controller(
+    gateway: &dyn TurnGateway,
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    watcher_owner_channel_id: ChannelId,
+    tmux_session_name: Option<&str>,
+    cell: &Arc<DeliveryLeaseCell>,
+    placeholder_controller: &super::super::placeholder_controller::PlaceholderController,
+    msg_id: MessageId,
+    relay_text: &str,
+    full_response_len: usize,
+    turn: TurnKey,
+    start: u64,
+    end: u64,
+    single_message_panel_footer_mode: bool,
+    dispatch_id: Option<&str>,
+    session_key: Option<&str>,
+    turn_id: Option<&str>,
+    lease_key: Option<DeliveryLeaseKey>,
+    locals: BridgeLongChunksLocals<'_>,
+) {
+    let outcome = deliver_long_chunks_via_controller(
+        gateway,
+        shared,
+        provider,
+        channel_id,
+        watcher_owner_channel_id,
+        tmux_session_name,
+        cell,
+        placeholder_controller,
+        msg_id,
+        relay_text,
+        turn,
+        lease_key,
+        start,
+        end,
+    )
+    .await;
+    apply_bridge_long_chunks_outcome(
+        outcome,
+        shared,
+        provider,
+        channel_id,
+        msg_id,
+        tmux_session_name,
+        relay_text,
+        full_response_len,
+        single_message_panel_footer_mode,
+        dispatch_id,
+        session_key,
+        turn_id,
+        locals,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn apply_bridge_long_chunks_legacy(
+    lease_acquire: BridgeLeaseAcquire,
+    gateway: &dyn TurnGateway,
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    watcher_owner_channel_id: ChannelId,
+    tmux_session_name: Option<&str>,
+    msg_id: MessageId,
+    relay_text: &str,
+    full_response_len: usize,
+    single_message_panel_footer_mode: bool,
+    dispatch_id: Option<&str>,
+    session_key: Option<&str>,
+    turn_id: Option<&str>,
+    locals: BridgeLongChunksLocals<'_>,
+) {
+    if matches!(lease_acquire, BridgeLeaseAcquire::Skip) {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            channel = channel_id.get(),
+            "  [{ts}] 🌉 #3041 B2: delivery lease held by another holder — bridge skipped duplicate long terminal send (channel {})",
+            channel_id
+        );
+        *locals.preserve_inflight_for_cleanup_retry = true;
+        *locals.bridge_skip_holder_owns_inflight = true;
+        return;
+    }
+    let lease = match lease_acquire {
+        BridgeLeaseAcquire::Held(lease) => Some(lease),
+        _ => None,
+    };
+    match send_ordered_long_terminal_response(
+        shared,
+        gateway,
+        provider,
+        channel_id,
+        msg_id,
+        tmux_session_name,
+        relay_text,
+        dispatch_id,
+        session_key,
+        turn_id,
+    )
+    .await
+    {
+        Ok((_first, last_chunk_msg_id)) => {
+            *locals.terminal_delivery_committed = true;
+            *locals.terminal_body_visible = true;
+            if single_message_panel_footer_mode {
+                *locals.completion_footer_terminal_text = Some(relay_text.to_string());
+            }
+            *locals.response_sent_offset = full_response_len;
+            *locals.inflight_response_sent_offset = full_response_len;
+            if let Some(lease) = lease {
+                let lease_range = lease.range();
+                let committed = lease.commit_and_advance(
+                    shared,
+                    watcher_owner_channel_id,
+                    tmux_session_name,
+                    crate::services::discord::LeaseOutcome::Delivered,
+                );
+                if committed {
+                    dr::record_long_chunk_terminal_delivery(
+                        shared,
+                        provider,
+                        watcher_owner_channel_id,
+                        channel_id,
+                        lease_range,
+                        last_chunk_msg_id.map(|m| m.get()),
+                    );
+                }
+            }
+        }
+        Err(error) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ⚠ terminal long response send failed for channel {}: {} — preserving inflight for retry",
+                channel_id,
+                error
+            );
+            if let Some(lease) = lease {
+                lease.commit_and_advance(
+                    shared,
+                    watcher_owner_channel_id,
+                    tmux_session_name,
+                    crate::services::discord::LeaseOutcome::NotDelivered,
+                );
+            }
+            *locals.preserve_inflight_for_cleanup_retry = true;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn apply_bridge_long_chunks_outcome(
+    outcome: toc::DeliveryOutcome,
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    msg_id: MessageId,
+    tmux_session_name: Option<&str>,
+    relay_text: &str,
+    full_response_len: usize,
+    single_message_panel_footer_mode: bool,
+    dispatch_id: Option<&str>,
+    session_key: Option<&str>,
+    turn_id: Option<&str>,
+    locals: BridgeLongChunksLocals<'_>,
+) {
+    match outcome {
+        toc::DeliveryOutcome::Delivered {
+            new_chunks: Some(chunks),
+            ..
+        } => {
+            *locals.terminal_delivery_committed = true;
+            *locals.terminal_body_visible = true;
+            if single_message_panel_footer_mode {
+                *locals.completion_footer_terminal_text = Some(relay_text.to_string());
+            }
+            *locals.response_sent_offset = full_response_len;
+            *locals.inflight_response_sent_offset = full_response_len;
+            record_bridge_long_chunk_delete_cleanup(
+                shared,
+                provider,
+                channel_id,
+                msg_id,
+                tmux_session_name,
+                chunks.anchor_delete_error,
+            );
+            crate::services::observability::emit_relay_delivery(
+                provider.as_str(),
+                channel_id.get(),
+                dispatch_id,
+                session_key,
+                turn_id,
+                chunks.first_message_id.map(|m| m.get()),
+                "turn_bridge",
+                "post",
+                None,
+                None,
+                true,
+                Some("terminal long response sent as ordered chunks"),
+            );
+        }
+        toc::DeliveryOutcome::Transient { .. } => {
+            *locals.preserve_inflight_for_cleanup_retry = true;
+            *locals.bridge_skip_holder_owns_inflight = true;
+        }
+        toc::DeliveryOutcome::NotDelivered { .. }
+        | toc::DeliveryOutcome::Unknown { .. }
+        | toc::DeliveryOutcome::Skipped
+        | toc::DeliveryOutcome::Delivered { .. } => {
+            *locals.preserve_inflight_for_cleanup_retry = true;
+        }
+    }
+}
+
+fn record_bridge_long_chunk_delete_cleanup(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    tmux_session_name: Option<&str>,
+    anchor_delete_error: Option<String>,
+) {
+    let outcome = match anchor_delete_error {
+        Some(error) => super::super::placeholder_cleanup::classify_delete_error(&error),
+        None => super::super::placeholder_cleanup::PlaceholderCleanupOutcome::Succeeded,
+    };
+    if let super::super::placeholder_cleanup::PlaceholderCleanupOutcome::Failed { class, detail } =
+        &outcome
+    {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⚠ placeholder cleanup {} failed ({}) for channel {} msg {}: {}",
+            super::super::placeholder_cleanup::PlaceholderCleanupOperation::DeleteTerminal.as_str(),
+            class.as_str(),
+            channel_id.get(),
+            message_id.get(),
+            detail
+        );
+    }
+    shared.ui.placeholder_cleanup.record(
+        super::super::placeholder_cleanup::PlaceholderCleanupRecord {
+            provider: provider.clone(),
+            channel_id,
+            message_id,
+            tmux_session_name: tmux_session_name.map(str::to_string),
+            operation:
+                super::super::placeholder_cleanup::PlaceholderCleanupOperation::DeleteTerminal,
+            outcome,
+            source: "turn_bridge_terminal_long_send_controller_cleanup",
+        },
+    );
 }
 
 /// #3089 A5: borrowed `&mut` handles to the site-5 send-arm locals the controller
@@ -630,7 +1002,8 @@ mod tests {
     // lease-range/predicate gates; and OFF byte-identical. Mirrors A4's set.
     mod bridge_short_replace_controller {
         use super::super::{
-            BridgeShortReplaceLocals, apply_bridge_short_replace_outcome,
+            BridgeLongChunksLocals, BridgeShortReplaceLocals, apply_bridge_long_chunks_controller,
+            apply_bridge_short_replace_outcome, bridge_long_chunks_cutover_decision,
             bridge_short_replace_cutover, bridge_short_replace_cutover_decision,
             bridge_terminal_lease_range, deliver_short_replace_via_controller,
             turn_bridge_terminal_controller_enabled,
@@ -839,6 +1212,7 @@ mod tests {
             footer: Option<String>,
             preserve: bool,
             skip_holder: bool,
+            response_offset: usize,
             inflight_offset: usize,
         }
         impl Locals {
@@ -873,6 +1247,202 @@ mod tests {
                 locals.borrow(),
             );
             locals
+        }
+
+        struct RuntimeRootGuard {
+            previous: Option<std::ffi::OsString>,
+            _temp: tempfile::TempDir,
+        }
+
+        impl Drop for RuntimeRootGuard {
+            fn drop(&mut self) {
+                match self.previous.take() {
+                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+                }
+            }
+        }
+
+        fn runtime_root_guard() -> RuntimeRootGuard {
+            let temp = match tempfile::tempdir() {
+                Ok(temp) => temp,
+                Err(error) => panic!("runtime root tempdir failed: {error}"),
+            };
+            let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
+            unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+            RuntimeRootGuard {
+                previous,
+                _temp: temp,
+            }
+        }
+
+        struct LongChunksFakeGateway {
+            send_ok: bool,
+            delete_ok: bool,
+            send_calls: AtomicUsize,
+            delete_calls: AtomicUsize,
+            clock: AtomicUsize,
+            send_step: AtomicUsize,
+            delete_step: AtomicUsize,
+        }
+
+        impl TurnGateway for LongChunksFakeGateway {
+            fn send_long_message_with_rollback<'a>(
+                &'a self,
+                _c: ChannelId,
+                _a: MessageId,
+                _content: &'a str,
+            ) -> GatewayFuture<'a, Result<Vec<MessageId>, String>> {
+                Box::pin(async move {
+                    self.send_calls.fetch_add(1, Ordering::SeqCst);
+                    self.send_step
+                        .store(self.clock.fetch_add(1, Ordering::SeqCst), Ordering::SeqCst);
+                    if self.send_ok {
+                        Ok(vec![MessageId::new(9000), MessageId::new(9001)])
+                    } else {
+                        Err("chunk send failed after rollback".to_string())
+                    }
+                })
+            }
+            fn delete_message<'a>(
+                &'a self,
+                _c: ChannelId,
+                _m: MessageId,
+            ) -> GatewayFuture<'a, Result<(), String>> {
+                Box::pin(async move {
+                    self.delete_calls.fetch_add(1, Ordering::SeqCst);
+                    self.delete_step
+                        .store(self.clock.fetch_add(1, Ordering::SeqCst), Ordering::SeqCst);
+                    if self.delete_ok {
+                        Ok(())
+                    } else {
+                        Err("delete failed".to_string())
+                    }
+                })
+            }
+            fn send_message<'a>(
+                &'a self,
+                _c: ChannelId,
+                _x: &'a str,
+            ) -> GatewayFuture<'a, Result<MessageId, String>> {
+                panic!("long-chunk helper uses send_long_message_with_rollback")
+            }
+            fn replace_message_with_outcome<'a>(
+                &'a self,
+                _c: ChannelId,
+                _m: MessageId,
+                _content: &'a str,
+            ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
+                panic!("long-chunk helper never replaces")
+            }
+            fn edit_message<'a>(
+                &'a self,
+                _c: ChannelId,
+                _m: MessageId,
+                _x: &'a str,
+            ) -> GatewayFuture<'a, Result<(), String>> {
+                panic!("long-chunk helper never edits")
+            }
+            fn add_reaction<'a>(
+                &'a self,
+                _c: ChannelId,
+                _m: MessageId,
+                _e: char,
+            ) -> GatewayFuture<'a, ()> {
+                panic!("unused on the long-chunk path")
+            }
+            fn remove_reaction<'a>(
+                &'a self,
+                _c: ChannelId,
+                _m: MessageId,
+                _e: char,
+            ) -> GatewayFuture<'a, ()> {
+                panic!("unused on the long-chunk path")
+            }
+            fn schedule_retry_with_history<'a>(
+                &'a self,
+                _c: ChannelId,
+                _u: MessageId,
+                _t: &'a str,
+            ) -> GatewayFuture<'a, ()> {
+                panic!("unused on the long-chunk path")
+            }
+            fn dispatch_queued_turn<'a>(
+                &'a self,
+                _c: ChannelId,
+                _i: &'a crate::services::discord::Intervention,
+                _o: &'a str,
+                _h: bool,
+            ) -> GatewayFuture<'a, Result<(), String>> {
+                panic!("unused on the long-chunk path")
+            }
+            fn validate_live_routing<'a>(
+                &'a self,
+                _c: ChannelId,
+            ) -> GatewayFuture<'a, Result<(), String>> {
+                panic!("unused on the long-chunk path")
+            }
+            fn requester_mention(&self) -> Option<String> {
+                None
+            }
+            fn can_chain_locally(&self) -> bool {
+                true
+            }
+            fn bot_owner_provider(&self) -> Option<ProviderKind> {
+                None
+            }
+        }
+
+        fn long_gateway(send_ok: bool, delete_ok: bool) -> LongChunksFakeGateway {
+            LongChunksFakeGateway {
+                send_ok,
+                delete_ok,
+                send_calls: AtomicUsize::new(0),
+                delete_calls: AtomicUsize::new(0),
+                clock: AtomicUsize::new(1),
+                send_step: AtomicUsize::new(0),
+                delete_step: AtomicUsize::new(0),
+            }
+        }
+
+        async fn run_long_apply(
+            gw: &LongChunksFakeGateway,
+            locals: &mut Locals,
+        ) -> Arc<SharedData> {
+            let shared = make_shared_data_for_tests();
+            let cell = Arc::new(DeliveryLeaseCell::new(ch()));
+            apply_bridge_long_chunks_controller(
+                gw,
+                shared.as_ref(),
+                &ProviderKind::Claude,
+                ch(),
+                ch(),
+                Some("AgentDesk-claude-8151"),
+                &cell,
+                &shared.ui.placeholder_controller,
+                MessageId::new(MSG),
+                &"x".repeat(crate::services::discord::DISCORD_MSG_LIMIT + 10),
+                8192,
+                turn(),
+                START,
+                END,
+                true,
+                None,
+                None,
+                None,
+                Some(lease_key()),
+                BridgeLongChunksLocals {
+                    terminal_delivery_committed: &mut locals.committed,
+                    terminal_body_visible: &mut locals.visible,
+                    completion_footer_terminal_text: &mut locals.footer,
+                    preserve_inflight_for_cleanup_retry: &mut locals.preserve,
+                    bridge_skip_holder_owns_inflight: &mut locals.skip_holder,
+                    response_sent_offset: &mut locals.response_offset,
+                    inflight_response_sent_offset: &mut locals.inflight_offset,
+                },
+            )
+            .await;
+            shared
         }
 
         // (1) NoCommitOnFallback: SentFallbackAfterEditFailure → Unknown{fell_back}
@@ -1146,6 +1716,120 @@ mod tests {
             );
         }
 
+        #[tokio::test(flavor = "current_thread")]
+        async fn bridge_long_chunks_controller_delivered_deletes_anchor_and_advances() {
+            let _root = runtime_root_guard();
+            let gw = long_gateway(true, true);
+            let mut locals = Locals::default();
+            let shared = run_long_apply(&gw, &mut locals).await;
+            assert_eq!(gw.send_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(gw.delete_calls.load(Ordering::SeqCst), 1);
+            assert!(
+                gw.send_step.load(Ordering::SeqCst) < gw.delete_step.load(Ordering::SeqCst),
+                "placeholder delete must run after the full chunk send"
+            );
+            assert_eq!(shared.committed_relay_offset(ch()), END);
+            assert!(locals.committed && locals.visible);
+            assert_eq!(locals.response_offset, 8192);
+            assert_eq!(locals.inflight_offset, 8192);
+            assert_eq!(
+                locals.footer.as_ref().map(String::len),
+                Some(crate::services::discord::DISCORD_MSG_LIMIT + 10)
+            );
+            assert!(
+                shared.ui.placeholder_cleanup.terminal_cleanup_committed(
+                    &ProviderKind::Claude,
+                    ch(),
+                    MessageId::new(MSG)
+                ),
+                "delete cleanup success is recorded"
+            );
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn bridge_long_chunks_delete_failure_still_commits() {
+            let _root = runtime_root_guard();
+            let gw = long_gateway(true, false);
+            let mut locals = Locals::default();
+            let shared = run_long_apply(&gw, &mut locals).await;
+            assert_eq!(shared.committed_relay_offset(ch()), END);
+            assert!(locals.committed && locals.visible);
+            assert_eq!(locals.inflight_offset, 8192);
+            assert!(
+                shared
+                    .ui
+                    .placeholder_cleanup
+                    .terminal_cleanup_retry_pending(
+                        &ProviderKind::Claude,
+                        ch(),
+                        MessageId::new(MSG)
+                    ),
+                "delete failure is recorded but does not un-deliver"
+            );
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn bridge_long_chunks_send_failure_preserves_without_delete_or_advance() {
+            let gw = long_gateway(false, true);
+            let mut locals = Locals::default();
+            let shared = run_long_apply(&gw, &mut locals).await;
+            assert_eq!(gw.send_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(gw.delete_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(shared.committed_relay_offset(ch()), 0);
+            assert!(locals.preserve);
+            assert!(!locals.committed);
+            assert_eq!(locals.inflight_offset, 0);
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn bridge_long_chunks_acquire_transient_no_send() {
+            let shared = make_shared_data_for_tests();
+            let cell = Arc::new(DeliveryLeaseCell::new(ch()));
+            assert!(cell.try_acquire(
+                lease_key(),
+                LeaseHolder::Watcher { instance_id: 999 },
+                START,
+                END,
+                lease_now_ms().saturating_add(60_000),
+            ));
+            let gw = long_gateway(true, true);
+            let mut locals = Locals::default();
+            apply_bridge_long_chunks_controller(
+                &gw,
+                shared.as_ref(),
+                &ProviderKind::Claude,
+                ch(),
+                ch(),
+                Some("AgentDesk-claude-8151"),
+                &cell,
+                &shared.ui.placeholder_controller,
+                MessageId::new(MSG),
+                &"x".repeat(crate::services::discord::DISCORD_MSG_LIMIT + 10),
+                8192,
+                turn(),
+                START,
+                END,
+                false,
+                None,
+                None,
+                None,
+                Some(lease_key()),
+                BridgeLongChunksLocals {
+                    terminal_delivery_committed: &mut locals.committed,
+                    terminal_body_visible: &mut locals.visible,
+                    completion_footer_terminal_text: &mut locals.footer,
+                    preserve_inflight_for_cleanup_retry: &mut locals.preserve,
+                    bridge_skip_holder_owns_inflight: &mut locals.skip_holder,
+                    response_sent_offset: &mut locals.response_offset,
+                    inflight_response_sent_offset: &mut locals.inflight_offset,
+                },
+            )
+            .await;
+            assert_eq!(gw.send_calls.load(Ordering::SeqCst), 0);
+            assert!(locals.preserve && locals.skip_holder);
+            assert_eq!(shared.committed_relay_offset(ch()), 0);
+        }
+
         // (7) pure no-double-acquire gate + flag-ON skip: `bridge_terminal_lease_range`
         // returns None for any cut-over turn (the controller owns the lease).
         // Mutation: dropping `!cutover_short_replace` makes it return Some(..).
@@ -1199,7 +1883,11 @@ mod tests {
             let long = "x".repeat(crate::services::discord::DISCORD_MSG_LIMIT + 10);
             assert!(
                 !bridge_short_replace_cutover_decision(true, true, &long, true, true),
-                "a body that exceeds the inline limit is the long-chunk arm, EXCLUDED"
+                "a body that exceeds the inline limit is not the short-replace arm"
+            );
+            assert!(
+                bridge_long_chunks_cutover_decision(true, true, &long, true, true),
+                "the long-chunk predicate routes the same body when A5 is enabled"
             );
             // A short body with a real range + flag ON → cut over.
             assert!(bridge_short_replace_cutover_decision(
