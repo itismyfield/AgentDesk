@@ -364,6 +364,8 @@ src/
 │   │   ├── transcript_tail.rs
 │   │   └── tui_relay.rs
 │   ├── cluster/
+│   │   ├── stream_relay/
+│   │   │   └── identity.rs
 │   │   ├── capability_routing.rs
 │   │   ├── intake_router_hook.rs
 │   │   ├── intake_routing.rs
