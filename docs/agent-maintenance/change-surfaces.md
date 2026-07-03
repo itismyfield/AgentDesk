@@ -1232,7 +1232,9 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6213 lines; production LoC; -34
+  - `src/services/discord/turn_bridge/mod.rs` (6176 lines; production LoC; -37
+    from #4047 S2-b removing the gate-outcome suppression branch and threading
+    the background_agent_pending sniff through the completion producer; -34
     from #3998 S1-f2 retiring the A5/A6b rollout OR-in and routing site-5 from
     structural A5 inputs only; +43 from #3805 P2 PR-D (two-message SINK rollover
     re-anchor) — after a mid-turn
