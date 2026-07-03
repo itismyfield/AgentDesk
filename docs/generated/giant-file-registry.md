@@ -20,8 +20,8 @@
 | `src/services/discord/idle_recap.rs` | 1252 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/outbound/turn_output_controller.rs` | 1148 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/placeholder_sweeper.rs` | 1020 | discord-relay | 2026-08-31 | #3405 |
-| `src/services/discord/recovery_engine.rs` | 3032 | discord-relay | 2026-10-31 | #3834 |
-| `src/services/discord/relay_recovery.rs` | 1276 | discord-relay | 2026-08-31 | #3405 |
+| `src/services/discord/recovery_engine.rs` | 3034 | discord-relay | 2026-10-31 | #3834 |
+| `src/services/discord/relay_recovery.rs` | 1287 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/router/intake_gate.rs` | 1611 | discord-relay | 2026-10-31 | #3838 |
 | `src/services/discord/router/message_handler/intake_turn.rs` | 2814 | discord-relay | 2026-10-31 | #3837 |
 | `src/services/discord/session_relay_sink.rs` | 1698 | discord-relay | 2026-08-31 | #3405 |
@@ -82,7 +82,7 @@
 | `src/services/auto_queue/activate_command.rs` | 1506 |
 | `src/services/auto_queue/cancel_run.rs` | 1032 |
 | `src/services/claude.rs` | 2969 |
-| `src/services/claude_tui/input.rs` | 1930 |
+| `src/services/claude_tui/input.rs` | 1932 |
 | `src/services/codex.rs` | 3049 |
 | `src/services/codex_tmux_wrapper.rs` | 1403 |
 | `src/services/codex_tui/input.rs` | 1366 |
@@ -100,8 +100,8 @@
 | `src/services/onboarding/mod.rs` | 2937 |
 | `src/services/opencode.rs` | 2760 |
 | `src/services/platform/binary_resolver.rs` | 1381 |
-| `src/services/provider.rs` | 1613 |
-| `src/services/qwen.rs` | 2196 |
+| `src/services/provider.rs` | 1656 |
+| `src/services/qwen.rs` | 2198 |
 | `src/services/routines/agent_executor.rs` | 2021 |
 | `src/services/routines/discord_log.rs` | 1589 |
 | `src/services/routines/store.rs` | 3670 |

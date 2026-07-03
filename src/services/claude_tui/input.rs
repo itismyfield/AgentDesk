@@ -1535,6 +1535,8 @@ mod active_turn_wait_extension_tests {
 }
 
 fn pane_looks_ready_for_prompt(pane: &str) -> bool {
+    // Prompt-delivery readiness only. Session completion/readiness fallback must
+    // go through `FallbackPaneReadiness`, which is disabled for ClaudeTui.
     crate::services::tmux_common::tmux_capture_indicates_claude_tui_ready_for_input(pane)
 }
 

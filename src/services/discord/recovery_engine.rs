@@ -3216,9 +3216,11 @@ pub(super) async fn restore_inflight_turns(
                 start_offset,
                 tx.clone(),
                 Some(cancel_for_reader),
-                crate::services::provider::SessionProbe::tmux(
+                crate::services::provider::SessionProbe::tmux_with_structured_output(
                     tmux_for_reader.clone(),
                     provider_for_reader,
+                    Some(runtime_kind_for_reader),
+                    output_for_reader.clone(),
                 ),
             ) {
                 Ok(ReadOutputResult::Completed { offset })

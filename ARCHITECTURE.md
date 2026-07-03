@@ -927,6 +927,8 @@ src/
 │   │   └── mod.rs
 │   ├── tui_prompt_dedupe/
 │   │   └── synthetic_prompt.rs
+│   ├── tui_turn_state/
+│   │   └── completion_scan.rs
 │   ├── turn_orchestrator/
 │   │   ├── dispatch_reservation.rs
 │   │   ├── pending_queue_persistence.rs
@@ -963,6 +965,7 @@ src/
 │   ├── monitoring_store.rs
 │   ├── opencode.rs
 │   ├── operator_connectors.rs
+│   ├── pane_readiness.rs
 │   ├── pipeline_override.rs
 │   ├── pipeline_routes.rs
 │   ├── pr_summary.rs

@@ -35,7 +35,7 @@ use super::SharedData;
 use super::{DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, LeaseOutcome};
 
 pub(in crate::services::discord) mod cleanup;
-mod completion_signal;
+pub(in crate::services::discord) mod completion_signal;
 mod delivery_lease;
 mod finalize;
 mod finalize_context;

@@ -86,16 +86,14 @@ impl SessionActivityResolver {
                         {
                             return ready;
                         }
-                        if crate::services::tui_turn_state::pane_ready_fallback_allowed(
+                        crate::services::provider::tmux_session_fallback_ready_for_input(
+                            tmux_name,
                             &provider,
                             runtime_kind,
-                        ) {
-                            crate::services::provider::tmux_session_ready_for_input(
-                                tmux_name, &provider,
-                            )
-                        } else {
-                            false
-                        }
+                        )
+                        .is_some_and(
+                            crate::services::pane_readiness::FallbackPaneReadiness::is_ready,
+                        )
                     })
                     .unwrap_or(false);
             #[cfg(not(unix))]

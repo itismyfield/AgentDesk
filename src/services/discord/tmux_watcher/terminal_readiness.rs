@@ -207,11 +207,12 @@ pub(super) fn watcher_session_ready_for_input(
     ) {
         return ready;
     }
-    if crate::services::tui_turn_state::pane_ready_fallback_allowed(provider, runtime_kind) {
-        crate::services::provider::tmux_session_ready_for_input(tmux_session_name, provider)
-    } else {
-        false
-    }
+    crate::services::provider::tmux_session_fallback_ready_for_input(
+        tmux_session_name,
+        provider,
+        runtime_kind,
+    )
+    .is_some_and(crate::services::pane_readiness::FallbackPaneReadiness::is_ready)
 }
 
 pub(super) fn discard_watcher_pending_buffer_after_suppressed_turn(

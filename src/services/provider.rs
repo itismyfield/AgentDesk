@@ -1187,12 +1187,26 @@ impl SessionProbe {
 
     #[cfg(unix)]
     pub fn tmux(session_name: String, provider: ProviderKind) -> Self {
+        let runtime_kind =
+            crate::services::tmux_common::resolve_tmux_runtime_kind_marker(&session_name);
+        Self::tmux_with_runtime(session_name, provider, runtime_kind)
+    }
+
+    #[cfg(unix)]
+    pub fn tmux_with_runtime(
+        session_name: String,
+        provider: ProviderKind,
+        runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
+    ) -> Self {
         let name_alive = session_name.clone();
         let name_ready = session_name;
         let provider_ready = provider;
         Self::new(
             move || tmux_session_alive(&name_alive),
-            move || tmux_session_ready_for_input(&name_ready, &provider_ready),
+            move || {
+                tmux_session_fallback_ready_for_input(&name_ready, &provider_ready, runtime_kind)
+                    .is_some_and(crate::services::pane_readiness::FallbackPaneReadiness::is_ready)
+            },
         )
     }
 
@@ -1216,13 +1230,30 @@ impl SessionProbe {
                     None,
                 )
                 .map(crate::services::tui_turn_state::TuiReadyState::is_ready)
-                .unwrap_or_else(|| tmux_session_ready_for_input(&name_ready, &provider_ready))
+                .or_else(|| {
+                    tmux_session_fallback_ready_for_input(
+                        &name_ready,
+                        &provider_ready,
+                        runtime_kind,
+                    )
+                    .map(crate::services::pane_readiness::FallbackPaneReadiness::is_ready)
+                })
+                .unwrap_or(false)
             },
         )
     }
 
     #[cfg(not(unix))]
     pub fn tmux(_session_name: String, _provider: ProviderKind) -> Self {
+        Self::new(|| false, || false)
+    }
+
+    #[cfg(not(unix))]
+    pub fn tmux_with_runtime(
+        _session_name: String,
+        _provider: ProviderKind,
+        _runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
+    ) -> Self {
         Self::new(|| false, || false)
     }
 
@@ -1384,21 +1415,33 @@ still running";
 }
 
 #[cfg(unix)]
-pub(crate) fn tmux_session_ready_for_input(
+pub(crate) fn tmux_session_fallback_ready_for_input(
     tmux_session_name: &str,
     provider: &ProviderKind,
-) -> bool {
-    crate::services::platform::tmux::capture_pane(tmux_session_name, -80)
-        .map(|stdout| tmux_capture_indicates_ready_for_input(&stdout, provider))
-        .unwrap_or(false)
+    runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
+) -> Option<crate::services::pane_readiness::FallbackPaneReadiness> {
+    crate::services::pane_readiness::FallbackPaneReadiness::from_pane_scrape(
+        provider,
+        runtime_kind,
+        || {
+            crate::services::platform::tmux::capture_pane(tmux_session_name, -80)
+                .map(|stdout| tmux_capture_indicates_ready_for_input(&stdout, provider))
+                .unwrap_or(false)
+        },
+    )
 }
 
 #[cfg(not(unix))]
-pub(crate) fn tmux_session_ready_for_input(
+pub(crate) fn tmux_session_fallback_ready_for_input(
     _tmux_session_name: &str,
-    _provider: &ProviderKind,
-) -> bool {
-    false
+    provider: &ProviderKind,
+    runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
+) -> Option<crate::services::pane_readiness::FallbackPaneReadiness> {
+    crate::services::pane_readiness::FallbackPaneReadiness::from_pane_scrape(
+        provider,
+        runtime_kind,
+        || false,
+    )
 }
 
 const READY_FOR_INPUT_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);

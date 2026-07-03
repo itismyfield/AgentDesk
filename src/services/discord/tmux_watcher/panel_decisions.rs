@@ -24,8 +24,8 @@ use super::*;
 ///                         the SAME finalize path as `Done` (flag-independent): the
 ///                         fresh-idle gate already PROVES pane idle (it only fires
 ///                         after `watcher_session_ready_for_input` — the SAME
-///                         `pane_ready_fallback_allowed && tmux_session_ready_for_input`
-///                         predicate the 5a far-backstop uses for `Unknown` — held
+///                         `FallbackPaneReadiness` predicate the 5a far-backstop
+///                         uses for `Unknown` — held
 ///                         over the idle timeout), so finalizing promptly here is
 ///                         behaviour-equivalent to the old `mailbox_finalize_owed`
 ///                         flag (owed was ~always true at this arm), without the
