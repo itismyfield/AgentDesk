@@ -145,7 +145,9 @@
     "session ended … start a new session" tmux-death notice and its
     `should_send_session_ended_notice`/`session_ended_notice`/
     `TmuxDeathLifecycleDecision` plumbing).
-  - `src/services/discord/tmux.rs` (1501 lines; -6 from #3874 removing dead
+  - `src/services/discord/tmux.rs` (1489 lines; -12 from #4047 S2-b deleting
+    the GateTimeout submit path and adding the shared bounded
+    background-agent sniff wrapper; -6 from #3874 removing dead
     permanently-None `Option<&Db>` threading from tmux/outbound call paths,
     with no relay or delivery semantics change; +22 from #3871 persisting the
     streamed rollover-prefix ids through the watcher seed/restore + persist path
@@ -1035,7 +1037,10 @@
     and covers frozen nonzero-frontier / empty-capture variants. This admission
     is bugfix-only for PR #4035; further recovery policy expansion should extract
     decision/apply helpers instead of growing this file.)
-  - `src/services/discord/recovery_engine.rs` (3017 lines; +97 from #3998 D1:
+  - `src/services/discord/recovery_engine.rs` (3016 lines; net -1 from #4047
+    S2-b: gate-outcome suppression removed, background_agent_pending producer
+    extracted to `recovery_engine/status_panel_completion_producer.rs`; +97
+    from #3998 D1:
     threaded recovery turn identity into terminal-text relay call sites and
     declared the new `recovery_engine/terminal_text_idempotency.rs` leaf; the
     no-anchor lease/send/anchor-persistence body lives in that leaf, while the
@@ -1232,7 +1237,9 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6213 lines; production LoC; -34
+  - `src/services/discord/turn_bridge/mod.rs` (6176 lines; production LoC; -37
+    from #4047 S2-b removing the gate-outcome suppression branch and threading
+    the background_agent_pending sniff through the completion producer; -34
     from #3998 S1-f2 retiring the A5/A6b rollout OR-in and routing site-5 from
     structural A5 inputs only; +43 from #3805 P2 PR-D (two-message SINK rollover
     re-anchor) — after a mid-turn
@@ -1588,11 +1595,9 @@
   - `src/services/discord/{commands/text_commands.rs,
     discord_config_audit.rs, router/intake_gate.rs}` (all 1000+ production
     lines).
-  - `src/services/discord/placeholder_sweeper.rs` (1020 lines; +1 from the
-    windows-build `#[cfg(unix)]` gate on the #3886 reconcile call; +5 from #3886
-    calling the deterministic TimedOut-completion-gate status-panel reconcile
-    (`super::tmux::reconcile_timed_out_tui_status_panel`) before the age-based
-    orphan-panel reclaim; +10 from #3859
+  - `src/services/discord/placeholder_sweeper.rs` (1014 lines; -6 from #4047
+    S2-b deleting the TimedOut-completion-gate status-panel reconcile call —
+    the suppression path it backfilled no longer exists; +10 from #3859
     draining the new `abandon_request_store` each sweep pass (finalizing
     failure-path-stranded placeholders to "중단됨" by message id, independent of
     the inflight lifecycle); crossed the giant

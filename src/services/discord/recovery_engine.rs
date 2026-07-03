@@ -28,6 +28,9 @@ use std::process::Command;
 
 #[path = "recovery_engine/status_panel.rs"]
 mod recovery_status_panel;
+#[path = "recovery_engine/status_panel_completion_producer.rs"]
+mod status_panel_completion_producer;
+use self::status_panel_completion_producer::*;
 
 // #3479 r8: behavior-preserving extraction of pure clusters into leaf modules.
 #[path = "recovery_engine/jsonl_extract.rs"]
@@ -482,30 +485,19 @@ pub(in crate::services::discord) async fn relay_recovered_terminal_text_to_place
 }
 
 /// Outcome of `complete_recovery_visible_turn` exposed to callers so they can
-/// tell whether the visible completion UI was emitted. A TUI quiescence timeout
-/// may suppress that UI, but once recovery has terminal delivery evidence it
-/// must still release mailbox/inflight ownership.
+/// tell whether recovery emitted the visible completion UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RecoveryCompletionOutcome {
     /// Visible completion emitted (or status-panel-v2 was disabled / no
     /// status message id was wired). Callers may proceed with downstream
     /// dispatch / analytics / mailbox finalization as before.
     Emitted,
-    /// Terminal response delivery is authoritative, but the visible completion
-    /// status/reaction was suppressed because the TUI quiescence probe timed
-    /// out. Callers still proceed with cleanup.
-    VisibleCompletionSuppressed,
 }
 
 impl RecoveryCompletionOutcome {
     /// `true` when callers should proceed with downstream side effects.
-    /// Visible completion suppression is not a mailbox correctness primitive.
     pub(super) fn should_proceed(self) -> bool {
-        matches!(
-            self,
-            RecoveryCompletionOutcome::Emitted
-                | RecoveryCompletionOutcome::VisibleCompletionSuppressed
-        )
+        matches!(self, RecoveryCompletionOutcome::Emitted)
     }
 }
 
@@ -535,6 +527,34 @@ async fn complete_recovery_visible_turn(
     background: bool,
     source: &'static str,
 ) -> RecoveryCompletionOutcome {
+    complete_recovery_visible_turn_with_sniffer(
+        http,
+        shared,
+        provider,
+        state,
+        background,
+        source,
+        |tmux_session_name| async move {
+            super::tmux::sniff_background_agent_pending_for_completion(tmux_session_name.as_deref())
+                .await
+        },
+    )
+    .await
+}
+
+async fn complete_recovery_visible_turn_with_sniffer<S, SniffFuture>(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &super::inflight::InflightTurnState,
+    background: bool,
+    source: &'static str,
+    sniff_background_agent_pending: S,
+) -> RecoveryCompletionOutcome
+where
+    S: FnOnce(Option<String>) -> SniffFuture,
+    SniffFuture: std::future::Future<Output = bool>,
+{
     let channel_id = ChannelId::new(state.channel_id);
     // A recovery/orphan turn may carry no user message (user_msg_id == 0,
     // e.g. a TUI-direct turn). There is then no user message to react against,
@@ -542,19 +562,9 @@ async fn complete_recovery_visible_turn(
     // status-panel completion still run. `MessageId::new(0)` would panic.
     let user_msg_id = super::inflight::optional_message_id(state.user_msg_id);
 
-    // #2161 (Codex round-2 M1): recovery completes a turn based on JSONL
-    // `result` + output-file drain, not tmux pane readiness. For ClaudeTui
-    // sessions the same premature-completion bug applies — gate the
-    // user-visible `응답 완료` emit on quiescence, and on timeout skip
-    // the emit so the next watcher pass / placeholder sweeper reconciles.
-    // The gate lives in the `tmux` module (`#[cfg(unix)]`); on non-unix
-    // targets we skip it and emit completion as normal.
-    //
-    // #2293 H3 — the gate is hoisted ABOVE the ⏳ → ✅ reaction so a
-    // TimedOut outcome ALSO suppresses the reaction (was: reaction ran
-    // before the gate, lying about completion to the user). Recovery's
-    // visible side effects now follow the same ordering as the bridge and
-    // watcher paths.
+    // #4047: recovery completes from terminal evidence, not pane quiescence.
+    // The TUI gate is retained as observation-only liveness/strict-signal
+    // telemetry; it must not suppress the visible completion event or reaction.
     #[cfg(unix)]
     if let Some(tmux_session_name) = state.tmux_session_name.as_deref() {
         let outcome = super::tmux::run_tui_completion_gate(
@@ -564,16 +574,7 @@ async fn complete_recovery_visible_turn(
             state.task_notification_kind,
         )
         .await;
-        if !outcome.should_emit_completion() {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!(
-                provider = %provider.as_str(),
-                channel = channel_id.get(),
-                source = source,
-                "[{ts}] ⚠ #2935 recovery visible completion suppressed — TUI quiescence gate timed out; continuing dispatch / analytics / mailbox cleanup because recovery already has terminal response delivery evidence"
-            );
-            return RecoveryCompletionOutcome::VisibleCompletionSuppressed;
-        }
+        let _ = outcome;
     }
 
     if let Some(user_msg_id) = user_msg_id {
@@ -628,21 +629,19 @@ async fn complete_recovery_visible_turn(
         return RecoveryCompletionOutcome::Emitted;
     };
 
-    let mut last_status_panel_text = String::new();
-    let _committed = super::turn_bridge::complete_status_panel_v2_with_http(
-        shared,
+    complete_recovery_status_panel_with_sniffer(
         http,
+        shared,
+        provider,
+        state,
         channel_id,
         status_msg_id,
-        provider,
         started_at_unix,
-        &mut last_status_panel_text,
         background,
         source,
-        (Some(state.user_msg_id), Some(state)),
+        sniff_background_agent_pending,
     )
-    .await;
-    RecoveryCompletionOutcome::Emitted
+    .await
 }
 
 #[cfg(test)]
@@ -657,8 +656,44 @@ mod recovery_dispatch_gate_tests {
 #[cfg(test)]
 mod recovery_completion_outcome_tests {
     use super::{RecoveryCompletionOutcome, recovery_status_panel};
+    use crate::services::agent_protocol::StatusEvent;
     use crate::services::provider::ProviderKind;
     use poise::serenity_prelude::{ChannelId, MessageId};
+    use std::sync::{Arc, Mutex};
+
+    struct RuntimeRootGuard {
+        previous: Option<std::ffi::OsString>,
+        _root: tempfile::TempDir,
+    }
+
+    impl RuntimeRootGuard {
+        fn new() -> Self {
+            let root = tempfile::tempdir().expect("runtime root");
+            let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
+            unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root.path()) };
+            Self {
+                previous,
+                _root: root,
+            }
+        }
+    }
+
+    impl Drop for RuntimeRootGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
+
+    fn isolate_agentdesk_runtime_root() -> (std::sync::MutexGuard<'static, ()>, RuntimeRootGuard) {
+        let lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = RuntimeRootGuard::new();
+        (lock, root)
+    }
 
     fn state_for_recovery(user_msg_id: u64) -> super::inflight::InflightTurnState {
         serde_json::from_value(serde_json::json!({
@@ -688,14 +723,6 @@ mod recovery_completion_outcome_tests {
     #[test]
     fn emitted_lets_callers_proceed_with_dispatch_finalize() {
         assert!(RecoveryCompletionOutcome::Emitted.should_proceed());
-    }
-
-    #[test]
-    fn visible_completion_suppression_still_allows_cleanup() {
-        assert!(
-            RecoveryCompletionOutcome::VisibleCompletionSuppressed.should_proceed(),
-            "#2935: quiescence timeout may hide 응답 완료, but must not preserve stale active ownership"
-        );
     }
 
     #[test]
@@ -773,6 +800,120 @@ mod recovery_completion_outcome_tests {
             Some(None),
             "flag-off v2 recovery preserves the SendFallback rollback behavior when no status_message_id was persisted"
         );
+    }
+
+    #[tokio::test]
+    async fn recovery_status_panel_completion_emits_background_agent_pending_payload() {
+        let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
+        let mut shared = super::super::make_shared_data_for_tests();
+        Arc::get_mut(&mut shared)
+            .expect("fresh test shared data should be uniquely owned")
+            .ui
+            .status_panel_v2_enabled = true;
+        let http = poise::serenity_prelude::Http::new("Bot test-token");
+        let provider = ProviderKind::Claude;
+        let state = state_for_recovery(9101);
+        let channel_id = ChannelId::new(state.channel_id);
+        let started_at_unix = 1_700_000_000;
+        shared.ui.placeholder_live_events.push_status_event(
+            channel_id,
+            StatusEvent::TurnCompleted {
+                background: false,
+                background_agent_pending: true,
+            },
+        );
+        let mut last_status_panel_text = shared.ui.placeholder_live_events.render_status_panel(
+            channel_id,
+            &provider,
+            started_at_unix,
+        );
+
+        let committed = super::super::turn_bridge::complete_status_panel_v2_with_http(
+            &shared,
+            &http,
+            channel_id,
+            Some(MessageId::new(4_047_301)),
+            &provider,
+            started_at_unix,
+            &mut last_status_panel_text,
+            false,
+            true,
+            "test_recovery_background_agent_pending_payload",
+            (Some(state.user_msg_id), Some(&state)),
+        )
+        .await;
+
+        assert!(committed);
+        let rendered = shared
+            .ui
+            .placeholder_live_events
+            .render_completion_footer(channel_id, &provider, "⠸");
+        let block = rendered.block.expect("background-agent pending footer");
+
+        assert!(rendered.has_unfinished_entries);
+        assert!(block.contains("Background agents"));
+        assert!(block.contains("Waiting for background agents ⠸"));
+    }
+
+    #[tokio::test]
+    async fn recovery_status_panel_completion_producer_threads_sniffed_background_agent_pending() {
+        let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
+        for (pending, channel_raw) in [(true, 4_047_311), (false, 4_047_312)] {
+            let shared = super::super::make_shared_data_for_tests();
+            let provider = ProviderKind::Claude;
+            let mut state = state_for_recovery(9101);
+            state.channel_id = channel_raw;
+            state.tmux_session_name = Some("AgentDesk-claude-recovery-background-test".to_string());
+            let channel_id = ChannelId::new(state.channel_id);
+            let observed_tmux_session = Arc::new(Mutex::new(Vec::new()));
+            let sniffer_observed_tmux_session = observed_tmux_session.clone();
+            let sink_shared = shared.clone();
+
+            let outcome = super::complete_recovery_status_panel_with_sniffer_and_sink(
+                &state,
+                move |tmux_session_name| async move {
+                    sniffer_observed_tmux_session
+                        .lock()
+                        .expect("observed tmux session lock")
+                        .push(tmux_session_name);
+                    pending
+                },
+                move |background_agent_pending| async move {
+                    sink_shared.ui.placeholder_live_events.push_status_event(
+                        channel_id,
+                        StatusEvent::TurnCompleted {
+                            background: false,
+                            background_agent_pending,
+                        },
+                    );
+                    true
+                },
+            )
+            .await;
+
+            assert_eq!(outcome, RecoveryCompletionOutcome::Emitted);
+            assert_eq!(
+                observed_tmux_session
+                    .lock()
+                    .expect("observed tmux session lock")
+                    .as_slice(),
+                &[Some(
+                    "AgentDesk-claude-recovery-background-test".to_string()
+                )]
+            );
+
+            let rendered = shared
+                .ui
+                .placeholder_live_events
+                .render_completion_footer(channel_id, &provider, "⠸");
+            let block_has_background_agents = rendered
+                .block
+                .as_deref()
+                .is_some_and(|block| block.contains("Background agents"));
+
+            assert_eq!(rendered.has_unfinished_entries, pending);
+            assert_eq!(block_has_background_agents, pending);
+        }
     }
 
     #[test]

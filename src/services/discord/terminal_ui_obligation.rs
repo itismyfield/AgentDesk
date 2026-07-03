@@ -15,12 +15,10 @@ use serde::{Deserialize, Serialize};
 use serenity::{ChannelId, MessageId};
 
 use super::inflight::{self, InflightTurnState};
-use super::placeholder_live_events::TerminalUiObligationPanelStatus;
 use super::{SharedData, http, runtime_store};
 use crate::services::provider::ProviderKind;
 
 const SWEEP_INTERVAL_SECS: u64 = 15;
-const OBLIGATION_DEADLINE_SECS: i64 = 600;
 const EDIT_RETRY_GIVE_UP_GRACE_SECS: i64 = (SWEEP_INTERVAL_SECS as i64) * 2;
 
 static SWEEPER_STARTED: LazyLock<Mutex<HashSet<String>>> =
@@ -76,137 +74,6 @@ pub(in crate::services::discord) fn terminal_ui_obligation_now_unix() -> i64 {
         .unwrap_or(0)
 }
 
-pub(in crate::services::discord) fn build_terminal_ui_obligation(
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    status_message_id: MessageId,
-    generation_mtime_ns: i64,
-    pending_state_text: String,
-    completion_text: String,
-    deadline_text: String,
-    created_unix: i64,
-) -> TerminalUiObligation {
-    TerminalUiObligation {
-        channel_id: channel_id.get(),
-        provider: provider.as_str().to_string(),
-        status_message_id: status_message_id.get(),
-        generation_mtime_ns,
-        pending_state_text,
-        completion_text,
-        deadline_text,
-        created_unix,
-        deadline_unix: created_unix.saturating_add(OBLIGATION_DEADLINE_SECS),
-    }
-}
-
-pub(in crate::services::discord) fn should_record_terminal_ui_obligation(
-    terminal_delivery_committed: bool,
-    gate_timed_out: bool,
-    status_message_id_present: bool,
-) -> bool {
-    terminal_delivery_committed && gate_timed_out && status_message_id_present
-}
-
-pub(in crate::services::discord) async fn record_terminal_ui_obligation_pending_status(
-    shared: &SharedData,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    status_message_id: MessageId,
-    status_panel_started_at: i64,
-    inflight_state: &InflightTurnState,
-) {
-    let pending_state_text = shared
-        .ui
-        .placeholder_live_events
-        .render_terminal_ui_obligation_panel(
-            channel_id,
-            provider,
-            status_panel_started_at,
-            TerminalUiObligationPanelStatus::Pending,
-        );
-    let completion_text = shared
-        .ui
-        .placeholder_live_events
-        .render_terminal_ui_obligation_panel(
-            channel_id,
-            provider,
-            status_panel_started_at,
-            TerminalUiObligationPanelStatus::Completed,
-        );
-    let deadline_text = shared
-        .ui
-        .placeholder_live_events
-        .render_terminal_ui_obligation_panel(
-            channel_id,
-            provider,
-            status_panel_started_at,
-            TerminalUiObligationPanelStatus::Deadline,
-        );
-    let created_unix = terminal_ui_obligation_now_unix();
-    let obligation = build_terminal_ui_obligation(
-        provider,
-        channel_id,
-        status_message_id,
-        terminal_ui_generation_mtime_for_inflight(inflight_state),
-        pending_state_text.clone(),
-        completion_text,
-        deadline_text,
-        created_unix,
-    );
-    match write_obligation(&obligation) {
-        Ok(()) => {
-            edit_terminal_ui_pending_status(
-                shared,
-                provider,
-                channel_id,
-                status_message_id,
-                &pending_state_text,
-            )
-            .await;
-        }
-        Err(error) => {
-            tracing::warn!(
-                provider = %provider.as_str(),
-                channel = channel_id.get(),
-                status_message_id = status_message_id.get(),
-                error = %error,
-                "failed to persist terminal UI obligation after committed TUI quiescence timeout"
-            );
-        }
-    }
-}
-
-async fn edit_terminal_ui_pending_status(
-    shared: &SharedData,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    status_message_id: MessageId,
-    pending_state_text: &str,
-) {
-    let Some(http) = shared.serenity_http_or_token_fallback() else {
-        tracing::warn!(
-            provider = %provider.as_str(),
-            channel = channel_id.get(),
-            status_message_id = status_message_id.get(),
-            "missing Discord HTTP handle for terminal UI obligation pending status; sweeper will retry"
-        );
-        return;
-    };
-    match http::edit_channel_message(&http, channel_id, status_message_id, pending_state_text).await
-    {
-        Ok(_) => {}
-        Err(error) => {
-            tracing::warn!(
-                provider = %provider.as_str(),
-                channel = channel_id.get(),
-                status_message_id = status_message_id.get(),
-                error = %error,
-                "failed to edit terminal UI obligation pending status; sweeper will retry"
-            );
-        }
-    }
-}
-
 pub(in crate::services::discord) fn terminal_ui_obligation_generation_is_current(
     obligation_generation_mtime_ns: i64,
     current_generation_mtime_ns: i64,
@@ -244,14 +111,6 @@ pub(in crate::services::discord) fn terminal_ui_generation_mtime_for_inflight(
                 .filter(|generation| *generation != 0)
         })
         .unwrap_or_else(|| runtime_store::load_generation() as i64)
-}
-
-pub(in crate::services::discord) fn write_obligation(
-    obligation: &TerminalUiObligation,
-) -> Result<(), String> {
-    let root = runtime_store::discord_terminal_ui_obligations_root()
-        .ok_or_else(|| "runtime root unavailable for terminal UI obligation".to_string())?;
-    write_obligation_in_root(&root, obligation)
 }
 
 #[allow(dead_code)] // #3607 public sidecar API; production currently sweeps via list_obligations.
@@ -568,6 +427,7 @@ fn obligation_path_in_root(root: &Path, provider: &str, channel_id: u64) -> Path
     root.join(provider).join(format!("{channel_id}.json"))
 }
 
+#[cfg(test)]
 fn write_obligation_in_root(root: &Path, obligation: &TerminalUiObligation) -> Result<(), String> {
     let json = serde_json::to_string_pretty(obligation)
         .map_err(|error| format!("serialize terminal UI obligation: {error}"))?;
@@ -690,14 +550,6 @@ mod tests {
         assert!(!terminal_ui_obligation_generation_is_current(10, 11));
         assert!(!terminal_ui_obligation_generation_is_current(0, 0));
         assert!(!terminal_ui_obligation_generation_is_current(10, 0));
-    }
-
-    #[test]
-    fn should_record_terminal_ui_obligation_only_for_committed_timedout_status_card() {
-        assert!(should_record_terminal_ui_obligation(true, true, true));
-        assert!(!should_record_terminal_ui_obligation(false, true, true));
-        assert!(!should_record_terminal_ui_obligation(true, false, true));
-        assert!(!should_record_terminal_ui_obligation(true, true, false));
     }
 
     #[test]

@@ -1,5 +1,4 @@
 use super::*;
-use crate::services::discord::turn_finalizer::completion_signal::CompletionSignalMode;
 
 fn state_for_matched_session(
     provider: ProviderKind,
@@ -36,6 +35,11 @@ fn state_for_matched_session(
         }))
         .expect("deserialize test inflight");
     state.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
+    state.runtime_kind = Some(match provider {
+        ProviderKind::Claude => crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+        ProviderKind::Codex => crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+        _ => crate::services::agent_protocol::RuntimeHandoffKind::ProcessBackend,
+    });
     state
 }
 
@@ -64,13 +68,8 @@ fn matched_gate_signal_for_file(
         &file.display().to_string(),
     );
     state.runtime_kind = Some(runtime_kind);
-    matched_session_completion_signal(
-        &provider,
-        Some(&state),
-        &tmux_session_name,
-        CompletionSignalMode::GateQuiescence,
-    )
-    .expect("matched session should produce a signal")
+    matched_session_completion_signal(&provider, Some(&state), &tmux_session_name)
+        .expect("matched session should produce a signal")
 }
 
 #[test]
@@ -84,12 +83,7 @@ fn matched_session_terminal_jsonl_confirms_idle_without_turn_source_branch() {
     );
 
     assert_eq!(
-        matched_session_completion_signal(
-            &ProviderKind::Claude,
-            Some(&state),
-            tmux_session_name,
-            CompletionSignalMode::GateQuiescence,
-        ),
+        matched_session_completion_signal(&ProviderKind::Claude, Some(&state), tmux_session_name),
         Some(crate::services::discord::turn_finalizer::CompletionSignal::Done)
     );
 }
@@ -106,18 +100,13 @@ fn turn_source_does_not_affect_jsonl_completion_probe() {
     state.turn_source = crate::services::discord::inflight::TurnSource::Managed;
 
     assert_eq!(
-        matched_session_completion_signal(
-            &ProviderKind::Claude,
-            Some(&state),
-            tmux_session_name,
-            CompletionSignalMode::GateQuiescence,
-        ),
+        matched_session_completion_signal(&ProviderKind::Claude, Some(&state), tmux_session_name),
         Some(crate::services::discord::turn_finalizer::CompletionSignal::Done)
     );
 }
 
 #[test]
-fn gate_quiescence_preserves_pre_s2a_acceptance_matrix() {
+fn finalize_authority_acceptance_matrix_is_the_gate_matrix() {
     use crate::services::agent_protocol::RuntimeHandoffKind;
     use crate::services::discord::turn_finalizer::{
         CompletionSignal, completion_signal_from_transcript,
@@ -132,7 +121,6 @@ fn gate_quiescence_preserves_pre_s2a_acceptance_matrix() {
                 r#"{"type":"result","result":"done","session_id":"s"}"#,
                 r#"{"ty"#,
             ][..],
-            true,
             false,
         ),
         (
@@ -140,7 +128,6 @@ fn gate_quiescence_preserves_pre_s2a_acceptance_matrix() {
             ProviderKind::Claude,
             RuntimeHandoffKind::ClaudeTui,
             &[r#"{"type":"system","subtype":"init","session_id":"s"}"#][..],
-            true,
             false,
         ),
         (
@@ -148,7 +135,6 @@ fn gate_quiescence_preserves_pre_s2a_acceptance_matrix() {
             ProviderKind::Codex,
             RuntimeHandoffKind::CodexTui,
             &[r#"{"type":"session_meta","payload":{"id":"s","cwd":"/repo"}}"#][..],
-            true,
             false,
         ),
         (
@@ -156,7 +142,6 @@ fn gate_quiescence_preserves_pre_s2a_acceptance_matrix() {
             ProviderKind::Codex,
             RuntimeHandoffKind::CodexTui,
             &[r#"{"type":"thread.started","thread_id":"t"}"#][..],
-            true,
             false,
         ),
         (
@@ -164,7 +149,6 @@ fn gate_quiescence_preserves_pre_s2a_acceptance_matrix() {
             ProviderKind::Codex,
             RuntimeHandoffKind::CodexTui,
             &[r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#][..],
-            true,
             false,
         ),
         (
@@ -172,7 +156,6 @@ fn gate_quiescence_preserves_pre_s2a_acceptance_matrix() {
             ProviderKind::Codex,
             RuntimeHandoffKind::CodexTui,
             &[r#"{"type":"item.completed","item":{"type":"agent_message","text":"done"}}"#][..],
-            true,
             false,
         ),
         (
@@ -181,14 +164,12 @@ fn gate_quiescence_preserves_pre_s2a_acceptance_matrix() {
             RuntimeHandoffKind::ClaudeTui,
             &[r#"{"type":"result","result":"done","session_id":"s"}"#][..],
             true,
-            true,
         ),
         (
             "claude_turn_duration",
             ProviderKind::Claude,
             RuntimeHandoffKind::ClaudeTui,
             &[r#"{"type":"system","subtype":"turn_duration","session_id":"s"}"#][..],
-            true,
             true,
         ),
         (
@@ -197,7 +178,6 @@ fn gate_quiescence_preserves_pre_s2a_acceptance_matrix() {
             RuntimeHandoffKind::ClaudeTui,
             &[r#"{"type":"system","subtype":"stop_hook_summary","session_id":"s"}"#][..],
             true,
-            true,
         ),
         (
             "claude_interrupt_marker",
@@ -205,14 +185,12 @@ fn gate_quiescence_preserves_pre_s2a_acceptance_matrix() {
             RuntimeHandoffKind::ClaudeTui,
             &[r#"{"type":"user","message":{"content":"[Request interrupted by user]"}}"#][..],
             true,
-            true,
         ),
         (
             "codex_turn_completed",
             ProviderKind::Codex,
             RuntimeHandoffKind::CodexTui,
             &[r#"{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":3}}"#][..],
-            true,
             true,
         ),
         (
@@ -223,12 +201,11 @@ fn gate_quiescence_preserves_pre_s2a_acceptance_matrix() {
                 r#"{"type":"result","result":"done","session_id":"s"}"#,
                 r#"{"type":"permission-mode","mode":"bypassPermissions"}"#,
             ][..],
-            false,
             true,
         ),
     ];
 
-    for (name, provider, runtime_kind, lines, old_gate_confirms, finalize_confirms) in cases {
+    for (name, provider, runtime_kind, lines, finalize_confirms) in cases {
         let file = write_jsonl(lines);
         let gate_signal =
             matched_gate_signal_for_file(provider.clone(), runtime_kind, file.path(), name);
@@ -237,8 +214,8 @@ fn gate_quiescence_preserves_pre_s2a_acceptance_matrix() {
 
         assert_eq!(
             gate_signal == CompletionSignal::Done,
-            old_gate_confirms,
-            "{name}: GateQuiescence drifted from pre-S2-a gate outcome"
+            finalize_confirms,
+            "{name}: matched gate signal must use FinalizeAuthority"
         );
         assert_eq!(
             finalizer_signal == CompletionSignal::Done,
@@ -249,7 +226,7 @@ fn gate_quiescence_preserves_pre_s2a_acceptance_matrix() {
 }
 
 #[test]
-fn gate_quiescence_keeps_old_64kb_tail_limit() {
+fn completion_gate_uses_widened_finalize_authority_scan() {
     use crate::services::agent_protocol::RuntimeHandoffKind;
     use crate::services::discord::turn_finalizer::{
         CompletionSignal, completion_signal_from_transcript,
@@ -276,15 +253,88 @@ fn gate_quiescence_keeps_old_64kb_tail_limit() {
         file.path(),
     );
 
-    assert_eq!(
-        gate_signal == CompletionSignal::Done,
-        false,
-        "GateQuiescence must keep the old 64KB gate limit and not confirm"
-    );
+    assert_eq!(gate_signal, CompletionSignal::Done);
     assert_eq!(
         finalizer_signal,
         CompletionSignal::Done,
         "FinalizeAuthority keeps the S2-a widened scan"
+    );
+}
+
+#[test]
+fn terminator_done_emits_even_when_legacy_quiescence_is_busy() {
+    let file = write_jsonl(&[r#"{"type":"result","result":"done","session_id":"s"}"#]);
+    let tmux_session_name = "AgentDesk-claude-busy-pane";
+    let state = state_for_matched_session(
+        ProviderKind::Claude,
+        tmux_session_name,
+        &file.path().display().to_string(),
+    );
+
+    assert_eq!(
+        matched_session_completion_signal(&ProviderKind::Claude, Some(&state), tmux_session_name),
+        Some(crate::services::discord::turn_finalizer::CompletionSignal::Done)
+    );
+    assert!(
+        TuiCompletionGateOutcome::BusyObserved.should_emit_completion(),
+        "legacy scrape/quiescence observation must not suppress a strict terminator Done"
+    );
+}
+
+#[test]
+fn issue_3268_handoff_done_signal_is_not_suppressed_by_busy_observation() {
+    let file = write_jsonl(&[r#"{"type":"result","result":"done","session_id":"s"}"#]);
+    let tmux_session_name = "AgentDesk-claude-stale-handoff-3268";
+    let mut state = state_for_matched_session(
+        ProviderKind::Claude,
+        tmux_session_name,
+        &file.path().display().to_string(),
+    );
+    state.current_msg_id = state.user_msg_id + 1;
+    state.status_message_id = Some(state.current_msg_id + 1);
+    state.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
+
+    assert!(
+        jsonl_terminal_can_confirm_completion(Some(&state)),
+        "watcher-owned handoff shape is allowed to observe the strict JSONL terminator"
+    );
+    assert_eq!(
+        matched_session_completion_signal(&ProviderKind::Claude, Some(&state), tmux_session_name),
+        Some(crate::services::discord::turn_finalizer::CompletionSignal::Done)
+    );
+    assert!(
+        TuiCompletionGateOutcome::BusyObserved.should_emit_completion(),
+        "#3268: a busy/stale handoff observation must not strand a completed turn"
+    );
+}
+
+#[test]
+fn issue_3540_rotation_misdetect_cannot_suppress_strict_done_completion() {
+    let file = write_jsonl(&[r#"{"type":"result","result":"done","session_id":"s"}"#]);
+    let tmux_session_name = "AgentDesk-claude-rotation-3540";
+    let mut state = state_for_matched_session(
+        ProviderKind::Claude,
+        tmux_session_name,
+        &file.path().display().to_string(),
+    );
+    state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+    state.current_msg_id = state.user_msg_id + 1;
+    state.status_message_id = Some(state.current_msg_id + 1);
+    state.turn_start_offset = Some(8192);
+    state.last_offset = 8192;
+
+    assert!(
+        !jsonl_terminal_can_confirm_completion(Some(&state)),
+        "the local gate observation may still be unable to prove the rotated/racy offset shape"
+    );
+    assert_eq!(
+        matched_session_completion_signal(&ProviderKind::Claude, Some(&state), tmux_session_name),
+        Some(crate::services::discord::turn_finalizer::CompletionSignal::Done),
+        "FinalizeAuthority reads the provider terminator directly"
+    );
+    assert!(
+        TuiCompletionGateOutcome::BusyObserved.should_emit_completion(),
+        "#3540: rotated/racy scrape state is observability only after strict Done"
     );
 }
 
@@ -350,16 +400,16 @@ fn relay_ownership_only_turn_cannot_confirm_idle_via_tui_completion_gate() {
     state.relay_ownership_only = true;
 
     assert!(
-        inflight_suppresses_tui_completion_lifecycle(Some(&state)),
-        "relay-only synthetic rows must force the completion gate onto the suppressing path"
+        inflight_skips_tui_completion_observation(Some(&state)),
+        "relay-only synthetic rows skip the observation path owned by bridge/sink relay"
     );
     assert!(
         !jsonl_terminal_can_confirm_completion(Some(&state)),
         "relay-only synthetic rows must not use matched JSONL idle as terminal completion evidence"
     );
     assert!(
-        !TuiCompletionGateOutcome::TimedOut.should_emit_completion(),
-        "relay-only synthetic rows must suppress watcher/bridge visible completion"
+        TuiCompletionGateOutcome::NotGated.should_emit_completion(),
+        "relay-only synthetic rows must not create completion suppression"
     );
 }
 
@@ -1561,12 +1611,7 @@ fn missing_structured_matched_session_jsonl_is_paused_live_for_existing_inflight
     state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
 
     assert_eq!(
-        matched_session_completion_signal(
-            &ProviderKind::Claude,
-            Some(&state),
-            tmux_session_name,
-            CompletionSignalMode::GateQuiescence,
-        ),
+        matched_session_completion_signal(&ProviderKind::Claude, Some(&state), tmux_session_name),
         Some(crate::services::discord::turn_finalizer::CompletionSignal::PausedLive)
     );
 }

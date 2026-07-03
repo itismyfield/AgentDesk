@@ -54,6 +54,13 @@ mod placeholder_reclaim;
 #[path = "tmux_watcher/single_message_footer.rs"]
 mod single_message_footer;
 
+#[path = "tmux_watcher/completion_producer.rs"]
+mod completion_producer;
+
+#[cfg(test)]
+#[path = "tmux_watcher/single_message_footer_tests.rs"]
+mod single_message_footer_tests;
+
 #[path = "tmux_watcher/terminal_send.rs"]
 mod terminal_send;
 
@@ -115,6 +122,7 @@ mod stall_exit;
 pub(in crate::services::discord) use self::completion_gate::{
     TuiCompletionGateOutcome, run_tui_completion_gate,
 };
+use self::completion_producer::*;
 use self::placeholder_reclaim::*;
 use self::session_bound_ack::*;
 use self::single_message_footer::*;
@@ -5708,12 +5716,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             );
         }
 
-        // #2161 TUI completion gate: ClaudeTui can land a `result` JSONL event before the
-        // pane is quiescent; without it the user sees `응답 완료` while the pane still
-        // streams. On gate timeout (Codex H2) do NOT emit `TurnCompleted` — the sweeper /
-        // next-turn intake closes the lingering Active panel. Codex r2 H1: the gate outcome
-        // is also threaded into the dispatch finalization so a busy pane does not drain
-        // queued turns.
+        // #4047 TUI completion observation: the strict JSONL terminator is the
+        // sole finalize authority. Pane quiescence is recorded for soak
+        // comparison only; it must not suppress completion or lifecycle cleanup.
         let watcher_tui_gate_outcome = if terminal_output_committed
             && watcher_terminal_kind_requires_tui_completion_gate(terminal_kind)
         {
@@ -5734,7 +5739,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 terminal_delivery_committed,
             ) {
                 // Keep the SSH-direct replay watermark in lockstep with committed bytes
-                // (TimedOut gates only keep this a candidate while delivery is unmirrored).
+                // Busy pane observations no longer keep this a candidate.
                 crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset(
                     &tmux_session_name,
                     &output_path,
@@ -5742,60 +5747,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 );
             }
         }
-        // #2293 H2 — single boolean threaded through every terminal side effect below.
-        // On `TimedOut` before the terminal delivery is durably mirrored, the pane is
-        // still busy past the bounded wait, so SKIP: ✅ reaction; transcript/turn-analytics
-        // persist (a completion row at this offset is wrong while output flows); history
-        // append; confirmed-end advance; `clear_inflight_state` (intake admits the next
-        // turn off inflight presence — wiping it races the busy pane);
-        // `finish_restored_watcher_active_turn` (mailbox cancel_token, same reason);
-        // deferred idle-queue kickoff; terminal-finalize stop. Once delivery is durably
-        // mirrored, match the bridge: suppress visible completion on timeout but allow
-        // lifecycle cleanup to release inflight/mailbox state and drain follow-ups.
         let lifecycle_stage_paused = watcher_tui_gate_blocks_lifecycle(
             watcher_tui_gate_outcome,
             terminal_delivery_committed,
         );
-        if lifecycle_stage_paused {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!(
-                provider = %watcher_provider.as_str(),
-                channel = channel_id.get(),
-                tmux_session = %tmux_session_name,
-                "[{ts}] ⚠ #2293: watcher lifecycle-stage paused — TUI quiescence gate timed out; submitting GateTimeout to the finalizer's deadline-armed reconciler instead of deferring to a never-firing next pass"
-            );
-            // #3016 phase 3: the silent SKIP the EPIC targets. The
-            // `terminal_output_committed && !lifecycle_stage_paused` blocks below are
-            // skipped, so submit a busy gate-timeout: the finalizer arms the short
-            // GATE_BACKSTOP and reconciles later. Only fire after committed output.
-            if terminal_output_committed {
-                // Prefer the persisted finalizer id from inflight so this resolves
-                // to the exact Watcher-owned ledger entry (→ DEFERS to backstop).
-                let gate_finalizer_turn_id =
-                    crate::services::discord::inflight::load_inflight_state(
-                        &watcher_provider,
-                        channel_id.get(),
-                    )
-                    .map(|s| s.effective_finalizer_turn_id())
-                    .unwrap_or(0);
-                let _ = shared
-                    .turn_finalizer
-                    .submit_terminal(
-                        crate::services::discord::turn_finalizer::TurnKey::new(
-                            channel_id,
-                            gate_finalizer_turn_id,
-                            shared.restart.current_generation,
-                        ),
-                        watcher_provider.clone(),
-                        crate::services::discord::turn_finalizer::TerminalEvent::GateTimeout {
-                            pane_quiescent: Some(false),
-                        },
-                        crate::services::discord::turn_finalizer::FinalizeContext::watcher(),
-                        shared.clone(),
-                    )
-                    .await;
-            }
-        }
 
         if terminal_output_committed && watcher_tui_gate_outcome.should_emit_completion() {
             // #2849: watcher-completed turns never traverse the bridge
@@ -5892,10 +5847,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // turn's own panel, if any, is created via the streaming sources and is
             // unaffected (in-range => gate false => completion fires as today).
             if !inflight_before_relay_is_stale_newer_turn {
-                let completion_background = matches!(
-                    task_notification_kind,
-                    Some(TaskNotificationKind::Background | TaskNotificationKind::MonitorAutoTurn)
-                );
                 // #3969 root invariant: read the CHOKEPOINT-FRESH inflight (this
                 // `inflight_before_relay` is re-loaded after the synthetic row exists,
                 // unlike the stale `:1017` flag) and suppress the #3089 footer for any
@@ -5917,7 +5868,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         status_panel_msg_id,
                         inflight_before_relay.as_ref(),
                     );
-                complete_watcher_terminal_footer_or_status_panel(
+                complete_watcher_terminal_footer_or_status_panel_with_sniffer(
                     &http,
                     &shared,
                     channel_id,
@@ -5930,7 +5881,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     &last_edit_text,
                     status_panel_msg_id,
                     &mut last_status_panel_text,
-                    completion_background,
+                    task_notification_kind,
+                    Some(tmux_session_name.clone()),
+                    |tmux_session_name| async move {
+                        crate::services::discord::tmux::sniff_background_agent_pending_for_completion(
+                            tmux_session_name.as_deref(),
+                        )
+                        .await
+                    },
                     status_panel_completion_user_msg_id,
                     turn_is_external_input_for_session,
                     turn_is_non_managed_tui_mirror,
@@ -5953,7 +5911,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         if terminal_output_committed {
             let ui_transition_pane_quiescent = match watcher_tui_gate_outcome {
                 TuiCompletionGateOutcome::ConfirmedIdle => Some(true),
-                TuiCompletionGateOutcome::TimedOut => Some(false),
+                TuiCompletionGateOutcome::BusyObserved => Some(false),
                 // NotGated / SkippedDead: quiescence was not probed.
                 TuiCompletionGateOutcome::NotGated | TuiCompletionGateOutcome::SkippedDead => None,
             };
@@ -5983,11 +5941,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // Advance the shared confirmed-delivery watermark on any committed
         // direct emission or empty-turn cleanup. CAS loop ensures we only ever move the
         // watermark FORWARD, even if some other instance has raced ahead.
-        // #2293 H2 — pinning the watermark while the gate is TimedOut is what
-        // keeps the next pass's gate evaluation pointed at the same JSONL
-        // slice; advancing here would let `tmux_tail_offset` equal
-        // `confirmed_end` on the retry, falsely claiming there's nothing
-        // new to relay.
+        // #4047: busy pane observations do not pin the watermark; terminal
+        // authority has already proven the turn is complete.
         let terminal_committed_offset = runtime_binding_candidate_offset.unwrap_or(current_offset);
         // #3041 P1-1 (§3, codex R2 Issue-1): the send completed by here. STOP the
         // heartbeat BEFORE the inline commit so the renew loop cannot race the
@@ -6091,8 +6046,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // the status-panel reclaim below). Strip the footer through the shared
         // final-output formatter so the visible message matches the idle runtime.
         //
-        // Self-gated: only on genuine commit (not a TimedOut/lifecycle-paused
-        // pane), and only when the body still ends with a footer — a
+        // Self-gated: only on genuine commit, and only when the body still ends with a footer — a
         // genuinely-still-streaming message never reaches this committed-output
         // block, and an already-finalized body is left untouched.
         if terminal_output_committed
@@ -6655,11 +6609,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 // ERROR-level invariant signal if a committed terminal was cleared
                 // with neither a visible UI completion nor a persisted obligation
                 // (#3607). Never gates cleanup. `terminal_ui_obligation_persisted` is
-                // `false` on the watcher path (obligations are the bridge
-                // gate-timeout path; the watcher's TimedOut gate routes through the
-                // finalizer GateTimeout submit, which suppresses THIS clear via
-                // `lifecycle_stage_paused`). Orchestration + the non-fatal invariant
-                // live in relay_owner_observability (non-hot file).
+                // `false` on the watcher path. S2-b removed completion-gate
+                // suppression, so a busy pane observation no longer suppresses this
+                // clear. Orchestration + the non-fatal invariant live in
+                // relay_owner_observability (non-hot file).
                 crate::services::discord::relay_owner_observability::emit_inflight_clear_with_invariant(
                     provider_kind.as_str(),
                     channel_id.get(),

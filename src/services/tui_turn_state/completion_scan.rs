@@ -11,21 +11,6 @@ use super::*;
 /// multi-megabyte transcript on every probe.
 const TURN_STATE_MAX_TAIL_BYTES: u64 = 1024 * 1024;
 
-/// Completion-signal scan acceptance mode.
-///
-/// `FinalizeAuthority` is the strict finalizer authority: only real
-/// per-provider turn terminators prove `Done`. `GateQuiescence` is the S2-a
-/// compatibility mode for the watcher completion gate: it intentionally
-/// preserves the pre-S2-a observer acceptance set (64KB tail, Claude malformed
-/// fallback, provider Idle-class envelopes, source-agnostic provider JSONL).
-/// S2-b should delete `GateQuiescence` together with the gate's `TimedOut`
-/// completion suppression.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum JsonlCompletionScanMode {
-    FinalizeAuthority,
-    GateQuiescence,
-}
-
 /// Strict, relay-offset-independent "is the last turn fully over?" probe.
 ///
 /// `jsonl_ready_for_input` calls this on the `offset_behind` path (the relay
@@ -97,21 +82,17 @@ pub(crate) fn jsonl_strict_terminator_idle(provider: &ProviderKind, path: &Path)
 /// ONLY behavioural change versus the lenient scan is which envelopes are
 /// allowed to *produce* an Idle verdict.
 pub(crate) fn jsonl_turn_end_terminator_idle(provider: &ProviderKind, path: &Path) -> bool {
-    jsonl_completion_scan_idle(provider, path, JsonlCompletionScanMode::FinalizeAuthority)
+    jsonl_completion_scan_idle(provider, path)
 }
 
-/// Shared completion-signal scan entry point for the S2-a finalizer/gate split.
-/// The scanner is common; only the explicit acceptance mode differs.
-pub(crate) fn jsonl_completion_scan_idle(
-    provider: &ProviderKind,
-    path: &Path,
-    mode: JsonlCompletionScanMode,
-) -> bool {
-    let strictness = match mode {
-        JsonlCompletionScanMode::FinalizeAuthority => TerminatorStrictness::FinalizeAuthority,
-        JsonlCompletionScanMode::GateQuiescence => TerminatorStrictness::GateQuiescence,
-    };
-    scan_strict_terminator_idle_with_strictness(provider, path, strictness)
+/// Shared completion-signal scan entry point for the finalizer/gate authority:
+/// only authoritative per-provider turn terminators prove completion.
+pub(crate) fn jsonl_completion_scan_idle(provider: &ProviderKind, path: &Path) -> bool {
+    scan_strict_terminator_idle_with_strictness(
+        provider,
+        path,
+        TerminatorStrictness::FinalizeAuthority,
+    )
 }
 
 /// Shared windowed reverse-scan driver for both the lenient
@@ -131,14 +112,6 @@ fn scan_strict_terminator_idle_with_strictness(
     match scan_strict_terminator(provider, &window.lines, strictness) {
         StrictTerminatorScan::Idle => return true,
         StrictTerminatorScan::Busy => return false,
-        // GateQuiescence deliberately reproduces the pre-S2-a gate: one 64KB
-        // observer-style tail only. Do not widen past the old acceptance
-        // window here.
-        StrictTerminatorScan::Inconclusive
-            if strictness == TerminatorStrictness::GateQuiescence =>
-        {
-            return false;
-        }
         // The window contained no definitive turn-state envelope. If it already
         // covered the whole file there is nothing more to read → conservative
         // Busy. Otherwise the real terminator may have scrolled out of the
@@ -169,11 +142,6 @@ enum TerminatorStrictness {
     /// The whole provider "Idle-class" family proves at-rest (the idle-queue
     /// drain's readiness question). Used by [`jsonl_strict_terminator_idle`].
     DrainReadiness,
-    /// The pre-S2-a completion-gate acceptance set: provider Idle-class
-    /// envelopes prove quiescence, Claude malformed/partial tails can fall back
-    /// to a prior result, `Unknown` stops the scan, and only the default 64KB
-    /// window is inspected.
-    GateQuiescence,
     /// ONLY the authoritative per-provider TURN terminator proves the turn
     /// ENDED. Every other envelope (including the lenient Idle-class markers) is
     /// walked past. Used by [`jsonl_turn_end_terminator_idle`] for the finalize
@@ -211,22 +179,6 @@ fn scan_strict_terminator(
         let json = match serde_json::from_str::<Value>(trimmed) {
             Ok(json) => json,
             Err(_) => {
-                if strictness == TerminatorStrictness::GateQuiescence {
-                    if let Some(state) = provider_partial_turn_state(provider, trimmed) {
-                        return match state {
-                            TuiTurnState::Idle => StrictTerminatorScan::Idle,
-                            TuiTurnState::Streaming
-                            | TuiTurnState::UserSubmitted
-                            | TuiTurnState::Unknown => StrictTerminatorScan::Busy,
-                        };
-                    }
-                    if provider_malformed_jsonl_line_policy(provider)
-                        == MalformedJsonlLinePolicy::FallbackToPrevious
-                    {
-                        continue;
-                    }
-                    return StrictTerminatorScan::Busy;
-                }
                 // A single torn *trailing* write (the writer was mid-flush when
                 // we read) should not pin the session Busy forever. We skip at
                 // most ONE such line, and ONLY when we can *positively* identify
@@ -265,9 +217,7 @@ fn scan_strict_terminator(
         match classified {
             Some(TuiTurnState::Idle) => match strictness {
                 // Lenient: any Idle-class envelope proves at-rest.
-                TerminatorStrictness::DrainReadiness | TerminatorStrictness::GateQuiescence => {
-                    return StrictTerminatorScan::Idle;
-                }
+                TerminatorStrictness::DrainReadiness => return StrictTerminatorScan::Idle,
                 // Turn-END-only (#3016 S3, Concern 1): an Idle-class envelope
                 // proves the TURN ended ONLY when it is the authoritative
                 // per-provider turn terminator. A non-terminator Idle-class
@@ -293,9 +243,6 @@ fn scan_strict_terminator(
             // renamed housekeeping envelope must not be able to *create* an
             // idle verdict — it can only be skipped over to reveal the real,
             // structurally-recognized terminator beneath it.
-            Some(TuiTurnState::Unknown) if strictness == TerminatorStrictness::GateQuiescence => {
-                return StrictTerminatorScan::Busy;
-            }
             Some(TuiTurnState::Unknown) | None => continue,
         }
     }
@@ -307,22 +254,6 @@ fn provider_envelope_turn_state(provider: &ProviderKind, json: &Value) -> Option
         ProviderKind::Claude => claude_envelope_turn_state(json),
         ProviderKind::Codex => codex_envelope_turn_state(json),
         _ => None,
-    }
-}
-
-fn provider_partial_turn_state(provider: &ProviderKind, line: &str) -> Option<TuiTurnState> {
-    match provider {
-        ProviderKind::Claude => claude_partial_turn_state(line),
-        ProviderKind::Codex => None,
-        _ => None,
-    }
-}
-
-fn provider_malformed_jsonl_line_policy(provider: &ProviderKind) -> MalformedJsonlLinePolicy {
-    match provider {
-        ProviderKind::Claude => MalformedJsonlLinePolicy::FallbackToPrevious,
-        ProviderKind::Codex => MalformedJsonlLinePolicy::ReturnUnknown,
-        _ => MalformedJsonlLinePolicy::ReturnUnknown,
     }
 }
 

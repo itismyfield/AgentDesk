@@ -521,6 +521,7 @@ src/
 │   │   │   ├── runtime.rs
 │   │   │   ├── state_extractors.rs
 │   │   │   ├── status_panel.rs
+│   │   │   ├── status_panel_completion_producer.rs
 │   │   │   ├── terminal_text_idempotency.rs
 │   │   │   └── terminal_watcher.rs
 │   │   ├── recovery_paths/
@@ -598,6 +599,7 @@ src/
 │   │   │   ├── commit_decisions.rs
 │   │   │   ├── completion_gate.rs
 │   │   │   ├── completion_gate_tests.rs
+│   │   │   ├── completion_producer.rs
 │   │   │   ├── controller_heartbeat.rs
 │   │   │   ├── liveness.rs
 │   │   │   ├── orphan_status_panel_cleanup.rs
@@ -609,6 +611,7 @@ src/
 │   │   │   ├── session_bound_ack.rs
 │   │   │   ├── session_bound_ack_tests.rs
 │   │   │   ├── single_message_footer.rs
+│   │   │   ├── single_message_footer_tests.rs
 │   │   │   ├── stall_exit.rs
 │   │   │   ├── supervisor_relay.rs
 │   │   │   ├── supervisor_relay_tests.rs
@@ -785,8 +788,6 @@ src/
 │   │   ├── startup_reclaim.rs
 │   │   ├── status_panel_orphan_store.rs
 │   │   ├── status_panel_orphan_store_tests.rs
-│   │   ├── status_panel_timedout_reconcile.rs
-│   │   ├── status_panel_timedout_reconcile_tests.rs
 │   │   ├── steering.rs
 │   │   ├── streaming_finalizer.rs
 │   │   ├── subagent_notification_card.rs

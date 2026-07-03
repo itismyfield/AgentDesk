@@ -1,11 +1,13 @@
 //! #3038 S1 tmux watcher TUI completion gate decisions.
 
 use super::*;
-use crate::services::discord::turn_finalizer::{CompletionSignal, completion_signal as cs};
+use crate::services::discord::turn_finalizer::{
+    CompletionSignal, completion_signal_from_transcript,
+};
 
-/// #2161 — TUI completion gate. Callers ask `run_tui_completion_gate` to
-/// confirm the underlying tmux pane has reached a `Ready for input`
-/// quiescent state before pushing `StatusEvent::TurnCompleted` to the live
+/// #2161/#4047 — TUI completion observation. Callers ask
+/// `run_tui_completion_gate` to record pane liveness and the strict provider
+/// terminator signal before pushing `StatusEvent::TurnCompleted` to the live
 /// status panel.
 ///
 /// Only `RuntimeHandoffKind::ClaudeTui` turns are gated; other runtime kinds
@@ -13,49 +15,41 @@ use crate::services::discord::turn_finalizer::{CompletionSignal, completion_sign
 /// stay unchanged (see `should_gate_completion_for_tui_quiescence` in
 /// `tmux.rs` for the full matrix).
 ///
-/// The wait is bounded by `TUI_COMPLETION_QUIESCENCE_TIMEOUT`. On `TimedOut`
-/// the caller MUST suppress the `TurnCompleted` emit — promoting the panel
-/// to `✅ 응답 완료` on a still-busy pane reproduces the bug this gate
-/// exists to prevent (Codex review #2161 H2). If terminal delivery is not
-/// yet durably mirrored, the placeholder sweeper and next-turn intake
-/// reconcile the lingering Active panel; already-committed delivery may still
-/// proceed with non-visual lifecycle cleanup.
+/// S2-b makes the provider JSONL terminator (`CompletionSignal::Done`) the sole
+/// finalize truth source. Pane scraping no longer delays or suppresses
+/// completion for structured JSONL sessions; it is retained only for process
+/// liveness, a JSONL-less fallback readiness observation, and the
+/// background-agent payload bit consumed by the footer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) enum TuiCompletionGateOutcome {
     NotGated,
     ConfirmedIdle,
     SkippedDead,
-    TimedOut,
+    BusyObserved,
 }
 
 impl TuiCompletionGateOutcome {
-    /// `true` when callers should proceed with emitting the user-visible
-    /// `TurnCompleted` status event. `false` only on `TimedOut`, where
-    /// the pane is still busy past the bounded wait and emitting would
-    /// reproduce the #2161 premature-completion bug. The placeholder
-    /// sweeper / next-turn intake reconciles the still-Active panel later.
+    /// S2-b: completion emission is unconditional once the finalizer authority
+    /// has proven `Done`; this helper remains for call-site readability.
     pub(in crate::services::discord) fn should_emit_completion(self) -> bool {
-        match self {
-            Self::NotGated | Self::ConfirmedIdle | Self::SkippedDead => true,
-            Self::TimedOut => false,
-        }
+        let _ = self;
+        true
     }
 }
 
-pub(super) fn inflight_suppresses_tui_completion_lifecycle(
+pub(super) fn inflight_skips_tui_completion_observation(
     inflight: Option<&crate::services::discord::inflight::InflightTurnState>,
 ) -> bool {
     inflight.is_some_and(|state| state.relay_ownership_only)
 }
 
-/// Source-agnostic terminal probe for a matched session's completion signal
-/// under an explicit acceptance mode. `InflightTurnState::turn_source` is audit
+/// Matched-session terminal probe using the same strict provider terminator
+/// authority as the finalizer. `InflightTurnState::turn_source` is audit
 /// metadata only (#2346/#2285).
 pub(super) fn matched_session_completion_signal(
     provider: &ProviderKind,
     inflight: Option<&crate::services::discord::inflight::InflightTurnState>,
     tmux_session_name: &str,
-    mode: cs::CompletionSignalMode,
 ) -> Option<CompletionSignal> {
     let state = inflight?;
     if state.tmux_session_name.as_deref() != Some(tmux_session_name) {
@@ -66,11 +60,10 @@ pub(super) fn matched_session_completion_signal(
         .as_deref()
         .map(str::trim)
         .filter(|path| !path.is_empty())?;
-    Some(cs::completion_signal_from_transcript_with_mode(
+    Some(completion_signal_from_transcript(
         provider,
         state.runtime_kind,
         std::path::Path::new(output_path),
-        mode,
     ))
 }
 
@@ -172,32 +165,16 @@ pub(in crate::services::discord) async fn run_tui_completion_gate(
 ) -> TuiCompletionGateOutcome {
     let inflight =
         crate::services::discord::inflight::load_inflight_state(provider, channel_id.get());
-    if inflight_suppresses_tui_completion_lifecycle(inflight.as_ref()) {
+    if inflight_skips_tui_completion_observation(inflight.as_ref()) {
         tracing::info!(
             provider = %provider.as_str(),
             channel = channel_id.get(),
             tmux_session = %tmux_session_name,
             inflight_user_msg_id = inflight.as_ref().map(|state| state.user_msg_id).unwrap_or(0),
             inflight_current_msg_id = inflight.as_ref().map(|state| state.current_msg_id).unwrap_or(0),
-            "suppressed TUI completion gate for relay-only synthetic turn; relay remains owned by the bridge/sink path"
+            "skipped TUI completion observation for relay-only synthetic turn; relay remains owned by the bridge/sink path"
         );
-        return TuiCompletionGateOutcome::TimedOut;
-    }
-    if jsonl_terminal_can_confirm_completion(inflight.as_ref())
-        && matched_session_completion_signal(
-            provider,
-            inflight.as_ref(),
-            tmux_session_name,
-            cs::CompletionSignalMode::GateQuiescence,
-        ) == Some(CompletionSignal::Done)
-    {
-        tracing::info!(
-            provider = %provider.as_str(),
-            channel = channel_id.get(),
-            tmux_session = %tmux_session_name,
-            "confirmed matched session completion from provider JSONL terminal envelope"
-        );
-        return TuiCompletionGateOutcome::ConfirmedIdle;
+        return TuiCompletionGateOutcome::NotGated;
     }
     let runtime_kind = inflight.as_ref().and_then(|state| state.runtime_kind);
     let rebind_origin = inflight
@@ -239,57 +216,35 @@ pub(in crate::services::discord) async fn run_tui_completion_gate(
         return TuiCompletionGateOutcome::SkippedDead;
     }
 
-    let started_at = tokio::time::Instant::now();
-    loop {
-        let ready = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            tokio::task::spawn_blocking({
-                let provider = provider.clone();
-                let tmux_session_name = tmux_session_name.to_string();
-                let inflight = inflight.clone();
-                move || {
-                    let completion_done = matched_session_completion_signal(
-                        &provider,
-                        inflight.as_ref(),
-                        &tmux_session_name,
-                        cs::CompletionSignalMode::GateQuiescence,
-                    ) == Some(CompletionSignal::Done);
-                    // #3521: a detached background agent leaves the foreground JSONL idle while
-                    // it keeps running; hold the turn (and its live footer panel) open until the
-                    // pane no longer shows the `Waiting for N background agent` chrome — otherwise
-                    // the turn finalizes and the panel vanishes mid-run. Capture failure => not
-                    // pending => complete normally (no stuck turn; STALL-WATCHDOG backstops a
-                    // forever-pending agent, completion-footer TTL caps animation at ~1h).
-                    completion_done
-                        && !crate::services::platform::tmux::capture_pane(&tmux_session_name, 0)
-                            .map(|pane| {
-                                crate::services::tmux_common::tmux_capture_indicates_claude_tui_background_agent_pending(&pane)
-                            })
-                            .unwrap_or(false)
-                }
-            }),
+    let completion_signal = if jsonl_terminal_can_confirm_completion(inflight.as_ref()) {
+        matched_session_completion_signal(provider, inflight.as_ref(), tmux_session_name)
+            .unwrap_or(CompletionSignal::Unknown)
+    } else {
+        CompletionSignal::Unknown
+    };
+    let fallback_ready = if completion_signal == CompletionSignal::Unknown {
+        crate::services::provider::tmux_session_fallback_ready_for_input(
+            tmux_session_name,
+            provider,
+            runtime_kind,
         )
-        .await
-        .unwrap_or(Ok(false))
-        .unwrap_or(false);
-
-        if ready {
-            return TuiCompletionGateOutcome::ConfirmedIdle;
-        }
-        if started_at.elapsed() >= crate::services::discord::tmux::TUI_COMPLETION_QUIESCENCE_TIMEOUT
-        {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!(
-                provider = %provider.as_str(),
-                channel = channel_id.get(),
-                tmux_session = %tmux_session_name,
-                gate = "tui_completion_quiescence",
-                "[{ts}] \u{26a0} TUI structured turn state was not idle after {:?} — suppressing turn-complete status to avoid premature completion (#2161); placeholder sweeper / next-turn intake will reconcile",
-                crate::services::discord::tmux::TUI_COMPLETION_QUIESCENCE_TIMEOUT,
-            );
-            return TuiCompletionGateOutcome::TimedOut;
-        }
-        tokio::time::sleep(crate::services::discord::tmux::TUI_COMPLETION_QUIESCENCE_POLL_INTERVAL)
-            .await;
-    }
+        .is_some_and(crate::services::pane_readiness::FallbackPaneReadiness::is_ready)
+    } else {
+        false
+    };
+    let legacy_observer_outcome = if completion_signal == CompletionSignal::Done || fallback_ready {
+        TuiCompletionGateOutcome::ConfirmedIdle
+    } else {
+        TuiCompletionGateOutcome::BusyObserved
+    };
+    tracing::info!(
+        provider = %provider.as_str(),
+        channel = channel_id.get(),
+        tmux_session = %tmux_session_name,
+        completion_signal = ?completion_signal,
+        fallback_ready,
+        legacy_gate_outcome = ?legacy_observer_outcome,
+        "TUI completion quiescence observation recorded; finalize verdict remains provider terminator authority"
+    );
+    legacy_observer_outcome
 }

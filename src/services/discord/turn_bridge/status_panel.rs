@@ -19,16 +19,20 @@ pub(super) async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
     started_at_unix: i64,
     last_status_panel_text: &mut String,
     background: bool,
+    background_agent_pending: bool,
     source: &'static str,
     expected_user_msg_id: u64,
 ) -> bool {
     if !shared.ui.status_panel_v2_enabled {
         return true;
     }
-    shared
-        .ui
-        .placeholder_live_events
-        .push_status_event(channel_id, StatusEvent::TurnCompleted { background });
+    shared.ui.placeholder_live_events.push_status_event(
+        channel_id,
+        StatusEvent::TurnCompleted {
+            background,
+            background_agent_pending,
+        },
+    );
     let panel_text = shared.ui.placeholder_live_events.render_status_panel(
         channel_id,
         provider,
@@ -254,6 +258,7 @@ pub(in crate::services::discord) async fn complete_status_panel_v2_with_http(
     started_at_unix: i64,
     last_status_panel_text: &mut String,
     background: bool,
+    background_agent_pending: bool,
     source: &'static str,
     expected_inflight: (Option<u64>, Option<&super::super::InflightTurnState>),
 ) -> bool {
@@ -261,10 +266,13 @@ pub(in crate::services::discord) async fn complete_status_panel_v2_with_http(
     if !shared.ui.status_panel_v2_enabled {
         return true;
     }
-    shared
-        .ui
-        .placeholder_live_events
-        .push_status_event(channel_id, StatusEvent::TurnCompleted { background });
+    shared.ui.placeholder_live_events.push_status_event(
+        channel_id,
+        StatusEvent::TurnCompleted {
+            background,
+            background_agent_pending,
+        },
+    );
     let panel_text = shared.ui.placeholder_live_events.render_status_panel(
         channel_id,
         provider,

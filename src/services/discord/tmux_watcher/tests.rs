@@ -471,7 +471,7 @@ async fn terminal_delivery_timeout_cleanup_releases_mailbox_and_preserves_follow
 
     let side_effects = watcher_terminal_commit_side_effects_for_test(
         true,
-        TuiCompletionGateOutcome::TimedOut,
+        TuiCompletionGateOutcome::BusyObserved,
         true,
     );
     assert!(side_effects.clear_inflight);

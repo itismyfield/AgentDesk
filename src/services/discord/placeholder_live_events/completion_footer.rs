@@ -175,7 +175,19 @@ pub(super) fn render_completion_footer(
     let mut emitted: Vec<EmittedLine> = Vec::new();
     let mut has_unfinished_entries = false;
 
+    if snapshot.background_agent_pending {
+        emitted.push(EmittedLine::header("Background agents"));
+        emitted.push(EmittedLine {
+            text: format!("Waiting for background agents {indicator}"),
+            terminal_id: None,
+        });
+        has_unfinished_entries = true;
+    }
+
     if !snapshot.tasks.is_empty() {
+        if !emitted.is_empty() {
+            emitted.push(EmittedLine::blank());
+        }
         emitted.push(EmittedLine::header("Tasks"));
         let mut task_unfinished = false;
         for slot in snapshot.tasks.iter().rev().take(STATUS_PANEL_TASK_LIMIT) {

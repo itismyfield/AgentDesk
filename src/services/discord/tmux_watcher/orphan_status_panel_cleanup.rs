@@ -128,6 +128,7 @@ pub(super) async fn complete_watcher_status_panel_v2(
     started_at_unix: i64,
     last_status_panel_text: &mut String,
     background: bool,
+    background_agent_pending: bool,
     expected_user_msg_id: Option<u64>,
 ) -> bool {
     // #2427 D wire (Codex round 2 HIGH-1): explicit-signal inflight cleanup
@@ -150,6 +151,7 @@ pub(super) async fn complete_watcher_status_panel_v2(
         started_at_unix,
         last_status_panel_text,
         background,
+        background_agent_pending,
         "tmux_watcher",
         (expected_user_msg_id, None),
     )

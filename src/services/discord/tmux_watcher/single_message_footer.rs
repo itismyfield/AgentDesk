@@ -275,10 +275,14 @@ pub(super) async fn complete_watcher_single_message_completion_footer(
     terminal_text: &str,
     indicator: &str,
     background: bool,
+    background_agent_pending: bool,
 ) -> bool {
     shared.ui.placeholder_live_events.push_status_event(
         channel_id,
-        crate::services::agent_protocol::StatusEvent::TurnCompleted { background },
+        crate::services::agent_protocol::StatusEvent::TurnCompleted {
+            background,
+            background_agent_pending,
+        },
     );
     let rendered = shared
         .ui
@@ -476,6 +480,7 @@ pub(super) async fn complete_watcher_terminal_footer_or_status_panel(
     status_panel_msg_id: Option<serenity::MessageId>,
     last_status_panel_text: &mut String,
     completion_background: bool,
+    background_agent_pending: bool,
     status_panel_completion_user_msg_id: Option<u64>,
     turn_is_external_input_for_session: bool,
     // #3969 root invariant: chokepoint-fresh "this turn is a non-Managed TUI
@@ -539,6 +544,7 @@ pub(super) async fn complete_watcher_terminal_footer_or_status_panel(
                 target_text,
                 indicator,
                 completion_background,
+                background_agent_pending,
             )
             .await;
         }
@@ -561,6 +567,7 @@ pub(super) async fn complete_watcher_terminal_footer_or_status_panel(
         status_panel_msg_id,
         last_status_panel_text,
         completion_background,
+        background_agent_pending,
         status_panel_completion_user_msg_id,
         turn_is_external_input_for_session,
         two_message_status_panel_generation_superseded,

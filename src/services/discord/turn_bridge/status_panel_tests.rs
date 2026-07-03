@@ -1,3 +1,4 @@
+use super::super::complete_bridge_terminal_footer_or_status_panel_with_sniffer;
 use super::{
     ChannelId, InflightTurnState, MessageId, ProviderKind, StatusPanelCompletionAction,
     bridge_epilogue_identity_guards_inflight_clear, complete_status_panel_v2,
@@ -606,6 +607,7 @@ async fn status_panel_fallback_completion_is_blocked_until_body_visible() {
             1_700_000_000,
             &mut last_status_panel_text,
             false,
+            false,
             "test_completion_before_body",
             1510319194921504929,
         )
@@ -631,6 +633,7 @@ async fn status_panel_fallback_completion_is_blocked_until_body_visible() {
             1_700_000_000,
             &mut last_status_panel_text,
             false,
+            false,
             "test_completion_after_body",
             1510319194921504929,
         )
@@ -645,6 +648,105 @@ async fn status_panel_fallback_completion_is_blocked_until_body_visible() {
         .clone();
     assert_eq!(sent_messages.len(), 1);
     assert!(sent_messages[0].contains("완료"));
+}
+
+#[tokio::test]
+async fn bridge_status_panel_completion_emits_background_agent_pending_payload() {
+    let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
+    let shared = make_status_panel_v2_shared_for_tests();
+    let gateway = StatusPanelFallbackGateway::default();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(4_047_401);
+    let mut last_status_panel_text = String::new();
+
+    let committed = complete_status_panel_v2(
+        shared.as_ref(),
+        &gateway,
+        channel_id,
+        None,
+        &provider,
+        1_700_000_000,
+        &mut last_status_panel_text,
+        false,
+        true,
+        "test_bridge_background_agent_pending_payload",
+        4_047_402,
+    )
+    .await;
+
+    assert!(committed);
+    let rendered = shared
+        .ui
+        .placeholder_live_events
+        .render_completion_footer(channel_id, &provider, "⠸");
+    let block = rendered.block.expect("background-agent pending footer");
+
+    assert!(rendered.has_unfinished_entries);
+    assert!(block.contains("Background agents"));
+    assert!(block.contains("Waiting for background agents ⠸"));
+}
+
+#[tokio::test]
+async fn bridge_status_panel_completion_producer_threads_sniffed_background_agent_pending() {
+    for (pending, channel_raw) in [(true, 4_047_411), (false, 4_047_412)] {
+        let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
+        let shared = make_status_panel_v2_shared_for_tests();
+        let gateway = StatusPanelFallbackGateway::default();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(channel_raw);
+        let mut last_status_panel_text = String::new();
+        let observed_tmux_session = Arc::new(Mutex::new(Vec::new()));
+        let sniffer_observed_tmux_session = observed_tmux_session.clone();
+
+        let committed = complete_bridge_terminal_footer_or_status_panel_with_sniffer(
+            shared.as_ref(),
+            &gateway,
+            channel_id,
+            MessageId::new(channel_raw + 1),
+            Some(MessageId::new(channel_raw + 2)),
+            None,
+            &provider,
+            1_700_000_000,
+            &mut last_status_panel_text,
+            false,
+            false,
+            Some("Final answer"),
+            "⠸",
+            0,
+            Some("AgentDesk-claude-status-panel-background-test".to_string()),
+            move |tmux_session_name| async move {
+                sniffer_observed_tmux_session
+                    .lock()
+                    .expect("observed tmux session lock")
+                    .push(tmux_session_name);
+                pending
+            },
+        )
+        .await;
+
+        assert!(committed);
+        assert_eq!(
+            observed_tmux_session
+                .lock()
+                .expect("observed tmux session lock")
+                .as_slice(),
+            &[Some(
+                "AgentDesk-claude-status-panel-background-test".to_string()
+            )]
+        );
+
+        let rendered = shared
+            .ui
+            .placeholder_live_events
+            .render_completion_footer(channel_id, &provider, "⠸");
+        let block_has_background_agents = rendered
+            .block
+            .as_deref()
+            .is_some_and(|block| block.contains("Background agents"));
+
+        assert_eq!(rendered.has_unfinished_entries, pending);
+        assert_eq!(block_has_background_agents, pending);
+    }
 }
 
 #[tokio::test]
@@ -664,6 +766,7 @@ async fn status_panel_completion_fallback_posts_when_message_id_is_synthetic() {
         &provider,
         1_700_000_000,
         &mut last_status_panel_text,
+        false,
         false,
         "test_synthetic_status_panel_id",
         1510319194921504929,
@@ -696,6 +799,7 @@ async fn status_panel_completion_fallback_posts_when_message_id_is_synthetic() {
         &provider,
         1_700_000_000,
         &mut last_status_panel_text,
+        false,
         false,
         "test_synthetic_status_panel_id_retry",
         1510319194921504929,
@@ -746,6 +850,7 @@ async fn status_panel_completion_sends_wip_warning_before_completion_surface() {
         1_700_000_000,
         &mut last_status_panel_text,
         false,
+        false,
         "test_wip_warning_order",
         user_msg_id,
     )
@@ -771,6 +876,7 @@ async fn status_panel_completion_sends_wip_warning_before_completion_surface() {
         &provider,
         1_700_000_000,
         &mut last_status_panel_text,
+        false,
         false,
         "test_wip_warning_order_retry",
         user_msg_id,
@@ -842,6 +948,7 @@ async fn status_panel_completion_fallback_posts_after_unknown_message_edit() {
         1_700_000_000,
         &mut last_status_panel_text,
         false,
+        false,
         "test_unknown_status_panel_id",
         1510319194921504929,
     )
@@ -907,6 +1014,7 @@ async fn status_panel_completion_purges_pending_bind_for_final_panel() {
         &provider,
         1_700_000_000,
         &mut last_status_panel_text,
+        false,
         false,
         "test_pending_bind_completion_purge",
         user_msg_id,

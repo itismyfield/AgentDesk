@@ -204,8 +204,8 @@ use terminal_delivery::{
     bridge_epilogue_skip_save_is_identity_guarded, send_ordered_long_terminal_response,
     should_complete_work_dispatch_after_terminal_delivery,
     should_fail_dispatch_after_terminal_delivery, silent_turn_skip_marks_committed,
-    terminal_delivery_should_send_new_chunks, tui_quiescence_timeout_requires_inflight_retry,
-    turn_bridge_replace_outcome_committed, warn_preserved_uncommitted as td_warn,
+    terminal_delivery_should_send_new_chunks, turn_bridge_replace_outcome_committed,
+    warn_preserved_uncommitted as td_warn,
 };
 use tmux_runtime::is_dcserver_restart_command;
 pub(super) use turn_analytics::persist_turn_analytics_row_with_handles;
@@ -5770,44 +5770,6 @@ pub(super) fn spawn_turn_bridge(
 
                 bridge_should_emit_completion = bridge_gate_outcome.should_emit_completion();
 
-                // On TimedOut we preserve the inflight + suppress dispatch
-                // completion so queued turns do not drain into a busy pane. The
-                // next watcher pass / placeholder sweeper reconciles when the
-                // pane finally reports idle.
-                if matches!(
-                    bridge_gate_outcome,
-                    super::tmux::TuiCompletionGateOutcome::TimedOut
-                ) {
-                    if tui_quiescence_timeout_requires_inflight_retry(terminal_delivery_committed) {
-                        preserve_inflight_for_cleanup_retry = true;
-                    } else {
-                        let terminal_ui_status_msg_id = normalize_status_panel_message_id(
-                            inflight_state.status_message_id.map(MessageId::new),
-                        );
-                        if super::terminal_ui_obligation::should_record_terminal_ui_obligation(
-                                terminal_delivery_committed,
-                                true,
-                                terminal_ui_status_msg_id.is_some(),
-                            )
-                            && let Some(status_msg_id) = terminal_ui_status_msg_id
-                        {
-                            super::terminal_ui_obligation::record_terminal_ui_obligation_pending_status(
-                                shared_owned.as_ref(),
-                                &provider,
-                                channel_id,
-                                status_msg_id,
-                                status_panel_started_at,
-                                &inflight_state,
-                            )
-                            .await;
-                        }
-                        tracing::warn!(
-                            provider = %provider.as_str(),
-                            channel = channel_id.get(),
-                            "TUI completion quiescence timed out after terminal delivery committed; suppressing visible completion only and continuing inflight cleanup"
-                        );
-                    }
-                }
             }
 
             if should_complete_work_dispatch_after_terminal_delivery(
@@ -5938,6 +5900,7 @@ pub(super) fn spawn_turn_bridge(
                     completion_footer_terminal_text.as_deref(),
                     indicator,
                     status_panel_generation, // #3805 P2: prove this turn's panel epoch
+                    inflight_state.tmux_session_name.as_deref(),
                 )
                 .await;
         }
