@@ -328,7 +328,6 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             ))
             .unwrap_or_else(|_| serde_json::json!({}));
         json["delivery_record_rollout"] = delivery_record_rollout_health_json();
-        json["turn_output_controller_rollout"] = turn_output_controller_rollout_health_json();
         json["intake_routing"] =
             crate::services::cluster::intake_router_hook::intake_routing_status_json();
 
@@ -428,7 +427,6 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             json["opencode"] = opencode_block;
         }
         json["delivery_record_rollout"] = delivery_record_rollout_health_json();
-        json["turn_output_controller_rollout"] = turn_output_controller_rollout_health_json();
         json["intake_routing"] =
             crate::services::cluster::intake_router_hook::intake_routing_status_json();
         let json = if detailed {
@@ -536,10 +534,6 @@ fn delivery_record_rollout_health_json() -> serde_json::Value {
     outbound::delivery_record_rollout_health_json()
 }
 
-fn turn_output_controller_rollout_health_json() -> serde_json::Value {
-    outbound::turn_output_controller_rollout_health_json()
-}
-
 fn public_health_json(json: serde_json::Value) -> serde_json::Value {
     let status = json
         .get("status")
@@ -570,7 +564,6 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
     let startup_degraded = json.get("startup_degraded").cloned();
     let startup_degraded_reasons = json.get("startup_degraded_reasons").cloned();
     let delivery_record_rollout = json.get("delivery_record_rollout").cloned();
-    let turn_output_controller_rollout = json.get("turn_output_controller_rollout").cloned();
     let intake_routing = json.get("intake_routing").cloned();
     // Public OpenCode summary is count-only and never includes the per-server
     // `warm_servers` array, pids, ports, or startup tails (spec C-3). The
@@ -606,9 +599,6 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
     }
     if let Some(delivery_record_rollout) = delivery_record_rollout {
         public["delivery_record_rollout"] = delivery_record_rollout;
-    }
-    if let Some(turn_output_controller_rollout) = turn_output_controller_rollout {
-        public["turn_output_controller_rollout"] = turn_output_controller_rollout;
     }
     if let Some(intake_routing) = intake_routing {
         public["intake_routing"] = intake_routing;
@@ -2236,36 +2226,6 @@ mod tests {
         }));
         assert_eq!(public["delivery_record_rollout"]["mode"], json!("off"));
         assert_eq!(public["delivery_record_rollout"]["warning_count"], json!(1));
-        assert_eq!(public["ok"], json!(true));
-    }
-
-    #[test]
-    fn public_health_json_preserves_turn_output_controller_rollout_state() {
-        let public = public_health_json(json!({
-            "status": "healthy",
-            "version": "0.1.2",
-            "db": true,
-            "dashboard": true,
-            "server_up": true,
-            "turn_output_controller_rollout": {
-                "owners": {
-                    "sink_short_replace": {"enabled": true, "env_var": "AGENTDESK_SINK_SHORT_REPLACE_CONTROLLER"}
-                },
-                "owner_count": 6,
-                "enabled_count": 6,
-                "effective_authority": "controller",
-                "warning_count": 0,
-                "configuration_warnings": []
-            }
-        }));
-        assert_eq!(
-            public["turn_output_controller_rollout"]["effective_authority"],
-            json!("controller")
-        );
-        assert_eq!(
-            public["turn_output_controller_rollout"]["enabled_count"],
-            json!(6)
-        );
         assert_eq!(public["ok"], json!(true));
     }
 

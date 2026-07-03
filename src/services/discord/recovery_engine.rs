@@ -428,14 +428,10 @@ pub(in crate::services::discord) async fn relay_recovered_terminal_text_to_place
     let delivery = match placeholder {
         Some(placeholder) => {
             use super::recovery_paths::controller_cutover as cc;
-            // #3089 A6a: anchored short-replace via the default-ON unified controller
-            // flag; the adapter maps the verdict to `RecoveryRelayOutcome` AND re-runs
-            // the #3297 probe. Explicit opt-out / None / empty
-            if cc::recovery_short_replace_should_cutover(
-                cc::recovery_relay_controller_enabled(),
-                true,
-                text,
-            ) {
+            // #3089 A6a/#3998 S1-f2: anchored short-replace via the unified
+            // controller; the adapter maps the verdict to `RecoveryRelayOutcome`
+            // AND re-runs the #3297 probe. None / empty stay legacy.
+            if cc::recovery_short_replace_should_cutover(true, text) {
                 let gateway =
                     DiscordGateway::new(http.clone(), shared.clone(), ProviderKind::Claude, None);
                 return cc::deliver_recovery_replace_via_controller(

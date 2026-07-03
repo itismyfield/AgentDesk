@@ -1,16 +1,10 @@
-//! #3089 A4 watcher terminal cutover to the unified turn-output controller
-//! (flag-gated, default ON with `=0|false` rollback opt-out).
+//! #3089 A4 watcher terminal cutover to the unified turn-output controller.
 //!
-//! This sibling module (mirroring `tmux_watcher/{liveness,commit_decisions,..}.rs`)
-//! holds the A4 cutover surface so the FROZEN `tmux_watcher.rs` giant-file ratchet
-//! (8223) absorbs only the small gate `if` + `DiscordGateway::new` construction +
-//! the `mod terminal_send;` line. The controller heartbeat adapter lives in
-//! `controller_heartbeat.rs`; this module holds the flag helper, short-replace
-//! controller helpers, and pure `watcher_terminal_lease_range` gate. Long-chunk
-//! controller helpers live in `terminal_long_chunks.rs` under the same flag.
+//! This sibling keeps the A4 controller helpers out of the frozen
+//! `tmux_watcher.rs` root. Long-chunk helpers live in `terminal_long_chunks.rs`;
+//! the shared heartbeat adapter lives in `controller_heartbeat.rs`.
 
 use std::sync::Arc;
-use std::sync::OnceLock;
 
 use super::*;
 
@@ -25,66 +19,16 @@ use crate::services::provider::ProviderKind;
 
 use super::controller_heartbeat::WatcherPostHeartbeat;
 
-/// #3089 A4/#3998 S1-d: flag gating the watcher's terminal delivery cutover
-/// onto the unified [`toc::deliver_turn_output`]. Default ON → eligible anchored
-/// short-replace and anchored long-chunk deliveries use the controller on the SAME
-/// `(channel, turn, [start,end))` lease as `LeaseHolder::Watcher`. OnceLock+env,
-/// mirroring `sink_short_replace_controller_enabled` (A2b) /
-/// `standby_relay_controller_enabled` (A3). `AGENTDESK_WATCHER_TERMINAL_CONTROLLER=0|false`
-/// is the rollback opt-out.
-pub(in crate::services::discord) fn watcher_terminal_controller_enabled() -> bool {
-    static CACHED: OnceLock<bool> = OnceLock::new();
-    *CACHED.get_or_init(|| {
-        let on = crate::services::discord::controller_rollout_flag::enabled_from_env(
-            "AGENTDESK_WATCHER_TERMINAL_CONTROLLER",
-        );
-        // Telemetry remains emitted only when the controller path is enabled.
-        if on {
-            tracing::info!("  ✓ watcher_terminal_controller: enabled");
-        }
-        on
-    })
-}
-
-/// #3089 A4/#3998 S1-d: watcher terminal controller cut-over decision. Computed at the lease
-/// acquire site (tmux_watcher.rs ~5944) so the watcher's own acquire/heartbeat/
-/// commit/advance/release can be gated behind `!cutover` (the controller owns the
-/// single lease when cut over — no double-acquire).
+/// #3089 A4/#3998 S1-d: watcher terminal controller cut-over decision.
+/// Computed at the lease acquire site so the watcher's own acquire/heartbeat/
+/// commit/advance/release can be gated behind `!cutover`.
 ///
-/// The flag is checked FIRST so explicit opt-out short-circuits before any work
-/// (the `formatted` body is only computed by the caller's flag-gated closure) —
-/// byte-identical legacy on the `=0|false` path.
-///
-/// Terms (mirroring the legacy short-replace branch arm at tmux_watcher.rs:6153-6394):
-/// - `will_direct_send` — the watcher will run the direct-send arm
-///   (`watcher_direct_fallback_after_session_bound_ack && has_direct_terminal_response`,
-///   tmux_watcher.rs:5942/6155).
-/// - `ordered_range` — `watcher_lease_end > watcher_lease_start` (a real `[start,end)`).
-/// - `has_placeholder` — `placeholder_msg_id.is_some()` (the `Some(msg_id)` arm, :6154).
-///   Required because the controller path currently needs an active edit/delete
-///   anchor. The watcher no-placeholder new-message fresh-send (`None` arm,
-///   tmux_watcher.rs:5373) stays legacy even with a real ordered range and
-///   non-empty non-TUI body; anchor-less fresh-send is #3998 flip/legacy-retirement
-///   scope, same class as A6a's `None`-placeholder fresh-send.
-/// - `should_send_ordered_new_chunks` —
-///   `watcher_should_send_ordered_new_chunks_for_terminal_fallback(..)` (:6156).
-///   `true` now routes through `SendNewChunks { delete_anchor: true }` only when
-///   `has_placeholder` is also true.
-/// - `formatted_is_empty` — the POST-format body is empty. Legacy
-///   `replace_long_message_raw_with_outcome` treats a zero-chunk body as
-///   `EditedOriginal` (delivered/advance) but the controller short-circuits an empty
-///   body to `Skipped` (no-advance), so empty bodies MUST stay legacy (A2b M2 parity).
-/// - `tui_completion_gate_required` —
-///   `watcher_terminal_kind_requires_tui_completion_gate(terminal_kind)` (:6726). TUI-
-///   gated turns' `Delivered`-vs-`Unknown` commit depends on the POST-send
-///   `lifecycle_stage_paused` which the controller's inline-commit cannot express, so
-///   they are RETAINED exclusions (stay legacy; #4047 removes the gate).
-///   Excluding them is ALSO what makes `lifecycle_stage_paused` always-false for
-///   the cut-over set (NotGated → `watcher_tui_gate_blocks_lifecycle == false`),
-///   so the advance callback returns `true` on confirmed transport.
+/// Structural exclusions stay legacy: no direct send, no ordered range, no
+/// placeholder anchor, empty formatted body, or TUI completion gate. Long bodies
+/// still use the controller through `SendNewChunks { delete_anchor: true }` when
+/// the same structural conditions hold.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) fn watcher_short_replace_cutover(
-    controller_enabled: bool,
     will_direct_send: bool,
     ordered_range: bool,
     has_placeholder: bool,
@@ -92,25 +36,18 @@ pub(in crate::services::discord) fn watcher_short_replace_cutover(
     formatted_is_empty: bool,
     tui_completion_gate_required: bool,
 ) -> bool {
-    controller_enabled
-        && will_direct_send
+    will_direct_send
         && ordered_range
         && has_placeholder
         && !formatted_is_empty
         && !tui_completion_gate_required
 }
 
-/// #3089 A4: the full short-replace cut-over decision at the watcher lease-acquire
-/// site. The flag is checked FIRST so explicit opt-out short-circuits before
-/// formatting the body — byte-identical legacy. When ON it formats the body EXACTLY as the send
-/// arm (tmux_watcher.rs:6173-6187: `format_for_discord_with[_status_panel]` then the
-/// optional `prepend_monitor_auto_turn_origin`) so the `should_send_ordered_new_chunks`
-/// (length) and `formatted_is_empty` terms match what the send arm sees, then applies
-/// [`watcher_short_replace_cutover`]. Kept here (not inlined) so the frozen
-/// `tmux_watcher.rs` call site stays a single line.
+/// #3089 A4: full cut-over decision at the watcher lease-acquire site. Formats
+/// the body exactly as the send arm, then applies
+/// [`watcher_short_replace_cutover`].
 #[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) fn watcher_short_replace_cutover_decision(
-    controller_enabled: bool,
     status_panel_v2_enabled: bool,
     should_tag_monitor_origin: bool,
     provider: &ProviderKind,
@@ -121,9 +58,6 @@ pub(in crate::services::discord) fn watcher_short_replace_cutover_decision(
     session_bound_fallback_uses_full_body: bool,
     tui_completion_gate_required: bool,
 ) -> bool {
-    if !controller_enabled {
-        return false;
-    }
     let formatted = if status_panel_v2_enabled {
         crate::services::discord::formatting::format_for_discord_with_status_panel(
             direct_terminal_response,
@@ -141,7 +75,6 @@ pub(in crate::services::discord) fn watcher_short_replace_cutover_decision(
         formatted
     };
     watcher_short_replace_cutover(
-        controller_enabled,
         will_direct_send,
         ordered_range,
         has_placeholder,

@@ -4844,16 +4844,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // zero/inverted range never delivers, so do not lease it).
         let watcher_will_direct_send =
             watcher_direct_fallback_after_session_bound_ack && has_direct_terminal_response;
-        // #3089 A4: cut the watcher short-replace branch onto the unified controller
-        // behind a default-ON flag. When ON the CONTROLLER owns the single lease, so
-        // the watcher's own acquire/heartbeat/b2-skip/commit/advance/release are skipped
-        // (no double-acquire). Explicit opt-out is byte-identical (flag short-circuits
-        // before formatting). Empty bodies / TUI-gated turns stay legacy; anchored long
-        // chunks route via the controller's anchor-delete plan when the flag is ON.
+        // #3089 A4/#3998 S1-f2: cut structurally eligible watcher terminal
+        // delivery onto the unified controller. The CONTROLLER owns the single
+        // lease, so the watcher's own acquire/heartbeat/b2-skip/commit/advance/
+        // release are skipped (no double-acquire). Empty bodies / TUI-gated turns
+        // stay legacy; anchored long chunks route via the controller's
+        // anchor-delete plan.
         // No-placeholder new-message fresh-send remains legacy: anchor-less
         // fresh-send is not yet a controller verb (#3998 legacy-retirement follow-up).
         let cutover_short_replace = terminal_send::watcher_short_replace_cutover_decision(
-            terminal_send::watcher_terminal_controller_enabled(),
             shared.ui.status_panel_v2_enabled,
             relay_decision.should_tag_monitor_origin,
             &watcher_provider,

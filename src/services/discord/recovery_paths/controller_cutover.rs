@@ -1,7 +1,7 @@
 //! #3089 A6a: route the recovery engine's anchored short-replace delivery
-//! through the unified turn-output controller (`deliver_turn_output`), behind a
-//! flag (default ON with `=0|false` rollback opt-out). This is an A3-clone — recovery's anchored relay, like
-//! standby, is TRANSPORT-ONLY: it never held a `DeliveryLeaseCell`, never
+//! through the unified turn-output controller (`deliver_turn_output`). This is an
+//! A3-clone — recovery's anchored relay, like standby, is TRANSPORT-ONLY: it never
+//! held a `DeliveryLeaseCell`, never
 //! advanced an offset, and ran no heartbeat — so the controller is driven with
 //! [`toc::NoLease`] (acquire always fails → `ProceedMarkerless`: no lease held,
 //! `heartbeat = None`) and `advance = None` (no offset authority → the confirmed
@@ -51,11 +51,9 @@
 //! left untouched. #3016/#3419 (inflight finalizer reregister) and #3418 D1
 //! (`recovery_text.rs`) are not delivery surfaces and are untouched.
 
-use std::sync::Arc;
-use std::sync::OnceLock;
-
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId};
+use std::sync::Arc;
 
 use super::super::SharedData;
 use super::super::gateway::TurnGateway;
@@ -67,33 +65,11 @@ use super::restart::probe_channel_liveness;
 use super::shared::{RecoveryRelayOutcome, escalate_transient_relay_outcome_with_probe};
 use crate::services::provider::ProviderKind;
 
-/// #3089 A6a: flag gating ONLY the recovery anchored short-replace branch onto
-/// the turn-output controller (`deliver_turn_output`). Default ON → that branch
-/// routes through the controller as a transport-only `ProceedMarkerless` delivery
-/// (recovery holds no lease, advances no offset, runs no heartbeat — see
-/// [`toc::NoLease`]); `AGENTDESK_RECOVERY_RELAY_CONTROLLER=0|false` is the
-/// rollback opt-out. OnceLock+env, mirroring `standby_relay_controller_enabled`.
-/// The `None` (TUI-direct fresh-send) branch stays legacy.
-pub(in crate::services::discord) fn recovery_relay_controller_enabled() -> bool {
-    static CACHED: OnceLock<bool> = OnceLock::new();
-    *CACHED.get_or_init(|| {
-        let on = crate::services::discord::controller_rollout_flag::enabled_from_env(
-            "AGENTDESK_RECOVERY_RELAY_CONTROLLER",
-        );
-        // Telemetry remains emitted only when the controller path is enabled.
-        if on {
-            tracing::info!("  ✓ recovery_relay_controller: enabled");
-        }
-        on
-    })
-}
-
 /// #3089 A6a: pure short-replace cut-over decision. Routes the recovery anchored
-/// short-replace branch onto the unified controller IFF the flag is ON **and**
-/// an anchored placeholder exists **and** the body is non-empty.
+/// short-replace branch onto the unified controller IFF an anchored placeholder
+/// exists **and** the body is non-empty.
 ///
 /// Each exclusion is LOAD-BEARING (a controller divergence the gate guards):
-/// - `enabled` false (explicit opt-out) → byte-identical legacy.
 /// - `has_placeholder` false (`placeholder == None`) → the legacy `None` arm
 ///   sends a NEW message via `send_long_message_raw`; the controller's
 ///   `Replace { Active }` plan edits the anchor `MessageId` in place. With no
@@ -106,11 +82,10 @@ pub(in crate::services::discord) fn recovery_relay_controller_enabled() -> bool 
 ///   non-delivered. Dropping this half would flip an empty body
 ///   `Delivered → TransientFailure`. Pinned by the truth-table test.
 pub(in crate::services::discord) fn recovery_short_replace_should_cutover(
-    enabled: bool,
     has_placeholder: bool,
     body: &str,
 ) -> bool {
-    enabled && has_placeholder && !body.is_empty()
+    has_placeholder && !body.is_empty()
 }
 
 /// #3089 A6a: deliver the recovered terminal text via the unified controller,
@@ -318,16 +293,13 @@ mod tests {
 
     #[test]
     fn should_cutover_truth_table() {
-        // (false, *, *) → false (explicit opt-out defers, byte-identical legacy).
-        assert!(!recovery_short_replace_should_cutover(false, true, "x"));
-        assert!(!recovery_short_replace_should_cutover(false, false, ""));
-        // (true, false, _) → false: None defers to the legacy fresh-send branch.
-        assert!(!recovery_short_replace_should_cutover(true, false, "x"));
-        // (true, true, "") → false: empty body defers (legacy zero-chunk →
+        // (false, _) → false: None defers to the legacy fresh-send branch.
+        assert!(!recovery_short_replace_should_cutover(false, "x"));
+        // (true, "") → false: empty body defers (legacy zero-chunk →
         // EditedOriginal → Delivered; controller → Skipped → not delivered).
-        assert!(!recovery_short_replace_should_cutover(true, true, ""));
-        // (true, true, "x") → true: the cutover row.
-        assert!(recovery_short_replace_should_cutover(true, true, "x"));
+        assert!(!recovery_short_replace_should_cutover(true, ""));
+        // (true, "x") → true: the cutover row.
+        assert!(recovery_short_replace_should_cutover(true, "x"));
     }
 
     #[test]
@@ -336,14 +308,14 @@ mod tests {
         // dropping `!body.is_empty()` flips the empty row; both true→false
         // under their respective mutations.
         assert!(
-            !recovery_short_replace_should_cutover(true, false, "x"),
+            !recovery_short_replace_should_cutover(false, "x"),
             "has_placeholder is load-bearing: None must defer"
         );
         assert!(
-            !recovery_short_replace_should_cutover(true, true, ""),
+            !recovery_short_replace_should_cutover(true, ""),
             "!body.is_empty() is load-bearing: empty must defer"
         );
-        assert!(recovery_short_replace_should_cutover(true, true, "x"));
+        assert!(recovery_short_replace_should_cutover(true, "x"));
     }
 
     // ---- controller adapter (fake gateway driving the REAL controller) --
@@ -687,31 +659,5 @@ mod tests {
         assert_eq!(anchor.panel_msg_id, 88_009);
         assert_eq!(anchor.panel_channel_id, state.channel_id);
         assert_eq!(anchor.range, (128, 256));
-    }
-
-    #[test]
-    fn zero_optout_predicate_defers_and_env_absent_defaults_on() {
-        // Explicit opt-out → the production gate never calls the controller adapter,
-        // so the legacy path runs.
-        assert!(!recovery_short_replace_should_cutover(false, true, "x"));
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        assert!(
-            !crate::services::discord::controller_rollout_flag::enabled_from_raw(Some("0")),
-            "AGENTDESK_RECOVERY_RELAY_CONTROLLER=0 is the rollback opt-out"
-        );
-        assert!(
-            !crate::services::discord::controller_rollout_flag::enabled_from_raw(Some("false")),
-            "AGENTDESK_RECOVERY_RELAY_CONTROLLER=false is the rollback opt-out"
-        );
-        // Default ON when the env var is unset. Only assert when truly unset, since
-        // `OnceLock` caches the first observation.
-        if std::env::var_os("AGENTDESK_RECOVERY_RELAY_CONTROLLER").is_none() {
-            assert!(
-                recovery_relay_controller_enabled(),
-                "flag defaults ON (controller path when absent)"
-            );
-        }
     }
 }

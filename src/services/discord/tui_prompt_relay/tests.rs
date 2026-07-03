@@ -2632,11 +2632,9 @@ fn task_notification_repeat_lease_clear_preserves_newer_turn() {
     );
 }
 
-// #3089 A6b r2 [High]: the codex external-input bridge frame builder moved to
-// `tui_prompt_relay_controller_cutover::codex_external_input_bridge_stream_messages`
-// (flag-gated `OutputOffset` plumbing). Its OFF (`[Text, Done]`, byte-identical
-// legacy) and ON (`[Text, OutputOffset, Done]`, reaches the controller) shapes are
-// pinned in that sibling's test module under the shared env lock.
+// #3089 A6b r2 [High]/#3998 S1-f2: the codex external-input bridge frame
+// builder emits `OutputOffset` so the bridge has a real ordered range for the
+// unconditional A5 controller route.
 
 // ====================================================================
 // #3256: stream-through of operator external-input prose. These tests pin

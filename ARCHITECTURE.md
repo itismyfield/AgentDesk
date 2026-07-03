@@ -484,8 +484,7 @@ src/
 │   │   │   ├── send_to_agent.rs
 │   │   │   ├── serenity_reference.rs
 │   │   │   ├── transport.rs
-│   │   │   ├── turn_output_controller.rs
-│   │   │   └── turn_output_controller_rollout_health.rs
+│   │   │   └── turn_output_controller.rs
 │   │   ├── placeholder_live_events/
 │   │   │   ├── background_task_events.rs
 │   │   │   ├── common.rs
@@ -721,7 +720,6 @@ src/
 │   │   ├── agentdesk_config.rs
 │   │   ├── answer_flush_barrier.rs
 │   │   ├── catch_up.rs
-│   │   ├── controller_rollout_flag.rs
 │   │   ├── delivery_lease_key.rs
 │   │   ├── destructive_cancel_gate.rs
 │   │   ├── discord_io.rs
@@ -810,7 +808,6 @@ src/
 │   │   ├── tui_busy_gate.rs
 │   │   ├── tui_direct_pending_start.rs
 │   │   ├── tui_prompt_relay.rs
-│   │   ├── tui_prompt_relay_controller_cutover.rs
 │   │   ├── tui_task_card.rs
 │   │   ├── turn_end_wip_warning.rs
 │   │   ├── turn_finalizer.rs

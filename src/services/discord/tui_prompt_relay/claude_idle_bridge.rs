@@ -99,6 +99,27 @@ pub(super) fn compose_tui_idle_response(
 }
 
 #[cfg(unix)]
+fn codex_external_input_bridge_stream_messages(
+    response: &str,
+    final_offset: u64,
+) -> Vec<StreamMessage> {
+    let mut messages = Vec::new();
+    if !response.trim().is_empty() {
+        messages.push(StreamMessage::Text {
+            content: response.to_string(),
+        });
+    }
+    messages.push(StreamMessage::OutputOffset {
+        offset: final_offset,
+    });
+    messages.push(StreamMessage::Done {
+        result: response.to_string(),
+        session_id: None,
+    });
+    messages
+}
+
+#[cfg(unix)]
 #[allow(dead_code)]
 pub(super) async fn relay_tui_idle_response_through_bridge(
     shared: &Arc<SharedData>,
@@ -107,10 +128,10 @@ pub(super) async fn relay_tui_idle_response_through_bridge(
     tmux_session_name: &str,
     output_path: &Path,
     start_offset: u64,
-    // #3089 A6b r2 [High]: the tail's authoritative end offset. Plumbed into the
-    // bridge stream as `OutputOffset` ONLY when the A6b flag is ON (OFF-safe — see
-    // `codex_external_input_bridge_stream_messages`) so codex external-input's
-    // `ordered_range` becomes true and the cutover reaches the controller.
+    // #3089 A6b r2 [High]/#3998 S1-f2: the tail's authoritative end offset.
+    // Plumbed into the bridge stream as `OutputOffset` so codex external-input's
+    // `ordered_range` becomes true and the unconditional A5 controller route is
+    // structurally eligible.
     final_offset: u64,
     prompt_text: &str,
     response: &str,
@@ -209,21 +230,16 @@ pub(super) async fn relay_tui_idle_response_through_bridge(
         defer_watcher_resume: false,
         reuse_status_panel_message: false,
         completion_tx: Some(completion_tx),
-        is_external_input_tui_direct: true, // #3089 A6b: scope the controller OR-in
+        is_external_input_tui_direct: true, // #3959: suppress mirror chrome footer
         inflight_state,
     };
 
     spawn_turn_bridge(shared.clone(), Arc::new(CancelToken::new()), rx, bridge);
-    // #3089 A6b r2 [High]: feed the bridge `[Text?, OutputOffset?(flag-gated), Done]`.
-    // The flag-gated `OutputOffset` advances `tmux_last_offset` to `final_offset` so
-    // codex external-input's `ordered_range` is true and the cutover reaches the
-    // controller; OFF → no `OutputOffset` → byte-identical legacy `NoRange`.
-    for message in
-        super::super::tui_prompt_relay_controller_cutover::codex_external_input_bridge_stream_messages(
-            response,
-            final_offset,
-        )
-    {
+    // #3089 A6b r2 [High]/#3998 S1-f2: feed the bridge
+    // `[Text?, OutputOffset, Done]`. `OutputOffset` advances `tmux_last_offset`
+    // to `final_offset` so codex external-input's `ordered_range` is true and
+    // the A5 controller route is structurally eligible.
+    for message in codex_external_input_bridge_stream_messages(response, final_offset) {
         tx.send(message)
             .map_err(|error| format!("send TUI-direct bridge stream event: {error}"))?;
     }
@@ -395,7 +411,7 @@ pub(super) async fn stream_tui_idle_response_through_bridge(
         defer_watcher_resume: false,
         reuse_status_panel_message: false,
         completion_tx: Some(completion_tx),
-        is_external_input_tui_direct: true, // #3089 A6b: scope the controller OR-in
+        is_external_input_tui_direct: true, // #3959: suppress mirror chrome footer
         inflight_state,
     };
 

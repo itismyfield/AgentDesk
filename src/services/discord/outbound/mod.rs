@@ -23,7 +23,6 @@ pub(crate) mod send_to_agent;
 pub(in crate::services::discord) mod serenity_reference;
 mod transport;
 pub(in crate::services::discord) mod turn_output_controller; // #3089 A1
-mod turn_output_controller_rollout_health; // #3794 read-only rollout health
 
 pub(crate) use decision::{
     DISCORD_MESSAGE_HARD_LIMIT_CHARS as DISCORD_HARD_LIMIT_CHARS,
@@ -50,8 +49,4 @@ pub(crate) fn shared_outbound_deduper() -> &'static OutboundDeduper {
 
 pub(crate) fn delivery_record_rollout_health_json() -> serde_json::Value {
     delivery_record::delivery_record_rollout_health_json()
-}
-
-pub(crate) fn turn_output_controller_rollout_health_json() -> serde_json::Value {
-    turn_output_controller_rollout_health::turn_output_controller_rollout_health_json()
 }

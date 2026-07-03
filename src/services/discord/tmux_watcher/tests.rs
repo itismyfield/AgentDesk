@@ -3171,50 +3171,20 @@ mod watcher_short_replace_controller {
     #[test]
     fn watcher_terminal_lease_range_pins_cutover() {
         use super::super::terminal_send::watcher_short_replace_cutover as cut;
-        // All gate terms satisfied (controller on, will-send, ordered, placeholder,
+        // All gate terms satisfied (will-send, ordered, placeholder,
         // not-ordered-chunks, non-empty, not-tui-gated) → cut over.
-        assert!(cut(true, true, true, true, false, false, false));
-        // Flag OFF → never cut over.
-        assert!(!cut(false, true, true, true, false, false, false));
+        assert!(cut(true, true, true, false, false, false));
         // No placeholder → legacy (the prompt-anchor reference-send branch).
-        assert!(!cut(true, true, true, false, false, false, false));
+        assert!(!cut(true, true, false, false, false, false));
         // should_send_ordered_new_chunks → controller long-chunk route.
-        assert!(cut(true, true, true, true, true, false, false));
+        assert!(cut(true, true, true, true, false, false));
         // empty formatted body → legacy (controller would Skip; legacy advances).
-        assert!(!cut(true, true, true, true, false, true, false));
+        assert!(!cut(true, true, true, false, true, false));
         // TUI-completion-gate required → legacy (post-send lifecycle_stage_paused).
-        assert!(!cut(true, true, true, true, false, false, true));
+        assert!(!cut(true, true, true, false, false, true));
         // not will-direct-send / not ordered range → legacy.
-        assert!(!cut(true, false, true, true, false, false, false));
-        assert!(!cut(true, true, false, true, false, false, false));
-    }
-
-    // (8) Explicit opt-out byte-identical characterization: with
-    // `AGENTDESK_WATCHER_TERMINAL_CONTROLLER=0`, the cut-over decision is false
-    // regardless of the other terms, so the legacy
-    // `replace_long_message_raw_with_outcome` arm runs verbatim. (Pure: the flag
-    // helper short-circuits before formatting, so opt-out has no observable side effect.)
-    #[test]
-    fn zero_optout_byte_identical() {
-        use super::super::terminal_send::watcher_short_replace_cutover_decision as decide;
-        assert!(
-            !crate::services::discord::controller_rollout_flag::enabled_from_raw(Some("0")),
-            "AGENTDESK_WATCHER_TERMINAL_CONTROLLER=0 is the rollback opt-out"
-        );
-        // controller_enabled = false (from explicit opt-out) → false even with
-        // every other term cut-over-true.
-        assert!(!decide(
-            false,
-            false,
-            false,
-            &ProviderKind::Claude,
-            "non-empty answer",
-            true,
-            true,
-            true,
-            false,
-            false,
-        ));
+        assert!(!cut(false, true, true, false, false, false));
+        assert!(!cut(true, false, true, false, false, false));
     }
 
     // (9) #3089 A4 r2 (codex r1 [High]): the controller write-back MUST mirror

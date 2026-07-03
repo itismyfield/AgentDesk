@@ -1,10 +1,9 @@
-//! #3089 A5 turn_bridge terminal cutover to the unified turn-output controller
-//! (flag-gated, default ON with `=0|false` rollback opt-out).
+//! #3089 A5 turn_bridge terminal cutover to the unified turn-output controller.
 //!
 //! Sibling of `turn_bridge/terminal_delivery.rs` (which owns `BridgeDeliveryLease`,
 //! `advance_tmux_relay_confirmed_end`, and `turn_bridge_replace_outcome_committed`).
-//! This module holds the A5 cutover surface — the flag helper, the pure cut-over
-//! decision + `bridge_terminal_lease_range` gate, the `BridgePostHeartbeat`
+//! This module holds the A5 cutover surface — the pure cut-over decision +
+//! `bridge_terminal_lease_range` gate, the `BridgePostHeartbeat`
 //! adapter, and the short-replace/long-chunk controller write-backs — extracted here so
 //! `terminal_delivery.rs` stays below the 1000-prod giant-file threshold (mirrors
 //! A4's `tmux_watcher/terminal_send.rs` sibling).
@@ -12,7 +11,6 @@
 use super::*;
 
 use std::sync::Arc;
-use std::sync::OnceLock;
 
 use super::super::gateway::TurnGateway;
 use super::super::inflight::RelayOwnerKind;
@@ -24,32 +22,8 @@ use crate::services::discord::{
     DeliveryLeaseCell, DeliveryLeaseHeartbeat, DeliveryLeaseKey, LeaseHolder, lease_now_ms,
 };
 
-/// #3089 A5/#3998 S1-d: flag gating the bridge terminal cutover onto the unified
-/// [`toc::deliver_turn_output`]. Default ON → eligible short-replace and
-/// long-chunk deliveries use the controller on the SAME `(channel, turn,
-/// [start,end))` lease as `LeaseHolder::Bridge`;
-/// `AGENTDESK_TURN_BRIDGE_TERMINAL_CONTROLLER=0|false` is the rollback opt-out.
-/// OnceLock+env, mirroring
-/// `watcher_terminal_controller_enabled` (A4) / `sink_short_replace_controller_enabled`
-/// (A2b) / `standby_relay_controller_enabled` (A3).
-pub(super) fn turn_bridge_terminal_controller_enabled() -> bool {
-    static CACHED: OnceLock<bool> = OnceLock::new();
-    *CACHED.get_or_init(|| {
-        let on = crate::services::discord::controller_rollout_flag::enabled_from_env(
-            "AGENTDESK_TURN_BRIDGE_TERMINAL_CONTROLLER",
-        );
-        // Telemetry remains emitted only when the controller path is enabled.
-        if on {
-            tracing::info!("  ✓ turn_bridge_terminal_controller: enabled");
-        }
-        on
-    })
-}
-
 /// #3089 A5: the bridge short-replace cut-over decision, computed at the site-5
-/// lease-acquire site (mod.rs ~6134). The flag is checked FIRST so explicit
-/// opt-out short-circuits before any work — byte-identical legacy on the
-/// `=0|false` path.
+/// lease-acquire site (mod.rs ~6134).
 ///
 /// Terms (mirroring the legacy short-replace branch arm at mod.rs:6126-6245):
 /// - `will_short_replace` — we are in the `can_chain_locally` short-replace arm
@@ -73,46 +47,33 @@ pub(super) fn turn_bridge_terminal_controller_enabled() -> bool {
 ///   mod.rs:6023). The headless arm (mod.rs:6247) is EXCLUDED.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn bridge_short_replace_cutover(
-    controller_enabled: bool,
     can_chain_locally: bool,
     will_short_replace: bool,
     ordered_range: bool,
     has_placeholder: bool,
     body_non_empty: bool,
 ) -> bool {
-    controller_enabled
-        && can_chain_locally
-        && will_short_replace
-        && ordered_range
-        && has_placeholder
-        && body_non_empty
+    can_chain_locally && will_short_replace && ordered_range && has_placeholder && body_non_empty
 }
 
 /// #3089 A5: the full short-replace cut-over decision at the site-5 lease-acquire
-/// site. The flag is checked FIRST so explicit opt-out short-circuits before
-/// computing the length predicate — byte-identical legacy. When ON it derives
-/// `will_short_replace` EXACTLY as the send arm (mod.rs:6024:
+/// site. It derives `will_short_replace` EXACTLY as the send arm (mod.rs:6024:
 /// `!super::terminal_delivery::terminal_delivery_should_send_new_chunks`) so the cutover and the legacy arm
 /// agree on which body is "short". Kept here (not inlined) so the frozen
 /// `mod.rs` call site stays a single line.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn bridge_short_replace_cutover_decision(
-    controller_enabled: bool,
     can_chain_locally: bool,
     formatted_response: &str,
     ordered_range: bool,
     has_placeholder: bool,
 ) -> bool {
-    if !controller_enabled {
-        return false;
-    }
     // The send arm is the short-replace arm IFF it does NOT send new chunks.
     let will_short_replace = !super::terminal_delivery::terminal_delivery_should_send_new_chunks(
         can_chain_locally,
         formatted_response,
     );
     bridge_short_replace_cutover(
-        controller_enabled,
         can_chain_locally,
         will_short_replace,
         ordered_range,
@@ -128,14 +89,12 @@ pub(super) fn bridge_short_replace_cutover_decision(
 /// Retained exclusions: `NoRange` (no advance authority; #4048), headless (no
 /// direct Discord POST), and empty body (consistent with A2b/A3 skip parity).
 pub(super) fn bridge_long_chunks_cutover_decision(
-    controller_enabled: bool,
     can_chain_locally: bool,
     formatted_response: &str,
     ordered_range: bool,
     has_placeholder: bool,
 ) -> bool {
-    controller_enabled
-        && can_chain_locally
+    can_chain_locally
         && super::terminal_delivery::terminal_delivery_should_send_new_chunks(
             can_chain_locally,
             formatted_response,
@@ -1005,7 +964,6 @@ mod tests {
             apply_bridge_short_replace_outcome, bridge_long_chunks_cutover_decision,
             bridge_short_replace_cutover, bridge_short_replace_cutover_decision,
             bridge_terminal_lease_range, deliver_short_replace_via_controller,
-            turn_bridge_terminal_controller_enabled,
         };
         use crate::services::discord::formatting::ReplaceLongMessageOutcome;
         use crate::services::discord::gateway::{GatewayFuture, TurnGateway};
@@ -1856,71 +1814,34 @@ mod tests {
         #[test]
         fn bridge_short_replace_cutover_predicate() {
             // All-true → cut over.
-            assert!(bridge_short_replace_cutover(
-                true, true, true, true, true, true
-            ));
+            assert!(bridge_short_replace_cutover(true, true, true, true, true));
             // Each false term independently disables the cutover.
-            assert!(!bridge_short_replace_cutover(
-                false, true, true, true, true, true
-            ));
-            assert!(!bridge_short_replace_cutover(
-                true, false, true, true, true, true
-            ));
-            assert!(!bridge_short_replace_cutover(
-                true, true, false, true, true, true
-            ));
-            assert!(!bridge_short_replace_cutover(
-                true, true, true, false, true, true
-            ));
-            assert!(!bridge_short_replace_cutover(
-                true, true, true, true, false, true
-            ));
-            assert!(!bridge_short_replace_cutover(
-                true, true, true, true, true, false
-            ));
+            assert!(!bridge_short_replace_cutover(false, true, true, true, true));
+            assert!(!bridge_short_replace_cutover(true, false, true, true, true));
+            assert!(!bridge_short_replace_cutover(true, true, false, true, true));
+            assert!(!bridge_short_replace_cutover(true, true, true, false, true));
+            assert!(!bridge_short_replace_cutover(true, true, true, true, false));
 
             // The decision helper: a long body (would chunk) is NOT short-replace.
             let long = "x".repeat(crate::services::discord::DISCORD_MSG_LIMIT + 10);
             assert!(
-                !bridge_short_replace_cutover_decision(true, true, &long, true, true),
+                !bridge_short_replace_cutover_decision(true, &long, true, true),
                 "a body that exceeds the inline limit is not the short-replace arm"
             );
             assert!(
-                bridge_long_chunks_cutover_decision(true, true, &long, true, true),
+                bridge_long_chunks_cutover_decision(true, &long, true, true),
                 "the long-chunk predicate routes the same body when A5 is enabled"
             );
-            // A short body with a real range + flag ON → cut over.
+            // A short body with a real range → cut over.
             assert!(bridge_short_replace_cutover_decision(
-                true, true, "short", true, true
+                true, "short", true, true
             ));
             // An empty body is NOT cut over (controller would Skip).
-            assert!(!bridge_short_replace_cutover_decision(
-                true, true, "", true, true
-            ));
+            assert!(!bridge_short_replace_cutover_decision(true, "", true, true));
             // No ordered range → not cut over.
             assert!(!bridge_short_replace_cutover_decision(
-                true, true, "short", false, true
+                true, "short", false, true
             ));
-        }
-
-        // (9) Explicit opt-out byte-identical: `controller_enabled = false` makes
-        // the decision false (the legacy arm runs) EVEN with every other cut-over
-        // term true, so the flag is the sole gate (mirrors A4). Passes `false`
-        // explicitly (not the env-read flag) so it is robust whether the harness
-        // runs default-ON or opt-out — the predicate's flag-first short-circuit is
-        // what `=0|false` rollback relies on.
-        #[test]
-        fn zero_optout_byte_identical() {
-            assert!(
-                !crate::services::discord::controller_rollout_flag::enabled_from_raw(Some("0")),
-                "AGENTDESK_TURN_BRIDGE_TERMINAL_CONTROLLER=0 is the rollback opt-out"
-            );
-            assert!(
-                !bridge_short_replace_cutover_decision(false, true, "short", true, true),
-                "controller_enabled=false from explicit opt-out → the cut-over decision is false → legacy arm"
-            );
-            // The env helper itself is callable (no panic / side-effect contract).
-            let _ = turn_bridge_terminal_controller_enabled();
         }
     }
 }

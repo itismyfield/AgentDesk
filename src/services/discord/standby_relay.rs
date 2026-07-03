@@ -23,7 +23,6 @@
 //! Leader path is unchanged.
 
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -39,41 +38,18 @@ use super::outbound::turn_output_controller as toc;
 use super::placeholder_controller::{PlaceholderKey, PlaceholderLifecycle};
 use crate::services::provider::ProviderKind;
 
-/// #3089 A3: flag gating ONLY the standby short-replace branch onto the
-/// turn-output controller (`deliver_turn_output`). Default ON → that branch routes
-/// through the controller as a transport-only `ProceedMarkerless` delivery
-/// (standby holds no lease, advances no offset, runs no heartbeat — see
-/// [`NoLease`](toc::NoLease)); `AGENTDESK_STANDBY_RELAY_CONTROLLER=0|false` is
-/// the rollback opt-out. OnceLock+env, mirroring
-/// `sink_short_replace_controller_enabled`. The long-chunk (send new chunks +
-/// delete original) and new-message branches stay legacy (deferred, exactly like
-/// the A2b sink cutover).
-pub(in crate::services::discord) fn standby_relay_controller_enabled() -> bool {
-    static CACHED: OnceLock<bool> = OnceLock::new();
-    *CACHED.get_or_init(|| {
-        let on = crate::services::discord::controller_rollout_flag::enabled_from_env(
-            "AGENTDESK_STANDBY_RELAY_CONTROLLER",
-        );
-        // Telemetry remains emitted only when the controller path is enabled.
-        if on {
-            tracing::info!("  ✓ standby_relay_controller: enabled");
-        }
-        on
-    })
-}
-
-/// #3089 A3 (review-fix r2 Medium): pure short-replace cut-over decision.
-/// Routes the standby short-replace branch onto the unified controller IFF the
-/// flag is ON **and** the post-format body is non-empty. The `!formatted.is_empty()`
-/// half is LOAD-BEARING and single-sourced here: legacy
+/// #3089 A3/#3998 S1-f2: pure short-replace cut-over decision.
+/// Routes the standby short-replace branch onto the unified controller when the
+/// post-format body is non-empty. The `!formatted.is_empty()` half is
+/// LOAD-BEARING and single-sourced here: legacy
 /// `replace_long_message_raw_with_outcome` treats a zero-chunk (empty) body as
 /// `EditedOriginal` → committed → **true** (no network), whereas the controller
 /// short-circuits an empty body to `Skipped` → **false**. Dropping the empty-body
 /// exclusion would wrongly flip empty bodies true→false, so it is pinned by
 /// `standby_short_replace_should_cutover_pins_both_conditions`. Mirrors A2b's
 /// `sink_guard_lease_range` extraction.
-fn standby_short_replace_should_cutover(controller_enabled: bool, formatted: &str) -> bool {
-    controller_enabled && !formatted.is_empty()
+fn standby_short_replace_should_cutover(formatted: &str) -> bool {
+    !formatted.is_empty()
 }
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -790,14 +766,13 @@ async fn deliver_response(
                 );
                 return true;
             }
-            // #3089 A3: route the short-replace branch through the unified
-            // controller behind a default-ON flag. The cut-over decision — including
-            // the load-bearing non-empty-body exclusion — lives in the single-sourced
-            // pure fn `standby_short_replace_should_cutover` (see its doc comment for
-            // the empty-body true→false divergence the gate guards against). Explicit
-            // opt-out (`=0|false`) or empty body → the verbatim legacy path below.
-            if standby_short_replace_should_cutover(standby_relay_controller_enabled(), &formatted)
-            {
+            // #3089 A3/#3998 S1-f2: route the structurally eligible
+            // short-replace branch through the unified controller. The cut-over
+            // decision, including the load-bearing non-empty-body exclusion,
+            // lives in the single-sourced pure fn
+            // `standby_short_replace_should_cutover` (see its doc comment for the
+            // empty-body true→false divergence the gate guards against).
+            if standby_short_replace_should_cutover(&formatted) {
                 let gateway = super::gateway::DiscordGateway::new(
                     http.clone(),
                     shared.clone(),
@@ -1353,7 +1328,7 @@ mod tests {
     // the helper): each test fails under a targeted controller mutation.
     mod a3_controller_cutover_tests {
         use super::super::{
-            RelayOwnerKind, deliver_short_replace_via_controller, standby_relay_controller_enabled,
+            RelayOwnerKind, deliver_short_replace_via_controller,
             standby_short_replace_should_cutover,
         };
         use crate::services::discord::formatting::ReplaceLongMessageOutcome;
@@ -1565,39 +1540,19 @@ mod tests {
             assert_eq!(replace_calls, 1, "the single POST was attempted and failed");
         }
 
-        // #3089 A3 (review-fix r2): characterizes the behaviours the production
-        // cut-over gate relies on — (a) the flag defaults ON when absent, while
-        // `=0|false` remains the legacy rollback opt-out, and (b) the controller
-        // diverges from legacy on an empty body (controller → Skipped → false;
-        // legacy zero-chunk → EditedOriginal → true). NOTE: this test calls
+        // #3089 A3 (review-fix r2): characterizes the empty-body behaviour the
+        // production cut-over gate relies on: the controller diverges from legacy
+        // on an empty body (controller → Skipped → false; legacy zero-chunk →
+        // EditedOriginal → true). NOTE: this test calls
         // `deliver_short_replace_via_controller` DIRECTLY, so it does NOT exercise
         // the production guard at `deliver_response`; it merely proves WHY the
         // guard's `!formatted.is_empty()` half must exist. The guard logic itself
-        // (both conditions) is single-sourced in the pure fn
-        // `standby_short_replace_should_cutover` and mutation-pinned by
+        // is single-sourced in the pure fn `standby_short_replace_should_cutover`
+        // and mutation-pinned by
         // `standby_short_replace_should_cutover_pins_both_conditions` below.
         #[test]
-        fn flag_default_on_zero_optout_and_empty_body_diverges_from_legacy() {
-            let _lock = crate::config::shared_test_env_lock()
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            // (a) Default ON when the env var is unset. Only assert when truly unset,
-            // since `OnceLock` caches the first observation.
-            if std::env::var_os("AGENTDESK_STANDBY_RELAY_CONTROLLER").is_none() {
-                assert!(
-                    standby_relay_controller_enabled(),
-                    "flag default ON (controller path when absent)"
-                );
-            }
-            assert!(
-                !crate::services::discord::controller_rollout_flag::enabled_from_raw(Some("0")),
-                "AGENTDESK_STANDBY_RELAY_CONTROLLER=0 is the rollback opt-out"
-            );
-            assert!(
-                !crate::services::discord::controller_rollout_flag::enabled_from_raw(Some("false")),
-                "AGENTDESK_STANDBY_RELAY_CONTROLLER=false is the rollback opt-out"
-            );
-            // (b) Empty body → controller Skipped → false (legacy would return true),
+        fn empty_body_diverges_from_legacy() {
+            // Empty body → controller Skipped → false (legacy would return true),
             // proving the nonempty gate must keep empty bodies on the legacy path.
             let shared = make_shared_data_for_tests();
             let provider = ProviderKind::Claude;
@@ -1626,36 +1581,27 @@ mod tests {
             assert_eq!(RelayOwnerKind::StandbyRelay.as_str(), "standby_relay");
         }
 
-        // #3089 A3 (review-fix r2 Medium): mutation pin for the PRODUCTION cut-over
-        // gate. The guard at `deliver_response` now calls the single-sourced pure
-        // fn `standby_short_replace_should_cutover`, so the load-bearing
-        // `!formatted.is_empty()` literal lives in EXACTLY ONE place. This test
-        // pins BOTH conditions:
-        //   • dropping `controller_enabled` (mutate body to `!formatted.is_empty()`)
-        //     fails the flag-OFF assertion;
-        //   • dropping `!formatted.is_empty()` (mutate body to `controller_enabled`
-        //     alone) fails the empty-body assertion — the codex r1 finding's exact
-        //     mutation (empty body would wrongly cut over → controller Skip → false
-        //     instead of legacy zero-chunk EditedOriginal → true).
+        // #3089 A3 (review-fix r2 Medium): mutation pin for the PRODUCTION
+        // cut-over gate. The guard at `deliver_response` calls the single-sourced
+        // pure fn `standby_short_replace_should_cutover`, so the load-bearing
+        // `!formatted.is_empty()` literal lives in EXACTLY ONE place. Dropping it
+        // makes an empty body wrongly cut over → controller Skip → false instead
+        // of legacy zero-chunk EditedOriginal → true.
         #[test]
         fn standby_short_replace_should_cutover_pins_both_conditions() {
             assert!(
-                !standby_short_replace_should_cutover(false, "x"),
-                "explicit opt-out → never cut over (byte-identical legacy path)"
-            );
-            assert!(
-                !standby_short_replace_should_cutover(true, ""),
+                !standby_short_replace_should_cutover(""),
                 "empty body MUST stay legacy: controller Skips → false, but legacy \
                  zero-chunk → EditedOriginal → true; cutting over would flip true→false"
             );
             assert!(
-                standby_short_replace_should_cutover(true, "x"),
-                "the ONLY cut-over case: flag ON + non-empty body"
+                standby_short_replace_should_cutover("x"),
+                "the cut-over case is a non-empty body"
             );
         }
 
         #[test]
-        fn none_placeholder_new_message_stays_legacy_even_when_controller_flag_on() {
+        fn none_placeholder_new_message_stays_legacy() {
             let module_src = include_str!("standby_relay.rs");
             let match_marker = format!("match {} {{", "placeholder_msg_id");
             let match_src = module_src
@@ -1672,8 +1618,8 @@ mod tests {
                 .expect("standby no-placeholder result match")];
 
             assert!(
-                standby_short_replace_should_cutover(true, "answer"),
-                "sanity: flag ON + non-empty cuts over only inside the Some(placeholder) branch"
+                standby_short_replace_should_cutover("answer"),
+                "sanity: a non-empty body cuts over only inside the Some(placeholder) branch"
             );
             assert!(
                 legacy_send_window.contains(&format!("formatting::{}(", "send_long_message_raw")),

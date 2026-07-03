@@ -395,9 +395,9 @@ pub(super) struct TurnBridgeContext {
     /// response instead of editing an old panel buried in scrollback.
     pub(super) reuse_status_panel_message: bool,
     pub(super) completion_tx: Option<tokio::sync::oneshot::Sender<()>>,
-    /// #3089 A6b: `true` ONLY at the two TUI external-input idle callers; scopes the
-    /// A6b site-5 controller OR-in to external-input (NOT a `request_owner_name`
-    /// string compare). Default `false` for every other bridge caller. See :6096.
+    /// `true` ONLY at the two TUI external-input idle callers. Default `false`
+    /// for every other bridge caller; used by footer/chrome decisions that need
+    /// the origin without a `request_owner_name` string compare.
     pub(super) is_external_input_tui_direct: bool,
     pub(super) inflight_state: InflightTurnState,
 }
@@ -1490,7 +1490,7 @@ pub(super) fn spawn_turn_bridge(
         let mut new_session_id = bridge.new_session_id.clone();
         let mut new_raw_provider_session_id: Option<String> = None;
         let defer_watcher_resume = bridge.defer_watcher_resume;
-        let is_external_input_tui_direct = bridge.is_external_input_tui_direct; // #3089 A6b: site-5 scope
+        let is_external_input_tui_direct = bridge.is_external_input_tui_direct;
         let completion_tx = bridge.completion_tx;
         // Guard: ensure completion_tx fires even if the task panics or
         // exits early, preventing the parent from hanging on completion_rx.
@@ -5234,7 +5234,6 @@ pub(super) fn spawn_turn_bridge(
                         let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
                         let bridge_end = tmux_last_offset.unwrap_or(0);
                         if terminal_controller_cutover::bridge_long_chunks_cutover_decision(
-                            terminal_controller_cutover::turn_bridge_terminal_controller_enabled(),
                             can_chain_locally,
                             &delivery_response,
                             bridge_end > bridge_start,
@@ -5326,27 +5325,17 @@ pub(super) fn spawn_turn_bridge(
                             .await;
                         }
                     } else {
-                        // #3089 A5/A6b (default-ON flags): route short-replace through the controller (`terminal_controller_cutover`); explicit opt-out → legacy below.
+                        // #3089 A5/#3998 S1-f2: route structurally eligible
+                        // short-replace through the controller
+                        // (`terminal_controller_cutover`).
                         let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
                         let ordered_range = tmux_last_offset.is_some_and(|e| e > bridge_start);
-                        // #3089 A5 OR A6b: route short-replace via the controller when A5 is ON (both origins) OR A6b is ON AND this is a TUI external-input turn (closes #3088). The OR-in IS the pure `bridge_short_replace_route_decision` (r2 [Medium]) so the production expression cannot be silently weakened — the `is_external_input_tui_direct &&` scoping is mutation-pinned by `a6b_flag_does_not_route_discord_origin_when_a5_off`.
-                        use super::tui_prompt_relay_controller_cutover as a6b;
-                        let cutover_short_replace = a6b::bridge_short_replace_route_decision(
+                        let cutover_short_replace =
                             terminal_controller_cutover::bridge_short_replace_cutover_decision(
-                                terminal_controller_cutover::turn_bridge_terminal_controller_enabled(),
                                 can_chain_locally,
                                 &delivery_response,
                                 ordered_range,
                                 true,
-                            ),
-                            a6b::tui_prompt_relay_controller_enabled(),
-                            is_external_input_tui_direct,
-                            a6b::tui_prompt_relay_short_replace_should_cutover_decision(
-                                a6b::tui_prompt_relay_controller_enabled(),
-                                can_chain_locally,
-                                &delivery_response,
-                                ordered_range,
-                            ),
                         );
                         if cutover_short_replace {
                             let bridge_turn = super::turn_finalizer::TurnKey::new(

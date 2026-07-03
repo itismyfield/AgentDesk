@@ -7,7 +7,6 @@ mod answer_flush_barrier;
 // recovery) subsystem extracted verbatim to its own sibling module.
 mod catch_up;
 mod commands;
-mod controller_rollout_flag;
 mod delivery_lease_key;
 mod destructive_cancel_gate;
 mod discord_io;
@@ -112,7 +111,6 @@ mod tui_busy_gate;
 mod tui_direct_abort_marker;
 mod tui_direct_pending_start;
 mod tui_prompt_relay;
-pub(super) mod tui_prompt_relay_controller_cutover; // #3089 A6b: see module doc (closes #3088)
 mod tui_task_card;
 mod turn_bridge;
 mod turn_finalizer;

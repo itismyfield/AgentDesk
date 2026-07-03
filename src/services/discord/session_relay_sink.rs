@@ -7,7 +7,6 @@
 //! treats terminal delivery as delegated instead of sending directly.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -48,26 +47,6 @@ const IDLE_JSONL_RELAY_MAX_BYTES_PER_TICK: u64 = 1_048_576;
 
 pub(in crate::services::discord) fn session_bound_discord_delivery_enabled() -> bool {
     SESSION_BOUND_DISCORD_DELIVERY_ENABLED.load(Ordering::Acquire)
-}
-
-/// #3089 A2b: flag gating ONLY the short-replace branch onto the turn-output
-/// controller (`deliver_turn_output`). Default ON → the controller drives
-/// acquire→POST→commit→release on the SAME `(channel, turn, [start,end))` lease;
-/// `AGENTDESK_SINK_SHORT_REPLACE_CONTROLLER=0|false` is the rollback opt-out.
-/// OnceLock+env, mirroring `single_message_panel::enabled()`. The long-chunk/new-message
-/// branches stay legacy (not expressible through `TurnGateway` — A2 analysis).
-pub(in crate::services::discord) fn sink_short_replace_controller_enabled() -> bool {
-    static CACHED: OnceLock<bool> = OnceLock::new();
-    *CACHED.get_or_init(|| {
-        let on = crate::services::discord::controller_rollout_flag::enabled_from_env(
-            "AGENTDESK_SINK_SHORT_REPLACE_CONTROLLER",
-        );
-        // Telemetry remains emitted only when the controller path is enabled.
-        if on {
-            tracing::info!("  ✓ sink_short_replace_controller: enabled");
-        }
-        on
-    })
 }
 
 pub(in crate::services::discord) fn session_bound_discord_relay_can_own_terminal_delivery(
@@ -872,13 +851,16 @@ impl SessionBoundDiscordRelaySink {
         };
         let channel = ChannelId::new(channel_id);
 
-        // #3089 A2b: cut the short-replace branch (PlaceholderEdit + single-message body) to
-        // the controller behind a flag (CONTROLLER owns the single lease — sink skips
-        // `SinkDeliveryLeaseGuard`, no double-acquire). ONLY a real ordered `[start,end)`
-        // (degenerate stays legacy → byte-identical). EMPTY `relay_text` ALSO stays legacy
-        // (review-fix M2): legacy `replace_long_message_raw_with_outcome` treats zero chunks as
-        // `EditedOriginal` (delivered/advance, `formatting.rs:2063`) but the controller returns
-        // `Skipped` (no-advance) for `body.is_empty()` — diverting would flip → Transient.
+        // #3089 A2b/#3998 S1-f2: structurally eligible short-replace
+        // (PlaceholderEdit + single-message body) routes to the controller
+        // unconditionally. The controller owns the single lease, so the sink skips
+        // `SinkDeliveryLeaseGuard` (no double-acquire). ONLY a real ordered
+        // `[start,end)` is eligible; degenerate stays legacy. EMPTY `relay_text`
+        // ALSO stays legacy (review-fix M2): legacy
+        // `replace_long_message_raw_with_outcome` treats zero chunks as
+        // `EditedOriginal` (delivered/advance, `formatting.rs:2063`) but the
+        // controller returns `Skipped` (no-advance) for `body.is_empty()` —
+        // diverting would flip → Transient.
         let cutover_range = match (
             delivery.frame_turn_start_offset,
             delivery.terminal_consumed_end,
@@ -886,8 +868,7 @@ impl SessionBoundDiscordRelaySink {
             (Some(start), Some(end)) if end > start => Some((start, end)),
             _ => None,
         };
-        let cutover_short_replace = sink_short_replace_controller_enabled()
-            && cutover_range.is_some()
+        let cutover_short_replace = cutover_range.is_some()
             && !relay_text.is_empty()
             && matches!(route, SessionBoundTerminalDeliveryRoute::PlaceholderEdit(_))
             && !session_bound_should_send_new_chunks_for_placeholder(&relay_text);
@@ -2959,19 +2940,6 @@ mod tests {
         assert_eq!(sink_guard_lease_range(None, true), None);
     }
 
-    #[test]
-    fn zero_optout_byte_identical_legacy_guard_path() {
-        assert!(
-            !crate::services::discord::controller_rollout_flag::enabled_from_raw(Some("0")),
-            "AGENTDESK_SINK_SHORT_REPLACE_CONTROLLER=0 is the rollback opt-out"
-        );
-        assert_eq!(
-            sink_guard_lease_range(Some((0, 256)), false),
-            Some((0, 256)),
-            "explicit opt-out keeps the short-replace delivery on the legacy guarded path"
-        );
-    }
-
     // #3089 A2b (review-fix M2): an EMPTY body diverges between the controller and
     // legacy, so the cut-over gate (`!relay_text.is_empty()`) MUST keep empty bodies
     // on the legacy path. This proves the divergence the gate guards against: the
@@ -3044,7 +3012,7 @@ mod tests {
     }
 
     #[test]
-    fn flag_on_exclusion_gate_keeps_no_range_and_empty_body_on_legacy_path() {
+    fn structural_exclusion_gate_keeps_no_range_and_empty_body_on_legacy_path() {
         let module_src = include_str!("session_relay_sink.rs");
 
         let assignment = format!("let {} = ", "cutover_short_replace");
@@ -3058,11 +3026,7 @@ mod tests {
                     .expect("session sink cutover gate terminator")];
 
         assert!(
-            gate_src.contains("sink_short_replace_controller_enabled()"),
-            "A2b default-ON flag must still be only one term in the gate, not enough to cut over retained arms"
-        );
-        assert!(
-            gate_src.contains(&format!("&& {}.is_some()", "cutover_range")),
+            gate_src.contains(&format!("{}.is_some()", "cutover_range")),
             "A2b cutover_range=None / NoRange must stay on the legacy no-advance path"
         );
         assert!(

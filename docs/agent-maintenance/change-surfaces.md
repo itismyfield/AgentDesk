@@ -200,8 +200,10 @@
     late-frame fresh row B is rejected; -576 from #3841 extracting placeholder
     suppression helpers to `tmux_placeholder_suppression.rs`;
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (7319 production lines; +59 from
-    #4019 R2 identity-guarded watcher exits — the real stall/auth/overload exit
+  - `src/services/discord/tmux_watcher.rs` (7301 production lines; -18 from
+    #3998 S1-f2 retiring the watcher terminal controller rollout flag and
+    collapsing the cutover call to structural inputs only; +59 from #4019 R2
+    identity-guarded watcher exits — the real stall/auth/overload exit
     release helper lives in `tmux_watcher/stall_exit.rs`, while the root carries
     only pinned-snapshot capture, three helper calls, monitor-token release before
     labelled watcher-loop breaks, and the 0-id finalize submit predicate; +33 from
@@ -1031,7 +1033,7 @@
     and covers frozen nonzero-frontier / empty-capture variants. This admission
     is bugfix-only for PR #4035; further recovery policy expansion should extract
     decision/apply helpers instead of growing this file.)
-  - `src/services/discord/recovery_engine.rs` (3034 lines; +97 from #3998 D1:
+  - `src/services/discord/recovery_engine.rs` (3030 lines; +97 from #3998 D1:
     threaded recovery turn identity into terminal-text relay call sites and
     declared the new `recovery_engine/terminal_text_idempotency.rs` leaf; the
     no-anchor lease/send/anchor-persistence body lives in that leaf, while the
@@ -1228,8 +1230,10 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6261 lines; production LoC; +43
-    from #3805 P2 PR-D (two-message SINK rollover re-anchor) — after a mid-turn
+  - `src/services/discord/turn_bridge/mod.rs` (6250 lines; production LoC; -34
+    from #3998 S1-f2 retiring the A5/A6b rollout OR-in and routing site-5 from
+    structural A5 inputs only; +43 from #3805 P2 PR-D (two-message SINK rollover
+    re-anchor) — after a mid-turn
     answer rollover, re-anchor the status panel BELOW the new tail answer; mod.rs
     gains only a per-interval rolled-over local + one gated re-anchor call after
     the rollover loop, all send/persist/retire/epoch-bump logic in the non-giant
@@ -1946,6 +1950,9 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   from #3864 moving SIGTERM queue-restore merge inside the mailbox actor; +10
   from #4018 round-2 adding the distinct `MonitorAutoTurn` active-turn marker
   while keeping monitor turns background for queue-yield/cancel semantics).
+- `src/services/discord/session_relay_sink.rs` (1679; -59 from #3998 S1-f2
+  retiring the A2b rollout getter/cache and flag-OFF pin tests; +7 from #3610
+  PR-1 passing the terminal anchor into the delivered-frontier shadow mirror).
 
 Decomposed below the giant-file threshold (no longer frozen; bugfix-scoped but
 normal test growth is allowed): `src/services/analytics.rs`,
@@ -1954,7 +1961,7 @@ normal test growth is allowed): `src/services/analytics.rs`,
 `src/services/routines/loader.rs`, `src/services/platform/shell.rs`,
 `src/services/platform/tmux.rs`, `src/services/mcp_config.rs`,
 `src/services/process.rs`, `src/services/discord/tmux_lifecycle.rs`,
-`src/services/qwen_tmux_wrapper.rs`, `src/services/discord/session_relay_sink.rs`,
+`src/services/qwen_tmux_wrapper.rs`,
 `src/services/discord/session_runtime.rs`,
 `src/services/tui_turn_state.rs`,
 `src/voice/turn_link.rs`, `src/services/discord/commands/config.rs`
