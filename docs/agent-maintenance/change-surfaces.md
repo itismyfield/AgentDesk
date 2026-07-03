@@ -8,7 +8,7 @@
 > [`docs/generated/giant-file-registry.md`](../generated/giant-file-registry.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-07-02 (against #4019 R1 reaction lifecycle fix — owning-runtime cleanup, shared thread-parent targets, and bounded finalizer retry).
+> Last refreshed: 2026-07-03 (against #3874 dead-code removal — freeze counts re-synced to the regenerated module inventory; no behavior change).
 >
 > PR #3456 dcserver-robustness: freeze counts re-synced after the reconcile
 > row-allocation churn reduction (`src/reconcile.rs` now 1816 prod lines) and the
@@ -78,16 +78,16 @@
 ### `policy_engine`
 
 - canonical_modules: `src/engine/mod.rs` (driver) plus `src/engine/ops/*.rs`
-  (per-domain op handlers). `src/pipeline.rs` (1409 lines, giant-file)
+  (per-domain op handlers). `src/pipeline.rs` (1383 lines, giant-file)
   composes the policy pipeline.
 - legacy_modules: none — there is no parallel engine. The whole surface is
   pre-migration giant-file territory.
 - do_not_edit_without_migration_plan:
-  - `src/engine/mod.rs` (1280 lines, giant-file).
-  - `src/engine/ops/db_ops.rs` (1244 lines, giant-file).
+  - `src/engine/mod.rs` (1279 lines, giant-file).
+  - `src/engine/ops/db_ops.rs` (1212 lines, giant-file).
   - `src/engine/loader.rs` (1332 lines, giant-file) — engine loader / QuickJS
     validator surface; split before adding non-bugfix behavior.
-  - `src/pipeline.rs` (1409 lines, giant-file).
+  - `src/pipeline.rs` (1383 lines, giant-file).
 - non-giant migration-sensitive note: `src/engine/intent.rs` is below the
   giant-file threshold but remains a migration-sensitive intent surface; keep
   changes scoped to the typed-facade contract.
@@ -107,12 +107,12 @@
 - canonical_modules: `src/dispatch/{mod,dispatch_context,dispatch_create,dispatch_status}.rs`.
 - legacy_modules: none.
 - do_not_edit_without_migration_plan (giant-file, awaiting split issue):
-  - `src/dispatch/dispatch_context.rs` (2852 lines).
-  - `src/dispatch/dispatch_create.rs` (1396 lines).
-  - `src/dispatch/dispatch_status.rs` (1529 lines).
-  - `src/services/dispatches/outbox_route.rs` (1182 lines; route extraction
+  - `src/dispatch/dispatch_context.rs` (2817 lines).
+  - `src/dispatch/dispatch_create.rs` (1334 lines).
+  - `src/dispatch/dispatch_status.rs` (1445 lines).
+  - `src/services/dispatches/outbox_route.rs` (1172 lines; route extraction
     orchestration surface from #1722, split before adding non-bugfix behavior).
-  - `src/services/dispatches/discord_delivery/orchestration.rs` (1538 lines;
+  - `src/services/dispatches/discord_delivery/orchestration.rs` (1496 lines;
     delivery orchestration surface extracted from the route layer in #1760,
     split before adding non-bugfix behavior).
 - active_callsite_coverage: n/a.
@@ -131,7 +131,7 @@
   parsing), `src/services/discord/inflight.rs` (state file contract).
 - legacy_modules: none — relay routes are being consolidated, not replaced.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/services/discord/watchers/lifecycle.rs` (2079 lines — canonical
+  - `src/services/discord/watchers/lifecycle.rs` (2052 lines — canonical
     lifecycle extraction surface from #1435; split further before adding new
     lifecycle behavior; #3016 phase-5b2 dropped the `mailbox_finalize_owed`
     construction from the watcher-spawn handle; #3718 moved runtime mtime
@@ -145,7 +145,9 @@
     "session ended … start a new session" tmux-death notice and its
     `should_send_session_ended_notice`/`session_ended_notice`/
     `TmuxDeathLifecycleDecision` plumbing).
-  - `src/services/discord/tmux.rs` (1507 lines; +22 from #3871 persisting the
+  - `src/services/discord/tmux.rs` (1501 lines; -6 from #3874 removing dead
+    permanently-None `Option<&Db>` threading from tmux/outbound call paths,
+    with no relay or delivery semantics change; +22 from #3871 persisting the
     streamed rollover-prefix ids through the watcher seed/restore + persist path
     so a terminal full-body fallback in a later iteration / after a restart still
     deletes them (cross-iteration durability of the dup-relay fix); +8 from #3886 hosting the
@@ -1033,7 +1035,7 @@
     and covers frozen nonzero-frontier / empty-capture variants. This admission
     is bugfix-only for PR #4035; further recovery policy expansion should extract
     decision/apply helpers instead of growing this file.)
-  - `src/services/discord/recovery_engine.rs` (3030 lines; +97 from #3998 D1:
+  - `src/services/discord/recovery_engine.rs` (3017 lines; +97 from #3998 D1:
     threaded recovery turn identity into terminal-text relay call sites and
     declared the new `recovery_engine/terminal_text_idempotency.rs` leaf; the
     no-anchor lease/send/anchor-persistence body lives in that leaf, while the
@@ -1230,7 +1232,7 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6250 lines; production LoC; -34
+  - `src/services/discord/turn_bridge/mod.rs` (6213 lines; production LoC; -34
     from #3998 S1-f2 retiring the A5/A6b rollout OR-in and routing site-5 from
     structural A5 inputs only; +43 from #3805 P2 PR-D (two-message SINK rollover
     re-anchor) — after a mid-turn
@@ -1643,13 +1645,13 @@
   finalize) under #3038 — the added doc-commented scaffolding nets a small
   file-LoC increase while shrinking the god-function from ~1158 to ~559 lines.
   Further growth requires a split issue.
-  `src/services/auto_queue/cancel_run.rs` (1032 lines) is the canonical
+  `src/services/auto_queue/cancel_run.rs` (1031 lines) is the canonical
   auto-queue cancellation and run-stop command surface; split before adding
   non-bugfix behavior.
 - legacy_modules: none; retired route fallback history is documented in
   `known-legacy.md`.
 - do_not_edit_without_migration_plan (giant-file routes):
-  - `src/server/routes/kanban.rs` (2677 lines after #3037 backflow batch
+  - `src/server/routes/kanban.rs` (2675 lines after #3037 backflow batch
     relocated the `require_explicit_bearer_token` /
     `resolve_requesting_agent_id_with_pg` auth/identity helpers to
     `crate::services::kanban`).
@@ -1720,10 +1722,10 @@
 - legacy_modules: none — these are shared runtime coordination surfaces.
 - do_not_edit_without_migration_plan (giant-file):
   - `src/config.rs` (2654 lines; +11 from #3573 failure_pause_auto_resume_secs config field; +16 from #3655 DB pool default 12→18 + 2-node-boot sizing-rationale comment; +47 from #3651 DatabaseConfig.foreground_reserve field (best-effort advisory docs) + manual Default impl + default-consistency tests; +8 from #3690 AgentDef.preferred_intake_node_labels field + doc; #3683 config hot-reload restart-fingerprint config surface; #3736 documents the disabled remote-profile compatibility shim; #3749 adds the `cluster.intake_routing` config authority and parse coverage; +13 from #3870 ServerConfig.allow_insecure_nonloopback_bind escape-hatch field + Debug/Default wiring + doc; +10 from #3805 P2 PR-A two_message_panel_enabled PlaceholderConfig field (two-message model scaffolding, default OFF, restart-required)).
-  - `src/server/mod.rs` (2670 lines; +42 from #3573 auto-resume tick + backoff-race fix; #3628 wires failure→pause producer behind the same knob, net -1 line from comment condensation; #3651 net ~0 — the message_outbox_loop is the foreground headless-delivery drain and must NOT be backpressured, so its earlier backpressure gate was removed during codex review; #3740 adds the boot hook for token-analytics cache prewarm; #3722 removes duplicate startup reseed when callers already completed guarded startup initialization; +20 from #3870 fail-closed bind-security guard at the listener bind site — force-loopback when non-loopback host + no auth_token).
+  - `src/server/mod.rs` (2666 lines; +42 from #3573 auto-resume tick + backoff-race fix; #3628 wires failure→pause producer behind the same knob, net -1 line from comment condensation; #3651 net ~0 — the message_outbox_loop is the foreground headless-delivery drain and must NOT be backpressured, so its earlier backpressure gate was removed during codex review; #3740 adds the boot hook for token-analytics cache prewarm; #3722 removes duplicate startup reseed when callers already completed guarded startup initialization; +20 from #3870 fail-closed bind-security guard at the listener bind site — force-loopback when non-loopback host + no auth_token).
   - `src/receipt.rs` (1842 lines).
-  - `src/github/sync.rs` (1513 lines).
-  - `src/reconcile.rs` (1868 lines; #3685 rebind-origin stale-inflight
+  - `src/github/sync.rs` (1508 lines).
+  - `src/reconcile.rs` (1863 lines; #3685 rebind-origin stale-inflight
     preservation review hardening; periodic reconcile loop covering stale
     inflights, orphan uploads, dispatched-session drift, and queue-review
     drift — split before adding non-bugfix behavior).
@@ -1795,18 +1797,18 @@ The remaining giant-file modules under `src/services/` not covered above.
 Line counts are *production* LoC (the `Prod` column in `module-inventory.md`,
 which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync.
 
-- `src/services/auto_queue.rs` (1546) and
+- `src/services/auto_queue.rs` (1545) and
   `src/services/auto_queue/activate_command.rs` (1506); auto-queue route
   behavior is split across `src/services/auto_queue/*` slices, with
   `activate_command.rs` now giant-file territory.
-  `src/services/auto_queue/cancel_run.rs` (1032) is also giant-file territory;
+  `src/services/auto_queue/cancel_run.rs` (1031) is also giant-file territory;
   split before further non-bugfix growth.
 - `src/services/onboarding/mod.rs` (2937),
-  `src/services/dispatched_sessions.rs` (1550), and
+  `src/services/dispatched_sessions.rs` (1546), and
   `src/services/settings.rs` (1114) — service-layer route support surfaces
   split out of the large dashboard route modules. (`src/services/onboarding.rs`
   and `src/services/api_friction.rs` have been removed/decomposed.)
-- `src/services/dispatches/outbox_route.rs` (1182) — dispatch outbox route
+- `src/services/dispatches/outbox_route.rs` (1172) — dispatch outbox route
   support extracted from the route layer; split before adding non-bugfix
   behavior.
 - `src/services/claude.rs` (2969), `src/services/gemini.rs` (1358),
@@ -1890,7 +1892,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   the AUTHORITATIVE transcript turn-state in `claude_tui_followup_stranded_prompt_
   draft_state`, not by the pane.)
 - `src/services/memory/memento.rs` (1893).
-- `src/services/dispatched_sessions.rs` (1550) — dispatched session domain
+- `src/services/dispatched_sessions.rs` (1546) — dispatched session domain
   service. This is the post-#1515 SRP extraction target for route/database
   callsites, but the module itself is now giant-file territory; split focused
   helpers before adding non-bugfix behavior. (+5 from #3169 exposing the idle-

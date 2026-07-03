@@ -1,6 +1,6 @@
 # Discord Outbound Migration — Coverage Map (#1006 v3 / #1280 / #1436 / #1457)
 
-Last refreshed: 2026-06-16 (against `main` @ `8ec7336e32eb6ef89e1143fab2543f2fc644ebac`)
+> Last refreshed: 2026-07-03 (against #3874 dead-code removal — manual outbound callsite coverage map refreshed after removing permanently-None `Option<&Db>` threading; no delivery semantics change).
 
 > #3664 outbound bot-selection note: the outbox drain (`src/server/mod.rs`)
 > now resolves the delivery bot via `message_outbox::delivery_bot_for_target_session`.
@@ -133,6 +133,8 @@ order-preserving multi-message stream continuation (see §4 exclusions).
 `OutboundTarget::DmUser(UserId)` and the v3 transport resolves the DM channel.
 Oversize `/api/discord/send` and `/api/discord/send-dm` payloads still call the existing
 attachment/chunk helpers until v3 grows attachment-capable transport.
+#3874 only removed the dead `Option<&Db>` parameter threading from this manual
+send API path; it did not change these coverage states.
 
 ---
 
