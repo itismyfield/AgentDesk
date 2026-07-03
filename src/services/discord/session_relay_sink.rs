@@ -3032,6 +3032,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn flag_on_exclusion_gate_keeps_no_range_and_empty_body_on_legacy_path() {
+        let module_src = include_str!("session_relay_sink.rs");
+
+        let assignment = format!("let {} = ", "cutover_short_replace");
+        let gate_start = module_src
+            .find(&assignment)
+            .expect("session sink cutover gate assignment");
+        let gate_src = &module_src[gate_start
+            ..gate_start
+                + module_src[gate_start..]
+                    .find(';')
+                    .expect("session sink cutover gate terminator")];
+
+        assert!(
+            gate_src.contains("sink_short_replace_controller_enabled()"),
+            "A2b flag ON must be only one term in the gate, not enough to cut over retained arms"
+        );
+        assert!(
+            gate_src.contains(&format!("&& {}.is_some()", "cutover_range")),
+            "A2b cutover_range=None / NoRange must stay on the legacy no-advance path"
+        );
+        assert!(
+            gate_src.contains(&format!("&& !{}.is_empty()", "relay_text")),
+            "A2b empty-body must stay legacy because controller Skipped would not advance"
+        );
+        assert!(
+            gate_src.contains("SessionBoundTerminalDeliveryRoute::PlaceholderEdit(_)"),
+            "A2b controller path is limited to anchored placeholder edits"
+        );
+        assert!(
+            module_src.contains(&format!(
+                "{}.filter(|_| {})",
+                "cutover_range", "cutover_short_replace"
+            )),
+            "A2b controller branch must require both the ordered range and cutover gate"
+        );
+    }
+
     #[allow(dead_code)] // #3034: test helper superseded by `inflight_with_identity_offset`.
     fn inflight_with_identity(
         channel_id: u64,

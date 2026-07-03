@@ -44,6 +44,8 @@ Last refreshed: 2026-06-16 (against `main` @ `8ec7336e32eb6ef89e1143fab2543f2fc6
 >
 > Last refreshed: 2026-07-03 (#3998 S1-d — A4 watcher anchored full-body long chunks and A5 turn_bridge anchored long chunks now route through the turn-output controller behind their existing owner flags. `OutputPlan::SendNewChunks` gained `delete_anchor`; controller transport sends rollback-aware chunks first, then best-effort deletes the active anchor, and returns chunk metadata for owner cleanup/durable-anchor records. The retained turn-output exclusions are now exactly five: empty body, `NoRange` deliver-without-advance (#4048), headless enqueue (no direct Discord POST), watcher no-placeholder new-message fresh-send (`placeholder_msg_id == None`; anchor-less fresh-send is not yet a controller verb, same class as A6a's `None`-placeholder fresh-send and re-evaluated with the #3998 flip/legacy-retirement phase), and TUI completion gate (#4047). Compiled defaults and release env remain unchanged).
 >
+> Last refreshed: 2026-07-03 (#3998 S1-e — the remaining A2b/A3/A6a retained exclusions are enumerated in §8.1.1 with code conditions, rationale, blockers, and pin tests. Together with #4053's A4/A5 inventory and #4054's A6a D1 idempotency fix, the Phase-B excluded-arm GO condition is satisfied as "all arms represented or explicitly retained with linked blockers". No code/default/flip changed).
+>
 > Companion docs: [`docs/discord-outbound-remaining-producers.md`](../discord-outbound-remaining-producers.md) (#1175 closure), [`docs/source-of-truth.md`](../source-of-truth.md).
 
 This is the single source of truth for "where is each Discord outbound callsite
@@ -97,7 +99,9 @@ non-TUI body, `placeholder_msg_id == None` fails the watcher `has_placeholder`
 gate and takes the raw fresh-send branch because anchor-less fresh-send is not
 yet a controller verb. The retained exclusions are empty body, `NoRange`,
 headless enqueue, watcher no-placeholder new-message fresh-send, and the TUI
-completion gate, so the legacy branches are not yet vestigial. Release
+completion gate; §8.1.1 records the remaining A2b/A3/A6a owner-specific arms
+beside the #4053 A4/A5 inventory, so the legacy branches are intentional rather
+than untracked. Release
 health reports the effective per-node rollout under `turn_output_controller_rollout`
 (#3794, read-only): per-owner `enabled`, `enabled_count`, and an
 `effective_authority` of `controller` / `mixed` / `legacy` so operators can detect
@@ -469,6 +473,22 @@ code: even with a flag ON, the retained exclusions still route the legacy
     re-evaluated with the #3998 flip/legacy-retirement phase.
   - TUI completion gate: lifecycle pause/commit semantics retire with #4047.
 
+#### 8.1.1 Retained-exclusion inventory (#3998 S1-e)
+
+#4053 already documents the A4/A5 retained arms. The remaining controller-owner
+arms are explicitly retained here so the Phase-B inventory is closed without
+changing runtime behavior.
+
+| owner / arm | code condition | decision / rationale | blocker / re-eval | pin test |
+|---|---|---|---|---|
+| A2b sink `NoRange` / `cutover_range == None` short-replace | `src/services/discord/session_relay_sink.rs:884-895` requires `cutover_range.is_some()` before controller routing; the legacy replace arm starts at `session_relay_sink.rs:990`. | **RETAIN.** This is the no-advance class: without a real ordered `[start,end)` range, the controller has no offset authority to commit. | #4048 advance-authority work / #3998 flip re-eval. | `flag_on_exclusion_gate_keeps_no_range_and_empty_body_on_legacy_path` |
+| A2b sink empty body | `src/services/discord/session_relay_sink.rs:891-895` requires `!relay_text.is_empty()` before controller routing. | **RETAIN.** Legacy zero-chunk replace is committed/advanced; the controller returns `Skipped`, so migrating would flip Skipped-vs-advance semantics. | #4047 / #4048 semantics re-eval. | `controller_skips_empty_body_so_cutover_gate_keeps_it_legacy`; `flag_on_exclusion_gate_keeps_no_range_and_empty_body_on_legacy_path` |
+| A3 standby empty body | `src/services/discord/standby_relay.rs:77-79` gates short-replace on `controller_enabled && !formatted.is_empty()`; legacy replace starts at `standby_relay.rs:814`. | **RETAIN.** Same empty-body parity class as A2b/A4/A5: controller `Skipped` would not match legacy committed replace. | #4047 / #4048 semantics re-eval. | `standby_short_replace_should_cutover_pins_both_conditions` |
+| A3 standby transport-only `NoLease` | `src/services/discord/standby_relay.rs:672-725` uses `toc::NoLease`, `lease_key: None`, `advance: None`, and `heartbeat: None`. | **RETAIN.** Standby has no lease, no offset authority, and no heartbeat to unify; this is intentionally transport-only instead of inventing a lease. | #3998 flip/legacy-retirement re-eval. | `edited_original_returns_true_and_does_not_delete_original`; `fallback_after_edit_failure_returns_true_and_preserves_original` |
+| A3 standby `placeholder_msg_id == None` new-message send | `src/services/discord/standby_relay.rs:893-895` calls legacy `formatting::send_long_message_raw`. | **RETAIN.** Anchor-less fresh-send is not a controller verb yet, same class as watcher no-placeholder (#4053) and A6a `None`-placeholder fresh-send. | #3998 flip/legacy-retirement re-eval after an anchor-less fresh-send verb exists. | `none_placeholder_new_message_stays_legacy_even_when_controller_flag_on` |
+| A6a recovery empty body | `src/services/discord/recovery_paths/controller_cutover.rs:112-117` requires `enabled && has_placeholder && !body.is_empty()`. | **RETAIN.** Same empty-body parity class: legacy anchored replace delivers, while the controller would `Skipped` → non-delivered. | #4047 / #4048 semantics re-eval. | `should_cutover_pins_each_condition` |
+| A6a recovery `placeholder == None` fresh-send | `src/services/discord/recovery_paths/controller_cutover.rs:112-117` requires `has_placeholder`; caller legacy branch is `src/services/discord/recovery_engine.rs:463-470` via `relay_no_anchor_terminal_text`. | **RETAIN.** Anchor-less fresh-send is not a controller verb yet. #4054 already made this path idempotent through `RecoveryDeliveryContext`, so the residual risk is transport-uniformity, not correctness. The #3297 gone-channel probe remains represented in the anchored controller adapter and must stay. | #3998 flip/legacy-retirement re-eval after an anchor-less fresh-send verb exists. | `should_cutover_pins_each_condition`; `controller_fallback_records_replacement_anchor`; `non_delivered_gone_probe_escalates_permanent` |
+
 ### 8.2 Per-flag flip evaluation
 
 | flag (owner) | flip runtime benefit | flip risk / blocker | decision |
@@ -508,11 +528,11 @@ precise.
 The flip becomes a real single-authority win only when coupled with legacy
 retirement. Before flipping:
 
-1. **Retained-exclusion resolution** — either migrate or intentionally retire the
-   remaining legacy-only arms: `NoRange` waits on #4048 advance authority,
-   TUI-gate waits on #4047, headless has no direct POST, watcher
-   no-placeholder / A6a `None`-placeholder fresh-send waits on an anchor-less
-   fresh-send controller verb, and empty body must keep A2b/A3 parity.
+1. **Retained-exclusion resolution** — satisfied for Phase-B by #4053, #4054,
+   and this §8.1.1 inventory: every excluded arm is either represented by the
+   controller or explicitly retained with a linked blocker / flip re-eval
+   (`NoRange` → #4048, TUI-gate → #4047, empty body → #4047/#4048, headless/no
+   direct POST, anchor-less fresh-send → #3998 flip/legacy-retirement re-eval).
 2. **CI-wide OFF-assumption audit** — invert/re-author the six default-OFF
    assertions and audit any other dev/CI default-OFF assumptions.
 3. **Release soak evidence** — record duplicate-relay / missed-terminal-body

@@ -620,7 +620,7 @@
 | `services::discord::semantic_boundaries` | `src/services/discord/semantic_boundaries.rs` | 261 | 261 | 0 |  |
 | `services::discord::session_banner` | `src/services/discord/session_banner.rs` | 68 | 68 | 0 |  |
 | `services::discord::session_identity` | `src/services/discord/session_identity.rs` | 214 | 141 | 73 |  |
-| `services::discord::session_relay_sink` | `src/services/discord/session_relay_sink.rs` | 4258 | 1700 | 2558 | giant-file |
+| `services::discord::session_relay_sink` | `src/services/discord/session_relay_sink.rs` | 4297 | 1700 | 2597 | giant-file |
 | `services::discord::session_relay_sink::idle_jsonl` | `src/services/discord/session_relay_sink/idle_jsonl.rs` | 169 | 169 | 0 |  |
 | `services::discord::session_relay_sink::orphan_reclaim` | `src/services/discord/session_relay_sink/orphan_reclaim.rs` | 218 | 116 | 102 |  |
 | `services::discord::session_runtime` | `src/services/discord/session_runtime.rs` | 1027 | 501 | 526 |  |
@@ -639,7 +639,7 @@
 | `services::discord::single_message_panel` | `src/services/discord/single_message_panel.rs` | 2803 | 865 | 1938 |  |
 | `services::discord::single_message_panel::completion_footer_registry` | `src/services/discord/single_message_panel/completion_footer_registry.rs` | 624 | 624 | 0 |  |
 | `services::discord::stall_recovery` | `src/services/discord/stall_recovery.rs` | 113 | 113 | 0 |  |
-| `services::discord::standby_relay` | `src/services/discord/standby_relay.rs` | 1648 | 917 | 731 |  |
+| `services::discord::standby_relay` | `src/services/discord/standby_relay.rs` | 1683 | 917 | 766 |  |
 | `services::discord::startup_reclaim` | `src/services/discord/startup_reclaim.rs` | 541 | 324 | 217 |  |
 | `services::discord::status_panel_orphan_store` | `src/services/discord/status_panel_orphan_store.rs` | 700 | 700 | 0 |  |
 | `services::discord::status_panel_timedout_reconcile` | `src/services/discord/status_panel_timedout_reconcile.rs` | 405 | 405 | 0 |  |
