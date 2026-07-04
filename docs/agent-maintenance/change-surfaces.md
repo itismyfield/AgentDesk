@@ -927,18 +927,24 @@
     `normalize_transcript_fallback_offset` stays private; below the giant-file
     threshold).
   - `src/services/discord/idle_recap.rs` (idle-recap card compose/post/clear
-    surface; #3479 dropped it below the giant-file threshold by extracting the
-    scrollback/summarizer and token-context-display clusters into the two
-    submodules below, so it is no longer a registered giant — its registry entry
-    and ratchet baseline were removed. Remaining surface: the
-    snapshot/compose/post/clear/CAS lifecycle, the `channel_has_active_turn`
-    mailbox/inflight probe, and the `post_recheck_action` seam that skips/undoes
-    a recap post when a turn raced the compose window).
+    surface; #3479 extracted the scrollback/summarizer and
+    token-context-display clusters into the two submodules below, but #4079's
+    recap UX/lifecycle fixes pushed the file back over the giant-file threshold
+    and its registered ratchet now tracks 1378 prod lines. Remaining surface:
+    the snapshot/compose/post/clear/CAS lifecycle, per-channel recap
+    superseding via `sessions.idle_recap_message_id`, routine-session
+    suppression, the recap button plan including "맥락 압축", the
+    `channel_has_active_turn` mailbox/inflight probe, and the
+    `post_recheck_action` seam that skips/undoes a recap post when a turn raced
+    the compose window. `src/services/discord/idle_recap_interaction.rs` owns
+    the corresponding button dispatch, suggested-reply enqueue, and `/compact`
+    enqueue response copy).
   - `src/services/discord/idle_recap/scrollback.rs` (#3479 scrollback: the tmux
     `capture-pane` tail capture, the `claude-e` transcript-tail fallback
     (`capture_transcript_scrollback` + the unit-testable `extract_transcript_tail_text`
     / `parse_transcript_line_text` workers), and the Haiku `summarize_with_haiku`
-    call — extracted verbatim from `idle_recap.rs`. Deps reached via `use super::*;`;
+    call plus #4079's user-perspective suggested-reply prompt contract. Deps
+    reached via `use super::*;`;
     `capture_tmux_scrollback` / `capture_transcript_scrollback` / `summarize_with_haiku`
     are re-exported by the parent so the `server::routes::idle_recap` caller keeps
     byte-identical `idle_recap::<fn>` call sites, while the parsing workers stay

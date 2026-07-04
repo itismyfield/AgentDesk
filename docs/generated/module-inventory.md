@@ -264,7 +264,7 @@
 | `server::routes::health_api` | `src/server/routes/health_api.rs` | 2355 | 1664 | 691 | giant-file |
 | `server::routes::home_metrics` | `src/server/routes/home_metrics.rs` | 352 | 352 | 0 |  |
 | `server::routes::hooks` | `src/server/routes/hooks.rs` | 129 | 129 | 0 |  |
-| `server::routes::idle_recap` | `src/server/routes/idle_recap.rs` | 357 | 357 | 0 |  |
+| `server::routes::idle_recap` | `src/server/routes/idle_recap.rs` | 405 | 405 | 0 |  |
 | `server::routes::kanban` | `src/server/routes/kanban.rs` | 2788 | 2725 | 63 | giant-file |
 | `server::routes::kanban_repos` | `src/server/routes/kanban_repos.rs` | 266 | 266 | 0 |  |
 | `server::routes::maintenance` | `src/server/routes/maintenance.rs` | 17 | 17 | 0 |  |
@@ -466,11 +466,11 @@
 | `services::discord::health::watcher_respawn` | `src/services/discord/health/watcher_respawn.rs` | 1125 | 497 | 628 |  |
 | `services::discord::http` | `src/services/discord/http.rs` | 178 | 138 | 40 |  |
 | `services::discord::idle_detector` | `src/services/discord/idle_detector.rs` | 475 | 401 | 74 |  |
-| `services::discord::idle_recap` | `src/services/discord/idle_recap.rs` | 2407 | 1252 | 1155 | giant-file |
+| `services::discord::idle_recap` | `src/services/discord/idle_recap.rs` | 2585 | 1373 | 1212 | giant-file |
 | `services::discord::idle_recap::context_display` | `src/services/discord/idle_recap/context_display.rs` | 154 | 154 | 0 |  |
 | `services::discord::idle_recap::relay_integrity` | `src/services/discord/idle_recap/relay_integrity.rs` | 213 | 160 | 53 |  |
-| `services::discord::idle_recap::scrollback` | `src/services/discord/idle_recap/scrollback.rs` | 279 | 279 | 0 |  |
-| `services::discord::idle_recap_interaction` | `src/services/discord/idle_recap_interaction.rs` | 458 | 424 | 34 |  |
+| `services::discord::idle_recap::scrollback` | `src/services/discord/idle_recap/scrollback.rs` | 301 | 287 | 14 |  |
+| `services::discord::idle_recap_interaction` | `src/services/discord/idle_recap_interaction.rs` | 545 | 494 | 51 |  |
 | `services::discord::idle_relay_drift` | `src/services/discord/idle_relay_drift.rs` | 764 | 529 | 235 |  |
 | `services::discord::inflight` | `src/services/discord/inflight.rs` | 6436 | 931 | 5505 |  |
 | `services::discord::inflight::anchor_repost` | `src/services/discord/inflight/anchor_repost.rs` | 550 | 189 | 361 |  |

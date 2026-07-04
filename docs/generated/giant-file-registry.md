@@ -16,7 +16,7 @@
 | `src/server/worker_registry.rs` | 1267 | server-runtime | 2026-08-31 | #3739 |
 | `src/services/codex_tui/rollout_tail.rs` | 1276 | discord-relay | 2026-10-31 | #3843 |
 | `src/services/discord/health/recovery.rs` | 2580 | discord-relay | 2026-10-31 | #3839 |
-| `src/services/discord/idle_recap.rs` | 1252 | discord-relay | 2026-08-31 | #3405 |
+| `src/services/discord/idle_recap.rs` | 1373 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/outbound/turn_output_controller.rs` | 1148 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/placeholder_sweeper.rs` | 1014 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/recovery_engine.rs` | 3010 | discord-relay | 2026-10-31 | #3834 |

@@ -10,8 +10,9 @@ use sqlx::PgPool;
 
 use super::{Data, Error, check_auth};
 use crate::services::discord::idle_recap::{
-    IDLE_RECAP_CLEAR_BUTTON_PREFIX, IDLE_RECAP_RELAY_DIAG_BUTTON_PREFIX,
-    IDLE_RECAP_SUGGEST_BUTTON_PREFIX, clear_recap_pointer, delete_previous_card,
+    IDLE_RECAP_CLEAR_BUTTON_PREFIX, IDLE_RECAP_COMPACT_BUTTON_PREFIX,
+    IDLE_RECAP_RELAY_DIAG_BUTTON_PREFIX, IDLE_RECAP_SUGGEST_BUTTON_PREFIX, clear_recap_pointer,
+    delete_previous_card,
 };
 use crate::services::provider::ProviderKind;
 
@@ -29,6 +30,7 @@ pub(super) fn is_idle_recap_clear_custom_id(custom_id: &str) -> bool {
 
 pub(super) fn is_idle_recap_custom_id(custom_id: &str) -> bool {
     is_idle_recap_clear_custom_id(custom_id)
+        || custom_id.starts_with(IDLE_RECAP_COMPACT_BUTTON_PREFIX)
         || custom_id.starts_with(IDLE_RECAP_RELAY_DIAG_BUTTON_PREFIX)
         || custom_id.starts_with(IDLE_RECAP_SUGGEST_BUTTON_PREFIX)
 }
@@ -44,6 +46,9 @@ pub(super) async fn handle_idle_recap_interaction(
     }
     if custom_id.starts_with(IDLE_RECAP_RELAY_DIAG_BUTTON_PREFIX) {
         return handle_idle_recap_relay_diag_interaction(ctx, component, data).await;
+    }
+    if custom_id.starts_with(IDLE_RECAP_COMPACT_BUTTON_PREFIX) {
+        return handle_idle_recap_compact_interaction(ctx, component, data).await;
     }
     if custom_id.starts_with(IDLE_RECAP_SUGGEST_BUTTON_PREFIX) {
         return handle_idle_recap_suggest_interaction(ctx, component, data).await;
@@ -249,6 +254,65 @@ async fn handle_idle_recap_relay_diag_interaction(
     Ok(())
 }
 
+async fn handle_idle_recap_compact_interaction(
+    ctx: &serenity::Context,
+    component: &serenity::ComponentInteraction,
+    data: &Data,
+) -> Result<(), Error> {
+    if !authorize_component(ctx, component, data).await {
+        return Ok(());
+    }
+
+    let Some(message_id) =
+        parse_message_id(&component.data.custom_id, IDLE_RECAP_COMPACT_BUTTON_PREFIX)
+    else {
+        let _ = component
+            .create_response(ctx, serenity::CreateInteractionResponse::Acknowledge)
+            .await;
+        return Ok(());
+    };
+    let Some(pool) = data.shared.pg_pool.as_ref().cloned() else {
+        send_ephemeral(ctx, component, "맥락 압축 요청 실패: DB 연결 없음.").await;
+        return Ok(());
+    };
+    let Some(target) = lookup_current_recap_target(
+        &pool,
+        message_id,
+        component.channel_id.get(),
+        data.provider.as_str(),
+    )
+    .await?
+    else {
+        send_ephemeral(
+            ctx,
+            component,
+            "맥락 압축 대상이 더 이상 유효하지 않습니다.",
+        )
+        .await;
+        return Ok(());
+    };
+
+    let prompt = "/compact";
+    let enqueued = crate::services::discord::enqueue_internal_followup(
+        &data.shared,
+        &data.provider,
+        component.channel_id,
+        serenity::MessageId::new(message_id),
+        prompt,
+        "idle recap context compact",
+    )
+    .await;
+    if !enqueued {
+        send_ephemeral(ctx, component, "맥락 압축 요청을 큐에 넣지 못했습니다.").await;
+        return Ok(());
+    }
+
+    send_ephemeral(ctx, component, &prompt_sent_ephemeral(prompt)).await;
+    let _ = clear_recap_pointer(&pool, &target.session_key, message_id).await;
+    delete_previous_card(&ctx.http, component.channel_id.get(), message_id).await;
+    Ok(())
+}
+
 async fn handle_idle_recap_suggest_interaction(
     ctx: &serenity::Context,
     component: &serenity::ComponentInteraction,
@@ -274,6 +338,7 @@ async fn handle_idle_recap_suggest_interaction(
         send_ephemeral(ctx, component, "추천 답변을 찾을 수 없습니다.").await;
         return Ok(());
     };
+    let prompt_text = suggested_reply.clone();
     let Some(pool) = data.shared.pg_pool.as_ref().cloned() else {
         send_ephemeral(ctx, component, "추천 답변 전송 실패: DB 연결 없음.").await;
         return Ok(());
@@ -309,7 +374,7 @@ async fn handle_idle_recap_suggest_interaction(
         return Ok(());
     }
 
-    send_ephemeral(ctx, component, "추천 답변을 큐에 넣었습니다.").await;
+    send_ephemeral(ctx, component, &prompt_sent_ephemeral(&prompt_text)).await;
     let _ = clear_recap_pointer(&pool, &target.session_key, message_id).await;
     delete_previous_card(&ctx.http, component.channel_id.get(), message_id).await;
     Ok(())
@@ -366,6 +431,11 @@ fn truncate_interaction_body(body: &str) -> String {
         out.push('…');
     }
     out
+}
+
+fn prompt_sent_ephemeral(prompt: &str) -> String {
+    let prompt = truncate_interaction_body(prompt);
+    format!("다음 프롬프트를 보냈습니다:\n> {prompt}")
 }
 
 fn parse_message_id(custom_id: &str, prefix: &str) -> Option<u64> {
@@ -430,6 +500,7 @@ mod tests {
     fn idle_recap_component_router_accepts_all_recap_actions() {
         assert!(is_idle_recap_custom_id("idle_recap:clear:1"));
         assert!(is_idle_recap_custom_id("idle_recap:relay_diag:1"));
+        assert!(is_idle_recap_custom_id("idle_recap:compact:1"));
         assert!(is_idle_recap_custom_id("idle_recap:suggest:1"));
         assert!(!is_idle_recap_custom_id("steer:cancel:1"));
     }
@@ -444,6 +515,10 @@ mod tests {
             Some(42)
         );
         assert_eq!(
+            parse_message_id("idle_recap:compact:42", IDLE_RECAP_COMPACT_BUTTON_PREFIX),
+            Some(42)
+        );
+        assert_eq!(
             parse_message_id(
                 "idle_recap:relay_diag:0",
                 IDLE_RECAP_RELAY_DIAG_BUTTON_PREFIX
@@ -453,6 +528,18 @@ mod tests {
         assert_eq!(
             parse_message_id("idle_recap:suggest:42", IDLE_RECAP_RELAY_DIAG_BUTTON_PREFIX),
             None
+        );
+    }
+
+    #[test]
+    fn recap_prompt_sent_ephemeral_includes_actual_prompt_text() {
+        assert_eq!(
+            prompt_sent_ephemeral("테스트 계속 진행해줘"),
+            "다음 프롬프트를 보냈습니다:\n> 테스트 계속 진행해줘"
+        );
+        assert_eq!(
+            prompt_sent_ephemeral("/compact"),
+            "다음 프롬프트를 보냈습니다:\n> /compact"
         );
     }
 }
