@@ -2428,7 +2428,10 @@ fn queue_persistence_context(
 }
 
 async fn mailbox_snapshot(shared: &SharedData, channel_id: ChannelId) -> ChannelMailboxSnapshot {
-    shared.mailbox(channel_id).snapshot().await
+    match shared.mailbox_peek(channel_id) {
+        Some(handle) => handle.snapshot().await,
+        None => ChannelMailboxSnapshot::default(),
+    }
 }
 
 async fn mailbox_cancel_token(
