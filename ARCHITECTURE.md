@@ -582,7 +582,8 @@ src/
 │   │   │   └── voice.rs
 │   │   ├── session_relay_sink/
 │   │   │   ├── idle_jsonl.rs
-│   │   │   └── orphan_reclaim.rs
+│   │   │   ├── orphan_reclaim.rs
+│   │   │   └── relay_format.rs
 │   │   ├── session_runtime/
 │   │   │   ├── channel_routing.rs
 │   │   │   ├── restore_cwd.rs

@@ -34,6 +34,7 @@ use tracing::Instrument;
 mod idle_jsonl;
 // #3960: orphaned `SessionBoundRelay` TUI-direct reclaim (producer-liveness TOCTOU).
 mod orphan_reclaim;
+mod relay_format;
 use self::idle_jsonl::{
     IdleRelayRangeAction, idle_jsonl_payload_contains_init_event,
     idle_jsonl_payload_contains_schedule_wakeup_setup, idle_jsonl_payload_contains_user_event,
@@ -838,19 +839,12 @@ impl SessionBoundDiscordRelaySink {
         })?;
 
         let raw_response_text = delivery.response_text.clone();
-        let formatted = if shared.ui.status_panel_v2_enabled {
-            formatting::format_for_discord_with_status_panel(&raw_response_text, &provider)
-        } else {
-            formatting::format_for_discord_with_provider(&raw_response_text, &provider)
-        };
-        let relay_text = if matches!(
-            delivery.task_notification_kind,
-            Some(TaskNotificationKind::MonitorAutoTurn)
-        ) {
-            super::prepend_monitor_auto_turn_origin(&formatted)
-        } else {
-            formatted
-        };
+        let relay_text = relay_format::session_bound_relay_text(
+            &shared,
+            &provider,
+            &raw_response_text,
+            delivery.task_notification_kind.as_ref(),
+        );
         let channel = ChannelId::new(channel_id);
 
         // #3089 A2b/#3998 S1-f2: structurally eligible short-replace
