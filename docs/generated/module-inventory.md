@@ -895,7 +895,7 @@
 | `services::routines::agent_executor` | `src/services/routines/agent_executor.rs` | 2504 | 2021 | 483 | giant-file |
 | `services::routines::discord_log` | `src/services/routines/discord_log.rs` | 2047 | 1589 | 458 | giant-file |
 | `services::routines::fresh_session_reaper` | `src/services/routines/fresh_session_reaper.rs` | 395 | 215 | 180 |  |
-| `services::routines::loader` | `src/services/routines/loader.rs` | 2318 | 670 | 1648 |  |
+| `services::routines::loader` | `src/services/routines/loader.rs` | 2313 | 670 | 1643 |  |
 | `services::routines::migrated` | `src/services/routines/migrated.rs` | 1286 | 883 | 403 |  |
 | `services::routines::runtime` | `src/services/routines/runtime.rs` | 1046 | 870 | 176 |  |
 | `services::routines::runtime_config` | `src/services/routines/runtime_config.rs` | 133 | 64 | 69 |  |

@@ -673,6 +673,13 @@ mod tests {
     use super::*;
     use std::thread;
 
+    fn fixture_routines_root() -> PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("routines")
+    }
+
     #[test]
     fn loads_registered_routine_script() {
         let dir = tempfile::tempdir().unwrap();
@@ -1298,32 +1305,20 @@ mod tests {
 
     #[test]
     fn bundled_sample_routines_load_and_validate() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("routines");
+        // Operator routines live in gitignored `routines/` in real deployments.
+        // Keep this battery hermetic by validating the tracked fixture contract.
+        let root = fixture_routines_root();
         let loader = RoutineScriptLoader::new().unwrap();
-        assert_eq!(loader.load_dir(&root).unwrap(), 22);
+        assert_eq!(loader.load_dir(&root).unwrap(), 8);
         assert_eq!(
             loader.script_refs().unwrap(),
             vec![
                 "agent-checkpoint-review.js".to_string(),
                 "family-profile-probe-obujang.js".to_string(),
                 "family-profile-probe-yohoejang.js".to_string(),
-                "migrated-launchd/agent-feedback-briefing.js".to_string(),
-                "migrated-launchd/ai-integrated-briefing.js".to_string(),
-                "migrated-launchd/banchan-day-reminder-cook.js".to_string(),
-                "migrated-launchd/banchan-day-reminder-prep.js".to_string(),
                 "migrated-launchd/cookingheart-daily-briefing.js".to_string(),
-                "migrated-launchd/family-morning-briefing-obujang.js".to_string(),
-                "migrated-launchd/family-morning-briefing-yohoejang.js".to_string(),
-                "migrated-launchd/memento-daily-report.js".to_string(),
-                "migrated-launchd/memento-hygiene.js".to_string(),
-                "migrated-launchd/memory-merge.js".to_string(),
                 "migrated-launchd/queue-stability-batch.js".to_string(),
-                "migrated-launchd/token-daily-report.js".to_string(),
-                "monitoring/automation-candidate-detector.js".to_string(),
-                "monitoring/automation-candidate-executor.js".to_string(),
                 "monitoring/automation-candidate-recommender.js".to_string(),
-                "monitoring/automation-executor.js".to_string(),
-                "monitoring/memento-digest-writer.js".to_string(),
                 "monitoring/working-watchdog.js".to_string(),
                 "script-summary.js".to_string(),
             ]
@@ -1421,7 +1416,7 @@ mod tests {
 
     #[test]
     fn family_profile_probe_agent_action_defers_daily_marker_until_delivery() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("routines");
+        let root = fixture_routines_root();
         let loader = RoutineScriptLoader::new().unwrap();
         loader
             .load_script(&root, &root.join("family-profile-probe-obujang.js"))
@@ -1516,7 +1511,7 @@ mod tests {
     }
 
     fn automation_recommender_loader() -> RoutineScriptLoader {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("routines");
+        let root = fixture_routines_root();
         let loader = RoutineScriptLoader::new().unwrap();
         loader
             .load_script(
