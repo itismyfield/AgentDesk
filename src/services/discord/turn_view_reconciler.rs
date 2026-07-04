@@ -1043,7 +1043,6 @@ impl TurnViewReconciler {
         emoji: char,
         source: &'static str,
     ) -> TurnViewDelivery {
-        let _ = identity;
         let Some(expected_state) = TurnViewState::from_queue_marker_emoji(emoji) else {
             tracing::warn!(
                 channel = target.channel_id.get(),
@@ -1080,10 +1079,20 @@ impl TurnViewReconciler {
                 channel = target.channel_id.get(),
                 message = target.message_id.get(),
                 target_kind = ?target.kind,
+                emoji = %emoji,
                 source,
-                "turn view queued reaction clear ignored without queued state"
+                "turn view queued reaction clear applying untracked fallback without queued state"
             );
-            return TurnViewDelivery::Delivered;
+            let Some(resolved_identity) =
+                self.resolve_identity(shared, target.kind, identity, source)
+            else {
+                return TurnViewDelivery::Failed;
+            };
+            let delivery = self
+                .apply_reaction(shared, target, emoji, false, &resolved_identity, source)
+                .await;
+            self.finish_target_locked(target, source, &target_lock, true);
+            return delivery;
         };
 
         if current.applied != expected_state {

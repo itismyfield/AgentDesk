@@ -32,9 +32,9 @@ pub(in crate::services::discord::router) fn queue_pending_reaction_for(
 /// entry — for BOTH standalone and merged. The head-only rule is correct only
 /// for placeholder-card OWNERSHIP (one card per active turn); a merged source
 /// `B` that is still queued under a newer head `C` keeps a valid `➕`, so a
-/// head-only check would wrongly remove it. `remove_reaction_raw` is
-/// best-effort (no-op when already cleared), and only the calling provider
-/// bot's own @me reaction is removed.
+/// head-only check would wrongly remove it. Reconciled queue-marker removal is
+/// best-effort (no-op when already cleared), and only the calling provider bot's
+/// own @me reaction is removed.
 async fn add_queue_pending_reaction_self_healing(
     ctx: &serenity::Context,
     data: &Data,

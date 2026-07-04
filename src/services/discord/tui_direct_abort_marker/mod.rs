@@ -438,8 +438,9 @@ pub(super) type ReactionApplierFn = Box<
 
 /// The production applier. Bot identity (#3164 add≡remove, I1): the `⏳` was
 /// added via the relay's `shared.serenity_http_or_token_fallback()`, and
-/// `remove_reaction_raw` only removes `@me`'s reaction — resolving the SAME
-/// source guarantees the removal targets exactly the reaction the add created.
+/// the shared reaction remove path only removes `@me`'s reaction — resolving
+/// the SAME source guarantees the removal targets exactly the reaction the add
+/// created.
 /// Success is keyed on the `✅`/`⚠` create (the remove is best-effort,
 /// mirroring `complete_tui_direct_prompt_anchor_lifecycle_if_present`).
 pub(super) fn shared_reaction_applier(shared: Arc<SharedData>) -> ReactionApplierFn {
