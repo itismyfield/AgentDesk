@@ -27,6 +27,7 @@ test-non-pg:
     cargo test --all-targets auto_queue -- --skip _pg --skip pg_ --skip postgres
     cargo test --all-targets cancel -- --skip _pg --skip pg_ --skip postgres
     cargo test --all-targets review_decision -- --skip _pg --skip pg_ --skip postgres
+    cargo test --all-targets stall_recovery -- --skip _pg --skip pg_ --skip postgres
     cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
 
 test-postgres:
