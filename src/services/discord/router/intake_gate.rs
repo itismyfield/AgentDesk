@@ -1,5 +1,5 @@
-use super::super::queue_reactions;
 use super::super::*;
+use super::super::{queue_marker, queue_reactions};
 use super::intake_queue_transaction::{
     IntakeQueueAuthorClass, IntakeQueueCommitOptions, IntakeQueueCommitSource,
     IntakeQueuePendingReactionPolicy, SoftInterventionCommitRequest, SoftInterventionSpec,
@@ -757,11 +757,13 @@ pub(in crate::services::discord) async fn handle_event(
                     channel_id,
                     new_message.id,
                 );
-                super::super::reaction_lifecycle::note_auxiliary_reaction_added(
+                let emoji = super::super::queue_exit_feedback_emoji(stale.queue_exit_kind);
+                queue_marker::note_exit_feedback_added(
+                    &data.shared,
                     &ctx.http,
                     channel_id,
                     new_message.id,
-                    super::super::queue_exit_feedback_emoji(stale.queue_exit_kind),
+                    emoji,
                 )
                 .await;
                 return Ok(());

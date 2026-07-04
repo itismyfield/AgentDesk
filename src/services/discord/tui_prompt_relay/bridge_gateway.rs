@@ -102,32 +102,6 @@ impl TurnGateway for TuiDirectBridgeGateway {
         })
     }
 
-    fn add_reaction<'a>(
-        &'a self,
-        channel_id: ChannelId,
-        message_id: MessageId,
-        emoji: char,
-    ) -> GatewayFuture<'a, ()> {
-        Box::pin(async move {
-            super::super::formatting::add_reaction_raw(&self.http, channel_id, message_id, emoji)
-                .await;
-        })
-    }
-
-    fn remove_reaction<'a>(
-        &'a self,
-        channel_id: ChannelId,
-        message_id: MessageId,
-        emoji: char,
-    ) -> GatewayFuture<'a, ()> {
-        Box::pin(async move {
-            super::super::formatting::remove_reaction_raw(
-                &self.http, channel_id, message_id, emoji,
-            )
-            .await;
-        })
-    }
-
     fn schedule_retry_with_history<'a>(
         &'a self,
         channel_id: ChannelId,

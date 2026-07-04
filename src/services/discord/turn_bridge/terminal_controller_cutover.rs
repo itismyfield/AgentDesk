@@ -1071,22 +1071,7 @@ mod tests {
             ) -> GatewayFuture<'a, Result<(), String>> {
                 panic!("short-replace never deletes (PreserveAlways)")
             }
-            fn add_reaction<'a>(
-                &'a self,
-                _c: ChannelId,
-                _m: MessageId,
-                _e: char,
-            ) -> GatewayFuture<'a, ()> {
-                panic!("unused on the short-replace path")
-            }
-            fn remove_reaction<'a>(
-                &'a self,
-                _c: ChannelId,
-                _m: MessageId,
-                _e: char,
-            ) -> GatewayFuture<'a, ()> {
-                panic!("unused on the short-replace path")
-            }
+
             fn schedule_retry_with_history<'a>(
                 &'a self,
                 _c: ChannelId,
@@ -1311,22 +1296,7 @@ mod tests {
             ) -> GatewayFuture<'a, Result<(), String>> {
                 panic!("long-chunk helper never edits")
             }
-            fn add_reaction<'a>(
-                &'a self,
-                _c: ChannelId,
-                _m: MessageId,
-                _e: char,
-            ) -> GatewayFuture<'a, ()> {
-                panic!("unused on the long-chunk path")
-            }
-            fn remove_reaction<'a>(
-                &'a self,
-                _c: ChannelId,
-                _m: MessageId,
-                _e: char,
-            ) -> GatewayFuture<'a, ()> {
-                panic!("unused on the long-chunk path")
-            }
+
             fn schedule_retry_with_history<'a>(
                 &'a self,
                 _c: ChannelId,

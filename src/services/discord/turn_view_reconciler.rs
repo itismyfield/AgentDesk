@@ -14,9 +14,10 @@ use poise::serenity_prelude as serenity;
 use serde::{Deserialize, Serialize};
 use serenity::{ChannelId, MessageId};
 
-use super::SharedData;
+use super::{SharedData, queue_reactions};
 
-const TURN_VIEW_REACTIONS: [char; 5] = ['📬', '⏳', '✅', '⚠', '🛑'];
+const TURN_VIEW_REACTIONS: [char; 7] = ['📬', '➕', '🔄', '⏳', '✅', '⚠', '🛑'];
+const QUEUE_EXIT_FEEDBACK_REACTIONS: [char; 3] = ['🚫', '⌛', '⏏'];
 const PERSISTED_STATE_VERSION: u32 = 1;
 const RECENTLY_FINALIZED_TARGET_MAX: usize = 1024;
 const RECENTLY_FINALIZED_TARGET_TTL: time::Duration = time::Duration::from_secs(10 * 60);
@@ -24,6 +25,8 @@ const RECENTLY_FINALIZED_TARGET_TTL: time::Duration = time::Duration::from_secs(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::services::discord) enum TurnViewState {
     Queued,
+    QueuedMerged,
+    QueuedReconcile,
     Pending,
     Completed,
     Failed,
@@ -64,6 +67,8 @@ impl TurnViewState {
     fn as_str(self) -> &'static str {
         match self {
             Self::Queued => "queued",
+            Self::QueuedMerged => "queued_merged",
+            Self::QueuedReconcile => "queued_reconcile",
             Self::Pending => "pending",
             Self::Completed => "completed",
             Self::Failed => "failed",
@@ -75,6 +80,8 @@ impl TurnViewState {
     fn from_str(value: &str) -> Option<Self> {
         match value {
             "queued" => Some(Self::Queued),
+            "queued_merged" => Some(Self::QueuedMerged),
+            "queued_reconcile" => Some(Self::QueuedReconcile),
             "pending" => Some(Self::Pending),
             "completed" => Some(Self::Completed),
             "failed" => Some(Self::Failed),
@@ -87,6 +94,8 @@ impl TurnViewState {
     fn emoji(self) -> Option<char> {
         match self {
             Self::Queued => Some('📬'),
+            Self::QueuedMerged => Some('➕'),
+            Self::QueuedReconcile => Some('🔄'),
             Self::Pending => Some('⏳'),
             Self::Completed => Some('✅'),
             Self::Failed => Some('⚠'),
@@ -97,6 +106,22 @@ impl TurnViewState {
 
     fn terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Stopped)
+    }
+
+    fn is_queue_marker(self) -> bool {
+        matches!(
+            self,
+            Self::Queued | Self::QueuedMerged | Self::QueuedReconcile
+        )
+    }
+
+    fn from_queue_marker_emoji(emoji: char) -> Option<Self> {
+        match emoji {
+            queue_reactions::QUEUE_STANDALONE_PENDING_REACTION => Some(Self::Queued),
+            queue_reactions::QUEUE_MERGED_PENDING_REACTION => Some(Self::QueuedMerged),
+            queue_reactions::QUEUE_RECONCILE_PENDING_REACTION => Some(Self::QueuedReconcile),
+            _ => None,
+        }
     }
 
     fn started_or_terminal(self) -> bool {
@@ -412,23 +437,28 @@ impl TurnViewReconciler {
         Some(start_attempt)
     }
 
-    pub(in crate::services::discord) async fn note_message_queued(
+    pub(in crate::services::discord) async fn note_queue_marker_added(
         &self,
         shared: &SharedData,
         target: TurnViewTarget,
         owner: TurnViewOwner,
         identity: TurnViewIdentity,
+        emoji: char,
         source: &'static str,
     ) -> bool {
-        self.note_state(
-            shared,
-            target,
-            owner,
-            identity,
-            TurnViewState::Queued,
-            source,
-        )
-        .await
+        let Some(desired) = TurnViewState::from_queue_marker_emoji(emoji) else {
+            tracing::warn!(
+                channel = target.channel_id.get(),
+                message = target.message_id.get(),
+                target_kind = ?target.kind,
+                emoji = %emoji,
+                source,
+                "turn view queue marker add ignored for unsupported emoji"
+            );
+            return false;
+        };
+        self.note_state(shared, target, owner, identity, desired, source)
+            .await
     }
 
     pub(in crate::services::discord) async fn note_start_rolled_back_to_queued(
@@ -444,17 +474,74 @@ impl TurnViewReconciler {
             .delivered()
     }
 
-    pub(in crate::services::discord) async fn note_queued_message_cancelled(
+    pub(in crate::services::discord) async fn note_queue_marker_removed(
         &self,
         shared: &SharedData,
         target: TurnViewTarget,
         owner: TurnViewOwner,
         identity: TurnViewIdentity,
+        emoji: char,
         source: &'static str,
     ) -> bool {
-        self.note_queued_message_cancelled_delivery(shared, target, owner, identity, source)
+        self.note_queue_marker_removed_delivery(shared, target, owner, identity, emoji, source)
             .await
             .delivered()
+    }
+
+    pub(in crate::services::discord) async fn note_untracked_reaction_added(
+        &self,
+        shared: &SharedData,
+        target: TurnViewTarget,
+        identity: TurnViewIdentity,
+        emoji: char,
+        source: &'static str,
+    ) -> bool {
+        self.note_untracked_reaction(shared, target, identity, emoji, true, source)
+            .await
+            .delivered()
+    }
+
+    async fn note_untracked_reaction(
+        &self,
+        shared: &SharedData,
+        target: TurnViewTarget,
+        identity: TurnViewIdentity,
+        emoji: char,
+        add: bool,
+        source: &'static str,
+    ) -> TurnViewDelivery {
+        if !super::reaction_lifecycle::is_real_discord_message_id(target.message_id) {
+            tracing::debug!(
+                channel = target.channel_id.get(),
+                message = target.message_id.get(),
+                target_kind = ?target.kind,
+                emoji = %emoji,
+                add,
+                source,
+                "turn view untracked reaction skipped for non-Discord/synthetic message id"
+            );
+            return TurnViewDelivery::Delivered;
+        }
+
+        let target_lock = self.target_lock(target);
+        {
+            let _target_guard = target_lock.lock().await;
+            let resolved_identity =
+                match self.resolve_identity(shared, target.kind, identity, source) {
+                    Some(identity) => identity,
+                    None => return TurnViewDelivery::Failed,
+                };
+            let delivery = self
+                .apply_reaction(shared, target, emoji, add, &resolved_identity, source)
+                .await;
+            if !delivery.delivered() {
+                return delivery;
+            }
+        }
+        if !self.targets.contains_key(&target) {
+            self.prune_target_lock_if_idle(target);
+        }
+        TurnViewDelivery::Delivered
     }
 
     async fn note_start_rolled_back_to_queued_delivery(
@@ -748,7 +835,7 @@ impl TurnViewReconciler {
         let target_lock = self.target_lock(target);
         let _target_guard = target_lock.lock().await;
 
-        if desired == TurnViewState::Queued
+        if desired.is_queue_marker()
             && self.recently_finalized_blocks_queued(target, owner.generation)
         {
             tracing::debug!(
@@ -792,7 +879,7 @@ impl TurnViewReconciler {
                 return (TurnViewDelivery::Delivered, None);
             }
             if current.owner == owner
-                && desired == TurnViewState::Queued
+                && desired.is_queue_marker()
                 && current.applied.started_or_terminal()
             {
                 tracing::debug!(
@@ -824,7 +911,7 @@ impl TurnViewReconciler {
                     // be promoted by a fresh dcserver generation. This remains
                     // monotonic (`Queued` -> `Pending`) and preserves the
                     // original reaction identity for the mailbox removal.
-                } else if matches!(desired, TurnViewState::Pending | TurnViewState::Queued) {
+                } else if desired == TurnViewState::Pending || desired.is_queue_marker() {
                     if current.applied == desired {
                         let transferred = Self::applied_target(
                             owner,
@@ -947,27 +1034,27 @@ impl TurnViewReconciler {
         (TurnViewDelivery::Delivered, start_attempt)
     }
 
-    async fn note_queued_message_cancelled_delivery(
+    async fn note_queue_marker_removed_delivery(
         &self,
         shared: &SharedData,
         target: TurnViewTarget,
         owner: TurnViewOwner,
         identity: TurnViewIdentity,
-        source: &'static str,
-    ) -> TurnViewDelivery {
-        self.note_queued_message_cancelled_delivery_inner(shared, target, owner, identity, source)
-            .await
-    }
-
-    async fn note_queued_message_cancelled_delivery_inner(
-        &self,
-        shared: &SharedData,
-        target: TurnViewTarget,
-        owner: TurnViewOwner,
-        identity: TurnViewIdentity,
+        emoji: char,
         source: &'static str,
     ) -> TurnViewDelivery {
         let _ = identity;
+        let Some(expected_state) = TurnViewState::from_queue_marker_emoji(emoji) else {
+            tracing::warn!(
+                channel = target.channel_id.get(),
+                message = target.message_id.get(),
+                target_kind = ?target.kind,
+                emoji = %emoji,
+                source,
+                "turn view queue marker clear ignored for unsupported emoji"
+            );
+            return TurnViewDelivery::Delivered;
+        };
         if !super::reaction_lifecycle::is_real_discord_message_id(target.message_id) {
             tracing::debug!(
                 channel = target.channel_id.get(),
@@ -999,14 +1086,15 @@ impl TurnViewReconciler {
             return TurnViewDelivery::Delivered;
         };
 
-        if current.applied != TurnViewState::Queued {
+        if current.applied != expected_state {
             tracing::debug!(
                 channel = target.channel_id.get(),
                 message = target.message_id.get(),
                 target_kind = ?target.kind,
+                emoji = %emoji,
                 source,
                 current_state = ?current.applied,
-                "turn view queued reaction clear ignored because target is not queued"
+                "turn view queued reaction clear ignored because target has a different queue marker"
             );
             if current.applied.terminal() {
                 self.finalize_target_locked(target, current.owner.generation, source, &target_lock);
@@ -1034,7 +1122,7 @@ impl TurnViewReconciler {
 
         let resolved_identity = current.identity.clone();
         let delivery = self
-            .apply_reaction(shared, target, '📬', false, &resolved_identity, source)
+            .apply_reaction(shared, target, emoji, false, &resolved_identity, source)
             .await;
         if delivery.delivered() || matches!(delivery, TurnViewDelivery::FailedPermanent) {
             self.discard_target_locked(target, source, &target_lock);
@@ -1475,7 +1563,9 @@ impl TurnViewReconciler {
         identity: &ResolvedIdentity,
         source: &'static str,
     ) -> TurnViewDelivery {
-        debug_assert!(TURN_VIEW_REACTIONS.contains(&emoji));
+        debug_assert!(
+            TURN_VIEW_REACTIONS.contains(&emoji) || QUEUE_EXIT_FEEDBACK_REACTIONS.contains(&emoji)
+        );
         #[cfg(not(test))]
         {
             let result = if add {
@@ -1592,23 +1682,25 @@ pub(in crate::services::discord) async fn note_intake_turn_started_with_attempt(
         .await
 }
 
-pub(in crate::services::discord) async fn note_intake_message_queued(
+pub(in crate::services::discord) async fn note_intake_queue_marker_added(
     shared: &Arc<SharedData>,
     http: &Arc<serenity::http::Http>,
     channel_id: ChannelId,
     message_id: MessageId,
     generation: u64,
+    emoji: char,
     source: &'static str,
 ) -> bool {
     let target = TurnViewTarget::intake_user_message(channel_id, message_id);
     let owner = turn_view_owner_for_message(channel_id, message_id, generation);
     shared
         .turn_view_reconciler
-        .note_message_queued(
+        .note_queue_marker_added(
             shared,
             target,
             owner,
             TurnViewIdentity::IntakeHttp(http.clone()),
+            emoji,
             source,
         )
         .await
@@ -1743,23 +1835,25 @@ pub(in crate::services::discord) async fn note_intake_turn_cleared_current_if_at
     .await
 }
 
-pub(in crate::services::discord) async fn note_intake_queued_message_cancelled(
+pub(in crate::services::discord) async fn note_intake_queue_marker_removed(
     shared: &Arc<SharedData>,
     http: &Arc<serenity::http::Http>,
     channel_id: ChannelId,
     message_id: MessageId,
     generation: u64,
+    emoji: char,
     source: &'static str,
 ) -> bool {
     let target = TurnViewTarget::intake_user_message(channel_id, message_id);
     let owner = turn_view_owner_for_message(channel_id, message_id, generation);
     shared
         .turn_view_reconciler
-        .note_queued_message_cancelled(
+        .note_queue_marker_removed(
             shared,
             target,
             owner,
             TurnViewIdentity::IntakeHttp(http.clone()),
+            emoji,
             source,
         )
         .await
@@ -1801,19 +1895,21 @@ pub(in crate::services::discord) async fn note_intake_turn_started_current_with_
     .await
 }
 
-pub(in crate::services::discord) async fn note_intake_message_queued_current(
+pub(in crate::services::discord) async fn note_intake_queue_marker_added_current(
     shared: &Arc<SharedData>,
     http: &Arc<serenity::http::Http>,
     channel_id: ChannelId,
     message_id: MessageId,
+    emoji: char,
     source: &'static str,
 ) -> bool {
-    note_intake_message_queued(
+    note_intake_queue_marker_added(
         shared,
         http,
         channel_id,
         message_id,
         shared.restart.current_generation,
+        emoji,
         source,
     )
     .await
@@ -1855,19 +1951,21 @@ pub(in crate::services::discord) async fn note_intake_turn_cleared_current(
     .await
 }
 
-pub(in crate::services::discord) async fn note_intake_queued_message_cancelled_current(
+pub(in crate::services::discord) async fn note_intake_queue_marker_removed_current(
     shared: &Arc<SharedData>,
     http: &Arc<serenity::http::Http>,
     channel_id: ChannelId,
     message_id: MessageId,
+    emoji: char,
     source: &'static str,
 ) -> bool {
-    note_intake_queued_message_cancelled(
+    note_intake_queue_marker_removed(
         shared,
         http,
         channel_id,
         message_id,
         shared.restart.current_generation,
+        emoji,
         source,
     )
     .await

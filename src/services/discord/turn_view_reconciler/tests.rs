@@ -273,11 +273,12 @@ async fn regression_4049_start_rollback_to_queued_swaps_hourglass_to_mailbox_and
     assert_eq!(persisted_applied(target), TurnViewState::Queued);
 
     reconciler
-        .note_queued_message_cancelled(
+        .note_queue_marker_removed(
             &shared,
             target,
             owner,
             TurnViewIdentity::Test("ignored-cancel"),
+            '📬',
             "test_queue_exit_after_rollback",
         )
         .await;
@@ -726,11 +727,12 @@ async fn regression_4049_late_queued_after_started_and_cancel_are_noops() {
     );
 
     reconciler
-        .note_queued_message_cancelled(
+        .note_queue_marker_removed(
             &shared,
             target,
             owner,
             TurnViewIdentity::Test("ignored-cancel"),
+            '📬',
             "test",
         )
         .await;
@@ -778,11 +780,12 @@ async fn queued_cancel_ignores_nonmatching_generation() {
     let ops_after_queue = reconciler.ops().len();
 
     reconciler
-        .note_queued_message_cancelled(
+        .note_queue_marker_removed(
             &shared,
             target,
             stale_cancel_owner,
             TurnViewIdentity::Test("ignored-cancel"),
+            '📬',
             "test",
         )
         .await;

@@ -256,24 +256,6 @@ mod completion_release_tests {
             Box::pin(async { Ok(ReplaceLongMessageOutcome::EditedOriginal) })
         }
 
-        fn add_reaction<'a>(
-            &'a self,
-            _channel_id: ChannelId,
-            _message_id: serenity::MessageId,
-            _emoji: char,
-        ) -> GatewayFuture<'a, ()> {
-            Box::pin(async {})
-        }
-
-        fn remove_reaction<'a>(
-            &'a self,
-            _channel_id: ChannelId,
-            _message_id: serenity::MessageId,
-            _emoji: char,
-        ) -> GatewayFuture<'a, ()> {
-            Box::pin(async {})
-        }
-
         fn schedule_retry_with_history<'a>(
             &'a self,
             _channel_id: ChannelId,
