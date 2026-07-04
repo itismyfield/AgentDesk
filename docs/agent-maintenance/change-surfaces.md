@@ -1039,7 +1039,7 @@
     and covers frozen nonzero-frontier / empty-capture variants. This admission
     is bugfix-only for PR #4035; further recovery policy expansion should extract
     decision/apply helpers instead of growing this file.)
-  - `src/services/discord/recovery_engine.rs` (3016 lines; net -1 from #4047
+  - `src/services/discord/recovery_engine.rs` (3010 lines; net -17 from #4047
     S2-b: gate-outcome suppression removed, background_agent_pending producer
     extracted to `recovery_engine/status_panel_completion_producer.rs`; +97
     from #3998 D1:
@@ -1156,7 +1156,7 @@
     children (`send_target`, `send_gate`, `send_api`, `manual_delivery`) to
     `outbound/` while preserving the `health::` re-export API; #1879
     snapshot/mailbox extraction, and #3082 answer-flush-barrier field).
-  - `src/services/discord/health/recovery.rs` (2574 lines; +23 from #4048
+  - `src/services/discord/health/recovery.rs` (2580 lines; +23 from #4048
     round 4 requiring strict provider-less stale-mailbox repair to verify a
     peeked local mailbox has an active token or queue before treating it as
     ownership evidence; +45 from #4048 round 3 scoping provider-less
@@ -1208,7 +1208,7 @@
     force-clean watcher-respawn follow-through + always-run cross-tick
     retry/dead-man (P1-a: no early return on zero candidates), delegating the
     new behaviour to `health/watcher_respawn.rs`).
-  - `src/services/discord/router/message_handler/intake_turn.rs` (2814 lines; -11 from #4019 R1 routing dequeue queue-marker cleanup through the shared 📬/➕/🔄 marker list and shortening the local contract note; +10 from #3813 Phase 3 (§4/AC#6) a single `edit_channel_message` call-site surfacing the hosted-TUI busy preflight readiness wait (⏳ TUI 준비 대기 중) on the intake placeholder so a safe up-to-45s wait doesn't look like a stalled session start — the render logic/const/tests live in sibling `tui_followup.rs` (non-baselined), the root only adds the one edit call before `wait_readiness` moves into spawn_blocking, and the compact state is transient (overwritten by dispatch streaming on ready or by the queued-card/delete/refusal-notice paths on still-busy); +18 from #3813 Phase 1a intake latency spans — six thin observation-only mark/emit call-sites (turn-claimed anchor + placeholder/prep/input marks + `submitted`/`deferred_busy` emit); all monotonic-`Instant` measurement + formatting lives in sibling `latency_spans.rs`, no control-flow change; -856 from #3837 behavior-preserving decomposition lifting three cohesive `handle_text_message` clusters verbatim into sibling `intake_turn/` submodules — `voice_intake::resolve_intake_voice_announcement` (voice-announcement resolution), `race_loss::handle_race_loss_enqueue` (the `if !started` mailbox enqueue + queued-placeholder render + queue-pending reaction lifecycle), and `turn_watchdog::spawn_text_turn_watchdog` (the per-turn watchdog spawn); pure code movement + path/visibility plumbing, no logic change; +21 from #3905 threading the intake gate's already-authorized, non-consuming voice-announcement resolution into direct dispatch (new `handle_text_message` `gate_resolved_voice_announcement` param + the trust-the-carry-forward resolution branch) so a sibling-gateway durable-consume race no longer WARN-drops an announce the gate authorized; #3464 single-dispatch dedup preserved via the unchanged per-message `route_voice_transcript_announcement_once` claim; +16 from #3811 recording the original-request turn anchor (`set_turn_request_anchor`) gated on the won mailbox claim (`started == true`) so a queued message never bleeds the active turn's deeplink; +1 from #3751 routing paused-watcher attach through owner-channel persistence helper; -65 from #3653 removing the separate session-restore notify bot send path so restore is absorbed by the session/status panel; -40 from #3591 100턴 세션 리셋(AssistantTurnCap) 제거: reset 판정/clear/DB clear/display 블록 삭제; -2 from #3588 idle 세션 리셋 제거(IdleExpired display arm + `now` 인자 정리); +23 from #3557 Codex review: cap the INITIAL watchdog deadline at the provider hard ceiling (+one-shot ceiling warn); +27 from #3557 (A) per-turn hard-ceiling clamp wired into the watchdog auto-extend block; +1 from #3479 item-3 `shared.dispatch.<field>` nesting;
+  - `src/services/discord/router/message_handler/intake_turn.rs` (2807 lines; -11 from #4019 R1 routing dequeue queue-marker cleanup through the shared 📬/➕/🔄 marker list and shortening the local contract note; +10 from #3813 Phase 3 (§4/AC#6) a single `edit_channel_message` call-site surfacing the hosted-TUI busy preflight readiness wait (⏳ TUI 준비 대기 중) on the intake placeholder so a safe up-to-45s wait doesn't look like a stalled session start — the render logic/const/tests live in sibling `tui_followup.rs` (non-baselined), the root only adds the one edit call before `wait_readiness` moves into spawn_blocking, and the compact state is transient (overwritten by dispatch streaming on ready or by the queued-card/delete/refusal-notice paths on still-busy); +18 from #3813 Phase 1a intake latency spans — six thin observation-only mark/emit call-sites (turn-claimed anchor + placeholder/prep/input marks + `submitted`/`deferred_busy` emit); all monotonic-`Instant` measurement + formatting lives in sibling `latency_spans.rs`, no control-flow change; -856 from #3837 behavior-preserving decomposition lifting three cohesive `handle_text_message` clusters verbatim into sibling `intake_turn/` submodules — `voice_intake::resolve_intake_voice_announcement` (voice-announcement resolution), `race_loss::handle_race_loss_enqueue` (the `if !started` mailbox enqueue + queued-placeholder render + queue-pending reaction lifecycle), and `turn_watchdog::spawn_text_turn_watchdog` (the per-turn watchdog spawn); pure code movement + path/visibility plumbing, no logic change; +21 from #3905 threading the intake gate's already-authorized, non-consuming voice-announcement resolution into direct dispatch (new `handle_text_message` `gate_resolved_voice_announcement` param + the trust-the-carry-forward resolution branch) so a sibling-gateway durable-consume race no longer WARN-drops an announce the gate authorized; #3464 single-dispatch dedup preserved via the unchanged per-message `route_voice_transcript_announcement_once` claim; +16 from #3811 recording the original-request turn anchor (`set_turn_request_anchor`) gated on the won mailbox claim (`started == true`) so a queued message never bleeds the active turn's deeplink; +1 from #3751 routing paused-watcher attach through owner-channel persistence helper; -65 from #3653 removing the separate session-restore notify bot send path so restore is absorbed by the session/status panel; -40 from #3591 100턴 세션 리셋(AssistantTurnCap) 제거: reset 판정/clear/DB clear/display 블록 삭제; -2 from #3588 idle 세션 리셋 제거(IdleExpired display arm + `now` 인자 정리); +23 from #3557 Codex review: cap the INITIAL watchdog deadline at the provider hard ceiling (+one-shot ceiling warn); +27 from #3557 (A) per-turn hard-ceiling clamp wired into the watchdog auto-extend block; +1 from #3479 item-3 `shared.dispatch.<field>` nesting;
     Discord message intake turn orchestration split from the router message
     handler; bugfix only outside a further extraction plan; #3464 extracted the
     unauthorized-voice-announcement scope decision to `voice_announcement_scope.rs`;
@@ -1246,7 +1246,11 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6176 lines; production LoC; -37
+  - `src/services/discord/turn_bridge/mod.rs` (6164 lines; production LoC; -16
+    from #4049 S4-a1 — reaction mutations replaced by turn_view_reconciler
+    notifications (tv_clear/tv_stop/tv_fail/tv_done) and
+    `record_status_panel_events` moved verbatim to the `status_panel.rs` child
+    to absorb the wiring growth (hotfile ceiling locked at 6587 raw); -37
     from #4047 S2-b removing the gate-outcome suppression branch and threading
     the background_agent_pending sniff through the completion producer; -34
     from #3998 S1-f2 retiring the A5/A6b rollout OR-in and routing site-5 from
@@ -1488,8 +1492,12 @@
     literal no-match key instead of releasing an arbitrary live entry;
     `turn_finalizer/finalize.rs` is now 246 prod LoC, `turn_finalizer/finalize_context.rs` 113 prod LoC,
     `turn_finalizer/reconcile.rs` 221 prod LoC, and
-    `turn_finalizer/cleanup.rs` 376 prod LoC. No PG lease/schema change.
-  - `src/services/discord/formatting.rs` (2860 lines; +25 from #3998 D1 exposing
+    `turn_finalizer/cleanup.rs` 565 prod LoC. No PG lease/schema change.
+  - `src/services/discord/turn_view_reconciler.rs` (1180 prod lines; #4049
+    S4-a1 turn-lifecycle reaction reconciler and internal sidecar state for
+    notification-only ⏳/✅/⚠/🛑 updates; bugfix-only until slice a2 can split
+    persistence/tests from the runtime reconciler).
+  - `src/services/discord/formatting.rs` (2856 lines; +25 from #3998 D1 exposing
     raw long-send created message ids and fallback replacement anchors for
     recovery anchor persistence while the existing `send_long_message_raw_with_reference`
     surface remains a unit-returning wrapper; presentation/chunking behavior unchanged. -25 from #4019 R1 moving
@@ -1931,7 +1939,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   surface. #3823 adds macOS Codex.app fallback discovery and all-candidate
   Codex semver probing so AgentDesk prefers the newest compatible Codex binary
   instead of silently launching a stale npm shim.
-- `src/services/discord/mod.rs` (now 4158 prod LoC after #4048 S3 extracted
+- `src/services/discord/mod.rs` (now 4157 prod LoC after #4048 S3 extracted
   the mailbox-release completion publish helper to `turn_completion_events.rs`
   and the post-enqueue idle-drain scheduler to `queue_io.rs` (-46 from 4204,
   +12 from 4146); 4056 prod LoC after #3479 item-3 extracted

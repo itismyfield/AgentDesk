@@ -3314,6 +3314,7 @@ mod tests {
                 super::super::turn_completion_events::TURN_COMPLETION_EVENT_BUS_CAPACITY,
             )
             .0,
+            turn_view_reconciler: super::super::turn_view_reconciler::TurnViewReconciler::default(),
         })
     }
 

@@ -670,7 +670,10 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
             }
 
             stats.record(CatchUpClassification::Recover);
-            reaction_cleanup::cleanup_recovered_catch_up_hourglass(http, channel_id, msg.id).await;
+            reaction_cleanup::cleanup_recovered_catch_up_hourglass(
+                http, shared, channel_id, msg.id,
+            )
+            .await;
             // Track the newest actually-recovered message for checkpoint
             let mid = msg.id.get();
             if max_recovered_id.map(|m| mid > m).unwrap_or(true) {

@@ -12,6 +12,7 @@ use super::SharedData;
 use super::inflight::{InflightTurnState, RelayOwnerKind, TurnSource};
 use super::outbound::delivery_record as dr; // #3089 B2c
 use super::turn_bridge::{TurnBridgeContext, spawn_turn_bridge};
+use super::turn_view_reconciler::note_tui_anchor_started as started;
 use crate::services::agent_protocol::{RuntimeHandoffKind, StreamMessage};
 use crate::services::claude_tui::hook_server::{HookEventKind, subscribe_hook_events};
 use crate::services::memory::TokenUsage;
@@ -663,15 +664,15 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
                 anchor_message.id.get(),
             );
         }
-        // #3164: add `⏳` with the command(provider) bot so it matches the bot that
-        // removes it in `complete_tui_direct_prompt_anchor_lifecycle_if_present`; on
-        // unavailable http skip the add (warned above). codex R2 issue-2: add BEFORE
-        // the anchor becomes findable (`record_prompt_anchor`) — anchor-first lets a
-        // fast watcher complete first and the delayed add re-leaves `⏳ + ✅`.
-        if let Some(command_http) = command_http.as_ref() {
-            super::formatting::add_reaction_raw(command_http, channel_id, anchor_message.id, '⏳')
-                .await;
-        }
+        // Add before the anchor becomes findable so fast completion cannot re-leave ⏳.
+        started(
+            shared,
+            channel_id,
+            anchor_message.id,
+            lease.generation,
+            "tui_anchor_start",
+        )
+        .await;
         crate::services::tui_prompt_dedupe::record_prompt_anchor(
             &prompt.provider,
             &prompt.tmux_session_name,
@@ -692,14 +693,12 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         ) {
             DeferredAnchorCompletionDrain::Complete => {
                 // command_http is available (decision required it) — deliver.
-                let command_http = command_http
-                    .as_ref()
-                    .expect("decision returns Complete only when command_http is_some");
                 let _ = complete_tui_direct_prompt_anchor_lifecycle_if_present(
-                    command_http,
+                    shared,
                     &prompt.provider,
                     &prompt.tmux_session_name,
                     channel_id,
+                    lease.generation,
                     "relay_record_prompt_anchor_drains_deferred_lease_gated_completion",
                 )
                 .await;

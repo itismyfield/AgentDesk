@@ -24,6 +24,12 @@ impl TurnCompletionEvent {
     }
 }
 
+#[cfg(test)]
+pub(in crate::services::discord) fn turn_completion_event_bus()
+-> broadcast::Sender<TurnCompletionEvent> {
+    broadcast::channel(TURN_COMPLETION_EVENT_BUS_CAPACITY).0
+}
+
 pub(in crate::services::discord) fn publish_turn_completion_event(
     shared: &SharedData,
     event: TurnCompletionEvent,

@@ -6,6 +6,7 @@ use serde::Serialize;
 use serenity::{ChannelId, MessageId};
 
 use crate::services::discord::session_identity::tmux_name_from_session_key;
+use crate::services::discord::turn_view_reconciler::note_intake_turn_cleared_via_shared as tv_clear;
 use crate::services::discord::{self as discord, SharedData};
 use crate::services::provider::{CancelToken, ProviderKind};
 
@@ -1791,15 +1792,13 @@ pub(crate) async fn run_stall_watchdog_pass(
                     "finalizer_turn_id": revalidated.finalizer_turn_id,
                 }),
             );
-            if let Some(user_msg_id) = revalidated.pending_hourglass_user_msg_id
-                && let Some(http) =
-                    owning_runtime_http_for_channel(registry, provider, channel_id).await
-            {
-                discord::formatting::remove_reaction_raw(
-                    &http,
+            if let Some(user_msg_id) = revalidated.pending_hourglass_user_msg_id {
+                tv_clear(
+                    &shared,
                     channel_id,
                     user_msg_id.into(),
-                    '⏳',
+                    generation,
+                    "health_watchdog",
                 )
                 .await;
             }
@@ -2015,6 +2014,10 @@ pub(crate) async fn run_stall_watchdog_pass(
             .as_ref()
             .filter(|state| state.user_msg_id != 0)
             .map(|state| state.user_msg_id);
+        let pending_hourglass_generation = force_clean_inflight
+            .as_ref()
+            .map(|state| state.born_generation)
+            .unwrap_or(shared.restart.current_generation);
         // #3041 B: before we tear the turn down, decide whether the next turn
         // should `--resume` this provider session or cold-start. A force-clean
         // that fires on a still-healthy session (watcher desync, post-restart
@@ -2058,12 +2061,15 @@ pub(crate) async fn run_stall_watchdog_pass(
             provider,
             thread_parent_kickoffs,
         );
-        if let Some(user_msg_id) = pending_hourglass_user_msg_id
-            && let Some(http) =
-                owning_runtime_http_for_channel(registry, provider, channel_id).await
-        {
-            discord::formatting::remove_reaction_raw(&http, channel_id, user_msg_id.into(), '⏳')
-                .await;
+        if let Some(user_msg_id) = pending_hourglass_user_msg_id {
+            tv_clear(
+                &shared,
+                channel_id,
+                user_msg_id.into(),
+                pending_hourglass_generation,
+                "health_force_clean",
+            )
+            .await;
         }
         stall_liveness::clear_stall_watchdog_liveness_state(
             provider,

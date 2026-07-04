@@ -699,6 +699,8 @@ src/
 │   │   │   ├── finalize_context.rs
 │   │   │   ├── reconcile.rs
 │   │   │   └── watcher_backstop.rs
+│   │   ├── turn_view_reconciler/
+│   │   │   └── tests.rs
 │   │   ├── voice_barge_in/
 │   │   │   ├── tests/
 │   │   │   │   └── pcm_harness_tests.rs
@@ -811,6 +813,7 @@ src/
 │   │   ├── turn_completion_events.rs
 │   │   ├── turn_end_wip_warning.rs
 │   │   ├── turn_finalizer.rs
+│   │   ├── turn_view_reconciler.rs
 │   │   ├── voice_acknowledgement.rs
 │   │   ├── voice_background_driver.rs
 │   │   ├── voice_barge_in.rs

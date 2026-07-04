@@ -114,6 +114,7 @@ mod tui_prompt_relay;
 mod tui_task_card;
 mod turn_bridge;
 mod turn_finalizer;
+mod turn_view_reconciler;
 mod voice_acknowledgement;
 mod voice_background_driver;
 mod voice_barge_in;
@@ -2131,10 +2132,10 @@ pub(crate) struct SharedData {
         tokio::sync::broadcast::Sender<inflight::InflightSignal>,
     /// #4048 S3: canonical finalize-completion edge bus for idle-queue drain.
     /// The TurnFinalizer publishes after the mailbox token release point, so this
-    /// is not coupled to visible status-panel/footer rendering. The listener
-    /// subscribes before taking its initial mailbox snapshot.
+    /// is not coupled to visible status-panel/footer rendering.
     pub(in crate::services::discord) turn_completion_events:
         tokio::sync::broadcast::Sender<turn_completion_events::TurnCompletionEvent>,
+    pub(in crate::services::discord) turn_view_reconciler: turn_view_reconciler::TurnViewReconciler,
 }
 
 impl SharedData {
@@ -2403,10 +2404,8 @@ pub(super) fn make_shared_data_for_tests_with_storage(
         health_registry: std::sync::Weak::new(),
         known_slash_commands: tokio::sync::OnceCell::new(),
         inflight_signals: tokio::sync::broadcast::channel(256).0,
-        turn_completion_events: tokio::sync::broadcast::channel(
-            turn_completion_events::TURN_COMPLETION_EVENT_BUS_CAPACITY,
-        )
-        .0,
+        turn_completion_events: turn_completion_events::turn_completion_event_bus(),
+        turn_view_reconciler: turn_view_reconciler::TurnViewReconciler::default(),
     })
 }
 

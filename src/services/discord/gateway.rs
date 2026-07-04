@@ -26,6 +26,7 @@ use formatting::ReplaceLongMessageOutcome;
 
 pub(super) type GatewayFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+#[allow(dead_code)]
 pub(super) trait TurnGateway: Send + Sync {
     fn send_message<'a>(
         &'a self,
