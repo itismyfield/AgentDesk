@@ -1398,8 +1398,10 @@ mod tests {
     fn relay_recovery_takeover_forgets_registered_completion_footer_target() {
         let channel_id = ChannelId::new(3_089_203);
         let shared = super::super::make_shared_data_for_tests();
-        super::super::single_message_panel::completion_footer_forget_registered_target(channel_id);
-        let _ = super::super::single_message_panel::register_completion_footer_target(
+        super::super::footer_view_reconciler::completion_footer_forget_registered_target(
+            channel_id,
+        );
+        let _ = super::super::footer_view_reconciler::register_completion_footer_target(
             channel_id,
             MessageId::new(3_089_303),
             &ProviderKind::Codex,
@@ -1415,7 +1417,7 @@ mod tests {
         ));
 
         assert_eq!(
-            super::super::single_message_panel::completion_footer_edit_for_registered_target_at(
+            super::super::footer_view_reconciler::completion_footer_edit_for_registered_target_at(
                 shared.as_ref(),
                 channel_id,
                 "⠸",
@@ -1429,8 +1431,10 @@ mod tests {
     fn relay_recovery_takeover_keeps_different_completion_footer_target() {
         let channel_id = ChannelId::new(3_089_213);
         let shared = super::super::make_shared_data_for_tests();
-        super::super::single_message_panel::completion_footer_forget_registered_target(channel_id);
-        let _ = super::super::single_message_panel::register_completion_footer_target(
+        super::super::footer_view_reconciler::completion_footer_forget_registered_target(
+            channel_id,
+        );
+        let _ = super::super::footer_view_reconciler::register_completion_footer_target(
             channel_id,
             MessageId::new(3_089_313),
             &ProviderKind::Codex,
@@ -1446,7 +1450,7 @@ mod tests {
         ));
 
         assert!(
-            super::super::single_message_panel::completion_footer_edit_for_registered_target_at(
+            super::super::footer_view_reconciler::completion_footer_edit_for_registered_target_at(
                 shared.as_ref(),
                 channel_id,
                 "⠸",
@@ -1454,7 +1458,9 @@ mod tests {
             )
             .is_some()
         );
-        super::super::single_message_panel::completion_footer_forget_registered_target(channel_id);
+        super::super::footer_view_reconciler::completion_footer_forget_registered_target(
+            channel_id,
+        );
     }
 
     #[test]

@@ -3,7 +3,9 @@ use std::sync::{Mutex, OnceLock};
 
 use poise::serenity_prelude::{ChannelId, MessageId};
 
-use crate::services::discord::{ProviderKind, SharedData, placeholder_live_events::TerminalSlotId};
+use crate::services::discord::{
+    ProviderKind, SharedData, placeholder_live_events::TerminalSlotId, single_message_panel as smp,
+};
 
 #[derive(Debug, Clone)]
 struct RegisteredCompletionFooter {
@@ -133,7 +135,7 @@ pub(in crate::services::discord) fn register_completion_footer_target_for_owner(
         return None;
     }
     if has_unfinished_entries {
-        let base_body = super::completion_footer_base_body(base_body, provider);
+        let base_body = smp::completion_footer_base_body(base_body, provider);
         let owner = previous
             .as_ref()
             .filter(|target| target.message_id == message_id)
@@ -361,7 +363,7 @@ pub(in crate::services::discord) fn completion_footer_edit_for_registered_target
     let idle_expired =
         completion_footer_idle_animation_expired(target.registered_at_unix, now_unix);
     let render_indicator = if idle_expired {
-        super::COMPLETION_FOOTER_IDLE_EXPIRED_INDICATOR
+        smp::COMPLETION_FOOTER_IDLE_EXPIRED_INDICATOR
     } else {
         indicator
     };
@@ -371,8 +373,7 @@ pub(in crate::services::discord) fn completion_footer_edit_for_registered_target
         render_indicator,
     );
     let completion_block = rendered.block;
-    let text =
-        super::compose_completion_footer_text(&target.base_body, completion_block.as_deref());
+    let text = smp::compose_completion_footer_text(&target.base_body, completion_block.as_deref());
     let remove_after_edit = idle_expired || !rendered.has_unfinished_entries;
     if text.trim().is_empty() {
         if idle_expired {
@@ -427,7 +428,7 @@ pub(in crate::services::discord) fn completion_footer_edit_still_registered(
 }
 
 fn completion_footer_idle_animation_expired(registered_at_unix: i64, now_unix: i64) -> bool {
-    now_unix.saturating_sub(registered_at_unix) >= super::COMPLETION_FOOTER_MAX_IDLE_ANIMATION_SECS
+    now_unix.saturating_sub(registered_at_unix) >= smp::COMPLETION_FOOTER_MAX_IDLE_ANIMATION_SECS
 }
 
 #[cfg(test)]
@@ -540,7 +541,7 @@ fn completion_footer_record_edit_result_with_block(
         return true;
     }
     target.consecutive_edit_failures = target.consecutive_edit_failures.saturating_add(1);
-    if target.consecutive_edit_failures >= super::COMPLETION_FOOTER_MAX_CONSECUTIVE_EDIT_FAILURES {
+    if target.consecutive_edit_failures >= smp::COMPLETION_FOOTER_MAX_CONSECUTIVE_EDIT_FAILURES {
         guard.remove(&channel_id.get());
     }
     true
@@ -553,8 +554,7 @@ fn supersede_edit_from_registered_target(
         .last_completion_block
         .as_deref()
         .map(freeze_completion_footer_block);
-    let text =
-        super::compose_completion_footer_text(&target.base_body, completion_block.as_deref());
+    let text = smp::compose_completion_footer_text(&target.base_body, completion_block.as_deref());
     CompletionFooterEdit {
         message_id: target.message_id,
         text,
@@ -571,10 +571,10 @@ fn supersede_edit_from_registered_target(
 }
 
 fn freeze_completion_footer_block(block: &str) -> String {
-    super::SINGLE_MESSAGE_PANEL_SPINNER_FRAMES
+    smp::SINGLE_MESSAGE_PANEL_SPINNER_FRAMES
         .iter()
         .fold(block.to_string(), |acc, frame| {
-            acc.replace(frame, super::COMPLETION_FOOTER_IDLE_EXPIRED_INDICATOR)
+            acc.replace(frame, smp::COMPLETION_FOOTER_IDLE_EXPIRED_INDICATOR)
         })
 }
 

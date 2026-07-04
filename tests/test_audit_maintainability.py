@@ -1,6 +1,6 @@
 """Unit tests for scripts/audit_maintainability.py and its check modules.
 
-Each of the 10 checks gets a focused fixture: a temporary ``src/`` tree is
+Each audit check gets a focused fixture: a temporary ``src/`` tree is
 created with files designed to trigger (or specifically not trigger) the
 rule, and we assert the harness emits the expected findings.
 """
@@ -37,6 +37,7 @@ _SPEC.loader.exec_module(HARNESS)
 import audit_maintainability.common as common  # noqa: E402
 from audit_maintainability.checks import (  # noqa: E402
     direct_discord_sends,
+    footer_view_writes,
     git_subprocess,
     legacy_sqlite,
     limit_clamp_duplication,
@@ -479,6 +480,90 @@ class DirectDiscordSendsCheck(unittest.TestCase):
         self.assertEqual(shifted_hits, [])
 
 
+class FooterViewWritesCheck(unittest.TestCase):
+    def test_live_footer_write_matcher_covers_fq_alias_and_turngateway_forms(self) -> None:
+        watcher_fq = """
+        async fn update_status(http: Http, channel_id: ChannelId, status_msg_id: MessageId) {
+            let panel_text = shared.ui.placeholder_live_events.render_status_panel(
+                channel_id,
+                &watcher_provider,
+                started_at_unix,
+            );
+            crate::services::discord::http::edit_channel_message(
+                &http,
+                channel_id,
+                status_msg_id,
+                &panel_text,
+            )
+            .await
+            .ok();
+        }
+        """
+        watcher_alias = """
+        async fn stream_footer(http: Http, channel_id: ChannelId, msg_id: MessageId) {
+            let display_text = build_watcher_streaming_edit_text(
+                shared.ui.status_panel_v2_enabled,
+                current_portion,
+                &status_block,
+                &watcher_provider,
+            );
+            edit_channel_message(&http, channel_id, msg_id, &display_text)
+                .await
+                .ok();
+        }
+        """
+        bridge_turngateway = """
+        async fn stream_bridge(gateway: Arc<dyn TurnGateway>, channel_id: ChannelId) {
+            let stable_display_text = build_turn_bridge_streaming_edit_text(
+                shared_owned.ui.status_panel_v2_enabled,
+                current_portion,
+                &status_block,
+                &provider,
+            );
+            TurnGateway::edit_message(
+                gateway.as_ref(),
+                channel_id,
+                current_msg_id,
+                &stable_display_text,
+            )
+            .await
+            .ok();
+        }
+        """
+        with _FakeSrcTree(
+            {
+                "src/services/discord/tmux_watcher.rs": watcher_fq + watcher_alias,
+                "src/services/discord/turn_bridge/mod.rs": bridge_turngateway,
+            }
+        ):
+            hits = list(footer_view_writes.CHECK.runner(set()))
+
+        self.assertEqual(
+            [hit.message for hit in hits],
+            [
+                "live footer/status-panel Discord write pending S4-b2: "
+                "`crate::services::discord::http::edit_channel_message(`",
+                "live footer/status-panel Discord write pending S4-b2: "
+                "`edit_channel_message(`",
+                "live footer/status-panel Discord write pending S4-b2: "
+                "`TurnGateway::edit_message(`",
+            ],
+        )
+
+    def test_live_footer_write_matcher_ignores_non_footer_write(self) -> None:
+        body = """
+        async fn plain_notice(gateway: Arc<dyn TurnGateway>, channel_id: ChannelId) {
+            gateway
+                .send_message(channel_id, "plain operator notice")
+                .await
+                .ok();
+        }
+        """
+        with _FakeSrcTree({"src/services/discord/turn_bridge/mod.rs": body}):
+            hits = list(footer_view_writes.CHECK.runner(set()))
+        self.assertEqual(hits, [])
+
+
 class ManualJsonMappingCheck(unittest.TestCase):
     def test_flags_serde_json_value_try_get(self) -> None:
         body = """
@@ -632,7 +717,7 @@ class SourceOfTruthAliasCheck(unittest.TestCase):
 
 
 class HarnessCli(unittest.TestCase):
-    def test_runs_all_eleven_checks_and_emits_yaml_keys(self) -> None:
+    def test_runs_all_thirteen_checks_and_emits_yaml_keys(self) -> None:
         with _FakeSrcTree({"src/main.rs": "fn main() {}\n"}):
             specs = HARNESS.load_check_specs()
             findings = HARNESS.run_all(specs, {})
@@ -646,6 +731,8 @@ class HarnessCli(unittest.TestCase):
             "route_srp_violations",
             "service_server_backflow",
             "direct_discord_sends",
+            "direct_discord_reactions",
+            "footer_view_writes",
             "manual_json_row_mapping",
             "limit_clamp_duplication",
             "git_subprocess_callsites",
@@ -686,6 +773,8 @@ class HarnessCli(unittest.TestCase):
                 "giant_file_ratchet",
                 "namespace_size_caps",
                 "direct_discord_sends",
+                "direct_discord_reactions",
+                "footer_view_writes",
                 "manual_json_row_mapping",
                 "legacy_sqlite_refs",
                 "source_of_truth_alias_writes",
@@ -710,10 +799,10 @@ class HarnessCli(unittest.TestCase):
             yaml_text = HARNESS.render_yaml(specs, findings)
             json_payload = json.loads(HARNESS.render_json(specs, findings))
         self.assertIn("hard_gate_enabled: true", yaml_text)
-        self.assertIn("hard_gate_count: 8", yaml_text)
+        self.assertIn("hard_gate_count: 10", yaml_text)
         self.assertIn("baseline_gate_count: 2", yaml_text)
         self.assertIs(json_payload["hard_gate_enabled"], True)
-        self.assertEqual(json_payload["hard_gate_count"], 8)
+        self.assertEqual(json_payload["hard_gate_count"], 10)
         self.assertEqual(json_payload["baseline_gate_count"], 2)
 
     def test_check_mode_returns_zero_with_no_findings(self) -> None:

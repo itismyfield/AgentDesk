@@ -705,7 +705,7 @@ pub(crate) async fn rebind_inflight_for_channel(
     };
 
     if let Some(current_msg_id) = optional_message_id(recovered_state_for_session.current_msg_id) {
-        smp::completion_footer_forget_registered_target_if_message(
+        footer_view_reconciler::note_footer_suppressed_for_message_takeover(
             discord_channel_id,
             current_msg_id,
         );
