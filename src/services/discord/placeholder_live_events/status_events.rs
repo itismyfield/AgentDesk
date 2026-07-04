@@ -244,9 +244,6 @@ pub(in crate::services::discord) fn status_events_from_task_notification_xml_for
         return Vec::new();
     }
     let kind = parsed.kind();
-    if background_task_notification_xml_status_transition(kind, Some(status)) {
-        return Vec::new();
-    }
     let events = status_events_from_task_notification_with_tool_use_id(
         kind,
         status,
@@ -260,11 +257,11 @@ pub(in crate::services::discord) fn status_events_from_task_notification_xml_for
     events.into_iter().filter(idful_subagent_or_other).collect()
 }
 
-/// #4097: `kind=background` XML task notifications are internal helper
-/// lifecycle chatter (pollers / re-attach jobs / background orchestration), not
-/// user-facing panel state. Keep the JSON/system path intact; suppress only the
-/// #3393 user-record XML bridge and its duplicate card surface.
-pub(in crate::services::discord) fn should_suppress_background_task_notification_xml(
+/// #4097: `kind=background` XML task-notification cards are noisy lifecycle
+/// chatter. The bridge still emits slot-keyed `BackgroundTaskEnd` events so a
+/// real background Bash slot can flip ✓/✗; only the duplicate card surface is
+/// suppressed.
+pub(in crate::services::discord) fn is_background_task_notification_xml_status_transition(
     raw: &str,
 ) -> bool {
     let parsed = super::super::tui_task_card::parse_task_notification(raw);

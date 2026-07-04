@@ -5201,12 +5201,12 @@ fn status_events_toolsearch_pretty_json_args_summary_not_bare_brace() {
 // stream-json `system` record the panel's `system_status_events` parses).
 // These tests drive the FULL ingestion: real-shape XML text (incl. the
 // hyphenated `<tool-use-id>` from the live transcript) → bridge parse → push →
-// `render_completion_footer` shows ✓. #4097 excludes internal
-// `kind=background` XML lifecycle chatter from that bridge.
+// `render_completion_footer` shows ✓/✗. #4097 keeps that bridge for matching
+// background Bash slots, but suppresses the duplicate notify-card surface.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn task_notification_xml_background_killed_is_suppressed_but_subagent_still_bridges() {
+fn task_notification_xml_background_flips_matching_slot_but_suppresses_card() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(3_393_001);
     events.push_status_events(
@@ -5233,8 +5233,10 @@ fn task_notification_xml_background_killed_is_suppressed_but_subagent_still_brid
 
     let bridged = status_events_from_task_notification_xml_for_footer_mode(raw_background, true);
     assert!(
-        bridged.is_empty(),
-        "kind=background XML must not bridge StatusEvents: {bridged:?}"
+        bridged
+            .iter()
+            .any(|event| matches!(event, StatusEvent::BackgroundTaskEnd { success: false, .. })),
+        "matching kind=background XML must still bridge terminal slot events: {bridged:?}"
     );
     assert!(
         events.task_notification_completion_visible_in_footer_for_mode(
@@ -5254,16 +5256,16 @@ fn task_notification_xml_background_killed_is_suppressed_but_subagent_still_brid
     );
     events.bridge_task_notification_xml(channel_id, raw_background);
 
-    let still_running = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
-    let running_block = still_running
+    let failed = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
+    let failed_block = failed
         .block
-        .expect("running background Bash should remain visible");
-    assert!(still_running.has_unfinished_entries);
+        .expect("finished background Bash should remain visible");
+    assert!(!failed.has_unfinished_entries);
     assert!(
-        running_block.contains("Bash Wait until PR 3392 CI settles ⠼"),
-        "background XML must not flip or evict the slot: {running_block}"
+        failed_block.contains("Bash Wait until PR 3392 CI settles ✗"),
+        "background XML must flip the matching slot to failure: {failed_block}"
     );
-    assert!(!running_block.contains('✓') && !running_block.contains('✗'));
+    assert!(!failed_block.contains('⠼'));
 
     events.push_status_events(
         channel_id,
@@ -5400,15 +5402,17 @@ fn task_notification_xml_unknown_id_and_duplicate_and_nonterminal_are_safe() {
         "unknown-id notification must not flip the known slot: {block}"
     );
 
-    // (b) Background XML is suppressed even for non-terminal status.
+    // (b) Non-terminal status: produces NO terminal End event.
     let nonterminal = "<task-notification><task-id>x2</task-id>\
         <tool-use-id>toolu_known</tool-use-id><status>running</status>\
         <summary>Background command \"Deploy runtime\" running</summary></task-notification>";
     let nonterminal_events =
         status_events_from_task_notification_xml_for_footer_mode(nonterminal, true);
     assert!(
-        nonterminal_events.is_empty(),
-        "kind=background XML must not bridge live-panel events: {nonterminal_events:?}"
+        !nonterminal_events
+            .iter()
+            .any(|e| matches!(e, StatusEvent::BackgroundTaskEnd { .. })),
+        "non-terminal status must not bridge a BackgroundTaskEnd: {nonterminal_events:?}"
     );
     events.push_status_events(channel_id, nonterminal_events);
     let still_running = events
@@ -5420,8 +5424,8 @@ fn task_notification_xml_unknown_id_and_duplicate_and_nonterminal_are_safe() {
         "non-terminal must not flip ✓: {still_running}"
     );
 
-    // (c) Even a matching terminal background XML notification is display-layer
-    // noise; duplicates remain no-ops.
+    // (c) Terminal match flips ✓; a DUPLICATE terminal notification must not flip
+    // the slot back to running.
     let done_xml = "<task-notification><task-id>x3</task-id>\
         <tool-use-id>toolu_known</tool-use-id><status>completed</status>\
         <summary>Background command \"Deploy runtime\" completed (exit code 0)</summary></task-notification>";
@@ -5433,12 +5437,13 @@ fn task_notification_xml_unknown_id_and_duplicate_and_nonterminal_are_safe() {
         channel_id,
         status_events_from_task_notification_xml_for_footer_mode(done_xml, true),
     );
-    let done = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
-    let done_block = done.block.expect("running slot still renders");
-    assert!(done.has_unfinished_entries);
+    let done = events
+        .render_completion_footer(channel_id, &ProviderKind::Claude, "⠼")
+        .block
+        .expect("done slot renders");
     assert!(
-        done_block.contains("Bash Deploy runtime ⠼") && !done_block.contains('✓'),
-        "background XML terminal notification must not flip ✓: {done_block}"
+        done.contains("Bash Deploy runtime ✓") && !done.contains('⠼'),
+        "duplicate terminal notification must stay ✓, not flip back: {done}"
     );
 }
 
