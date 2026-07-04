@@ -147,7 +147,7 @@
 | `engine::hooks` | `src/engine/hooks.rs` | 84 | 84 | 0 |  |
 | `engine::intent` | `src/engine/intent.rs` | 525 | 504 | 21 |  |
 | `engine::loader` | `src/engine/loader.rs` | 2013 | 1332 | 681 | giant-file |
-| `engine::ops` | `src/engine/ops.rs` | 95 | 95 | 0 |  |
+| `engine::ops` | `src/engine/ops.rs` | 97 | 97 | 0 |  |
 | `engine::ops::agent_ops` | `src/engine/ops/agent_ops.rs` | 246 | 246 | 0 |  |
 | `engine::ops::auto_queue_ops` | `src/engine/ops/auto_queue_ops.rs` | 662 | 662 | 0 |  |
 | `engine::ops::cards_ops` | `src/engine/ops/cards_ops.rs` | 448 | 448 | 0 |  |
@@ -160,7 +160,7 @@
 | `engine::ops::http_ops` | `src/engine/ops/http_ops.rs` | 243 | 149 | 94 |  |
 | `engine::ops::kanban_ops` | `src/engine/ops/kanban_ops.rs` | 1540 | 942 | 598 |  |
 | `engine::ops::kv_ops` | `src/engine/ops/kv_ops.rs` | 202 | 202 | 0 |  |
-| `engine::ops::log_ops` | `src/engine/ops/log_ops.rs` | 39 | 39 | 0 |  |
+| `engine::ops::log_ops` | `src/engine/ops/log_ops.rs` | 76 | 60 | 16 |  |
 | `engine::ops::message_ops` | `src/engine/ops/message_ops.rs` | 103 | 103 | 0 |  |
 | `engine::ops::pipeline_ops` | `src/engine/ops/pipeline_ops.rs` | 225 | 225 | 0 |  |
 | `engine::ops::quality_ops` | `src/engine/ops/quality_ops.rs` | 95 | 95 | 0 |  |
@@ -192,7 +192,7 @@
 | `kanban::transition_core` | `src/kanban/transition_core.rs` | 674 | 674 | 0 |  |
 | `launch` | `src/launch.rs` | 67 | 67 | 0 |  |
 | `lib` | `src/lib.rs` | 162 | 162 | 0 |  |
-| `logging` | `src/logging.rs` | 427 | 373 | 54 |  |
+| `logging` | `src/logging.rs` | 546 | 374 | 172 |  |
 | `manual_intervention` | `src/manual_intervention.rs` | 35 | 35 | 0 |  |
 | `pipeline` | `src/pipeline.rs` | 1517 | 1383 | 134 | giant-file |
 | `receipt` | `src/receipt.rs` | 1842 | 1842 | 0 | giant-file |
