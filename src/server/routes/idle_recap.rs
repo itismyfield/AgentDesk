@@ -13,12 +13,13 @@
 //!      20 s timeout; fall back to a header-only card if it fails).
 //!   5. Re-check whether a turn became active during the (slow) compose
 //!      window (#3146 Part 1, codex clear/post race); if so, SKIP posting.
-//!   6. Otherwise delete the previous recap card for this channel (best
-//!      effort) and post the new one via the provider bot.
+//!   6. Otherwise post the new recap card via the provider bot.
 //!   7. Re-check active-turn ONCE MORE after the POST returns (#3146 Part 1,
 //!      codex R3 P1 — check-then-post TOCTOU). If a turn raced into the
 //!      (step-5 check → step-6 POST) window, UNDO the post: delete the
-//!      just-posted card and do NOT persist its pointer. Otherwise persist.
+//!      just-posted card and do NOT persist its pointer. Otherwise persist with
+//!      a newest-wins conditional swap, then clear any older recap pointer for
+//!      the channel so only the newest card survives overlapping recap jobs.
 //!
 //! Lifecycle hooks live in two places, both now using capture-at-claim +
 //! compare-and-clear (codex R3 P2):
@@ -81,6 +82,9 @@ pub async fn post_idle_recap(
 
     if !snapshot.has_resumable_provider_session() {
         return skip("no resumable provider session");
+    }
+    if snapshot.is_routine_session {
+        return skip("routine session");
     }
 
     let Some(channel_id) = idle_recap::resolve_post_channel(&snapshot) else {
@@ -241,12 +245,6 @@ async fn run_idle_recap_post_job(
         return Ok(());
     }
 
-    if let (Some(prev_msg), Some(prev_chan)) =
-        (snapshot.previous_message_id, snapshot.previous_channel_id)
-    {
-        idle_recap::delete_previous_card(http.as_ref(), prev_chan as u64, prev_msg as u64).await;
-    }
-
     match idle_recap::post_recap_card(http.as_ref(), channel_id, &content, actions).await {
         Ok(message_id) => {
             // #3146 Part 1 (codex R3 P1 — check-then-post TOCTOU): the pre-post
@@ -293,13 +291,13 @@ async fn run_idle_recap_post_job(
             // bumped the generation, so the conditional UPDATE matches 0 rows.
             // The claim's increment and this persist serialize on the same
             // Postgres row, so this CAS is the ATOMIC close of Window 1: if a
-            // claim committed first we delete the just-posted card and skip
-            // persisting (treated like `DeleteAndSkipPersist`; an expected race
-            // outcome, NOT an error — the idle-cycle stamp already deduped this
-            // cycle so it does not re-fire). If the persist committed first, the
-            // claim's relocated post-claim clear sees the just-committed pointer
-            // and removes the card.
-            let rows_affected = match idle_recap::persist_recap_message_id(
+            // claim committed first, or a newer recap card already owns this
+            // session row, we delete the just-posted card and skip persisting
+            // (an expected race outcome, NOT an error — the idle-cycle stamp
+            // already deduped this cycle so it does not re-fire). If the
+            // persist committed first, the claim's relocated post-claim clear
+            // sees the just-committed pointer and removes the card.
+            let persist_result = match idle_recap::persist_recap_message_id(
                 &pool,
                 &session_key,
                 channel_id,
@@ -308,7 +306,7 @@ async fn run_idle_recap_post_job(
             )
             .await
             {
-                Ok(rows) => rows,
+                Ok(result) => result,
                 Err(e) => {
                     // Best-effort: clear the now-orphan card and report. The
                     // stamp at the top still dedupes this cycle.
@@ -316,17 +314,67 @@ async fn run_idle_recap_post_job(
                     return Err(format!("persist: {e}"));
                 }
             };
-            if idle_recap::persist_cas_outcome(rows_affected)
-                == idle_recap::PersistCasOutcome::CasLostDeleteAndSkip
+            let previous_card = match persist_result {
+                idle_recap::PersistRecapMessageIdResult::Persisted { previous_card } => {
+                    previous_card
+                }
+                idle_recap::PersistRecapMessageIdResult::LostDeleteAndSkip => {
+                    idle_recap::delete_previous_card(http.as_ref(), channel_id, message_id).await;
+                    tracing::info!(
+                        session_key = %session_key,
+                        channel_id = channel_id,
+                        message_id = message_id,
+                        "idle_recap: persist lost to a turn claim or newer recap; deleted just-posted card"
+                    );
+                    return Ok(());
+                }
+            };
+            if let Some(previous_card) = previous_card {
+                idle_recap::delete_previous_card(
+                    http.as_ref(),
+                    previous_card.channel_id,
+                    previous_card.message_id,
+                )
+                .await;
+            }
+            match idle_recap::recap_channel_has_newer_card(&pool, channel_id, message_id).await {
+                Ok(true) => {
+                    let _ = idle_recap::clear_recap_pointer(&pool, &session_key, message_id).await;
+                    idle_recap::delete_previous_card(http.as_ref(), channel_id, message_id).await;
+                    tracing::info!(
+                        session_key = %session_key,
+                        channel_id = channel_id,
+                        message_id = message_id,
+                        "idle_recap: deleted just-posted card because a newer recap already owns the channel"
+                    );
+                    return Ok(());
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        session_key = %session_key,
+                        channel_id = channel_id,
+                        message_id = message_id,
+                        error = %error,
+                        "idle_recap: newer-card check failed; keeping just-posted recap"
+                    );
+                }
+            }
+            if let Err(error) = idle_recap::delete_older_recorded_recaps_for_channel(
+                http.as_ref(),
+                &pool,
+                channel_id,
+                message_id,
+            )
+            .await
             {
-                idle_recap::delete_previous_card(http.as_ref(), channel_id, message_id).await;
-                tracing::info!(
+                tracing::warn!(
                     session_key = %session_key,
                     channel_id = channel_id,
                     message_id = message_id,
-                    "idle_recap: turn claimed during persist window (generation CAS lost); deleted just-posted card"
+                    error = %error,
+                    "idle_recap: older channel recap cleanup failed"
                 );
-                return Ok(());
             }
             tracing::info!(
                 session_key = %session_key,

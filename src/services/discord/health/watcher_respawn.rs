@@ -597,69 +597,99 @@ mod tests {
         )));
     }
 
-    #[tokio::test]
-    async fn release_stale_mailbox_ownership_unjams_next_synthetic_inflight() {
-        let provider = ProviderKind::Codex;
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let channel = ChannelId::new(3_410_201);
-        let token = std::sync::Arc::new(CancelToken::new());
-        let started = crate::services::discord::mailbox_try_start_turn(
-            &shared,
-            channel,
-            token.clone(),
-            UserId::new(7),
-            MessageId::new(1_515_137_342_367_862_825),
-        )
-        .await;
-        assert!(
-            started,
-            "seed a stale mailbox owner mirroring the #3410 jam"
-        );
-        shared.restart.global_active.store(1, Ordering::Relaxed);
+    struct EnvRootGuard(Option<std::ffi::OsString>);
 
-        // A DIFFERENT later turn id cannot claim while the stale owner holds it
-        // — this is the `skipping TUI-direct synthetic inflight` rejection.
-        let blocked = crate::services::discord::mailbox_try_start_turn(
-            &shared,
-            channel,
-            std::sync::Arc::new(CancelToken::new()),
-            UserId::new(8),
-            MessageId::new(9_999_999),
-        )
-        .await;
-        assert!(!blocked, "stale ownership must block the next turn pre-fix");
+    impl Drop for EnvRootGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
 
-        let released = release_stale_mailbox_ownership_after_force_clean(
-            &shared,
-            &provider,
-            channel,
-            Some(1_515_137_342_367_862_825),
-        )
-        .await;
-        assert!(
-            released,
-            "force-clean follow-through must release ownership"
-        );
-        assert!(token.cancelled.load(Ordering::Relaxed));
-        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
-        assert!(
-            crate::services::discord::mailbox_snapshot(&shared, channel)
-                .await
-                .active_user_message_id
-                .is_none(),
-            "mailbox must be free for the next synthetic inflight"
-        );
+    #[test]
+    fn release_stale_mailbox_ownership_unjams_next_synthetic_inflight() {
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let _env = EnvRootGuard(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let tmp = tempfile::tempdir().expect("temp runtime root");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
 
-        // Now the next turn's synthetic inflight can claim the channel.
-        let now_allowed = crate::services::discord::mailbox_try_start_turn(
-            &shared,
-            channel,
-            std::sync::Arc::new(CancelToken::new()),
-            UserId::new(8),
-            MessageId::new(9_999_999),
-        )
-        .await;
-        assert!(now_allowed, "next turn must be able to claim after release");
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                let provider = ProviderKind::Codex;
+                let shared = crate::services::discord::make_shared_data_for_tests();
+                let channel = ChannelId::new(3_410_201);
+                let token = std::sync::Arc::new(CancelToken::new());
+                let started = crate::services::discord::mailbox_try_start_turn(
+                    &shared,
+                    channel,
+                    token.clone(),
+                    UserId::new(7),
+                    MessageId::new(1_515_137_342_367_862_825),
+                )
+                .await;
+                assert!(
+                    started,
+                    "seed a stale mailbox owner mirroring the #3410 jam"
+                );
+                shared.restart.global_active.store(1, Ordering::Relaxed);
+
+                // A DIFFERENT later turn id cannot claim while the stale owner holds it
+                // — this is the `skipping TUI-direct synthetic inflight` rejection.
+                let blocked = crate::services::discord::mailbox_try_start_turn(
+                    &shared,
+                    channel,
+                    std::sync::Arc::new(CancelToken::new()),
+                    UserId::new(8),
+                    MessageId::new(9_999_999),
+                )
+                .await;
+                assert!(!blocked, "stale ownership must block the next turn pre-fix");
+
+                let mut rx =
+                    crate::services::discord::turn_completion_events::subscribe_turn_completion_events(
+                        shared.as_ref(),
+                    );
+                let released = release_stale_mailbox_ownership_after_force_clean(
+                    &shared,
+                    &provider,
+                    channel,
+                    Some(1_515_137_342_367_862_825),
+                )
+                .await;
+                assert!(
+                    released,
+                    "force-clean follow-through must release ownership"
+                );
+                let event = rx
+                    .try_recv()
+                    .expect("force-clean stale mailbox release must publish a completion event");
+                assert_eq!(event.channel_id, channel);
+                assert!(token.cancelled.load(Ordering::Relaxed));
+                assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+                assert!(
+                    crate::services::discord::mailbox_snapshot(&shared, channel)
+                        .await
+                        .active_user_message_id
+                        .is_none(),
+                    "mailbox must be free for the next synthetic inflight"
+                );
+
+                // Now the next turn's synthetic inflight can claim the channel.
+                let now_allowed = crate::services::discord::mailbox_try_start_turn(
+                    &shared,
+                    channel,
+                    std::sync::Arc::new(CancelToken::new()),
+                    UserId::new(8),
+                    MessageId::new(9_999_999),
+                )
+                .await;
+                assert!(now_allowed, "next turn must be able to claim after release");
+            });
     }
 
     #[tokio::test]

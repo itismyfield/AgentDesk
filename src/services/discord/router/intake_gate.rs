@@ -757,7 +757,7 @@ pub(in crate::services::discord) async fn handle_event(
                     channel_id,
                     new_message.id,
                 );
-                add_reaction(
+                super::super::reaction_lifecycle::note_auxiliary_reaction_added(
                     &ctx.http,
                     channel_id,
                     new_message.id,

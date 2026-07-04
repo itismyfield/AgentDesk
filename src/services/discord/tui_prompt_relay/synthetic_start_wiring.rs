@@ -1,12 +1,11 @@
 //! #4002 — shared TUI-direct synthetic turn-start relay-ownership wiring.
 //!
-//! The active-turn `else` branch of [`relay_observed_prompt`] and the
-//! SystemContinuation (compact-resume) suppress branch must both install the
-//! SAME passive synthetic inflight and adopt its resolved relay owner so the
+//! The active-turn `else` branch of [`relay_observed_prompt`] installs the
+//! passive synthetic inflight and adopts its resolved relay owner so the
 //! post-block bridge-tail gate honours cross-relayer single-ownership (Path X).
-//! Before the fix the suppress branch fell through INFLIGHT-LESS and the
-//! observer spawned an UN-ARBITRATED BridgeAdapter tail that raced the real
-//! turn's owner → two live panels (the #4002 recap duplicate).
+//! #4082: neutral session notes such as SystemContinuation / compact-resume are
+//! explicitly gated out here too, so a future accidental call cannot claim the
+//! mailbox or mint a phantom synthetic turn.
 //!
 //! This helper is a PURE extraction of the else-branch inline block — behaviour
 //! is byte-identical for the active-turn callers (HumanTuiDirect /
@@ -19,6 +18,8 @@
 use super::*;
 
 /// Run the shared synthetic-start wiring for a TUI-direct turn. It:
+///   0. refuses prompt classes that the shared injected-prompt decision says do
+///      not start an external turn,
 ///   1. reads the prior-turn view (`synthetic_start_prior_turn_view`),
 ///   2. either DEFERS the start to the detached per-channel worker when a prior
 ///      turn is still draining (`should_defer_synthetic_turn_start` /
@@ -33,19 +34,27 @@ use super::*;
 /// tail down. `lease` is `&mut` so the adopt re-record (fresh generation) is
 /// reflected in the caller's lease for that guard.
 ///
-/// #4002: the passive inflight `claim_tui_direct_synthetic_turn` installs stamps
-/// `relay_ownership_only` by RE-DERIVING `suppresses_user_turn_lifecycle` from the
-/// prompt itself, so a SystemContinuation (compact-resume) turn never gains watcher
-/// completion Path B (⏳→✅ + session_transcripts / turn_analytics) — no extra flag
-/// is threaded through this seam.
 pub(super) async fn wire_tui_direct_synthetic_turn_start(
     shared: &Arc<SharedData>,
     provider_str: &str,
     channel_id: ChannelId,
     prompt: &ObservedTuiPrompt,
     anchor_message_id: MessageId,
+    relay_prompt_decision: &RelayObservedPromptInjectionDecision,
     lease: &mut ExternalInputRelayLease,
 ) -> bool {
+    if !relay_prompt_decision.starts_external_turn_lifecycle() {
+        tracing::info!(
+            provider = %prompt.provider,
+            channel_id = channel_id.get(),
+            tmux_session_name = %prompt.tmux_session_name,
+            injected_class = ?relay_prompt_decision.injected_class,
+            slash_command_kind = relay_prompt_decision.slash_command_kind.as_deref().unwrap_or(""),
+            local_only_slash = relay_prompt_decision.local_only_slash,
+            "skipped TUI-direct synthetic turn-start for injected prompt class with no external-turn lifecycle"
+        );
+        return false;
+    }
     // #3154 P1-3: set when the synthetic turn-start is DEFERRED to the detached
     // per-channel worker; the observer then must NOT spawn its own BridgeAdapter
     // tail below (a second observer tail would relay the SAME output twice — the

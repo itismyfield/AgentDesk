@@ -5,8 +5,8 @@ use super::*;
 pub(super) fn make_owner(
     user_msg_id: Option<MessageId>,
     started_at_unix: i64,
-) -> super::single_message_panel::CompletionFooterOwner {
-    super::single_message_panel::CompletionFooterOwner::new(
+) -> super::footer_view_reconciler::CompletionFooterOwner {
+    super::footer_view_reconciler::CompletionFooterOwner::new(
         user_msg_id.map(|id| id.get()).unwrap_or(0),
         started_at_unix,
     )
@@ -14,7 +14,7 @@ pub(super) fn make_owner(
 
 pub(super) fn make_owner_now(
     user_msg_id: Option<MessageId>,
-) -> (i64, super::single_message_panel::CompletionFooterOwner) {
+) -> (i64, super::footer_view_reconciler::CompletionFooterOwner) {
     let started_at_unix = chrono::Utc::now().timestamp();
     (started_at_unix, make_owner(user_msg_id, started_at_unix))
 }
@@ -271,46 +271,15 @@ async fn complete_bridge_single_message_terminal_no_footer(
     provider: &ProviderKind,
     terminal_text: &str,
 ) -> bool {
-    super::single_message_panel::completion_footer_forget_registered_target_if_message(
+    super::footer_view_reconciler::note_footer_suppressed_for_tui_mirror(
+        super::footer_view_reconciler::FooterViewWriter::bridge(shared),
         channel_id,
-        terminal_msg_id,
-    );
-    let Some(finalized) = super::single_message_panel::finalize_streaming_footer_with_completion(
-        terminal_text,
+        Some(terminal_msg_id),
         provider,
-        None,
-    ) else {
-        // Already clean (short-replace rewrote the message to this prose) — the
-        // mirror carries the assistant turn with no chrome, nothing to edit.
-        return true;
-    };
-    match edit_bridge_completion_footer(shared, channel_id, terminal_msg_id, &finalized).await {
-        Ok(()) => true,
-        Err(error) => {
-            tracing::warn!(
-                "[turn_bridge] #3959 failed to strip TUI-direct mirror footer on message {} in channel {}: {}",
-                terminal_msg_id,
-                channel_id,
-                error
-            );
-            false
-        }
-    }
-}
-
-async fn edit_bridge_completion_footer(
-    shared: &SharedData,
-    channel_id: ChannelId,
-    msg_id: MessageId,
-    text: &str,
-) -> Result<(), String> {
-    let Some(http) = shared.serenity_http_or_token_fallback() else {
-        return Err("no Discord HTTP available for completion footer edit".to_string());
-    };
-    super::http::edit_channel_message(&http, channel_id, msg_id, text)
-        .await
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+        terminal_text,
+        "turn_bridge_tui_mirror",
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -318,7 +287,7 @@ pub(super) async fn complete_bridge_single_message_completion_footer(
     shared: &SharedData,
     channel_id: ChannelId,
     terminal_msg_id: MessageId,
-    owner: super::single_message_panel::CompletionFooterOwner,
+    owner: super::footer_view_reconciler::CompletionFooterOwner,
     provider: &ProviderKind,
     _started_at_unix: i64,
     terminal_text: &str,
@@ -326,164 +295,49 @@ pub(super) async fn complete_bridge_single_message_completion_footer(
     background: bool,
     background_agent_pending: bool,
 ) -> bool {
-    shared.ui.placeholder_live_events.push_status_event(
+    super::footer_view_reconciler::note_turn_completed_footer(
+        super::footer_view_reconciler::FooterViewWriter::bridge(shared),
         channel_id,
-        StatusEvent::TurnCompleted {
-            background,
-            background_agent_pending,
-        },
-    );
-    let rendered = shared
-        .ui
-        .placeholder_live_events
-        .render_completion_footer(channel_id, provider, indicator);
-    if let Some(edit) = super::single_message_panel::register_completion_footer_target_for_owner(
-        channel_id,
-        terminal_msg_id,
+        Some(terminal_msg_id),
         owner,
         provider,
-        chrono::Utc::now().timestamp(),
         terminal_text,
-        rendered.block.as_deref(),
-        rendered.has_unfinished_entries,
-    ) {
-        if let Err(error) =
-            edit_bridge_completion_footer(shared, channel_id, edit.message_id, &edit.text).await
-        {
-            tracing::warn!(
-                "[turn_bridge] failed to supersede completion footer message {} in channel {}: {}",
-                edit.message_id,
-                channel_id,
-                error
-            );
-        }
-    }
-    let Some(finalized) = super::single_message_panel::finalize_streaming_footer_with_completion(
-        terminal_text,
-        provider,
-        rendered.block.as_deref(),
-    ) else {
-        return true;
-    };
-    let inflight = crate::services::discord::turn_end_wip_warning::load_matching_inflight_state(
-        provider,
-        channel_id,
-        Some(owner.user_msg_id),
-    );
-    let _ = crate::services::discord::turn_end_wip_warning::warn_turn_end_wip_with_shared_http(
-        shared,
-        channel_id,
-        inflight.as_ref(),
+        indicator,
+        background,
+        background_agent_pending,
         "turn_bridge_single_message_footer",
     )
-    .await;
-    let edited = match edit_bridge_completion_footer(
-        shared,
-        channel_id,
-        terminal_msg_id,
-        &finalized,
-    )
     .await
-    {
-        Ok(()) => true,
-        Err(error) => {
-            tracing::warn!(
-                "[turn_bridge] failed to edit completion footer message {} in channel {}: {}",
-                terminal_msg_id,
-                channel_id,
-                error
-            );
-            false
-        }
-    };
-    let recorded =
-        super::single_message_panel::completion_footer_record_committed_text_result_for_owner(
-            channel_id,
-            terminal_msg_id,
-            owner,
-            !rendered.has_unfinished_entries,
-            edited,
-            &finalized,
-            rendered.block.as_deref(),
-        );
-    // #3391: the finalize edit delivered this render's terminal marks once;
-    // evict those slot identities so subsequent footer renders (incl. #3386
-    // migration) drop the completed task AND subagent entries.
-    if edited && recorded {
-        shared
-            .ui
-            .placeholder_live_events
-            .evict_delivered_terminal_footer_tasks(channel_id, &rendered.delivered_terminal_ids);
-    }
-    edited
 }
 
 pub(super) async fn supersede_bridge_footer(
     shared: &SharedData,
     channel_id: ChannelId,
-    owner: super::single_message_panel::CompletionFooterOwner,
+    owner: super::footer_view_reconciler::CompletionFooterOwner,
 ) -> bool {
-    let Some(edit) =
-        super::single_message_panel::completion_footer_supersede_registered_target_for_owner(
-            channel_id,
-            Some(owner),
-        )
-    else {
-        return false;
-    };
-    match edit_bridge_completion_footer(shared, channel_id, edit.message_id, &edit.text).await {
-        Ok(()) => true,
-        Err(error) => {
-            tracing::warn!(
-                "[turn_bridge] failed to supersede completion footer message {} in channel {}: {}",
-                edit.message_id,
-                channel_id,
-                error
-            );
-            false
-        }
-    }
+    super::footer_view_reconciler::note_footer_superseded(
+        super::footer_view_reconciler::FooterViewWriter::bridge(shared),
+        channel_id,
+        owner,
+        "turn_bridge_supersede",
+    )
+    .await
 }
 
 pub(super) async fn refresh_bridge_footer(
     shared: &SharedData,
     channel_id: ChannelId,
-    owner: super::single_message_panel::CompletionFooterOwner,
+    owner: super::footer_view_reconciler::CompletionFooterOwner,
     indicator: &str,
 ) -> bool {
-    let Some(edit) =
-        super::single_message_panel::completion_footer_edit_for_registered_target_for_owner(
-            shared, channel_id, owner, indicator,
-        )
-    else {
-        return false;
-    };
-    if !super::single_message_panel::completion_footer_edit_still_registered(channel_id, &edit) {
-        return false;
-    }
-    let edited = match edit_bridge_completion_footer(
-        shared,
+    super::footer_view_reconciler::note_background_refresh_due(
+        super::footer_view_reconciler::FooterViewWriter::bridge(shared),
         channel_id,
-        edit.message_id,
-        &edit.text,
+        Some(owner),
+        indicator,
+        "turn_bridge_refresh",
     )
     .await
-    {
-        Ok(()) => true,
-        Err(error) => {
-            tracing::warn!(
-                "[turn_bridge] failed to refresh completion footer message {} in channel {}: {}",
-                edit.message_id,
-                channel_id,
-                error
-            );
-            false
-        }
-    };
-    super::single_message_panel::completion_footer_record_edit_result_for_edit(
-        shared, channel_id, &edit, edited,
-    );
-    edited
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -601,7 +455,7 @@ where
     }
     let background_agent_pending = sniff_background_agent_pending(tmux_session_name).await;
     if single_message_panel_footer_mode {
-        let owner = super::single_message_panel::CompletionFooterOwner::new(
+        let owner = super::footer_view_reconciler::CompletionFooterOwner::new(
             this_turn_user_msg_id,
             started_at_unix,
         );
@@ -747,7 +601,7 @@ mod tests {
         let channel_id = ChannelId::new(4_047_201);
         let provider = ProviderKind::Claude;
         let owner =
-            super::single_message_panel::CompletionFooterOwner::new(4_047_202, 1_700_000_000);
+            super::footer_view_reconciler::CompletionFooterOwner::new(4_047_202, 1_700_000_000);
 
         let _ = complete_bridge_single_message_completion_footer(
             shared.as_ref(),

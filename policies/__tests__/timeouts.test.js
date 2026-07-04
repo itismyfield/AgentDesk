@@ -172,7 +172,7 @@ test("timeouts card timeout module marks requested dispatches failed before retr
   const shadowLine = state.logs.info.find((line) => line.startsWith("[timeout_shadow] "));
   assert.ok(shadowLine);
   const shadow = JSON.parse(shadowLine.slice("[timeout_shadow] ".length));
-  assert.equal(shadow.target, "timeout_shadow");
+  assert.equal(shadow.target, "agentdesk::timeout_shadow");
   assert.equal(shadow.card_id, "card-requested-1");
   assert.equal(shadow.section, "_section_A");
   assert.equal(shadow.js_decision, "retry");
@@ -312,7 +312,7 @@ test("timeouts dispatch maintenance shadows failed-dispatch retries without chan
   const shadowLine = state.logs.info.find((line) => line.startsWith("[timeout_shadow] "));
   assert.ok(shadowLine);
   const shadow = JSON.parse(shadowLine.slice("[timeout_shadow] ".length));
-  assert.equal(shadow.target, "timeout_shadow");
+  assert.equal(shadow.target, "agentdesk::timeout_shadow");
   assert.equal(shadow.card_id, "card-retry-1");
   assert.equal(shadow.section, "_section_J");
   assert.equal(shadow.js_decision, "retry");

@@ -53,6 +53,26 @@ pub(super) fn terminal_delivery_should_send_new_chunks(
     can_chain_locally && formatted_response.len() > super::super::DISCORD_MSG_LIMIT
 }
 
+pub(super) fn record_stopped_turn_terminal_replace_delivery(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    watcher_owner_channel_id: ChannelId,
+    range: (u64, u64),
+    terminal_anchor_msg_id: MessageId,
+    terminal_anchor_channel_id: ChannelId,
+    raw_response_body: &str,
+) {
+    super::super::outbound::delivery_record::record_delivered_frontier_with_body(
+        shared,
+        provider,
+        watcher_owner_channel_id,
+        range,
+        terminal_anchor_msg_id.get(),
+        terminal_anchor_channel_id.get(),
+        raw_response_body,
+    );
+}
+
 /// Returns `(first_chunk_msg_id, last_chunk_msg_id)` on a FULL commit. The send
 /// is all-or-nothing: `send_ordered_long_terminal_chunks` propagates the
 /// rollback-aware `send_long_message_with_rollback` `Err` (which deletes any
@@ -678,13 +698,15 @@ impl Drop for BridgeDeliveryLease {
 mod tests {
     use super::{
         bridge_epilogue_clears_inflight, bridge_epilogue_marks_watcher_delivered,
-        bridge_epilogue_skip_save_is_identity_guarded, replace_outcome_commits_terminal_delivery,
+        bridge_epilogue_skip_save_is_identity_guarded,
+        record_stopped_turn_terminal_replace_delivery, replace_outcome_commits_terminal_delivery,
         send_ordered_long_terminal_chunks, should_complete_work_dispatch_after_terminal_delivery,
         should_fail_dispatch_after_terminal_delivery, terminal_delivery_should_send_new_chunks,
     };
     use crate::services::discord::formatting;
     use crate::services::discord::formatting::ReplaceLongMessageOutcome;
     use crate::services::discord::gateway::{GatewayFuture, TurnGateway};
+    use crate::services::discord::{DeliveryLeaseKey, make_shared_data_for_tests};
     use crate::services::provider::ProviderKind;
     use poise::serenity_prelude::{ChannelId, MessageId};
     use std::sync::{Arc, Mutex};
@@ -1136,6 +1158,85 @@ mod tests {
         assert!(!should_fail_dispatch_after_terminal_delivery(
             false, true, false,
         ));
+    }
+
+    #[test]
+    fn stopped_turn_terminal_replace_raw_fingerprint_refuses_phantom_rerelay_4081() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        struct EnvReset(Option<std::ffi::OsString>);
+        impl Drop for EnvReset {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+                }
+            }
+        }
+        let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let temp = tempfile::TempDir::new().expect("temp runtime root");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Codex;
+        let session = "AgentDesk-codex-adk-cdx-stop-raw-4081";
+        let channel_id = ChannelId::new(7_4084);
+        let raw_body = "# stopped heading\nraw extractor body";
+        let display_body = format!(
+            "{}\n\n[Stopped]",
+            formatting::format_for_discord_with_provider(raw_body, &provider)
+        );
+        assert_ne!(raw_body, display_body);
+
+        let gen_path = crate::services::tmux_common::session_temp_path(session, "generation");
+        std::fs::create_dir_all(std::path::Path::new(&gen_path).parent().unwrap()).unwrap();
+        std::fs::write(&gen_path, b"1").unwrap();
+        crate::services::discord::tmux::advance_watcher_confirmed_end(
+            &shared,
+            &provider,
+            channel_id,
+            session,
+            raw_body.len() as u64,
+            "terminal_delivery_tests:stopped_turn_terminal_replace_raw_fingerprint_refuses_phantom_rerelay_4081",
+        );
+        record_stopped_turn_terminal_replace_delivery(
+            &shared,
+            &provider,
+            channel_id,
+            (0, raw_body.len() as u64),
+            MessageId::new(94_084),
+            channel_id,
+            raw_body,
+        );
+
+        let degenerate_key =
+            DeliveryLeaseKey::new_for_site(channel_id, 33, 0, None, None, "watcher");
+        let recent_raw =
+            super::super::super::outbound::delivery_record::recent_delivered_content_matches(
+                &provider, channel_id, session, raw_body,
+            );
+        assert!(degenerate_key.is_degenerate_legacy());
+        assert!(
+            recent_raw,
+            "stopped-turn terminal replace must fingerprint the raw extractor body"
+        );
+        assert!(
+            !super::super::super::outbound::delivery_record::recent_delivered_content_matches(
+                &provider,
+                channel_id,
+                session,
+                &display_body,
+            ),
+            "display formatting plus [Stopped] must not enter the duplicate fingerprint"
+        );
+        let fresh_assistant_text_in_observed_range = false;
+        assert!(
+            degenerate_key.is_degenerate_legacy()
+                && recent_raw
+                && !fresh_assistant_text_in_observed_range,
+            "phantom degenerate-key re-relay of the same raw bytes must be refused"
+        );
     }
 
     // #3041 P1-2: matrix tests for the BRIDGE delivery-lease wiring. These drive

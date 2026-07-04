@@ -649,7 +649,9 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
                     author_id: msg.author.id,
                     author_is_bot: msg.author.bot,
                     message_id: msg.id,
+                    queued_generation: crate::services::discord::runtime_store::load_generation(),
                     source_message_ids: vec![msg.id],
+                    source_message_queued_generations: Vec::new(),
                     text: text.clone(),
                     mode: InterventionMode::Soft,
                     created_at: now,
@@ -670,7 +672,10 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
             }
 
             stats.record(CatchUpClassification::Recover);
-            reaction_cleanup::cleanup_recovered_catch_up_hourglass(http, channel_id, msg.id).await;
+            reaction_cleanup::cleanup_recovered_catch_up_hourglass(
+                http, shared, channel_id, msg.id,
+            )
+            .await;
             // Track the newest actually-recovered message for checkpoint
             let mid = msg.id.get();
             if max_recovered_id.map(|m| mid > m).unwrap_or(true) {
@@ -907,7 +912,9 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
                     author_id: msg.author.id,
                     author_is_bot: msg.author.bot,
                     message_id: msg.id,
+                    queued_generation: crate::services::discord::runtime_store::load_generation(),
                     source_message_ids: vec![msg.id],
+                    source_message_queued_generations: Vec::new(),
                     text: text.to_string(),
                     mode: InterventionMode::Soft,
                     created_at: now,

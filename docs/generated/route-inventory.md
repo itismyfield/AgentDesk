@@ -49,7 +49,7 @@
 | `POST` | `/api/channels/{channel_id}/monitoring` | `monitoring::upsert_monitoring` | `src/server/routes/monitoring.rs:19` | `src/server/routes/domains/ops.rs:301` |
 | `DELETE` | `/api/channels/{channel_id}/monitoring/{key}` | `monitoring::remove_monitoring` | `src/server/routes/monitoring.rs:52` | `src/server/routes/domains/ops.rs:305` |
 | `GET` | `/api/channels/{id}/queue` | `queue_api::list_channel_queue` | `src/server/routes/queue_api.rs:20` | `src/server/routes/domains/ops.rs:292` |
-| `POST` | `/api/channels/{id}/relay-recovery` | `health_api::relay_recovery_handler` | `src/server/routes/health_api.rs:1356` | `src/server/routes/domains/ops.rs:297` |
+| `POST` | `/api/channels/{id}/relay-recovery` | `health_api::relay_recovery_handler` | `src/server/routes/health_api.rs:1362` | `src/server/routes/domains/ops.rs:297` |
 | `GET` | `/api/channels/{id}/watcher-state` | `queue_api::get_watcher_state` | `src/server/routes/queue_api.rs:240` | `src/server/routes/domains/ops.rs:293` |
 | `GET` | `/api/cluster/issue-specs` | `cluster::list_issue_specs` | `src/server/routes/cluster.rs:378` | `src/server/routes/domains/ops.rs:92` |
 | `POST` | `/api/cluster/issue-specs/upsert` | `cluster::upsert_issue_spec` | `src/server/routes/cluster.rs:394` | `src/server/routes/domains/ops.rs:93` |
@@ -74,12 +74,12 @@
 | `DELETE` | `/api/departments/{id}` | `departments::delete_department` | `src/server/routes/departments.rs:184` | `src/server/routes/domains/admin.rs:42` |
 | `PATCH` | `/api/departments/{id}` | `departments::update_department` | `src/server/routes/departments.rs:110` | `src/server/routes/domains/admin.rs:42` |
 | `GET` | `/api/discord/bindings` | `discord::list_bindings` | `src/server/routes/discord.rs:18` | `src/server/routes/domains/integrations.rs:34` |
-| `POST` | `/api/discord/bot-tokens/reload` | `health_api::reload_discord_bot_tokens_handler` | `src/server/routes/health_api.rs:1478` | `src/server/routes/domains/ops.rs:32` |
+| `POST` | `/api/discord/bot-tokens/reload` | `health_api::reload_discord_bot_tokens_handler` | `src/server/routes/health_api.rs:1484` | `src/server/routes/domains/ops.rs:32` |
 | `GET` | `/api/discord/channels/{id}` | `discord::channel_info` | `src/server/routes/discord.rs:311` | `src/server/routes/domains/integrations.rs:39` |
 | `GET` | `/api/discord/channels/{id}/messages` | `discord::channel_messages` | `src/server/routes/discord.rs:183` | `src/server/routes/domains/integrations.rs:35` |
-| `POST` | `/api/discord/send` | `health_api::send_handler` | `src/server/routes/health_api.rs:1428` | `src/server/routes/domains/ops.rs:31` |
-| `POST` | `/api/discord/send-dm` | `health_api::senddm_handler` | `src/server/routes/health_api.rs:1617` | `src/server/routes/domains/ops.rs:40` |
-| `POST` | `/api/discord/send-to-agent` | `health_api::send_to_agent_handler` | `src/server/routes/health_api.rs:1577` | `src/server/routes/domains/ops.rs:36` |
+| `POST` | `/api/discord/send` | `health_api::send_handler` | `src/server/routes/health_api.rs:1434` | `src/server/routes/domains/ops.rs:31` |
+| `POST` | `/api/discord/send-dm` | `health_api::senddm_handler` | `src/server/routes/health_api.rs:1623` | `src/server/routes/domains/ops.rs:40` |
+| `POST` | `/api/discord/send-to-agent` | `health_api::send_to_agent_handler` | `src/server/routes/health_api.rs:1583` | `src/server/routes/domains/ops.rs:36` |
 | `GET` | `/api/dispatch-outbox/failed` | `health_api::list_dispatch_outbox_failures_handler` | `src/server/routes/health_api.rs:749` | `src/server/routes/domains/ops.rs:22` |
 | `POST` | `/api/dispatch-outbox/failed` | `health_api::ack_dispatch_outbox_failures_handler` | `src/server/routes/health_api.rs:774` | `src/server/routes/domains/ops.rs:22` |
 | `GET` | `/api/dispatched-sessions` | `dispatched_sessions::list_dispatched_sessions` | `src/server/routes/dispatched_sessions.rs:16` | `src/server/routes/domains/ops.rs:157` |
@@ -123,7 +123,7 @@
 | `POST` | `/api/hook/reset-status` | `hooks::reset_status` | `src/server/routes/hooks.rs:25` | `src/server/routes/domains/integrations.rs:41` |
 | `DELETE` | `/api/hook/session/{sessionKey}` | `hooks::disconnect_session` | `src/server/routes/hooks.rs:59` | `src/server/routes/domains/integrations.rs:43` |
 | `POST` | `/api/hook/skill-usage` | `hooks::skill_usage` | `src/server/routes/hooks.rs:42` | `src/server/routes/domains/integrations.rs:42` |
-| `POST` | `/api/inflight/rebind` | `health_api::rebind_inflight_handler` | `src/server/routes/health_api.rs:1543` | `src/server/routes/domains/ops.rs:41` |
+| `POST` | `/api/inflight/rebind` | `health_api::rebind_inflight_handler` | `src/server/routes/health_api.rs:1549` | `src/server/routes/domains/ops.rs:41` |
 | `GET` | `/api/internal/card-thread` | `dispatches::get_card_thread` | `src/server/routes/dispatches/thread_reuse.rs:68` | `src/server/routes/domains/ops.rs:117` |
 | `POST` | `/api/internal/escalation/emit` | `escalation::emit_escalation` | `src/server/routes/escalation.rs:1370` | `src/server/routes/domains/admin.rs:72` |
 | `POST` | `/api/internal/link-dispatch-thread` | `dispatches::link_dispatch_thread` | `src/server/routes/dispatches/thread_reuse.rs:44` | `src/server/routes/domains/ops.rs:113` |
@@ -255,7 +255,7 @@
 | `GET` | `/api/sessions` | `agents_crud::list_sessions` | `src/server/routes/agents_crud.rs:1831` | `src/server/routes/domains/agents.rs:51` |
 | `GET` | `/api/sessions/{id}/tmux-output` | `dispatched_sessions::tmux_output` | `src/server/routes/dispatched_sessions.rs:93` | `src/server/routes/domains/ops.rs:203` |
 | `POST` | `/api/sessions/{session_key}/force-kill` | `dispatched_sessions::force_kill_session` | `src/server/routes/dispatched_sessions.rs:109` | `src/server/routes/domains/ops.rs:189` |
-| `POST` | `/api/sessions/{session_key}/idle-recap` | `idle_recap::post_idle_recap` | `src/server/routes/idle_recap.rs:68` | `src/server/routes/domains/ops.rs:197` |
+| `POST` | `/api/sessions/{session_key}/idle-recap` | `idle_recap::post_idle_recap` | `src/server/routes/idle_recap.rs:69` | `src/server/routes/domains/ops.rs:197` |
 | `POST` | `/api/sessions/{session_key}/kill-tmux` | `dispatched_sessions::kill_tmux_session` | `src/server/routes/dispatched_sessions.rs:125` | `src/server/routes/domains/ops.rs:193` |
 | `GET` | `/api/settings` | `settings::get_settings` | `src/server/routes/settings.rs:28` | `src/server/routes/domains/admin.rs:48` |
 | `PUT` | `/api/settings` | `settings::put_settings` | `src/server/routes/settings.rs:38` | `src/server/routes/domains/admin.rs:48` |

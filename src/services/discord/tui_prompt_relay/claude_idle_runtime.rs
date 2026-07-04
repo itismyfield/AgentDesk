@@ -138,25 +138,25 @@ pub(super) fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
                             &transcript_path,
                             line_end_offset,
                         );
-                        // #3305: a LOCAL-completing pass-through command's
-                        // `<command-*>` transcript echo (/effort /compact /cost
-                        // /context) never starts a model turn, so do NOT select an
-                        // external turn owner / wait for a synthetic claim / spawn a
-                        // response tail for it. Skipping here (after advancing the
-                        // offset so it is not re-scanned) keeps the inflight table
-                        // empty so the next injection is not FOREIGN-ABORTed; the
-                        // broadcast relay still posts the kind-only guidance note. A
-                        // /loop echo is off the allow-list and keeps full lifecycle.
-                        if is_local_only_slash_command_prompt(&prompt) {
+                        if !claude_idle_prompt_observation_should_tail_response(observation) {
+                            continue;
+                        }
+                        // #3305/#4033/#4082: use the same injected-prompt decision
+                        // that renders the observer note before selecting an
+                        // external owner. Local-only slash echoes and neutral compact
+                        // continuation records never start a model turn, so they must
+                        // not wait for / create a TUI-direct synthetic inflight.
+                        let relay_prompt_decision =
+                            relay_observed_prompt_injected_prompt_decision(&prompt);
+                        if !relay_prompt_decision.starts_external_turn_lifecycle() {
                             tracing::info!(
                                 tmux_session_name = %tmux_session_name,
                                 channel_id = channel_id.get(),
-                                slash_command_kind = %slash_command_control_kind(&prompt),
-                                "Claude idle transcript relay skipped local-only pass-through slash command (no external turn owner / synthetic claim / response tail)"
+                                injected_class = ?relay_prompt_decision.injected_class,
+                                slash_command_kind = relay_prompt_decision.slash_command_kind.as_deref().unwrap_or(""),
+                                local_only_slash = relay_prompt_decision.local_only_slash,
+                                "Claude idle transcript relay skipped injected prompt with no external-turn lifecycle (no external turn owner / synthetic claim / response tail)"
                             );
-                            continue;
-                        }
-                        if !claude_idle_prompt_observation_should_tail_response(observation) {
                             continue;
                         }
                         let lease = record_external_turn_lease_for_output(

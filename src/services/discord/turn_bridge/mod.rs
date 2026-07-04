@@ -47,6 +47,11 @@ use response_delivery::{
 
 use super::gateway::TurnGateway;
 use super::restart_report::{RestartCompletionReport, clear_restart_report, save_restart_report};
+use super::turn_view_reconciler::{
+    note_intake_turn_cleared_via_shared as tv_clear,
+    note_intake_turn_completed_via_shared as tv_done,
+    note_intake_turn_failed_via_shared as tv_fail, note_intake_turn_stopped_via_shared as tv_stop,
+};
 use super::*;
 use crate::db::session_observability::{
     BackgroundChildSpawn, close_background_child_pg, insert_background_child_pg,
@@ -195,7 +200,7 @@ use stale_resume::{
 };
 use status_panel::{
     bridge_epilogue_identity_guards_inflight_clear, migrate_separate_status_panel_to_footer,
-    should_open_long_running_placeholder_controller,
+    record_status_panel_events, should_open_long_running_placeholder_controller,
     status_panel_completion_ready_after_terminal_body, status_panel_message_id_for_turn,
 };
 use terminal_delivery::{
@@ -260,22 +265,6 @@ fn record_placeholder_live_event(
             .ui
             .placeholder_live_events
             .push_event(channel_id, event);
-    }
-}
-
-fn record_status_panel_events(
-    shared: &SharedData,
-    channel_id: ChannelId,
-    events: Vec<StatusEvent>,
-) -> bool {
-    if shared.ui.status_panel_v2_enabled && !events.is_empty() {
-        shared
-            .ui
-            .placeholder_live_events
-            .push_status_events(channel_id, events);
-        true
-    } else {
-        false
     }
 }
 
@@ -3988,9 +3977,9 @@ pub(super) fn spawn_turn_bridge(
             // the submitted prompt's anchor as the synthetic inflight's
             // user_msg_id; a non-consuming peek leaves it for the watcher). A
             // different / absent anchor means the follow-up is genuinely
-            // unsubmitted, so it STILL requeues — the deferred idle-queue kickoff
-            // is itself gated on pane-busy, so a follow-up behind a different
-            // streaming turn is DEFERRED (preserved in the mailbox), not dropped.
+            // unsubmitted, so it STILL requeues and remains preserved in the
+            // mailbox behind the active turn until the completion event kicks the
+            // drain.
             let same_input_occupies_pane = base
                 && claude_tui_followup_same_input_occupies_pane(
                     inflight_state
@@ -4460,15 +4449,14 @@ pub(super) fn spawn_turn_bridge(
         // non-unix targets where the tmux module is configured out.
         #[allow(unused_mut)]
         let mut bridge_should_emit_completion = true;
+        let inflight_generation = inflight_state.born_generation;
 
-        // Remove ⏳ only if the bridge still owns output delivery.
-        // Relay owners commit their own visible lifecycle.
         if !bridge_output_owner
             .map(|owner| owner.skips_bridge_spinner_cleanup())
             .unwrap_or(false)
             && let Some(user_msg_id) = user_msg_id
         {
-            gateway.remove_reaction(channel_id, user_msg_id, '⏳').await;
+            tv_clear(&shared_owned, channel_id, user_msg_id, inflight_generation, "clear").await;
         }
 
         // Recovery auto-retry: session died during restart recovery
@@ -4727,14 +4715,14 @@ pub(super) fn spawn_turn_bridge(
                         outcome,
                     );
                     if replace_committed && committed {
-                        super::outbound::delivery_record::shadow_mirror_delivered_frontier(
+                        terminal_delivery::record_stopped_turn_terminal_replace_delivery(
                             shared_owned.as_ref(),
                             &provider,
                             watcher_owner_channel_id,
                             lease_range,
-                            true,
-                            Some(current_msg_id.get()),
-                            Some(channel_id.get()),
+                            current_msg_id,
+                            channel_id,
+                            remaining_response,
                         );
                     }
                 }
@@ -4746,7 +4734,7 @@ pub(super) fn spawn_turn_bridge(
             if preserved_restart_mode.is_none()
                 && let Some(user_msg_id) = user_msg_id
             {
-                gateway.add_reaction(channel_id, user_msg_id, '🛑').await;
+                tv_stop(&shared_owned, channel_id, user_msg_id, inflight_generation, "stop").await;
             }
 
             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -4819,14 +4807,14 @@ pub(super) fn spawn_turn_bridge(
                         outcome,
                     );
                     if replace_committed && committed {
-                        super::outbound::delivery_record::shadow_mirror_delivered_frontier(
+                        super::outbound::delivery_record::record_delivered_frontier_with_body(
                             shared_owned.as_ref(),
                             &provider,
                             watcher_owner_channel_id,
                             lease_range,
-                            true,
-                            Some(current_msg_id.get()),
-                            Some(channel_id.get()),
+                            current_msg_id.get(),
+                            channel_id.get(),
+                            &full_response,
                         );
                     }
                 }
@@ -4836,7 +4824,7 @@ pub(super) fn spawn_turn_bridge(
             }
 
             if let Some(user_msg_id) = user_msg_id {
-                gateway.add_reaction(channel_id, user_msg_id, '⚠').await;
+                tv_fail(&shared_owned, channel_id, user_msg_id, inflight_generation, "fail").await;
             }
 
             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -5258,6 +5246,7 @@ pub(super) fn spawn_turn_bridge(
                                 &shared_owned.ui.placeholder_controller,
                                 current_msg_id,
                                 &delivery_response,
+                                &spoken_delivery_response,
                                 full_response.len(),
                                 bridge_turn,
                                 bridge_start,
@@ -5300,6 +5289,7 @@ pub(super) fn spawn_turn_bridge(
                                 inflight_state.tmux_session_name.as_deref(),
                                 current_msg_id,
                                 &delivery_response,
+                                &spoken_delivery_response,
                                 full_response.len(),
                                 single_message_panel_footer_mode,
                                 dispatch_id.as_deref(),
@@ -5357,6 +5347,7 @@ pub(super) fn spawn_turn_bridge(
                                 &shared_owned.ui.placeholder_controller,
                                 current_msg_id,
                                 &delivery_response,
+                                &spoken_delivery_response,
                                 full_response.len(),
                                 bridge_turn,
                                 bridge_start,
@@ -5463,19 +5454,16 @@ pub(super) fn spawn_turn_bridge(
                                             inflight_state.tmux_session_name.as_deref(),
                                             outcome,
                                         );
-                                        // #3630: mirror the delivered frontier like the
-                                        // cutover/long-chunk paths so a post-restart
-                                        // no-inflight watcher dedups it instead of
-                                        // re-relaying a duplicate.
+                                        // #3630: mirror delivered frontier for post-restart no-inflight dedup.
                                         if replace_committed && committed {
-                                            super::outbound::delivery_record::shadow_mirror_delivered_frontier(
+                                            super::outbound::delivery_record::record_delivered_frontier_with_body(
                                                 shared_owned.as_ref(),
                                                 &provider,
                                                 watcher_owner_channel_id,
                                                 lease_range,
-                                                true,
-                                                Some(current_msg_id.get()),
-                                                Some(channel_id.get()),
+                                                current_msg_id.get(),
+                                                channel_id.get(),
+                                                &spoken_delivery_response,
                                             );
                                         }
                                         replace_committed
@@ -5823,7 +5811,7 @@ pub(super) fn spawn_turn_bridge(
                 && !delivery_response.trim().is_empty()
                 && let Some(user_msg_id) = user_msg_id
             {
-                gateway.add_reaction(channel_id, user_msg_id, '✅').await;
+                tv_done(&shared_owned, channel_id, user_msg_id, inflight_generation, "done").await;
             }
 
             td_warn(terminal_delivery_committed, preserve_inflight_for_cleanup_retry, channel_id);

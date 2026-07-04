@@ -106,10 +106,8 @@ mod session_bound_ack;
 // streaming UTF-8 chunk decoder; `terminal_readiness` holds the synchronous
 // terminal-readiness / inflight-classification predicates and the pure
 // buffer/message-id reconcilers. The async `shared`-touching
-// `commit_watcher_direct_terminal_session_idle` (which sits between the two
-// readiness clusters in this root) deliberately STAYS here. Items are
-// `pub(super)` there and re-imported here so the watcher loop's call sites stay
-// byte-identical.
+// `commit_watcher_direct_terminal_session_idle` now lives in `tmux_watcher/liveness.rs`;
+// items are re-imported here so the watcher loop's call sites stay byte-identical.
 #[path = "tmux_watcher/terminal_readiness.rs"]
 mod terminal_readiness;
 
@@ -130,104 +128,6 @@ use self::stall_exit::*;
 use self::supervisor_relay::*;
 use self::terminal_readiness::*;
 use self::utf8_chunk_decoder::*;
-
-#[cfg(unix)]
-async fn commit_watcher_direct_terminal_session_idle(
-    shared: &std::sync::Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: serenity::ChannelId,
-    tmux_session_name: &str,
-    terminal_kind: Option<WatcherTerminalKind>,
-    data_start_offset: u64,
-    current_offset: u64,
-) -> bool {
-    if shared.mailbox(channel_id).cancel_token().await.is_some() {
-        tracing::debug!(
-            channel_id = channel_id.get(),
-            tmux_session_name = %tmux_session_name,
-            provider = %provider.as_str(),
-            "skipping watcher-direct terminal session-idle commit; mailbox turn is active"
-        );
-        return false;
-    }
-
-    if crate::services::discord::inflight::load_inflight_state(provider, channel_id.get()).is_some()
-    {
-        tracing::debug!(
-            channel_id = channel_id.get(),
-            tmux_session_name = %tmux_session_name,
-            provider = %provider.as_str(),
-            "skipping watcher-direct terminal session-idle commit; inflight state is active"
-        );
-        return false;
-    }
-
-    let session_key = crate::services::discord::adk_session::build_namespaced_session_key(
-        &shared.token_hash,
-        provider,
-        tmux_session_name,
-    );
-    let channel_name = {
-        let data = shared.core.lock().await;
-        data.sessions
-            .get(&channel_id)
-            .and_then(|session| session.channel_name.clone())
-    };
-    let agent_id =
-        crate::services::discord::resolve_channel_role_binding(channel_id, channel_name.as_deref())
-            .map(|binding| binding.role_id);
-    let terminal_committed_at = chrono::Utc::now();
-
-    match crate::services::discord::internal_api::mark_session_idle_if_not_newer_live(
-        &session_key,
-        provider.as_str(),
-        agent_id.as_deref(),
-        terminal_committed_at,
-    )
-    .await
-    {
-        Ok(true) => {}
-        Ok(false) => {
-            tracing::debug!(
-                channel_id = channel_id.get(),
-                tmux_session_name = %tmux_session_name,
-                provider = %provider.as_str(),
-                session_key = %session_key,
-                data_start_offset,
-                current_offset,
-                terminal_kind = terminal_kind.map(WatcherTerminalKind::as_str).unwrap_or("unknown"),
-                "skipping watcher-direct terminal session-idle commit; session row is absent or newer live"
-            );
-            return false;
-        }
-        Err(error) => {
-            tracing::warn!(
-                channel_id = channel_id.get(),
-                tmux_session_name = %tmux_session_name,
-                provider = %provider.as_str(),
-                session_key = %session_key,
-                data_start_offset,
-                current_offset,
-                terminal_kind = terminal_kind.map(WatcherTerminalKind::as_str).unwrap_or("unknown"),
-                error = %error,
-                "failed to commit watcher-direct terminal session idle"
-            );
-            return false;
-        }
-    }
-
-    tracing::info!(
-        channel_id = channel_id.get(),
-        tmux_session_name = %tmux_session_name,
-        provider = %provider.as_str(),
-        session_key = %session_key,
-        data_start_offset,
-        current_offset,
-        terminal_kind = terminal_kind.map(WatcherTerminalKind::as_str).unwrap_or("unknown"),
-        "watcher-direct terminal response committed session idle"
-    );
-    true
-}
 
 pub(in crate::services::discord) async fn tmux_output_watcher(
     channel_id: ChannelId,
@@ -3075,18 +2975,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 .filter(|state| !state.rebind_origin && state.user_msg_id != 0)
                             {
                                 let user_msg_id = serenity::MessageId::new(state.user_msg_id);
-                                crate::services::discord::formatting::remove_reaction_raw(
+                                crate::services::discord::turn_view_reconciler::note_intake_turn_failed(
+                                    &shared,
                                     &http,
                                     channel_id,
                                     user_msg_id,
-                                    '⏳',
-                                )
-                                .await;
-                                crate::services::discord::formatting::add_reaction_raw(
-                                    &http,
-                                    channel_id,
-                                    user_msg_id,
-                                    '⚠',
+                                    state.born_generation,
+                                    "tmux_watcher_ready_for_input_stall",
                                 )
                                 .await;
                             }
@@ -3451,18 +3346,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 .filter(|s| !s.rebind_origin && s.user_msg_id != 0)
             {
                 let user_msg_id = serenity::MessageId::new(state.user_msg_id);
-                crate::services::discord::formatting::remove_reaction_raw(
+                crate::services::discord::turn_view_reconciler::note_intake_turn_failed(
+                    &shared,
                     &http,
                     channel_id,
                     user_msg_id,
-                    '⏳',
-                )
-                .await;
-                crate::services::discord::formatting::add_reaction_raw(
-                    &http,
-                    channel_id,
-                    user_msg_id,
-                    '⚠',
+                    state.born_generation,
+                    "tmux_watcher_auth_expired",
                 )
                 .await;
             }
@@ -3621,19 +3511,24 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 .filter(|s| !s.rebind_origin && s.user_msg_id != 0)
             {
                 let user_msg_id = serenity::MessageId::new(state.user_msg_id);
-                crate::services::discord::formatting::remove_reaction_raw(
-                    &http,
-                    channel_id,
-                    user_msg_id,
-                    '⏳',
-                )
-                .await;
                 if matches!(&decision, ProviderOverloadDecision::Exhausted) {
-                    crate::services::discord::formatting::add_reaction_raw(
+                    crate::services::discord::turn_view_reconciler::note_intake_turn_failed(
+                        &shared,
                         &http,
                         channel_id,
                         user_msg_id,
-                        '⚠',
+                        state.born_generation,
+                        "tmux_watcher_overload_exhausted",
+                    )
+                    .await;
+                } else {
+                    crate::services::discord::turn_view_reconciler::note_intake_turn_cleared(
+                        &shared,
+                        &http,
+                        channel_id,
+                        user_msg_id,
+                        state.born_generation,
+                        "tmux_watcher_overload_retry",
                     )
                     .await;
                 }
@@ -4067,6 +3962,20 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 status_panel_msg_id = None;
             }
         }
+        let fresh_seen = fresh_assistant_text_seen;
+        let drop_seed = local_cmd_no_output(&all_data, terminal_kind, fresh_seen, &tool_state);
+        let restored_seed_delivery_confirmed = drop_seed
+            && restored_response_seed
+                .get(response_sent_offset..)
+                .is_some_and(|seed_body| {
+                    !seed_body.trim().is_empty()
+                        && crate::services::discord::outbound::delivery_record::recent_delivered_content_matches(
+                            &watcher_provider,
+                            channel_id,
+                            &tmux_session_name,
+                            seed_body,
+                        )
+                });
         if discard_restored_response_seed_before_no_inflight_terminal_relay(
             &mut full_response,
             &mut response_sent_offset,
@@ -4074,6 +3983,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             &restored_response_seed,
             inflight_before_relay.is_some(),
             fresh_assistant_text_seen,
+            drop_seed,
+            restored_seed_delivery_confirmed,
         ) {
             tracing::info!(
                 provider = %watcher_provider.as_str(),
@@ -4709,14 +4620,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         | WatcherTerminalResendAction::WaitInFlight
                 )
             );
-        // codex BLOCKER 2: on a non-skip reconciled re-send the action is always
-        // `SendFull` (the watcher response-text coordinate cannot be derived from
-        // the JSONL `committed` offset, and the sink delegation is all-or-nothing,
-        // so no partial-suffix variant exists). The full body is re-sent: no
-        // black-hole when committed<end, and never a mis-offset
-        // `full_response[response_sent_offset..]` slice driven by an unrelated
-        // streaming offset. The non-reconciled path keeps the existing full-body
-        // fallback semantics.
         let session_bound_fallback_uses_full_body = session_bound_terminal_delivery_attempted
             && watcher_direct_fallback_after_session_bound_ack;
         let direct_terminal_response = watcher_terminal_response_for_direct_send(
@@ -4724,7 +4627,20 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             response_sent_offset,
             session_bound_fallback_uses_full_body,
         );
-        let has_direct_terminal_response = !direct_terminal_response.trim().is_empty();
+        let direct_terminal_response_decision = watcher_direct_terminal_response_decision(
+            &watcher_provider,
+            channel_id,
+            shared.restart.current_generation,
+            &tmux_session_name,
+            inflight_before_relay.as_ref(),
+            current_offset,
+            fresh_assistant_text_seen,
+            direct_terminal_response,
+        );
+        let has_direct_terminal_response = direct_terminal_response_decision.has_sendable_body();
+        let direct_terminal_response_refused_duplicate =
+            watcher_direct_fallback_after_session_bound_ack
+                && direct_terminal_response_decision.refused_duplicate();
         // #2838/#3042 (relay-stability P0-1): count the primary duplicate-emit vector — a
         // session-bound terminal ACK that timed out while the watcher direct-sends (sink may
         // have already posted; rising counts ⇒ P1 dual-authority lease overdue). Gate on the
@@ -4777,6 +4693,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             terminal_commit_ack = session_bound_relay_owns_terminal_delivery,
             route = if session_bound_relay_owns_terminal_delivery {
                 "session_bound"
+            } else if direct_terminal_response_refused_duplicate {
+                "duplicate_guard_refused"
             } else if watcher_direct_fallback_after_session_bound_ack {
                 "watcher_direct"
             } else if relay_decision.suppressed {
@@ -4843,12 +4761,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // AND fully committed). Declared at lease scope so it survives the
         // `let relay_ok = if … { … }` block that holds the send arm.
         let mut watcher_long_chunk_anchor_msg_id: Option<MessageId> = None;
+        let mut watcher_long_chunk_delivered_body: Option<String> = None;
         let watcher_lease_cell = shared.delivery_lease(channel_id);
         // Only the watcher-direct fallback path direct-sends; acquire exactly when it
         // runs with a real body so the lease identity matches the delivered bytes (a
         // zero/inverted range never delivers, so do not lease it).
-        let watcher_will_direct_send =
-            watcher_direct_fallback_after_session_bound_ack && has_direct_terminal_response;
+        let watcher_will_direct_send = watcher_direct_fallback_after_session_bound_ack
+            && has_direct_terminal_response
+            && !direct_terminal_response_refused_duplicate;
         // #3089 A4/#3998 S1-f2: cut structurally eligible watcher terminal
         // delivery onto the unified controller. The CONTROLLER owns the single
         // lease, so the watcher's own acquire/heartbeat/b2-skip/commit/advance/
@@ -5022,6 +4942,16 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 "  [{ts}] 👁 #3041 B2: delivery lease held by another holder — skipped duplicate terminal send for {tmux_session_name} (range {watcher_lease_start}..{watcher_lease_end})"
             );
             false
+        } else if direct_terminal_response_refused_duplicate {
+            tracing::warn!(
+                provider = %watcher_provider.as_str(),
+                channel = channel_id.get(),
+                tmux_session = %tmux_session_name,
+                data_start_offset = watcher_lease_start,
+                lease_end = watcher_lease_end,
+                "watcher: refused degenerate-key duplicate terminal response without committing delivery; waiting for fresh in-range output"
+            );
+            false
         } else if watcher_direct_fallback_after_session_bound_ack {
             let formatted = if shared.ui.status_panel_v2_enabled {
                 crate::services::discord::formatting::format_for_discord_with_status_panel(
@@ -5068,6 +4998,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                     &tmux_session_name,
                                     msg_id,
                                     &relay_text,
+                                    direct_terminal_response,
                                     &watcher_lease_cell,
                                     watcher_lease_turn,
                                     Some(watcher_lease_key.clone()),
@@ -5091,6 +5022,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 )
                                 .await;
                             } else {
+                                let delivered_long_chunk_body =
+                                    direct_terminal_response.to_string();
                                 terminal_long_chunks::apply_watcher_long_chunks_legacy(
                                     &http,
                                     &shared,
@@ -5117,6 +5050,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                     },
                                 )
                                 .await;
+                                if watcher_long_chunk_anchor_msg_id.is_some() {
+                                    watcher_long_chunk_delivered_body =
+                                        Some(delivered_long_chunk_body);
+                                }
                             }
                         } else if cutover_short_replace {
                             // #3089 A4: route short-replace through the unified controller
@@ -5136,6 +5073,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 &tmux_session_name,
                                 msg_id,
                                 &relay_text,
+                                direct_terminal_response,
                                 &watcher_lease_cell,
                                 watcher_lease_turn,
                                 Some(watcher_lease_key.clone()),
@@ -6005,13 +5943,16 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 // commit+advance (M4) AND `Some` anchor (⇒ the long-chunk arm ran and
                 // fully committed, (A)). Same-channel; logic in the sibling.
                 if let Some(anchor) = watcher_long_chunk_anchor_msg_id {
-                    terminal_send::record_watcher_long_chunk_terminal_delivery(
-                        &shared,
-                        &watcher_provider,
-                        channel_id,
-                        (watcher_lease_start, watcher_lease_end),
-                        Some(anchor.get()),
-                    );
+                    if let Some(body) = watcher_long_chunk_delivered_body.as_deref() {
+                        terminal_send::record_watcher_long_chunk_terminal_delivery(
+                            &shared,
+                            &watcher_provider,
+                            channel_id,
+                            (watcher_lease_start, watcher_lease_end),
+                            Some(anchor.get()),
+                            body,
+                        );
+                    }
                 }
             }
             // Release (Unleased for the next turn). Inline same-holder compare-and-
@@ -6195,10 +6136,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 );
             }
             let completed = crate::services::discord::tui_prompt_relay::complete_tui_direct_prompt_anchor_lifecycle_if_present(
-                &http,
+                &shared,
                 watcher_provider.as_str(),
                 &tmux_session_name,
                 channel_id,
+                external_input_lease_generation_before_relay
+                    .unwrap_or(shared.restart.current_generation),
                 if lifecycle_stage_paused {
                     "watcher_terminal_delivery_visible_completion_suppressed"
                 } else {
@@ -6264,12 +6207,17 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             let pinned_injected_message_id = inflight_state
                 .as_ref()
                 .and_then(|state| state.injected_prompt_message_id);
+            let pinned_injected_generation = inflight_state
+                .as_ref()
+                .map(|state| state.born_generation)
+                .unwrap_or(shared.restart.current_generation);
             let _ = crate::services::discord::tui_prompt_relay::complete_tui_direct_anchor_lifecycle_for_inflight(
-                &http,
+                &shared,
                 watcher_provider.as_str(),
                 &tmux_session_name,
                 channel_id,
                 pinned_injected_message_id,
+                pinned_injected_generation,
                 "watcher_task_notification_anchor_cleanup_user_msg_zero",
             )
             .await;
@@ -6313,18 +6261,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 .filter(|s| watcher_completion_lifecycle_applies(s))
         {
             let user_msg_id = serenity::MessageId::new(state.user_msg_id);
-            crate::services::discord::formatting::remove_reaction_raw(
+            crate::services::discord::turn_view_reconciler::note_intake_turn_completed(
+                &shared,
                 &http,
                 channel_id,
                 user_msg_id,
-                '⏳',
-            )
-            .await;
-            crate::services::discord::formatting::add_reaction_raw(
-                &http,
-                channel_id,
-                user_msg_id,
-                '✅',
+                state.born_generation,
+                "tmux_watcher_terminal_commit",
             )
             .await;
 

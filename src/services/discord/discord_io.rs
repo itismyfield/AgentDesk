@@ -355,6 +355,7 @@ pub(super) async fn rate_limit_wait(shared: &Arc<SharedData>, channel_id: Channe
 }
 
 /// Add a reaction to a message
+#[allow(dead_code)]
 pub(super) async fn add_reaction(
     http: &Arc<serenity::http::Http>,
     channel_id: ChannelId,

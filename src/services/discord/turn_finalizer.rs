@@ -1025,12 +1025,11 @@ async fn handle_terminal(
         // No live relay owner → nothing will drive the pane to quiescence;
         // finalize now. This recovered/orphan watcher case (post-restart
         // inflight, no `register_start`) has no later watcher block to clear
-        // inflight or kick the queue — the caller's `watcher()` submit SKIPS
-        // its cleanup block and discards this outcome, so reproduce what the
-        // deadline-armed `gate_backstop()` would have done: clear inflight
-        // here (else the file keeps blocking the channel after the mailbox
-        // release) AND kick off the queued soft-queue backlog (else a queued
-        // follow-up stays stuck — the EPIC restart/#3011 regression).
+        // inflight — the caller's `watcher()` submit SKIPS its cleanup block and
+        // discards this outcome, so reproduce the deadline-armed
+        // `gate_backstop()` context shape: clear inflight here (else the file
+        // keeps blocking the channel after the mailbox release) and preserve the
+        // queue-admission bit; actual drain is the #4048 `do_finalize` event.
         effective_ctx.clear_inflight = true;
         effective_ctx.kickoff_queue = true;
     }
@@ -1048,10 +1047,11 @@ async fn handle_terminal(
     } else {
         key
     };
-    // #3866: `do_finalize` is the single chokepoint for finalize side-effects
-    // (inflight clear, mailbox token release, `global_active` decrement, voice
-    // drain, queue kickoff). Contain a panic HERE rather than only at the actor
-    // loop so the Finalizing->Finalized flip below STILL runs on a caught panic.
+    // #3866/#4048: `do_finalize` is the single chokepoint for finalize
+    // side-effects (inflight clear, mailbox token release, `global_active`
+    // decrement, voice drain, completion-event publish). Contain a panic HERE
+    // rather than only at the actor loop so the Finalizing->Finalized flip below
+    // STILL runs on a caught panic.
     // That matters: the entry was just flipped to `Finalizing`, and reconcile GC
     // reaps only `Finalized` while every backstop/probe gates on `Pending`, so an
     // entry left stuck in `Finalizing` after a panic would leak FOREVER and
@@ -2130,12 +2130,13 @@ mod tests {
     /// must finalize IMMEDIATELY (not Deferred — no owner will ever drive the
     /// pane to quiescence and the caller discards the outcome while the
     /// `!lifecycle_stage_paused` cleanup block is skipped), AND it must honor
-    /// the pending-queue state so a queued follow-up actually kicks off:
+    /// the pending-queue state so a queued follow-up is visible to the
+    /// completion-event drain listener:
     ///   * outcome is `Finalized` (the channel does NOT stay stuck), and
     ///   * `removed_token` is `Some` (the active turn's mailbox token is
     ///     released — inflight/mailbox not orphaned), and
-    ///   * `has_pending` is `true` (the queued follow-up is surfaced so the
-    ///     finalizer's `kickoff_queue` schedules its dispatch).
+    ///   * `has_pending` is `true` (the queued follow-up is surfaced while the
+    ///     #4048 completion event schedules its dispatch).
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn restored_unregistered_watcher_gate_timeout_finalizes_and_kicks_off_queue() {
         use crate::services::turn_orchestrator::{Intervention, InterventionMode};
@@ -2155,7 +2156,8 @@ mod tests {
                 .restore_active_turn(active_token.clone(), UserId::new(7), MessageId::new(70))
                 .await;
             // A queued soft follow-up behind the active turn so `has_pending` is
-            // true; the immediate-no-owner path must surface it (kickoff_queue).
+            // true; the immediate-no-owner path must surface it for the
+            // completion-event queue drain.
             shared
                 .mailbox(ch)
                 .replace_queue(
@@ -2163,7 +2165,10 @@ mod tests {
                         author_id: UserId::new(1),
                         author_is_bot: false,
                         message_id: MessageId::new(71),
+                        queued_generation: crate::services::discord::runtime_store::load_generation(
+                        ),
                         source_message_ids: vec![MessageId::new(71)],
+                        source_message_queued_generations: Vec::new(),
                         text: "queued follow-up".to_string(),
                         mode: InterventionMode::Soft,
                         created_at: std::time::Instant::now(),
@@ -2206,7 +2211,7 @@ mod tests {
                     );
                     assert!(
                         has_pending,
-                        "the queued follow-up must be honored so the finalizer kicks off the queue"
+                        "the queued follow-up must be honored for the completion-event queue drain"
                     );
                 }
                 other => panic!(
@@ -2263,7 +2268,10 @@ mod tests {
                         author_id: UserId::new(1),
                         author_is_bot: false,
                         message_id: MessageId::new(5003),
+                        queued_generation: crate::services::discord::runtime_store::load_generation(
+                        ),
                         source_message_ids: vec![MessageId::new(5003)],
+                        source_message_queued_generations: Vec::new(),
                         text: "queued behind turn-2".to_string(),
                         mode: InterventionMode::Soft,
                         created_at: std::time::Instant::now(),

@@ -27,10 +27,10 @@ pub(in crate::services::discord) struct FinalizeContext {
     /// Whether to drain voice barge-in deferred prompts as part of finalize.
     /// The bridge branches drain voice; the watcher path did NOT.
     pub(in crate::services::discord) drain_voice: bool,
-    /// Whether to schedule a deferred idle-queue kickoff when the finalize
-    /// leaves a pending soft-queue (gated on `mailbox_online && has_pending`).
-    /// The watcher's `finish_restored_watcher_active_turn` did this; the bridge
-    /// branches deferred kickoff to a later site, so they pass `false`.
+    /// Legacy context bit for paths that historically owned post-finalize queue
+    /// admission. Queue drain is now driven by the #4048 completion-event
+    /// listener; this bit remains as part of the backstop/no-owner context shape
+    /// used by reaction cleanup and outcome assertions.
     pub(in crate::services::discord) kickoff_queue: bool,
     /// Whether an identity-guard miss is expected/idempotent for this submitter.
     /// The real reconcile backstop is intentionally quiet on misses; recovery
@@ -41,7 +41,7 @@ pub(in crate::services::discord) struct FinalizeContext {
 impl FinalizeContext {
     /// Bridge non-delegation / missing-handoff branches: bridge owns the
     /// inflight clear elsewhere, marks completion-cleanup on non-cancel, drains
-    /// voice, defers queue kickoff.
+    /// voice, and leaves queue admission to the completion-event listener.
     pub(in crate::services::discord) fn bridge() -> Self {
         Self {
             clear_inflight: false,
@@ -54,9 +54,9 @@ impl FinalizeContext {
 
     /// Watcher terminal via `finish_restored_watcher_active_turn`: the watcher
     /// clears inflight inline before submitting, does NOT mark completion
-    /// cleanup, does NOT drain voice. The queue kickoff stays at the caller
-    /// because it is gated on the caller's `dispatch_ok`, which the finalizer
-    /// cannot see — so the context leaves kickoff to the submitter.
+    /// cleanup, does NOT drain voice. Queue admission is now driven by the
+    /// #4048 completion-event listener; watcher-specific dispatch_ok guards
+    /// remain outside finalizer cleanup.
     pub(in crate::services::discord) fn watcher() -> Self {
         Self {
             clear_inflight: false,
@@ -70,10 +70,8 @@ impl FinalizeContext {
     /// Monitor-auto-turn / recovery terminal (#3016 phase 4): the caller owns
     /// the inflight clear (or there is none — synthetic monitor turn / recovery
     /// already cleared it), does NOT mark completion-cleanup, does NOT drain
-    /// voice, but DOES kick off any queued backlog (the pre-#3016
-    /// `finish_monitor_auto_turn` / `finish_recovered_turn_mailbox` both
-    /// scheduled the deferred idle-queue kickoff on `has_pending`). This is
-    /// `watcher()` plus the queue kickoff.
+    /// voice, and keeps the legacy queue-admission context bit. The actual
+    /// drain trigger is now the #4048 completion-event listener.
     pub(in crate::services::discord) fn monitor() -> Self {
         Self {
             clear_inflight: false,
@@ -86,8 +84,8 @@ impl FinalizeContext {
 
     /// Deadline-armed gate-timeout backstop, fired from the reconciler with no
     /// caller to have cleared inflight: finalize fully (clear inflight here),
-    /// no completion-cleanup or voice drain (watcher semantics), kick off the
-    /// queue if backlog remains.
+    /// no completion-cleanup or voice drain (watcher semantics), and preserve
+    /// the legacy queue-admission context bit for cleanup/outcome semantics.
     pub(super) fn gate_backstop() -> Self {
         Self {
             clear_inflight: true,

@@ -436,6 +436,16 @@ owner = "discord-finalizer"
 deadline = "2026-08-31"
 decompose_issue = "#3016"
 
+[[entry]]
+# Crossed the 1000-prod-LoC threshold in #4049 S4-a1: the notification-only
+# turn lifecycle reaction reconciler now owns per-target serialization plus
+# durable adder-identity sidecar state. Split persistence/test-heavy support
+# into narrower modules in slice a2 once the reconciler contract is stable.
+file = "src/services/discord/turn_view_reconciler.rs"
+owner = "discord-relay"
+deadline = "2026-08-31"
+decompose_issue = "#4049"
+
 # NOTE: src/services/discord/idle_recap.rs previously had an [[entry]] here; #3479
 # extracted the scrollback-capture/Haiku-summarizer and token-context-display
 # clusters into `idle_recap/scrollback.rs` and `idle_recap/context_display.rs`,
@@ -488,6 +498,17 @@ file = "src/services/discord/tui_direct_pending_start.rs"
 owner = "discord-relay"
 deadline = "2026-08-31"
 decompose_issue = "#3540"
+
+[[entry]]
+# Crossed the 1000-prod-LoC giant threshold in #4081 when the durable delivery
+# record sidecar gained bounded content fingerprints for degenerate watcher
+# lease-key duplicate suppression. Decomposition should split the lease,
+# delivered-frontier, owner-context, and recent-content fingerprint stores into
+# narrower outbound/delivery_record siblings.
+file = "src/services/discord/outbound/delivery_record.rs"
+owner = "discord-relay"
+deadline = "2026-10-31"
+decompose_issue = "#3405"
 
 [[entry]]
 # Crossed the 1000-prod-LoC giant threshold in #4019 R2: synthetic TUI-direct

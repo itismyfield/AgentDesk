@@ -5,7 +5,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
-use super::{Intervention, InterventionMode};
+use super::{Intervention, InterventionMode, SourceMessageQueuedGeneration};
 use crate::services::provider::ProviderKind;
 
 const STALE_PENDING_QUEUE_TMP_AGE: Duration = Duration::from_secs(60);
@@ -18,7 +18,12 @@ pub(crate) struct PendingQueueItem {
     pub(crate) author_is_bot: bool,
     pub(crate) message_id: u64,
     #[serde(default)]
+    pub(crate) queued_generation: u64,
+    #[serde(default)]
     pub(crate) source_message_ids: Vec<u64>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) source_message_queued_generations: Vec<PendingQueueSourceGeneration>,
     pub(crate) text: String,
     #[serde(default)]
     pub(crate) reply_context: Option<String>,
@@ -46,6 +51,12 @@ pub(crate) struct PendingQueueItem {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PendingQueueSourceGeneration {
+    pub(crate) message_id: u64,
+    pub(crate) queued_generation: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -253,10 +264,19 @@ fn pending_queue_item_from_intervention(
     channel_id: ChannelId,
     dispatch_role_override: Option<u64>,
 ) -> PendingQueueItem {
+    let source_message_queued_generations: Vec<PendingQueueSourceGeneration> = intervention
+        .source_message_queued_generations()
+        .into_iter()
+        .map(|owner| PendingQueueSourceGeneration {
+            message_id: owner.message_id.get(),
+            queued_generation: owner.queued_generation,
+        })
+        .collect();
     PendingQueueItem {
         author_id: intervention.author_id.get(),
         author_is_bot: intervention.author_is_bot,
         message_id: intervention.message_id.get(),
+        queued_generation: intervention.queued_generation,
         source_message_ids: if intervention.source_message_ids.is_empty() {
             vec![intervention.message_id.get()]
         } else {
@@ -266,6 +286,7 @@ fn pending_queue_item_from_intervention(
                 .map(|id| id.get())
                 .collect()
         },
+        source_message_queued_generations,
         text: intervention.text.clone(),
         reply_context: intervention.reply_context.clone(),
         has_reply_boundary: intervention.has_reply_boundary,
@@ -427,11 +448,50 @@ fn pending_queue_item_to_intervention(item: PendingQueueItem, now: Instant) -> I
     if source_message_ids.is_empty() {
         source_message_ids.push(MessageId::new(item.message_id));
     }
+    let queued_generation = if item.queued_generation == 0 {
+        crate::services::discord::runtime_store::load_generation()
+    } else {
+        item.queued_generation
+    };
+    let mut source_message_queued_generations: Vec<SourceMessageQueuedGeneration> = item
+        .source_message_queued_generations
+        .into_iter()
+        .filter(|owner| owner.message_id != 0)
+        .map(|owner| {
+            let generation = if owner.queued_generation == 0 {
+                queued_generation
+            } else {
+                owner.queued_generation
+            };
+            SourceMessageQueuedGeneration::new(MessageId::new(owner.message_id), generation)
+        })
+        .collect();
+    if source_message_queued_generations.is_empty() {
+        source_message_queued_generations = source_message_ids
+            .iter()
+            .copied()
+            .map(|message_id| SourceMessageQueuedGeneration::new(message_id, queued_generation))
+            .collect();
+    } else {
+        for message_id in &source_message_ids {
+            if !source_message_queued_generations
+                .iter()
+                .any(|owner| owner.message_id == *message_id)
+            {
+                source_message_queued_generations.push(SourceMessageQueuedGeneration::new(
+                    *message_id,
+                    queued_generation,
+                ));
+            }
+        }
+    }
     Intervention {
         author_id: UserId::new(item.author_id),
         author_is_bot: item.author_is_bot,
         message_id: MessageId::new(item.message_id),
+        queued_generation,
         source_message_ids,
+        source_message_queued_generations,
         text: item.text,
         mode: InterventionMode::Soft,
         created_at: now,

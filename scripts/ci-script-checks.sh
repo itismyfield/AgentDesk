@@ -170,6 +170,9 @@ echo "=== Agent maintenance freshness gate (warn, #1432; LoC hard-gate, #3036) =
 echo "=== Agent maintenance freshness tests ==="
 "$PYTHON" -m unittest tests.test_agent_maintenance_docs
 
+echo "=== Maintainability audit tests ==="
+"$PYTHON" -m unittest tests.test_audit_maintainability.FooterViewWritesCheck
+
 echo "=== Maintainability audit ==="
 mkdir -p target
 "$PYTHON" scripts/audit_maintainability.py --format yaml > target/maintainability-audit.yaml

@@ -164,17 +164,7 @@ pub(crate) async fn compose_with_haiku(scrollback: &str) -> Option<RecapComposer
     if scrollback.is_empty() {
         return None;
     }
-    let prompt = format!(
-        "다음은 AI 코딩 에이전트와 사용자의 마지막 대화 ~100줄입니다. \
-         사용자가 지금 다시 돌아왔을 때 \"어떤 작업을 하던 중이었는지\"를 \
-         즉시 기억할 수 있도록 1-2문장으로 한국어 요약을 만드세요. \
-         이어서 보낼 만한 사용자 답변이 명확할 때만 suggested_reply를 한 개 제안하세요. \
-         도구 호출 / 스크롤 / 진행 표시 같은 노이즈는 무시하고 \
-         실제 작업 내용(파일·결정·다음 단계)에 집중하세요. \
-         반드시 JSON 객체 하나만 출력하세요. 형식: \
-         {{\"summary\":\"...\",\"suggested_reply\":\"...\"}}. \
-         suggested_reply가 없으면 null로 두세요.\n\n---\n\n{scrollback}",
-    );
+    let prompt = recap_composer_prompt(scrollback);
 
     let cancel = std::sync::Arc::new(CancelToken::new());
     let cancel_for_blocking = cancel.clone();
@@ -202,6 +192,23 @@ pub(crate) async fn compose_with_haiku(scrollback: &str) -> Option<RecapComposer
     };
 
     parse_recap_composer_output(&result)
+}
+
+fn recap_composer_prompt(scrollback: &str) -> String {
+    format!(
+        "다음은 AI 코딩 에이전트와 사용자의 마지막 대화 ~100줄입니다. \
+         사용자가 지금 다시 돌아왔을 때 \"어떤 작업을 하던 중이었는지\"를 \
+         즉시 기억할 수 있도록 1-2문장으로 한국어 요약을 만드세요. \
+         이어서 보낼 만한 사용자 답변이 명확할 때만 suggested_reply를 한 개 제안하세요. \
+         suggested_reply는 에이전트가 말할 문장이 아니라 사용자가 다음에 직접 입력할 \
+         요청/지시/질문이어야 합니다. \"진행하겠습니다\", \"확인했습니다\" 같은 \
+         에이전트 관점의 응답은 쓰지 말고, \"테스트 계속 진행해줘\"처럼 사용자 관점으로 쓰세요. \
+         도구 호출 / 스크롤 / 진행 표시 같은 노이즈는 무시하고 \
+         실제 작업 내용(파일·결정·다음 단계)에 집중하세요. \
+         반드시 JSON 객체 하나만 출력하세요. 형식: \
+         {{\"summary\":\"...\",\"suggested_reply\":\"...\"}}. \
+         suggested_reply가 없으면 null로 두세요.\n\n---\n\n{scrollback}",
+    )
 }
 
 /// Backward-compatible summary-only wrapper for any local callers that still
@@ -275,5 +282,20 @@ fn first_suggested_reply_value(value: &serde_json::Value) -> Option<&str> {
         serde_json::Value::Array(items) => items.iter().find_map(|item| item.as_str()),
         serde_json::Value::Null => None,
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recap_composer_prompt_requires_user_perspective_suggestion() {
+        let prompt = recap_composer_prompt("[user] 다음 단계 알려줘");
+
+        assert!(prompt.contains("사용자가 다음에 직접 입력할"));
+        assert!(prompt.contains("에이전트 관점의 응답은 쓰지 말고"));
+        assert!(prompt.contains("테스트 계속 진행해줘"));
+        assert!(prompt.contains("[user] 다음 단계 알려줘"));
     }
 }

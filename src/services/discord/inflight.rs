@@ -3798,6 +3798,13 @@ mod stall_recovery_tests {
         // the same turn identity records a `last_offset_monotonic` violation
         // (and trips the debug_assert) but does NOT skip the write — a legit
         // fresh-turn reset must still be able to persist.
+        //
+        // Force authority OFF so this test pins the original observe-only
+        // branch regardless of a release-like process env. Authority ON is the
+        // #3416 enforce branch: the same violation is recorded, then the write is
+        // skipped and #3933 intentionally relaxes the debug tripwire.
+        let _authority =
+            crate::services::discord::outbound::delivery_record::authority_test_seam::force(false);
         let temp = TempDir::new().unwrap();
         let mut existing = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 100);
         existing.last_offset = 300;
@@ -3860,6 +3867,13 @@ mod stall_recovery_tests {
         // for the SAME turn identity records a `response_sent_offset_monotonic`
         // violation (and trips the debug_assert) but does NOT skip the write —
         // mirrors the last_offset_monotonic precedent.
+        //
+        // Force authority OFF so this test pins the original observe-only
+        // branch regardless of a release-like process env. Authority ON is the
+        // #3416 enforce branch: the same violation is recorded, then the write is
+        // skipped and #3933 intentionally relaxes the debug tripwire.
+        let _authority =
+            crate::services::discord::outbound::delivery_record::authority_test_seam::force(false);
         let temp = TempDir::new().unwrap();
         let mut existing = build_inflight_for_guard_tests(ProviderKind::Claude, 321, 100);
         existing.full_response = "hello world".to_string();

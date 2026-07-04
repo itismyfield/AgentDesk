@@ -439,6 +439,7 @@ fn channel_records_are_abandoned_locked(provider: &str, channel_id: u64) -> bool
             .all(|record| record.attempt_count >= PENDING_START_MAX_CLAIM_ATTEMPTS)
 }
 
+#[cfg(test)]
 pub(super) fn pending_synthetic_start_abandoned(provider: &str, channel_id: u64) -> bool {
     let _guard = PRESENCE_RECONCILE_LOCK
         .lock()

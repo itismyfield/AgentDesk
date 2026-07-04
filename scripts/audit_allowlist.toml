@@ -87,6 +87,45 @@ direct_discord_sends = [
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:96efc64ae5a0f315"
 ]
 
+# Direct Discord reactions: permanent transport seams. These are the single raw
+# reaction I/O layer driven by reaction_lifecycle / turn_view_reconciler and
+# must not be migrated into semantic call sites. Entries use line-independent
+# stable keys.
+direct_discord_reactions = [
+  "src/services/discord/discord_io.rs#direct_discord_reactions:e01f4c2f7b0935cb",
+  "src/services/discord/discord_io.rs#direct_discord_reactions:c80562ff7808cb8c",
+  "src/services/discord/gateway.rs#direct_discord_reactions:def371963f71d782",
+  "src/services/discord/gateway.rs#direct_discord_reactions:d8eb644833217308",
+  "src/services/discord/tui_prompt_relay/bridge_gateway.rs#direct_discord_reactions:c2509c171c7efedd",
+  "src/services/discord/tui_prompt_relay/bridge_gateway.rs#direct_discord_reactions:20c65e9299f28a47"
+]
+
+# Footer view writes: #4049 S4-b1 intentionally centralizes only the completion
+# path. These live in-progress footer/status-panel write paths are S4-b2-owned
+# and must be removed from this allowlist when the live footer cascade moves into
+# footer_view_reconciler.
+footer_view_writes = [
+  "src/services/discord/tmux_watcher.rs#footer_view_writes:ea29213494d1fb2c",
+  "src/services/discord/tmux_watcher.rs#footer_view_writes:5415d09ce6a6466a",
+  "src/services/discord/tmux_watcher.rs#footer_view_writes:68c7489b59d3819b",
+  "src/services/discord/tmux_watcher.rs#footer_view_writes:f1a4678b93b4a816",
+  "src/services/discord/tmux_watcher.rs#footer_view_writes:882a806a2deac7bf",
+  "src/services/discord/tmux_watcher.rs#footer_view_writes:cdb10010e940c7dc",
+  "src/services/discord/tmux_watcher.rs#footer_view_writes:9b7c3dd700213b46",
+  "src/services/discord/tmux_watcher.rs#footer_view_writes:7512a09d4bb439fc",
+  "src/services/discord/tmux_watcher.rs#footer_view_writes:6abf69aebffa23c2",
+  "src/services/discord/tmux_watcher/two_message_panel.rs#footer_view_writes:5337251a73d4d11f",
+  "src/services/discord/turn_bridge/mod.rs#footer_view_writes:5e4dbc295c569d85",
+  "src/services/discord/turn_bridge/mod.rs#footer_view_writes:4f6f8dfbe9ef5e03",
+  "src/services/discord/turn_bridge/mod.rs#footer_view_writes:8905153297c71169",
+  "src/services/discord/turn_bridge/mod.rs#footer_view_writes:dc7b9fccab51920e",
+  "src/services/discord/turn_bridge/mod.rs#footer_view_writes:07e34ddccea9cb3b",
+  "src/services/discord/turn_bridge/mod.rs#footer_view_writes:3358727f88ed48b3",
+  "src/services/discord/turn_bridge/mod.rs#footer_view_writes:6dad50d55556502e",
+  "src/services/discord/turn_bridge/two_message_panel.rs#footer_view_writes:a9ce6b67175262d4",
+  "src/services/discord/turn_bridge/two_message_panel.rs#footer_view_writes:86e7bb20f9b34ca7"
+]
+
 # Manual JSON row mapping: legacy mapping callsites pending typed migration.
 manual_json_row_mapping = [
 ]

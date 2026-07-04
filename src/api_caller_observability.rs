@@ -1,6 +1,6 @@
 use axum::http::HeaderMap;
 
-pub const LOG_TARGET: &str = "api_caller_observability";
+pub const LOG_TARGET: &str = "agentdesk::api_caller_observability";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthStrength {

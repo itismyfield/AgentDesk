@@ -2,6 +2,104 @@
 
 use super::*;
 
+#[cfg(unix)]
+pub(super) async fn commit_watcher_direct_terminal_session_idle(
+    shared: &std::sync::Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    tmux_session_name: &str,
+    terminal_kind: Option<WatcherTerminalKind>,
+    data_start_offset: u64,
+    current_offset: u64,
+) -> bool {
+    if shared.mailbox(channel_id).cancel_token().await.is_some() {
+        tracing::debug!(
+            channel_id = channel_id.get(),
+            tmux_session_name = %tmux_session_name,
+            provider = %provider.as_str(),
+            "skipping watcher-direct terminal session-idle commit; mailbox turn is active"
+        );
+        return false;
+    }
+
+    if crate::services::discord::inflight::load_inflight_state(provider, channel_id.get()).is_some()
+    {
+        tracing::debug!(
+            channel_id = channel_id.get(),
+            tmux_session_name = %tmux_session_name,
+            provider = %provider.as_str(),
+            "skipping watcher-direct terminal session-idle commit; inflight state is active"
+        );
+        return false;
+    }
+
+    let session_key = crate::services::discord::adk_session::build_namespaced_session_key(
+        &shared.token_hash,
+        provider,
+        tmux_session_name,
+    );
+    let channel_name = {
+        let data = shared.core.lock().await;
+        data.sessions
+            .get(&channel_id)
+            .and_then(|session| session.channel_name.clone())
+    };
+    let agent_id =
+        crate::services::discord::resolve_channel_role_binding(channel_id, channel_name.as_deref())
+            .map(|binding| binding.role_id);
+    let terminal_committed_at = chrono::Utc::now();
+
+    match crate::services::discord::internal_api::mark_session_idle_if_not_newer_live(
+        &session_key,
+        provider.as_str(),
+        agent_id.as_deref(),
+        terminal_committed_at,
+    )
+    .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::debug!(
+                channel_id = channel_id.get(),
+                tmux_session_name = %tmux_session_name,
+                provider = %provider.as_str(),
+                session_key = %session_key,
+                data_start_offset,
+                current_offset,
+                terminal_kind = terminal_kind.map(WatcherTerminalKind::as_str).unwrap_or("unknown"),
+                "skipping watcher-direct terminal session-idle commit; session row is absent or newer live"
+            );
+            return false;
+        }
+        Err(error) => {
+            tracing::warn!(
+                channel_id = channel_id.get(),
+                tmux_session_name = %tmux_session_name,
+                provider = %provider.as_str(),
+                session_key = %session_key,
+                data_start_offset,
+                current_offset,
+                terminal_kind = terminal_kind.map(WatcherTerminalKind::as_str).unwrap_or("unknown"),
+                error = %error,
+                "failed to commit watcher-direct terminal session idle"
+            );
+            return false;
+        }
+    }
+
+    tracing::info!(
+        channel_id = channel_id.get(),
+        tmux_session_name = %tmux_session_name,
+        provider = %provider.as_str(),
+        session_key = %session_key,
+        data_start_offset,
+        current_offset,
+        terminal_kind = terminal_kind.map(WatcherTerminalKind::as_str).unwrap_or("unknown"),
+        "watcher-direct terminal response committed session idle"
+    );
+    true
+}
+
 /// #3041 P1-1: process-global monotonic counter that mints a unique
 /// `instance_id` for each watcher spawn. It distinguishes an outgoing watcher
 /// from its replacement across a reattach so the delivery-lease holder
@@ -376,6 +474,8 @@ pub(super) fn discard_restored_response_seed_before_no_inflight_terminal_relay(
     restored_response_seed: &str,
     inflight_present: bool,
     fresh_assistant_text_seen: bool,
+    force_discard_restored_seed: bool,
+    restored_seed_delivery_confirmed: bool,
 ) -> bool {
     if inflight_present || restored_response_seed.trim().is_empty() {
         return false;
@@ -386,10 +486,14 @@ pub(super) fn discard_restored_response_seed_before_no_inflight_terminal_relay(
     let restored_seed_has_undelivered_body = restored_response_seed
         .get(*response_sent_offset..)
         .is_some_and(|body| !body.trim().is_empty());
-    // Preserve the restored seed only for the quiescence handoff shape: it still
-    // contains bytes past response_sent_offset, and this pass saw no fresh
-    // assistant text. Fresh text keeps the original stale-prefix strip.
-    if restored_seed_has_undelivered_body && !fresh_assistant_text_seen {
+    // Preserve the restored seed for the quiescence handoff shape unless the
+    // force-discard signal is backed by authoritative delivery evidence for the
+    // seed body. `local_cmd_no_output` describes the current turn shape; the
+    // delivered-content ring is the proof that stripping this body cannot lose it.
+    if restored_seed_has_undelivered_body
+        && !fresh_assistant_text_seen
+        && !(force_discard_restored_seed && restored_seed_delivery_confirmed)
+    {
         return false;
     }
     let seed_len = restored_response_seed.len();
@@ -400,4 +504,65 @@ pub(super) fn discard_restored_response_seed_before_no_inflight_terminal_relay(
     }
     last_edit_text.clear();
     true
+}
+
+pub(super) fn local_cmd_no_output(
+    unprocessed_tail: &str,
+    terminal_kind: Option<WatcherTerminalKind>,
+    fresh_assistant_text_seen: bool,
+    tool_state: &WatcherToolState,
+) -> bool {
+    matches!(terminal_kind, Some(WatcherTerminalKind::SoftUserBoundary))
+        && !fresh_assistant_text_seen
+        && !tool_state.any_tool_used
+        && first_user_prompt_text(unprocessed_tail).is_some_and(|prompt| {
+        !crate::services::discord::tui_prompt_relay::observed_prompt_starts_external_turn_lifecycle(
+            &prompt,
+        )
+    })
+}
+
+fn first_user_prompt_text(unprocessed_tail: &str) -> Option<String> {
+    for line in unprocessed_tail
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let value = serde_json::from_str::<serde_json::Value>(line).ok()?;
+        if value.get("type").and_then(serde_json::Value::as_str) != Some("user") {
+            return None;
+        }
+        return user_message_prompt_text(value.get("message")?);
+    }
+    None
+}
+
+fn user_message_prompt_text(message: &serde_json::Value) -> Option<String> {
+    if message
+        .get("role")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|role| role != "user")
+    {
+        return None;
+    }
+    match message.get("content")? {
+        serde_json::Value::String(text) => non_empty_prompt_text(text),
+        serde_json::Value::Array(items) => {
+            let text = items
+                .iter()
+                .filter_map(|item| {
+                    item.get("text")
+                        .or_else(|| item.get("input_text"))
+                        .and_then(serde_json::Value::as_str)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            non_empty_prompt_text(&text)
+        }
+        _ => None,
+    }
+}
+
+fn non_empty_prompt_text(text: &str) -> Option<String> {
+    (!text.trim().is_empty()).then(|| text.to_string())
 }

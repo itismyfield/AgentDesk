@@ -1,3 +1,8 @@
+use super::super::super::queue_marker;
+use super::super::super::turn_view_reconciler::{
+    note_intake_turn_cleared_current as tv_clear_current,
+    note_intake_turn_started_current_with_attempt as tv_start_current_with_attempt,
+};
 use super::voice_announcement_route::route_voice_transcript_announcement_once;
 use super::*;
 
@@ -598,15 +603,15 @@ pub(in crate::services::discord) async fn handle_text_message(
                 }
             }
         };
-    if should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref())
+    let turn_start_attempt = if should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref())
         && !super::super::super::voice_barge_in::is_synthetic_voice_message_id(user_msg_id)
     {
-        // Voice-originated turns use a synthetic msg id (>= 9e18) that does
-        // not correspond to a real Discord message, so add_reaction would
-        // return "Unknown Message". TTS already plays an acknowledgement
-        // for the user — the ⏳ reaction is text-intake only.
-        add_reaction(http, channel_id, user_msg_id, '⏳').await;
-    }
+        tv_start_current_with_attempt(shared, http, channel_id, user_msg_id, "intake_start")
+            .await
+            .attempt()
+    } else {
+        None
+    };
 
     // ── Dispatch thread auto-creation ──────────────────────────────
     // When a dispatch message arrives, create a Discord thread for
@@ -1175,13 +1180,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         if should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref())
             && !super::super::super::voice_barge_in::is_synthetic_voice_message_id(user_msg_id)
         {
-            super::super::super::formatting::remove_reaction_raw(
-                http,
-                channel_id,
-                user_msg_id,
-                '⏳',
-            )
-            .await;
+            tv_clear_current(shared, http, channel_id, user_msg_id, "intake_goal").await;
         }
         consume_codex_goal_lifecycle_command(
             http,
@@ -1332,7 +1331,7 @@ pub(in crate::services::discord) async fn handle_text_message(
             channel_id,
             user_msg_id,
         );
-        super::super::super::formatting::add_reaction_raw(
+        super::super::super::reaction_lifecycle::note_auxiliary_reaction_added(
             http,
             channel_id,
             user_msg_id,
@@ -1453,11 +1452,13 @@ pub(in crate::services::discord) async fn handle_text_message(
     // composes safely with the entrypoint drains.
     if queued_placeholder_handoff.is_some() && !turn_kind.is_background_trigger() {
         for emoji in queue_pending_reactions_to_clear() {
-            super::super::super::formatting::remove_reaction_raw(
+            queue_marker::note_removed_current(
+                shared,
                 http,
                 channel_id,
                 user_msg_id,
                 emoji,
+                "dequeue_head_queue_marker_clear",
             )
             .await;
         }
@@ -1495,6 +1496,7 @@ pub(in crate::services::discord) async fn handle_text_message(
             &voice_announcement,
             reply_to_user_message,
             &dispatch_id_for_thread,
+            turn_start_attempt,
         )
         .await;
     }
@@ -2282,17 +2284,27 @@ pub(in crate::services::discord) async fn handle_text_message(
                         } else {
                             '📬'
                         };
-                        add_reaction(http, channel_id, user_msg_id, emoji).await;
+                        queue_marker::note_added_current(
+                            shared,
+                            http,
+                            channel_id,
+                            user_msg_id,
+                            emoji,
+                            "tui_busy_pre_submit_queued",
+                        )
+                        .await;
                         if !shared.queued_placeholder_still_owned(
                             channel_id,
                             user_msg_id,
                             placeholder_msg_id,
                         ) {
-                            super::super::super::formatting::remove_reaction_raw(
+                            queue_marker::note_removed_current(
+                                shared,
                                 http,
                                 channel_id,
                                 user_msg_id,
                                 emoji,
+                                "tui_busy_pre_submit_queue_self_heal",
                             )
                             .await;
                         }
@@ -2385,8 +2397,7 @@ pub(in crate::services::discord) async fn handle_text_message(
             "claude_tui_followup_busy_pre_submit",
             diagnostic_json,
         );
-        super::super::super::formatting::remove_reaction_raw(http, channel_id, user_msg_id, '⏳')
-            .await;
+        tv_clear_current(shared, http, channel_id, user_msg_id, "intake_busy_queue").await;
         super::super::super::saturating_decrement_global_active(shared);
         shared.turn_start_times.remove(&channel_id);
         post_adk_session_status(

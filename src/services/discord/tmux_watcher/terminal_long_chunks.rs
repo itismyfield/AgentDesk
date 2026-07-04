@@ -23,6 +23,7 @@ pub(in crate::services::discord) async fn deliver_long_chunks_via_controller<
     tmux_session_name: &str,
     msg_id: MessageId,
     relay_text: &str,
+    delivered_body: &str,
     cell: &Arc<DeliveryLeaseCell>,
     turn: TurnKey,
     lease_key: Option<crate::services::discord::DeliveryLeaseKey>,
@@ -88,6 +89,7 @@ pub(in crate::services::discord) async fn deliver_long_chunks_via_controller<
             channel_id,
             (start, end),
             chunks.tail_message_id.map(|m| m.get()),
+            delivered_body,
         );
     }
     outcome
@@ -112,6 +114,7 @@ pub(in crate::services::discord) async fn apply_watcher_long_chunks_controller(
     tmux_session_name: &str,
     msg_id: MessageId,
     relay_text: &str,
+    delivered_body: &str,
     cell: &Arc<DeliveryLeaseCell>,
     turn: TurnKey,
     lease_key: Option<crate::services::discord::DeliveryLeaseKey>,
@@ -136,6 +139,7 @@ pub(in crate::services::discord) async fn apply_watcher_long_chunks_controller(
         tmux_session_name,
         msg_id,
         relay_text,
+        delivered_body,
         cell,
         turn,
         lease_key,

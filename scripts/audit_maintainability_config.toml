@@ -17,6 +17,7 @@
 # new turn_anchor.rs). More specific than the `**` glob below, so it must precede it
 # for fnmatch first-match precedence.
 "src/services/discord/placeholder_live_events/status_panel.rs" = 703
+"src/services/discord/placeholder_live_events/status_events.rs" = 720 # 2026-07-04 #4097 admission: +21 for kind=background XML task-notification suppression (relay noise fix); cohesive documented helper, namespace effectively full (precedent: status_panel.rs).
 "src/services/discord/placeholder_live_events/**" = 700
 "src/services/discord/prompt_builder/**" = 700
 "src/services/discord/runtime_bootstrap/**" = 700

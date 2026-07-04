@@ -76,6 +76,7 @@ const RECAP_SUMMARY_MODEL: &str = "claude-haiku-4-5-20251001";
 pub(crate) const IDLE_RECAP_CLEAR_BUTTON_PREFIX: &str = "idle_recap:clear:";
 pub(crate) const IDLE_RECAP_RELAY_DIAG_BUTTON_PREFIX: &str = "idle_recap:relay_diag:";
 pub(crate) const IDLE_RECAP_SUGGEST_BUTTON_PREFIX: &str = "idle_recap:suggest:";
+pub(crate) const IDLE_RECAP_COMPACT_BUTTON_PREFIX: &str = "idle_recap:compact:";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RecapLiveContextUsage {
@@ -102,8 +103,6 @@ pub(crate) struct RecapSnapshot {
     pub(crate) latest_turn_input_tokens: Option<i64>,
     pub(crate) latest_turn_cache_create_tokens: Option<i64>,
     pub(crate) latest_turn_cache_read_tokens: Option<i64>,
-    pub(crate) previous_message_id: Option<i64>,
-    pub(crate) previous_channel_id: Option<i64>,
     pub(crate) discord_channel_id: Option<String>,
     pub(crate) discord_channel_cc: Option<String>,
     pub(crate) discord_channel_cdx: Option<String>,
@@ -112,6 +111,7 @@ pub(crate) struct RecapSnapshot {
     /// Used as the fallback source for transcript-based scrollback when no
     /// live tmux pane exists (e.g. the `claude-e` per-turn spawn runtime).
     pub(crate) cwd: Option<String>,
+    pub(crate) is_routine_session: bool,
     /// #3148: per-channel turn-generation counter captured at snapshot load.
     /// The persist CAS (`persist_recap_message_id`) folds this into the UPDATE
     /// `WHERE` so a turn claimed during the (multi-second) compose/persist
@@ -150,8 +150,17 @@ pub(crate) async fn load_recap_snapshot(
                 s.claude_session_id,
                 s.raw_provider_session_id,
                 s.cwd,
-                s.idle_recap_message_id,
-                s.idle_recap_channel_id,
+                EXISTS (
+                    SELECT 1
+                    FROM routine_runs rr
+                    WHERE rr.owned_tmux_session = s.session_key
+                       OR EXISTS (
+                            SELECT 1
+                            FROM turns rt
+                            WHERE rt.session_key = s.session_key
+                              AND rt.turn_id = rr.turn_id
+                       )
+                ) AS is_routine_session,
                 s.idle_recap_turn_generation,
                 a.discord_channel_id,
                 a.discord_channel_cc,
@@ -211,8 +220,7 @@ struct RecapSnapshotRow {
     claude_session_id: Option<String>,
     raw_provider_session_id: Option<String>,
     cwd: Option<String>,
-    idle_recap_message_id: Option<i64>,
-    idle_recap_channel_id: Option<i64>,
+    is_routine_session: bool,
     idle_recap_turn_generation: i64,
     discord_channel_id: Option<String>,
     discord_channel_cc: Option<String>,
@@ -246,14 +254,13 @@ impl RecapSnapshotRow {
             latest_turn_input_tokens: self.latest_turn_input_tokens,
             latest_turn_cache_create_tokens: self.latest_turn_cache_create_tokens,
             latest_turn_cache_read_tokens: self.latest_turn_cache_read_tokens,
-            previous_message_id: self.idle_recap_message_id,
-            previous_channel_id: self.idle_recap_channel_id,
             idle_recap_turn_generation: self.idle_recap_turn_generation,
             discord_channel_id: self.discord_channel_id,
             discord_channel_cc: self.discord_channel_cc,
             discord_channel_cdx: self.discord_channel_cdx,
             discord_channel_alt: self.discord_channel_alt,
             cwd: self.cwd,
+            is_routine_session: self.is_routine_session,
         }
     }
 }
@@ -551,8 +558,7 @@ fn compose_recap_header(snapshot: &RecapSnapshot, relay_status: RelayIntegritySt
         RecapContextDisplay::Unknown => "context unknown".to_string(),
     };
     format!(
-        "📦 응답 완료 · {state_label}\n세션: {provider_label} · {context_label} · idle {idle_since} · {}",
-        relay_status.label()
+        "📦 응답 완료 · {state_label}\n세션: {provider_label} · {context_label} · idle {idle_since}"
     )
 }
 
@@ -614,6 +620,7 @@ pub(crate) async fn post_recap_card(
 pub(crate) struct RecapCardActions {
     pub(crate) relay_investigate: bool,
     pub(crate) suggested_reply: bool,
+    pub(crate) context_compact: bool,
 }
 
 impl RecapCardActions {
@@ -627,6 +634,7 @@ impl RecapCardActions {
                 .and_then(|output| output.suggested_reply.as_deref())
                 .and_then(sanitize_recap_line)
                 .is_some(),
+            context_compact: true,
         }
     }
 }
@@ -634,12 +642,16 @@ impl RecapCardActions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RecapButtonKind {
     ClearSession,
+    ContextCompact,
     RelayInvestigate,
     SendSuggestedReply,
 }
 
 fn recap_button_plan(actions: RecapCardActions) -> Vec<RecapButtonKind> {
     let mut plan = vec![RecapButtonKind::ClearSession];
+    if actions.context_compact {
+        plan.push(RecapButtonKind::ContextCompact);
+    }
     if actions.relay_investigate {
         plan.push(RecapButtonKind::RelayInvestigate);
     }
@@ -665,6 +677,11 @@ fn recap_button(kind: RecapButtonKind, message_id_suffix: &str) -> CreateButton 
         RecapButtonKind::ClearSession => (
             IDLE_RECAP_CLEAR_BUTTON_PREFIX,
             "새 세션 시작",
+            ButtonStyle::Secondary,
+        ),
+        RecapButtonKind::ContextCompact => (
+            IDLE_RECAP_COMPACT_BUTTON_PREFIX,
+            "맥락 압축",
             ButtonStyle::Secondary,
         ),
         RecapButtonKind::RelayInvestigate => (
@@ -751,6 +768,105 @@ pub(crate) async fn delete_previous_card(http: &serenity::Http, channel_id: u64,
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecordedRecapCard {
+    pub(crate) session_key: String,
+    pub(crate) channel_id: u64,
+    pub(crate) message_id: u64,
+}
+
+pub(crate) async fn lookup_recorded_recaps_for_channel(
+    pool: &PgPool,
+    channel_id: u64,
+) -> Result<Vec<RecordedRecapCard>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, (String, i64, i64)>(
+        "SELECT session_key, idle_recap_channel_id, idle_recap_message_id
+         FROM sessions
+         WHERE idle_recap_channel_id = $1
+           AND idle_recap_message_id IS NOT NULL
+         ORDER BY idle_recap_message_id DESC",
+    )
+    .bind(channel_id as i64)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(session_key, channel_id, message_id)| {
+            Some(RecordedRecapCard {
+                session_key,
+                channel_id: u64::try_from(channel_id).ok()?,
+                message_id: u64::try_from(message_id).ok()?,
+            })
+        })
+        .collect())
+}
+
+pub(crate) async fn delete_older_recorded_recaps_for_channel(
+    http: &serenity::Http,
+    pool: &PgPool,
+    channel_id: u64,
+    current_message_id: u64,
+) -> Result<(), sqlx::Error> {
+    let cards = lookup_recorded_recaps_for_channel(pool, channel_id)
+        .await?
+        .into_iter()
+        .filter(|card| recap_card_should_be_superseded(card.message_id, current_message_id))
+        .collect();
+    delete_recorded_recap_cards(http, pool, cards).await;
+    Ok(())
+}
+
+async fn delete_recorded_recap_cards(
+    http: &serenity::Http,
+    pool: &PgPool,
+    cards: Vec<RecordedRecapCard>,
+) {
+    for card in cards {
+        delete_previous_card(http, card.channel_id, card.message_id).await;
+        if let Err(error) = clear_recap_pointer(pool, &card.session_key, card.message_id).await {
+            tracing::warn!(
+                error = %error,
+                session_key = %card.session_key,
+                channel_id = card.channel_id,
+                message_id = card.message_id,
+                "idle_recap: failed to clear superseded recap pointer"
+            );
+        }
+    }
+}
+
+pub(crate) async fn recap_channel_has_newer_card(
+    pool: &PgPool,
+    channel_id: u64,
+    message_id: u64,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM sessions
+            WHERE idle_recap_channel_id = $1
+              AND idle_recap_message_id IS NOT NULL
+              AND idle_recap_message_id > $2
+         )",
+    )
+    .bind(channel_id as i64)
+    .bind(message_id as i64)
+    .fetch_one(pool)
+    .await
+}
+
+fn recap_card_should_be_superseded(candidate_message_id: u64, current_message_id: u64) -> bool {
+    candidate_message_id < current_message_id
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PersistRecapMessageIdResult {
+    Persisted {
+        previous_card: Option<RecordedRecapCard>,
+    },
+    LostDeleteAndSkip,
+}
+
 /// Persist the freshly-posted message id (and the channel it lives in) so
 /// the next cycle can delete it and `message_handler` can clear it the
 /// moment the user sends their next turn.
@@ -763,30 +879,63 @@ pub(crate) async fn delete_previous_card(http: &serenity::Http, channel_id: u64,
 /// UPDATEs serialize on the Postgres row, so if a claim committed first this
 /// CAS matches 0 rows and the caller deletes the just-posted card instead of
 /// stamping it over the now-active turn (closing Window 1 atomically). Returns
-/// the number of rows affected: `1` = card persisted, `0` = CAS lost (a turn
-/// raced in).
+/// `LostDeleteAndSkip` when the generation CAS lost or this session already
+/// points at a newer recap card.
 pub(crate) async fn persist_recap_message_id(
     pool: &PgPool,
     session_key: &str,
     channel_id: u64,
     message_id: u64,
     captured_generation: i64,
-) -> Result<u64, sqlx::Error> {
-    sqlx::query(
-        "UPDATE sessions
-         SET idle_recap_message_id = $1,
-             idle_recap_channel_id = $2,
-             idle_recap_posted_at  = NOW()
-         WHERE session_key = $3
-           AND idle_recap_turn_generation = $4",
+) -> Result<PersistRecapMessageIdResult, sqlx::Error> {
+    let previous = sqlx::query_as::<_, (Option<i64>, Option<i64>)>(
+        "WITH current AS (
+             SELECT session_key,
+                    idle_recap_message_id AS previous_message_id,
+                    idle_recap_channel_id AS previous_channel_id
+             FROM sessions
+             WHERE session_key = $3
+               AND idle_recap_turn_generation = $4
+               AND (
+                    idle_recap_message_id IS NULL
+                    OR idle_recap_message_id < $1
+               )
+             FOR UPDATE
+         ),
+         updated AS (
+             UPDATE sessions AS s
+             SET idle_recap_message_id = $1,
+                 idle_recap_channel_id = $2,
+                 idle_recap_posted_at  = NOW()
+             FROM current
+             WHERE s.session_key = current.session_key
+             RETURNING current.previous_message_id, current.previous_channel_id
+         )
+         SELECT previous_message_id, previous_channel_id
+         FROM updated",
     )
     .bind(message_id as i64)
     .bind(channel_id as i64)
     .bind(session_key)
     .bind(captured_generation)
-    .execute(pool)
-    .await
-    .map(|result| result.rows_affected())
+    .fetch_optional(pool)
+    .await?;
+
+    let Some((previous_message_id, previous_channel_id)) = previous else {
+        return Ok(PersistRecapMessageIdResult::LostDeleteAndSkip);
+    };
+
+    let previous_card =
+        previous_message_id
+            .zip(previous_channel_id)
+            .and_then(|(message_id, channel_id)| {
+                Some(RecordedRecapCard {
+                    session_key: session_key.to_string(),
+                    channel_id: u64::try_from(channel_id).ok()?,
+                    message_id: u64::try_from(message_id).ok()?,
+                })
+            });
+    Ok(PersistRecapMessageIdResult::Persisted { previous_card })
 }
 
 /// #3148 / #3158: which row(s) a turn-claim bump targets.
@@ -1222,34 +1371,6 @@ pub(crate) fn post_recheck_action(active_turn_after_post: bool) -> PostRecheckAc
     }
 }
 
-/// #3148: what the post job does with the result of the conditional persist
-/// (`persist_recap_message_id`, which folds the turn-generation CAS into its
-/// `WHERE`). This is the atomic close of Window 1: a turn that claims in the
-/// post-recheck→persist gap bumps the generation, the persist matches 0 rows,
-/// and we treat the card the same as the `DeleteAndSkipPersist` path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PersistCasOutcome {
-    /// `rows_affected == 1`: the generation was unchanged, the pointer is now
-    /// persisted, log success.
-    Persisted,
-    /// `rows_affected == 0`: a turn claimed during the persist window and
-    /// bumped the generation, so the CAS lost. Delete the just-posted card and
-    /// skip persisting (an expected race outcome, NOT an error — the idle-cycle
-    /// stamp already deduped this cycle so it does not re-fire).
-    CasLostDeleteAndSkip,
-}
-
-/// Pure decision seam mapping the persist CAS `rows_affected` to the post job's
-/// action, so the "0 rows ⇒ delete + skip" branch is unit-testable without a
-/// live Postgres.
-pub(crate) fn persist_cas_outcome(rows_affected: u64) -> PersistCasOutcome {
-    if rows_affected == 0 {
-        PersistCasOutcome::CasLostDeleteAndSkip
-    } else {
-        PersistCasOutcome::Persisted
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1490,14 +1611,13 @@ mod tests {
             latest_turn_input_tokens: None,
             latest_turn_cache_create_tokens: None,
             latest_turn_cache_read_tokens: None,
-            previous_message_id: None,
-            previous_channel_id: None,
             idle_recap_turn_generation: 0,
             discord_channel_id: None,
             discord_channel_cc: None,
             discord_channel_cdx: Some("1506295335096549406".to_string()),
             discord_channel_alt: None,
             cwd: None,
+            is_routine_session: false,
         }
     }
 
@@ -1629,7 +1749,10 @@ mod tests {
         };
         let ok = relay_probe_with(RelayIntegrityStatus::Ok);
         let content = compose_recap_text(&snapshot, Some(&composer), &ok);
-        assert!(content.contains("relay OK"));
+        assert!(!content.contains("relay OK"));
+        let header = compose_recap_header(&snapshot, RelayIntegrityStatus::Ok);
+        assert_eq!(header.lines().count(), 2);
+        assert!(!header.contains("relay OK"));
         // Labelled blocks on their own lines for legibility (the summary and the
         // suggested reply are separated by blank lines, not crammed together).
         assert!(content.contains("> 📝 **요약**\n> 작업 요약"));
@@ -1665,14 +1788,14 @@ mod tests {
             &relay_probe_with(RelayIntegrityStatus::Suspect),
         );
         assert!(suspect.contains("릴레이 누락 의심"));
-        assert!(suspect.contains("relay suspect"));
+        assert!(!suspect.contains("relay suspect"));
 
         let unknown = compose_recap_text(
             &snapshot,
             Some(&composer),
             &relay_probe_with(RelayIntegrityStatus::Unknown),
         );
-        assert!(unknown.contains("relay unknown"));
+        assert!(!unknown.contains("relay unknown"));
     }
 
     #[test]
@@ -1689,6 +1812,7 @@ mod tests {
             recap_button_plan(normal),
             vec![
                 RecapButtonKind::ClearSession,
+                RecapButtonKind::ContextCompact,
                 RecapButtonKind::SendSuggestedReply
             ]
         );
@@ -1701,6 +1825,7 @@ mod tests {
             recap_button_plan(suspect),
             vec![
                 RecapButtonKind::ClearSession,
+                RecapButtonKind::ContextCompact,
                 RecapButtonKind::RelayInvestigate,
                 RecapButtonKind::SendSuggestedReply
             ]
@@ -1714,6 +1839,7 @@ mod tests {
             recap_button_plan(unknown),
             vec![
                 RecapButtonKind::ClearSession,
+                RecapButtonKind::ContextCompact,
                 RecapButtonKind::SendSuggestedReply
             ]
         );
@@ -1726,11 +1852,19 @@ mod tests {
             recap_button_plan(no_suggestion),
             vec![
                 RecapButtonKind::ClearSession,
+                RecapButtonKind::ContextCompact,
                 RecapButtonKind::RelayInvestigate
             ]
         );
-        assert!(recap_button_plan(suspect).len() <= 3);
-        assert!(recap_button_plan(normal).len() <= 2);
+        assert!(recap_button_plan(suspect).len() <= 4);
+        assert!(recap_button_plan(normal).len() <= 3);
+    }
+
+    #[test]
+    fn recap_supersedes_only_older_channel_cards() {
+        assert!(recap_card_should_be_superseded(99, 100));
+        assert!(!recap_card_should_be_superseded(100, 100));
+        assert!(!recap_card_should_be_superseded(101, 100));
     }
 
     #[test]
@@ -2069,62 +2203,58 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // #3148 (per-channel turn-generation CAS): the persist folds a
-    // compare-and-swap on the generation captured at snapshot load. A turn
-    // claimed in the post-recheck→persist gap (residual Window 1) bumps the
-    // generation, so the conditional UPDATE matches 0 rows and the just-posted
-    // card is deleted instead of stamped over the now-active turn.
+    // #3148 / #4079 persist swap: the persist folds a compare-and-swap on the
+    // generation captured at snapshot load AND a newest-wins message pointer
+    // guard. A losing persist deletes only its just-posted card.
     // ---------------------------------------------------------------
 
-    /// Pure decision seam: `rows_affected == 0` (CAS lost — a turn claimed in
-    /// the persist window and bumped the generation) → delete the just-posted
-    /// card and skip persist; `rows_affected == 1` → persisted.
-    #[test]
-    fn persist_cas_outcome_skips_when_generation_bumped_persists_otherwise() {
-        assert_eq!(
-            persist_cas_outcome(0),
-            PersistCasOutcome::CasLostDeleteAndSkip,
-            "0 rows ⇒ a turn claimed during the persist window bumped the generation ⇒ delete+skip"
-        );
-        assert_eq!(
-            persist_cas_outcome(1),
-            PersistCasOutcome::Persisted,
-            "1 row ⇒ generation unchanged ⇒ card persisted"
-        );
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum PersistModelOutcome {
+        Persisted,
+        LostDeleteAndSkip,
+    }
+
+    fn model_persist_recap_pointer(
+        pointer: &mut Option<u64>,
+        captured_generation: i64,
+        current_generation: i64,
+        own_message_id: u64,
+    ) -> PersistModelOutcome {
+        if captured_generation == current_generation
+            && pointer.is_none_or(|current_message_id| current_message_id < own_message_id)
+        {
+            *pointer = Some(own_message_id);
+            PersistModelOutcome::Persisted
+        } else {
+            PersistModelOutcome::LostDeleteAndSkip
+        }
     }
 
     /// Interleaving (Window 1): the recap job captures generation `G` at
     /// snapshot load; a turn claims between capture and persist, bumping the
-    /// row's generation to `G+1`. The persist's `... AND
-    /// idle_recap_turn_generation = G` then matches 0 rows. This models that
-    /// conditional UPDATE purely: the persist succeeds only when the captured
-    /// generation still equals the row's CURRENT generation. The post job must
-    /// then DELETE the just-posted card and NOT persist it.
+    /// row's generation to `G+1`. The persist's generation guard then matches 0
+    /// rows. The post job must DELETE the just-posted card and NOT persist it.
     #[tokio::test]
-    async fn persist_cas_noop_when_turn_claimed_between_capture_and_persist() {
-        // The recap job captured this at snapshot load (~20s before persist).
+    async fn persist_swap_noop_when_turn_claimed_between_capture_and_persist() {
         let captured_generation: i64 = 7;
-        // A turn claimed in the compose/persist window and bumped the row.
         let row_generation_now: i64 = 8;
-
-        // Model the conditional persist UPDATE's row count: 1 iff the captured
-        // generation still matches the row's current generation, else 0.
-        let rows_affected: u64 = if captured_generation == row_generation_now {
-            1
-        } else {
-            0
-        };
+        let mut pointer = None;
 
         let deleted: Rc<RefCell<Vec<(u64, u64)>>> = Rc::new(RefCell::new(Vec::new()));
         let persisted: Rc<RefCell<Vec<(u64, u64)>>> = Rc::new(RefCell::new(Vec::new()));
         let channel_id = 4242u64;
         let posted_message_id = 9090u64;
 
-        match persist_cas_outcome(rows_affected) {
-            PersistCasOutcome::CasLostDeleteAndSkip => {
+        match model_persist_recap_pointer(
+            &mut pointer,
+            captured_generation,
+            row_generation_now,
+            posted_message_id,
+        ) {
+            PersistModelOutcome::LostDeleteAndSkip => {
                 deleted.borrow_mut().push((channel_id, posted_message_id));
             }
-            PersistCasOutcome::Persisted => {
+            PersistModelOutcome::Persisted => {
                 persisted.borrow_mut().push((channel_id, posted_message_id));
             }
         }
@@ -2132,50 +2262,98 @@ mod tests {
         assert_eq!(
             deleted.borrow().as_slice(),
             &[(channel_id, posted_message_id)],
-            "a turn claimed in the persist window bumped the generation ⇒ card deleted, not persisted"
+            "a turn claimed in the persist window bumped the generation => card deleted, not persisted"
         );
         assert!(
             persisted.borrow().is_empty(),
-            "the card must NOT be persisted over the now-active turn (Window 1 closed by the CAS)"
+            "the card must NOT be persisted over the now-active turn"
         );
+        assert_eq!(pointer, None);
     }
 
-    /// Positive control: no claim raced in, so the captured generation still
-    /// equals the row's current generation → persist succeeds (1 row), the card
-    /// is persisted, nothing deleted. Guards against a false-skip on a genuinely
-    /// idle channel.
+    /// Positive control: no claim raced in and no newer recap exists, so the
+    /// captured generation still equals the row's current generation and the
+    /// pointer is empty. Persist succeeds and nothing is deleted.
     #[tokio::test]
-    async fn persist_cas_persists_when_generation_unchanged() {
+    async fn persist_swap_persists_when_generation_unchanged_and_no_newer_card() {
         let captured_generation: i64 = 3;
         let row_generation_now: i64 = 3;
-        let rows_affected: u64 = if captured_generation == row_generation_now {
-            1
-        } else {
-            0
-        };
+        let mut pointer = None;
 
         let deleted: Rc<RefCell<Vec<(u64, u64)>>> = Rc::new(RefCell::new(Vec::new()));
         let persisted: Rc<RefCell<Vec<(u64, u64)>>> = Rc::new(RefCell::new(Vec::new()));
         let channel_id = 555u64;
         let posted_message_id = 6161u64;
 
-        match persist_cas_outcome(rows_affected) {
-            PersistCasOutcome::CasLostDeleteAndSkip => {
+        match model_persist_recap_pointer(
+            &mut pointer,
+            captured_generation,
+            row_generation_now,
+            posted_message_id,
+        ) {
+            PersistModelOutcome::LostDeleteAndSkip => {
                 deleted.borrow_mut().push((channel_id, posted_message_id));
             }
-            PersistCasOutcome::Persisted => {
+            PersistModelOutcome::Persisted => {
                 persisted.borrow_mut().push((channel_id, posted_message_id));
             }
         }
 
         assert!(
             deleted.borrow().is_empty(),
-            "no false-skip on a genuinely idle channel: nothing deleted when generation unchanged"
+            "no false-skip on a genuinely idle channel"
         );
         assert_eq!(
             persisted.borrow().as_slice(),
             &[(channel_id, posted_message_id)],
-            "the card is persisted when no turn claimed during the persist window"
+            "the card is persisted when no turn claimed and no newer recap exists"
+        );
+        assert_eq!(pointer, Some(posted_message_id));
+    }
+
+    #[test]
+    fn concurrent_same_session_recap_persist_keeps_newer_card_when_older_persists_later() {
+        let channel_id = 777u64;
+        let generation = 4i64;
+        let older_message_id = 100u64;
+        let newer_message_id = 101u64;
+        let mut pointer = None;
+        let visible_cards: Rc<RefCell<Vec<(u64, u64)>>> = Rc::new(RefCell::new(vec![
+            (channel_id, older_message_id),
+            (channel_id, newer_message_id),
+        ]));
+        let deleted: Rc<RefCell<Vec<(u64, u64)>>> = Rc::new(RefCell::new(Vec::new()));
+
+        assert_eq!(
+            model_persist_recap_pointer(&mut pointer, generation, generation, newer_message_id),
+            PersistModelOutcome::Persisted,
+            "job B persists the newer snowflake first"
+        );
+        assert_eq!(pointer, Some(newer_message_id));
+
+        if model_persist_recap_pointer(&mut pointer, generation, generation, older_message_id)
+            == PersistModelOutcome::LostDeleteAndSkip
+        {
+            visible_cards
+                .borrow_mut()
+                .retain(|card| *card != (channel_id, older_message_id));
+            deleted.borrow_mut().push((channel_id, older_message_id));
+        }
+
+        assert_eq!(
+            pointer,
+            Some(newer_message_id),
+            "the older late persist must not overwrite the newer pointer"
+        );
+        assert_eq!(
+            visible_cards.borrow().as_slice(),
+            &[(channel_id, newer_message_id)],
+            "exactly one visible recap card remains"
+        );
+        assert_eq!(
+            deleted.borrow().as_slice(),
+            &[(channel_id, older_message_id)],
+            "the late older job deletes its own just-posted card"
         );
     }
 

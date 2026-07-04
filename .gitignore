@@ -46,7 +46,20 @@ __pycache__/
 # Transient ops playbooks (campaign prompts, incident runbooks)
 /docs/ops/
 
-# Per-user routine scripts — individual user config space (#3081 follow-up; keeps already-tracked shared routines, ignores new local ones)
-routines/
+# Operator-private routine scripts. Keep local/runtime routines out of public repo history.
+routines/*
+!tests/fixtures/routines/
+!tests/fixtures/routines/**
 !src/server/routes/routines/
 !src/server/routes/routines/*.rs
+
+# Exception: the automation-candidate pipeline routines are shipped engine code
+# (feat(pipeline-v2) #2064), loaded by name via RoutineScriptLoader's default
+# `./routines` dir and exercised by `npm run test:policies`. They were swept up
+# by mistake in the operator-routine untrack pass (#4076) — keep them tracked.
+!routines/monitoring/
+routines/monitoring/*
+!routines/monitoring/automation-executor.js
+!routines/monitoring/automation-candidate-executor.js
+!routines/monitoring/automation-candidate-detector.js
+!routines/monitoring/automation-candidate-recommender.js

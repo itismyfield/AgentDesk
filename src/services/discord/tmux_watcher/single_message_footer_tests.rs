@@ -13,7 +13,7 @@ async fn watcher_single_message_completion_footer_emits_background_agent_pending
     let shared = crate::services::discord::make_shared_data_for_tests();
     let channel_id = ChannelId::new(4_047_101);
     let provider = ProviderKind::Claude;
-    let owner = crate::services::discord::single_message_panel::CompletionFooterOwner::new(
+    let owner = crate::services::discord::footer_view_reconciler::CompletionFooterOwner::new(
         4_047_102,
         1_700_000_000,
     );

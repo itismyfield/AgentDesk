@@ -82,6 +82,13 @@ pub(super) fn discord_restart_reports_root() -> Option<PathBuf> {
     runtime_root().map(|root| root.join("discord_restart_reports"))
 }
 
+/// #4049 S4-a1: durable turn-view reaction state. The reconciler stores the
+/// bot token hash that added a lifecycle reaction so cold terminal/clear
+/// notifications after restart remove with the same Discord @me identity.
+pub(super) fn discord_turn_view_reconciler_root() -> Option<PathBuf> {
+    runtime_root().map(|root| root.join("discord_turn_view_reconciler"))
+}
+
 /// #3293 verify r1 (finding 3): durable preservation of the full assistant
 /// response + row metadata for every recovery force-clear. Kept OUT of
 /// `discord_restart_reports/` because that store is flushed-and-deleted on

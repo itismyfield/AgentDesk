@@ -11,6 +11,7 @@ mod delivery_lease_key;
 mod destructive_cancel_gate;
 mod discord_io;
 mod dispatch_policy;
+mod footer_view_reconciler;
 pub(crate) mod formatting;
 mod gateway;
 mod gateway_voice_queue;
@@ -42,6 +43,7 @@ mod placeholder_sweeper;
 mod prompt_builder;
 mod queue_dispatch;
 mod queue_io;
+mod queue_marker;
 mod queue_reactions;
 mod queued_placeholders_store;
 mod reaction_cleanup;
@@ -94,6 +96,7 @@ pub(in crate::services::discord) mod task_supervisor;
 mod terminal_ui_obligation;
 #[cfg(unix)]
 mod tmux;
+mod turn_completion_events;
 pub(in crate::services::discord) mod turn_end_wip_warning;
 #[cfg(unix)]
 pub(crate) use tmux::write_spawn_nonce;
@@ -107,13 +110,13 @@ mod tmux_overload_retry;
 mod tmux_reaper;
 #[cfg(unix)]
 mod tmux_restart_handoff;
-mod tui_busy_gate;
 mod tui_direct_abort_marker;
 mod tui_direct_pending_start;
 mod tui_prompt_relay;
 mod tui_task_card;
 mod turn_bridge;
 mod turn_finalizer;
+mod turn_view_reconciler;
 mod voice_acknowledgement;
 mod voice_background_driver;
 mod voice_barge_in;
@@ -323,6 +326,7 @@ pub(in crate::services::discord) fn advance_last_message_checkpoint(
 
 pub(in crate::services::discord) use queue_io::{
     schedule_deferred_idle_queue_kickoff, schedule_deferred_idle_queue_kickoff_immediate,
+    spawn_turn_completion_idle_queue_listener,
 };
 pub(super) fn single_message_panel_enabled() -> bool {
     single_message_panel::enabled()
@@ -2128,6 +2132,12 @@ pub(crate) struct SharedData {
     /// hiccup yields `RecvError::Lagged` rather than dropped channels.
     pub(in crate::services::discord) inflight_signals:
         tokio::sync::broadcast::Sender<inflight::InflightSignal>,
+    /// #4048 S3: canonical finalize-completion edge bus for idle-queue drain.
+    /// The TurnFinalizer publishes after the mailbox token release point, so this
+    /// is not coupled to visible status-panel/footer rendering.
+    pub(in crate::services::discord) turn_completion_events:
+        tokio::sync::broadcast::Sender<turn_completion_events::TurnCompletionEvent>,
+    pub(in crate::services::discord) turn_view_reconciler: turn_view_reconciler::TurnViewReconciler,
 }
 
 impl SharedData {
@@ -2396,6 +2406,8 @@ pub(super) fn make_shared_data_for_tests_with_storage(
         health_registry: std::sync::Weak::new(),
         known_slash_commands: tokio::sync::OnceCell::new(),
         inflight_signals: tokio::sync::broadcast::channel(256).0,
+        turn_completion_events: turn_completion_events::turn_completion_event_bus(),
+        turn_view_reconciler: turn_view_reconciler::TurnViewReconciler::default(),
     })
 }
 
@@ -2416,7 +2428,10 @@ fn queue_persistence_context(
 }
 
 async fn mailbox_snapshot(shared: &SharedData, channel_id: ChannelId) -> ChannelMailboxSnapshot {
-    shared.mailbox(channel_id).snapshot().await
+    match shared.mailbox_peek(channel_id) {
+        Some(handle) => handle.snapshot().await,
+        None => ChannelMailboxSnapshot::default(),
+    }
 }
 
 async fn mailbox_cancel_token(
@@ -2677,8 +2692,6 @@ async fn idle_queue_channel_has_kickable_backlog(
     snapshot: &ChannelMailboxSnapshot,
 ) -> bool {
     idle_queue_snapshot_has_kickable_backlog(shared, provider, channel_id, snapshot)
-        && !tui_busy_gate::idle_queue_blocked_by_hosted_tui_busy_pane(shared, provider, channel_id)
-            .await
 }
 
 async fn mailbox_try_start_turn(
@@ -2813,7 +2826,7 @@ async fn mailbox_clear_recovery_marker(shared: &SharedData, channel_id: ChannelI
 }
 
 async fn mailbox_enqueue_intervention(
-    shared: &SharedData,
+    shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
     intervention: Intervention,
@@ -2835,6 +2848,13 @@ async fn mailbox_enqueue_intervention(
             channel_id = channel_id.get(),
             error = %error,
             "mailbox enqueue failed durable pending-queue persistence"
+        );
+    }
+    if result.enqueued && result.persistence_error.is_none() {
+        queue_io::schedule_post_enqueue_idle_queue_kick(
+            shared.clone(),
+            provider.clone(),
+            channel_id,
         );
     }
     MailboxEnqueueOutcome {
@@ -2989,16 +3009,9 @@ async fn apply_queue_exit_feedback(
         }
     }
 
+    queue_marker::drain_queue_exit_markers(shared, &http, channel_id, &queue_exit_events).await;
     for event in queue_exit_events {
-        // Clean up every queue marker on contributing messages so exits leave
-        // only the terminal-state reaction visible.
-        let is_standalone = event.intervention.source_message_ids.len() <= 1;
-        for message_id in &event.intervention.source_message_ids {
-            for emoji in queue_reactions::drain_reactions_for_queue_exit(is_standalone) {
-                formatting::remove_reaction_raw(&http, channel_id, *message_id, *emoji).await;
-            }
-        }
-        formatting::add_reaction_raw(
+        reaction_lifecycle::note_auxiliary_reaction_added(
             &http,
             channel_id,
             event.intervention.message_id,
@@ -3109,7 +3122,9 @@ pub(in crate::services::discord) async fn enqueue_internal_followup(
             author_id: UserId::new(1),
             author_is_bot: false,
             message_id: reply_message_id,
+            queued_generation: shared.restart.current_generation,
             source_message_ids: vec![reply_message_id],
+            source_message_queued_generations: Vec::new(),
             text: text.into(),
             mode: InterventionMode::Soft,
             created_at: Instant::now(),
@@ -3275,11 +3290,11 @@ async fn idle_queue_take_next_soft_if_ready(
     channel_id: ChannelId,
 ) -> MailboxTakeNextSoftOutcome {
     // #3167 — only a real (non-background) active turn blocks the dequeue. The
-    // cleanup-retry and hosted-TUI-busy gates remain unchanged.
+    // cleanup-retry guard remains a correctness guard; the hosted-TUI busy-pane
+    // re-scrape gate was removed in #4048 S3 because finalize completion is now
+    // the drain authority.
     if mailbox_has_blocking_active_turn(shared, channel_id).await
         || cleanup_retry_inflight_blocks_idle_kickoff(shared, provider, channel_id)
-        || tui_busy_gate::idle_queue_blocked_by_hosted_tui_busy_pane(shared, provider, channel_id)
-            .await
     {
         return MailboxTakeNextSoftOutcome::default();
     }
@@ -3395,7 +3410,7 @@ async fn mailbox_clear_pending_dispatch_reservation(
 /// in-flight turn frees the pane rather than hot-looping. No-op for anchorless
 /// (recovery) turns or empty text.
 pub(in crate::services::discord) async fn mailbox_requeue_inflight_for_followup_retry(
-    shared: &SharedData,
+    shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
     inflight_state: &InflightTurnState,
@@ -3414,7 +3429,9 @@ pub(in crate::services::discord) async fn mailbox_requeue_inflight_for_followup_
         author_id: UserId::new(inflight_state.request_owner_user_id),
         author_is_bot: false,
         message_id,
+        queued_generation: shared.restart.current_generation,
         source_message_ids: vec![message_id],
+        source_message_queued_generations: Vec::new(),
         text: inflight_state.user_text.clone(),
         mode: crate::services::turn_orchestrator::InterventionMode::Soft,
         created_at: std::time::Instant::now(),
@@ -3601,6 +3618,7 @@ async fn mailbox_finish_turn(
     // that the legacy heuristic depended on. The latch is idempotent — if
     // `mailbox_clear_recovery_marker` already ran, this is a no-op.
     shared.mailboxes.recovery_done(channel_id).mark_done();
+    turn_completion_events::publish_mailbox_release_completion_event(shared, channel_id, &result);
     result
 }
 
@@ -3635,6 +3653,7 @@ async fn mailbox_finish_turn_if_matches(
     if result.removed_token.is_some() {
         shared.mailboxes.recovery_done(channel_id).mark_done();
     }
+    turn_completion_events::publish_mailbox_release_completion_event(shared, channel_id, &result);
     result
 }
 
@@ -3647,6 +3666,7 @@ async fn mailbox_finish_cancelled_turn(
     if result.removed_token.is_some() {
         shared.mailboxes.recovery_done(channel_id).mark_done();
     }
+    turn_completion_events::publish_mailbox_release_completion_event(shared, channel_id, &result);
     result
 }
 
@@ -3789,7 +3809,6 @@ pub(super) type Context<'a> = poise::Context<'a, Data, Error>;
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct IdleQueueKickoffChannelOutcome {
     pub(super) started: bool,
-    pub(super) dispatch_failed: bool,
 }
 
 async fn kickoff_idle_queue_channel(
@@ -3854,11 +3873,15 @@ async fn kickoff_idle_queue_channel(
         channel_id
     );
 
-    for message_id in &intervention.source_message_ids {
-        for emoji in queue_reactions::QUEUE_PENDING_REACTION_EMOJIS {
-            formatting::remove_reaction_raw(&ctx.http, channel_id, *message_id, emoji).await;
-        }
-    }
+    let source_message_generations = intervention.source_message_queued_generations();
+    queue_marker::start_and_drain_kickoff_markers(
+        shared,
+        &ctx.http,
+        channel_id,
+        intervention.message_id,
+        &source_message_generations,
+    )
+    .await;
 
     let drained_cards = gateway::drain_merged_queued_placeholders(
         shared,
@@ -3912,10 +3935,7 @@ async fn kickoff_idle_queue_channel(
             );
             mailbox_requeue_intervention_front(shared, provider, channel_id, intervention).await;
             drop(dispatch_lease);
-            IdleQueueKickoffChannelOutcome {
-                started: false,
-                dispatch_failed: true,
-            }
+            IdleQueueKickoffChannelOutcome { started: false }
         }
         Ok(()) => {
             mailbox_abandon_unclaimed_dispatch_after_success(
@@ -3926,10 +3946,7 @@ async fn kickoff_idle_queue_channel(
             )
             .await;
             drop(dispatch_lease);
-            IdleQueueKickoffChannelOutcome {
-                started: true,
-                dispatch_failed: false,
-            }
+            IdleQueueKickoffChannelOutcome { started: true }
         }
     }
 }
@@ -4245,9 +4262,7 @@ fn resolve_codex_skill_file(path: &Path) -> Option<std::path::PathBuf> {
     None
 }
 
-use discord_io::{
-    add_reaction, check_auth, check_owner, rate_limit_wait, try_handle_pending_dm_reply,
-};
+use discord_io::{check_auth, check_owner, rate_limit_wait, try_handle_pending_dm_reply};
 
 // ─── Event handler ───────────────────────────────────────────────────────────
 
@@ -4677,7 +4692,9 @@ mod idle_queue_background_supersede_tests {
             author_id: UserId::new(7),
             author_is_bot: false,
             message_id: MessageId::new(message_id),
+            queued_generation: crate::services::discord::runtime_store::load_generation(),
             source_message_ids: vec![MessageId::new(message_id)],
+            source_message_queued_generations: Vec::new(),
             text: text.to_string(),
             mode: InterventionMode::Soft,
             created_at: Instant::now(),

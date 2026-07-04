@@ -358,6 +358,9 @@ pub(super) fn watcher_terminal_response_for_direct_send<'a>(
     response_sent_offset: usize,
     session_bound_fallback_uses_full_body: bool,
 ) -> &'a str {
+    // Reconciled re-sends use the full body because committed-offset authority is
+    // byte-range based while sink delegation is all-or-nothing; a suffix would
+    // splice unrelated coordinates and risk a black hole.
     if session_bound_fallback_uses_full_body {
         return full_response;
     }

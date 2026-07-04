@@ -433,6 +433,9 @@ src/
 │   │   │   ├── text_commands.rs
 │   │   │   ├── tui_passthrough.rs
 │   │   │   └── voice.rs
+│   │   ├── footer_view_reconciler/
+│   │   │   ├── mod.rs
+│   │   │   └── registry.rs
 │   │   ├── health/
 │   │   │   ├── recovery/
 │   │   │   │   ├── leak_recovery_ledger.rs
@@ -582,7 +585,8 @@ src/
 │   │   │   └── voice.rs
 │   │   ├── session_relay_sink/
 │   │   │   ├── idle_jsonl.rs
-│   │   │   └── orphan_reclaim.rs
+│   │   │   ├── orphan_reclaim.rs
+│   │   │   └── relay_format.rs
 │   │   ├── session_runtime/
 │   │   │   ├── channel_routing.rs
 │   │   │   ├── restore_cwd.rs
@@ -593,8 +597,6 @@ src/
 │   │   │   ├── read.rs
 │   │   │   ├── validation.rs
 │   │   │   └── write.rs
-│   │   ├── single_message_panel/
-│   │   │   └── completion_footer_registry.rs
 │   │   ├── tmux_watcher/
 │   │   │   ├── commit_decisions.rs
 │   │   │   ├── completion_gate.rs
@@ -699,6 +701,8 @@ src/
 │   │   │   ├── finalize_context.rs
 │   │   │   ├── reconcile.rs
 │   │   │   └── watcher_backstop.rs
+│   │   ├── turn_view_reconciler/
+│   │   │   └── tests.rs
 │   │   ├── voice_barge_in/
 │   │   │   ├── tests/
 │   │   │   │   └── pcm_harness_tests.rs
@@ -755,6 +759,7 @@ src/
 │   │   ├── placeholder_sweeper.rs
 │   │   ├── queue_dispatch.rs
 │   │   ├── queue_io.rs
+│   │   ├── queue_marker.rs
 │   │   ├── queue_reactions.rs
 │   │   ├── queued_placeholders_store.rs
 │   │   ├── reaction_cleanup.rs
@@ -805,12 +810,13 @@ src/
 │   │   ├── tmux_restart_handoff.rs
 │   │   ├── tmux_session_files.rs
 │   │   ├── tmux_watcher.rs
-│   │   ├── tui_busy_gate.rs
 │   │   ├── tui_direct_pending_start.rs
 │   │   ├── tui_prompt_relay.rs
 │   │   ├── tui_task_card.rs
+│   │   ├── turn_completion_events.rs
 │   │   ├── turn_end_wip_warning.rs
 │   │   ├── turn_finalizer.rs
+│   │   ├── turn_view_reconciler.rs
 │   │   ├── voice_acknowledgement.rs
 │   │   ├── voice_background_driver.rs
 │   │   ├── voice_barge_in.rs

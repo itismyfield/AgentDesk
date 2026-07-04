@@ -1,10 +1,10 @@
 use super::{
     FreshIdleFinalizeDecision, SessionBoundRelayAckOutcome, TuiCompletionGateOutcome,
-    build_watcher_streaming_edit_text,
+    WatcherTerminalKind, build_watcher_streaming_edit_text,
     discard_restored_response_seed_before_no_inflight_terminal_relay,
-    legacy_wrapper_prompt_candidates_from_pane, mark_watcher_terminal_delivery_committed,
-    reacquire_watcher_inflight_for_active_stream, should_probe_tmux_liveness,
-    terminal_relay_decision, watcher_batch_contains_assistant_event,
+    legacy_wrapper_prompt_candidates_from_pane, local_cmd_no_output,
+    mark_watcher_terminal_delivery_committed, reacquire_watcher_inflight_for_active_stream,
+    should_probe_tmux_liveness, terminal_relay_decision, watcher_batch_contains_assistant_event,
     watcher_batch_contains_relayable_response,
     watcher_fallback_edit_failure_can_delete_original_placeholder,
     watcher_fresh_idle_finalize_decision, watcher_inflight_absence_is_abandonment,
@@ -426,7 +426,9 @@ async fn terminal_delivery_timeout_cleanup_releases_mailbox_and_preserves_follow
             author_id: UserId::new(99),
             author_is_bot: false,
             message_id: MessageId::new(2001),
+            queued_generation: crate::services::discord::runtime_store::load_generation(),
             source_message_ids: vec![MessageId::new(2001)],
+            source_message_queued_generations: Vec::new(),
             text: "queued follow-up".to_string(),
             mode: InterventionMode::Soft,
             created_at: std::time::Instant::now(),
@@ -563,7 +565,9 @@ fn watchdog_timeout_path_releases_mailbox_via_finalizer_and_does_not_double_fina
                 author_id: UserId::new(99),
                 author_is_bot: false,
                 message_id: MessageId::new(6001),
+                queued_generation: crate::services::discord::runtime_store::load_generation(),
                 source_message_ids: vec![MessageId::new(6001)],
+                source_message_queued_generations: Vec::new(),
                 text: "post-timeout follow-up".to_string(),
                 mode: InterventionMode::Soft,
                 created_at: std::time::Instant::now(),
@@ -848,7 +852,9 @@ fn timeout_finalize_drains_reacquired_id_zero_wedge_for_live_pinned_turn() {
                 author_id: UserId::new(99),
                 author_is_bot: false,
                 message_id: MessageId::new(3600),
+                queued_generation: crate::services::discord::runtime_store::load_generation(),
                 source_message_ids: vec![MessageId::new(3600)],
+                source_message_queued_generations: Vec::new(),
                 text: "follow-up while A runs".to_string(),
                 mode: InterventionMode::Soft,
                 created_at: std::time::Instant::now(),
@@ -1967,6 +1973,8 @@ fn no_inflight_terminal_response_drops_restored_response_seed() {
             restored,
             false,
             true,
+            false,
+            false,
         )
     );
     assert_eq!(full_response, "fresh turn");
@@ -1989,6 +1997,8 @@ fn restored_response_seed_is_kept_for_managed_inflight() {
             restored,
             true,
             true,
+            false,
+            false,
         )
     );
     assert_eq!(full_response, "previous turnfresh turn");
@@ -2008,6 +2018,8 @@ fn no_inflight_user_boundary_without_fresh_text_drops_already_delivered_restored
             &mut response_sent_offset,
             &mut last_edit_text,
             restored,
+            false,
+            false,
             false,
             false,
         )
@@ -2030,6 +2042,8 @@ fn no_inflight_user_boundary_without_fresh_text_preserves_body_bearing_seed_for_
             &mut response_sent_offset,
             &mut last_edit_text,
             restored,
+            false,
+            false,
             false,
             false,
         )
@@ -2058,6 +2072,156 @@ fn no_inflight_user_boundary_without_fresh_text_preserves_body_bearing_seed_for_
         watcher_terminal_response_for_direct_send(&full_response, response_sent_offset, false),
         restored
     );
+}
+
+#[test]
+fn compact_local_only_boundary_without_seed_delivery_fingerprint_preserves_restored_seed_4096() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(987_4096_001);
+    let tmux_session_name = "AgentDesk-claude-adk-cc-4096-missing-fingerprint";
+    let restored = "queued turn terminal body that failed delivery";
+    let mut full_response = restored.to_string();
+    let mut response_sent_offset = 0;
+    let mut last_edit_text = restored.to_string();
+    let compact_tail =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"/compact\"}}\n";
+
+    let tool_state = crate::services::discord::tmux::WatcherToolState::new();
+    let force_discard = local_cmd_no_output(
+        compact_tail,
+        Some(WatcherTerminalKind::SoftUserBoundary),
+        false,
+        &tool_state,
+    );
+
+    assert!(force_discard);
+    crate::services::discord::outbound::delivery_record::record_delivered_content_fingerprint(
+        &provider,
+        channel_id,
+        tmux_session_name,
+        "same-session tui-direct turn that really delivered",
+    );
+    let restored_seed_delivery_confirmed =
+        crate::services::discord::outbound::delivery_record::recent_delivered_content_matches(
+            &provider,
+            channel_id,
+            tmux_session_name,
+            restored,
+        );
+    assert!(
+        !restored_seed_delivery_confirmed,
+        "a competing same-session delivery must not authorize dropping the failed seed"
+    );
+    assert!(
+        !discard_restored_response_seed_before_no_inflight_terminal_relay(
+            &mut full_response,
+            &mut response_sent_offset,
+            &mut last_edit_text,
+            restored,
+            false,
+            false,
+            force_discard,
+            restored_seed_delivery_confirmed,
+        )
+    );
+    assert_eq!(full_response, restored);
+    assert_eq!(response_sent_offset, 0);
+    assert_eq!(last_edit_text, restored);
+}
+
+#[test]
+fn compact_local_only_boundary_without_output_drops_restored_seed_4081() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(987_4096_002);
+    let tmux_session_name = "AgentDesk-claude-adk-cc-4096-confirmed-fingerprint";
+    let restored = "prior delivered response";
+    let mut full_response = restored.to_string();
+    let mut response_sent_offset = 0;
+    let mut last_edit_text = restored.to_string();
+    let compact_tail =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"/compact\"}}\n";
+
+    let tool_state = crate::services::discord::tmux::WatcherToolState::new();
+    let force_discard = local_cmd_no_output(
+        compact_tail,
+        Some(WatcherTerminalKind::SoftUserBoundary),
+        false,
+        &tool_state,
+    );
+
+    assert!(force_discard);
+    crate::services::discord::outbound::delivery_record::record_delivered_content_fingerprint(
+        &provider,
+        channel_id,
+        tmux_session_name,
+        restored,
+    );
+    let restored_seed_delivery_confirmed =
+        crate::services::discord::outbound::delivery_record::recent_delivered_content_matches(
+            &provider,
+            channel_id,
+            tmux_session_name,
+            restored,
+        );
+    assert!(restored_seed_delivery_confirmed);
+    assert!(
+        discard_restored_response_seed_before_no_inflight_terminal_relay(
+            &mut full_response,
+            &mut response_sent_offset,
+            &mut last_edit_text,
+            restored,
+            false,
+            false,
+            force_discard,
+            restored_seed_delivery_confirmed,
+        )
+    );
+    assert_eq!(full_response, "");
+    assert_eq!(response_sent_offset, 0);
+    assert!(last_edit_text.is_empty());
+}
+
+#[test]
+fn orphan_reclaim_real_tail_still_preserves_body_seed_4081() {
+    let restored = "undelivered orphan tail";
+    let mut full_response = restored.to_string();
+    let mut response_sent_offset = 0;
+    let mut last_edit_text = String::new();
+    let tool_state = crate::services::discord::tmux::WatcherToolState::new();
+    let force_discard = local_cmd_no_output(
+        "",
+        Some(WatcherTerminalKind::SoftUserBoundary),
+        false,
+        &tool_state,
+    );
+
+    assert!(!force_discard);
+    assert!(
+        !discard_restored_response_seed_before_no_inflight_terminal_relay(
+            &mut full_response,
+            &mut response_sent_offset,
+            &mut last_edit_text,
+            restored,
+            false,
+            false,
+            force_discard,
+            false,
+        )
+    );
+    assert_eq!(full_response, restored);
+    assert_eq!(response_sent_offset, 0);
 }
 
 #[test]
@@ -2621,6 +2785,7 @@ mod watcher_short_replace_controller {
             "AgentDesk-claude-8141",
             MessageId::new(MSG),
             "answer",
+            "answer",
             cell,
             turn(),
             Some(lease_key()),
@@ -2643,6 +2808,7 @@ mod watcher_short_replace_controller {
             ch(),
             "AgentDesk-claude-8141",
             MessageId::new(MSG),
+            &"x".repeat(crate::services::discord::DISCORD_MSG_LIMIT + 10),
             &"x".repeat(crate::services::discord::DISCORD_MSG_LIMIT + 10),
             cell,
             turn(),

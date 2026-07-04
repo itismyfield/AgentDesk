@@ -218,6 +218,7 @@ pub(super) async fn deliver_short_replace_via_controller(
     placeholder_controller: &super::super::placeholder_controller::PlaceholderController,
     msg_id: MessageId,
     relay_text: &str,
+    delivered_body: &str,
     turn: TurnKey,
     lease_key: Option<DeliveryLeaseKey>,
     start: u64,
@@ -321,6 +322,7 @@ pub(super) async fn deliver_short_replace_via_controller(
         dr::outcome_is_shadow_delivered(&outcome),
         Some(msg_id.get()),
         Some(channel_id.get()),
+        Some(delivered_body),
     );
     outcome
 }
@@ -342,6 +344,7 @@ pub(super) async fn deliver_long_chunks_via_controller(
     placeholder_controller: &super::super::placeholder_controller::PlaceholderController,
     msg_id: MessageId,
     relay_text: &str,
+    delivered_body: &str,
     turn: TurnKey,
     lease_key: Option<DeliveryLeaseKey>,
     start: u64,
@@ -405,6 +408,7 @@ pub(super) async fn deliver_long_chunks_via_controller(
             channel_id,
             (start, end),
             chunks.tail_message_id.map(|m| m.get()),
+            delivered_body,
         );
     }
     outcome
@@ -433,6 +437,7 @@ pub(super) async fn apply_bridge_long_chunks_controller(
     placeholder_controller: &super::super::placeholder_controller::PlaceholderController,
     msg_id: MessageId,
     relay_text: &str,
+    delivered_body: &str,
     full_response_len: usize,
     turn: TurnKey,
     start: u64,
@@ -455,6 +460,7 @@ pub(super) async fn apply_bridge_long_chunks_controller(
         placeholder_controller,
         msg_id,
         relay_text,
+        delivered_body,
         turn,
         lease_key,
         start,
@@ -489,6 +495,7 @@ pub(super) async fn apply_bridge_long_chunks_legacy(
     tmux_session_name: Option<&str>,
     msg_id: MessageId,
     relay_text: &str,
+    delivered_body: &str,
     full_response_len: usize,
     single_message_panel_footer_mode: bool,
     dispatch_id: Option<&str>,
@@ -549,6 +556,7 @@ pub(super) async fn apply_bridge_long_chunks_legacy(
                         channel_id,
                         lease_range,
                         last_chunk_msg_id.map(|m| m.get()),
+                        delivered_body,
                     );
                 }
             }
@@ -714,6 +722,7 @@ pub(super) async fn apply_bridge_short_replace_controller(
     placeholder_controller: &super::super::placeholder_controller::PlaceholderController,
     msg_id: MessageId,
     relay_text: &str,
+    delivered_body: &str,
     full_response_len: usize,
     turn: TurnKey,
     start: u64,
@@ -736,6 +745,7 @@ pub(super) async fn apply_bridge_short_replace_controller(
         placeholder_controller,
         msg_id,
         relay_text,
+        delivered_body,
         turn,
         lease_key,
         start,
@@ -1153,6 +1163,7 @@ mod tests {
                 &shared.ui.placeholder_controller,
                 MessageId::new(MSG),
                 "answer body",
+                "answer body",
                 turn(),
                 Some(lease_key()),
                 START,
@@ -1378,6 +1389,7 @@ mod tests {
                 &cell,
                 &shared.ui.placeholder_controller,
                 MessageId::new(MSG),
+                &"x".repeat(crate::services::discord::DISCORD_MSG_LIMIT + 10),
                 &"x".repeat(crate::services::discord::DISCORD_MSG_LIMIT + 10),
                 8192,
                 turn(),
@@ -1762,6 +1774,7 @@ mod tests {
                 &cell,
                 &shared.ui.placeholder_controller,
                 MessageId::new(MSG),
+                &"x".repeat(crate::services::discord::DISCORD_MSG_LIMIT + 10),
                 &"x".repeat(crate::services::discord::DISCORD_MSG_LIMIT + 10),
                 8192,
                 turn(),

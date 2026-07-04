@@ -49,6 +49,81 @@ enum ReactionAction {
     Remove,
 }
 
+fn parent_retry_failure_status(
+    _initial_status: Option<u16>,
+    final_status: Option<u16>,
+) -> Option<u16> {
+    final_status
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) fn test_parent_retry_failure_status(
+    initial_status: Option<u16>,
+    final_status: Option<u16>,
+) -> Option<u16> {
+    parent_retry_failure_status(initial_status, final_status)
+}
+
+#[cfg(not(test))]
+#[derive(Clone, Debug)]
+pub(in crate::services::discord) struct ReactionLifecycleError {
+    message: String,
+    status: Option<u16>,
+}
+
+#[cfg(not(test))]
+impl ReactionLifecycleError {
+    pub(in crate::services::discord) fn status(&self) -> Option<u16> {
+        self.status
+    }
+
+    fn new(message: impl Into<String>, status: Option<u16>) -> Self {
+        Self {
+            message: message.into(),
+            status,
+        }
+    }
+
+    fn from_serenity(error: serenity::Error) -> Self {
+        let status = match &error {
+            serenity::Error::Http(http_error) => {
+                http_error.status_code().map(|status| status.as_u16())
+            }
+            _ => None,
+        };
+        Self::new(error.to_string(), status)
+    }
+
+    fn with_parent_retry_error(self, parent_channel_id: ChannelId, second: Self) -> Self {
+        let status = parent_retry_failure_status(self.status, second.status);
+        Self::new(
+            format!(
+                "{}; parent-channel retry in {} failed: {}",
+                self, parent_channel_id, second
+            ),
+            status,
+        )
+    }
+
+    fn with_dispatch_parent_retry_error(self, target_channel_id: ChannelId, second: Self) -> Self {
+        let status = parent_retry_failure_status(self.status, second.status);
+        Self::new(
+            format!(
+                "{}; dispatch-parent retry in {} failed: {}",
+                self, target_channel_id, second
+            ),
+            status,
+        )
+    }
+}
+
+#[cfg(not(test))]
+impl std::fmt::Display for ReactionLifecycleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 impl ReactionAction {
     fn label(self) -> &'static str {
         match self {
@@ -75,6 +150,27 @@ async fn apply_reaction_action(
             .delete_reaction(http, message_id, None, reaction)
             .await
             .map_err(|error| error.to_string()),
+    }
+}
+
+#[cfg(not(test))]
+async fn apply_reaction_action_detailed(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    message_id: serenity::MessageId,
+    emoji: char,
+    action: ReactionAction,
+) -> Result<(), ReactionLifecycleError> {
+    let reaction = serenity::ReactionType::Unicode(emoji.to_string());
+    match action {
+        ReactionAction::Add => channel_id
+            .create_reaction(http, message_id, reaction)
+            .await
+            .map_err(ReactionLifecycleError::from_serenity),
+        ReactionAction::Remove => channel_id
+            .delete_reaction(http, message_id, None, reaction)
+            .await
+            .map_err(ReactionLifecycleError::from_serenity),
     }
 }
 
@@ -157,20 +253,89 @@ async fn try_reaction_raw_once_on_channel(
 }
 
 #[cfg(not(test))]
-async fn try_reaction_raw_with_shared(
+async fn try_reaction_raw_once_on_channel_detailed(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    message_id: serenity::MessageId,
+    emoji: char,
+    action: ReactionAction,
+) -> Result<(), ReactionLifecycleError> {
+    if !is_real_discord_message_id(message_id) {
+        tracing::debug!(
+            channel = channel_id.get(),
+            message = message_id.get(),
+            emoji = %emoji,
+            action = action.label(),
+            "discord reaction skipped for non-Discord/synthetic message id"
+        );
+        return Ok(());
+    }
+
+    apply_reaction_action_detailed(http, channel_id, message_id, emoji, action).await
+}
+
+#[cfg(not(test))]
+async fn try_reaction_raw_on_channel_detailed(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    message_id: serenity::MessageId,
+    emoji: char,
+    action: ReactionAction,
+) -> Result<(), ReactionLifecycleError> {
+    match try_reaction_raw_once_on_channel_detailed(http, channel_id, message_id, emoji, action)
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(first_error) => {
+            if let Some(parent_channel_id) = thread_parent_channel_from_http(http, channel_id)
+                .await
+                .filter(|parent| *parent != channel_id)
+            {
+                tracing::debug!(
+                    channel = channel_id.get(),
+                    parent_channel = parent_channel_id.get(),
+                    message = message_id.get(),
+                    emoji = %emoji,
+                    action = action.label(),
+                    error = %first_error,
+                    "discord reaction retrying against thread parent channel"
+                );
+                try_reaction_raw_once_on_channel_detailed(
+                    http,
+                    parent_channel_id,
+                    message_id,
+                    emoji,
+                    action,
+                )
+                .await
+                .map_err(|second_error| {
+                    first_error.with_parent_retry_error(parent_channel_id, second_error)
+                })
+            } else {
+                Err(first_error)
+            }
+        }
+    }
+}
+
+#[cfg(not(test))]
+async fn try_reaction_raw_with_shared_detailed(
     http: &serenity::Http,
     shared: &SharedData,
     channel_id: ChannelId,
     message_id: serenity::MessageId,
     emoji: char,
     action: ReactionAction,
-) -> Result<(), String> {
+) -> Result<(), ReactionLifecycleError> {
     let target_channel_id = reaction_target_channel_for_shared(shared, channel_id);
     if target_channel_id == channel_id {
-        return try_reaction_raw_on_channel(http, channel_id, message_id, emoji, action).await;
+        return try_reaction_raw_on_channel_detailed(http, channel_id, message_id, emoji, action)
+            .await;
     }
 
-    match try_reaction_raw_once_on_channel(http, channel_id, message_id, emoji, action).await {
+    match try_reaction_raw_once_on_channel_detailed(http, channel_id, message_id, emoji, action)
+        .await
+    {
         Ok(()) => Ok(()),
         Err(first_error) => {
             tracing::debug!(
@@ -182,13 +347,17 @@ async fn try_reaction_raw_with_shared(
                 error = %first_error,
                 "discord reaction retrying against dispatch thread parent channel"
             );
-            try_reaction_raw_once_on_channel(http, target_channel_id, message_id, emoji, action)
-                .await
-                .map_err(|second_error| {
-                    format!(
-                        "{first_error}; dispatch-parent retry in {target_channel_id} failed: {second_error}"
-                    )
-                })
+            try_reaction_raw_once_on_channel_detailed(
+                http,
+                target_channel_id,
+                message_id,
+                emoji,
+                action,
+            )
+            .await
+            .map_err(|second_error| {
+                first_error.with_dispatch_parent_retry_error(target_channel_id, second_error)
+            })
         }
     }
 }
@@ -202,24 +371,15 @@ pub(in crate::services::discord) async fn try_add_reaction_raw(
     try_reaction_raw_on_channel(http, channel_id, message_id, emoji, ReactionAction::Add).await
 }
 
-pub(in crate::services::discord) async fn try_remove_reaction_raw(
-    http: &serenity::Http,
-    channel_id: ChannelId,
-    message_id: serenity::MessageId,
-    emoji: char,
-) -> Result<(), String> {
-    try_reaction_raw_on_channel(http, channel_id, message_id, emoji, ReactionAction::Remove).await
-}
-
 #[cfg(not(test))]
-pub(in crate::services::discord) async fn try_add_reaction_raw_with_shared(
+pub(in crate::services::discord) async fn try_add_reaction_raw_with_shared_detailed(
     http: &serenity::Http,
     shared: &SharedData,
     channel_id: ChannelId,
     message_id: serenity::MessageId,
     emoji: char,
-) -> Result<(), String> {
-    try_reaction_raw_with_shared(
+) -> Result<(), ReactionLifecycleError> {
+    try_reaction_raw_with_shared_detailed(
         http,
         shared,
         channel_id,
@@ -230,15 +390,24 @@ pub(in crate::services::discord) async fn try_add_reaction_raw_with_shared(
     .await
 }
 
+pub(in crate::services::discord) async fn try_remove_reaction_raw(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    message_id: serenity::MessageId,
+    emoji: char,
+) -> Result<(), String> {
+    try_reaction_raw_on_channel(http, channel_id, message_id, emoji, ReactionAction::Remove).await
+}
+
 #[cfg(not(test))]
-pub(in crate::services::discord) async fn try_remove_reaction_raw_with_shared(
+pub(in crate::services::discord) async fn try_remove_reaction_raw_with_shared_detailed(
     http: &serenity::Http,
     shared: &SharedData,
     channel_id: ChannelId,
     message_id: serenity::MessageId,
     emoji: char,
-) -> Result<(), String> {
-    try_reaction_raw_with_shared(
+) -> Result<(), ReactionLifecycleError> {
+    try_reaction_raw_with_shared_detailed(
         http,
         shared,
         channel_id,
@@ -283,6 +452,24 @@ pub(in crate::services::discord) async fn remove_reaction_raw(
             false
         }
     }
+}
+
+pub(in crate::services::discord) async fn note_auxiliary_reaction_added(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    message_id: serenity::MessageId,
+    emoji: char,
+) -> bool {
+    add_reaction_raw(http, channel_id, message_id, emoji).await
+}
+
+pub(in crate::services::discord) async fn note_auxiliary_reaction_removed(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    message_id: serenity::MessageId,
+    emoji: char,
+) -> bool {
+    remove_reaction_raw(http, channel_id, message_id, emoji).await
 }
 
 #[cfg(test)]

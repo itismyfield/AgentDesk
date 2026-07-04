@@ -55,7 +55,11 @@ impl InjectedPromptClass {
     /// Whether this injected class should keep the provider-output bridge tail.
     #[cfg(test)]
     pub(super) fn still_delivers_assistant_output(self) -> bool {
-        !matches!(self, InjectedPromptClass::SubagentNotificationEvent)
+        !matches!(
+            self,
+            InjectedPromptClass::SystemContinuation
+                | InjectedPromptClass::SubagentNotificationEvent
+        )
     }
 
     pub(super) fn is_subagent_notification_event(self) -> bool {

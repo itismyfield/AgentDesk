@@ -1,4 +1,5 @@
 use std::sync::Arc;
+#[cfg(test)]
 use std::time::Duration;
 
 use crate::services::provider::ProviderKind;
@@ -7,13 +8,12 @@ use super::{FinalizeContext, TerminalEvent, TurnKey};
 use crate::services::discord::SharedData;
 use crate::services::discord::inflight::RelayOwnerKind;
 
-#[cfg(not(test))]
-const REACTION_CLEANUP_RETRY_BACKOFF: Duration = Duration::from_millis(250);
-
 #[derive(Clone, Copy)]
 struct ReactionCleanupRequest {
     channel_id: serenity::model::id::ChannelId,
     message_id: serenity::model::id::MessageId,
+    #[cfg_attr(test, allow(dead_code))]
+    generation: u64,
     add_checkmark: bool,
     source: &'static str,
 }
@@ -65,6 +65,7 @@ pub(super) fn finalized_reaction_lifecycle(
         ReactionCleanupRequest {
             channel_id: key.channel_id,
             message_id,
+            generation: key.generation,
             add_checkmark: standby_completion_cleanup || !matches!(event, TerminalEvent::Cancel),
             source,
         },
@@ -329,85 +330,44 @@ pub(super) async fn already_finalized_active_state(
 #[cfg(not(test))]
 fn schedule_reaction_cleanup(shared: Arc<SharedData>, request: ReactionCleanupRequest) {
     super::super::task_supervisor::spawn_observed("turn_finalizer_reaction_cleanup", async move {
-        let _ = apply_reaction(
-            &shared,
-            request.channel_id,
-            request.message_id,
-            '⏳',
-            false,
-            request.source,
-        )
-        .await;
         if request.add_checkmark {
-            let _ = apply_reaction(
+            let Some(http) = shared.serenity_http_or_token_fallback() else {
+                return;
+            };
+            let _ = super::super::turn_view_reconciler::note_intake_turn_completed(
                 &shared,
+                &http,
                 request.channel_id,
                 request.message_id,
-                '✅',
-                true,
+                request.generation,
+                request.source,
+            )
+            .await;
+        } else if let Some(http) = shared.serenity_http_or_token_fallback() {
+            let _ = super::super::turn_view_reconciler::note_intake_turn_cleared(
+                &shared,
+                &http,
+                request.channel_id,
+                request.message_id,
+                request.generation,
                 request.source,
             )
             .await;
         }
+        let target = super::super::turn_view_reconciler::TurnViewTarget::intake_user_message(
+            request.channel_id,
+            request.message_id,
+        );
+        let owner = super::super::turn_view_reconciler::turn_view_owner_for_message(
+            request.channel_id,
+            request.message_id,
+            request.generation,
+        );
+        shared.turn_view_reconciler.evict_finalized(target, &owner);
     });
 }
 
-#[cfg(not(test))]
-async fn apply_reaction(
-    shared: &Arc<SharedData>,
-    channel_id: serenity::model::id::ChannelId,
-    message_id: serenity::model::id::MessageId,
-    emoji: char,
-    add: bool,
-    source: &'static str,
-) -> bool {
-    match retry_once_after_backoff(
-        || apply_reaction_once(shared, channel_id, message_id, emoji, add),
-        REACTION_CLEANUP_RETRY_BACKOFF,
-    )
-    .await
-    {
-        Ok(()) => true,
-        Err((first_error, second_error)) => {
-            tracing::warn!(
-                channel = channel_id.get(),
-                message = message_id.get(),
-                emoji = %emoji,
-                add,
-                source,
-                first_error = %first_error,
-                error = %second_error,
-                "turn finalizer reaction cleanup failed after retry"
-            );
-            false
-        }
-    }
-}
-
-#[cfg(not(test))]
-async fn apply_reaction_once(
-    shared: &Arc<SharedData>,
-    channel_id: serenity::model::id::ChannelId,
-    message_id: serenity::model::id::MessageId,
-    emoji: char,
-    add: bool,
-) -> Result<(), String> {
-    let Some(http) = shared.serenity_http_or_token_fallback() else {
-        return Err("provider serenity http unavailable".to_string());
-    };
-    if add {
-        super::super::formatting::try_add_reaction_raw_with_shared(
-            &http, shared, channel_id, message_id, emoji,
-        )
-        .await
-    } else {
-        super::super::formatting::try_remove_reaction_raw_with_shared(
-            &http, shared, channel_id, message_id, emoji,
-        )
-        .await
-    }
-}
-
+#[cfg(test)]
 async fn retry_once_after_backoff<F, Fut, E>(
     mut operation: F,
     backoff: Duration,

@@ -10,11 +10,130 @@ use tracing_subscriber::fmt::writer::MakeWriter;
 const DEFAULT_DCSERVER_LOG_MAX_BYTES: u64 = 100 * 1024 * 1024;
 const DEFAULT_DCSERVER_LOG_MAX_FILES: usize = 10;
 
-fn tracing_env_filter() -> Result<EnvFilter> {
+pub(crate) fn tracing_env_filter() -> Result<EnvFilter> {
     let directive = "agentdesk=info"
         .parse()
         .map_err(|error| anyhow::anyhow!("Failed to parse tracing directive: {error}"))?;
     Ok(EnvFilter::from_default_env().add_directive(directive))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+    use tracing_subscriber::fmt::writer::MakeWriter;
+
+    #[derive(Clone)]
+    struct CapturingWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for CapturingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.buffer.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for CapturingWriter {
+        type Writer = CapturingWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn tracing_env_filter_with_rust_log_unset() -> EnvFilter {
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        let saved = std::env::var_os("RUST_LOG");
+        remove_rust_log_for_test();
+        let filter = tracing_env_filter().expect("default tracing filter");
+        restore_rust_log_for_test(saved);
+        filter
+    }
+
+    fn remove_rust_log_for_test() {
+        // SAFETY: logging tests serialize this process-wide mutation with ENV_LOCK
+        // and restore the previous value before releasing the lock.
+        unsafe {
+            std::env::remove_var("RUST_LOG");
+        }
+    }
+
+    fn restore_rust_log_for_test(saved: Option<OsString>) {
+        // SAFETY: logging tests serialize this process-wide mutation with ENV_LOCK
+        // and restore the previous value before releasing the lock.
+        unsafe {
+            match saved {
+                Some(value) => std::env::set_var("RUST_LOG", value),
+                None => std::env::remove_var("RUST_LOG"),
+            }
+        }
+    }
+
+    fn capture_logs_with_default_filter<F>(emit: F) -> String
+    where
+        F: FnOnce(),
+    {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(tracing_env_filter_with_rust_log_unset())
+            .with_ansi(false)
+            .without_time()
+            .with_target(true)
+            .with_writer(CapturingWriter {
+                buffer: buffer.clone(),
+            })
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, emit);
+        String::from_utf8(buffer.lock().unwrap().clone()).unwrap()
+    }
+
+    #[test]
+    fn default_agentdesk_filter_keeps_observability_targets_and_drops_policy_target() {
+        let logs = capture_logs_with_default_filter(|| {
+            tracing::info!(
+                target: crate::api_caller_observability::LOG_TARGET,
+                "api caller production filter marker"
+            );
+            tracing::info!(
+                target: crate::engine::ops::TIMEOUT_SHADOW_LOG_TARGET,
+                "timeout shadow production filter marker"
+            );
+            tracing::info!(
+                target: "policy",
+                "policy production filter marker"
+            );
+        });
+
+        assert!(
+            logs.contains("api caller production filter marker"),
+            "logs={logs}"
+        );
+        assert!(
+            logs.contains(crate::api_caller_observability::LOG_TARGET),
+            "logs={logs}"
+        );
+        assert!(
+            logs.contains("timeout shadow production filter marker"),
+            "logs={logs}"
+        );
+        assert!(
+            logs.contains(crate::engine::ops::TIMEOUT_SHADOW_LOG_TARGET),
+            "logs={logs}"
+        );
+        assert!(
+            !logs.contains("policy production filter marker"),
+            "logs={logs}"
+        );
+        assert!(!logs.contains("policy"), "logs={logs}");
+    }
 }
 
 fn init_tracing_once() -> Result<()> {

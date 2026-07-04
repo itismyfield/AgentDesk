@@ -50,6 +50,8 @@ CHECK_MODULES = (
     "audit_maintainability.checks.route_srp",
     "audit_maintainability.checks.service_server_backflow",
     "audit_maintainability.checks.direct_discord_sends",
+    "audit_maintainability.checks.direct_discord_reactions",
+    "audit_maintainability.checks.footer_view_writes",
     "audit_maintainability.checks.manual_json_mapping",
     "audit_maintainability.checks.limit_clamp_duplication",
     "audit_maintainability.checks.git_subprocess",
