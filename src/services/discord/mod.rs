@@ -42,6 +42,7 @@ mod placeholder_sweeper;
 mod prompt_builder;
 mod queue_dispatch;
 mod queue_io;
+mod queue_marker;
 mod queue_reactions;
 mod queued_placeholders_store;
 mod reaction_cleanup;
@@ -3004,16 +3005,9 @@ async fn apply_queue_exit_feedback(
         }
     }
 
+    queue_marker::drain_queue_exit_markers(shared, &http, channel_id, &queue_exit_events).await;
     for event in queue_exit_events {
-        // Clean up every queue marker on contributing messages so exits leave
-        // only the terminal-state reaction visible.
-        let is_standalone = event.intervention.source_message_ids.len() <= 1;
-        for message_id in &event.intervention.source_message_ids {
-            for emoji in queue_reactions::drain_reactions_for_queue_exit(is_standalone) {
-                formatting::remove_reaction_raw(&http, channel_id, *message_id, *emoji).await;
-            }
-        }
-        formatting::add_reaction_raw(
+        reaction_lifecycle::note_auxiliary_reaction_added(
             &http,
             channel_id,
             event.intervention.message_id,
@@ -3124,7 +3118,9 @@ pub(in crate::services::discord) async fn enqueue_internal_followup(
             author_id: UserId::new(1),
             author_is_bot: false,
             message_id: reply_message_id,
+            queued_generation: shared.restart.current_generation,
             source_message_ids: vec![reply_message_id],
+            source_message_queued_generations: Vec::new(),
             text: text.into(),
             mode: InterventionMode::Soft,
             created_at: Instant::now(),
@@ -3429,7 +3425,9 @@ pub(in crate::services::discord) async fn mailbox_requeue_inflight_for_followup_
         author_id: UserId::new(inflight_state.request_owner_user_id),
         author_is_bot: false,
         message_id,
+        queued_generation: shared.restart.current_generation,
         source_message_ids: vec![message_id],
+        source_message_queued_generations: Vec::new(),
         text: inflight_state.user_text.clone(),
         mode: crate::services::turn_orchestrator::InterventionMode::Soft,
         created_at: std::time::Instant::now(),
@@ -3871,11 +3869,15 @@ async fn kickoff_idle_queue_channel(
         channel_id
     );
 
-    for message_id in &intervention.source_message_ids {
-        for emoji in queue_reactions::QUEUE_PENDING_REACTION_EMOJIS {
-            formatting::remove_reaction_raw(&ctx.http, channel_id, *message_id, emoji).await;
-        }
-    }
+    let source_message_generations = intervention.source_message_queued_generations();
+    queue_marker::start_and_drain_kickoff_markers(
+        shared,
+        &ctx.http,
+        channel_id,
+        intervention.message_id,
+        &source_message_generations,
+    )
+    .await;
 
     let drained_cards = gateway::drain_merged_queued_placeholders(
         shared,
@@ -4256,9 +4258,7 @@ fn resolve_codex_skill_file(path: &Path) -> Option<std::path::PathBuf> {
     None
 }
 
-use discord_io::{
-    add_reaction, check_auth, check_owner, rate_limit_wait, try_handle_pending_dm_reply,
-};
+use discord_io::{check_auth, check_owner, rate_limit_wait, try_handle_pending_dm_reply};
 
 // ─── Event handler ───────────────────────────────────────────────────────────
 
@@ -4688,7 +4688,9 @@ mod idle_queue_background_supersede_tests {
             author_id: UserId::new(7),
             author_is_bot: false,
             message_id: MessageId::new(message_id),
+            queued_generation: crate::services::discord::runtime_store::load_generation(),
             source_message_ids: vec![MessageId::new(message_id)],
+            source_message_queued_generations: Vec::new(),
             text: text.to_string(),
             mode: InterventionMode::Soft,
             created_at: Instant::now(),

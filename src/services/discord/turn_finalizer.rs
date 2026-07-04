@@ -2165,7 +2165,10 @@ mod tests {
                         author_id: UserId::new(1),
                         author_is_bot: false,
                         message_id: MessageId::new(71),
+                        queued_generation: crate::services::discord::runtime_store::load_generation(
+                        ),
                         source_message_ids: vec![MessageId::new(71)],
+                        source_message_queued_generations: Vec::new(),
                         text: "queued follow-up".to_string(),
                         mode: InterventionMode::Soft,
                         created_at: std::time::Instant::now(),
@@ -2265,7 +2268,10 @@ mod tests {
                         author_id: UserId::new(1),
                         author_is_bot: false,
                         message_id: MessageId::new(5003),
+                        queued_generation: crate::services::discord::runtime_store::load_generation(
+                        ),
                         source_message_ids: vec![MessageId::new(5003)],
+                        source_message_queued_generations: Vec::new(),
                         text: "queued behind turn-2".to_string(),
                         mode: InterventionMode::Soft,
                         created_at: std::time::Instant::now(),

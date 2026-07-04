@@ -68,6 +68,7 @@ pub(super) async fn handle_race_loss_enqueue(
     voice_announcement: &Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
     reply_to_user_message: bool,
     dispatch_id_for_thread: &Option<String>,
+    turn_start_attempt: Option<crate::services::discord::turn_view_reconciler::TurnStartAttempt>,
 ) -> Result<(), Error> {
     let bot_owner_provider = crate::services::discord::resolve_discord_bot_provider(token);
     let is_thread_routed = channel_id != original_channel_id;
@@ -231,15 +232,17 @@ pub(super) async fn handle_race_loss_enqueue(
                 // WILL be processed correctly. Roll back the `⏳`
                 // sentinel so the user knows we did not silently
                 // accept the message.
-                crate::services::discord::turn_view_reconciler::note_intake_turn_cleared(
-                    shared,
-                    http,
-                    channel_id,
-                    user_msg_id,
-                    shared.restart.current_generation,
-                    "race_loss_placeholder_post_failed",
-                )
-                .await;
+                if let Some(turn_start_attempt) = turn_start_attempt {
+                    crate::services::discord::turn_view_reconciler::note_intake_start_rolled_back_to_queued(
+                        shared,
+                        channel_id,
+                        user_msg_id,
+                        shared.restart.current_generation,
+                        turn_start_attempt,
+                        "race_loss_placeholder_post_failed",
+                    )
+                    .await;
+                }
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(
                     "  [{ts}] ⚠ RACE: placeholder POST failed for race-lost message AFTER enqueue (channel {}, error={}); message remains queued, dispatch will POST fresh card",
@@ -336,12 +339,12 @@ pub(super) async fn handle_race_loss_enqueue(
             // insert.
             drop(persist_guard);
             let _ = channel_id.delete_message(http, placeholder_msg_id).await;
-            crate::services::discord::turn_view_reconciler::note_intake_turn_cleared(
+            crate::services::discord::turn_view_reconciler::note_intake_turn_cleared_current_if_attempt_matches(
                 shared,
                 http,
                 channel_id,
                 user_msg_id,
-                shared.restart.current_generation,
+                turn_start_attempt,
                 "race_loss_orphan_placeholder",
             )
             .await;
@@ -371,25 +374,10 @@ pub(super) async fn handle_race_loss_enqueue(
         None
     };
 
-    // #1116 Pending-reaction emoji machine: 📬 queued → ⏳ processing →
-    // ✅ done. Round-9: enqueue already happened above; the reaction
-    // safely reflects the actual queue state.
-    //
-    // #2036 Surface 3 fix: previously, if the active turn finished
-    // between this enqueue and the `add_reaction` await below, the
-    // dequeue path's 📬 cleanup could run before our add landed and
-    // leave the icon stuck on a turn that had already started. The
-    // user-reported case (run 767447c8): dispatch message lands on a
-    // channel whose previous turn is wrapping up, so the message gets
-    // queued and reacted with 📬; the bridge then promotes it before
-    // the add_reaction await resolves, and the leftover 📬 lies about
-    // codex still being queue-pending while codex is in fact already
-    // responding to the dispatch. Round-12 fix: after the
-    // `add_reaction` await resolves, re-check whether our message is
-    // still in the queue. If the queued_placeholder mapping has been
-    // consumed (i.e. dispatch already promoted us into an active
-    // turn), strip the just-added queue-pending emoji so the visual
-    // state matches reality.
+    // #1116/#2036: enqueue already happened above, then the marker path
+    // rechecks ownership after the Discord await so a fast dequeue cannot
+    // leave a stale 📬 behind.
+    let mut queued_marker_notified = false;
     if !is_thread_routed && should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref()) {
         // #1190 follow-up: merged messages get ➕ so the user can tell
         // them apart from standalone queue head entries (📬).
@@ -398,16 +386,41 @@ pub(super) async fn handle_race_loss_enqueue(
         } else {
             '📬'
         };
-        add_reaction(http, channel_id, user_msg_id, emoji).await;
-        // #2036 Surface 3: detect queue→start races where the
-        // dispatch path consumed our mapping before this reaction
-        // landed and proactively unstick the emoji.
-        if !shared.queued_placeholder_still_owned(channel_id, user_msg_id, placeholder_msg_id) {
-            crate::services::discord::formatting::remove_reaction_raw(
+        queued_marker_notified =
+            emoji == crate::services::discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION;
+        if queued_marker_notified {
+            if let Some(turn_start_attempt) = turn_start_attempt {
+                crate::services::discord::turn_view_reconciler::note_intake_start_rolled_back_to_queued_current(
+                    shared,
+                    channel_id,
+                    user_msg_id,
+                    turn_start_attempt,
+                    "race_loss_message_queued",
+                )
+                .await;
+            }
+        } else {
+            crate::services::discord::queue_marker::note_added_current(
+                shared,
                 http,
                 channel_id,
                 user_msg_id,
                 emoji,
+                "race_loss_message_queued",
+            )
+            .await;
+        }
+        // #2036 Surface 3: detect queue→start races where the
+        // dispatch path consumed our mapping before this reaction
+        // landed and proactively unstick the emoji.
+        if !shared.queued_placeholder_still_owned(channel_id, user_msg_id, placeholder_msg_id) {
+            crate::services::discord::queue_marker::note_removed_current(
+                shared,
+                http,
+                channel_id,
+                user_msg_id,
+                emoji,
+                "race_loss_queue_self_heal",
             )
             .await;
             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -575,15 +588,17 @@ pub(super) async fn handle_race_loss_enqueue(
         // `...` and would otherwise leak.
         let _ = channel_id.delete_message(http, placeholder_msg_id).await;
     }
-    crate::services::discord::turn_view_reconciler::note_intake_turn_cleared(
-        shared,
-        http,
-        channel_id,
-        user_msg_id,
-        shared.restart.current_generation,
-        "race_loss_message_queued",
-    )
-    .await;
+    if !queued_marker_notified {
+        crate::services::discord::turn_view_reconciler::note_intake_turn_cleared_current_if_attempt_matches(
+            shared,
+            http,
+            channel_id,
+            user_msg_id,
+            turn_start_attempt,
+            "race_loss_message_queued",
+        )
+        .await;
+    }
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
         "  [{ts}] 🔀 RACE: message queued (another turn won), channel {}",
@@ -612,7 +627,9 @@ mod race_loss_requeue_tests {
             author_id: UserId::new(id),
             author_is_bot: false,
             message_id: MessageId::new(id),
+            queued_generation: crate::services::discord::runtime_store::load_generation(),
             source_message_ids: vec![MessageId::new(id)],
+            source_message_queued_generations: Vec::new(),
             text: text.to_string(),
             mode: InterventionMode::Soft,
             created_at: Instant::now(),

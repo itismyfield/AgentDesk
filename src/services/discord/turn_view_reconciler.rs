@@ -1,4 +1,13 @@
-use std::{collections::HashMap, fs, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    fs,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time,
+};
 
 use dashmap::DashMap;
 use poise::serenity_prelude as serenity;
@@ -7,11 +16,14 @@ use serenity::{ChannelId, MessageId};
 
 use super::SharedData;
 
-const TURN_LIFECYCLE_REACTIONS: [char; 4] = ['⏳', '✅', '⚠', '🛑'];
+const TURN_VIEW_REACTIONS: [char; 5] = ['📬', '⏳', '✅', '⚠', '🛑'];
 const PERSISTED_STATE_VERSION: u32 = 1;
+const RECENTLY_FINALIZED_TARGET_MAX: usize = 1024;
+const RECENTLY_FINALIZED_TARGET_TTL: time::Duration = time::Duration::from_secs(10 * 60);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::services::discord) enum TurnViewState {
+    Queued,
     Pending,
     Completed,
     Failed,
@@ -51,6 +63,7 @@ impl TurnViewDelivery {
 impl TurnViewState {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Queued => "queued",
             Self::Pending => "pending",
             Self::Completed => "completed",
             Self::Failed => "failed",
@@ -61,6 +74,7 @@ impl TurnViewState {
 
     fn from_str(value: &str) -> Option<Self> {
         match value {
+            "queued" => Some(Self::Queued),
             "pending" => Some(Self::Pending),
             "completed" => Some(Self::Completed),
             "failed" => Some(Self::Failed),
@@ -72,6 +86,7 @@ impl TurnViewState {
 
     fn emoji(self) -> Option<char> {
         match self {
+            Self::Queued => Some('📬'),
             Self::Pending => Some('⏳'),
             Self::Completed => Some('✅'),
             Self::Failed => Some('⚠'),
@@ -82,6 +97,13 @@ impl TurnViewState {
 
     fn terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Stopped)
+    }
+
+    fn started_or_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Pending | Self::Completed | Self::Failed | Self::Stopped
+        )
     }
 }
 
@@ -172,6 +194,31 @@ impl TurnViewOwner {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(in crate::services::discord) struct TurnStartAttempt(u64);
+
+impl TurnStartAttempt {
+    fn get(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::services::discord) struct TurnViewStartRecord {
+    delivered: bool,
+    attempt: Option<TurnStartAttempt>,
+}
+
+impl TurnViewStartRecord {
+    pub(in crate::services::discord) fn delivered(self) -> bool {
+        self.delivered
+    }
+
+    pub(in crate::services::discord) fn attempt(self) -> Option<TurnStartAttempt> {
+        self.attempt
+    }
+}
+
 #[derive(Clone)]
 pub(in crate::services::discord) enum TurnViewIdentity {
     IntakeHttp(Arc<serenity::http::Http>),
@@ -194,6 +241,61 @@ struct AppliedTarget {
     owner: TurnViewOwner,
     applied: TurnViewState,
     identity: ResolvedIdentity,
+    start_attempt: Option<TurnStartAttempt>,
+}
+
+#[derive(Clone, Copy)]
+struct RecentlyFinalizedTarget {
+    generation: u64,
+    recorded_at: time::Instant,
+}
+
+#[derive(Default)]
+struct RecentlyFinalizedTargets {
+    targets: HashMap<TurnViewTarget, RecentlyFinalizedTarget>,
+}
+
+impl RecentlyFinalizedTargets {
+    fn blocks_queued(&mut self, target: TurnViewTarget, generation: u64) -> bool {
+        self.prune(time::Instant::now());
+        self.targets
+            .get(&target)
+            .is_some_and(|entry| generation <= entry.generation)
+    }
+
+    fn remember(&mut self, target: TurnViewTarget, generation: u64) {
+        let now = time::Instant::now();
+        self.prune(now);
+        self.targets
+            .entry(target)
+            .and_modify(|entry| {
+                if generation >= entry.generation {
+                    entry.generation = generation;
+                    entry.recorded_at = now;
+                }
+            })
+            .or_insert(RecentlyFinalizedTarget {
+                generation,
+                recorded_at: now,
+            });
+        while self.targets.len() > RECENTLY_FINALIZED_TARGET_MAX {
+            let Some(oldest) = self
+                .targets
+                .iter()
+                .min_by_key(|(_, entry)| entry.recorded_at)
+                .map(|(target, _)| *target)
+            else {
+                break;
+            };
+            self.targets.remove(&oldest);
+        }
+    }
+
+    fn prune(&mut self, now: time::Instant) {
+        self.targets.retain(|_, entry| {
+            now.duration_since(entry.recorded_at) <= RECENTLY_FINALIZED_TARGET_TTL
+        });
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -209,12 +311,18 @@ struct PersistedTargetState {
     identity_label: String,
     #[serde(default)]
     token_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    start_attempt_id: Option<u64>,
 }
 
 #[derive(Default)]
 pub(in crate::services::discord) struct TurnViewReconciler {
     targets: DashMap<TurnViewTarget, AppliedTarget>,
     target_locks: std::sync::Mutex<HashMap<TurnViewTarget, Arc<tokio::sync::Mutex<()>>>>,
+    next_start_attempt: AtomicU64,
+    // Bounded in-memory only. A restart loses this guard, and durable queue
+    // replay remains the source of truth for messages still queued on disk.
+    recently_finalized: std::sync::Mutex<RecentlyFinalizedTargets>,
     #[cfg(test)]
     ops: Arc<std::sync::Mutex<Vec<TestReactionOp>>>,
     #[cfg(test)]
@@ -230,15 +338,213 @@ impl TurnViewReconciler {
         identity: TurnViewIdentity,
         source: &'static str,
     ) -> bool {
+        self.note_turn_started_with_attempt(shared, target, owner, identity, source)
+            .await
+            .delivered()
+    }
+
+    pub(in crate::services::discord) async fn note_turn_started_with_attempt(
+        &self,
+        shared: &SharedData,
+        target: TurnViewTarget,
+        owner: TurnViewOwner,
+        identity: TurnViewIdentity,
+        source: &'static str,
+    ) -> TurnViewStartRecord {
+        let (delivery, attempt) = self
+            .note_state_delivery_with_attempt(
+                shared,
+                target,
+                owner,
+                identity,
+                TurnViewState::Pending,
+                source,
+            )
+            .await;
+        TurnViewStartRecord {
+            delivered: delivery.delivered(),
+            attempt,
+        }
+    }
+
+    fn mint_start_attempt(&self) -> TurnStartAttempt {
+        TurnStartAttempt(self.next_start_attempt.fetch_add(1, Ordering::Relaxed) + 1)
+    }
+
+    fn start_attempt_for(&self, desired: TurnViewState) -> Option<TurnStartAttempt> {
+        (desired == TurnViewState::Pending).then(|| self.mint_start_attempt())
+    }
+
+    fn applied_target(
+        owner: TurnViewOwner,
+        applied: TurnViewState,
+        identity: ResolvedIdentity,
+        start_attempt: Option<TurnStartAttempt>,
+    ) -> AppliedTarget {
+        AppliedTarget {
+            owner,
+            applied,
+            identity,
+            start_attempt: (applied == TurnViewState::Pending)
+                .then_some(start_attempt)
+                .flatten(),
+        }
+    }
+
+    fn update_matching_pending_attempt(
+        &self,
+        shared: &SharedData,
+        target: TurnViewTarget,
+        owner: TurnViewOwner,
+        current: &AppliedTarget,
+        start_attempt: Option<TurnStartAttempt>,
+        source: &'static str,
+    ) -> Option<TurnStartAttempt> {
+        let start_attempt = start_attempt?;
+        let updated = AppliedTarget {
+            owner,
+            applied: TurnViewState::Pending,
+            identity: current.identity.clone(),
+            start_attempt: Some(start_attempt),
+        };
+        self.targets.insert(target, updated.clone());
+        self.persist_target(target, &updated, shared, source);
+        Some(start_attempt)
+    }
+
+    pub(in crate::services::discord) async fn note_message_queued(
+        &self,
+        shared: &SharedData,
+        target: TurnViewTarget,
+        owner: TurnViewOwner,
+        identity: TurnViewIdentity,
+        source: &'static str,
+    ) -> bool {
         self.note_state(
             shared,
             target,
             owner,
             identity,
-            TurnViewState::Pending,
+            TurnViewState::Queued,
             source,
         )
         .await
+    }
+
+    pub(in crate::services::discord) async fn note_start_rolled_back_to_queued(
+        &self,
+        shared: &SharedData,
+        target: TurnViewTarget,
+        owner: TurnViewOwner,
+        start_attempt: TurnStartAttempt,
+        source: &'static str,
+    ) -> bool {
+        self.note_start_rolled_back_to_queued_delivery(shared, target, owner, start_attempt, source)
+            .await
+            .delivered()
+    }
+
+    pub(in crate::services::discord) async fn note_queued_message_cancelled(
+        &self,
+        shared: &SharedData,
+        target: TurnViewTarget,
+        owner: TurnViewOwner,
+        identity: TurnViewIdentity,
+        source: &'static str,
+    ) -> bool {
+        self.note_queued_message_cancelled_delivery(shared, target, owner, identity, source)
+            .await
+            .delivered()
+    }
+
+    async fn note_start_rolled_back_to_queued_delivery(
+        &self,
+        shared: &SharedData,
+        target: TurnViewTarget,
+        owner: TurnViewOwner,
+        start_attempt: TurnStartAttempt,
+        source: &'static str,
+    ) -> TurnViewDelivery {
+        if !super::reaction_lifecycle::is_real_discord_message_id(target.message_id) {
+            tracing::debug!(
+                channel = target.channel_id.get(),
+                message = target.message_id.get(),
+                target_kind = ?target.kind,
+                source,
+                "turn view start rollback skipped for non-Discord/synthetic message id"
+            );
+            return TurnViewDelivery::Delivered;
+        }
+
+        let target_lock = self.target_lock(target);
+        let _target_guard = target_lock.lock().await;
+
+        let current = self
+            .targets
+            .get(&target)
+            .map(|entry| entry.clone())
+            .or_else(|| self.load_persisted_target(target, shared, source));
+
+        let Some(current) = current else {
+            tracing::debug!(
+                channel = target.channel_id.get(),
+                message = target.message_id.get(),
+                target_kind = ?target.kind,
+                source,
+                "turn view start rollback ignored without current pending state"
+            );
+            return TurnViewDelivery::Delivered;
+        };
+
+        if current.owner != owner
+            || current.applied != TurnViewState::Pending
+            || current.start_attempt != Some(start_attempt)
+        {
+            tracing::debug!(
+                channel = target.channel_id.get(),
+                message = target.message_id.get(),
+                target_kind = ?target.kind,
+                source,
+                current_state = ?current.applied,
+                current_generation = current.owner.generation,
+                current_turn_id = %current.owner.turn_id,
+                current_start_attempt = current.start_attempt.map(TurnStartAttempt::get),
+                rollback_generation = owner.generation,
+                rollback_turn_id = %owner.turn_id,
+                rollback_start_attempt = start_attempt.get(),
+                "turn view start rollback ignored because current state is not the matching pending start attempt"
+            );
+            if current.applied.terminal() {
+                self.finalize_target_locked(target, current.owner.generation, source, &target_lock);
+            } else {
+                self.targets.insert(target, current);
+            }
+            return TurnViewDelivery::Delivered;
+        }
+
+        let resolved_identity = current.identity.clone();
+        let delivery = self
+            .apply_diff(
+                shared,
+                target,
+                TurnViewState::Pending,
+                TurnViewState::Queued,
+                &resolved_identity,
+                source,
+            )
+            .await;
+        if !delivery.delivered() {
+            if matches!(delivery, TurnViewDelivery::FailedPermanent) {
+                self.discard_target_locked(target, source, &target_lock);
+            }
+            return delivery;
+        }
+
+        let applied_target =
+            Self::applied_target(owner, TurnViewState::Queued, resolved_identity, None);
+        self.targets.insert(target, applied_target.clone());
+        self.persist_target(target, &applied_target, shared, source);
+        TurnViewDelivery::Delivered
     }
 
     pub(in crate::services::discord) async fn note_turn_completed(
@@ -311,6 +617,29 @@ impl TurnViewReconciler {
             .await
     }
 
+    pub(in crate::services::discord) async fn note_turn_cleared_if_attempt_matches(
+        &self,
+        shared: &SharedData,
+        target: TurnViewTarget,
+        owner: TurnViewOwner,
+        identity: TurnViewIdentity,
+        start_attempt: TurnStartAttempt,
+        source: &'static str,
+    ) -> bool {
+        let (delivery, _) = self
+            .note_state_delivery_with_clear_attempt_guard(
+                shared,
+                target,
+                owner,
+                identity,
+                TurnViewState::None,
+                Some(start_attempt),
+                source,
+            )
+            .await;
+        delivery.delivered()
+    }
+
     #[allow(dead_code)]
     pub(in crate::services::discord) async fn note_anchor_replaced(
         &self,
@@ -342,6 +671,7 @@ impl TurnViewReconciler {
             .map(|entry| entry.owner == *owner)
             .unwrap_or(false);
         if remove {
+            self.remember_recently_finalized(target, owner.generation);
             self.targets.remove(&target);
             self.delete_persisted_target(target, "evict_finalized");
             self.prune_target_lock_if_idle(target);
@@ -371,6 +701,38 @@ impl TurnViewReconciler {
         desired: TurnViewState,
         source: &'static str,
     ) -> TurnViewDelivery {
+        let (delivery, _) = self
+            .note_state_delivery_with_attempt(shared, target, owner, identity, desired, source)
+            .await;
+        delivery
+    }
+
+    async fn note_state_delivery_with_attempt(
+        &self,
+        shared: &SharedData,
+        target: TurnViewTarget,
+        owner: TurnViewOwner,
+        identity: TurnViewIdentity,
+        desired: TurnViewState,
+        source: &'static str,
+    ) -> (TurnViewDelivery, Option<TurnStartAttempt>) {
+        self.note_state_delivery_with_clear_attempt_guard(
+            shared, target, owner, identity, desired, None, source,
+        )
+        .await
+    }
+
+    async fn note_state_delivery_with_clear_attempt_guard(
+        &self,
+        shared: &SharedData,
+        target: TurnViewTarget,
+        owner: TurnViewOwner,
+        identity: TurnViewIdentity,
+        desired: TurnViewState,
+        clear_start_attempt: Option<TurnStartAttempt>,
+        source: &'static str,
+    ) -> (TurnViewDelivery, Option<TurnStartAttempt>) {
+        let start_attempt = self.start_attempt_for(desired);
         if !super::reaction_lifecycle::is_real_discord_message_id(target.message_id) {
             tracing::debug!(
                 channel = target.channel_id.get(),
@@ -380,11 +742,25 @@ impl TurnViewReconciler {
                 source,
                 "turn view reaction skipped for non-Discord/synthetic message id"
             );
-            return TurnViewDelivery::Delivered;
+            return (TurnViewDelivery::Delivered, None);
         }
 
         let target_lock = self.target_lock(target);
         let _target_guard = target_lock.lock().await;
+
+        if desired == TurnViewState::Queued
+            && self.recently_finalized_blocks_queued(target, owner.generation)
+        {
+            tracing::debug!(
+                channel = target.channel_id.get(),
+                message = target.message_id.get(),
+                target_kind = ?target.kind,
+                source,
+                queued_generation = owner.generation,
+                "turn view queued notification ignored for recently finalized generation"
+            );
+            return (TurnViewDelivery::Delivered, None);
+        }
 
         let current = self
             .targets
@@ -392,17 +768,73 @@ impl TurnViewReconciler {
             .map(|entry| entry.clone())
             .or_else(|| self.load_persisted_target(target, shared, source));
         if let Some(current) = current.as_ref() {
+            if desired == TurnViewState::None
+                && let Some(clear_start_attempt) = clear_start_attempt
+                && (current.owner != owner
+                    || current.applied != TurnViewState::Pending
+                    || current.start_attempt != Some(clear_start_attempt))
+            {
+                tracing::debug!(
+                    channel = target.channel_id.get(),
+                    message = target.message_id.get(),
+                    target_kind = ?target.kind,
+                    source,
+                    current_state = ?current.applied,
+                    current_generation = current.owner.generation,
+                    current_turn_id = %current.owner.turn_id,
+                    current_start_attempt = current.start_attempt.map(TurnStartAttempt::get),
+                    clear_generation = owner.generation,
+                    clear_turn_id = %owner.turn_id,
+                    clear_start_attempt = clear_start_attempt.get(),
+                    "turn view attempt-scoped clear ignored because current state is not the matching pending start attempt"
+                );
+                self.targets.insert(target, current.clone());
+                return (TurnViewDelivery::Delivered, None);
+            }
+            if current.owner == owner
+                && desired == TurnViewState::Queued
+                && current.applied.started_or_terminal()
+            {
+                tracing::debug!(
+                    channel = target.channel_id.get(),
+                    message = target.message_id.get(),
+                    target_kind = ?target.kind,
+                    source,
+                    current_state = ?current.applied,
+                    "turn view queued notification ignored after target already started"
+                );
+                if current.applied.terminal() {
+                    self.finalize_target_locked(
+                        target,
+                        current.owner.generation,
+                        source,
+                        &target_lock,
+                    );
+                } else {
+                    self.targets.insert(target, current.clone());
+                }
+                return (TurnViewDelivery::Delivered, None);
+            }
             if current.owner != owner {
-                if desired == TurnViewState::Pending {
+                if desired == TurnViewState::Pending
+                    && current.applied == TurnViewState::Queued
+                    && current.owner.turn_id == owner.turn_id
+                {
+                    // Restart generation handoff: the same queued message may
+                    // be promoted by a fresh dcserver generation. This remains
+                    // monotonic (`Queued` -> `Pending`) and preserves the
+                    // original reaction identity for the mailbox removal.
+                } else if matches!(desired, TurnViewState::Pending | TurnViewState::Queued) {
                     if current.applied == desired {
-                        let transferred = AppliedTarget {
+                        let transferred = Self::applied_target(
                             owner,
-                            applied: current.applied,
-                            identity: current.identity.clone(),
-                        };
+                            current.applied,
+                            current.identity.clone(),
+                            start_attempt,
+                        );
                         self.targets.insert(target, transferred.clone());
                         self.persist_target(target, &transferred, shared, source);
-                        return TurnViewDelivery::Delivered;
+                        return (TurnViewDelivery::Delivered, transferred.start_attempt);
                     }
                 } else {
                     tracing::debug!(
@@ -418,17 +850,38 @@ impl TurnViewReconciler {
                         "turn view reaction notification ignored for stale owner"
                     );
                     if current.applied.terminal() {
-                        self.finalize_target_locked(target, source, &target_lock);
+                        self.finalize_target_locked(
+                            target,
+                            current.owner.generation,
+                            source,
+                            &target_lock,
+                        );
                     }
-                    return TurnViewDelivery::Delivered;
+                    return (TurnViewDelivery::Delivered, None);
                 }
             }
             if current.applied == desired {
+                if desired == TurnViewState::Pending {
+                    let attempt = self.update_matching_pending_attempt(
+                        shared,
+                        target,
+                        owner,
+                        current,
+                        start_attempt,
+                        source,
+                    );
+                    return (TurnViewDelivery::Delivered, attempt);
+                }
                 self.targets.insert(target, current.clone());
                 if desired.terminal() {
-                    self.finalize_target_locked(target, source, &target_lock);
+                    self.finalize_target_locked(
+                        target,
+                        current.owner.generation,
+                        source,
+                        &target_lock,
+                    );
                 }
-                return TurnViewDelivery::Delivered;
+                return (TurnViewDelivery::Delivered, None);
             }
         }
 
@@ -436,7 +889,7 @@ impl TurnViewReconciler {
             Some(current) => current.identity.clone(),
             None => match self.resolve_identity(shared, target.kind, identity, source) {
                 Some(identity) => identity,
-                None => return TurnViewDelivery::Failed,
+                None => return (TurnViewDelivery::Failed, None),
             },
         };
 
@@ -447,7 +900,7 @@ impl TurnViewReconciler {
             if delivery.delivered() {
                 self.discard_target_locked(target, source, &target_lock);
             }
-            return delivery;
+            return (delivery, None);
         }
 
         let applied = current
@@ -476,28 +929,117 @@ impl TurnViewReconciler {
             if matches!(delivery, TurnViewDelivery::FailedPermanent) {
                 self.discard_target_locked(target, source, &target_lock);
             }
-            return delivery;
+            return (delivery, None);
         }
         if desired == TurnViewState::None {
             self.discard_target_locked(target, source, &target_lock);
         } else if desired.terminal() {
-            let applied_target = AppliedTarget {
-                owner,
-                applied: desired,
-                identity: resolved_identity,
-            };
+            let finalized_generation = owner.generation;
+            let applied_target = Self::applied_target(owner, desired, resolved_identity, None);
             self.targets.insert(target, applied_target);
-            self.finalize_target_locked(target, source, &target_lock);
+            self.finalize_target_locked(target, finalized_generation, source, &target_lock);
         } else {
-            let applied_target = AppliedTarget {
-                owner,
-                applied: desired,
-                identity: resolved_identity,
-            };
+            let applied_target =
+                Self::applied_target(owner, desired, resolved_identity, start_attempt);
             self.targets.insert(target, applied_target.clone());
             self.persist_target(target, &applied_target, shared, source);
         }
-        TurnViewDelivery::Delivered
+        (TurnViewDelivery::Delivered, start_attempt)
+    }
+
+    async fn note_queued_message_cancelled_delivery(
+        &self,
+        shared: &SharedData,
+        target: TurnViewTarget,
+        owner: TurnViewOwner,
+        identity: TurnViewIdentity,
+        source: &'static str,
+    ) -> TurnViewDelivery {
+        self.note_queued_message_cancelled_delivery_inner(shared, target, owner, identity, source)
+            .await
+    }
+
+    async fn note_queued_message_cancelled_delivery_inner(
+        &self,
+        shared: &SharedData,
+        target: TurnViewTarget,
+        owner: TurnViewOwner,
+        identity: TurnViewIdentity,
+        source: &'static str,
+    ) -> TurnViewDelivery {
+        let _ = identity;
+        if !super::reaction_lifecycle::is_real_discord_message_id(target.message_id) {
+            tracing::debug!(
+                channel = target.channel_id.get(),
+                message = target.message_id.get(),
+                target_kind = ?target.kind,
+                source,
+                "turn view queued reaction clear skipped for non-Discord/synthetic message id"
+            );
+            return TurnViewDelivery::Delivered;
+        }
+
+        let target_lock = self.target_lock(target);
+        let _target_guard = target_lock.lock().await;
+
+        let current = self
+            .targets
+            .get(&target)
+            .map(|entry| entry.clone())
+            .or_else(|| self.load_persisted_target(target, shared, source));
+
+        let Some(current) = current else {
+            tracing::debug!(
+                channel = target.channel_id.get(),
+                message = target.message_id.get(),
+                target_kind = ?target.kind,
+                source,
+                "turn view queued reaction clear ignored without queued state"
+            );
+            return TurnViewDelivery::Delivered;
+        };
+
+        if current.applied != TurnViewState::Queued {
+            tracing::debug!(
+                channel = target.channel_id.get(),
+                message = target.message_id.get(),
+                target_kind = ?target.kind,
+                source,
+                current_state = ?current.applied,
+                "turn view queued reaction clear ignored because target is not queued"
+            );
+            if current.applied.terminal() {
+                self.finalize_target_locked(target, current.owner.generation, source, &target_lock);
+            } else {
+                self.targets.insert(target, current);
+            }
+            return TurnViewDelivery::Delivered;
+        }
+
+        if current.owner != owner {
+            tracing::debug!(
+                channel = target.channel_id.get(),
+                message = target.message_id.get(),
+                target_kind = ?target.kind,
+                source,
+                current_generation = current.owner.generation,
+                current_turn_id = %current.owner.turn_id,
+                cancel_generation = owner.generation,
+                cancel_turn_id = %owner.turn_id,
+                "turn view queued reaction clear ignored for non-matching queued generation"
+            );
+            self.targets.insert(target, current);
+            return TurnViewDelivery::Delivered;
+        }
+
+        let resolved_identity = current.identity.clone();
+        let delivery = self
+            .apply_reaction(shared, target, '📬', false, &resolved_identity, source)
+            .await;
+        if delivery.delivered() || matches!(delivery, TurnViewDelivery::FailedPermanent) {
+            self.discard_target_locked(target, source, &target_lock);
+        }
+        delivery
     }
 
     fn target_lock(&self, target: TurnViewTarget) -> Arc<tokio::sync::Mutex<()>> {
@@ -523,10 +1065,26 @@ impl TurnViewReconciler {
     fn finalize_target_locked(
         &self,
         target: TurnViewTarget,
+        finalized_generation: u64,
         source: &'static str,
         target_lock: &Arc<tokio::sync::Mutex<()>>,
     ) {
+        self.remember_recently_finalized(target, finalized_generation);
         self.finish_target_locked(target, source, target_lock, false);
+    }
+
+    fn recently_finalized_blocks_queued(&self, target: TurnViewTarget, generation: u64) -> bool {
+        self.recently_finalized
+            .lock()
+            .expect("turn view recently finalized guard")
+            .blocks_queued(target, generation)
+    }
+
+    fn remember_recently_finalized(&self, target: TurnViewTarget, generation: u64) {
+        self.recently_finalized
+            .lock()
+            .expect("turn view recently finalized guard")
+            .remember(target, generation);
     }
 
     fn finish_target_locked(
@@ -763,11 +1321,12 @@ impl TurnViewReconciler {
             return None;
         }
         let identity = self.resolve_persisted_identity(&record, shared, source)?;
-        Some(AppliedTarget {
-            owner: TurnViewOwner::new(record.owner_generation, record.owner_turn_id),
+        Some(Self::applied_target(
+            TurnViewOwner::new(record.owner_generation, record.owner_turn_id),
             applied,
             identity,
-        })
+            record.start_attempt_id.map(TurnStartAttempt),
+        ))
     }
 
     fn persist_target(
@@ -795,6 +1354,7 @@ impl TurnViewReconciler {
             applied: applied.applied.as_str().to_string(),
             identity_label: applied.identity.label.clone(),
             token_hash: applied.identity.token_hash.clone(),
+            start_attempt_id: applied.start_attempt.map(TurnStartAttempt::get),
         };
         let Ok(json) = serde_json::to_string_pretty(&record) else {
             return;
@@ -897,7 +1457,7 @@ impl TurnViewReconciler {
         source: &'static str,
     ) -> TurnViewDelivery {
         let mut delivery = TurnViewDelivery::Delivered;
-        for emoji in TURN_LIFECYCLE_REACTIONS {
+        for emoji in TURN_VIEW_REACTIONS {
             delivery = delivery.merge(
                 self.apply_reaction(shared, target, emoji, false, identity, source)
                     .await,
@@ -915,7 +1475,7 @@ impl TurnViewReconciler {
         identity: &ResolvedIdentity,
         source: &'static str,
     ) -> TurnViewDelivery {
-        debug_assert!(TURN_LIFECYCLE_REACTIONS.contains(&emoji));
+        debug_assert!(TURN_VIEW_REACTIONS.contains(&emoji));
         #[cfg(not(test))]
         {
             let result = if add {
@@ -1010,6 +1570,66 @@ pub(in crate::services::discord) async fn note_intake_turn_started(
         .await
 }
 
+pub(in crate::services::discord) async fn note_intake_turn_started_with_attempt(
+    shared: &Arc<SharedData>,
+    http: &Arc<serenity::http::Http>,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    generation: u64,
+    source: &'static str,
+) -> TurnViewStartRecord {
+    let target = TurnViewTarget::intake_user_message(channel_id, message_id);
+    let owner = turn_view_owner_for_message(channel_id, message_id, generation);
+    shared
+        .turn_view_reconciler
+        .note_turn_started_with_attempt(
+            shared,
+            target,
+            owner,
+            TurnViewIdentity::IntakeHttp(http.clone()),
+            source,
+        )
+        .await
+}
+
+pub(in crate::services::discord) async fn note_intake_message_queued(
+    shared: &Arc<SharedData>,
+    http: &Arc<serenity::http::Http>,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    generation: u64,
+    source: &'static str,
+) -> bool {
+    let target = TurnViewTarget::intake_user_message(channel_id, message_id);
+    let owner = turn_view_owner_for_message(channel_id, message_id, generation);
+    shared
+        .turn_view_reconciler
+        .note_message_queued(
+            shared,
+            target,
+            owner,
+            TurnViewIdentity::IntakeHttp(http.clone()),
+            source,
+        )
+        .await
+}
+
+pub(in crate::services::discord) async fn note_intake_start_rolled_back_to_queued(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    generation: u64,
+    start_attempt: TurnStartAttempt,
+    source: &'static str,
+) -> bool {
+    let target = TurnViewTarget::intake_user_message(channel_id, message_id);
+    let owner = turn_view_owner_for_message(channel_id, message_id, generation);
+    shared
+        .turn_view_reconciler
+        .note_start_rolled_back_to_queued(shared, target, owner, start_attempt, source)
+        .await
+}
+
 pub(in crate::services::discord) async fn note_intake_turn_completed(
     shared: &Arc<SharedData>,
     http: &Arc<serenity::http::Http>,
@@ -1076,6 +1696,75 @@ pub(in crate::services::discord) async fn note_intake_turn_cleared(
         .await
 }
 
+pub(in crate::services::discord) async fn note_intake_turn_cleared_if_attempt_matches(
+    shared: &Arc<SharedData>,
+    http: &Arc<serenity::http::Http>,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    generation: u64,
+    start_attempt: TurnStartAttempt,
+    source: &'static str,
+) -> bool {
+    let target = TurnViewTarget::intake_user_message(channel_id, message_id);
+    let owner = turn_view_owner_for_message(channel_id, message_id, generation);
+    shared
+        .turn_view_reconciler
+        .note_turn_cleared_if_attempt_matches(
+            shared,
+            target,
+            owner,
+            TurnViewIdentity::IntakeHttp(http.clone()),
+            start_attempt,
+            source,
+        )
+        .await
+}
+
+pub(in crate::services::discord) async fn note_intake_turn_cleared_current_if_attempt_matches(
+    shared: &Arc<SharedData>,
+    http: &Arc<serenity::http::Http>,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    start_attempt: Option<TurnStartAttempt>,
+    source: &'static str,
+) -> bool {
+    let Some(start_attempt) = start_attempt else {
+        return true;
+    };
+    note_intake_turn_cleared_if_attempt_matches(
+        shared,
+        http,
+        channel_id,
+        message_id,
+        shared.restart.current_generation,
+        start_attempt,
+        source,
+    )
+    .await
+}
+
+pub(in crate::services::discord) async fn note_intake_queued_message_cancelled(
+    shared: &Arc<SharedData>,
+    http: &Arc<serenity::http::Http>,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    generation: u64,
+    source: &'static str,
+) -> bool {
+    let target = TurnViewTarget::intake_user_message(channel_id, message_id);
+    let owner = turn_view_owner_for_message(channel_id, message_id, generation);
+    shared
+        .turn_view_reconciler
+        .note_queued_message_cancelled(
+            shared,
+            target,
+            owner,
+            TurnViewIdentity::IntakeHttp(http.clone()),
+            source,
+        )
+        .await
+}
+
 pub(in crate::services::discord) async fn note_intake_turn_started_current(
     shared: &Arc<SharedData>,
     http: &Arc<serenity::http::Http>,
@@ -1094,6 +1783,60 @@ pub(in crate::services::discord) async fn note_intake_turn_started_current(
     .await
 }
 
+pub(in crate::services::discord) async fn note_intake_turn_started_current_with_attempt(
+    shared: &Arc<SharedData>,
+    http: &Arc<serenity::http::Http>,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    source: &'static str,
+) -> TurnViewStartRecord {
+    note_intake_turn_started_with_attempt(
+        shared,
+        http,
+        channel_id,
+        message_id,
+        shared.restart.current_generation,
+        source,
+    )
+    .await
+}
+
+pub(in crate::services::discord) async fn note_intake_message_queued_current(
+    shared: &Arc<SharedData>,
+    http: &Arc<serenity::http::Http>,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    source: &'static str,
+) -> bool {
+    note_intake_message_queued(
+        shared,
+        http,
+        channel_id,
+        message_id,
+        shared.restart.current_generation,
+        source,
+    )
+    .await
+}
+
+pub(in crate::services::discord) async fn note_intake_start_rolled_back_to_queued_current(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    start_attempt: TurnStartAttempt,
+    source: &'static str,
+) -> bool {
+    note_intake_start_rolled_back_to_queued(
+        shared,
+        channel_id,
+        message_id,
+        shared.restart.current_generation,
+        start_attempt,
+        source,
+    )
+    .await
+}
+
 pub(in crate::services::discord) async fn note_intake_turn_cleared_current(
     shared: &Arc<SharedData>,
     http: &Arc<serenity::http::Http>,
@@ -1102,6 +1845,24 @@ pub(in crate::services::discord) async fn note_intake_turn_cleared_current(
     source: &'static str,
 ) -> bool {
     note_intake_turn_cleared(
+        shared,
+        http,
+        channel_id,
+        message_id,
+        shared.restart.current_generation,
+        source,
+    )
+    .await
+}
+
+pub(in crate::services::discord) async fn note_intake_queued_message_cancelled_current(
+    shared: &Arc<SharedData>,
+    http: &Arc<serenity::http::Http>,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    source: &'static str,
+) -> bool {
+    note_intake_queued_message_cancelled(
         shared,
         http,
         channel_id,

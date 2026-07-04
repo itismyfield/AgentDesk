@@ -87,28 +87,15 @@ direct_discord_sends = [
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:96efc64ae5a0f315"
 ]
 
-# Direct Discord reactions: slice a2 migrates these queue-marker / queue-exit
-# and gateway transport seams after turn-lifecycle reactions move to the
-# reconciler in slice a1. Entries use line-independent stable keys.
+# Direct Discord reactions: permanent transport seams. These are the single raw
+# reaction I/O layer driven by reaction_lifecycle / turn_view_reconciler and
+# must not be migrated into semantic call sites. Entries use line-independent
+# stable keys.
 direct_discord_reactions = [
-  # slice a2 migrates these
-  "src/services/discord/discord_io.rs#direct_discord_reactions:36adfdc43dd46838",
+  "src/services/discord/discord_io.rs#direct_discord_reactions:e01f4c2f7b0935cb",
   "src/services/discord/discord_io.rs#direct_discord_reactions:c80562ff7808cb8c",
   "src/services/discord/gateway.rs#direct_discord_reactions:def371963f71d782",
   "src/services/discord/gateway.rs#direct_discord_reactions:d8eb644833217308",
-  "src/services/discord/gateway.rs#direct_discord_reactions:30002e8d0ddc7bf9",
-  "src/services/discord/mod.rs#direct_discord_reactions:3f8286c8ce1f401e",
-  "src/services/discord/mod.rs#direct_discord_reactions:7b47452541917a40",
-  "src/services/discord/mod.rs#direct_discord_reactions:6704802e41820430",
-  "src/services/discord/router/intake_gate.rs#direct_discord_reactions:9bb28b0b9a7a0927",
-  "src/services/discord/router/intake_gate/queue_effects.rs#direct_discord_reactions:c27aadcac104dc03",
-  "src/services/discord/router/intake_gate/queue_effects.rs#direct_discord_reactions:43b8e6354b5d8b42",
-  "src/services/discord/router/message_handler/intake_turn.rs#direct_discord_reactions:05a90a662644abbb",
-  "src/services/discord/router/message_handler/intake_turn.rs#direct_discord_reactions:3f3fc41ea464cfaa",
-  "src/services/discord/router/message_handler/intake_turn.rs#direct_discord_reactions:a00fc7fa9e14143d",
-  "src/services/discord/router/message_handler/intake_turn.rs#direct_discord_reactions:149ce4e731b42fee",
-  "src/services/discord/router/message_handler/intake_turn/race_loss.rs#direct_discord_reactions:d0ff80c90e9541cc",
-  "src/services/discord/router/message_handler/intake_turn/race_loss.rs#direct_discord_reactions:56fdda09c9400d9c",
   "src/services/discord/tui_prompt_relay/bridge_gateway.rs#direct_discord_reactions:c2509c171c7efedd",
   "src/services/discord/tui_prompt_relay/bridge_gateway.rs#direct_discord_reactions:20c65e9299f28a47"
 ]

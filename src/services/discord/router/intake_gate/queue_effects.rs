@@ -42,7 +42,15 @@ async fn add_queue_pending_reaction_self_healing(
     user_msg_id: serenity::MessageId,
     emoji: char,
 ) {
-    add_reaction(&ctx.http, channel_id, user_msg_id, emoji).await;
+    crate::services::discord::queue_marker::note_added_current(
+        &data.shared,
+        &ctx.http,
+        channel_id,
+        user_msg_id,
+        emoji,
+        "intake_gate_queue_pending",
+    )
+    .await;
     let still_queued = {
         let snapshot = mailbox_snapshot(&data.shared, channel_id).await;
         snapshot.intervention_queue.iter().any(|intervention| {
@@ -51,11 +59,13 @@ async fn add_queue_pending_reaction_self_healing(
         })
     };
     if !still_queued {
-        crate::services::discord::formatting::remove_reaction_raw(
+        crate::services::discord::queue_marker::note_removed_current(
+            &data.shared,
             &ctx.http,
             channel_id,
             user_msg_id,
             emoji,
+            "intake_gate_queue_pending_self_heal",
         )
         .await;
         let ts = chrono::Local::now().format("%H:%M:%S");

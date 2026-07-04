@@ -48,11 +48,28 @@ pub(crate) enum InterventionMode {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct SourceMessageQueuedGeneration {
+    pub(crate) message_id: MessageId,
+    pub(crate) queued_generation: u64,
+}
+
+impl SourceMessageQueuedGeneration {
+    pub(crate) fn new(message_id: MessageId, queued_generation: u64) -> Self {
+        Self {
+            message_id,
+            queued_generation,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct Intervention {
     pub(crate) author_id: UserId,
     pub(crate) author_is_bot: bool,
     pub(crate) message_id: MessageId,
+    pub(crate) queued_generation: u64,
     pub(crate) source_message_ids: Vec<MessageId>,
+    pub(crate) source_message_queued_generations: Vec<SourceMessageQueuedGeneration>,
     pub(crate) text: String,
     pub(crate) mode: InterventionMode,
     pub(crate) created_at: Instant,
@@ -70,6 +87,34 @@ pub(crate) struct Intervention {
     /// the voice-transcript framing instead of falling back to plain text.
     /// `None` for non-voice paths.
     pub(crate) voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
+}
+
+impl Intervention {
+    pub(crate) fn source_message_queued_generations(&self) -> Vec<SourceMessageQueuedGeneration> {
+        let source_message_ids = if self.source_message_ids.is_empty() {
+            vec![self.message_id]
+        } else {
+            self.source_message_ids.clone()
+        };
+        if self.source_message_queued_generations.is_empty() {
+            return source_message_ids
+                .into_iter()
+                .map(|message_id| {
+                    SourceMessageQueuedGeneration::new(message_id, self.queued_generation)
+                })
+                .collect();
+        }
+        let mut owners = self.source_message_queued_generations.clone();
+        for message_id in source_message_ids {
+            if !owners.iter().any(|owner| owner.message_id == message_id) {
+                owners.push(SourceMessageQueuedGeneration::new(
+                    message_id,
+                    self.queued_generation,
+                ));
+            }
+        }
+        owners
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,6 +176,28 @@ fn ensure_source_message_ids(intervention: &mut Intervention) {
             .source_message_ids
             .push(intervention.message_id);
     }
+    if intervention.source_message_queued_generations.is_empty() {
+        intervention.source_message_queued_generations = intervention
+            .source_message_ids
+            .iter()
+            .copied()
+            .map(|message_id| {
+                SourceMessageQueuedGeneration::new(message_id, intervention.queued_generation)
+            })
+            .collect();
+    } else {
+        for message_id in &intervention.source_message_ids {
+            if !intervention
+                .source_message_queued_generations
+                .iter()
+                .any(|owner| owner.message_id == *message_id)
+            {
+                intervention.source_message_queued_generations.push(
+                    SourceMessageQueuedGeneration::new(*message_id, intervention.queued_generation),
+                );
+            }
+        }
+    }
 }
 
 fn push_unique_message_ids(
@@ -140,6 +207,20 @@ fn push_unique_message_ids(
     for message_id in incoming {
         if !existing.contains(&message_id) {
             existing.push(message_id);
+        }
+    }
+}
+
+fn push_unique_source_message_queued_generations(
+    existing: &mut Vec<SourceMessageQueuedGeneration>,
+    incoming: impl IntoIterator<Item = SourceMessageQueuedGeneration>,
+) {
+    for incoming in incoming {
+        if !existing
+            .iter()
+            .any(|owner| owner.message_id == incoming.message_id)
+        {
+            existing.push(incoming);
         }
     }
 }
@@ -199,9 +280,14 @@ pub(crate) fn enqueue_intervention(
             }
             last.text.push_str(&intervention.text);
             last.message_id = intervention.message_id;
+            last.queued_generation = intervention.queued_generation;
             push_unique_message_ids(
                 &mut last.source_message_ids,
                 intervention.source_message_ids.into_iter(),
+            );
+            push_unique_source_message_queued_generations(
+                &mut last.source_message_queued_generations,
+                intervention.source_message_queued_generations.into_iter(),
             );
             last.created_at = intervention.created_at;
             // #2266: on merge, the incoming voice announcement (if any)
@@ -3086,7 +3172,9 @@ mod actor_hydrate_regression_tests {
             author_id: UserId::new(1),
             author_is_bot: false,
             message_id: MessageId::new(message_id),
+            queued_generation: crate::services::discord::runtime_store::load_generation(),
             source_message_ids: vec![MessageId::new(message_id)],
+            source_message_queued_generations: Vec::new(),
             text: text.to_string(),
             mode: InterventionMode::Soft,
             created_at,
@@ -3106,6 +3194,7 @@ mod actor_hydrate_regression_tests {
     ) -> Intervention {
         Intervention {
             source_message_ids: source_ids.iter().copied().map(MessageId::new).collect(),
+            source_message_queued_generations: Vec::new(),
             ..make_intervention(message_id, text, created_at)
         }
     }
@@ -3988,7 +4077,9 @@ mod active_turn_kind_tests {
             author_id: UserId::new(1),
             author_is_bot: false,
             message_id: MessageId::new(message_id),
+            queued_generation: crate::services::discord::runtime_store::load_generation(),
             source_message_ids: vec![MessageId::new(message_id)],
+            source_message_queued_generations: Vec::new(),
             text: format!("msg-{message_id}"),
             mode: InterventionMode::Soft,
             created_at: Instant::now(),
@@ -4522,7 +4613,9 @@ mod enqueue_refusal_reason_tests {
             author_id: UserId::new(1),
             author_is_bot: false,
             message_id: MessageId::new(message_id),
+            queued_generation: crate::services::discord::runtime_store::load_generation(),
             source_message_ids: vec![MessageId::new(message_id)],
+            source_message_queued_generations: Vec::new(),
             text: text.to_string(),
             mode: InterventionMode::Soft,
             created_at,
@@ -4604,7 +4697,9 @@ mod no_ttl_evict_tests {
             author_id: UserId::new(1),
             author_is_bot: false,
             message_id: MessageId::new(message_id),
+            queued_generation: crate::services::discord::runtime_store::load_generation(),
             source_message_ids: vec![MessageId::new(message_id)],
+            source_message_queued_generations: Vec::new(),
             text: format!("msg-{message_id}"),
             mode: InterventionMode::Soft,
             created_at,
@@ -4761,7 +4856,9 @@ mod persistence_tests {
             author_id: UserId::new(100),
             author_is_bot: voice_announcement.is_some(),
             message_id: MessageId::new(message_id),
+            queued_generation: crate::services::discord::runtime_store::load_generation(),
             source_message_ids: vec![MessageId::new(message_id)],
+            source_message_queued_generations: Vec::new(),
             text: text.to_string(),
             mode: InterventionMode::Soft,
             created_at: Instant::now(),
@@ -5772,7 +5869,9 @@ mod persistence_tests {
             author_id: UserId::new(100),
             author_is_bot: true,
             message_id,
+            queued_generation: crate::services::discord::runtime_store::load_generation(),
             source_message_ids: vec![message_id],
+            source_message_queued_generations: Vec::new(),
             text: "DISPATCH: restore me".to_string(),
             mode: InterventionMode::Soft,
             created_at: Instant::now(),
@@ -5868,6 +5967,103 @@ mod persistence_tests {
         assert_eq!(
             loaded[&channel_id][0].pending_uploads, intervention.pending_uploads,
             "queued attachment-only turns must carry their own upload context"
+        );
+    }
+
+    #[test]
+    fn pending_queue_roundtrip_preserves_per_source_queued_generations() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvGuard::set_root(tmp.path());
+
+        let provider = ProviderKind::Codex;
+        let token_hash = "source_generation_roundtrip";
+        let channel_id = ChannelId::new(2_840_011);
+        let source_a = MessageId::new(2_840_012);
+        let source_b = MessageId::new(2_840_013);
+        let mut intervention = make_intervention(source_b.get(), "merged sources", None);
+        intervention.queued_generation = 72;
+        intervention.source_message_ids = vec![source_a, source_b];
+        intervention.source_message_queued_generations = vec![
+            SourceMessageQueuedGeneration::new(source_a, 71),
+            SourceMessageQueuedGeneration::new(source_b, 72),
+        ];
+
+        save_channel_queue(
+            &provider,
+            token_hash,
+            channel_id,
+            std::slice::from_ref(&intervention),
+            None,
+        )
+        .unwrap();
+
+        let saved = read_saved_items(tmp.path(), &provider, token_hash, channel_id);
+        assert_eq!(saved[0].source_message_queued_generations.len(), 2);
+        assert_eq!(
+            saved[0].source_message_queued_generations[0].message_id,
+            source_a.get()
+        );
+        assert_eq!(
+            saved[0].source_message_queued_generations[0].queued_generation,
+            71
+        );
+        assert_eq!(
+            saved[0].source_message_queued_generations[1].message_id,
+            source_b.get()
+        );
+        assert_eq!(
+            saved[0].source_message_queued_generations[1].queued_generation,
+            72
+        );
+
+        let (loaded, _) = load_pending_queues(&provider, token_hash);
+        let loaded_sources = loaded[&channel_id][0].source_message_queued_generations();
+        assert_eq!(
+            loaded_sources
+                .iter()
+                .map(|source| (source.message_id, source.queued_generation))
+                .collect::<Vec<_>>(),
+            vec![(source_a, 71), (source_b, 72)]
+        );
+    }
+
+    #[test]
+    fn pending_queue_legacy_single_generation_sources_restore_with_defaulted_owner_list() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvGuard::set_root(tmp.path());
+
+        let provider = ProviderKind::Codex;
+        let token_hash = "legacy_single_generation_sources";
+        let channel_id = ChannelId::new(2_840_021);
+        let source_a = MessageId::new(2_840_022);
+        let source_b = MessageId::new(2_840_023);
+        let path = queue_file_path(tmp.path(), &provider, token_hash, channel_id);
+        std::fs::create_dir_all(path.parent().expect("queue parent")).unwrap();
+        let legacy = serde_json::json!([
+            {
+                "author_id": 100,
+                "author_is_bot": false,
+                "message_id": source_b.get(),
+                "queued_generation": 81,
+                "source_message_ids": [source_a.get(), source_b.get()],
+                "text": "legacy merged row",
+                "reply_context": null,
+                "has_reply_boundary": false,
+                "merge_consecutive": true
+            }
+        ]);
+        std::fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
+
+        let (loaded, _) = load_pending_queues(&provider, token_hash);
+        let loaded_sources = loaded[&channel_id][0].source_message_queued_generations();
+        assert_eq!(
+            loaded_sources
+                .iter()
+                .map(|source| (source.message_id, source.queued_generation))
+                .collect::<Vec<_>>(),
+            vec![(source_a, 81), (source_b, 81)]
         );
     }
 
@@ -6019,7 +6215,9 @@ mod purge_queue_tests {
             author_id: UserId::new(1),
             author_is_bot: false,
             message_id: MessageId::new(message_id),
+            queued_generation: crate::services::discord::runtime_store::load_generation(),
             source_message_ids: vec![MessageId::new(message_id)],
+            source_message_queued_generations: Vec::new(),
             text: text.to_string(),
             mode: InterventionMode::Soft,
             created_at,
@@ -6189,7 +6387,9 @@ mod finish_cancelled_turn_tests {
             author_id: UserId::new(1),
             author_is_bot: false,
             message_id: MessageId::new(message_id),
+            queued_generation: crate::services::discord::runtime_store::load_generation(),
             source_message_ids: vec![MessageId::new(message_id)],
+            source_message_queued_generations: Vec::new(),
             text: text.to_string(),
             mode: InterventionMode::Soft,
             created_at: Instant::now(),

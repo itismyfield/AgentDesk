@@ -29,6 +29,20 @@ fn persisted_exists(target: TurnViewTarget) -> bool {
     persisted_path(target).exists()
 }
 
+fn persisted_applied(target: TurnViewTarget) -> TurnViewState {
+    let text = std::fs::read_to_string(persisted_path(target)).expect("persisted turn view state");
+    let record: PersistedTargetState =
+        serde_json::from_str(&text).expect("parse persisted turn view state");
+    TurnViewState::from_str(&record.applied).expect("known persisted turn view state")
+}
+
+fn persisted_start_attempt(target: TurnViewTarget) -> Option<TurnStartAttempt> {
+    let text = std::fs::read_to_string(persisted_path(target)).expect("persisted turn view state");
+    let record: PersistedTargetState =
+        serde_json::from_str(&text).expect("parse persisted turn view state");
+    record.start_attempt_id.map(TurnStartAttempt)
+}
+
 fn persisted_record(
     shared: &SharedData,
     target: TurnViewTarget,
@@ -46,6 +60,7 @@ fn persisted_record(
         applied: applied.to_string(),
         identity_label: target.kind.identity_label().to_string(),
         token_hash: Some(shared.token_hash.clone()),
+        start_attempt_id: None,
     }
 }
 
@@ -81,6 +96,53 @@ fn snapshot_reactions(
     reactions
 }
 
+/// Isolate each reconciler test from the process-global `AGENTDESK_ROOT_DIR`.
+/// S4-a2 gave the reconciler a persisted target store (`persist_target` /
+/// `load_persisted_target`), so every `note_state` transition now resolves the
+/// runtime-store root and panics under the #3293 guard unless a test root is
+/// installed. Acquire the crate-wide env lock (the same
+/// `config::shared_test_env_lock()` every other env-mutating test serializes
+/// on) for the FULL test scope, point the env at a private temp dir, and
+/// restore the prior value on drop. The `MutexGuard` is held across the test's
+/// `.await` points; that is sound because reconciler tests run on the default
+/// current-thread `#[tokio::test]` runtime, so the future never moves threads.
+struct ScopedRuntimeRoot {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    _temp: tempfile::TempDir,
+    prev: Option<std::ffi::OsString>,
+}
+
+impl Drop for ScopedRuntimeRoot {
+    fn drop(&mut self) {
+        unsafe {
+            match self.prev.take() {
+                Some(value) => std::env::set_var("AGENTDESK_ROOT_DIR", value),
+                None => std::env::remove_var("AGENTDESK_ROOT_DIR"),
+            }
+        }
+    }
+}
+
+#[must_use]
+fn scoped_runtime_root() -> ScopedRuntimeRoot {
+    let lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let prev = std::env::var_os("AGENTDESK_ROOT_DIR");
+    let temp = tempfile::tempdir().expect("create temp runtime dir for reconciler test");
+    unsafe {
+        std::env::set_var(
+            "AGENTDESK_ROOT_DIR",
+            temp.path().to_str().expect("temp path must be valid utf-8"),
+        );
+    }
+    ScopedRuntimeRoot {
+        _lock: lock,
+        _temp: temp,
+        prev,
+    }
+}
+
 async fn note_sequence(states: &[TurnViewState]) -> TurnViewReconciler {
     let reconciler = TurnViewReconciler::default();
     let shared = crate::services::discord::make_shared_data_for_tests();
@@ -104,6 +166,7 @@ async fn note_sequence(states: &[TurnViewState]) -> TurnViewReconciler {
 
 #[tokio::test]
 async fn sequence_start_complete_leaves_only_completed_reaction() {
+    let _root = scoped_runtime_root();
     let reconciler = note_sequence(&[TurnViewState::Pending, TurnViewState::Completed]).await;
 
     assert_eq!(
@@ -113,7 +176,636 @@ async fn sequence_start_complete_leaves_only_completed_reaction() {
 }
 
 #[tokio::test]
+async fn queued_then_started_swaps_mailbox_to_hourglass_without_residue() {
+    let _root = scoped_runtime_root();
+    let reconciler = note_sequence(&[TurnViewState::Queued, TurnViewState::Pending]).await;
+
+    assert_eq!(
+        snapshot_reactions(&reconciler, target()),
+        vec![expected('⏳', "intake-a")]
+    );
+    let ops = reconciler.ops();
+    assert!(ops.iter().any(|op| op.add && op.emoji == '📬'));
+    assert!(ops.iter().any(|op| !op.add && op.emoji == '📬'));
+    assert!(
+        !snapshot_reactions(&reconciler, target())
+            .iter()
+            .any(|(emoji, _)| *emoji == '📬')
+    );
+}
+
+#[tokio::test]
+async fn requeue_renotification_of_queued_target_is_coalesced_noop() {
+    let _root = scoped_runtime_root();
+    let reconciler = note_sequence(&[TurnViewState::Queued, TurnViewState::Queued]).await;
+
+    let ops = reconciler.ops();
+    assert_eq!(ops.iter().filter(|op| op.emoji == '📬').count(), 1);
+    assert_eq!(
+        snapshot_reactions(&reconciler, target()),
+        vec![expected('📬', "intake-a")]
+    );
+}
+
+#[tokio::test]
+async fn queue_cancel_removes_mailbox_marker() {
+    let _root = scoped_runtime_root();
+    let reconciler = note_sequence(&[TurnViewState::Queued, TurnViewState::None]).await;
+
+    let ops = reconciler.ops();
+    assert!(ops.iter().any(|op| op.add && op.emoji == '📬'));
+    assert!(ops.iter().any(|op| !op.add && op.emoji == '📬'));
+    assert_eq!(snapshot_reactions(&reconciler, target()), Vec::new());
+}
+
+#[tokio::test]
+async fn regression_4049_start_rollback_to_queued_swaps_hourglass_to_mailbox_and_cancel_cleans() {
+    let _root = scoped_runtime_root();
+    let reconciler = TurnViewReconciler::default();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let target = target_with(100_000_000_000_141, 100_000_000_000_142);
+    clear_persisted(target);
+    let owner = owner(37, "rollback");
+
+    let start_attempt = reconciler
+        .note_turn_started_with_attempt(
+            &shared,
+            target,
+            owner.clone(),
+            TurnViewIdentity::Test("intake-a"),
+            "test_seed_pending",
+        )
+        .await
+        .attempt()
+        .expect("pending start records an attempt");
+    assert_eq!(
+        snapshot_reactions(&reconciler, target),
+        vec![expected('⏳', "intake-a")]
+    );
+    assert_eq!(persisted_applied(target), TurnViewState::Pending);
+
+    reconciler
+        .note_start_rolled_back_to_queued(
+            &shared,
+            target,
+            owner.clone(),
+            start_attempt,
+            "test_start_rolled_back_to_queued",
+        )
+        .await;
+
+    let ops = reconciler.ops();
+    assert_eq!(ops.len(), 3);
+    assert!(ops[1].emoji == '⏳' && !ops[1].add);
+    assert!(ops[2].emoji == '📬' && ops[2].add);
+    assert_eq!(
+        snapshot_reactions(&reconciler, target),
+        vec![expected('📬', "intake-a")]
+    );
+    assert_eq!(
+        reconciler
+            .targets
+            .get(&target)
+            .expect("rolled back target should remain tracked")
+            .applied,
+        TurnViewState::Queued
+    );
+    assert_eq!(persisted_applied(target), TurnViewState::Queued);
+
+    reconciler
+        .note_queued_message_cancelled(
+            &shared,
+            target,
+            owner,
+            TurnViewIdentity::Test("ignored-cancel"),
+            "test_queue_exit_after_rollback",
+        )
+        .await;
+
+    assert_eq!(snapshot_reactions(&reconciler, target), Vec::new());
+    assert!(!persisted_exists(target));
+    assert!(!reconciler.targets.contains_key(&target));
+}
+
+#[tokio::test]
+async fn regression_4049_same_generation_redispatch_stale_start_rollback_noop() {
+    let _root = scoped_runtime_root();
+    let reconciler = TurnViewReconciler::default();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let target = target_with(100_000_000_000_145, 100_000_000_000_146);
+    clear_persisted(target);
+    let owner = owner(40, "same-generation-redispatch");
+
+    let attempt1 = reconciler
+        .note_turn_started_with_attempt(
+            &shared,
+            target,
+            owner.clone(),
+            TurnViewIdentity::Test("intake-a"),
+            "test_seed_attempt1",
+        )
+        .await
+        .attempt()
+        .expect("attempt1 recorded");
+    assert_eq!(
+        snapshot_reactions(&reconciler, target),
+        vec![expected('⏳', "intake-a")]
+    );
+    let ops_after_attempt1 = reconciler.ops().len();
+
+    let attempt2 = reconciler
+        .note_turn_started_with_attempt(
+            &shared,
+            target,
+            owner.clone(),
+            TurnViewIdentity::Test("intake-a"),
+            "test_redispatch_attempt2",
+        )
+        .await
+        .attempt()
+        .expect("attempt2 recorded");
+    assert_ne!(
+        attempt1, attempt2,
+        "same-generation re-dispatch must mint a new start attempt"
+    );
+    assert_eq!(
+        reconciler.ops().len(),
+        ops_after_attempt1,
+        "same-state re-dispatch only refreshes identity, not emoji"
+    );
+
+    reconciler
+        .note_start_rolled_back_to_queued(
+            &shared,
+            target,
+            owner,
+            attempt1,
+            "test_delayed_attempt1_rollback",
+        )
+        .await;
+
+    assert_eq!(
+        snapshot_reactions(&reconciler, target),
+        vec![expected('⏳', "intake-a")],
+        "stale rollback for attempt1 must not clobber attempt2 pending"
+    );
+    let current = reconciler
+        .targets
+        .get(&target)
+        .expect("redispatched pending target should remain tracked");
+    assert_eq!(current.applied, TurnViewState::Pending);
+    assert_eq!(current.start_attempt, Some(attempt2));
+    assert_eq!(persisted_applied(target), TurnViewState::Pending);
+}
+
+#[tokio::test]
+async fn regression_4049_attempt_scoped_clear_removes_matching_pending() {
+    let _root = scoped_runtime_root();
+    let reconciler = TurnViewReconciler::default();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let target = target_with(100_000_000_000_147, 100_000_000_000_148);
+    clear_persisted(target);
+    let owner = owner(42, "matching-clear");
+
+    let attempt = reconciler
+        .note_turn_started_with_attempt(
+            &shared,
+            target,
+            owner.clone(),
+            TurnViewIdentity::Test("intake-a"),
+            "test_seed_pending",
+        )
+        .await
+        .attempt()
+        .expect("pending start records an attempt");
+    assert_eq!(
+        snapshot_reactions(&reconciler, target),
+        vec![expected('⏳', "intake-a")]
+    );
+
+    reconciler
+        .note_turn_cleared_if_attempt_matches(
+            &shared,
+            target,
+            owner,
+            TurnViewIdentity::Test("ignored-clear"),
+            attempt,
+            "test_matching_attempt_clear",
+        )
+        .await;
+
+    let ops = reconciler.ops();
+    assert!(ops.iter().any(|op| !op.add && op.emoji == '⏳'));
+    assert_eq!(snapshot_reactions(&reconciler, target), Vec::new());
+    assert!(!persisted_exists(target));
+    assert!(!reconciler.targets.contains_key(&target));
+}
+
+async fn assert_stale_attempt_clear_keeps_redispatch_pending(
+    target: TurnViewTarget,
+    owner_suffix: &str,
+    source: &'static str,
+) {
+    let reconciler = TurnViewReconciler::default();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    clear_persisted(target);
+    let owner = owner(43, owner_suffix);
+
+    let attempt1 = reconciler
+        .note_turn_started_with_attempt(
+            &shared,
+            target,
+            owner.clone(),
+            TurnViewIdentity::Test("intake-a"),
+            "test_seed_attempt1",
+        )
+        .await
+        .attempt()
+        .expect("attempt1 recorded");
+    let attempt2 = reconciler
+        .note_turn_started_with_attempt(
+            &shared,
+            target,
+            owner.clone(),
+            TurnViewIdentity::Test("intake-a"),
+            "test_redispatch_attempt2",
+        )
+        .await
+        .attempt()
+        .expect("attempt2 recorded");
+    assert_ne!(attempt1, attempt2);
+    let ops_after_attempt2 = reconciler.ops().len();
+
+    reconciler
+        .note_turn_cleared_if_attempt_matches(
+            &shared,
+            target,
+            owner,
+            TurnViewIdentity::Test("ignored-stale-clear"),
+            attempt1,
+            source,
+        )
+        .await;
+
+    assert_eq!(
+        reconciler.ops().len(),
+        ops_after_attempt2,
+        "stale attempt-scoped clear must not touch Discord"
+    );
+    assert_eq!(
+        snapshot_reactions(&reconciler, target),
+        vec![expected('⏳', "intake-a")],
+        "stale clear for attempt1 must not clobber attempt2 pending"
+    );
+    let current = reconciler
+        .targets
+        .get(&target)
+        .expect("redispatched pending target should remain tracked");
+    assert_eq!(current.applied, TurnViewState::Pending);
+    assert_eq!(current.start_attempt, Some(attempt2));
+    assert_eq!(persisted_applied(target), TurnViewState::Pending);
+    assert_eq!(persisted_start_attempt(target), Some(attempt2));
+}
+
+#[tokio::test]
+async fn regression_4049_dispatch_already_running_stale_clear_keeps_redispatch_pending() {
+    let _root = scoped_runtime_root();
+    assert_stale_attempt_clear_keeps_redispatch_pending(
+        target_with(100_000_000_000_149, 100_000_000_000_150),
+        "dispatch-already-running-clear",
+        "race_loss_orphan_placeholder",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn regression_4049_final_race_loss_stale_clear_keeps_redispatch_pending() {
+    let _root = scoped_runtime_root();
+    assert_stale_attempt_clear_keeps_redispatch_pending(
+        target_with(100_000_000_000_153, 100_000_000_000_154),
+        "final-race-loss-clear",
+        "race_loss_message_queued",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn regression_4049_stale_clear_after_newer_rollback_keeps_queued_marker() {
+    let _root = scoped_runtime_root();
+    let reconciler = TurnViewReconciler::default();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let target = target_with(100_000_000_000_155, 100_000_000_000_156);
+    clear_persisted(target);
+    let owner = owner(45, "stale-clear-after-rollback");
+
+    let attempt1 = reconciler
+        .note_turn_started_with_attempt(
+            &shared,
+            target,
+            owner.clone(),
+            TurnViewIdentity::Test("intake-a"),
+            "test_seed_attempt1",
+        )
+        .await
+        .attempt()
+        .expect("attempt1 recorded");
+    let attempt2 = reconciler
+        .note_turn_started_with_attempt(
+            &shared,
+            target,
+            owner.clone(),
+            TurnViewIdentity::Test("intake-a"),
+            "test_redispatch_attempt2",
+        )
+        .await
+        .attempt()
+        .expect("attempt2 recorded");
+    assert_ne!(attempt1, attempt2);
+
+    reconciler
+        .note_start_rolled_back_to_queued(
+            &shared,
+            target,
+            owner.clone(),
+            attempt2,
+            "test_attempt2_rollback_to_queued",
+        )
+        .await;
+
+    assert_eq!(
+        snapshot_reactions(&reconciler, target),
+        vec![expected('📬', "intake-a")]
+    );
+    let current = reconciler
+        .targets
+        .get(&target)
+        .expect("rolled-back queued target should remain tracked");
+    assert_eq!(current.applied, TurnViewState::Queued);
+    assert_eq!(current.start_attempt, None);
+    drop(current);
+    assert_eq!(persisted_applied(target), TurnViewState::Queued);
+    assert_eq!(persisted_start_attempt(target), None);
+    let ops_after_rollback = reconciler.ops().len();
+
+    reconciler
+        .note_turn_cleared_if_attempt_matches(
+            &shared,
+            target,
+            owner,
+            TurnViewIdentity::Test("ignored-stale-clear"),
+            attempt1,
+            "test_delayed_attempt1_clear_after_attempt2_queued",
+        )
+        .await;
+
+    assert_eq!(
+        reconciler.ops().len(),
+        ops_after_rollback,
+        "stale attempt-scoped clear must not touch Discord after rollback to queued"
+    );
+    assert_eq!(
+        snapshot_reactions(&reconciler, target),
+        vec![expected('📬', "intake-a")],
+        "stale attempt1 clear must not remove the newer queued marker"
+    );
+    let current = reconciler
+        .targets
+        .get(&target)
+        .expect("queued target should survive stale attempt-scoped clear");
+    assert_eq!(current.applied, TurnViewState::Queued);
+    assert_eq!(current.start_attempt, None);
+    assert_eq!(persisted_applied(target), TurnViewState::Queued);
+    assert_eq!(persisted_start_attempt(target), None);
+}
+
+#[tokio::test]
+async fn regression_4049_attempt_scoped_clear_preserves_pending_without_start_attempt() {
+    let _root = scoped_runtime_root();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let target = target_with(100_000_000_000_157, 100_000_000_000_158);
+    clear_persisted(target);
+    let provider = shared.provider.as_str().to_string();
+    let record = persisted_record(&shared, target, &provider, "pending");
+    write_persisted(&record, target);
+
+    let reconciler = TurnViewReconciler::default();
+    reconciler
+        .note_turn_cleared_if_attempt_matches(
+            &shared,
+            target,
+            owner(91, "persisted"),
+            TurnViewIdentity::Test("ignored-clear"),
+            TurnStartAttempt(99),
+            "test_pending_without_start_attempt_clear",
+        )
+        .await;
+
+    assert!(
+        reconciler.ops().is_empty(),
+        "attempt-scoped clear without a matching pending nonce must not touch Discord"
+    );
+    let current = reconciler
+        .targets
+        .get(&target)
+        .expect("pending target without nonce should survive attempt-scoped clear");
+    assert_eq!(current.applied, TurnViewState::Pending);
+    assert_eq!(current.start_attempt, None);
+    assert_eq!(persisted_applied(target), TurnViewState::Pending);
+    assert_eq!(persisted_start_attempt(target), None);
+}
+
+#[tokio::test]
+async fn regression_4049_late_start_rollback_after_terminal_is_noop() {
+    let _root = scoped_runtime_root();
+    let reconciler = TurnViewReconciler::default();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let target = target_with(100_000_000_000_143, 100_000_000_000_144);
+    clear_persisted(target);
+    let owner = owner(39, "terminal-rollback");
+
+    let start_attempt = reconciler
+        .note_turn_started_with_attempt(
+            &shared,
+            target,
+            owner.clone(),
+            TurnViewIdentity::Test("intake-a"),
+            "test_seed_pending",
+        )
+        .await
+        .attempt()
+        .expect("pending start records an attempt");
+    reconciler
+        .note_state(
+            &shared,
+            target,
+            owner.clone(),
+            TurnViewIdentity::Test("ignored-terminal"),
+            TurnViewState::Completed,
+            "test_terminal_before_rollback",
+        )
+        .await;
+    let ops_after_terminal = reconciler.ops().len();
+    let reactions_after_terminal = snapshot_reactions(&reconciler, target);
+
+    reconciler
+        .note_start_rolled_back_to_queued(
+            &shared,
+            target,
+            owner,
+            start_attempt,
+            "test_late_start_rolled_back_to_queued",
+        )
+        .await;
+
+    assert_eq!(
+        reconciler.ops().len(),
+        ops_after_terminal,
+        "late rollback after terminal must not touch Discord"
+    );
+    assert_eq!(
+        snapshot_reactions(&reconciler, target),
+        reactions_after_terminal
+    );
+    assert_eq!(
+        snapshot_reactions(&reconciler, target),
+        vec![expected('✅', "intake-a")]
+    );
+    assert!(!persisted_exists(target));
+    assert!(!reconciler.targets.contains_key(&target));
+}
+
+#[tokio::test]
+async fn regression_4049_late_queued_after_started_and_cancel_are_noops() {
+    let _root = scoped_runtime_root();
+    let reconciler = TurnViewReconciler::default();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let target = target_with(100_000_000_000_151, 100_000_000_000_152);
+    clear_persisted(target);
+    let owner = owner(41, "late-queued");
+
+    reconciler
+        .note_state(
+            &shared,
+            target,
+            owner.clone(),
+            TurnViewIdentity::Test("intake-a"),
+            TurnViewState::Pending,
+            "test",
+        )
+        .await;
+    let ops_after_start = reconciler.ops().len();
+
+    reconciler
+        .note_state(
+            &shared,
+            target,
+            owner.clone(),
+            TurnViewIdentity::Test("ignored-late-queued"),
+            TurnViewState::Queued,
+            "test",
+        )
+        .await;
+
+    assert_eq!(
+        reconciler.ops().len(),
+        ops_after_start,
+        "late queued notification after start must not touch Discord"
+    );
+    assert_eq!(
+        snapshot_reactions(&reconciler, target),
+        vec![expected('⏳', "intake-a")]
+    );
+    assert!(persisted_exists(target));
+    assert_eq!(
+        reconciler
+            .targets
+            .get(&target)
+            .expect("pending target should remain tracked")
+            .applied,
+        TurnViewState::Pending
+    );
+
+    reconciler
+        .note_queued_message_cancelled(
+            &shared,
+            target,
+            owner,
+            TurnViewIdentity::Test("ignored-cancel"),
+            "test",
+        )
+        .await;
+
+    assert_eq!(
+        reconciler.ops().len(),
+        ops_after_start,
+        "queued cancel after start must not touch Discord"
+    );
+    assert_eq!(
+        snapshot_reactions(&reconciler, target),
+        vec![expected('⏳', "intake-a")]
+    );
+    assert!(persisted_exists(target));
+    assert_eq!(
+        reconciler
+            .targets
+            .get(&target)
+            .expect("pending target should survive queued cancel")
+            .applied,
+        TurnViewState::Pending
+    );
+}
+
+#[tokio::test]
+async fn queued_cancel_ignores_nonmatching_generation() {
+    let _root = scoped_runtime_root();
+    let reconciler = TurnViewReconciler::default();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let target = target_with(100_000_000_000_161, 100_000_000_000_162);
+    clear_persisted(target);
+    let queued_owner = owner(43, "queued");
+    let stale_cancel_owner = owner(44, "queued");
+
+    reconciler
+        .note_state(
+            &shared,
+            target,
+            queued_owner,
+            TurnViewIdentity::Test("intake-a"),
+            TurnViewState::Queued,
+            "test",
+        )
+        .await;
+    let ops_after_queue = reconciler.ops().len();
+
+    reconciler
+        .note_queued_message_cancelled(
+            &shared,
+            target,
+            stale_cancel_owner,
+            TurnViewIdentity::Test("ignored-cancel"),
+            "test",
+        )
+        .await;
+
+    assert_eq!(reconciler.ops().len(), ops_after_queue);
+    assert_eq!(
+        snapshot_reactions(&reconciler, target),
+        vec![expected('📬', "intake-a")]
+    );
+    assert!(persisted_exists(target));
+    assert_eq!(
+        reconciler
+            .targets
+            .get(&target)
+            .expect("queued target should survive stale cancel")
+            .applied,
+        TurnViewState::Queued
+    );
+}
+
+#[tokio::test]
 async fn sequence_start_fail_leaves_only_failed_reaction() {
+    let _root = scoped_runtime_root();
     let reconciler = note_sequence(&[TurnViewState::Pending, TurnViewState::Failed]).await;
 
     assert_eq!(
@@ -124,6 +816,7 @@ async fn sequence_start_fail_leaves_only_failed_reaction() {
 
 #[tokio::test]
 async fn sequence_start_stop_leaves_only_stopped_reaction() {
+    let _root = scoped_runtime_root();
     let reconciler = note_sequence(&[TurnViewState::Pending, TurnViewState::Stopped]).await;
 
     assert_eq!(
@@ -134,6 +827,7 @@ async fn sequence_start_stop_leaves_only_stopped_reaction() {
 
 #[tokio::test]
 async fn sequence_start_recover_complete_removes_hourglass_residue() {
+    let _root = scoped_runtime_root();
     let reconciler = note_sequence(&[
         TurnViewState::Pending,
         TurnViewState::None,
@@ -149,6 +843,7 @@ async fn sequence_start_recover_complete_removes_hourglass_residue() {
 
 #[tokio::test]
 async fn cold_clear_removes_possible_lifecycle_residue() {
+    let _root = scoped_runtime_root();
     let reconciler = TurnViewReconciler::default();
     let shared = crate::services::discord::make_shared_data_for_tests();
     let target = TurnViewTarget::intake_user_message(
@@ -178,6 +873,7 @@ async fn cold_clear_removes_possible_lifecycle_residue() {
 
 #[tokio::test]
 async fn stale_completion_after_newer_turn_started_is_ignored() {
+    let _root = scoped_runtime_root();
     let reconciler = TurnViewReconciler::default();
     let shared = crate::services::discord::make_shared_data_for_tests();
     let target = target();
@@ -231,6 +927,7 @@ async fn stale_completion_after_newer_turn_started_is_ignored() {
 
 #[tokio::test]
 async fn regression_3164_adder_identity_equals_remover_identity_on_thread_target() {
+    let _root = scoped_runtime_root();
     let reconciler = TurnViewReconciler::default();
     let shared = crate::services::discord::make_shared_data_for_tests();
     let parent = ChannelId::new(100_000_000_000_201);
@@ -271,6 +968,7 @@ async fn regression_3164_adder_identity_equals_remover_identity_on_thread_target
 
 #[tokio::test]
 async fn cold_terminal_uses_persisted_pending_adder_identity_after_identity_change() {
+    let _root = scoped_runtime_root();
     let shared = crate::services::discord::make_shared_data_for_tests();
     let target = TurnViewTarget::intake_user_message(
         ChannelId::new(100_000_000_000_401),
@@ -315,6 +1013,7 @@ async fn cold_terminal_uses_persisted_pending_adder_identity_after_identity_chan
 
 #[tokio::test]
 async fn terminal_delivery_evicts_persisted_target_and_lock() {
+    let _root = scoped_runtime_root();
     let reconciler = TurnViewReconciler::default();
     let shared = crate::services::discord::make_shared_data_for_tests();
     let target = target_with(100_000_000_000_451, 100_000_000_000_452);
@@ -357,7 +1056,70 @@ async fn terminal_delivery_evicts_persisted_target_and_lock() {
 }
 
 #[tokio::test]
+async fn regression_4049_late_queued_after_terminal_eviction_is_noop() {
+    let _root = scoped_runtime_root();
+    let reconciler = TurnViewReconciler::default();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let target = target_with(100_000_000_000_471, 100_000_000_000_472);
+    clear_persisted(target);
+    let owner = owner(21, "terminal-late-queued");
+
+    reconciler
+        .note_state(
+            &shared,
+            target,
+            owner.clone(),
+            TurnViewIdentity::Test("intake-a"),
+            TurnViewState::Pending,
+            "test",
+        )
+        .await;
+    reconciler
+        .note_state(
+            &shared,
+            target,
+            owner.clone(),
+            TurnViewIdentity::Test("ignored-terminal"),
+            TurnViewState::Completed,
+            "test",
+        )
+        .await;
+
+    assert!(!persisted_exists(target));
+    assert!(!reconciler.targets.contains_key(&target));
+    let ops_after_terminal = reconciler.ops().len();
+
+    reconciler
+        .note_state(
+            &shared,
+            target,
+            owner,
+            TurnViewIdentity::Test("ignored-late-queued"),
+            TurnViewState::Queued,
+            "test_delayed_note_message_queued",
+        )
+        .await;
+
+    assert_eq!(
+        reconciler.ops().len(),
+        ops_after_terminal,
+        "delayed queued notification after terminal eviction must not touch Discord"
+    );
+    assert!(
+        !snapshot_reactions(&reconciler, target)
+            .iter()
+            .any(|(emoji, _)| *emoji == '📬'),
+        "late queued notification must not re-add mailbox next to the terminal reaction"
+    );
+    assert!(
+        !persisted_exists(target),
+        "late queued notification must not recreate persisted reconciler state"
+    );
+}
+
+#[tokio::test]
 async fn regression_3303_success_path_leaves_no_hourglass_residue() {
+    let _root = scoped_runtime_root();
     let reconciler = note_sequence(&[TurnViewState::Pending, TurnViewState::Completed]).await;
 
     assert!(
@@ -369,6 +1131,7 @@ async fn regression_3303_success_path_leaves_no_hourglass_residue() {
 
 #[tokio::test]
 async fn concurrent_terminal_notifications_leave_exactly_one_terminal_reaction() {
+    let _root = scoped_runtime_root();
     let reconciler = TurnViewReconciler::default();
     let shared = crate::services::discord::make_shared_data_for_tests();
     let target = TurnViewTarget::intake_user_message(
@@ -423,6 +1186,7 @@ async fn concurrent_terminal_notifications_leave_exactly_one_terminal_reaction()
 
 #[tokio::test]
 async fn queued_terminal_notification_uses_existing_lock_while_prior_terminal_evicts() {
+    let _root = scoped_runtime_root();
     let reconciler = std::sync::Arc::new(TurnViewReconciler::default());
     let shared = crate::services::discord::make_shared_data_for_tests();
     let target = target_with(100_000_000_000_551, 100_000_000_000_552);
@@ -511,6 +1275,7 @@ async fn queued_terminal_notification_uses_existing_lock_while_prior_terminal_ev
 
 #[tokio::test]
 async fn regression_4041_duplicate_transitions_are_coalesced() {
+    let _root = scoped_runtime_root();
     let reconciler = note_sequence(&[
         TurnViewState::Pending,
         TurnViewState::Pending,
@@ -536,6 +1301,7 @@ async fn regression_4041_duplicate_transitions_are_coalesced() {
 
 #[tokio::test]
 async fn permanent_failure_deletes_persisted_pending_and_stays_cold() {
+    let _root = scoped_runtime_root();
     let shared = crate::services::discord::make_shared_data_for_tests();
     let target = target_with(100_000_000_000_601, 100_000_000_000_602);
     clear_persisted(target);
@@ -594,6 +1360,7 @@ async fn permanent_failure_deletes_persisted_pending_and_stays_cold() {
 
 #[tokio::test]
 async fn dispatch_parent_retry_transient_keeps_persisted_pending_and_retries() {
+    let _root = scoped_runtime_root();
     let shared = crate::services::discord::make_shared_data_for_tests();
     let target = target_with(100_000_000_000_621, 100_000_000_000_622);
     clear_persisted(target);
@@ -671,6 +1438,7 @@ async fn dispatch_parent_retry_transient_keeps_persisted_pending_and_retries() {
 
 #[test]
 fn persisted_provider_mismatch_deletes_file_and_loads_cold() {
+    let _root = scoped_runtime_root();
     let shared = crate::services::discord::make_shared_data_for_tests();
     let target = target_with(100_000_000_000_701, 100_000_000_000_702);
     clear_persisted(target);
@@ -689,6 +1457,7 @@ fn persisted_provider_mismatch_deletes_file_and_loads_cold() {
 
 #[test]
 fn persisted_unknown_applied_value_deletes_file_and_loads_cold() {
+    let _root = scoped_runtime_root();
     let shared = crate::services::discord::make_shared_data_for_tests();
     let target = target_with(100_000_000_000_711, 100_000_000_000_712);
     clear_persisted(target);

@@ -18,7 +18,7 @@ use super::router;
 use super::router::handle_text_message;
 use super::turn_bridge::{auto_retry_with_history, release_retry_pending};
 use super::{
-    Intervention, SharedData, formatting, queue_reactions, rate_limit_wait,
+    Intervention, SharedData, formatting, queue_marker, rate_limit_wait,
     resolve_discord_bot_provider, validate_live_channel_routing,
 };
 use crate::services::provider::ProviderKind;
@@ -730,15 +730,15 @@ impl TurnGateway for DiscordGateway {
                 return Err("missing live Discord context".to_string());
             };
 
-            for message_id in &intervention.source_message_ids {
-                // Every queue marker (standalone 📬, merged ➕, reconcile 🔄)
-                // must be cleaned up — `source_message_ids` collects every
-                // message that contributed to this intervention.
-                for emoji in queue_reactions::QUEUE_PENDING_REACTION_EMOJIS {
-                    formatting::remove_reaction_raw(&self.http, channel_id, *message_id, emoji)
-                        .await;
-                }
-            }
+            let source_message_generations = intervention.source_message_queued_generations();
+            queue_marker::drain_dispatched_queue_markers(
+                &self.shared,
+                &self.http,
+                channel_id,
+                intervention.message_id,
+                &source_message_generations,
+            )
+            .await;
 
             // codex review P2 (#1332 follow-up): merged interventions can carry
             // several `source_message_ids`, each of which had registered its own

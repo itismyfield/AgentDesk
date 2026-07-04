@@ -454,6 +454,24 @@ pub(in crate::services::discord) async fn remove_reaction_raw(
     }
 }
 
+pub(in crate::services::discord) async fn note_auxiliary_reaction_added(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    message_id: serenity::MessageId,
+    emoji: char,
+) -> bool {
+    add_reaction_raw(http, channel_id, message_id, emoji).await
+}
+
+pub(in crate::services::discord) async fn note_auxiliary_reaction_removed(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    message_id: serenity::MessageId,
+    emoji: char,
+) -> bool {
+    remove_reaction_raw(http, channel_id, message_id, emoji).await
+}
+
 #[cfg(test)]
 mod tests {
     use poise::serenity_prelude::{ChannelId, MessageId};
