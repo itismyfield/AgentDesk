@@ -1,5 +1,48 @@
 use super::*;
 
+async fn enqueue_race_loss_requeued_intervention(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    user_msg_id: MessageId,
+    intervention: Intervention,
+) -> crate::services::discord::MailboxEnqueueOutcome {
+    let outcome = crate::services::discord::queue_io::with_post_enqueue_idle_queue_kick_suppressed(
+        crate::services::discord::mailbox_enqueue_intervention(
+            shared,
+            provider,
+            channel_id,
+            intervention,
+        ),
+    )
+    .await;
+    if outcome.persistence_error.is_some() {
+        crate::services::discord::mailbox_clear_pending_dispatch_reservation(
+            shared,
+            provider,
+            channel_id,
+            user_msg_id,
+        )
+        .await;
+    } else {
+        crate::services::discord::mailbox_abandon_pending_dispatch(
+            shared,
+            provider,
+            channel_id,
+            user_msg_id,
+        )
+        .await;
+    }
+    if outcome.enqueued && outcome.persistence_error.is_none() {
+        crate::services::discord::queue_io::schedule_race_loss_requeue_post_enqueue_idle_recheck(
+            shared.clone(),
+            provider.clone(),
+            channel_id,
+        );
+    }
+    outcome
+}
+
 /// #3837 decomposition: the start-turn race-loss enqueue path lifted verbatim
 /// from `handle_text_message`. Behavior-preserving — this is the exact body of
 /// the `if !started { ... }` block (mailbox enqueue, queued-placeholder render,
@@ -56,10 +99,11 @@ pub(super) async fn handle_race_loss_enqueue(
     // mapping insert: if the dispatch path has already promoted our
     // intervention into an active turn (with its own fresh card), we
     // delete our orphan POST and skip the mapping insert.
-    let enqueue_outcome = crate::services::discord::mailbox_enqueue_intervention(
+    let enqueue_outcome = enqueue_race_loss_requeued_intervention(
         shared,
         &bot_owner_provider,
         channel_id,
+        user_msg_id,
         build_race_requeued_intervention(
             // #2266: attribute the queued `Intervention` to the original
             // Discord author (the announce bot for voice transcripts) so
@@ -86,59 +130,15 @@ pub(super) async fn handle_race_loss_enqueue(
     )
     .await;
     let enqueued = enqueue_outcome.enqueued;
-    if enqueue_outcome.persistence_error.is_some() {
-        crate::services::discord::mailbox_clear_pending_dispatch_reservation(
-            shared,
-            &bot_owner_provider,
-            channel_id,
-            user_msg_id,
-        )
-        .await;
-    } else {
-        crate::services::discord::mailbox_abandon_pending_dispatch(
-            shared,
-            &bot_owner_provider,
-            channel_id,
-            user_msg_id,
-        )
-        .await;
-    }
 
-    // codex review P1: cover the residual race window where the active
-    // turn finished between `mailbox_try_start_turn` and the enqueue
-    // above. In that case `mailbox_finish_turn` saw an empty queue and
-    // skipped the dequeue chain — schedule a deferred drain so the
-    // intervention we just enqueued does not strand. Round-9: this still
-    // runs first so the deferred kickoff fires even if the placeholder
-    // POST below ends up failing.
-    //
-    // #3903: gate on the BLOCKING (real) active turn, not on *any* active
-    // turn. The previous `mailbox_has_active_turn` skipped this drain
-    // whenever a background SYSTEM-INJECTION turn (e.g. a `/loop`
-    // auto-check) held the slot — but such a turn's finalize does NOT
-    // re-kick the user queue, so a genuine user message re-enqueued here
-    // (it lost the start-turn race to the injection) stranded in the queue
-    // until an external fetch surfaced it (user-message loss → data
-    // integrity). A background turn is non-blocking (#3167), so scheduling
-    // the (idempotent, gated, bounded-retry) drain now lets the drain
-    // supersede the background injection and dispatch the queued user
-    // message as soon as the pane is idle — exactly-once, never doubled
-    // (the dequeue is actor-serialized through `take_next_soft`). When a
-    // REAL turn holds the slot we still skip the drain: that turn's own
-    // finalize owns the dequeue chain (unchanged pre-#3903 behavior).
-    let has_blocking_active_turn =
-        crate::services::discord::mailbox_has_blocking_active_turn(shared, channel_id).await;
-    if super::super::super::intake_gate::should_schedule_post_enqueue_idle_drain(
-        enqueued,
-        has_blocking_active_turn,
-    ) {
-        crate::services::discord::schedule_deferred_idle_queue_kickoff(
-            shared.clone(),
-            bot_owner_provider.clone(),
-            channel_id,
-            "race-loss enqueue idle drain",
-        );
-    }
+    // #4078: this is not a fresh enqueue; it is the same message being returned
+    // after losing a mailbox-start race to a still-live opponent. Scheduling a
+    // blind post-enqueue kick self-feeds KICKOFF -> race-loss -> requeue loops
+    // while that opponent keeps the token. The helper above suppresses the blind
+    // generic kick, clears this lost dispatch reservation, then restores the
+    // enqueue-then-check invariant with a strict post-enqueue snapshot: still-live
+    // holder => stay silent and let its completion event wake us; already-idle
+    // channel => one missed-completion kick.
 
     // If the enqueue was rejected (dedup / duplicate) there is nothing
     // for the dispatch path to pick up. Skip the placeholder POST + the
@@ -580,36 +580,90 @@ pub(super) async fn handle_race_loss_enqueue(
 }
 
 #[cfg(test)]
-mod schedule_post_enqueue_idle_drain_tests {
-    use super::super::super::super::intake_gate::should_schedule_post_enqueue_idle_drain;
+mod race_loss_requeue_tests {
+    use super::*;
 
-    #[test]
-    fn schedules_when_enqueued_and_slot_idle() {
-        // Slot idle (no blocking turn) and the message was enqueued — the
-        // original race-window strand guard must still schedule the drain.
-        assert!(should_schedule_post_enqueue_idle_drain(true, false));
+    struct EnvReset(Option<std::ffi::OsString>);
+
+    impl Drop for EnvReset {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
     }
 
-    #[test]
-    fn schedules_when_enqueued_behind_background_injection() {
-        // #3903 core case: a `/loop`/system-injection turn holds the slot, so
-        // it is NOT a blocking turn. The re-enqueued genuine user message must
-        // still trigger a drain so it is not stranded behind the injection.
-        assert!(should_schedule_post_enqueue_idle_drain(true, false));
+    fn user_intervention(id: u64, text: &str) -> Intervention {
+        Intervention {
+            author_id: UserId::new(id),
+            author_is_bot: false,
+            message_id: MessageId::new(id),
+            source_message_ids: vec![MessageId::new(id)],
+            text: text.to_string(),
+            mode: InterventionMode::Soft,
+            created_at: Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+            pending_uploads: Vec::new(),
+            voice_announcement: None,
+        }
     }
 
-    #[test]
-    fn skips_when_real_turn_holds_slot() {
-        // A real (blocking) turn owns the dequeue chain via its own finalize —
-        // scheduling here would only spin redundantly (pre-#3903 behavior).
-        assert!(!should_schedule_post_enqueue_idle_drain(true, true));
-    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn race_loss_requeue_suppresses_post_enqueue_idle_kick_while_holder_active() {
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let tmp = tempfile::tempdir().expect("temp runtime root");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
 
-    #[test]
-    fn skips_when_enqueue_was_refused() {
-        // Dedup/duplicate refusal: nothing landed in the queue, so there is
-        // nothing to drain regardless of the slot state.
-        assert!(!should_schedule_post_enqueue_idle_drain(false, false));
-        assert!(!should_schedule_post_enqueue_idle_drain(false, true));
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_078_100);
+        let holder_msg = MessageId::new(4_078_102);
+
+        assert!(
+            crate::services::discord::mailbox_try_start_turn(
+                &shared,
+                channel_id,
+                Arc::new(CancelToken::new()),
+                UserId::new(4_078_102),
+                holder_msg,
+            )
+            .await,
+            "seed the active holder that owns the completion wake edge"
+        );
+
+        let outcome = enqueue_race_loss_requeued_intervention(
+            &shared,
+            &provider,
+            channel_id,
+            MessageId::new(4_078_101),
+            user_intervention(4_078_101, "race loss requeue"),
+        )
+        .await;
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        assert!(outcome.enqueued);
+        assert_eq!(
+            shared
+                .restart
+                .deferred_hook_backlog
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "race-loss requeue must not arm a post-enqueue kick/backstop"
+        );
+        assert!(
+            !shared
+                .restart
+                .deferred_hook_channels
+                .contains_key(&channel_id),
+            "race-loss requeue must not arm a post-enqueue kick/backstop"
+        );
+        let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
+        assert!(snapshot.cancel_token.is_some());
+        assert_eq!(snapshot.active_user_message_id, Some(holder_msg));
+        assert_eq!(snapshot.intervention_queue.len(), 1);
     }
 }
