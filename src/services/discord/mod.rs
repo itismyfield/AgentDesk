@@ -11,6 +11,7 @@ mod delivery_lease_key;
 mod destructive_cancel_gate;
 mod discord_io;
 mod dispatch_policy;
+mod footer_view_reconciler;
 pub(crate) mod formatting;
 mod gateway;
 mod gateway_voice_queue;

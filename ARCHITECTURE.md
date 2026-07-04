@@ -433,6 +433,9 @@ src/
 │   │   │   ├── text_commands.rs
 │   │   │   ├── tui_passthrough.rs
 │   │   │   └── voice.rs
+│   │   ├── footer_view_reconciler/
+│   │   │   ├── mod.rs
+│   │   │   └── registry.rs
 │   │   ├── health/
 │   │   │   ├── recovery/
 │   │   │   │   ├── leak_recovery_ledger.rs
@@ -595,7 +598,6 @@ src/
 │   │   │   ├── validation.rs
 │   │   │   └── write.rs
 │   │   ├── single_message_panel/
-│   │   │   └── completion_footer_registry.rs
 │   │   ├── tmux_watcher/
 │   │   │   ├── commit_decisions.rs
 │   │   │   ├── completion_gate.rs

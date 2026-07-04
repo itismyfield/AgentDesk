@@ -1,3 +1,4 @@
+use super::footer_view_reconciler;
 use super::gateway::DiscordGateway;
 use super::inflight::optional_message_id;
 use super::recovery_paths::restart::dispose_recovery_relay_outcome;
@@ -6,7 +7,6 @@ use super::settings::{
     load_last_session_path, resolve_role_binding,
     validate_bot_channel_routing_with_provider_channel,
 };
-use super::single_message_panel as smp;
 use super::turn_bridge::stale_inflight_message;
 use super::turn_view_reconciler::note_intake_turn_completed as tv_done;
 use super::*;
@@ -420,7 +420,10 @@ pub(in crate::services::discord) async fn relay_recovered_terminal_text_to_place
         },
     };
     if let Some(placeholder) = placeholder {
-        smp::completion_footer_forget_registered_target_if_message(channel_id, placeholder);
+        footer_view_reconciler::note_footer_suppressed_for_message_takeover(
+            channel_id,
+            placeholder,
+        );
         if reused_recorded_anchor {
             tracing::info!(
                 channel_id = channel_id.get(),
@@ -914,8 +917,10 @@ mod recovery_completion_outcome_tests {
     fn recovery_takeover_forgets_registered_completion_footer_target() {
         let channel_id = ChannelId::new(3_089_201);
         let shared = super::super::make_shared_data_for_tests();
-        super::super::single_message_panel::completion_footer_forget_registered_target(channel_id);
-        let _ = super::super::single_message_panel::register_completion_footer_target(
+        super::super::footer_view_reconciler::completion_footer_forget_registered_target(
+            channel_id,
+        );
+        let _ = super::super::footer_view_reconciler::register_completion_footer_target(
             channel_id,
             MessageId::new(3_089_301),
             &ProviderKind::Claude,
@@ -926,13 +931,14 @@ mod recovery_completion_outcome_tests {
         );
 
         assert!(
-            super::super::single_message_panel::completion_footer_forget_registered_target_if_message(
-            channel_id,
-            MessageId::new(3_089_301),
-        ));
+            super::super::footer_view_reconciler::note_footer_suppressed_for_message_takeover(
+                channel_id,
+                MessageId::new(3_089_301),
+            )
+        );
 
         assert_eq!(
-            super::super::single_message_panel::completion_footer_edit_for_registered_target_at(
+            super::super::footer_view_reconciler::completion_footer_edit_for_registered_target_at(
                 shared.as_ref(),
                 channel_id,
                 "⠸",
@@ -946,8 +952,10 @@ mod recovery_completion_outcome_tests {
     fn recovery_takeover_keeps_different_completion_footer_target() {
         let channel_id = ChannelId::new(3_089_211);
         let shared = super::super::make_shared_data_for_tests();
-        super::super::single_message_panel::completion_footer_forget_registered_target(channel_id);
-        let _ = super::super::single_message_panel::register_completion_footer_target(
+        super::super::footer_view_reconciler::completion_footer_forget_registered_target(
+            channel_id,
+        );
+        let _ = super::super::footer_view_reconciler::register_completion_footer_target(
             channel_id,
             MessageId::new(3_089_311),
             &ProviderKind::Claude,
@@ -958,13 +966,14 @@ mod recovery_completion_outcome_tests {
         );
 
         assert!(
-            !super::super::single_message_panel::completion_footer_forget_registered_target_if_message(
-            channel_id,
-            MessageId::new(3_089_312),
-        ));
+            !super::super::footer_view_reconciler::note_footer_suppressed_for_message_takeover(
+                channel_id,
+                MessageId::new(3_089_312),
+            )
+        );
 
         assert!(
-            super::super::single_message_panel::completion_footer_edit_for_registered_target_at(
+            super::super::footer_view_reconciler::completion_footer_edit_for_registered_target_at(
                 shared.as_ref(),
                 channel_id,
                 "⠸",
@@ -972,7 +981,9 @@ mod recovery_completion_outcome_tests {
             )
             .is_some()
         );
-        super::super::single_message_panel::completion_footer_forget_registered_target(channel_id);
+        super::super::footer_view_reconciler::completion_footer_forget_registered_target(
+            channel_id,
+        );
     }
 }
 

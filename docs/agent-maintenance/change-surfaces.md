@@ -209,10 +209,12 @@
     late-frame fresh row B is rejected; -576 from #3841 extracting placeholder
     suppression helpers to `tmux_placeholder_suppression.rs`;
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (7173 production lines; #4081
+  - `src/services/discord/tmux_watcher.rs` (7174 production lines; #4049 S4-b1
+    inventory sync records the current hotfile count with 9 ratchet lines of
+    headroom; #4081
     round2 moved `commit_watcher_direct_terminal_session_idle` verbatim into
     `tmux_watcher/liveness.rs` and kept only thin duplicate-guard/long-body
-    wiring in the root loop, leaving 10 hotfile-ratchet lines of headroom; -18 from
+    wiring in the root loop; -18 from
     #3998 S1-f2 retiring the watcher terminal controller rollout flag and
     collapsing the cutover call to structural inputs only; +59 from #4019 R2
     identity-guarded watcher exits — the real stall/auth/overload exit
@@ -1051,7 +1053,9 @@
     and covers frozen nonzero-frontier / empty-capture variants. This admission
     is bugfix-only for PR #4035; further recovery policy expansion should extract
     decision/apply helpers instead of growing this file.)
-  - `src/services/discord/recovery_engine.rs` (3010 lines; net -17 from #4047
+  - `src/services/discord/recovery_engine.rs` (3013 lines; +3 from #4049 S4-b1
+    routing completion-footer takeover suppression through
+    `footer_view_reconciler`; net -17 from #4047
     S2-b: gate-outcome suppression removed, background_agent_pending producer
     extracted to `recovery_engine/status_panel_completion_producer.rs`; +97
     from #3998 D1:

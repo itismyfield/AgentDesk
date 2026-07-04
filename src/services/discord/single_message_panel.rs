@@ -1,9 +1,5 @@
 use std::sync::OnceLock;
 
-mod completion_footer_registry;
-
-pub(in crate::services::discord) use completion_footer_registry::*;
-
 /// Byte budget for the COMPLETION footer task section (#3089 S3) — the final
 /// turn message keeps a compact task summary. The LIVE streaming panel uses the
 /// larger `SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES` below.
@@ -22,7 +18,7 @@ pub(in crate::services::discord) const SINGLE_MESSAGE_PANEL_SPINNER_FRAMES: &[&s
 // crashed agent must not keep editing the terminal message forever.
 pub(in crate::services::discord) const COMPLETION_FOOTER_MAX_IDLE_ANIMATION_SECS: i64 = 3600;
 pub(in crate::services::discord) const COMPLETION_FOOTER_MAX_CONSECUTIVE_EDIT_FAILURES: u8 = 3;
-const COMPLETION_FOOTER_IDLE_EXPIRED_INDICATOR: &str = "…";
+pub(in crate::services::discord) const COMPLETION_FOOTER_IDLE_EXPIRED_INDICATOR: &str = "…";
 
 pub(in crate::services::discord) fn single_message_panel_spinner_frame(
     index: usize,
@@ -867,6 +863,7 @@ fn strip_footer_braille_spinner_prefix(line: &str) -> Option<&str> {
 mod tests {
     use super::super::DISCORD_MSG_LIMIT;
     use super::super::ProviderKind;
+    use super::super::footer_view_reconciler as footer_registry;
     use crate::services::agent_protocol::StatusEvent;
     use poise::serenity_prelude::{ChannelId, MessageId};
 
@@ -1200,10 +1197,10 @@ mod tests {
     #[test]
     fn registered_refresh_repair_scoped_to_body_keeps_footer_marks_3394() {
         let channel_id = ChannelId::new(3_394_201);
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
         let shared = push_finished_and_running_background_tasks(channel_id);
         let body_with_dangling_fence = "Streaming reply\n\n```text\ncut off mid fence";
-        let _ = super::register_completion_footer_target(
+        let _ = footer_registry::register_completion_footer_target(
             channel_id,
             MessageId::new(3_394_301),
             &ProviderKind::Claude,
@@ -1213,7 +1210,7 @@ mod tests {
             true,
         );
 
-        let edit = super::completion_footer_edit_for_registered_target_at(
+        let edit = footer_registry::completion_footer_edit_for_registered_target_at(
             shared.as_ref(),
             channel_id,
             "⠸",
@@ -1241,7 +1238,7 @@ mod tests {
         // #3391: the delivered ✓ slot identity is reported for this edit, and it is
         // genuinely present in the delivered text above.
         assert!(!edit.delivered_terminal_ids.is_empty());
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
     }
 
     /// #3394 round 2: a body with a BALANCED fence and a footer compose without
@@ -1480,7 +1477,7 @@ mod tests {
     #[test]
     fn registering_new_target_supersedes_old_footer_once_and_keeps_snapshot() {
         let channel_id = ChannelId::new(3_089_021);
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
         let shared = push_unfinished_subagent(channel_id);
         assert!(
             shared
@@ -1499,7 +1496,7 @@ mod tests {
         assert!(old_block.contains("Subagents\n└ "));
 
         assert_eq!(
-            super::register_completion_footer_target(
+            footer_registry::register_completion_footer_target(
                 channel_id,
                 MessageId::new(3_089_121),
                 &ProviderKind::Claude,
@@ -1511,7 +1508,7 @@ mod tests {
             None
         );
         let new_block = old_block.replace('⠸', "⠼");
-        let supersede = super::register_completion_footer_target(
+        let supersede = footer_registry::register_completion_footer_target(
             channel_id,
             MessageId::new(3_089_122),
             &ProviderKind::Claude,
@@ -1530,7 +1527,7 @@ mod tests {
         assert!(!supersede.text.contains('⠸'));
         assert!(!supersede.text.contains('⠼'));
 
-        let latest = super::completion_footer_edit_for_registered_target_at(
+        let latest = footer_registry::completion_footer_edit_for_registered_target_at(
             shared.as_ref(),
             channel_id,
             "⠋",
@@ -1539,13 +1536,13 @@ mod tests {
         .expect("new target should be the only registered target");
         assert_eq!(latest.message_id, MessageId::new(3_089_122));
         assert!(!latest.text.contains("Old answer"));
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
     }
 
     #[test]
     fn carried_entry_notification_updates_latest_target_not_superseded_text() {
         let channel_id = ChannelId::new(3_089_022);
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
         let shared = super::super::make_shared_data_for_tests();
         shared.ui.placeholder_live_events.push_status_event(
             channel_id,
@@ -1570,7 +1567,7 @@ mod tests {
             .render_completion_footer(channel_id, &ProviderKind::Claude, "⠸")
             .block
             .expect("old footer block");
-        let _ = super::register_completion_footer_target(
+        let _ = footer_registry::register_completion_footer_target(
             channel_id,
             MessageId::new(3_089_221),
             &ProviderKind::Claude,
@@ -1589,7 +1586,7 @@ mod tests {
             .render_completion_footer(channel_id, &ProviderKind::Claude, "⠼")
             .block
             .expect("carried footer block");
-        let supersede = super::register_completion_footer_target(
+        let supersede = footer_registry::register_completion_footer_target(
             channel_id,
             MessageId::new(3_089_222),
             &ProviderKind::Claude,
@@ -1620,7 +1617,7 @@ mod tests {
                 ack_only: false,
             },
         );
-        let latest = super::completion_footer_edit_for_registered_target_at(
+        let latest = footer_registry::completion_footer_edit_for_registered_target_at(
             shared.as_ref(),
             channel_id,
             "⠋",
@@ -1631,21 +1628,23 @@ mod tests {
         assert!(latest.text.contains("Carried bash ✓"));
         assert!(latest.text.contains("Carried agent ✓"));
         assert!(!supersede.text.contains('✓'));
-        super::completion_footer_record_edit_result_for_edit(
+        footer_registry::completion_footer_record_edit_result_for_edit(
             shared.as_ref(),
             channel_id,
             &latest,
             true,
         );
-        assert!(!super::completion_footer_has_registered_target(channel_id));
+        assert!(!footer_registry::completion_footer_has_registered_target(
+            channel_id
+        ));
     }
 
     #[test]
     fn completion_footer_terminal_mark_renders_once_then_next_edit_drops_it() {
         let channel_id = ChannelId::new(3_391_101);
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
         let shared = push_finished_and_running_background_tasks(channel_id);
-        let _ = super::register_completion_footer_target(
+        let _ = footer_registry::register_completion_footer_target(
             channel_id,
             MessageId::new(3_391_201),
             &ProviderKind::Claude,
@@ -1655,7 +1654,7 @@ mod tests {
             true,
         );
 
-        let edit = super::completion_footer_edit_for_registered_target_at(
+        let edit = footer_registry::completion_footer_edit_for_registered_target_at(
             shared.as_ref(),
             channel_id,
             "⠸",
@@ -1666,14 +1665,14 @@ mod tests {
         assert!(edit.text.contains("Bash Running job ⠸"));
         assert!(!edit.remove_after_edit);
 
-        super::completion_footer_record_edit_result_for_edit(
+        footer_registry::completion_footer_record_edit_result_for_edit(
             shared.as_ref(),
             channel_id,
             &edit,
             true,
         );
 
-        let next = super::completion_footer_edit_for_registered_target_at(
+        let next = footer_registry::completion_footer_edit_for_registered_target_at(
             shared.as_ref(),
             channel_id,
             "⠼",
@@ -1682,15 +1681,15 @@ mod tests {
         .expect("running entry keeps the target registered");
         assert!(!next.text.contains("Finished job"));
         assert!(next.text.contains("Bash Running job ⠼"));
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
     }
 
     #[test]
     fn completion_footer_failed_delivery_retries_terminal_mark() {
         let channel_id = ChannelId::new(3_391_102);
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
         let shared = push_finished_and_running_background_tasks(channel_id);
-        let _ = super::register_completion_footer_target(
+        let _ = footer_registry::register_completion_footer_target(
             channel_id,
             MessageId::new(3_391_202),
             &ProviderKind::Claude,
@@ -1699,7 +1698,7 @@ mod tests {
             None,
             true,
         );
-        let edit = super::completion_footer_edit_for_registered_target_at(
+        let edit = footer_registry::completion_footer_edit_for_registered_target_at(
             shared.as_ref(),
             channel_id,
             "⠸",
@@ -1707,14 +1706,14 @@ mod tests {
         )
         .expect("first refresh should render the terminal mark");
 
-        super::completion_footer_record_edit_result_for_edit(
+        footer_registry::completion_footer_record_edit_result_for_edit(
             shared.as_ref(),
             channel_id,
             &edit,
             false,
         );
 
-        let retry = super::completion_footer_edit_for_registered_target_at(
+        let retry = footer_registry::completion_footer_edit_for_registered_target_at(
             shared.as_ref(),
             channel_id,
             "⠼",
@@ -1722,13 +1721,13 @@ mod tests {
         )
         .expect("failed edit keeps the target registered");
         assert!(retry.text.contains("Bash Finished job ✓"));
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
     }
 
     #[test]
     fn completion_footer_evicts_all_terminal_marks_delivered_by_one_edit() {
         let channel_id = ChannelId::new(3_391_103);
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
         let shared = push_finished_and_running_background_tasks(channel_id);
         shared.ui.placeholder_live_events.push_status_event(
             channel_id,
@@ -1745,7 +1744,7 @@ mod tests {
                 success: false,
             },
         );
-        let _ = super::register_completion_footer_target(
+        let _ = footer_registry::register_completion_footer_target(
             channel_id,
             MessageId::new(3_391_203),
             &ProviderKind::Claude,
@@ -1754,7 +1753,7 @@ mod tests {
             None,
             true,
         );
-        let edit = super::completion_footer_edit_for_registered_target_at(
+        let edit = footer_registry::completion_footer_edit_for_registered_target_at(
             shared.as_ref(),
             channel_id,
             "⠸",
@@ -1764,14 +1763,14 @@ mod tests {
         assert!(edit.text.contains("Bash Finished job ✓"));
         assert!(edit.text.contains("Bash Failed sweep ✗"));
 
-        super::completion_footer_record_edit_result_for_edit(
+        footer_registry::completion_footer_record_edit_result_for_edit(
             shared.as_ref(),
             channel_id,
             &edit,
             true,
         );
 
-        let next = super::completion_footer_edit_for_registered_target_at(
+        let next = footer_registry::completion_footer_edit_for_registered_target_at(
             shared.as_ref(),
             channel_id,
             "⠼",
@@ -1781,13 +1780,13 @@ mod tests {
         assert!(!next.text.contains("Finished job"));
         assert!(!next.text.contains("Failed sweep"));
         assert!(next.text.contains("Bash Running job ⠼"));
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
     }
 
     #[test]
     fn migration_does_not_carry_delivered_terminal_marks_to_new_target() {
         let channel_id = ChannelId::new(3_391_104);
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
         let shared = push_finished_and_running_background_tasks(channel_id);
         let old_block = shared
             .ui
@@ -1796,7 +1795,7 @@ mod tests {
             .block
             .expect("old footer block");
         assert_eq!(
-            super::register_completion_footer_target(
+            footer_registry::register_completion_footer_target(
                 channel_id,
                 MessageId::new(3_391_204),
                 &ProviderKind::Claude,
@@ -1807,7 +1806,7 @@ mod tests {
             ),
             None
         );
-        let edit = super::completion_footer_edit_for_registered_target_at(
+        let edit = footer_registry::completion_footer_edit_for_registered_target_at(
             shared.as_ref(),
             channel_id,
             "⠸",
@@ -1815,7 +1814,7 @@ mod tests {
         )
         .expect("old target refresh");
         assert!(edit.text.contains("Bash Finished job ✓"));
-        super::completion_footer_record_edit_result_for_edit(
+        footer_registry::completion_footer_record_edit_result_for_edit(
             shared.as_ref(),
             channel_id,
             &edit,
@@ -1833,7 +1832,7 @@ mod tests {
             .block
             .expect("running entry still renders");
         assert!(!new_block.contains("Finished job"));
-        let supersede = super::register_completion_footer_target(
+        let supersede = footer_registry::register_completion_footer_target(
             channel_id,
             MessageId::new(3_391_205),
             &ProviderKind::Claude,
@@ -1847,7 +1846,7 @@ mod tests {
         assert!(supersede.text.contains("Bash Finished job ✓"));
         assert!(supersede.text.contains("Bash Running job …"));
 
-        let latest = super::completion_footer_edit_for_registered_target_at(
+        let latest = footer_registry::completion_footer_edit_for_registered_target_at(
             shared.as_ref(),
             channel_id,
             "⠋",
@@ -1857,13 +1856,13 @@ mod tests {
         assert_eq!(latest.message_id, MessageId::new(3_391_205));
         assert!(!latest.text.contains("Finished job"));
         assert!(latest.text.contains("Bash Running job ⠋"));
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
     }
 
     #[test]
     fn ttl_freezes_carried_entries_on_latest_target() {
         let channel_id = ChannelId::new(3_089_023);
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
         let shared = push_unfinished_background_task(channel_id);
         shared
             .ui
@@ -1876,7 +1875,7 @@ mod tests {
             .block
             .expect("carried footer block");
         let now = 1_800_000_000;
-        let _ = super::register_completion_footer_target(
+        let _ = footer_registry::register_completion_footer_target(
             channel_id,
             MessageId::new(3_089_123),
             &ProviderKind::Claude,
@@ -1886,7 +1885,7 @@ mod tests {
             true,
         );
 
-        let edit = super::completion_footer_edit_for_registered_target_at(
+        let edit = footer_registry::completion_footer_edit_for_registered_target_at(
             shared.as_ref(),
             channel_id,
             "⠼",
@@ -1899,22 +1898,24 @@ mod tests {
         assert!(edit.text.contains("Tasks\n└ Bash Run background codex …"));
         assert!(!edit.text.contains('⠼'));
         assert!(!edit.text.contains('✓'));
-        super::completion_footer_record_edit_result_for_edit(
+        footer_registry::completion_footer_record_edit_result_for_edit(
             shared.as_ref(),
             channel_id,
             &edit,
             true,
         );
-        assert!(!super::completion_footer_has_registered_target(channel_id));
+        assert!(!footer_registry::completion_footer_has_registered_target(
+            channel_id
+        ));
     }
 
     #[test]
     fn completion_footer_ttl_freezes_unfinished_entries_then_forgets_target() {
         let channel_id = ChannelId::new(3_089_001);
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
         let shared = push_unfinished_subagent(channel_id);
         let now = 1_800_000_000;
-        let _ = super::register_completion_footer_target(
+        let _ = footer_registry::register_completion_footer_target(
             channel_id,
             MessageId::new(3_089_101),
             &ProviderKind::Claude,
@@ -1924,7 +1925,7 @@ mod tests {
             true,
         );
 
-        let edit = super::completion_footer_edit_for_registered_target_at(
+        let edit = footer_registry::completion_footer_edit_for_registered_target_at(
             shared.as_ref(),
             channel_id,
             "⠸",
@@ -1938,17 +1939,23 @@ mod tests {
         assert!(!edit.text.contains('⠸'));
         assert!(!edit.text.contains('✓'));
 
-        super::completion_footer_record_edit_result(channel_id, edit.remove_after_edit, true);
-        assert!(!super::completion_footer_has_registered_target(channel_id));
+        footer_registry::completion_footer_record_edit_result(
+            channel_id,
+            edit.remove_after_edit,
+            true,
+        );
+        assert!(!footer_registry::completion_footer_has_registered_target(
+            channel_id
+        ));
     }
 
     #[test]
     fn completion_footer_ttl_freezes_unfinished_background_bash_task() {
         let channel_id = ChannelId::new(3_089_011);
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
         let shared = push_unfinished_background_task(channel_id);
         let now = 1_800_000_000;
-        let _ = super::register_completion_footer_target(
+        let _ = footer_registry::register_completion_footer_target(
             channel_id,
             MessageId::new(3_089_111),
             &ProviderKind::Claude,
@@ -1958,7 +1965,7 @@ mod tests {
             true,
         );
 
-        let edit = super::completion_footer_edit_for_registered_target_at(
+        let edit = footer_registry::completion_footer_edit_for_registered_target_at(
             shared.as_ref(),
             channel_id,
             "⠸",
@@ -1972,17 +1979,23 @@ mod tests {
         assert!(!edit.text.contains('⠸'));
         assert!(!edit.text.contains('✓'));
 
-        super::completion_footer_record_edit_result(channel_id, edit.remove_after_edit, true);
-        assert!(!super::completion_footer_has_registered_target(channel_id));
+        footer_registry::completion_footer_record_edit_result(
+            channel_id,
+            edit.remove_after_edit,
+            true,
+        );
+        assert!(!footer_registry::completion_footer_has_registered_target(
+            channel_id
+        ));
     }
 
     #[test]
     fn completion_footer_below_ttl_keeps_animating_registered_target() {
         let channel_id = ChannelId::new(3_089_002);
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
         let shared = push_unfinished_subagent(channel_id);
         let now = 1_800_000_000;
-        let _ = super::register_completion_footer_target(
+        let _ = footer_registry::register_completion_footer_target(
             channel_id,
             MessageId::new(3_089_102),
             &ProviderKind::Claude,
@@ -1992,7 +2005,7 @@ mod tests {
             true,
         );
 
-        let edit = super::completion_footer_edit_for_registered_target_at(
+        let edit = footer_registry::completion_footer_edit_for_registered_target_at(
             shared.as_ref(),
             channel_id,
             "⠸",
@@ -2004,18 +2017,24 @@ mod tests {
         assert!(edit.text.contains("Subagents\n└ "));
         assert!(edit.text.contains('⠸'));
 
-        super::completion_footer_record_edit_result(channel_id, edit.remove_after_edit, true);
-        assert!(super::completion_footer_has_registered_target(channel_id));
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_record_edit_result(
+            channel_id,
+            edit.remove_after_edit,
+            true,
+        );
+        assert!(footer_registry::completion_footer_has_registered_target(
+            channel_id
+        ));
+        footer_registry::completion_footer_forget_registered_target(channel_id);
     }
 
     #[test]
     fn completion_footer_skips_refresh_when_committed_text_is_unchanged_3717() {
         let channel_id = ChannelId::new(3_717_001);
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
         let shared = push_unfinished_subagent(channel_id);
         let now = 1_800_000_000;
-        let _ = super::register_completion_footer_target(
+        let _ = footer_registry::register_completion_footer_target(
             channel_id,
             MessageId::new(3_717_101),
             &ProviderKind::Claude,
@@ -2025,7 +2044,7 @@ mod tests {
             true,
         );
 
-        let first = super::completion_footer_edit_for_registered_target_at(
+        let first = footer_registry::completion_footer_edit_for_registered_target_at(
             shared.as_ref(),
             channel_id,
             "⠸",
@@ -2033,7 +2052,7 @@ mod tests {
         )
         .expect("first refresh should edit the footer");
         assert!(first.text.contains('⠸'));
-        super::completion_footer_record_edit_result_for_edit(
+        footer_registry::completion_footer_record_edit_result_for_edit(
             shared.as_ref(),
             channel_id,
             &first,
@@ -2041,7 +2060,7 @@ mod tests {
         );
 
         assert_eq!(
-            super::completion_footer_edit_for_registered_target_at(
+            footer_registry::completion_footer_edit_for_registered_target_at(
                 shared.as_ref(),
                 channel_id,
                 "⠸",
@@ -2051,7 +2070,7 @@ mod tests {
             "same rendered footer text must not issue a redundant Discord edit"
         );
 
-        let next = super::completion_footer_edit_for_registered_target_at(
+        let next = footer_registry::completion_footer_edit_for_registered_target_at(
             shared.as_ref(),
             channel_id,
             "⠼",
@@ -2060,17 +2079,17 @@ mod tests {
         .expect("changed spinner frame still edits the stable target");
         assert_eq!(next.message_id, MessageId::new(3_717_101));
         assert!(next.text.contains('⠼'));
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
     }
 
     #[test]
     fn duplicate_same_message_registration_preserves_committed_noop_state_3717() {
         let channel_id = ChannelId::new(3_717_002);
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
         let shared = push_unfinished_subagent(channel_id);
         let msg_id = MessageId::new(3_717_102);
         let now = 1_800_000_000;
-        let _ = super::register_completion_footer_target(
+        let _ = footer_registry::register_completion_footer_target(
             channel_id,
             msg_id,
             &ProviderKind::Claude,
@@ -2079,14 +2098,14 @@ mod tests {
             None,
             true,
         );
-        let first = super::completion_footer_edit_for_registered_target_at(
+        let first = footer_registry::completion_footer_edit_for_registered_target_at(
             shared.as_ref(),
             channel_id,
             "⠸",
             now + 1,
         )
         .expect("first refresh should edit the footer");
-        super::completion_footer_record_edit_result_for_edit(
+        footer_registry::completion_footer_record_edit_result_for_edit(
             shared.as_ref(),
             channel_id,
             &first,
@@ -2094,7 +2113,7 @@ mod tests {
         );
 
         assert_eq!(
-            super::register_completion_footer_target(
+            footer_registry::register_completion_footer_target(
                 channel_id,
                 msg_id,
                 &ProviderKind::Claude,
@@ -2107,7 +2126,7 @@ mod tests {
             "same message id is a duplicate registration, not a supersede"
         );
         assert_eq!(
-            super::completion_footer_edit_for_registered_target_at(
+            footer_registry::completion_footer_edit_for_registered_target_at(
                 shared.as_ref(),
                 channel_id,
                 "⠸",
@@ -2117,7 +2136,7 @@ mod tests {
             "duplicate registration must not lose the committed-text dedupe state"
         );
 
-        let changed = super::completion_footer_edit_for_registered_target_at(
+        let changed = footer_registry::completion_footer_edit_for_registered_target_at(
             shared.as_ref(),
             channel_id,
             "⠼",
@@ -2125,17 +2144,17 @@ mod tests {
         )
         .expect("changed content still edits the original stable target");
         assert_eq!(changed.message_id, msg_id);
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
     }
 
     #[test]
     fn stale_owner_cannot_refresh_newer_footer_target_3717() {
         let channel_id = ChannelId::new(3_717_003);
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
         let shared = push_unfinished_subagent(channel_id);
-        let old_owner = super::CompletionFooterOwner::new(10, 1_800_000_000);
-        let new_owner = super::CompletionFooterOwner::new(11, 1_800_000_010);
-        let _ = super::register_completion_footer_target_for_owner(
+        let old_owner = footer_registry::CompletionFooterOwner::new(10, 1_800_000_000);
+        let new_owner = footer_registry::CompletionFooterOwner::new(11, 1_800_000_010);
+        let _ = footer_registry::register_completion_footer_target_for_owner(
             channel_id,
             MessageId::new(3_717_103),
             new_owner,
@@ -2147,7 +2166,7 @@ mod tests {
         );
 
         assert_eq!(
-            super::completion_footer_edit_for_registered_target_at_for_owner(
+            footer_registry::completion_footer_edit_for_registered_target_at_for_owner(
                 shared.as_ref(),
                 channel_id,
                 Some(old_owner),
@@ -2158,7 +2177,7 @@ mod tests {
             "older owner must not edit the newer registered footer target"
         );
 
-        let edit = super::completion_footer_edit_for_registered_target_at_for_owner(
+        let edit = footer_registry::completion_footer_edit_for_registered_target_at_for_owner(
             shared.as_ref(),
             channel_id,
             Some(new_owner),
@@ -2167,17 +2186,17 @@ mod tests {
         )
         .expect("registered owner should refresh its target");
         assert_eq!(edit.message_id, MessageId::new(3_717_103));
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
     }
 
     #[test]
     fn stale_owner_cannot_register_over_newer_footer_target_3717() {
         let channel_id = ChannelId::new(3_717_007);
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
         let shared = push_unfinished_subagent(channel_id);
-        let old_owner = super::CompletionFooterOwner::new(50, 1_800_000_000);
-        let new_owner = super::CompletionFooterOwner::new(51, 1_800_000_010);
-        let _ = super::register_completion_footer_target_for_owner(
+        let old_owner = footer_registry::CompletionFooterOwner::new(50, 1_800_000_000);
+        let new_owner = footer_registry::CompletionFooterOwner::new(51, 1_800_000_010);
+        let _ = footer_registry::register_completion_footer_target_for_owner(
             channel_id,
             MessageId::new(3_717_108),
             new_owner,
@@ -2189,7 +2208,7 @@ mod tests {
         );
 
         assert_eq!(
-            super::register_completion_footer_target_for_owner(
+            footer_registry::register_completion_footer_target_for_owner(
                 channel_id,
                 MessageId::new(3_717_109),
                 old_owner,
@@ -2203,7 +2222,7 @@ mod tests {
             "older completion must not replace the newer registered footer target"
         );
 
-        let edit = super::completion_footer_edit_for_registered_target_at_for_owner(
+        let edit = footer_registry::completion_footer_edit_for_registered_target_at_for_owner(
             shared.as_ref(),
             channel_id,
             Some(new_owner),
@@ -2212,17 +2231,17 @@ mod tests {
         )
         .expect("newer target should remain registered after stale register attempt");
         assert_eq!(edit.message_id, MessageId::new(3_717_108));
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
     }
 
     #[test]
     fn stale_edit_snapshot_is_not_current_after_target_changes_3717() {
         let channel_id = ChannelId::new(3_717_009);
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
         let shared = push_unfinished_subagent(channel_id);
-        let old_owner = super::CompletionFooterOwner::new(70, 1_800_000_000);
-        let new_owner = super::CompletionFooterOwner::new(71, 1_800_000_010);
-        let _ = super::register_completion_footer_target_for_owner(
+        let old_owner = footer_registry::CompletionFooterOwner::new(70, 1_800_000_000);
+        let new_owner = footer_registry::CompletionFooterOwner::new(71, 1_800_000_010);
+        let _ = footer_registry::register_completion_footer_target_for_owner(
             channel_id,
             MessageId::new(3_717_112),
             old_owner,
@@ -2232,7 +2251,7 @@ mod tests {
             None,
             true,
         );
-        let old_edit = super::completion_footer_edit_for_registered_target_at_for_owner(
+        let old_edit = footer_registry::completion_footer_edit_for_registered_target_at_for_owner(
             shared.as_ref(),
             channel_id,
             Some(old_owner),
@@ -2240,11 +2259,11 @@ mod tests {
             1_800_000_001,
         )
         .expect("old owner should initially receive an edit");
-        assert!(super::completion_footer_edit_still_registered(
+        assert!(footer_registry::completion_footer_edit_still_registered(
             channel_id, &old_edit
         ));
 
-        let _ = super::register_completion_footer_target_for_owner(
+        let _ = footer_registry::register_completion_footer_target_for_owner(
             channel_id,
             MessageId::new(3_717_113),
             new_owner,
@@ -2256,20 +2275,20 @@ mod tests {
         );
 
         assert!(
-            !super::completion_footer_edit_still_registered(channel_id, &old_edit),
+            !footer_registry::completion_footer_edit_still_registered(channel_id, &old_edit),
             "refresh callers must skip an edit snapshot after another target registers"
         );
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
     }
 
     #[test]
     fn stale_owner_cannot_clear_newer_footer_target_3717() {
         let channel_id = ChannelId::new(3_717_008);
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
         let shared = push_unfinished_subagent(channel_id);
-        let old_owner = super::CompletionFooterOwner::new(60, 1_800_000_000);
-        let new_owner = super::CompletionFooterOwner::new(61, 1_800_000_010);
-        let _ = super::register_completion_footer_target_for_owner(
+        let old_owner = footer_registry::CompletionFooterOwner::new(60, 1_800_000_000);
+        let new_owner = footer_registry::CompletionFooterOwner::new(61, 1_800_000_010);
+        let _ = footer_registry::register_completion_footer_target_for_owner(
             channel_id,
             MessageId::new(3_717_110),
             new_owner,
@@ -2281,7 +2300,7 @@ mod tests {
         );
 
         assert_eq!(
-            super::register_completion_footer_target_for_owner(
+            footer_registry::register_completion_footer_target_for_owner(
                 channel_id,
                 MessageId::new(3_717_111),
                 old_owner,
@@ -2295,7 +2314,7 @@ mod tests {
             "older no-residual completion must not clear the newer footer target"
         );
 
-        let edit = super::completion_footer_edit_for_registered_target_at_for_owner(
+        let edit = footer_registry::completion_footer_edit_for_registered_target_at_for_owner(
             shared.as_ref(),
             channel_id,
             Some(new_owner),
@@ -2304,17 +2323,17 @@ mod tests {
         )
         .expect("newer target should remain registered after stale clear attempt");
         assert_eq!(edit.message_id, MessageId::new(3_717_110));
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
     }
 
     #[test]
     fn stale_edit_result_cannot_remove_newer_footer_target_3717() {
         let channel_id = ChannelId::new(3_717_004);
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
         let shared = push_unfinished_subagent(channel_id);
-        let old_owner = super::CompletionFooterOwner::new(20, 1_800_000_000);
-        let new_owner = super::CompletionFooterOwner::new(21, 1_800_000_010);
-        let _ = super::register_completion_footer_target_for_owner(
+        let old_owner = footer_registry::CompletionFooterOwner::new(20, 1_800_000_000);
+        let new_owner = footer_registry::CompletionFooterOwner::new(21, 1_800_000_010);
+        let _ = footer_registry::register_completion_footer_target_for_owner(
             channel_id,
             MessageId::new(3_717_104),
             old_owner,
@@ -2324,7 +2343,7 @@ mod tests {
             None,
             true,
         );
-        let old_edit = super::completion_footer_edit_for_registered_target_at_for_owner(
+        let old_edit = footer_registry::completion_footer_edit_for_registered_target_at_for_owner(
             shared.as_ref(),
             channel_id,
             Some(old_owner),
@@ -2332,7 +2351,7 @@ mod tests {
             1_800_000_001,
         )
         .expect("old owner should initially receive an edit");
-        let _ = super::register_completion_footer_target_for_owner(
+        let _ = footer_registry::register_completion_footer_target_for_owner(
             channel_id,
             MessageId::new(3_717_105),
             new_owner,
@@ -2345,14 +2364,14 @@ mod tests {
 
         let mut stale_remove = old_edit.clone();
         stale_remove.remove_after_edit = true;
-        super::completion_footer_record_edit_result_for_edit(
+        footer_registry::completion_footer_record_edit_result_for_edit(
             shared.as_ref(),
             channel_id,
             &stale_remove,
             true,
         );
 
-        let new_edit = super::completion_footer_edit_for_registered_target_at_for_owner(
+        let new_edit = footer_registry::completion_footer_edit_for_registered_target_at_for_owner(
             shared.as_ref(),
             channel_id,
             Some(new_owner),
@@ -2361,17 +2380,17 @@ mod tests {
         )
         .expect("stale edit result must not remove the newer target");
         assert_eq!(new_edit.message_id, MessageId::new(3_717_105));
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
     }
 
     #[test]
     fn older_turn_start_cannot_supersede_newer_footer_target_3717() {
         let channel_id = ChannelId::new(3_717_005);
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
         let shared = push_unfinished_subagent(channel_id);
-        let old_owner = super::CompletionFooterOwner::new(30, 1_800_000_000);
-        let new_owner = super::CompletionFooterOwner::new(31, 1_800_000_010);
-        let _ = super::register_completion_footer_target_for_owner(
+        let old_owner = footer_registry::CompletionFooterOwner::new(30, 1_800_000_000);
+        let new_owner = footer_registry::CompletionFooterOwner::new(31, 1_800_000_010);
+        let _ = footer_registry::register_completion_footer_target_for_owner(
             channel_id,
             MessageId::new(3_717_106),
             new_owner,
@@ -2383,7 +2402,7 @@ mod tests {
         );
 
         assert_eq!(
-            super::completion_footer_supersede_registered_target_for_owner(
+            footer_registry::completion_footer_supersede_registered_target_for_owner(
                 channel_id,
                 Some(old_owner)
             ),
@@ -2391,7 +2410,7 @@ mod tests {
             "older turn-start cleanup must not supersede the newer footer target"
         );
         assert!(
-            super::completion_footer_edit_for_registered_target_at_for_owner(
+            footer_registry::completion_footer_edit_for_registered_target_at_for_owner(
                 shared.as_ref(),
                 channel_id,
                 Some(new_owner),
@@ -2401,16 +2420,16 @@ mod tests {
             .is_some(),
             "newer target should remain registered after stale supersede attempt"
         );
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
     }
 
     #[test]
     fn same_second_lower_snowflake_cannot_supersede_higher_footer_owner_3717() {
         let channel_id = ChannelId::new(3_717_006);
-        super::completion_footer_forget_registered_target(channel_id);
-        let old_owner = super::CompletionFooterOwner::new(40, 1_800_000_000);
-        let new_owner = super::CompletionFooterOwner::new(41, 1_800_000_000);
-        let _ = super::register_completion_footer_target_for_owner(
+        footer_registry::completion_footer_forget_registered_target(channel_id);
+        let old_owner = footer_registry::CompletionFooterOwner::new(40, 1_800_000_000);
+        let new_owner = footer_registry::CompletionFooterOwner::new(41, 1_800_000_000);
+        let _ = footer_registry::register_completion_footer_target_for_owner(
             channel_id,
             MessageId::new(3_717_107),
             new_owner,
@@ -2422,24 +2441,24 @@ mod tests {
         );
 
         assert_eq!(
-            super::completion_footer_supersede_registered_target_for_owner(
+            footer_registry::completion_footer_supersede_registered_target_for_owner(
                 channel_id,
                 Some(old_owner)
             ),
             None,
             "same-second stale owner with lower Discord snowflake must not supersede"
         );
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
     }
 
     #[test]
     fn same_second_unknown_owner_does_not_block_known_owner_3717() {
         let channel_id = ChannelId::new(3_717_010);
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
         let shared = push_unfinished_subagent(channel_id);
-        let unknown_owner = super::CompletionFooterOwner::new(0, 1_800_000_000);
-        let known_owner = super::CompletionFooterOwner::new(81, 1_800_000_000);
-        let _ = super::register_completion_footer_target_for_owner(
+        let unknown_owner = footer_registry::CompletionFooterOwner::new(0, 1_800_000_000);
+        let known_owner = footer_registry::CompletionFooterOwner::new(81, 1_800_000_000);
+        let _ = footer_registry::register_completion_footer_target_for_owner(
             channel_id,
             MessageId::new(3_717_114),
             unknown_owner,
@@ -2451,7 +2470,7 @@ mod tests {
         );
 
         assert!(
-            super::register_completion_footer_target_for_owner(
+            footer_registry::register_completion_footer_target_for_owner(
                 channel_id,
                 MessageId::new(3_717_115),
                 known_owner,
@@ -2464,7 +2483,7 @@ mod tests {
             .is_some(),
             "same-second user_msg_id=0 owner must not be treated as provably newer"
         );
-        let edit = super::completion_footer_edit_for_registered_target_at_for_owner(
+        let edit = footer_registry::completion_footer_edit_for_registered_target_at_for_owner(
             shared.as_ref(),
             channel_id,
             Some(known_owner),
@@ -2473,17 +2492,17 @@ mod tests {
         )
         .expect("known owner should replace same-second unknown target");
         assert_eq!(edit.message_id, MessageId::new(3_717_115));
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
     }
 
     #[test]
     fn same_second_unknown_owner_cannot_register_over_known_owner_3717() {
         let channel_id = ChannelId::new(3_717_011);
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
         let shared = push_unfinished_subagent(channel_id);
-        let known_owner = super::CompletionFooterOwner::new(81, 1_800_000_000);
-        let unknown_owner = super::CompletionFooterOwner::new(0, 1_800_000_000);
-        let _ = super::register_completion_footer_target_for_owner(
+        let known_owner = footer_registry::CompletionFooterOwner::new(81, 1_800_000_000);
+        let unknown_owner = footer_registry::CompletionFooterOwner::new(0, 1_800_000_000);
+        let _ = footer_registry::register_completion_footer_target_for_owner(
             channel_id,
             MessageId::new(3_717_116),
             known_owner,
@@ -2495,7 +2514,7 @@ mod tests {
         );
 
         assert_eq!(
-            super::register_completion_footer_target_for_owner(
+            footer_registry::register_completion_footer_target_for_owner(
                 channel_id,
                 MessageId::new(3_717_117),
                 unknown_owner,
@@ -2508,7 +2527,7 @@ mod tests {
             None,
             "same-second user_msg_id=0 owner must not replace a known owner"
         );
-        let edit = super::completion_footer_edit_for_registered_target_at_for_owner(
+        let edit = footer_registry::completion_footer_edit_for_registered_target_at_for_owner(
             shared.as_ref(),
             channel_id,
             Some(known_owner),
@@ -2517,17 +2536,17 @@ mod tests {
         )
         .expect("known owner should remain registered");
         assert_eq!(edit.message_id, MessageId::new(3_717_116));
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
     }
 
     #[test]
     fn same_second_unknown_owner_cannot_supersede_known_owner_3717() {
         let channel_id = ChannelId::new(3_717_012);
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
         let shared = push_unfinished_subagent(channel_id);
-        let known_owner = super::CompletionFooterOwner::new(82, 1_800_000_000);
-        let unknown_owner = super::CompletionFooterOwner::new(0, 1_800_000_000);
-        let _ = super::register_completion_footer_target_for_owner(
+        let known_owner = footer_registry::CompletionFooterOwner::new(82, 1_800_000_000);
+        let unknown_owner = footer_registry::CompletionFooterOwner::new(0, 1_800_000_000);
+        let _ = footer_registry::register_completion_footer_target_for_owner(
             channel_id,
             MessageId::new(3_717_118),
             known_owner,
@@ -2539,7 +2558,7 @@ mod tests {
         );
 
         assert_eq!(
-            super::completion_footer_supersede_registered_target_for_owner(
+            footer_registry::completion_footer_supersede_registered_target_for_owner(
                 channel_id,
                 Some(unknown_owner)
             ),
@@ -2547,7 +2566,7 @@ mod tests {
             "same-second user_msg_id=0 owner must not supersede a known owner"
         );
         assert!(
-            super::completion_footer_edit_for_registered_target_at_for_owner(
+            footer_registry::completion_footer_edit_for_registered_target_at_for_owner(
                 shared.as_ref(),
                 channel_id,
                 Some(known_owner),
@@ -2557,15 +2576,15 @@ mod tests {
             .is_some(),
             "known owner should remain registered after unknown supersede attempt"
         );
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
     }
 
     #[test]
     fn completion_footer_consecutive_edit_failures_evict_registered_target() {
         let channel_id = ChannelId::new(3_089_003);
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
         let shared = push_unfinished_subagent(channel_id);
-        let _ = super::register_completion_footer_target(
+        let _ = footer_registry::register_completion_footer_target(
             channel_id,
             MessageId::new(3_089_103),
             &ProviderKind::Claude,
@@ -2576,18 +2595,22 @@ mod tests {
         );
 
         for expected_failures in 1..super::COMPLETION_FOOTER_MAX_CONSECUTIVE_EDIT_FAILURES {
-            super::completion_footer_record_edit_result(channel_id, false, false);
+            footer_registry::completion_footer_record_edit_result(channel_id, false, false);
             assert_eq!(
-                super::completion_footer_registered_failure_count(channel_id),
+                footer_registry::completion_footer_registered_failure_count(channel_id),
                 Some(expected_failures)
             );
-            assert!(super::completion_footer_has_registered_target(channel_id));
+            assert!(footer_registry::completion_footer_has_registered_target(
+                channel_id
+            ));
         }
 
-        super::completion_footer_record_edit_result(channel_id, false, false);
-        assert!(!super::completion_footer_has_registered_target(channel_id));
+        footer_registry::completion_footer_record_edit_result(channel_id, false, false);
+        assert!(!footer_registry::completion_footer_has_registered_target(
+            channel_id
+        ));
         assert_eq!(
-            super::completion_footer_edit_for_registered_target_at(
+            footer_registry::completion_footer_edit_for_registered_target_at(
                 shared.as_ref(),
                 channel_id,
                 "⠸",
@@ -2600,9 +2623,9 @@ mod tests {
     #[test]
     fn completion_footer_forget_registered_target_suppresses_future_edits() {
         let channel_id = ChannelId::new(3_089_004);
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
         let shared = push_unfinished_subagent(channel_id);
-        let _ = super::register_completion_footer_target(
+        let _ = footer_registry::register_completion_footer_target(
             channel_id,
             MessageId::new(3_089_104),
             &ProviderKind::Claude,
@@ -2612,10 +2635,10 @@ mod tests {
             true,
         );
 
-        super::completion_footer_forget_registered_target(channel_id);
+        footer_registry::completion_footer_forget_registered_target(channel_id);
 
         assert_eq!(
-            super::completion_footer_edit_for_registered_target_at(
+            footer_registry::completion_footer_edit_for_registered_target_at(
                 shared.as_ref(),
                 channel_id,
                 "⠸",
