@@ -401,7 +401,7 @@
 | `services::codex_tui::rollout_tail` | `src/services/codex_tui/rollout_tail.rs` | 4201 | 1276 | 2925 | giant-file |
 | `services::codex_tui::rollout_tail::parser` | `src/services/codex_tui/rollout_tail/parser.rs` | 405 | 405 | 0 |  |
 | `services::codex_tui::session` | `src/services/codex_tui/session.rs` | 800 | 316 | 484 |  |
-| `services::discord` | `src/services/discord/mod.rs` | 5311 | 4158 | 1153 | giant-file |
+| `services::discord` | `src/services/discord/mod.rs` | 5314 | 4161 | 1153 | giant-file |
 | `services::discord::abandon_request_store` | `src/services/discord/abandon_request_store.rs` | 477 | 355 | 122 |  |
 | `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 980 | 854 | 126 |  |
 | `services::discord::agent_handoff` | `src/services/discord/agent_handoff.rs` | 928 | 574 | 354 |  |
@@ -463,7 +463,7 @@
 | `services::discord::health::relay_dead_reattach` | `src/services/discord/health/relay_dead_reattach.rs` | 266 | 100 | 166 |  |
 | `services::discord::health::runtime_resolve` | `src/services/discord/health/runtime_resolve.rs` | 390 | 322 | 68 |  |
 | `services::discord::health::session_enrichment` | `src/services/discord/health/session_enrichment.rs` | 226 | 226 | 0 |  |
-| `services::discord::health::snapshot` | `src/services/discord/health/snapshot.rs` | 998 | 887 | 111 |  |
+| `services::discord::health::snapshot` | `src/services/discord/health/snapshot.rs` | 1065 | 887 | 178 |  |
 | `services::discord::health::stall_liveness` | `src/services/discord/health/stall_liveness.rs` | 1574 | 662 | 912 |  |
 | `services::discord::health::watcher_respawn` | `src/services/discord/health/watcher_respawn.rs` | 1125 | 497 | 628 |  |
 | `services::discord::http` | `src/services/discord/http.rs` | 178 | 138 | 40 |  |

@@ -597,7 +597,6 @@ src/
 │   │   │   ├── read.rs
 │   │   │   ├── validation.rs
 │   │   │   └── write.rs
-│   │   ├── single_message_panel/
 │   │   ├── tmux_watcher/
 │   │   │   ├── commit_decisions.rs
 │   │   │   ├── completion_gate.rs
