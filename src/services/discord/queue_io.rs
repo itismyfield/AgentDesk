@@ -28,6 +28,10 @@ const IDLE_QUEUE_BACKSTOP_WARN_TARGET: &str = "agentdesk::discord::idle_queue_ba
 static IDLE_QUEUE_BACKSTOP_FIRES_FOR_TESTS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+tokio::task_local! {
+    static SUPPRESS_POST_ENQUEUE_IDLE_QUEUE_KICK: bool;
+}
+
 #[cfg(test)]
 type IdleQueueKickHookForTests = std::sync::Arc<
     dyn Fn(
@@ -79,6 +83,75 @@ async fn idle_queue_kick_hook_outcome_for_tests(
         .expect("idle queue kick hook lock")
         .clone();
     hook?(shared, provider, channel_id, reason).await
+}
+
+pub(super) async fn with_post_enqueue_idle_queue_kick_suppressed<F>(future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    SUPPRESS_POST_ENQUEUE_IDLE_QUEUE_KICK
+        .scope(true, future)
+        .await
+}
+
+fn post_enqueue_idle_queue_kick_suppressed() -> bool {
+    SUPPRESS_POST_ENQUEUE_IDLE_QUEUE_KICK
+        .try_with(|suppressed| *suppressed)
+        .unwrap_or(false)
+}
+
+fn race_loss_requeue_snapshot_has_active_holder(snapshot: &ChannelMailboxSnapshot) -> bool {
+    snapshot.cancel_token.is_some()
+        || snapshot.active_request_owner.is_some()
+        || snapshot.active_user_message_id.is_some()
+}
+
+fn race_loss_requeue_snapshot_has_idle_kickable_backlog(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    snapshot: &ChannelMailboxSnapshot,
+) -> bool {
+    !race_loss_requeue_snapshot_has_active_holder(snapshot)
+        && idle_queue_snapshot_has_kickable_backlog(shared, provider, channel_id, snapshot)
+}
+
+pub(super) fn schedule_race_loss_requeue_post_enqueue_idle_recheck(
+    shared: Arc<SharedData>,
+    provider: ProviderKind,
+    channel_id: ChannelId,
+) {
+    super::task_supervisor::spawn_observed("race_loss_requeue_idle_recheck", async move {
+        let snapshot = super::mailbox_snapshot(&shared, channel_id).await;
+        if !race_loss_requeue_snapshot_has_idle_kickable_backlog(
+            &shared, &provider, channel_id, &snapshot,
+        ) {
+            tracing::debug!(
+                provider = provider.as_str(),
+                channel_id = channel_id.get(),
+                active_holder = race_loss_requeue_snapshot_has_active_holder(&snapshot),
+                queue_len = snapshot.intervention_queue.len(),
+                "Deferred drain: race-loss requeue post-enqueue recheck found no idle kickable backlog"
+            );
+            return;
+        }
+
+        let outcome = kick_idle_queue_channel_if_context_available(
+            &shared,
+            &provider,
+            channel_id,
+            "race_loss_requeue_idle_recheck",
+        )
+        .await;
+        arm_event_backstop_after_no_start_if_queue_nonempty(
+            &shared,
+            &provider,
+            channel_id,
+            outcome,
+            "race_loss_requeue_idle_recheck",
+        )
+        .await;
+    });
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -198,6 +271,15 @@ pub(super) fn schedule_post_enqueue_idle_queue_kick(
     provider: ProviderKind,
     channel_id: ChannelId,
 ) {
+    if post_enqueue_idle_queue_kick_suppressed() {
+        tracing::debug!(
+            provider = provider.as_str(),
+            channel_id = channel_id.get(),
+            "Deferred drain: suppressed post-enqueue idle snapshot kick for race-loss requeue"
+        );
+        return;
+    }
+
     // #4048 S3 enqueue-then-check closes the lost-wakeup window that remains
     // after subscribe-then-snapshot on the completion listener: a turn can
     // publish/release before this enqueue is durable, so the event listener's
@@ -1235,6 +1317,270 @@ mod presleep_tests {
                 .deferred_hook_channels
                 .contains_key(&channel_id),
             "generic enqueue helper must kick immediately enough to arm the channel backstop without advancing time"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn race_loss_requeue_does_not_rekick_until_holding_turn_completes_4078() {
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let tmp = tempfile::tempdir().expect("temp runtime root");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_078_200);
+        let holder_msg = MessageId::new(4_078_201);
+        let queued_msg = MessageId::new(4_078_202);
+
+        spawn_turn_completion_idle_queue_listener(shared.clone(), provider.clone());
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            mailbox_try_start_turn_kinded(
+                &shared,
+                channel_id,
+                Arc::new(CancelToken::new()),
+                UserId::new(4_078_201),
+                holder_msg,
+                ActiveTurnKind::Background,
+            )
+            .await,
+            "seed the mailbox-holding background turn"
+        );
+
+        let kick_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook_calls = kick_calls.clone();
+        let _hook = set_idle_queue_kick_hook_for_tests(Arc::new(
+            move |shared, provider, channel, reason| {
+                let hook_calls = hook_calls.clone();
+                Box::pin(async move {
+                    if channel != channel_id {
+                        return None;
+                    }
+                    let call = hook_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let taken = shared
+                        .mailbox(channel)
+                        .take_next_soft(queue_persistence_context(&shared, &provider, channel))
+                        .await;
+                    let intervention = taken
+                        .intervention
+                        .expect("kick should dequeue the queued message");
+                    assert_eq!(intervention.message_id, queued_msg);
+
+                    if call == 0 {
+                        assert_eq!(reason, "post_enqueue_idle_snapshot");
+                        let started = mailbox_try_start_turn(
+                            &shared,
+                            channel,
+                            Arc::new(CancelToken::new()),
+                            intervention.author_id,
+                            intervention.message_id,
+                        )
+                        .await;
+                        assert!(
+                            !started,
+                            "the mailbox holder has not completed, so the dequeued turn loses the race"
+                        );
+                        let requeued_msg = intervention.message_id;
+                        let requeue = with_post_enqueue_idle_queue_kick_suppressed(
+                            mailbox_enqueue_intervention(&shared, &provider, channel, intervention),
+                        )
+                        .await;
+                        assert!(requeue.enqueued, "race-loss path requeues the message");
+                        mailbox_abandon_pending_dispatch(&shared, &provider, channel, requeued_msg)
+                            .await;
+                        schedule_race_loss_requeue_post_enqueue_idle_recheck(
+                            shared.clone(),
+                            provider.clone(),
+                            channel,
+                        );
+                        return Some(IdleQueueKickoffChannelOutcome { started });
+                    }
+
+                    assert_eq!(reason, "turn_completion_event");
+                    let started = mailbox_try_start_turn(
+                        &shared,
+                        channel,
+                        Arc::new(CancelToken::new()),
+                        intervention.author_id,
+                        intervention.message_id,
+                    )
+                    .await;
+                    assert!(
+                        started,
+                        "the completion-event kick must start the requeued message after the holder finishes"
+                    );
+                    Some(IdleQueueKickoffChannelOutcome { started })
+                })
+            },
+        ));
+
+        let enqueue = mailbox_enqueue_intervention(
+            &shared,
+            &provider,
+            channel_id,
+            user_intervention(queued_msg.get(), "queued behind background holder"),
+        )
+        .await;
+        assert!(enqueue.enqueued);
+        yield_backstop_tasks().await;
+        assert_eq!(
+            kick_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "fresh enqueue gets the initial post-enqueue kick"
+        );
+
+        tokio::time::advance(
+            DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY + std::time::Duration::from_secs(1),
+        )
+        .await;
+        yield_backstop_tasks().await;
+        assert_eq!(
+            kick_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "race-loss requeue must not schedule another immediate/deferred kick while the holder is live"
+        );
+        let snapshot = mailbox_snapshot(&shared, channel_id).await;
+        assert!(snapshot.cancel_token.is_some());
+        assert_eq!(snapshot.active_user_message_id, Some(holder_msg));
+        assert_eq!(snapshot.intervention_queue.len(), 1);
+        assert_eq!(snapshot.intervention_queue[0].message_id, queued_msg);
+
+        let finish = mailbox_finish_turn(&shared, &provider, channel_id).await;
+        assert!(
+            finish.has_pending,
+            "the holder completion observes the requeued message and publishes the wake edge"
+        );
+        yield_backstop_tasks().await;
+        assert_eq!(
+            kick_calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "only the holder completion event produces the second kick"
+        );
+        let snapshot = mailbox_snapshot(&shared, channel_id).await;
+        assert!(snapshot.cancel_token.is_some());
+        assert_eq!(snapshot.active_user_message_id, Some(queued_msg));
+        assert!(
+            snapshot.intervention_queue.is_empty(),
+            "completion-event kick consumes the requeued message"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn race_loss_requeue_idle_recheck_kicks_after_missed_completion_4078() {
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let tmp = tempfile::tempdir().expect("temp runtime root");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_078_300);
+        let holder_msg = MessageId::new(4_078_301);
+        let queued_msg = MessageId::new(4_078_302);
+
+        spawn_turn_completion_idle_queue_listener(shared.clone(), provider.clone());
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            mailbox_try_start_turn(
+                &shared,
+                channel_id,
+                Arc::new(CancelToken::new()),
+                UserId::new(4_078_301),
+                holder_msg,
+            )
+            .await,
+            "seed the mailbox holder before the missed-completion window"
+        );
+
+        let finish = mailbox_finish_turn(&shared, &provider, channel_id).await;
+        assert!(
+            !finish.has_pending,
+            "holder completion must see the queue empty before the race-loss requeue lands"
+        );
+        yield_backstop_tasks().await;
+        assert_eq!(
+            shared
+                .restart
+                .deferred_hook_backlog
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "empty completion-event drain must arm no backstop before the requeue"
+        );
+
+        let kick_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook_calls = kick_calls.clone();
+        let _hook = set_idle_queue_kick_hook_for_tests(Arc::new(
+            move |shared, provider, channel, reason| {
+                let hook_calls = hook_calls.clone();
+                Box::pin(async move {
+                    if channel != channel_id {
+                        return None;
+                    }
+                    hook_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    assert_eq!(reason, "race_loss_requeue_idle_recheck");
+                    let taken = shared
+                        .mailbox(channel)
+                        .take_next_soft(queue_persistence_context(&shared, &provider, channel))
+                        .await;
+                    let intervention = taken
+                        .intervention
+                        .expect("idle recheck kick should dequeue the missed race-loss requeue");
+                    assert_eq!(intervention.message_id, queued_msg);
+                    let started = mailbox_try_start_turn(
+                        &shared,
+                        channel,
+                        Arc::new(CancelToken::new()),
+                        intervention.author_id,
+                        intervention.message_id,
+                    )
+                    .await;
+                    assert!(
+                        started,
+                        "the channel is already idle, so the recheck kick must start the queued message"
+                    );
+                    Some(IdleQueueKickoffChannelOutcome { started })
+                })
+            },
+        ));
+
+        let requeue = with_post_enqueue_idle_queue_kick_suppressed(mailbox_enqueue_intervention(
+            &shared,
+            &provider,
+            channel_id,
+            user_intervention(queued_msg.get(), "missed completion race-loss requeue"),
+        ))
+        .await;
+        assert!(requeue.enqueued, "race-loss requeue lands durably");
+        mailbox_abandon_pending_dispatch(&shared, &provider, channel_id, queued_msg).await;
+        schedule_race_loss_requeue_post_enqueue_idle_recheck(
+            shared.clone(),
+            provider.clone(),
+            channel_id,
+        );
+        yield_backstop_tasks().await;
+
+        assert_eq!(
+            kick_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the post-enqueue idle recheck schedules exactly one missed-completion kick"
+        );
+        let snapshot = mailbox_snapshot(&shared, channel_id).await;
+        assert!(snapshot.cancel_token.is_some());
+        assert_eq!(snapshot.active_user_message_id, Some(queued_msg));
+        assert!(
+            snapshot.intervention_queue.is_empty(),
+            "the recheck kick consumes and starts the requeued message"
+        );
+        assert_eq!(
+            shared
+                .restart
+                .deferred_hook_backlog
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "a successful recheck kick must not leave a slow backstop armed"
         );
     }
 
