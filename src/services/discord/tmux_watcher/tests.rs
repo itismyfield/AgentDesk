@@ -7,9 +7,9 @@ use super::{
     should_probe_tmux_liveness, terminal_relay_decision, watcher_batch_contains_assistant_event,
     watcher_batch_contains_relayable_response,
     watcher_fallback_edit_failure_can_delete_original_placeholder,
-    watcher_fresh_idle_finalize_decision, watcher_inflight_absence_is_abandonment,
-    watcher_output_progressed_recently, watcher_should_clear_stale_terminal_message_ids,
-    watcher_should_delete_suppressed_placeholder,
+    watcher_fresh_idle_finalize_decision, watcher_handle_no_dispatch_post_work_idle_body,
+    watcher_inflight_absence_is_abandonment, watcher_output_progressed_recently,
+    watcher_should_clear_stale_terminal_message_ids, watcher_should_delete_suppressed_placeholder,
     watcher_should_direct_send_after_session_bound_ack,
     watcher_should_reclaim_orphan_turn_placeholder,
     watcher_should_suppress_streaming_after_bridge_delivery,
@@ -2133,6 +2133,89 @@ fn compact_local_only_boundary_without_seed_delivery_fingerprint_preserves_resto
     assert_eq!(full_response, restored);
     assert_eq!(response_sent_offset, 0);
     assert_eq!(last_edit_text, restored);
+}
+
+#[test]
+fn tui_direct_watcher_synthetic_post_work_idle_preserves_body_4102() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+    let tmux_session_name = "AgentDesk-codex-adk-cc-4102";
+    let mut state = InflightTurnState::new(
+        ProviderKind::Codex,
+        987_4102_001,
+        None,
+        42,
+        1001,
+        1002,
+        "external prompt".to_string(),
+        None,
+        Some(tmux_session_name.to_string()),
+        Some("/tmp/agentdesk-4102-output.jsonl".to_string()),
+        None,
+        64,
+    );
+    state.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
+    state.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
+
+    let mut full_response = "provider body accumulated before idle timeout".to_string();
+    let mut terminal_kind = None;
+
+    assert!(watcher_handle_no_dispatch_post_work_idle_body(
+        &mut full_response,
+        &mut terminal_kind,
+        Some(&state),
+        false,
+        tmux_session_name,
+    ));
+    assert_eq!(
+        full_response,
+        "provider body accumulated before idle timeout"
+    );
+    assert_eq!(
+        terminal_kind,
+        Some(WatcherTerminalKind::SoftStopHookSummary)
+    );
+}
+
+#[test]
+fn no_dispatch_post_work_idle_still_clears_non_synthetic_body_4102() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+    let tmux_session_name = "AgentDesk-codex-adk-cc-4102-local";
+    let state = InflightTurnState::new(
+        ProviderKind::Codex,
+        987_4102_002,
+        None,
+        42,
+        2001,
+        2002,
+        "/local command".to_string(),
+        None,
+        Some(tmux_session_name.to_string()),
+        Some("/tmp/agentdesk-4102-local-output.jsonl".to_string()),
+        None,
+        64,
+    );
+    let mut full_response = "local command echo that must not relay".to_string();
+    let mut terminal_kind = None;
+
+    assert!(!watcher_handle_no_dispatch_post_work_idle_body(
+        &mut full_response,
+        &mut terminal_kind,
+        Some(&state),
+        false,
+        tmux_session_name,
+    ));
+    assert!(full_response.is_empty());
+    assert_eq!(terminal_kind, None);
 }
 
 #[test]

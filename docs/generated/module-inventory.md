@@ -671,7 +671,7 @@
 | `services::discord::tmux_watcher::completion_gate` | `src/services/discord/tmux_watcher/completion_gate.rs` | 250 | 250 | 0 |  |
 | `services::discord::tmux_watcher::completion_producer` | `src/services/discord/tmux_watcher/completion_producer.rs` | 54 | 54 | 0 |  |
 | `services::discord::tmux_watcher::controller_heartbeat` | `src/services/discord/tmux_watcher/controller_heartbeat.rs` | 34 | 34 | 0 |  |
-| `services::discord::tmux_watcher::liveness` | `src/services/discord/tmux_watcher/liveness.rs` | 568 | 486 | 82 |  |
+| `services::discord::tmux_watcher::liveness` | `src/services/discord/tmux_watcher/liveness.rs` | 589 | 507 | 82 |  |
 | `services::discord::tmux_watcher::orphan_status_panel_cleanup` | `src/services/discord/tmux_watcher/orphan_status_panel_cleanup.rs` | 238 | 238 | 0 |  |
 | `services::discord::tmux_watcher::panel_decisions` | `src/services/discord/tmux_watcher/panel_decisions.rs` | 598 | 598 | 0 |  |
 | `services::discord::tmux_watcher::placeholder_reclaim` | `src/services/discord/tmux_watcher/placeholder_reclaim.rs` | 106 | 106 | 0 |  |
@@ -691,7 +691,7 @@
 | `services::discord::tui_direct_abort_marker::deferred_claim` | `src/services/discord/tui_direct_abort_marker/deferred_claim.rs` | 669 | 265 | 404 |  |
 | `services::discord::tui_direct_abort_marker::store` | `src/services/discord/tui_direct_abort_marker/store.rs` | 348 | 348 | 0 |  |
 | `services::discord::tui_direct_pending_start` | `src/services/discord/tui_direct_pending_start.rs` | 3810 | 1491 | 2319 | giant-file |
-| `services::discord::tui_prompt_relay` | `src/services/discord/tui_prompt_relay.rs` | 991 | 991 | 0 |  |
+| `services::discord::tui_prompt_relay` | `src/services/discord/tui_prompt_relay.rs` | 992 | 992 | 0 |  |
 | `services::discord::tui_prompt_relay::anchor_completion` | `src/services/discord/tui_prompt_relay/anchor_completion.rs` | 454 | 218 | 236 |  |
 | `services::discord::tui_prompt_relay::bridge_completion` | `src/services/discord/tui_prompt_relay/bridge_completion.rs` | 167 | 81 | 86 |  |
 | `services::discord::tui_prompt_relay::bridge_gateway` | `src/services/discord/tui_prompt_relay/bridge_gateway.rs` | 211 | 211 | 0 |  |

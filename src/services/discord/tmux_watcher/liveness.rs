@@ -467,6 +467,27 @@ pub(super) fn reacquire_watcher_inflight_for_active_stream(
     crate::services::discord::inflight::save_inflight_state_if_absent(&state).unwrap_or(false)
 }
 
+pub(super) fn watcher_handle_no_dispatch_post_work_idle_body(
+    full_response: &mut String,
+    terminal_kind: &mut Option<WatcherTerminalKind>,
+    stall_inflight_snapshot: Option<&InflightTurnState>,
+    dispatch_id_present: bool,
+    tmux_session_name: &str,
+) -> bool {
+    if !dispatch_id_present
+        && !full_response.trim().is_empty()
+        && crate::services::discord::tui_prompt_relay::tui_direct_watcher_synthetic_inflight_matches(
+            stall_inflight_snapshot,
+            tmux_session_name,
+        )
+    {
+        terminal_kind.get_or_insert(WatcherTerminalKind::SoftStopHookSummary);
+        return true;
+    }
+    full_response.clear();
+    false
+}
+
 pub(super) fn discard_restored_response_seed_before_no_inflight_terminal_relay(
     full_response: &mut String,
     response_sent_offset: &mut usize,

@@ -1346,7 +1346,7 @@ pub(super) fn tui_direct_synthetic_inflight_matches(
     })
 }
 
-pub(super) fn tui_direct_watcher_synthetic_inflight_matches(
+pub(in crate::services::discord) fn tui_direct_watcher_synthetic_inflight_matches(
     state: Option<&InflightTurnState>,
     tmux_session_name: &str,
 ) -> bool {

@@ -1602,7 +1602,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                             tmux_session_name
                                         );
                                     }
-                                    full_response.clear();
+                                    watcher_handle_no_dispatch_post_work_idle_body(&mut full_response, &mut terminal_kind, ready_for_input_stall_inflight_snapshot.as_ref(), ready_for_input_stall_dispatch_id.is_some(), &tmux_session_name);
                                     break;
                                 }
                             }
