@@ -903,6 +903,12 @@ impl RelayObservedPromptInjectionDecision {
     }
 }
 
+pub(in crate::services::discord) fn observed_prompt_starts_external_turn_lifecycle(
+    prompt: &str,
+) -> bool {
+    relay_observed_prompt_injected_prompt_decision(prompt).starts_external_turn_lifecycle()
+}
+
 /// Pure classification used before relay lease/ownership side effects.
 fn relay_observed_prompt_injected_prompt_decision(
     prompt: &str,

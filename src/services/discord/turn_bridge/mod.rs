@@ -4715,14 +4715,14 @@ pub(super) fn spawn_turn_bridge(
                         outcome,
                     );
                     if replace_committed && committed {
-                        super::outbound::delivery_record::shadow_mirror_delivered_frontier(
+                        terminal_delivery::record_stopped_turn_terminal_replace_delivery(
                             shared_owned.as_ref(),
                             &provider,
                             watcher_owner_channel_id,
                             lease_range,
-                            true,
-                            Some(current_msg_id.get()),
-                            Some(channel_id.get()),
+                            current_msg_id,
+                            channel_id,
+                            remaining_response,
                         );
                     }
                 }
@@ -4807,14 +4807,14 @@ pub(super) fn spawn_turn_bridge(
                         outcome,
                     );
                     if replace_committed && committed {
-                        super::outbound::delivery_record::shadow_mirror_delivered_frontier(
+                        super::outbound::delivery_record::record_delivered_frontier_with_body(
                             shared_owned.as_ref(),
                             &provider,
                             watcher_owner_channel_id,
                             lease_range,
-                            true,
-                            Some(current_msg_id.get()),
-                            Some(channel_id.get()),
+                            current_msg_id.get(),
+                            channel_id.get(),
+                            &full_response,
                         );
                     }
                 }
@@ -5246,6 +5246,7 @@ pub(super) fn spawn_turn_bridge(
                                 &shared_owned.ui.placeholder_controller,
                                 current_msg_id,
                                 &delivery_response,
+                                &spoken_delivery_response,
                                 full_response.len(),
                                 bridge_turn,
                                 bridge_start,
@@ -5288,6 +5289,7 @@ pub(super) fn spawn_turn_bridge(
                                 inflight_state.tmux_session_name.as_deref(),
                                 current_msg_id,
                                 &delivery_response,
+                                &spoken_delivery_response,
                                 full_response.len(),
                                 single_message_panel_footer_mode,
                                 dispatch_id.as_deref(),
@@ -5345,6 +5347,7 @@ pub(super) fn spawn_turn_bridge(
                                 &shared_owned.ui.placeholder_controller,
                                 current_msg_id,
                                 &delivery_response,
+                                &spoken_delivery_response,
                                 full_response.len(),
                                 bridge_turn,
                                 bridge_start,
@@ -5451,19 +5454,16 @@ pub(super) fn spawn_turn_bridge(
                                             inflight_state.tmux_session_name.as_deref(),
                                             outcome,
                                         );
-                                        // #3630: mirror the delivered frontier like the
-                                        // cutover/long-chunk paths so a post-restart
-                                        // no-inflight watcher dedups it instead of
-                                        // re-relaying a duplicate.
+                                        // #3630: mirror delivered frontier for post-restart no-inflight dedup.
                                         if replace_committed && committed {
-                                            super::outbound::delivery_record::shadow_mirror_delivered_frontier(
+                                            super::outbound::delivery_record::record_delivered_frontier_with_body(
                                                 shared_owned.as_ref(),
                                                 &provider,
                                                 watcher_owner_channel_id,
                                                 lease_range,
-                                                true,
-                                                Some(current_msg_id.get()),
-                                                Some(channel_id.get()),
+                                                current_msg_id.get(),
+                                                channel_id.get(),
+                                                &spoken_delivery_response,
                                             );
                                         }
                                         replace_committed

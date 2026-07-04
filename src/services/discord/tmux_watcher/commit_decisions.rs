@@ -75,7 +75,15 @@ pub(super) fn mark_watcher_terminal_delivery_committed(
         },
     );
     match outcome {
-        crate::services::discord::inflight::WatcherTerminalCommitOutcome::Committed => true,
+        crate::services::discord::inflight::WatcherTerminalCommitOutcome::Committed => {
+            crate::services::discord::outbound::delivery_record::record_delivered_content_fingerprint(
+                provider,
+                channel_id,
+                tmux_session_name,
+                full_response,
+            );
+            true
+        }
         crate::services::discord::inflight::WatcherTerminalCommitOutcome::Skipped => false,
         crate::services::discord::inflight::WatcherTerminalCommitOutcome::IoError => {
             tracing::warn!(

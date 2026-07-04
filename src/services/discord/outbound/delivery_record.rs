@@ -74,6 +74,8 @@ use crate::services::provider::ProviderKind;
 /// target); the isolation proof test asserts this segment differs.
 const DELIVERY_RECORDS_DIR: &str = "discord_delivery_records";
 const DELIVERY_OWNER_CONTEXT_DIR: &str = "discord_delivery_owner_context";
+const RECENT_DELIVERED_CONTENT_LIMIT: usize = 16;
+const RECENT_DELIVERED_CONTENT_WINDOW_MS: u64 = 15 * 60 * 1000;
 
 /// Durable per-turn delivery record (design §4.3). Two **independent** durable
 /// fields, deliberately not folded into one state machine: the lease is the
@@ -90,6 +92,9 @@ pub(in crate::services::discord) struct DeliveryRecord {
     /// restart in B3 (no 0-reset).
     #[serde(default)]
     pub delivered_frontier: Option<DeliveredCommit>,
+    /// Bounded byte-content fingerprints for degenerate lease fallback dedup.
+    #[serde(default)]
+    pub recent_delivered_contents: Vec<DeliveredContentFingerprint>,
 }
 
 /// The offset-authority channel for a delivery channel and tmux generation.
@@ -143,6 +148,15 @@ pub(in crate::services::discord) struct DeliveredCommit {
     /// watcher) set this to their single channel; null = no anchor recorded.
     #[serde(default)]
     pub panel_channel_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(in crate::services::discord) struct DeliveredContentFingerprint {
+    pub channel_id: u64,
+    pub content_hash: String,
+    pub content_len: u64,
+    pub generation_mtime_ns: i64,
+    pub delivered_at_epoch_ms: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -789,6 +803,173 @@ pub(in crate::services::discord) fn range_already_committed(
     range_end > 0 && range_end <= committed
 }
 
+fn now_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn delivered_content_hash(channel_id: u64, body: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&channel_id.to_le_bytes());
+    hasher.update(body.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+fn delivered_content_fingerprint(
+    channel_id: u64,
+    body: &str,
+    generation_mtime_ns: i64,
+    delivered_at_epoch_ms: u64,
+) -> Option<DeliveredContentFingerprint> {
+    (!body.trim().is_empty()).then(|| DeliveredContentFingerprint {
+        channel_id,
+        content_hash: delivered_content_hash(channel_id, body),
+        content_len: body.len() as u64,
+        generation_mtime_ns,
+        delivered_at_epoch_ms,
+    })
+}
+
+fn recent_content_fingerprint_matches(
+    record: &DeliveryRecord,
+    fingerprint: &DeliveredContentFingerprint,
+    now_ms: u64,
+) -> bool {
+    record.recent_delivered_contents.iter().any(|recent| {
+        recent.channel_id == fingerprint.channel_id
+            && recent.content_len == fingerprint.content_len
+            && recent.content_hash == fingerprint.content_hash
+            && recent.generation_mtime_ns == fingerprint.generation_mtime_ns
+            && now_ms.saturating_sub(recent.delivered_at_epoch_ms)
+                <= RECENT_DELIVERED_CONTENT_WINDOW_MS
+    })
+}
+
+fn prune_recent_content_fingerprints(entries: &mut Vec<DeliveredContentFingerprint>, now_ms: u64) {
+    entries.retain(|entry| {
+        now_ms.saturating_sub(entry.delivered_at_epoch_ms) <= RECENT_DELIVERED_CONTENT_WINDOW_MS
+    });
+    if entries.len() > RECENT_DELIVERED_CONTENT_LIMIT {
+        entries.drain(0..entries.len() - RECENT_DELIVERED_CONTENT_LIMIT);
+    }
+}
+
+fn record_delivered_content_fingerprint_at(
+    path: &Path,
+    channel_id: u64,
+    body: &str,
+    generation_mtime_ns: i64,
+    delivered_at_epoch_ms: u64,
+) -> Result<(), String> {
+    let Some(fingerprint) =
+        delivered_content_fingerprint(channel_id, body, generation_mtime_ns, delivered_at_epoch_ms)
+    else {
+        return Ok(());
+    };
+    mutate_record_at(path, |record| {
+        prune_recent_content_fingerprints(
+            &mut record.recent_delivered_contents,
+            delivered_at_epoch_ms,
+        );
+        record.recent_delivered_contents.retain(|recent| {
+            !(recent.channel_id == fingerprint.channel_id
+                && recent.content_len == fingerprint.content_len
+                && recent.content_hash == fingerprint.content_hash
+                && recent.generation_mtime_ns == fingerprint.generation_mtime_ns)
+        });
+        record.recent_delivered_contents.push(fingerprint);
+        prune_recent_content_fingerprints(
+            &mut record.recent_delivered_contents,
+            delivered_at_epoch_ms,
+        );
+    })
+}
+
+fn recent_delivered_content_matches_at(
+    path: &Path,
+    channel_id: u64,
+    body: &str,
+    generation_mtime_ns: i64,
+    now_ms: u64,
+) -> bool {
+    let Some(fingerprint) =
+        delivered_content_fingerprint(channel_id, body, generation_mtime_ns, now_ms)
+    else {
+        return false;
+    };
+    read_record_at(path)
+        .as_ref()
+        .is_some_and(|record| recent_content_fingerprint_matches(record, &fingerprint, now_ms))
+}
+
+fn record_delivered_content_fingerprint_for_generation(
+    provider: &ProviderKind,
+    channel_id: u64,
+    body: &str,
+    generation_mtime_ns: i64,
+) {
+    let path = match record_path_or_err(provider, channel_id) {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(
+                provider = provider.as_str(),
+                channel = channel_id,
+                error = %error,
+                "delivery content fingerprint path unavailable"
+            );
+            return;
+        }
+    };
+    if let Err(error) = record_delivered_content_fingerprint_at(
+        &path,
+        channel_id,
+        body,
+        generation_mtime_ns,
+        now_epoch_ms(),
+    ) {
+        tracing::warn!(
+            provider = provider.as_str(),
+            channel = channel_id,
+            error = %error,
+            "delivery content fingerprint write failed"
+        );
+    }
+}
+
+pub(in crate::services::discord) fn record_delivered_content_fingerprint(
+    provider: &ProviderKind,
+    channel: ChannelId,
+    tmux_session_name: &str,
+    body: &str,
+) {
+    record_delivered_content_fingerprint_for_generation(
+        provider,
+        channel.get(),
+        body,
+        current_generation_mtime_ns(tmux_session_name),
+    );
+}
+
+pub(in crate::services::discord) fn recent_delivered_content_matches(
+    provider: &ProviderKind,
+    channel: ChannelId,
+    tmux_session_name: &str,
+    body: &str,
+) -> bool {
+    let Some(path) = delivery_record_path(provider, channel.get()) else {
+        return false;
+    };
+    recent_delivered_content_matches_at(
+        &path,
+        channel.get(),
+        body,
+        current_generation_mtime_ns(tmux_session_name),
+        now_epoch_ms(),
+    )
+}
+
 /// I2 outcome map (pure, testable): the shadow-write fires ONLY for a confirmed
 /// `Delivered`. Every other outcome means the controller did NOT advance the
 /// offset — `NotDelivered` (identity gate refused), `Transient`/`Unknown`
@@ -931,16 +1112,25 @@ pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
     is_delivered: bool,
     terminal_anchor_msg_id: Option<u64>,
     terminal_anchor_channel_id: Option<u64>,
+    delivered_body: Option<&str>,
 ) {
-    if !should_shadow_mirror(is_delivered, delivery_record_shadow_enabled()) {
-        return;
-    }
     let channel_id = channel.get();
     let coord = shared.tmux_relay_coord(channel);
-    let in_memory_confirmed_end = coord.confirmed_end_offset.load(Ordering::Acquire);
     let generation_mtime_ns = coord
         .confirmed_end_generation_mtime_ns
         .load(Ordering::Acquire);
+    if is_delivered && let Some(body) = delivered_body {
+        record_delivered_content_fingerprint_for_generation(
+            provider,
+            channel_id,
+            body,
+            generation_mtime_ns,
+        );
+    }
+    if !should_shadow_mirror(is_delivered, delivery_record_shadow_enabled()) {
+        return;
+    }
+    let in_memory_confirmed_end = coord.confirmed_end_offset.load(Ordering::Acquire);
     let fresh = crate::services::discord::inflight::load_inflight_state(provider, channel_id);
     let attempts = fresh
         .as_ref()
@@ -955,6 +1145,48 @@ pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
         terminal_anchor_msg_id,
         terminal_anchor_channel_id,
         in_memory_confirmed_end,
+    );
+}
+
+pub(in crate::services::discord) fn record_delivered_frontier_with_body(
+    shared: &crate::services::discord::SharedData,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    range: (u64, u64),
+    terminal_anchor_msg_id: u64,
+    terminal_anchor_channel_id: u64,
+    body: &str,
+) {
+    shadow_mirror_delivered_frontier(
+        shared,
+        provider,
+        channel,
+        range,
+        true,
+        Some(terminal_anchor_msg_id),
+        Some(terminal_anchor_channel_id),
+        Some(body),
+    );
+}
+
+pub(in crate::services::discord) fn shadow_mirror_same_channel_frontier_with_body(
+    shared: &crate::services::discord::SharedData,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    range: (u64, u64),
+    is_delivered: bool,
+    terminal_anchor_msg_id: u64,
+    body: &str,
+) {
+    shadow_mirror_delivered_frontier(
+        shared,
+        provider,
+        channel,
+        range,
+        is_delivered,
+        Some(terminal_anchor_msg_id),
+        Some(channel.get()),
+        Some(body),
     );
 }
 
@@ -986,7 +1218,10 @@ pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
 /// delivery lease acquired/committed (offset-space consistent — never mix spaces).
 /// `last_chunk_anchor_msg_id = None` (empty chunk Vec — impossible on the `Ok`
 /// path, but type-honest) records the range with a null anchor, identical to the
-/// absent-status-panel case. Shadow flag OFF (default) → no-op.
+/// absent-status-panel case. The delivered-frontier mirror still obeys the shadow
+/// flag, while the #4081 recent-content fingerprint is recorded for confirmed
+/// deliveries so degenerate-key phantom re-relays can be refused even before the
+/// durable frontier authority is enabled.
 pub(in crate::services::discord) fn record_long_chunk_terminal_delivery(
     shared: &crate::services::discord::SharedData,
     provider: &ProviderKind,
@@ -994,6 +1229,7 @@ pub(in crate::services::discord) fn record_long_chunk_terminal_delivery(
     delivery_channel_id: ChannelId,
     range: (u64, u64),
     last_chunk_anchor_msg_id: Option<u64>,
+    delivered_body: &str,
 ) {
     shadow_mirror_delivered_frontier(
         shared,
@@ -1003,6 +1239,7 @@ pub(in crate::services::discord) fn record_long_chunk_terminal_delivery(
         true,
         last_chunk_anchor_msg_id,
         Some(delivery_channel_id.get()),
+        Some(delivered_body),
     );
 }
 
@@ -1038,6 +1275,7 @@ mod tests {
         let record = DeliveryRecord {
             delivery_lease: Some(sample_lease()),
             delivered_frontier: Some(sample_frontier()),
+            recent_delivered_contents: Vec::new(),
         };
         let json = serde_json::to_string_pretty(&record).unwrap();
         let back: DeliveryRecord = serde_json::from_str(&json).unwrap();
@@ -1059,9 +1297,108 @@ mod tests {
         let record = DeliveryRecord {
             delivery_lease: Some(sample_lease()),
             delivered_frontier: Some(sample_frontier()),
+            recent_delivered_contents: Vec::new(),
         };
         write_record_at(&path, &record).unwrap();
         assert_eq!(read_record_at(&path), Some(record));
+    }
+
+    #[test]
+    fn degenerate_content_guard_matches_byte_identical_recent_delivery_4081() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 4081);
+        let generation = 44_081_i64;
+        let now = 1_700_000_000_000_u64;
+
+        record_delivered_content_fingerprint_at(&path, 4081, "prior body", generation, now)
+            .unwrap();
+
+        assert!(recent_delivered_content_matches_at(
+            &path,
+            4081,
+            "prior body",
+            generation,
+            now + 1,
+        ));
+        assert!(!recent_delivered_content_matches_at(
+            &path,
+            4081,
+            "different body",
+            generation,
+            now + 1,
+        ));
+        assert!(!recent_delivered_content_matches_at(
+            &path,
+            4082,
+            "prior body",
+            generation,
+            now + 1,
+        ));
+        assert!(!recent_delivered_content_matches_at(
+            &path,
+            4081,
+            "prior body",
+            generation + 1,
+            now + 1,
+        ));
+    }
+
+    #[test]
+    fn recent_delivered_content_ring_is_bounded_4081() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 4082);
+        let generation = 44_082_i64;
+        let now = 1_700_000_000_000_u64;
+
+        for idx in 0..(RECENT_DELIVERED_CONTENT_LIMIT + 4) {
+            record_delivered_content_fingerprint_at(
+                &path,
+                4082,
+                &format!("body-{idx}"),
+                generation,
+                now + idx as u64,
+            )
+            .unwrap();
+        }
+
+        let record = read_record_at(&path).unwrap();
+        assert_eq!(
+            record.recent_delivered_contents.len(),
+            RECENT_DELIVERED_CONTENT_LIMIT
+        );
+        assert!(!recent_delivered_content_matches_at(
+            &path,
+            4082,
+            "body-0",
+            generation,
+            now + 100,
+        ));
+        assert!(recent_delivered_content_matches_at(
+            &path,
+            4082,
+            "body-19",
+            generation,
+            now + 100,
+        ));
+    }
+
+    #[test]
+    fn recent_delivered_content_window_expires_4081() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 4083);
+        let generation = 44_083_i64;
+        let now = 1_700_000_000_000_u64;
+
+        record_delivered_content_fingerprint_at(&path, 4083, "prior body", generation, now)
+            .unwrap();
+
+        assert!(!recent_delivered_content_matches_at(
+            &path,
+            4083,
+            "prior body",
+            generation,
+            now + RECENT_DELIVERED_CONTENT_WINDOW_MS + 1,
+        ));
     }
 
     #[test]
@@ -2070,6 +2407,7 @@ mod tests {
             ChannelId::new(900_800_700), // delivery (anchor home)
             (0, 4096),
             Some(912_345_678),
+            "",
         );
         // No durable record was created for either channel under the test root.
         assert!(read_record(&ProviderKind::Claude, 100_200_300).is_none());

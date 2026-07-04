@@ -8,7 +8,7 @@
 > [`docs/generated/giant-file-registry.md`](../generated/giant-file-registry.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-07-03 (against #3874 dead-code removal — freeze counts re-synced to the regenerated module inventory; no behavior change).
+> Last refreshed: 2026-07-04 (against #4081 duplicate compact relay fix — delivery-record content fingerprint sidecar registered in the generated giant-file inventory; relay behavior bugfix only).
 >
 > PR #3456 dcserver-robustness: freeze counts re-synced after the reconcile
 > row-allocation churn reduction (`src/reconcile.rs` now 1816 prod lines) and the
@@ -57,6 +57,9 @@
 - do_not_edit_without_migration_plan:
   - `src/services/discord/formatting.rs::send_long_message_raw` (line 1971,
     ordered-chunk continuation contract not yet modelled in v3).
+  - `src/services/discord/outbound/delivery_record.rs` (1208 lines; durable
+    delivery lease/frontier/owner-context sidecar, plus the #4081 bounded
+    recent-content fingerprint guard; bugfix only until split under #3405).
   - `src/services/message_outbox.rs` is the PG-backed message outbox
     enqueue/claim/accounting surface (now below the giant-file threshold once
     `#[cfg(test)] mod` blocks are excluded; bugfix only until split).
@@ -206,7 +209,10 @@
     late-frame fresh row B is rejected; -576 from #3841 extracting placeholder
     suppression helpers to `tmux_placeholder_suppression.rs`;
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (7301 production lines; -18 from
+  - `src/services/discord/tmux_watcher.rs` (7173 production lines; #4081
+    round2 moved `commit_watcher_direct_terminal_session_idle` verbatim into
+    `tmux_watcher/liveness.rs` and kept only thin duplicate-guard/long-body
+    wiring in the root loop, leaving 10 hotfile-ratchet lines of headroom; -18 from
     #3998 S1-f2 retiring the watcher terminal controller rollout flag and
     collapsing the cutover call to structural inputs only; +59 from #4019 R2
     identity-guarded watcher exits — the real stall/auth/overload exit

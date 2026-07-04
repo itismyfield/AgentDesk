@@ -627,6 +627,7 @@ impl SessionBoundDiscordRelaySink {
         channel_id: u64,
         msg_id: MessageId,
         relay_text: &str,
+        delivered_fingerprint_body: &str,
         delivery: &SessionRelayDelivery,
         trace: &SessionRelayTraceContext,
         start: u64,
@@ -691,14 +692,14 @@ impl SessionBoundDiscordRelaySink {
 
         // #3089 B1: shadow-mirror durable delivered frontier — flag-gated, observe-only, Delivered-only (I2), OFF=no-op.
         // #3610 PR-1: anchor msg = `msg_id` (current_msg_id — true terminal anchor, not status_message_id). PR-1b: anchor channel = `channel` (same-channel path).
-        dr::shadow_mirror_delivered_frontier(
+        dr::shadow_mirror_same_channel_frontier_with_body(
             shared,
             provider,
             channel,
             (start, end),
             dr::outcome_is_shadow_delivered(&outcome),
-            Some(msg_id.get()),
-            Some(channel.get()),
+            msg_id.get(),
+            delivered_fingerprint_body,
         );
 
         match outcome {
@@ -836,10 +837,11 @@ impl SessionBoundDiscordRelaySink {
             ))
         })?;
 
+        let raw_response_text = delivery.response_text.clone();
         let formatted = if shared.ui.status_panel_v2_enabled {
-            formatting::format_for_discord_with_status_panel(&delivery.response_text, &provider)
+            formatting::format_for_discord_with_status_panel(&raw_response_text, &provider)
         } else {
-            formatting::format_for_discord_with_provider(&delivery.response_text, &provider)
+            formatting::format_for_discord_with_provider(&raw_response_text, &provider)
         };
         let relay_text = if matches!(
             delivery.task_notification_kind,
@@ -907,6 +909,7 @@ impl SessionBoundDiscordRelaySink {
                         channel_id,
                         msg_id,
                         &relay_text,
+                        &raw_response_text,
                         &delivery,
                         &trace,
                         start,
@@ -2833,6 +2836,7 @@ mod tests {
                 channel.get(),
                 MessageId::new(99),
                 "answer",
+                "answer",
                 &delivery,
                 &trace,
                 start,
@@ -2888,6 +2892,7 @@ mod tests {
                 channel.get(),
                 MessageId::new(99),
                 "answer",
+                "answer",
                 &delivery,
                 &trace,
                 start,
@@ -2910,6 +2915,118 @@ mod tests {
                 .load(std::sync::atomic::Ordering::SeqCst),
             1,
             "the mismatched run still POSTs once (markerless-equivalent), only the advance differs"
+        );
+    }
+
+    // #4081 round-4: the session-bound short-replace controller sends formatted
+    // Discord text, but its duplicate fingerprint must be recorded from the raw
+    // terminal body. `# heading` is intentionally used because Discord formatting
+    // rewrites that shape; recording `relay_text` would make the raw-body watcher
+    // duplicate check miss.
+    #[test]
+    fn session_sink_short_replace_raw_body_fingerprint_refuses_watcher_rerelay_4081() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        struct EnvReset(Option<std::ffi::OsString>);
+        impl Drop for EnvReset {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+                }
+            }
+        }
+        let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let temp = tempfile::TempDir::new().expect("temp runtime root");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let provider = ProviderKind::Claude;
+        let channel = ChannelId::new(8_041_4081);
+        let session = "AgentDesk-claude-session-sink-raw-4081";
+        let raw_body = "# heading\nbody line\n".to_string();
+        let relay_text = formatting::format_for_discord_with_provider(&raw_body, &provider);
+        assert_ne!(
+            raw_body, relay_text,
+            "the regression pin needs formatted/raw divergence"
+        );
+        let module_src = include_str!("session_relay_sink.rs");
+        assert!(
+            module_src.contains("let raw_response_text = delivery.response_text.clone();"),
+            "session sink must preserve raw response bytes before Discord formatting"
+        );
+        assert!(
+            module_src.contains("format_for_discord_with_provider(&raw_response_text"),
+            "session sink must format from the preserved raw body, not derive raw from formatted text"
+        );
+        assert!(
+            module_src.contains("format_for_discord_with_status_panel(&raw_response_text"),
+            "session sink status-panel formatting must also use the preserved raw body"
+        );
+        assert!(
+            module_src.contains("&relay_text,\n                        &raw_response_text,"),
+            "session sink production cut-over call must thread the raw pre-format body into the fingerprint slot"
+        );
+
+        let gen_path = crate::services::tmux_common::session_temp_path(session, "generation");
+        std::fs::create_dir_all(std::path::Path::new(&gen_path).parent().unwrap())
+            .expect("generation dir");
+        std::fs::write(&gen_path, b"1").expect("generation file");
+
+        let start = 0;
+        let end = raw_body.len() as u64;
+        let mut delivery =
+            delivery_with_fence_offset(session, Some(end), 0, "2026-07-04T00:00:00Z", Some(start));
+        delivery.provider = provider.clone();
+        delivery.channel_id = channel.get();
+        delivery.response_text = raw_body.clone();
+
+        let matching = inflight_with_identity_offset(
+            channel.get(),
+            session,
+            0,
+            "2026-07-04T00:00:00Z",
+            Some(start),
+        );
+        super::super::inflight::save_inflight_state(&matching).expect("persist matching inflight");
+
+        let shared = super::super::make_shared_data_for_tests();
+        let sink = SessionBoundDiscordRelaySink::new(Arc::new(HealthRegistry::new()));
+        let gateway = ShortReplaceFakeGateway {
+            outcome: super::super::formatting::ReplaceLongMessageOutcome::EditedOriginal,
+            ok: true,
+            replace_calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let trace = SessionRelayTraceContext::default();
+
+        let outcome = rt
+            .block_on(sink.deliver_short_replace_via_controller(
+                &gateway,
+                &shared,
+                &provider,
+                channel,
+                channel.get(),
+                MessageId::new(99),
+                &relay_text,
+                &raw_body,
+                &delivery,
+                &trace,
+                start,
+                end,
+            ))
+            .expect("raw-fingerprint cut-over delivery is Ok");
+        assert!(matches!(outcome, SessionRelayDeliveryOutcome::Delivered));
+        assert!(
+            dr::recent_delivered_content_matches(&provider, channel, session, &raw_body),
+            "the watcher-direct duplicate-refusal lookup must match the raw terminal body"
+        );
+        assert!(
+            !dr::recent_delivered_content_matches(&provider, channel, session, &relay_text),
+            "formatted Discord relay text must not satisfy the raw-body refusal lookup"
         );
     }
 

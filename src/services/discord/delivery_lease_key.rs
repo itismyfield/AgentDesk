@@ -149,4 +149,8 @@ impl DeliveryLeaseKey {
     pub(in crate::services::discord) fn channel_id(&self) -> ChannelId {
         self.channel_id
     }
+
+    pub(in crate::services::discord) fn is_degenerate_legacy(&self) -> bool {
+        self.user_msg_id == 0 && self.turn_started_at.is_none() && self.turn_start_offset.is_none()
+    }
 }

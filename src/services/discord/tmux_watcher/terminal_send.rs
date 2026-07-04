@@ -172,6 +172,7 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
     tmux_session_name: &str,
     msg_id: MessageId,
     relay_text: &str,
+    delivered_body: &str,
     cell: &Arc<DeliveryLeaseCell>,
     turn: TurnKey,
     lease_key: Option<crate::services::discord::DeliveryLeaseKey>,
@@ -242,7 +243,10 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
     )
     .await;
 
-    // #3089 B2a: shadow-mirror durable delivered frontier — flag-gated, observe-only, Delivered-only (I2), OFF=no-op. Extends B1's sink coverage to the watcher (A4) before B2b's authority flip.
+    // #3089 B2a: shadow-mirror durable delivered frontier — flag-gated,
+    // observe-only, Delivered-only (I2). #4081 still records confirmed body
+    // fingerprints when the frontier mirror is OFF. Extends B1's sink coverage to
+    // the watcher (A4) before B2b's authority flip.
     // #3610 PR-1: anchor = `msg_id` — the controller active-slot `current_msg_id`
     // (the assistant response message terminal-replace edits in place), NOT
     // `status_message_id`. Records the true terminal anchor for PR-2.
@@ -256,6 +260,7 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
         dr::outcome_is_shadow_delivered(&outcome),
         Some(msg_id.get()),
         Some(channel_id.get()),
+        Some(delivered_body),
     );
 
     match outcome {
@@ -332,6 +337,7 @@ pub(in crate::services::discord) async fn apply_watcher_short_replace_controller
     tmux_session_name: &str,
     msg_id: MessageId,
     relay_text: &str,
+    delivered_body: &str,
     cell: &Arc<DeliveryLeaseCell>,
     turn: TurnKey,
     lease_key: Option<crate::services::discord::DeliveryLeaseKey>,
@@ -356,6 +362,7 @@ pub(in crate::services::discord) async fn apply_watcher_short_replace_controller
         tmux_session_name,
         msg_id,
         relay_text,
+        delivered_body,
         cell,
         turn,
         lease_key,
@@ -514,14 +521,16 @@ pub(in crate::services::discord) fn apply_watcher_short_replace_result(
 /// is `(watcher_lease_start, watcher_lease_end)` — the SAME offset range the lease
 /// committed and `confirmed_end_offset` advanced to (never mix offset spaces).
 /// Delegates to the shared `dr::record_long_chunk_terminal_delivery` (PR-1c) with
-/// `watcher_owner_channel_id == delivery_channel_id == channel_id`; the shadow flag
-/// being OFF (default) makes the whole thing a no-op (deploy-safe).
+/// `watcher_owner_channel_id == delivery_channel_id == channel_id`; the delivered
+/// frontier still obeys the shadow flag, while #4081 records the confirmed body
+/// fingerprint for degenerate-key duplicate refusal.
 pub(in crate::services::discord) fn record_watcher_long_chunk_terminal_delivery(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
     range: (u64, u64),
     last_chunk_anchor_msg_id: Option<u64>,
+    delivered_body: &str,
 ) {
     dr::record_long_chunk_terminal_delivery(
         shared,
@@ -530,6 +539,7 @@ pub(in crate::services::discord) fn record_watcher_long_chunk_terminal_delivery(
         channel_id,
         range,
         last_chunk_anchor_msg_id,
+        delivered_body,
     );
 }
 
@@ -589,6 +599,7 @@ mod tests {
             channel,
             (0, 8192),
             Some(912_345_678),
+            "",
         );
         // No durable record was created under the test root for this channel.
         assert!(dr::read_record(&ProviderKind::Claude, channel.get()).is_none());
@@ -608,6 +619,7 @@ mod tests {
             channel,
             (0, 2048),
             None,
+            "",
         );
         assert!(dr::read_record(&ProviderKind::Claude, channel.get()).is_none());
     }

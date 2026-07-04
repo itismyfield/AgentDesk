@@ -202,6 +202,333 @@ fn pinned_delivery_lease_key_id0_without_offset_acquires_and_commits_delivery() 
 }
 
 #[test]
+fn degenerate_key_content_guard_requires_no_fresh_output_4081() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    struct EnvReset(Option<std::ffi::OsString>);
+    impl Drop for EnvReset {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
+    let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+    let temp = tempfile::TempDir::new().expect("temp runtime root");
+    unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
+    let provider = ProviderKind::Codex;
+    let session = "AgentDesk-codex-adk-cdx-4081";
+    let channel_id = poise::serenity_prelude::ChannelId::new(7_4081);
+    let body = "prior delivered body";
+    let gen_path = crate::services::tmux_common::session_temp_path(session, "generation");
+    std::fs::create_dir_all(std::path::Path::new(&gen_path).parent().unwrap()).unwrap();
+    std::fs::write(&gen_path, b"1").unwrap();
+    crate::services::discord::outbound::delivery_record::record_delivered_content_fingerprint(
+        &provider, channel_id, session, body,
+    );
+
+    let phantom_decision = watcher_direct_terminal_response_decision(
+        &provider, channel_id, 33, session, None, 50, false, body,
+    );
+    assert_eq!(
+        phantom_decision,
+        WatcherDirectTerminalResponseDecision::RefusedDegenerateDuplicate,
+        "phantom fallback under a degenerate key must refuse byte-identical recent content"
+    );
+    assert!(!phantom_decision.has_sendable_body());
+    assert!(phantom_decision.refused_duplicate());
+    assert_eq!(
+        watcher_direct_terminal_response_decision(
+            &provider, channel_id, 33, session, None, 50, true, body
+        ),
+        WatcherDirectTerminalResponseDecision::Send,
+        "a legitimate repeated answer has fresh assistant text in range and must deliver"
+    );
+    assert_eq!(
+        watcher_direct_terminal_response_decision(
+            &provider,
+            channel_id,
+            33,
+            session,
+            None,
+            50,
+            false,
+            "fresh body",
+        ),
+        WatcherDirectTerminalResponseDecision::Send
+    );
+
+    let mut disambiguated = state_with_offsets(0, session, Some(10), 10);
+    disambiguated.started_at = "2026-07-04T01:44:00Z".to_string();
+    assert_eq!(
+        watcher_direct_terminal_response_decision(
+            &provider,
+            channel_id,
+            33,
+            session,
+            Some(&disambiguated),
+            50,
+            false,
+            body,
+        ),
+        WatcherDirectTerminalResponseDecision::Send,
+        "fully disambiguated id-0 turns remain governed by the normal lease key"
+    );
+}
+
+#[test]
+fn long_chunk_delivery_fingerprint_refuses_phantom_rerelay_4081() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    struct EnvReset(Option<std::ffi::OsString>);
+    impl Drop for EnvReset {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
+    let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+    let temp = tempfile::TempDir::new().expect("temp runtime root");
+    unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let provider = ProviderKind::Codex;
+    let session = "AgentDesk-codex-adk-cdx-long-4081";
+    let channel_id = poise::serenity_prelude::ChannelId::new(7_4082);
+    let body = "long terminal body\n".repeat(180);
+    let gen_path = crate::services::tmux_common::session_temp_path(session, "generation");
+    std::fs::create_dir_all(std::path::Path::new(&gen_path).parent().unwrap()).unwrap();
+    std::fs::write(&gen_path, b"1").unwrap();
+    crate::services::discord::tmux::advance_watcher_confirmed_end(
+        &shared,
+        &provider,
+        channel_id,
+        session,
+        body.len() as u64,
+        "turn_identity_tests:long_chunk_delivery_fingerprint_refuses_phantom_rerelay_4081",
+    );
+    crate::services::discord::outbound::delivery_record::record_long_chunk_terminal_delivery(
+        &shared,
+        &provider,
+        channel_id,
+        channel_id,
+        (0, body.len() as u64),
+        Some(9_4081),
+        &body,
+    );
+
+    assert_eq!(
+        watcher_direct_terminal_response_decision(
+            &provider,
+            channel_id,
+            33,
+            session,
+            None,
+            body.len() as u64,
+            false,
+            &body,
+        ),
+        WatcherDirectTerminalResponseDecision::RefusedDegenerateDuplicate,
+        "confirmed long-chunk body fingerprint must block phantom re-relay under a degenerate key"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_long_chunk_delivery_fingerprint_uses_raw_body_4081() {
+    use crate::services::discord::gateway::{GatewayFuture, TurnGateway};
+    use poise::serenity_prelude::{ChannelId, MessageId};
+
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    struct EnvReset(Option<std::ffi::OsString>);
+    impl Drop for EnvReset {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+            }
+        }
+    }
+    struct LongChunkGateway;
+    impl TurnGateway for LongChunkGateway {
+        fn send_long_message_with_rollback<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _anchor: MessageId,
+            content: &'a str,
+        ) -> GatewayFuture<'a, Result<Vec<MessageId>, String>> {
+            Box::pin(async move {
+                assert!(
+                    content.starts_with("**heading**"),
+                    "live send must receive formatted relay text"
+                );
+                Ok(vec![MessageId::new(94_081), MessageId::new(94_082)])
+            })
+        }
+
+        fn delete_message<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn replace_message_with_outcome<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _content: &'a str,
+        ) -> GatewayFuture<
+            'a,
+            Result<crate::services::discord::formatting::ReplaceLongMessageOutcome, String>,
+        > {
+            panic!("long-chunk pin must not replace")
+        }
+
+        fn send_message<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _content: &'a str,
+        ) -> GatewayFuture<'a, Result<MessageId, String>> {
+            panic!("long-chunk pin must not send a short message")
+        }
+
+        fn edit_message<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _content: &'a str,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            panic!("long-chunk pin must not edit")
+        }
+
+        fn add_reaction<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _emoji: char,
+        ) -> GatewayFuture<'a, ()> {
+            panic!("long-chunk pin must not add reactions")
+        }
+
+        fn remove_reaction<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _emoji: char,
+        ) -> GatewayFuture<'a, ()> {
+            panic!("long-chunk pin must not remove reactions")
+        }
+
+        fn schedule_retry_with_history<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _user_msg_id: MessageId,
+            _reason: &'a str,
+        ) -> GatewayFuture<'a, ()> {
+            panic!("long-chunk pin must not schedule retries")
+        }
+
+        fn dispatch_queued_turn<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _intervention: &'a crate::services::discord::Intervention,
+            _origin: &'a str,
+            _include_history: bool,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            panic!("long-chunk pin must not dispatch queued turns")
+        }
+
+        fn validate_live_routing<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            panic!("long-chunk pin must not validate live routing")
+        }
+
+        fn requester_mention(&self) -> Option<String> {
+            None
+        }
+
+        fn can_chain_locally(&self) -> bool {
+            true
+        }
+
+        fn bot_owner_provider(&self) -> Option<ProviderKind> {
+            None
+        }
+    }
+
+    let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+    let temp = tempfile::TempDir::new().expect("temp runtime root");
+    unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let provider = ProviderKind::Codex;
+    let session = "AgentDesk-codex-adk-cdx-live-raw-4081";
+    let channel_id = ChannelId::new(7_4083);
+    let raw_body = format!("# heading\n{}", "raw body line\n".repeat(220));
+    let formatted_body = crate::services::discord::formatting::format_for_discord_with_provider(
+        &raw_body, &provider,
+    );
+    assert_ne!(raw_body, formatted_body);
+
+    let gen_path = crate::services::tmux_common::session_temp_path(session, "generation");
+    std::fs::create_dir_all(std::path::Path::new(&gen_path).parent().unwrap()).unwrap();
+    std::fs::write(&gen_path, b"1").unwrap();
+
+    let generation = 33;
+    let cell = shared.delivery_lease(channel_id);
+    let lease_key =
+        pinned_delivery_lease_key(channel_id, generation, None, session, raw_body.len() as u64);
+    let turn = crate::services::discord::turn_finalizer::TurnKey::new(channel_id, 0, generation);
+    let outcome = super::super::terminal_long_chunks::deliver_long_chunks_via_controller(
+        &LongChunkGateway,
+        &shared,
+        &provider,
+        channel_id,
+        session,
+        MessageId::new(94_080),
+        &formatted_body,
+        &raw_body,
+        &cell,
+        turn,
+        Some(lease_key),
+        1,
+        0,
+        raw_body.len() as u64,
+    )
+    .await;
+    assert!(matches!(
+        outcome,
+        crate::services::discord::outbound::turn_output_controller::DeliveryOutcome::Delivered { .. }
+    ));
+
+    assert_eq!(
+        watcher_direct_terminal_response_decision(
+            &provider,
+            channel_id,
+            generation,
+            session,
+            None,
+            raw_body.len() as u64,
+            false,
+            &raw_body,
+        ),
+        WatcherDirectTerminalResponseDecision::RefusedDegenerateDuplicate,
+        "live long-chunk delivery must fingerprint raw pre-format bytes"
+    );
+}
+
+#[test]
 fn restored_watcher_finalize_skips_zero_id_submit() {
     assert!(!should_submit_restored_watcher_finalize(false, 0));
     assert!(!should_submit_restored_watcher_finalize(true, 777));
