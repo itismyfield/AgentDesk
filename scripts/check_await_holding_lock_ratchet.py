@@ -30,7 +30,7 @@ from pathlib import Path
 # serializes tests mutating the process-wide PRESENT index / durable-store root;
 # releasing it before the awaits would let concurrent tests stomp the statics.
 # Both are test-only and cannot deadlock a live task. Justified, reviewable raise.
-BASELINE = 35
+BASELINE = 36  # +1 (#4068): mailbox snapshot peek-only test holds lock_test_env() guard across await to serialize AGENTDESK_ROOT_DIR
 
 ALLOW_RE = re.compile(r"#\[allow\([^)]*\bclippy::await_holding_lock\b")
 
