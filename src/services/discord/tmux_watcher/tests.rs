@@ -1974,6 +1974,7 @@ fn no_inflight_terminal_response_drops_restored_response_seed() {
             false,
             true,
             false,
+            false,
         )
     );
     assert_eq!(full_response, "fresh turn");
@@ -1997,6 +1998,7 @@ fn restored_response_seed_is_kept_for_managed_inflight() {
             true,
             true,
             false,
+            false,
         )
     );
     assert_eq!(full_response, "previous turnfresh turn");
@@ -2016,6 +2018,7 @@ fn no_inflight_user_boundary_without_fresh_text_drops_already_delivered_restored
             &mut response_sent_offset,
             &mut last_edit_text,
             restored,
+            false,
             false,
             false,
             false,
@@ -2039,6 +2042,7 @@ fn no_inflight_user_boundary_without_fresh_text_preserves_body_bearing_seed_for_
             &mut response_sent_offset,
             &mut last_edit_text,
             restored,
+            false,
             false,
             false,
             false,
@@ -2071,7 +2075,77 @@ fn no_inflight_user_boundary_without_fresh_text_preserves_body_bearing_seed_for_
 }
 
 #[test]
+fn compact_local_only_boundary_without_seed_delivery_fingerprint_preserves_restored_seed_4096() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(987_4096_001);
+    let tmux_session_name = "AgentDesk-claude-adk-cc-4096-missing-fingerprint";
+    let restored = "queued turn terminal body that failed delivery";
+    let mut full_response = restored.to_string();
+    let mut response_sent_offset = 0;
+    let mut last_edit_text = restored.to_string();
+    let compact_tail =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"/compact\"}}\n";
+
+    let tool_state = crate::services::discord::tmux::WatcherToolState::new();
+    let force_discard = local_cmd_no_output(
+        compact_tail,
+        Some(WatcherTerminalKind::SoftUserBoundary),
+        false,
+        &tool_state,
+    );
+
+    assert!(force_discard);
+    crate::services::discord::outbound::delivery_record::record_delivered_content_fingerprint(
+        &provider,
+        channel_id,
+        tmux_session_name,
+        "same-session tui-direct turn that really delivered",
+    );
+    let restored_seed_delivery_confirmed =
+        crate::services::discord::outbound::delivery_record::recent_delivered_content_matches(
+            &provider,
+            channel_id,
+            tmux_session_name,
+            restored,
+        );
+    assert!(
+        !restored_seed_delivery_confirmed,
+        "a competing same-session delivery must not authorize dropping the failed seed"
+    );
+    assert!(
+        !discard_restored_response_seed_before_no_inflight_terminal_relay(
+            &mut full_response,
+            &mut response_sent_offset,
+            &mut last_edit_text,
+            restored,
+            false,
+            false,
+            force_discard,
+            restored_seed_delivery_confirmed,
+        )
+    );
+    assert_eq!(full_response, restored);
+    assert_eq!(response_sent_offset, 0);
+    assert_eq!(last_edit_text, restored);
+}
+
+#[test]
 fn compact_local_only_boundary_without_output_drops_restored_seed_4081() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(987_4096_002);
+    let tmux_session_name = "AgentDesk-claude-adk-cc-4096-confirmed-fingerprint";
     let restored = "prior delivered response";
     let mut full_response = restored.to_string();
     let mut response_sent_offset = 0;
@@ -2088,6 +2162,20 @@ fn compact_local_only_boundary_without_output_drops_restored_seed_4081() {
     );
 
     assert!(force_discard);
+    crate::services::discord::outbound::delivery_record::record_delivered_content_fingerprint(
+        &provider,
+        channel_id,
+        tmux_session_name,
+        restored,
+    );
+    let restored_seed_delivery_confirmed =
+        crate::services::discord::outbound::delivery_record::recent_delivered_content_matches(
+            &provider,
+            channel_id,
+            tmux_session_name,
+            restored,
+        );
+    assert!(restored_seed_delivery_confirmed);
     assert!(
         discard_restored_response_seed_before_no_inflight_terminal_relay(
             &mut full_response,
@@ -2097,6 +2185,7 @@ fn compact_local_only_boundary_without_output_drops_restored_seed_4081() {
             false,
             false,
             force_discard,
+            restored_seed_delivery_confirmed,
         )
     );
     assert_eq!(full_response, "");
@@ -2128,6 +2217,7 @@ fn orphan_reclaim_real_tail_still_preserves_body_seed_4081() {
             false,
             false,
             force_discard,
+            false,
         )
     );
     assert_eq!(full_response, restored);

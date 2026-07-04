@@ -3964,6 +3964,18 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         }
         let fresh_seen = fresh_assistant_text_seen;
         let drop_seed = local_cmd_no_output(&all_data, terminal_kind, fresh_seen, &tool_state);
+        let restored_seed_delivery_confirmed = drop_seed
+            && restored_response_seed
+                .get(response_sent_offset..)
+                .is_some_and(|seed_body| {
+                    !seed_body.trim().is_empty()
+                        && crate::services::discord::outbound::delivery_record::recent_delivered_content_matches(
+                            &watcher_provider,
+                            channel_id,
+                            &tmux_session_name,
+                            seed_body,
+                        )
+                });
         if discard_restored_response_seed_before_no_inflight_terminal_relay(
             &mut full_response,
             &mut response_sent_offset,
@@ -3972,6 +3984,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             inflight_before_relay.is_some(),
             fresh_assistant_text_seen,
             drop_seed,
+            restored_seed_delivery_confirmed,
         ) {
             tracing::info!(
                 provider = %watcher_provider.as_str(),

@@ -475,6 +475,7 @@ pub(super) fn discard_restored_response_seed_before_no_inflight_terminal_relay(
     inflight_present: bool,
     fresh_assistant_text_seen: bool,
     force_discard_restored_seed: bool,
+    restored_seed_delivery_confirmed: bool,
 ) -> bool {
     if inflight_present || restored_response_seed.trim().is_empty() {
         return false;
@@ -485,12 +486,13 @@ pub(super) fn discard_restored_response_seed_before_no_inflight_terminal_relay(
     let restored_seed_has_undelivered_body = restored_response_seed
         .get(*response_sent_offset..)
         .is_some_and(|body| !body.trim().is_empty());
-    // Preserve the restored seed only for the quiescence handoff shape: it still
-    // contains bytes past response_sent_offset, and this pass saw no fresh
-    // assistant text. Fresh text keeps the original stale-prefix strip.
+    // Preserve the restored seed for the quiescence handoff shape unless the
+    // force-discard signal is backed by authoritative delivery evidence for the
+    // seed body. `local_cmd_no_output` describes the current turn shape; the
+    // delivered-content ring is the proof that stripping this body cannot lose it.
     if restored_seed_has_undelivered_body
         && !fresh_assistant_text_seen
-        && !force_discard_restored_seed
+        && !(force_discard_restored_seed && restored_seed_delivery_confirmed)
     {
         return false;
     }
