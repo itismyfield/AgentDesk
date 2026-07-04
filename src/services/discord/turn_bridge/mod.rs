@@ -47,6 +47,11 @@ use response_delivery::{
 
 use super::gateway::TurnGateway;
 use super::restart_report::{RestartCompletionReport, clear_restart_report, save_restart_report};
+use super::turn_view_reconciler::{
+    note_intake_turn_cleared_via_shared as tv_clear,
+    note_intake_turn_completed_via_shared as tv_done,
+    note_intake_turn_failed_via_shared as tv_fail, note_intake_turn_stopped_via_shared as tv_stop,
+};
 use super::*;
 use crate::db::session_observability::{
     BackgroundChildSpawn, close_background_child_pg, insert_background_child_pg,
@@ -195,7 +200,7 @@ use stale_resume::{
 };
 use status_panel::{
     bridge_epilogue_identity_guards_inflight_clear, migrate_separate_status_panel_to_footer,
-    should_open_long_running_placeholder_controller,
+    record_status_panel_events, should_open_long_running_placeholder_controller,
     status_panel_completion_ready_after_terminal_body, status_panel_message_id_for_turn,
 };
 use terminal_delivery::{
@@ -260,22 +265,6 @@ fn record_placeholder_live_event(
             .ui
             .placeholder_live_events
             .push_event(channel_id, event);
-    }
-}
-
-fn record_status_panel_events(
-    shared: &SharedData,
-    channel_id: ChannelId,
-    events: Vec<StatusEvent>,
-) -> bool {
-    if shared.ui.status_panel_v2_enabled && !events.is_empty() {
-        shared
-            .ui
-            .placeholder_live_events
-            .push_status_events(channel_id, events);
-        true
-    } else {
-        false
     }
 }
 
@@ -4460,15 +4449,14 @@ pub(super) fn spawn_turn_bridge(
         // non-unix targets where the tmux module is configured out.
         #[allow(unused_mut)]
         let mut bridge_should_emit_completion = true;
+        let inflight_generation = inflight_state.born_generation;
 
-        // Remove ⏳ only if the bridge still owns output delivery.
-        // Relay owners commit their own visible lifecycle.
         if !bridge_output_owner
             .map(|owner| owner.skips_bridge_spinner_cleanup())
             .unwrap_or(false)
             && let Some(user_msg_id) = user_msg_id
         {
-            gateway.remove_reaction(channel_id, user_msg_id, '⏳').await;
+            tv_clear(&shared_owned, channel_id, user_msg_id, inflight_generation, "clear").await;
         }
 
         // Recovery auto-retry: session died during restart recovery
@@ -4746,7 +4734,7 @@ pub(super) fn spawn_turn_bridge(
             if preserved_restart_mode.is_none()
                 && let Some(user_msg_id) = user_msg_id
             {
-                gateway.add_reaction(channel_id, user_msg_id, '🛑').await;
+                tv_stop(&shared_owned, channel_id, user_msg_id, inflight_generation, "stop").await;
             }
 
             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -4836,7 +4824,7 @@ pub(super) fn spawn_turn_bridge(
             }
 
             if let Some(user_msg_id) = user_msg_id {
-                gateway.add_reaction(channel_id, user_msg_id, '⚠').await;
+                tv_fail(&shared_owned, channel_id, user_msg_id, inflight_generation, "fail").await;
             }
 
             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -5823,7 +5811,7 @@ pub(super) fn spawn_turn_bridge(
                 && !delivery_response.trim().is_empty()
                 && let Some(user_msg_id) = user_msg_id
             {
-                gateway.add_reaction(channel_id, user_msg_id, '✅').await;
+                tv_done(&shared_owned, channel_id, user_msg_id, inflight_generation, "done").await;
             }
 
             td_warn(terminal_delivery_committed, preserve_inflight_for_cleanup_retry, channel_id);

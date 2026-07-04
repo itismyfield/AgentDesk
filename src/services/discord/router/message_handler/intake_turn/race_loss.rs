@@ -146,11 +146,13 @@ pub(super) async fn handle_race_loss_enqueue(
     // it. `📬` reaction is also skipped (the prior live enqueue already
     // owns the card and emoji). Just clean up `⏳` and return.
     if !enqueued {
-        crate::services::discord::formatting::remove_reaction_raw(
+        crate::services::discord::turn_view_reconciler::note_intake_turn_cleared(
+            shared,
             http,
             channel_id,
             user_msg_id,
-            '⏳',
+            shared.restart.current_generation,
+            "race_loss_enqueue_rejected",
         )
         .await;
         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -229,11 +231,13 @@ pub(super) async fn handle_race_loss_enqueue(
                 // WILL be processed correctly. Roll back the `⏳`
                 // sentinel so the user knows we did not silently
                 // accept the message.
-                crate::services::discord::formatting::remove_reaction_raw(
+                crate::services::discord::turn_view_reconciler::note_intake_turn_cleared(
+                    shared,
                     http,
                     channel_id,
                     user_msg_id,
-                    '⏳',
+                    shared.restart.current_generation,
+                    "race_loss_placeholder_post_failed",
                 )
                 .await;
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -332,11 +336,13 @@ pub(super) async fn handle_race_loss_enqueue(
             // insert.
             drop(persist_guard);
             let _ = channel_id.delete_message(http, placeholder_msg_id).await;
-            crate::services::discord::formatting::remove_reaction_raw(
+            crate::services::discord::turn_view_reconciler::note_intake_turn_cleared(
+                shared,
                 http,
                 channel_id,
                 user_msg_id,
-                '⏳',
+                shared.restart.current_generation,
+                "race_loss_orphan_placeholder",
             )
             .await;
             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -569,8 +575,15 @@ pub(super) async fn handle_race_loss_enqueue(
         // `...` and would otherwise leak.
         let _ = channel_id.delete_message(http, placeholder_msg_id).await;
     }
-    crate::services::discord::formatting::remove_reaction_raw(http, channel_id, user_msg_id, '⏳')
-        .await;
+    crate::services::discord::turn_view_reconciler::note_intake_turn_cleared(
+        shared,
+        http,
+        channel_id,
+        user_msg_id,
+        shared.restart.current_generation,
+        "race_loss_message_queued",
+    )
+    .await;
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
         "  [{ts}] 🔀 RACE: message queued (another turn won), channel {}",

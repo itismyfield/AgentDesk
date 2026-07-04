@@ -393,10 +393,15 @@ pub(super) async fn flush_restart_reports(
                     // Mark user message as completed: ⏳ → ✅
                     if let Some(umid) = report.user_msg_id {
                         let user_msg_id = serenity::model::id::MessageId::new(umid);
-                        super::formatting::remove_reaction_raw(http, channel_id, user_msg_id, '⏳')
-                            .await;
-                        super::formatting::add_reaction_raw(http, channel_id, user_msg_id, '✅')
-                            .await;
+                        super::turn_view_reconciler::note_intake_turn_completed(
+                            shared,
+                            http,
+                            channel_id,
+                            user_msg_id,
+                            report.generation,
+                            "restart_report_complete",
+                        )
+                        .await;
                     }
                     clear_restart_report(provider, report.channel_id);
                     break;

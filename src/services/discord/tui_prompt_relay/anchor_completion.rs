@@ -83,11 +83,12 @@ pub(super) fn decide_deferred_anchor_completion_drain(
 }
 
 pub(in crate::services::discord) async fn complete_tui_direct_prompt_anchor_lifecycle_if_present(
-    http: &serenity::Http,
+    shared: &std::sync::Arc<super::super::SharedData>,
     provider: &str,
     tmux_session_name: &str,
     channel_id: ChannelId,
-    reason: &str,
+    generation: u64,
+    reason: &'static str,
 ) -> Option<crate::services::tui_prompt_dedupe::TuiPromptAnchor> {
     let anchor = crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
         provider,
@@ -96,12 +97,14 @@ pub(in crate::services::discord) async fn complete_tui_direct_prompt_anchor_life
     )?;
     let anchor_channel_id = ChannelId::new(anchor.channel_id);
     let anchor_message_id = MessageId::new(anchor.message_id);
-    super::super::formatting::remove_reaction_raw(http, anchor_channel_id, anchor_message_id, '⏳')
-        .await;
-    let completion_reaction = serenity::ReactionType::Unicode('✅'.to_string());
-    if let Err(error) = anchor_channel_id
-        .create_reaction(http, anchor_message_id, completion_reaction)
-        .await
+    if !super::super::turn_view_reconciler::note_tui_anchor_completed(
+        shared,
+        anchor_channel_id,
+        anchor_message_id,
+        generation,
+        reason,
+    )
+    .await
     {
         tracing::warn!(
             provider = %provider,
@@ -109,7 +112,6 @@ pub(in crate::services::discord) async fn complete_tui_direct_prompt_anchor_life
             tmux_session_name = %tmux_session_name,
             anchor_message_id = anchor.message_id,
             reason,
-            error = %error,
             "failed to complete TUI-direct prompt anchor reaction lifecycle; keeping anchor for retry"
         );
         return None;
@@ -151,20 +153,22 @@ pub(super) fn pinned_anchor_cleanup_target(pinned_injected_message_id: Option<u6
 }
 
 pub(in crate::services::discord) async fn complete_tui_direct_anchor_lifecycle_for_inflight(
-    http: &serenity::Http,
+    shared: &std::sync::Arc<super::super::SharedData>,
     provider: &str,
     tmux_session_name: &str,
     channel_id: ChannelId,
     pinned_injected_message_id: Option<u64>,
-    reason: &str,
+    generation: u64,
+    reason: &'static str,
 ) -> Option<crate::services::tui_prompt_dedupe::TuiPromptAnchor> {
     let Some(message_id) = pinned_anchor_cleanup_target(pinned_injected_message_id) else {
         // Legacy row without a pinned id — preserve the prior shared-slot path.
         return complete_tui_direct_prompt_anchor_lifecycle_if_present(
-            http,
+            shared,
             provider,
             tmux_session_name,
             channel_id,
+            generation,
             reason,
         )
         .await;
@@ -175,12 +179,14 @@ pub(in crate::services::discord) async fn complete_tui_direct_anchor_lifecycle_f
     };
     let anchor_channel_id = ChannelId::new(anchor.channel_id);
     let anchor_message_id = MessageId::new(anchor.message_id);
-    super::super::formatting::remove_reaction_raw(http, anchor_channel_id, anchor_message_id, '⏳')
-        .await;
-    let completion_reaction = serenity::ReactionType::Unicode('✅'.to_string());
-    if let Err(error) = anchor_channel_id
-        .create_reaction(http, anchor_message_id, completion_reaction)
-        .await
+    if !super::super::turn_view_reconciler::note_tui_anchor_completed(
+        shared,
+        anchor_channel_id,
+        anchor_message_id,
+        generation,
+        reason,
+    )
+    .await
     {
         tracing::warn!(
             provider = %provider,
@@ -188,7 +194,6 @@ pub(in crate::services::discord) async fn complete_tui_direct_anchor_lifecycle_f
             tmux_session_name = %tmux_session_name,
             anchor_message_id = anchor.message_id,
             reason,
-            error = %error,
             "failed to complete pinned TUI-direct injected-message reaction lifecycle; keeping for retry"
         );
         return None;

@@ -30,10 +30,6 @@ pub(super) use super::reaction_lifecycle::reaction_target_channel_for_shared;
 pub(super) use super::reaction_lifecycle::{
     add_reaction_raw, is_real_discord_message_id, remove_reaction_raw,
 };
-#[cfg(not(test))]
-pub(super) use super::reaction_lifecycle::{
-    try_add_reaction_raw_with_shared, try_remove_reaction_raw_with_shared,
-};
 
 static REPLACE_CONTINUATION_ROLLBACKS: LazyLock<
     Mutex<HashMap<(u64, u64), ReplaceContinuationRollback>>,

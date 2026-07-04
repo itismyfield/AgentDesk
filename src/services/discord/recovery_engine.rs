@@ -8,6 +8,7 @@ use super::settings::{
 };
 use super::single_message_panel as smp;
 use super::turn_bridge::stale_inflight_message;
+use super::turn_view_reconciler::note_intake_turn_completed as tv_done;
 use super::*;
 use crate::db::turns::TurnTokenUsage;
 use crate::services::agent_protocol::{RuntimeHandoff, RuntimeHandoffKind, StreamMessage};
@@ -577,27 +578,20 @@ where
         let _ = outcome;
     }
 
+    let generation = state.born_generation;
     if let Some(user_msg_id) = user_msg_id {
-        super::formatting::remove_reaction_raw(http, channel_id, user_msg_id, '⏳').await;
-        super::formatting::add_reaction_raw(http, channel_id, user_msg_id, '✅').await;
+        tv_done(shared, http, channel_id, user_msg_id, generation, "done").await;
     } else if recovery_inflight_needs_anchor_lifecycle_cleanup(state) {
-        // #3099: a TUI-injected task-notification turn can complete via recovery
-        // with `user_msg_id == 0` (no anchored Discord user message), so the
-        // `⏳ → ✅` step above is skipped. The hourglass, however, was added to a
-        // real notify-bot message, so clean it off that exact injected message
-        // instead of leaving it stale next to the `✅` the completion path applies
-        // elsewhere.
-        //
-        // #3099 codex re-review (P2): target THIS turn's pinned
-        // `injected_prompt_message_id` instead of re-reading the single shared
-        // prompt-anchor slot, which a later injection may already own.
+        // #3099: user_msg_id==0 recovery completes this turn's own injected
+        // prompt anchor, not the shared slot a later turn may own.
         if let Some(tmux_session_name) = state.tmux_session_name.as_deref() {
             let _ = super::tui_prompt_relay::complete_tui_direct_anchor_lifecycle_for_inflight(
-                http,
+                shared,
                 provider.as_str(),
                 tmux_session_name,
                 channel_id,
                 state.injected_prompt_message_id,
+                generation,
                 "recovery_task_notification_anchor_cleanup_user_msg_zero",
             )
             .await;

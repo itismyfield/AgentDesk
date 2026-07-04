@@ -1,3 +1,7 @@
+use super::super::super::turn_view_reconciler::{
+    note_intake_turn_cleared_current as tv_clear_current,
+    note_intake_turn_started_current as tv_start_current,
+};
 use super::voice_announcement_route::route_voice_transcript_announcement_once;
 use super::*;
 
@@ -601,11 +605,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     if should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref())
         && !super::super::super::voice_barge_in::is_synthetic_voice_message_id(user_msg_id)
     {
-        // Voice-originated turns use a synthetic msg id (>= 9e18) that does
-        // not correspond to a real Discord message, so add_reaction would
-        // return "Unknown Message". TTS already plays an acknowledgement
-        // for the user — the ⏳ reaction is text-intake only.
-        add_reaction(http, channel_id, user_msg_id, '⏳').await;
+        tv_start_current(shared, http, channel_id, user_msg_id, "intake_start").await;
     }
 
     // ── Dispatch thread auto-creation ──────────────────────────────
@@ -1175,13 +1175,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         if should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref())
             && !super::super::super::voice_barge_in::is_synthetic_voice_message_id(user_msg_id)
         {
-            super::super::super::formatting::remove_reaction_raw(
-                http,
-                channel_id,
-                user_msg_id,
-                '⏳',
-            )
-            .await;
+            tv_clear_current(shared, http, channel_id, user_msg_id, "intake_goal").await;
         }
         consume_codex_goal_lifecycle_command(
             http,
@@ -2385,8 +2379,7 @@ pub(in crate::services::discord) async fn handle_text_message(
             "claude_tui_followup_busy_pre_submit",
             diagnostic_json,
         );
-        super::super::super::formatting::remove_reaction_raw(http, channel_id, user_msg_id, '⏳')
-            .await;
+        tv_clear_current(shared, http, channel_id, user_msg_id, "intake_busy_queue").await;
         super::super::super::saturating_decrement_global_active(shared);
         shared.turn_start_times.remove(&channel_id);
         post_adk_session_status(

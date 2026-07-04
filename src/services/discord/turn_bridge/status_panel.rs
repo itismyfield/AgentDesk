@@ -666,3 +666,19 @@ pub(super) async fn migrate_separate_status_panel_to_footer<G: TurnGateway + ?Si
 #[cfg(test)]
 #[path = "status_panel_tests.rs"]
 mod status_panel_v2_rework_tests;
+
+pub(super) fn record_status_panel_events(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    events: Vec<StatusEvent>,
+) -> bool {
+    if shared.ui.status_panel_v2_enabled && !events.is_empty() {
+        shared
+            .ui
+            .placeholder_live_events
+            .push_status_events(channel_id, events);
+        true
+    } else {
+        false
+    }
+}

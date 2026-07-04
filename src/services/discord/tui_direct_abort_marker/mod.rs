@@ -409,13 +409,13 @@ pub(super) enum ReactionDelivery {
     /// can NEVER be reacted on again — terminate the marker instead of
     /// retrying forever (verify r1 fix #3).
     FailedPermanent,
-    HttpUnavailable,
 }
 
 /// Classify a reaction-create failure status into transient vs permanent.
 /// Reuses the sweeper's message-gone allowlist (404/403/410;
 /// `placeholder_sweeper::is_permanent_message_gone_status`, the #3293-shared
 /// classifier) so every Discord-permanence verdict in this subtree agrees.
+#[cfg(test)]
 fn classify_reaction_failure(status: Option<u16>) -> ReactionDelivery {
     if status.is_some_and(super::placeholder_sweeper::is_permanent_message_gone_status) {
         ReactionDelivery::FailedPermanent
@@ -452,40 +452,46 @@ pub(super) fn shared_reaction_applier(shared: Arc<SharedData>) -> ReactionApplie
             if anchor_message_id == 0 {
                 return ReactionDelivery::Failed; // I5 (defensive; record() already rejects)
             }
-            let Some(http) = shared.serenity_http_or_token_fallback() else {
-                return ReactionDelivery::HttpUnavailable;
-            };
             let channel = ChannelId::new(channel_id);
             let message = MessageId::new(anchor_message_id);
-            super::formatting::remove_reaction_raw(&http, channel, message, '⏳').await;
-            let emoji = match op {
-                ReactionOp::Complete => '✅',
-                ReactionOp::FailureWarn => '⚠',
+            let delivery = match op {
+                ReactionOp::Complete => {
+                    super::turn_view_reconciler::note_tui_anchor_completed_delivery(
+                        &shared,
+                        channel,
+                        message,
+                        shared.restart.current_generation,
+                        "tui_direct_abort_marker_complete",
+                    )
+                    .await
+                }
+                ReactionOp::FailureWarn => {
+                    super::turn_view_reconciler::note_tui_anchor_failed_delivery(
+                        &shared,
+                        channel,
+                        message,
+                        shared.restart.current_generation,
+                        "tui_direct_abort_marker_failure_warn",
+                    )
+                    .await
+                }
             };
-            let reaction = serenity::ReactionType::Unicode(emoji.to_string());
-            match channel.create_reaction(&http, message, reaction).await {
-                Ok(_) => ReactionDelivery::Delivered,
-                Err(error) => {
-                    let status = match &error {
-                        serenity::Error::Http(http_err) => {
-                            http_err.status_code().map(|status| status.as_u16())
-                        }
-                        _ => None,
-                    };
-                    let delivery = classify_reaction_failure(status);
-                    // The permanent case logs ONCE at its termination site in
-                    // the reconciler (where the marker is deleted) — not here.
-                    if delivery == ReactionDelivery::Failed {
-                        tracing::warn!(
-                            provider = %provider,
-                            channel_id,
-                            anchor_message_id,
-                            op = ?op,
-                            error = %error,
-                            "tui_direct_abort_marker: reaction correction delivery failed transiently; marker preserved for retry (I6)"
-                        );
-                    }
-                    delivery
+            match delivery {
+                super::turn_view_reconciler::TurnViewDelivery::Delivered => {
+                    ReactionDelivery::Delivered
+                }
+                super::turn_view_reconciler::TurnViewDelivery::FailedPermanent => {
+                    ReactionDelivery::FailedPermanent
+                }
+                super::turn_view_reconciler::TurnViewDelivery::Failed => {
+                    tracing::warn!(
+                        provider = %provider,
+                        channel_id,
+                        anchor_message_id,
+                        op = ?op,
+                        "tui_direct_abort_marker: reaction correction delivery failed transiently; marker preserved for retry (I6)"
+                    );
+                    ReactionDelivery::Failed
                 }
             }
         })
@@ -578,7 +584,7 @@ pub(super) async fn drain_on_terminal_commit_with_applier(
                     "tui_direct_abort_marker: anchor permanently gone (404/403/410); covered marker terminated without ✅ (#3296)"
                 );
             }
-            ReactionDelivery::Failed | ReactionDelivery::HttpUnavailable => {
+            ReactionDelivery::Failed => {
                 // I6 fail-open: the anchor IS covered — stamp it so the sweep
                 // retries the ✅ (and can never degrade it to ⚠).
                 marker.covered_at_ms = Some(now_ms);
@@ -807,7 +813,7 @@ pub(super) async fn sweep_expired_with_applier<P: Into<LiveInflightProbe>>(
                 );
             }
             // I6: keep the marker for the next pass (delivery failed late).
-            ReactionDelivery::Failed | ReactionDelivery::HttpUnavailable => {}
+            ReactionDelivery::Failed => {}
         }
     }
     // GC AFTER the marker loop: the first pass after long downtime must 대조

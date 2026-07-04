@@ -3075,18 +3075,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                 .filter(|state| !state.rebind_origin && state.user_msg_id != 0)
                             {
                                 let user_msg_id = serenity::MessageId::new(state.user_msg_id);
-                                crate::services::discord::formatting::remove_reaction_raw(
+                                crate::services::discord::turn_view_reconciler::note_intake_turn_failed(
+                                    &shared,
                                     &http,
                                     channel_id,
                                     user_msg_id,
-                                    '⏳',
-                                )
-                                .await;
-                                crate::services::discord::formatting::add_reaction_raw(
-                                    &http,
-                                    channel_id,
-                                    user_msg_id,
-                                    '⚠',
+                                    state.born_generation,
+                                    "tmux_watcher_ready_for_input_stall",
                                 )
                                 .await;
                             }
@@ -3451,18 +3446,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 .filter(|s| !s.rebind_origin && s.user_msg_id != 0)
             {
                 let user_msg_id = serenity::MessageId::new(state.user_msg_id);
-                crate::services::discord::formatting::remove_reaction_raw(
+                crate::services::discord::turn_view_reconciler::note_intake_turn_failed(
+                    &shared,
                     &http,
                     channel_id,
                     user_msg_id,
-                    '⏳',
-                )
-                .await;
-                crate::services::discord::formatting::add_reaction_raw(
-                    &http,
-                    channel_id,
-                    user_msg_id,
-                    '⚠',
+                    state.born_generation,
+                    "tmux_watcher_auth_expired",
                 )
                 .await;
             }
@@ -3621,19 +3611,24 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 .filter(|s| !s.rebind_origin && s.user_msg_id != 0)
             {
                 let user_msg_id = serenity::MessageId::new(state.user_msg_id);
-                crate::services::discord::formatting::remove_reaction_raw(
-                    &http,
-                    channel_id,
-                    user_msg_id,
-                    '⏳',
-                )
-                .await;
                 if matches!(&decision, ProviderOverloadDecision::Exhausted) {
-                    crate::services::discord::formatting::add_reaction_raw(
+                    crate::services::discord::turn_view_reconciler::note_intake_turn_failed(
+                        &shared,
                         &http,
                         channel_id,
                         user_msg_id,
-                        '⚠',
+                        state.born_generation,
+                        "tmux_watcher_overload_exhausted",
+                    )
+                    .await;
+                } else {
+                    crate::services::discord::turn_view_reconciler::note_intake_turn_cleared(
+                        &shared,
+                        &http,
+                        channel_id,
+                        user_msg_id,
+                        state.born_generation,
+                        "tmux_watcher_overload_retry",
                     )
                     .await;
                 }
@@ -6195,10 +6190,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 );
             }
             let completed = crate::services::discord::tui_prompt_relay::complete_tui_direct_prompt_anchor_lifecycle_if_present(
-                &http,
+                &shared,
                 watcher_provider.as_str(),
                 &tmux_session_name,
                 channel_id,
+                external_input_lease_generation_before_relay
+                    .unwrap_or(shared.restart.current_generation),
                 if lifecycle_stage_paused {
                     "watcher_terminal_delivery_visible_completion_suppressed"
                 } else {
@@ -6264,12 +6261,17 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             let pinned_injected_message_id = inflight_state
                 .as_ref()
                 .and_then(|state| state.injected_prompt_message_id);
+            let pinned_injected_generation = inflight_state
+                .as_ref()
+                .map(|state| state.born_generation)
+                .unwrap_or(shared.restart.current_generation);
             let _ = crate::services::discord::tui_prompt_relay::complete_tui_direct_anchor_lifecycle_for_inflight(
-                &http,
+                &shared,
                 watcher_provider.as_str(),
                 &tmux_session_name,
                 channel_id,
                 pinned_injected_message_id,
+                pinned_injected_generation,
                 "watcher_task_notification_anchor_cleanup_user_msg_zero",
             )
             .await;
@@ -6313,18 +6315,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 .filter(|s| watcher_completion_lifecycle_applies(s))
         {
             let user_msg_id = serenity::MessageId::new(state.user_msg_id);
-            crate::services::discord::formatting::remove_reaction_raw(
+            crate::services::discord::turn_view_reconciler::note_intake_turn_completed(
+                &shared,
                 &http,
                 channel_id,
                 user_msg_id,
-                '⏳',
-            )
-            .await;
-            crate::services::discord::formatting::add_reaction_raw(
-                &http,
-                channel_id,
-                user_msg_id,
-                '✅',
+                state.born_generation,
+                "tmux_watcher_terminal_commit",
             )
             .await;
 

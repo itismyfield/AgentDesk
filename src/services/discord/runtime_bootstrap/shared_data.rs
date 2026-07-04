@@ -252,5 +252,7 @@ pub(super) fn run_bot_build_shared_data(
             crate::services::discord::turn_completion_events::TURN_COMPLETION_EVENT_BUS_CAPACITY,
         )
         .0,
+        turn_view_reconciler:
+            crate::services::discord::turn_view_reconciler::TurnViewReconciler::default(),
     })
 }
