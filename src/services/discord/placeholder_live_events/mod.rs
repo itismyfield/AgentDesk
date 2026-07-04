@@ -272,6 +272,9 @@ impl PlaceholderLiveEvents {
         raw: &str,
         footer_mode_enabled: bool,
     ) -> bool {
+        if status_events::is_background_task_notification_xml_status_transition(raw) {
+            return true;
+        }
         if !footer_mode_enabled {
             return false;
         }

@@ -243,8 +243,9 @@ pub(in crate::services::discord) fn status_events_from_task_notification_xml_for
     if status.is_empty() {
         return Vec::new();
     }
+    let kind = parsed.kind();
     let events = status_events_from_task_notification_with_tool_use_id(
-        parsed.kind(),
+        kind,
         status,
         parsed.summary.as_deref().unwrap_or(""),
         parsed.tool_use_id.as_deref(),
@@ -254,6 +255,21 @@ pub(in crate::services::discord) fn status_events_from_task_notification_xml_for
     // the WRONG one (permanently, post-#3391). A missing id → no terminal effect
     // (heartbeat/activity kept). The `system` path keeps its id-less fallback.
     events.into_iter().filter(idful_subagent_or_other).collect()
+}
+
+/// #4097: `kind=background` XML task-notification cards are noisy lifecycle
+/// chatter. The bridge still emits slot-keyed `BackgroundTaskEnd` events so a
+/// real background Bash slot can flip ✓/✗; only the duplicate card surface is
+/// suppressed.
+pub(in crate::services::discord) fn is_background_task_notification_xml_status_transition(
+    raw: &str,
+) -> bool {
+    let parsed = super::super::tui_task_card::parse_task_notification(raw);
+    background_task_notification_xml_status_transition(parsed.kind(), parsed.status.as_deref())
+}
+
+fn background_task_notification_xml_status_transition(kind: &str, status: Option<&str>) -> bool {
+    kind == "background" && status.is_some_and(|value| !value.trim().is_empty())
 }
 
 /// #3393 finding 1 XML-bridge drop predicate: `false` for an id-less `SubagentEnd`.

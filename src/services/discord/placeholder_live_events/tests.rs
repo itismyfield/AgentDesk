@@ -5197,19 +5197,18 @@ fn status_events_toolsearch_pretty_json_args_summary_not_bare_brace() {
 // ---------------------------------------------------------------------------
 // #3393: user-record `<task-notification>` XML → live panel terminal StatusEvents.
 //
-// Background-task / subagent completions reach the transcript ONLY as this XML
-// (never the stream-json `system` record the panel's `system_status_events`
-// parses). These tests drive the FULL ingestion: real-shape XML text (incl. the
+// Subagent completions reach the transcript ONLY as this XML (never the
+// stream-json `system` record the panel's `system_status_events` parses).
+// These tests drive the FULL ingestion: real-shape XML text (incl. the
 // hyphenated `<tool-use-id>` from the live transcript) → bridge parse → push →
-// `render_completion_footer` shows ✓. State-machine-only proof is explicitly
-// forbidden by the issue, so every assertion goes through the panel render.
+// `render_completion_footer` shows ✓/✗. #4097 keeps that bridge for matching
+// background Bash slots, but suppresses the duplicate notify-card surface.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn task_notification_xml_background_bash_flips_footer_slot_to_done() {
+fn task_notification_xml_background_flips_matching_slot_but_suppresses_card() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(3_393_001);
-    // A running background Bash slot keyed by the launch tool-use id.
     events.push_status_events(
         channel_id,
         status_events_from_tool_use_with_id_for_footer_mode(
@@ -5224,43 +5223,85 @@ fn task_notification_xml_background_bash_flips_footer_slot_to_done() {
             true,
         ),
     );
-    let running = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
-    let running_block = running
-        .block
-        .expect("running background Bash should render");
-    assert!(running.has_unfinished_entries);
-    assert!(running_block.contains("Bash Wait until PR 3392 CI settles ⠸"));
-    assert!(!running_block.contains('✓'));
-
-    // Real-shape XML user-record text (background Bash variant, hyphenated
-    // `<tool-use-id>` child tag, status `completed`) — copied from a live
-    // transcript notification.
-    let raw = "<task-notification>\n\
+    let raw_background = "<task-notification>\n\
         <task-id>b5gr0v9xj</task-id>\n\
         <tool-use-id>toolu_01Ls2svfdnzcn9uGwA7aHjHW</tool-use-id>\n\
         <output-file>/private/tmp/claude-501/sess/tasks/b5gr0v9xj.output</output-file>\n\
-        <status>completed</status>\n\
-        <summary>Background command \"Wait until PR 3392 CI settles\" completed (exit code 0)</summary>\n\
+        <status>killed</status>\n\
+        <summary>Background command \"Wait until PR 3392 CI settles\" killed</summary>\n\
         </task-notification>";
-    let bridged = status_events_from_task_notification_xml_for_footer_mode(raw, true);
+
+    let bridged = status_events_from_task_notification_xml_for_footer_mode(raw_background, true);
     assert!(
         bridged
             .iter()
-            .any(|e| matches!(e, StatusEvent::BackgroundTaskEnd { .. })),
-        "background XML must bridge to BackgroundTaskEnd: {bridged:?}"
+            .any(|event| matches!(event, StatusEvent::BackgroundTaskEnd { success: false, .. })),
+        "matching kind=background XML must still bridge terminal slot events: {bridged:?}"
     );
-    events.push_status_events(channel_id, bridged);
-
-    let done = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
-    let done_block = done
-        .block
-        .expect("finished background Bash should stay visible");
-    assert!(!done.has_unfinished_entries);
     assert!(
-        done_block.contains("Bash Wait until PR 3392 CI settles ✓"),
-        "matching XML notification must flip ✓: {done_block}"
+        events.task_notification_completion_visible_in_footer_for_mode(
+            channel_id,
+            raw_background,
+            true,
+        ),
+        "background lifecycle XML should be consumed quietly instead of posting a notify card"
     );
-    assert!(!done_block.contains('⠼'));
+    assert!(
+        events.task_notification_completion_visible_in_footer_for_mode(
+            channel_id,
+            raw_background,
+            false,
+        ),
+        "background lifecycle XML should stay quiet even when footer mode is off"
+    );
+    events.bridge_task_notification_xml(channel_id, raw_background);
+
+    let failed = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠼");
+    let failed_block = failed
+        .block
+        .expect("finished background Bash should remain visible");
+    assert!(!failed.has_unfinished_entries);
+    assert!(
+        failed_block.contains("Bash Wait until PR 3392 CI settles ✗"),
+        "background XML must flip the matching slot to failure: {failed_block}"
+    );
+    assert!(!failed_block.contains('⠼'));
+
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({
+                "subagent_type": "scout",
+                "description": "Scout issues #3275 #3276"
+            })
+            .to_string(),
+            Some("toolu_user_facing_subagent"),
+        ),
+    );
+    let raw_subagent = "<task-notification>\n\
+        <task-id>a09e45d12a68015a5</task-id>\n\
+        <tool-use-id>toolu_user_facing_subagent</tool-use-id>\n\
+        <status>completed</status>\n\
+        <summary>Agent \"Scout issues #3275 #3276\" completed</summary>\n\
+        <result>Done.</result>\n\
+        </task-notification>";
+    let subagent_events =
+        status_events_from_task_notification_xml_for_footer_mode(raw_subagent, true);
+    assert!(
+        subagent_events
+            .iter()
+            .any(|e| matches!(e, StatusEvent::SubagentEnd { .. })),
+        "user-facing subagent XML must still bridge: {subagent_events:?}"
+    );
+    events.push_status_events(channel_id, subagent_events);
+
+    let done = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let done_block = done.block.expect("subagent completion should render");
+    assert!(
+        done_block.contains("Scout issues #3275 #3276") && done_block.contains('✓'),
+        "user-facing XML notification must still flip ✓: {done_block}"
+    );
 }
 
 #[test]
@@ -5421,7 +5462,7 @@ fn task_notification_xml_bridge_inert_when_footer_mode_off() {
 }
 
 #[test]
-fn task_completion_card_suppression_requires_footer_mode_and_matching_background_slot() {
+fn task_completion_card_suppression_quiets_background_xml_lifecycle() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(3_654_001);
     events.push_status_events(
@@ -5445,28 +5486,36 @@ fn task_completion_card_suppression_requires_footer_mode_and_matching_background
     assert!(
         events
             .task_notification_completion_visible_in_footer_for_mode(channel_id, completed, true,),
-        "footer-on matching background completion should suppress the notify card"
+        "background completion XML should suppress the notify card"
     );
     assert!(
-        !events
+        events
             .task_notification_completion_visible_in_footer_for_mode(channel_id, completed, false,),
-        "footer-off/legacy mode must keep the notify card"
+        "background completion XML should stay quiet even when footer mode is off"
     );
 
     let unknown = "<task-notification><task-id>bg2</task-id>\
         <tool-use-id>toolu_bg_unknown</tool-use-id><status>completed</status>\
         <summary>Background command \"Other\" completed (exit code 0)</summary></task-notification>";
     assert!(
-        !events.task_notification_completion_visible_in_footer_for_mode(channel_id, unknown, true),
-        "unknown tool-use-id has no footer completion surface, so the card must remain"
+        events.task_notification_completion_visible_in_footer_for_mode(channel_id, unknown, true),
+        "background lifecycle XML should be quiet even without a matching slot"
     );
 
     let failed = "<task-notification><task-id>bg3</task-id>\
         <tool-use-id>toolu_bg_match</tool-use-id><status>failed</status>\
         <summary>Background command \"Watch CI\" failed (exit code 1)</summary></task-notification>";
     assert!(
-        !events.task_notification_completion_visible_in_footer_for_mode(channel_id, failed, true),
-        "failure/error notifications keep their card for details instead of being footer-suppressed"
+        events.task_notification_completion_visible_in_footer_for_mode(channel_id, failed, true),
+        "background failure XML should be consumed quietly"
+    );
+
+    let killed = "<task-notification><task-id>bg4</task-id>\
+        <tool-use-id>toolu_bg_match</tool-use-id><status>killed</status>\
+        <summary>Background command \"Watch CI\" killed</summary></task-notification>";
+    assert!(
+        events.task_notification_completion_visible_in_footer_for_mode(channel_id, killed, true),
+        "background killed XML should be consumed quietly"
     );
 }
 
