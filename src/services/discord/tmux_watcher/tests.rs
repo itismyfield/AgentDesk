@@ -19,6 +19,7 @@ use super::{
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::InflightTurnState;
 use crate::services::discord::formatting::ReplaceLongMessageOutcome;
+use crate::services::discord::inflight::{RelayOwnerKind, TurnSource};
 use crate::services::discord::{
     mailbox_enqueue_intervention, mailbox_snapshot, mailbox_take_next_soft_intervention,
     mailbox_try_start_turn,
@@ -1323,6 +1324,12 @@ fn fresh_idle_inflight(
 #[test]
 fn fresh_idle_paused_live_defers_via_completion_signal() {
     use crate::services::discord::turn_finalizer::CompletionSignal;
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
     let provider = ProviderKind::Claude;
     let session = "AgentDesk-claude-adk-cc-9873100";
     let current_turn = fresh_idle_inflight(provider.clone(), 987_3100, session, 9001, 10);
@@ -1367,6 +1374,12 @@ fn fresh_idle_paused_live_defers_via_completion_signal() {
 #[test]
 fn fresh_idle_done_finalizes_and_unknown_routes_by_emptiness() {
     use crate::services::discord::turn_finalizer::CompletionSignal;
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
     let provider = ProviderKind::Claude;
     let session = "AgentDesk-claude-adk-cc-9873101";
     let channel_id = 987_3101u64;
@@ -1435,6 +1448,12 @@ fn fresh_idle_done_finalizes_and_unknown_routes_by_emptiness() {
 #[test]
 fn fresh_idle_unknown_keeps_wrong_turn_race_guards() {
     use crate::services::discord::turn_finalizer::CompletionSignal;
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
     let provider = ProviderKind::Claude;
     let session = "AgentDesk-claude-adk-cc-9873108";
     let channel_id = 987_3108u64;
@@ -1503,6 +1522,12 @@ fn fresh_idle_unknown_keeps_wrong_turn_race_guards() {
 #[test]
 fn fresh_idle_done_wrong_turn_race_does_not_finalize_followup() {
     use crate::services::discord::turn_finalizer::CompletionSignal;
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
     let provider = ProviderKind::Claude;
     let session = "AgentDesk-claude-adk-cc-9873102";
     let channel_id = 987_3102u64;
@@ -2135,15 +2160,13 @@ fn compact_local_only_boundary_without_seed_delivery_fingerprint_preserves_resto
     assert_eq!(last_edit_text, restored);
 }
 
-#[test]
-fn tui_direct_watcher_synthetic_post_work_idle_preserves_body_4102() {
-    let _lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let _root_guard = AgentdeskRootGuard::set(tmp.path());
-
-    let tmux_session_name = "AgentDesk-codex-adk-cc-4102";
+fn make_post_work_idle_inflight(
+    tmux_session_name: &str,
+    turn_source: TurnSource,
+    relay_owner: RelayOwnerKind,
+    turn_start_offset: Option<u64>,
+    last_offset: u64,
+) -> InflightTurnState {
     let mut state = InflightTurnState::new(
         ProviderKind::Codex,
         987_4102_001,
@@ -2156,10 +2179,30 @@ fn tui_direct_watcher_synthetic_post_work_idle_preserves_body_4102() {
         Some(tmux_session_name.to_string()),
         Some("/tmp/agentdesk-4102-output.jsonl".to_string()),
         None,
+        last_offset,
+    );
+    state.turn_source = turn_source;
+    state.set_relay_owner_kind(relay_owner);
+    state.turn_start_offset = turn_start_offset;
+    state
+}
+
+#[test]
+fn tui_direct_watcher_synthetic_post_work_idle_preserves_fresh_body_4102() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+    let tmux_session_name = "AgentDesk-codex-adk-cc-4102";
+    let state = make_post_work_idle_inflight(
+        tmux_session_name,
+        TurnSource::ExternalInput,
+        RelayOwnerKind::Watcher,
+        Some(64),
         64,
     );
-    state.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
-    state.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
 
     let mut full_response = "provider body accumulated before idle timeout".to_string();
     let mut terminal_kind = None;
@@ -2170,42 +2213,35 @@ fn tui_direct_watcher_synthetic_post_work_idle_preserves_body_4102() {
         Some(&state),
         false,
         tmux_session_name,
+        true,
+        128,
     ));
     assert_eq!(
         full_response,
         "provider body accumulated before idle timeout"
     );
-    assert_eq!(
-        terminal_kind,
-        Some(WatcherTerminalKind::SoftStopHookSummary)
-    );
+    assert_eq!(terminal_kind, None);
 }
 
 #[test]
-fn no_dispatch_post_work_idle_still_clears_non_synthetic_body_4102() {
+fn post_work_idle_synthetic_seed_without_fresh_text_is_cleared_4108() {
     let _lock = crate::config::shared_test_env_lock()
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
     let tmp = tempfile::tempdir().expect("tempdir");
     let _root_guard = AgentdeskRootGuard::set(tmp.path());
 
-    let tmux_session_name = "AgentDesk-codex-adk-cc-4102-local";
-    let state = InflightTurnState::new(
-        ProviderKind::Codex,
-        987_4102_002,
-        None,
-        42,
-        2001,
-        2002,
-        "/local command".to_string(),
-        None,
-        Some(tmux_session_name.to_string()),
-        Some("/tmp/agentdesk-4102-local-output.jsonl".to_string()),
-        None,
+    let tmux_session_name = "AgentDesk-codex-adk-cc-4108-restored-seed";
+    let state = make_post_work_idle_inflight(
+        tmux_session_name,
+        TurnSource::ExternalInput,
+        RelayOwnerKind::Watcher,
+        Some(64),
         64,
     );
-    let mut full_response = "local command echo that must not relay".to_string();
-    let mut terminal_kind = None;
+
+    let mut full_response = "restored seed body from previous turn".to_string();
+    let mut terminal_kind = Some(WatcherTerminalKind::SoftUserBoundary);
 
     assert!(!watcher_handle_no_dispatch_post_work_idle_body(
         &mut full_response,
@@ -2213,9 +2249,161 @@ fn no_dispatch_post_work_idle_still_clears_non_synthetic_body_4102() {
         Some(&state),
         false,
         tmux_session_name,
+        false,
+        128,
     ));
     assert!(full_response.is_empty());
-    assert_eq!(terminal_kind, None);
+    assert_eq!(terminal_kind, Some(WatcherTerminalKind::SoftUserBoundary));
+}
+
+#[test]
+fn no_dispatch_post_work_idle_clears_non_preservable_shapes_4108() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+    let tmux_session_name = "AgentDesk-codex-adk-cc-4108-negative";
+    let mismatch_session_name = "AgentDesk-codex-adk-cc-4108-other";
+    let cases = [
+        (
+            "external input without watcher owner",
+            Some(make_post_work_idle_inflight(
+                tmux_session_name,
+                TurnSource::ExternalInput,
+                RelayOwnerKind::None,
+                Some(64),
+                64,
+            )),
+            false,
+            "fresh body",
+            tmux_session_name,
+        ),
+        (
+            "managed turn with watcher owner",
+            Some(make_post_work_idle_inflight(
+                tmux_session_name,
+                TurnSource::Managed,
+                RelayOwnerKind::Watcher,
+                Some(64),
+                64,
+            )),
+            false,
+            "fresh body",
+            tmux_session_name,
+        ),
+        (
+            "dispatch id present",
+            Some(make_post_work_idle_inflight(
+                tmux_session_name,
+                TurnSource::ExternalInput,
+                RelayOwnerKind::Watcher,
+                Some(64),
+                64,
+            )),
+            true,
+            "fresh body",
+            tmux_session_name,
+        ),
+        (
+            "session name mismatch",
+            Some(make_post_work_idle_inflight(
+                mismatch_session_name,
+                TurnSource::ExternalInput,
+                RelayOwnerKind::Watcher,
+                Some(64),
+                64,
+            )),
+            false,
+            "fresh body",
+            tmux_session_name,
+        ),
+        (
+            "empty body",
+            Some(make_post_work_idle_inflight(
+                tmux_session_name,
+                TurnSource::ExternalInput,
+                RelayOwnerKind::Watcher,
+                Some(64),
+                64,
+            )),
+            false,
+            "",
+            tmux_session_name,
+        ),
+    ];
+
+    for (label, state, dispatch_id_present, body, session_name) in cases {
+        let mut full_response = body.to_string();
+        let mut terminal_kind = None;
+        assert!(
+            !watcher_handle_no_dispatch_post_work_idle_body(
+                &mut full_response,
+                &mut terminal_kind,
+                state.as_ref(),
+                dispatch_id_present,
+                session_name,
+                true,
+                128,
+            ),
+            "{label}"
+        );
+        assert!(full_response.is_empty(), "{label}");
+        assert_eq!(terminal_kind, None, "{label}");
+    }
+}
+
+#[test]
+fn tui_direct_watcher_synthetic_newer_offset_does_not_match_4108() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+    let tmux_session_name = "AgentDesk-codex-adk-cc-4108-newer-offset";
+    let state = make_post_work_idle_inflight(
+        tmux_session_name,
+        TurnSource::ExternalInput,
+        RelayOwnerKind::Watcher,
+        Some(256),
+        256,
+    );
+    assert!(
+        !crate::services::discord::tui_prompt_relay::tui_direct_watcher_synthetic_inflight_matches(
+            Some(&state),
+            tmux_session_name,
+            128,
+        )
+    );
+    let fallback_state = make_post_work_idle_inflight(
+        tmux_session_name,
+        TurnSource::ExternalInput,
+        RelayOwnerKind::Watcher,
+        None,
+        256,
+    );
+    assert!(
+        !crate::services::discord::tui_prompt_relay::tui_direct_watcher_synthetic_inflight_matches(
+            Some(&fallback_state),
+            tmux_session_name,
+            128,
+        )
+    );
+
+    let mut full_response = "future turn body must not be attributed backward".to_string();
+    let mut terminal_kind = None;
+    assert!(!watcher_handle_no_dispatch_post_work_idle_body(
+        &mut full_response,
+        &mut terminal_kind,
+        Some(&state),
+        false,
+        tmux_session_name,
+        true,
+        128,
+    ));
+    assert!(full_response.is_empty());
 }
 
 #[test]
@@ -2950,24 +3138,38 @@ mod watcher_short_replace_controller {
     // `confirmed_end_offset` watermark advances to END. A mutation making the
     // advance callback unconditional would still advance here, so this test pins
     // Delivered + the real watermark move (the offset is the decisive assertion).
-    #[tokio::test(flavor = "current_thread")]
-    async fn watcher_short_replace_advance_identity_gate() {
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let cell = Arc::new(DeliveryLeaseCell::new(ch()));
-        assert_eq!(shared.committed_relay_offset(ch()), 0);
-        let gw = gateway(ReplaceLongMessageOutcome::EditedOriginal, true);
-        let result = run(&gw, &shared, &cell).await;
-        assert_eq!(result, WatcherShortReplaceResult::Delivered);
-        assert_eq!(gw.replace_calls.load(Ordering::SeqCst), 1, "one POST");
-        assert_eq!(
-            shared.committed_relay_offset(ch()),
-            END,
-            "confirmed transport advances the watermark to the leased end"
-        );
-        assert!(
-            matches!(cell.read(), LeaseSnapshot::Unleased),
-            "controller committed then released the single lease (no leftover)"
-        );
+    #[test]
+    fn watcher_short_replace_advance_identity_gate() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = match tempfile::tempdir() {
+            Ok(temp) => temp,
+            Err(error) => panic!("runtime root tempdir failed: {error}"),
+        };
+        let _root = super::AgentdeskRootGuard::set(temp.path());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        runtime.block_on(async {
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let cell = Arc::new(DeliveryLeaseCell::new(ch()));
+            assert_eq!(shared.committed_relay_offset(ch()), 0);
+            let gw = gateway(ReplaceLongMessageOutcome::EditedOriginal, true);
+            let result = run(&gw, &shared, &cell).await;
+            assert_eq!(result, WatcherShortReplaceResult::Delivered);
+            assert_eq!(gw.replace_calls.load(Ordering::SeqCst), 1, "one POST");
+            assert_eq!(
+                shared.committed_relay_offset(ch()),
+                END,
+                "confirmed transport advances the watermark to the leased end"
+            );
+            assert!(
+                matches!(cell.read(), LeaseSnapshot::Unleased),
+                "controller committed then released the single lease (no leftover)"
+            );
+        });
     }
 
     // (3) #2757 PreserveAlways: a `SentFallbackAfterEditFailure` + post-send
@@ -3223,106 +3425,138 @@ mod watcher_short_replace_controller {
     // so the write-back mirrors the legacy fallback arm — #3089 A4 r2);
     // `PartialContinuationFailure` → Unknown → PartialFailureRetry (no advance,
     // I2). The offset must NOT advance on the partial path but MUST on fallback.
-    #[tokio::test(flavor = "current_thread")]
-    async fn watcher_short_replace_fallback_commit_policy() {
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let cell = Arc::new(DeliveryLeaseCell::new(ch()));
-        let gw = gateway(
-            ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
-                edit_error: "edit failed".to_string(),
-                replacement_anchor: None,
-            },
-            true,
-        );
-        assert_eq!(
-            run(&gw, &shared, &cell).await,
-            WatcherShortReplaceResult::DeliveredFallback {
-                edit_error: "edit failed".to_string(),
-            },
-            "CommitOnFallback maps SentFallbackAfterEditFailure → DeliveredFallback \
-                 (advances, surfaces the replace identity + edit_error)"
-        );
-        assert_eq!(shared.committed_relay_offset(ch()), END);
-
-        let shared2 = crate::services::discord::make_shared_data_for_tests();
-        let cell2 = Arc::new(DeliveryLeaseCell::new(ch()));
-        let gw2 = gateway(
-            ReplaceLongMessageOutcome::PartialContinuationFailure {
-                sent_chunks: 1,
-                total_chunks: 2,
-                failed_chunk_index: 1,
-                sent_continuation_message_ids: vec![1],
-                cleanup_errors: vec![],
-                error: "mid-stream".to_string(),
-            },
-            true,
-        );
-        assert_eq!(
-            run(&gw2, &shared2, &cell2).await,
-            WatcherShortReplaceResult::PartialFailureRetry,
-            "PartialContinuationFailure → Unknown → PartialFailureRetry (I2)"
-        );
-        assert_eq!(
-            shared2.committed_relay_offset(ch()),
-            0,
-            "I2: a partial/ambiguous result NEVER advances the offset"
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn watcher_long_chunks_controller_delivered_deletes_anchor_and_advances() {
+    #[test]
+    fn watcher_short_replace_fallback_commit_policy() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let temp = match tempfile::tempdir() {
             Ok(temp) => temp,
             Err(error) => panic!("runtime root tempdir failed: {error}"),
         };
         let _root = super::AgentdeskRootGuard::set(temp.path());
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let cell = Arc::new(DeliveryLeaseCell::new(ch()));
-        let gw = long_gateway(true, true);
-        let outcome = run_long(&gw, &shared, &cell).await;
-        match outcome {
-            toc::DeliveryOutcome::Delivered {
-                new_chunks: Some(chunks),
-                ..
-            } => {
-                assert_eq!(chunks.first_message_id, Some(MessageId::new(9100)));
-                assert_eq!(chunks.tail_message_id, Some(MessageId::new(9101)));
-                assert_eq!(chunks.anchor_delete_error, None);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        runtime.block_on(async {
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let cell = Arc::new(DeliveryLeaseCell::new(ch()));
+            let gw = gateway(
+                ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
+                    edit_error: "edit failed".to_string(),
+                    replacement_anchor: None,
+                },
+                true,
+            );
+            assert_eq!(
+                run(&gw, &shared, &cell).await,
+                WatcherShortReplaceResult::DeliveredFallback {
+                    edit_error: "edit failed".to_string(),
+                },
+                "CommitOnFallback maps SentFallbackAfterEditFailure → DeliveredFallback \
+                     (advances, surfaces the replace identity + edit_error)"
+            );
+            assert_eq!(shared.committed_relay_offset(ch()), END);
+
+            let shared2 = crate::services::discord::make_shared_data_for_tests();
+            let cell2 = Arc::new(DeliveryLeaseCell::new(ch()));
+            let gw2 = gateway(
+                ReplaceLongMessageOutcome::PartialContinuationFailure {
+                    sent_chunks: 1,
+                    total_chunks: 2,
+                    failed_chunk_index: 1,
+                    sent_continuation_message_ids: vec![1],
+                    cleanup_errors: vec![],
+                    error: "mid-stream".to_string(),
+                },
+                true,
+            );
+            assert_eq!(
+                run(&gw2, &shared2, &cell2).await,
+                WatcherShortReplaceResult::PartialFailureRetry,
+                "PartialContinuationFailure → Unknown → PartialFailureRetry (I2)"
+            );
+            assert_eq!(
+                shared2.committed_relay_offset(ch()),
+                0,
+                "I2: a partial/ambiguous result NEVER advances the offset"
+            );
+        });
+    }
+
+    #[test]
+    fn watcher_long_chunks_controller_delivered_deletes_anchor_and_advances() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = match tempfile::tempdir() {
+            Ok(temp) => temp,
+            Err(error) => panic!("runtime root tempdir failed: {error}"),
+        };
+        let _root = super::AgentdeskRootGuard::set(temp.path());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        runtime.block_on(async {
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let cell = Arc::new(DeliveryLeaseCell::new(ch()));
+            let gw = long_gateway(true, true);
+            let outcome = run_long(&gw, &shared, &cell).await;
+            match outcome {
+                toc::DeliveryOutcome::Delivered {
+                    new_chunks: Some(chunks),
+                    ..
+                } => {
+                    assert_eq!(chunks.first_message_id, Some(MessageId::new(9100)));
+                    assert_eq!(chunks.tail_message_id, Some(MessageId::new(9101)));
+                    assert_eq!(chunks.anchor_delete_error, None);
+                }
+                other => panic!("expected Delivered, got {}", toc_debug_outcome(&other)),
             }
-            other => panic!("expected Delivered, got {}", toc_debug_outcome(&other)),
-        }
-        assert_eq!(gw.send_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(gw.delete_calls.load(Ordering::SeqCst), 1);
-        assert!(
-            gw.send_step.load(Ordering::SeqCst) < gw.delete_step.load(Ordering::SeqCst),
-            "placeholder delete must run after the full chunk send"
-        );
-        assert_eq!(shared.committed_relay_offset(ch()), END);
-        assert!(matches!(cell.read(), LeaseSnapshot::Unleased));
+            assert_eq!(gw.send_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(gw.delete_calls.load(Ordering::SeqCst), 1);
+            assert!(
+                gw.send_step.load(Ordering::SeqCst) < gw.delete_step.load(Ordering::SeqCst),
+                "placeholder delete must run after the full chunk send"
+            );
+            assert_eq!(shared.committed_relay_offset(ch()), END);
+            assert!(matches!(cell.read(), LeaseSnapshot::Unleased));
+        });
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn watcher_long_chunks_delete_failure_still_delivers() {
+    #[test]
+    fn watcher_long_chunks_delete_failure_still_delivers() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let temp = match tempfile::tempdir() {
             Ok(temp) => temp,
             Err(error) => panic!("runtime root tempdir failed: {error}"),
         };
         let _root = super::AgentdeskRootGuard::set(temp.path());
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let cell = Arc::new(DeliveryLeaseCell::new(ch()));
-        let gw = long_gateway(true, false);
-        let outcome = run_long(&gw, &shared, &cell).await;
-        match outcome {
-            toc::DeliveryOutcome::Delivered {
-                new_chunks: Some(chunks),
-                ..
-            } => assert_eq!(chunks.anchor_delete_error.as_deref(), Some("delete failed")),
-            other => panic!(
-                "delete failure should still be Delivered, got {}",
-                toc_debug_outcome(&other)
-            ),
-        }
-        assert_eq!(shared.committed_relay_offset(ch()), END);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        runtime.block_on(async {
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let cell = Arc::new(DeliveryLeaseCell::new(ch()));
+            let gw = long_gateway(true, false);
+            let outcome = run_long(&gw, &shared, &cell).await;
+            match outcome {
+                toc::DeliveryOutcome::Delivered {
+                    new_chunks: Some(chunks),
+                    ..
+                } => assert_eq!(chunks.anchor_delete_error.as_deref(), Some("delete failed")),
+                other => panic!(
+                    "delete failure should still be Delivered, got {}",
+                    toc_debug_outcome(&other)
+                ),
+            }
+            assert_eq!(shared.committed_relay_offset(ch()), END);
+        });
     }
 
     #[tokio::test(flavor = "current_thread")]

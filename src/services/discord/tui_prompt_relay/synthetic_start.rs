@@ -1346,7 +1346,7 @@ pub(super) fn tui_direct_synthetic_inflight_matches(
     })
 }
 
-pub(in crate::services::discord) fn tui_direct_watcher_synthetic_inflight_matches(
+fn tui_direct_watcher_synthetic_inflight_shape_matches(
     state: Option<&InflightTurnState>,
     tmux_session_name: &str,
 ) -> bool {
@@ -1354,6 +1354,17 @@ pub(in crate::services::discord) fn tui_direct_watcher_synthetic_inflight_matche
         state.turn_source == TurnSource::ExternalInput
             && state.tmux_session_name.as_deref() == Some(tmux_session_name)
             && state.effective_relay_owner_kind() == RelayOwnerKind::Watcher
+    })
+}
+
+pub(in crate::services::discord) fn tui_direct_watcher_synthetic_inflight_matches(
+    state: Option<&InflightTurnState>,
+    tmux_session_name: &str,
+    current_offset: u64,
+) -> bool {
+    state.is_some_and(|state| {
+        tui_direct_watcher_synthetic_inflight_shape_matches(Some(state), tmux_session_name)
+            && state.turn_start_offset.unwrap_or(state.last_offset) < current_offset
     })
 }
 
@@ -1390,7 +1401,7 @@ pub(super) async fn wait_for_tui_direct_watcher_synthetic_claim(
 ) -> bool {
     let deadline = tokio::time::Instant::now() + TUI_DIRECT_SYNTHETIC_CLAIM_WAIT;
     loop {
-        if tui_direct_watcher_synthetic_inflight_matches(
+        if tui_direct_watcher_synthetic_inflight_shape_matches(
             super::super::inflight::load_inflight_state(provider, channel_id.get()).as_ref(),
             tmux_session_name,
         ) {

@@ -469,19 +469,22 @@ pub(super) fn reacquire_watcher_inflight_for_active_stream(
 
 pub(super) fn watcher_handle_no_dispatch_post_work_idle_body(
     full_response: &mut String,
-    terminal_kind: &mut Option<WatcherTerminalKind>,
+    _terminal_kind: &mut Option<WatcherTerminalKind>,
     stall_inflight_snapshot: Option<&InflightTurnState>,
     dispatch_id_present: bool,
     tmux_session_name: &str,
+    fresh_assistant_text_seen: bool,
+    current_offset: u64,
 ) -> bool {
     if !dispatch_id_present
+        && fresh_assistant_text_seen
         && !full_response.trim().is_empty()
         && crate::services::discord::tui_prompt_relay::tui_direct_watcher_synthetic_inflight_matches(
             stall_inflight_snapshot,
             tmux_session_name,
+            current_offset,
         )
     {
-        terminal_kind.get_or_insert(WatcherTerminalKind::SoftStopHookSummary);
         return true;
     }
     full_response.clear();
