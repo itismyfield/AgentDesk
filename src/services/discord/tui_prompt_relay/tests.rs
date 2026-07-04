@@ -1823,21 +1823,20 @@ fn classify_injected_prompt_continuation_wins_over_embedded_task_tag() {
     );
 }
 
-// #3099 codex re-review (P1): a SystemContinuation must suppress ONLY the
-// user-turn lifecycle (⏳ + anchor + synthetic ownership) — it must STILL
-// deliver the provider's assistant output via the bridge tail. The original
-// early-return ran before the bridge tail spawn, orphaning Claude's output.
-// This guards the contract that drives the restructured relay flow.
+// #4082: a SystemContinuation is a provider-injected session note, not a turn.
+// It suppresses the user-turn lifecycle and the external-output bridge tail so
+// it cannot strand the mailbox behind a phantom synthetic inflight after
+// `/compact`.
 #[test]
-fn system_continuation_suppresses_user_turn_but_still_delivers_output() {
+fn system_continuation_suppresses_external_turn_lifecycle() {
     let cont = InjectedPromptClass::SystemContinuation;
     assert!(
         cont.suppresses_user_turn_lifecycle(),
         "SystemContinuation must drop the ⏳/user-turn lifecycle"
     );
     assert!(
-        cont.still_delivers_assistant_output(),
-        "SystemContinuation must still relay Claude's assistant output (no orphaning)"
+        !cont.still_delivers_assistant_output(),
+        "SystemContinuation must not spawn a bridge tail or claim a synthetic external turn"
     );
     assert!(!cont.is_human_active_turn());
 
@@ -1849,8 +1848,8 @@ fn system_continuation_suppresses_user_turn_but_still_delivers_output() {
     assert!(!subagent.still_delivers_assistant_output());
     assert!(!subagent.is_human_active_turn());
 
-    // Human + task-notification turns keep their user-turn lifecycle AND
-    // deliver output.
+    // Human + task-notification turns keep their user-turn lifecycle AND deliver
+    // output.
     for active in [
         InjectedPromptClass::HumanTuiDirect,
         InjectedPromptClass::TaskNotificationEvent,
@@ -3295,166 +3294,157 @@ fn synthetic_owner_delivery_path_matches_producer_presence() {
 }
 
 // ====================================================================
-// #4002 (recap duplicate root fix) — the SystemContinuation (compact
-// resume) suppress branch now CONVERGES on the SAME Path-X synthetic-start
-// seam the active-turn else-branch uses (`wire_tui_direct_synthetic_turn_start`):
-// it installs a passive synthetic inflight, adopts the resolved relay_owner
-// into the lease, and the post-block bridge-tail gate then honours cross-
-// relayer single-ownership. Before the fix the suppress branch fell through
-// INFLIGHT-LESS — the observer spawned an UN-ARBITRATED BridgeAdapter tail
-// that raced the real turn's owner → two live panels (2 slots). These pin the
-// convergence at the pure seams the helper chains (owner-resolve → adopt →
-// observer gate) plus the UNCHANGED lifecycle contract (the note stays a
-// neutral "not an active turn" note — no ⏳/anchor/lifecycle reactions).
+// #4082 defect 1 — compact continuation records are neutral session notes.
+// They must render through the existing classifier but must NOT select an
+// external turn owner, start a synthetic inflight, or occupy the mailbox.
+// Genuine typed TUI input keeps the existing synthetic-inflight path.
 // ====================================================================
 
-/// (a) ROUTING PIN. The compact-resume note keeps its neutral lifecycle
-/// (`suppresses_user_turn_lifecycle` stays true — the ⏳/anchor-card/
-/// `record_prompt_anchor`/completion-drain all live BEFORE the extracted seam,
-/// so the suppress path never runs them) yet STILL relays the model's output
-/// (`still_delivers_assistant_output`). The fix adds ONLY relay-ownership
-/// wiring: once the passive synthetic inflight's claim resolves to the live
-/// watcher, the observer bridge tail stands down, so the SystemContinuation
-/// output relays from EXACTLY ONE owner (the watcher) — not the unarbitrated
-/// second tail that produced the duplicate slot.
-#[test]
-fn system_continuation_converges_on_synthetic_start_seam() {
-    use super::synthetic_start::tui_direct_synthetic_relay_owner;
+fn external_turn_test_lease(
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+) -> ExternalInputRelayLease {
+    ExternalInputRelayLease {
+        channel_id: Some(channel_id.get()),
+        turn_id: Some(format!(
+            "external:claude:{}:{tmux_session_name}:test",
+            channel_id.get()
+        )),
+        session_key: Some(format!("session:{tmux_session_name}")),
+        relay_owner: ExternalInputRelayOwner::BridgeAdapter,
+        runtime_kind: Some(RuntimeHandoffKind::ClaudeTui),
+        generation:
+            crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+    }
+}
 
-    let cont = InjectedPromptClass::SystemContinuation;
-    // Side-effect no-leak: the suppress branch runs NONE of the active-turn
-    // lifecycle, so this contract is unchanged by the fix.
-    assert!(
-        cont.suppresses_user_turn_lifecycle(),
-        "the compact-resume note must stay a neutral 'not an active turn' note"
+#[tokio::test]
+async fn compact_continuation_injection_skips_synthetic_and_leaves_mailbox_free() {
+    let temp = tempfile::tempdir().expect("temp runtime root");
+    let _env = EnvRootGuard::set(temp.path());
+    let shared = super::super::make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(940_000_000_004_082);
+    let tmux = "AgentDesk-claude-4082-compact-continuation";
+    let anchor_id = MessageId::new(940_000_000_004_182);
+    let prompt_text = "This session is being continued from a previous conversation that ran out of context.\n\
+         Summary: compacted transcript body";
+    let prompt = ObservedTuiPrompt {
+        provider: provider.as_str().to_string(),
+        tmux_session_name: tmux.to_string(),
+        prompt: prompt_text.to_string(),
+        observed_at: chrono::Utc::now(),
+    };
+    let decision = relay_observed_prompt_injected_prompt_decision(&prompt.prompt);
+    assert_eq!(
+        decision.injected_class,
+        InjectedPromptClass::SystemContinuation
     );
     assert!(
-        cont.still_delivers_assistant_output(),
-        "SystemContinuation output is still relayed — the fix only arbitrates WHO relays it"
+        !decision.starts_external_turn_lifecycle(),
+        "compact continuation records must be passive notes, not external turns"
     );
-    assert!(!cont.is_human_active_turn());
 
-    // The seam resolves ownership IDENTICALLY to the active-turn path: watcher
-    // alive ⇒ the passive synthetic inflight's claim resolves to the watcher …
-    let resolved = tui_direct_synthetic_relay_owner(true, true, true);
-    assert_eq!(resolved, ExternalInputRelayOwner::TmuxWatcher);
-    // … and the adopted (watcher-owned) lease makes the observer stand down —
-    // the watcher is the SOLE relayer (1 slot). RED if the suppress branch is
-    // reverted to fall through inflight-less (the observer would spawn a 2nd tail).
+    let mut lease = external_turn_test_lease(channel_id, tmux);
+    let deferred = synthetic_start_wiring::wire_tui_direct_synthetic_turn_start(
+        &shared,
+        provider.as_str(),
+        channel_id,
+        &prompt,
+        anchor_id,
+        &decision,
+        &mut lease,
+    )
+    .await;
     assert!(
-        !observer_should_spawn_bridge_tail(false, resolved),
-        "a watcher-owned SystemContinuation turn: the observer bridge tail stands down"
+        !deferred,
+        "neutral continuation must not defer or start synthetic ownership"
+    );
+    assert!(
+        super::super::inflight::load_inflight_state(&provider, channel_id.get()).is_none(),
+        "neutral continuation must not write a synthetic inflight row"
+    );
+    let snapshot = super::super::mailbox_snapshot(shared.as_ref(), channel_id).await;
+    assert_eq!(snapshot.active_user_message_id, None);
+    assert!(snapshot.cancel_token.is_none());
+
+    let next_message_id = MessageId::new(940_000_000_004_282);
+    assert!(
+        super::super::mailbox_try_start_turn(
+            shared.as_ref(),
+            channel_id,
+            Arc::new(CancelToken::new()),
+            serenity::UserId::new(42),
+            next_message_id,
+        )
+        .await,
+        "subsequent Discord message must start immediately because the mailbox stayed free"
     );
 }
 
-/// (b interleaving — watcher alive → adopt → 1 slot). The passive synthetic
-/// inflight the fix installs on the SystemContinuation path claims the turn; the
-/// claim resolves to the LIVE watcher, so the lease adopts the watcher owner and
-/// the observer stands down. EXACTLY ONE relayer (the watcher) — the duplicate
-/// second tail is gone. Mirrors the active-turn adoption against the REAL lease store.
-#[test]
-fn system_continuation_watcher_alive_adopts_owner_exactly_one_relayer() {
-    let provider = "claude";
-    let tmux = "tmux-4002-sc-watcher-alive";
-    let channel_id: u64 = 771_000_000_004_002;
-
-    // The suppress branch records the pre-claim (BridgeAdapter) lease, then the
-    // passive synthetic claim resolves to the watcher (watcher_can_own == true).
-    let mut lease = ExternalInputRelayLease::unassigned(Some(channel_id));
-    lease.relay_owner = ExternalInputRelayOwner::BridgeAdapter;
-    let lease =
-        crate::services::tui_prompt_dedupe::record_external_input_turn_lease(provider, tmux, lease);
-
-    let claimed_owner = super::synthetic_start::tui_direct_synthetic_relay_owner(true, true, true);
-    assert_eq!(claimed_owner, ExternalInputRelayOwner::TmuxWatcher);
+#[tokio::test]
+async fn genuine_tui_direct_typed_prompt_still_creates_synthetic_inflight() {
+    let temp = tempfile::tempdir().expect("temp runtime root");
+    let _env = EnvRootGuard::set(temp.path());
+    let shared = super::super::make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(940_000_000_004_083);
+    let tmux = "AgentDesk-claude-4082-genuine-typed";
+    let anchor_id = MessageId::new(940_000_000_004_183);
+    let prompt = ObservedTuiPrompt {
+        provider: provider.as_str().to_string(),
+        tmux_session_name: tmux.to_string(),
+        prompt: "please review PR #1234".to_string(),
+        observed_at: chrono::Utc::now(),
+    };
+    let decision = relay_observed_prompt_injected_prompt_decision(&prompt.prompt);
+    assert_eq!(decision.injected_class, InjectedPromptClass::HumanTuiDirect);
     assert!(
-        claim_should_adopt_relay_owner(true, lease.relay_owner, claimed_owner),
-        "a successful watcher claim flips the BridgeAdapter lease → must adopt"
+        decision.starts_external_turn_lifecycle(),
+        "real typed TUI input must keep the synthetic-start lifecycle"
+    );
+    let transcript_path = temp.path().join("claude-typed.jsonl");
+    std::fs::write(&transcript_path, "").expect("seed transcript path");
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+        tmux,
+        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            output_path: transcript_path.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: None,
+            last_offset: 0,
+            relay_last_offset: None,
+        },
     );
 
-    // Adopt exactly as the shared seam does: re-record with the claimed owner.
-    let mut adopted = lease.clone();
-    adopted.relay_owner = claimed_owner;
-    crate::services::tui_prompt_dedupe::record_external_input_turn_lease(provider, tmux, adopted);
-
-    let stored =
-        crate::services::tui_prompt_dedupe::external_input_relay_lease(provider, tmux, channel_id)
-            .expect("lease present after adoption");
-    let observer_relays = observer_should_spawn_bridge_tail(false, stored.relay_owner);
-    let watcher_relays = matches!(stored.relay_owner, ExternalInputRelayOwner::TmuxWatcher);
-    assert_eq!(
-        u8::from(observer_relays) + u8::from(watcher_relays),
-        1,
-        "watcher-alive SystemContinuation: exactly ONE relayer (the watcher); the \
-         pre-fix unarbitrated observer tail would make this 2 (the duplicate slot)"
+    let mut lease = external_turn_test_lease(channel_id, tmux);
+    let deferred = synthetic_start_wiring::wire_tui_direct_synthetic_turn_start(
+        &shared,
+        provider.as_str(),
+        channel_id,
+        &prompt,
+        anchor_id,
+        &decision,
+        &mut lease,
+    )
+    .await;
+    assert!(
+        !deferred,
+        "no prior turn exists, so the claim should be inline"
     );
 
-    let _ = crate::services::tui_prompt_dedupe::clear_external_input_relay_lease(
-        provider, tmux, channel_id,
-    );
-}
-
-/// (b interleaving — watcher dead → BridgeAdapter → tail retained, no GAP). The
-/// critical no-GAP guard: when the watcher is dead the claim resolves to the
-/// BridgeAdapter, so the passive synthetic inflight must NOT stand the tail down —
-/// the observer's bridge tail (inline) OR the worker's tail (deferred) is the SOLE
-/// relayer. RED if the fix over-suppresses (relayer_count == 0 == GAP).
-#[test]
-fn system_continuation_watcher_dead_bridge_tail_is_sole_relayer_no_gap() {
-    // Watcher cannot own (dead) + no live producer ⇒ BridgeAdapter.
-    let resolved = super::synthetic_start::tui_direct_synthetic_relay_owner(false, true, false);
-    assert_eq!(resolved, ExternalInputRelayOwner::BridgeAdapter);
-    assert!(bridge_adapter_owns_external_turn(resolved));
-
-    // Inline (non-deferred) path: the observer tail is the sole relayer.
-    let observer_relays = observer_should_spawn_bridge_tail(false, resolved);
-    let watcher_relays = matches!(resolved, ExternalInputRelayOwner::TmuxWatcher);
-    assert_eq!(
-        u8::from(observer_relays) + u8::from(watcher_relays),
-        1,
-        "watcher-dead SystemContinuation: the bridge tail is the SOLE relayer (no \
-         GAP) — the fix must not suppress the only relayer"
-    );
-
-    // Deferred variant (prior turn still draining): the observer stands down but
-    // the worker spawns EXACTLY ONE tail for the BridgeAdapter resolution — no GAP
-    // on the deferred path either.
-    assert!(!observer_should_spawn_bridge_tail(true, resolved));
-    assert!(deferred_claim_requires_bridge_tail_relayer(resolved));
-}
-
-/// (b interleaving — SystemContinuation then a real turn → 1 slot). The passive
-/// synthetic inflight the fix installs occupies the mailbox, so a near-simultaneous
-/// real turn's claim FAILS (claimed == false) and adopts nothing — no second owner,
-/// no second relayer. The single owner established by the SystemContinuation turn
-/// stays the sole relayer (1 slot). Pins that a failed 2nd claim never re-records.
-#[test]
-fn system_continuation_then_real_turn_second_claim_mints_no_extra_relayer() {
-    // Obs1 (SystemContinuation): the passive synthetic claim resolves to the live
-    // watcher and adopts — the watcher is the sole relayer (1).
-    let obs1_owner = super::synthetic_start::tui_direct_synthetic_relay_owner(true, true, true);
-    assert_eq!(obs1_owner, ExternalInputRelayOwner::TmuxWatcher);
-    let obs1_relayers = u8::from(observer_should_spawn_bridge_tail(false, obs1_owner))
-        + u8::from(matches!(obs1_owner, ExternalInputRelayOwner::TmuxWatcher));
-    assert_eq!(obs1_relayers, 1);
-
-    // Obs2 (the real turn, same session): the mailbox is held by obs1's inflight,
-    // so its claim returns claimed == false → adoption is skipped, NOTHING is
-    // re-recorded, and no second inflight/relayer is minted.
-    let obs2_adopts = claim_should_adopt_relay_owner(
-        false,
-        ExternalInputRelayOwner::TmuxWatcher,
-        ExternalInputRelayOwner::BridgeAdapter,
-    );
-    let obs2_extra_relayers = u8::from(obs2_adopts);
-    assert_eq!(
-        obs2_extra_relayers, 0,
-        "a failed 2nd claim (mailbox occupied) mints no extra relayer"
-    );
-    assert_eq!(
-        obs1_relayers + obs2_extra_relayers,
-        1,
-        "1 slot total across the interleaving (no duplicate)"
+    let snapshot = super::super::mailbox_snapshot(shared.as_ref(), channel_id).await;
+    assert_eq!(snapshot.active_user_message_id, Some(anchor_id));
+    assert!(snapshot.cancel_token.is_some());
+    let state = super::super::inflight::load_inflight_state(&provider, channel_id.get())
+        .expect("typed TUI prompt must create synthetic inflight");
+    assert_eq!(state.turn_source, TurnSource::ExternalInput);
+    assert_eq!(state.tmux_session_name.as_deref(), Some(tmux));
+    assert_eq!(state.user_msg_id, anchor_id.get());
+    assert!(
+        !state.relay_ownership_only,
+        "human typed input must remain a full synthetic external turn"
     );
 }
 

@@ -105,7 +105,7 @@ use self::relay_ownership::{
 
 mod synthetic_orphan_reclaim; // #3982 orphan-at-birth reclaim trigger (see module doc)
 mod synthetic_start;
-mod synthetic_start_wiring; // #4002 shared Path-X wiring reused by the suppress branch
+mod synthetic_start_wiring; // #4002 shared Path-X wiring with #4082 neutral-note gate
 #[cfg(test)]
 pub(in crate::services::discord) use self::synthetic_start::synthetic_start_offset_carry_forward;
 use self::synthetic_start::{
@@ -342,8 +342,9 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     // a genuine second /loop / /compact falls outside the 2s window → fresh turn.
     let relay_prompt_decision = relay_observed_prompt_injected_prompt_decision(&prompt.prompt);
     let injected_class = relay_prompt_decision.injected_class;
-    // #3305/#4033: one pure decision drives dedupe and the local-only lifecycle
-    // skip, so stdout halves use the same allow-list as helper-level checks.
+    // #3305/#4033/#4082: one pure decision drives dedupe and the lifecycle
+    // skips, so stdout halves and compact continuation records use the same
+    // classifier for note rendering, external-owner selection, and synthetic start.
     let local_only_slash = relay_prompt_decision.local_only_slash;
     if matches!(injected_class, InjectedPromptClass::SlashCommandControl) {
         let kind = relay_prompt_decision
@@ -457,11 +458,11 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     // #3176: anchor id of THIS turn's synthetic inflight (set only on the anchor-
     // posting branch); the idle-tail drain-wait uses it to identity-pin our own row
     // (no self-deadlock) while still waiting on a genuinely distinct previous turn.
-    let mut current_turn_anchor_id: Option<u64> = None;
+    let current_turn_anchor_id: Option<u64>;
     // #3154 P1-3: function-scope so the post-block bridge-tail guard reads it; set
     // true when the synthetic turn-start is deferred to the detached worker, so the
     // observer skips its own BridgeAdapter tail (no duplicate relay).
-    let mut deferred_synthetic_start = false;
+    let deferred_synthetic_start: bool;
     if local_only_slash {
         // #3305: a LOCAL-completing pass-through (/effort /compact /cost /context)
         // renders in the TUI but starts no model turn. Post ONLY the kind-only
@@ -538,33 +539,8 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
                     channel_id = channel_id.get(),
                     tmux_session_name = %prompt.tmux_session_name,
                     note_message_id = message.id.get(),
-                    "rendered system/compact continuation injection as neutral session note; no active-turn lifecycle, assistant output still relayed via bridge tail"
+                    "rendered system/compact continuation injection as neutral session note; no active-turn lifecycle, no external turn owner, no synthetic inflight"
                 );
-                // #4002 (recap duplicate root fix): the compact-resume note is NOT an
-                // active-turn anchor — no ⏳/anchor-card/`record_prompt_anchor`/
-                // completion-drain ran above, so this stays a neutral "not an active
-                // turn" note. But the SystemContinuation output IS still relayed, and
-                // before this fix it fell through inflight-less: the observer spawned an
-                // UN-ARBITRATED BridgeAdapter tail that raced the real turn's owner →
-                // two live panels (2 slots). Route it through the SAME Path-X seam the
-                // active-turn else-branch uses: pin the note as this turn's anchor so
-                // the idle-tail drain-wait identity-pins our own row, then install a
-                // passive synthetic inflight + adopt the resolved relay_owner into the
-                // lease. The post-block bridge-tail gate then honours cross-relayer
-                // single-ownership: watcher-alive → adopt → tail stands down (1 slot);
-                // watcher-dead → BridgeAdapter → tail is the SOLE relayer (no GAP);
-                // deferred → observer stands down, the worker spawns exactly one tail.
-                current_turn_anchor_id = Some(message.id.get());
-                deferred_synthetic_start =
-                    synthetic_start_wiring::wire_tui_direct_synthetic_turn_start(
-                        shared,
-                        &prompt.provider,
-                        channel_id,
-                        &prompt,
-                        message.id,
-                        &mut lease,
-                    )
-                    .await;
             }
             Err(error) => {
                 tracing::warn!(
@@ -576,6 +552,7 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
                 );
             }
         }
+        return;
     } else {
         // #3178 (codex fix): a SlashCommandControl is a FULL active turn now (anchor +
         // ⏳ + synthetic inflight like HumanTuiDirect). Its anchor content carries the
@@ -753,20 +730,22 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
                 ),
             "passive system injections must not reach active-turn handling",
         );
-        // #3154 P1-3 / #4002: run the shared synthetic-start wiring. It reads the
+        // #3154 P1-3 / #4002 / #4082: run the shared synthetic-start wiring. It reads the
         // prior-turn view and either DEFERS to the detached per-channel worker when
         // a prior turn is still draining — the observer then must NOT spawn its own
         // BridgeAdapter tail below (a second observer tail would relay the SAME
         // output twice — the original bug); the worker owns the relay-owner handoff
         // — else INLINE-claims a passive synthetic inflight and adopts the resolved
         // relay_owner into `lease` for the post-block bridge-tail ownership guard.
-        // Extracted so the SystemContinuation suppress branch reuses the SAME seam.
+        // The helper also carries the classifier-derived external-turn gate so a
+        // neutral note cannot claim the mailbox if this seam is called accidentally.
         deferred_synthetic_start = synthetic_start_wiring::wire_tui_direct_synthetic_turn_start(
             shared,
             &prompt.provider,
             channel_id,
             &prompt,
             anchor_message.id,
+            &relay_prompt_decision,
             &mut lease,
         )
         .await;
@@ -915,6 +894,14 @@ struct RelayObservedPromptInjectionDecision {
     injected_class: InjectedPromptClass,
     slash_command_kind: Option<String>,
     local_only_slash: bool,
+}
+
+impl RelayObservedPromptInjectionDecision {
+    fn starts_external_turn_lifecycle(&self) -> bool {
+        !self.local_only_slash
+            && !self.injected_class.suppresses_user_turn_lifecycle()
+            && !self.injected_class.is_subagent_notification_event()
+    }
 }
 
 /// Pure classification used before relay lease/ownership side effects.
