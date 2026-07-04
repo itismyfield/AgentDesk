@@ -28,6 +28,8 @@ mod timeouts_ops;
 pub(crate) mod turn_ops;
 
 pub(crate) use db_ops::execute_policy_sql;
+#[cfg(test)]
+pub(crate) use log_ops::TIMEOUT_SHADOW_LOG_TARGET;
 pub(crate) use review_ops::{ADVANCE_REVIEW_ROUND_HINT_KEY, ensure_js_error_json};
 
 use crate::supervisor::BridgeHandle;

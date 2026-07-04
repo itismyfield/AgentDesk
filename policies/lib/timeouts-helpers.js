@@ -15,6 +15,8 @@ function timeoutReducerDecisionLabel(preview) {
   return preview.resolution || "unknown";
 }
 
+var TIMEOUT_SHADOW_LOG_TARGET = "agentdesk::timeout_shadow";
+
 function emitTimeoutShadowLog(record) {
   try {
     agentdesk.log.info("[timeout_shadow] " + JSON.stringify(record));
@@ -26,7 +28,7 @@ function shadowTimeoutDecision(payload) {
   var section = payload && payload.section ? payload.section : null;
   var jsDecision = payload && payload.js_decision ? payload.js_decision : "unknown";
   var record = {
-    target: "timeout_shadow",
+    target: TIMEOUT_SHADOW_LOG_TARGET,
     card_id: cardId,
     section: section,
     js_decision: jsDecision,
