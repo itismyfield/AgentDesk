@@ -47,8 +47,19 @@ __pycache__/
 /docs/ops/
 
 # Operator-private routine scripts. Keep local/runtime routines out of public repo history.
-routines/
+routines/*
 !tests/fixtures/routines/
 !tests/fixtures/routines/**
 !src/server/routes/routines/
 !src/server/routes/routines/*.rs
+
+# Exception: the automation-candidate pipeline routines are shipped engine code
+# (feat(pipeline-v2) #2064), loaded by name via RoutineScriptLoader's default
+# `./routines` dir and exercised by `npm run test:policies`. They were swept up
+# by mistake in the operator-routine untrack pass (#4076) — keep them tracked.
+!routines/monitoring/
+routines/monitoring/*
+!routines/monitoring/automation-executor.js
+!routines/monitoring/automation-candidate-executor.js
+!routines/monitoring/automation-candidate-detector.js
+!routines/monitoring/automation-candidate-recommender.js
