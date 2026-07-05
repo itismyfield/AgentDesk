@@ -1385,6 +1385,8 @@ mod catch_up_recovery_tests {
         fetch_error: Option<&'static str>,
         messages: Vec<serenity::Message>,
         fetch_attempts: Option<Arc<AtomicUsize>>,
+        cleanup_hook:
+            Option<Arc<dyn Fn(&Arc<super::super::SharedData>, ChannelId, MessageId) + Send + Sync>>,
     }
 
     impl TestCatchUpDiscordApi {
@@ -1395,6 +1397,7 @@ mod catch_up_recovery_tests {
                 fetch_error: Some("temporary test fetch failure"),
                 messages: Vec::new(),
                 fetch_attempts: None,
+                cleanup_hook: None,
             }
         }
 
@@ -1405,6 +1408,7 @@ mod catch_up_recovery_tests {
                 fetch_error: None,
                 messages: Vec::new(),
                 fetch_attempts: None,
+                cleanup_hook: None,
             }
         }
     }
@@ -1438,10 +1442,13 @@ mod catch_up_recovery_tests {
 
         async fn cleanup_recovered_catch_up_hourglass(
             &self,
-            _shared: &Arc<super::super::SharedData>,
-            _channel_id: ChannelId,
-            _message_id: MessageId,
+            shared: &Arc<super::super::SharedData>,
+            channel_id: ChannelId,
+            message_id: MessageId,
         ) {
+            if let Some(hook) = &self.cleanup_hook {
+                hook(shared, channel_id, message_id);
+            }
         }
     }
 
@@ -1470,6 +1477,15 @@ mod catch_up_recovery_tests {
         message.content = text.to_string();
         message.timestamp = message_id.created_at();
         message
+    }
+
+    fn set_dir_readonly(path: &std::path::Path, readonly: bool) {
+        let mut permissions = std::fs::metadata(path)
+            .unwrap_or_else(|error| panic!("read permissions for {}: {error}", path.display()))
+            .permissions();
+        permissions.set_readonly(readonly);
+        std::fs::set_permissions(path, permissions)
+            .unwrap_or_else(|error| panic!("set permissions for {}: {error}", path.display()));
     }
 
     #[test]
@@ -1850,6 +1866,7 @@ mod catch_up_recovery_tests {
             fetch_error: None,
             messages: Vec::new(),
             fetch_attempts: Some(Arc::clone(&fetch_attempts)),
+            cleanup_hook: None,
         };
         let retry_checkpoints = HashMap::new();
         catch_up_missed_messages_inner_with_api_and_pending_retry_channels(
@@ -1884,6 +1901,18 @@ mod catch_up_recovery_tests {
         let later_id = recent_message_id(3);
         let checkpoint = first_id.get() - 1;
         write_last_message_checkpoint(root.path(), &provider, channel_id, checkpoint);
+        let pending_queue_dir = root
+            .path()
+            .join("runtime")
+            .join("discord_pending_queue")
+            .join(provider.as_str())
+            .join(&shared.token_hash);
+        // The queue dir is created lazily on first persist; pre-create it so the
+        // readonly flip in the cleanup hook can target it before any file lands.
+        std::fs::create_dir_all(&pending_queue_dir).expect("pre-create pending queue dir");
+        let readonly_dir = pending_queue_dir.clone();
+        let cleanup_calls = Arc::new(AtomicUsize::new(0));
+        let cleanup_calls_for_hook = Arc::clone(&cleanup_calls);
 
         let api = TestCatchUpDiscordApi {
             current_user_id: Some(9001),
@@ -1891,14 +1920,21 @@ mod catch_up_recovery_tests {
             fetch_error: None,
             messages: vec![
                 catch_up_test_message(channel_id, first_id, author_id, "repeat turn"),
-                catch_up_test_message(channel_id, deferred_id, author_id, "repeat turn"),
+                catch_up_test_message(channel_id, deferred_id, author_id, "deferred turn"),
                 catch_up_test_message(channel_id, later_id, author_id, "later turn"),
             ],
             fetch_attempts: None,
+            cleanup_hook: Some(Arc::new(move |_shared, _channel_id, _message_id| {
+                if cleanup_calls_for_hook.fetch_add(1, Ordering::SeqCst) == 0 {
+                    set_dir_readonly(&readonly_dir, true);
+                }
+            })),
         };
         let retry_checkpoints = HashMap::new();
 
         catch_up_missed_messages_inner_with_api(&api, &shared, &provider, &retry_checkpoints).await;
+        set_dir_readonly(&pending_queue_dir, false);
+        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
 
         let saved_checkpoint = *shared
             .last_message_ids
@@ -1934,6 +1970,59 @@ mod catch_up_recovery_tests {
                 .source_message_ids
                 .contains(&later_id),
             "later message must not be merged or committed in the deferred pass"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn phase1_last_item_dedup_advances_checkpoint_without_retry_and_continues() {
+        let root = scoped_runtime_root();
+        let shared = super::super::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(1479671298497183835);
+        let author_id = 343742347365974026;
+        let later_author_id = author_id + 1;
+        let first_id = recent_message_id(1);
+        let duplicate_id = recent_message_id(2);
+        let later_id = recent_message_id(3);
+        let checkpoint = first_id.get() - 1;
+        write_last_message_checkpoint(root.path(), &provider, channel_id, checkpoint);
+
+        let api = TestCatchUpDiscordApi {
+            current_user_id: Some(9001),
+            binding_status: RuntimeChannelBindingStatus::Owned,
+            fetch_error: None,
+            messages: vec![
+                catch_up_test_message(channel_id, first_id, author_id, "repeat turn"),
+                catch_up_test_message(channel_id, duplicate_id, author_id, "repeat turn"),
+                catch_up_test_message(channel_id, later_id, later_author_id, "later turn"),
+            ],
+            fetch_attempts: None,
+            cleanup_hook: None,
+        };
+        let retry_checkpoints = HashMap::new();
+
+        catch_up_missed_messages_inner_with_api(&api, &shared, &provider, &retry_checkpoints).await;
+
+        let saved_checkpoint = *shared
+            .last_message_ids
+            .get(&channel_id)
+            .expect("phase1 should checkpoint through the later committed message");
+        assert_eq!(saved_checkpoint, later_id.get());
+        assert!(!shared.catch_up_retry_pending.contains_key(&channel_id));
+
+        let snapshot = super::super::mailbox_snapshot(&shared, channel_id).await;
+        let queued_ids: Vec<MessageId> = snapshot
+            .intervention_queue
+            .iter()
+            .map(|item| item.message_id)
+            .collect();
+        assert_eq!(queued_ids, vec![first_id, later_id]);
+        assert!(
+            !snapshot
+                .intervention_queue
+                .iter()
+                .any(|item| item.message_id == duplicate_id),
+            "last-item dedup must advance the checkpoint without queueing a duplicate"
         );
     }
 
@@ -2094,7 +2183,7 @@ mod catch_up_recovery_tests {
     }
 
     #[test]
-    fn phase2_enqueue_commit_classifies_source_id_duplicate_without_recovery() {
+    fn phase2_enqueue_commit_classifies_duplicate_refusals_without_recovery() {
         let accepted = super::super::MailboxEnqueueOutcome {
             enqueued: true,
             merged: false,
@@ -2127,6 +2216,17 @@ mod catch_up_recovery_tests {
             classify_phase2_enqueue_commit(&already_active),
             Phase2EnqueueCommit::Duplicate
         );
+
+        let last_item_dedup = super::super::MailboxEnqueueOutcome {
+            enqueued: false,
+            merged: false,
+            refusal_reason: Some(EnqueueRefusalReason::LastItemDedup),
+            persistence_error: None,
+        };
+        assert_eq!(
+            classify_phase2_enqueue_commit(&last_item_dedup),
+            Phase2EnqueueCommit::Duplicate
+        );
     }
 
     #[test]
@@ -2139,17 +2239,6 @@ mod catch_up_recovery_tests {
         };
         assert_eq!(
             classify_phase2_enqueue_commit(&actor_unreachable),
-            Phase2EnqueueCommit::Deferred
-        );
-
-        let last_item_dedup = super::super::MailboxEnqueueOutcome {
-            enqueued: false,
-            merged: false,
-            refusal_reason: Some(EnqueueRefusalReason::LastItemDedup),
-            persistence_error: None,
-        };
-        assert_eq!(
-            classify_phase2_enqueue_commit(&last_item_dedup),
             Phase2EnqueueCommit::Deferred
         );
 

@@ -410,9 +410,9 @@
 | `services::discord::agent_handoff` | `src/services/discord/agent_handoff.rs` | 928 | 574 | 354 |  |
 | `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 1083 | 982 | 101 |  |
 | `services::discord::answer_flush_barrier` | `src/services/discord/answer_flush_barrier.rs` | 511 | 209 | 302 |  |
-| `services::discord::catch_up` | `src/services/discord/catch_up.rs` | 2167 | 1301 | 866 | giant-file |
+| `services::discord::catch_up` | `src/services/discord/catch_up.rs` | 2256 | 1301 | 955 | giant-file |
 | `services::discord::catch_up::classification` | `src/services/discord/catch_up/classification.rs` | 48 | 48 | 0 |  |
-| `services::discord::catch_up::phase2` | `src/services/discord/catch_up/phase2.rs` | 88 | 88 | 0 |  |
+| `services::discord::catch_up::phase2` | `src/services/discord/catch_up/phase2.rs` | 89 | 89 | 0 |  |
 | `services::discord::commands` | `src/services/discord/commands/mod.rs` | 120 | 120 | 0 |  |
 | `services::discord::commands::command_policy` | `src/services/discord/commands/command_policy.rs` | 221 | 209 | 12 |  |
 | `services::discord::commands::config` | `src/services/discord/commands/config.rs` | 1224 | 956 | 268 |  |
