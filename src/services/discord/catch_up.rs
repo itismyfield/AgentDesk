@@ -206,7 +206,13 @@ fn consume_catch_up_retry_state_for_scan(
     }
 
     let Some((_, pending_retry_state)) = shared.catch_up_retry_pending.remove(&channel_id) else {
-        return CatchUpRetryScanDecision::SkipConsumed;
+        // A concurrent drain-path take consumed the pending entry. A caller-
+        // supplied `retry_checkpoints` entry was handed to THIS scan though —
+        // losing the DashMap race must not discard it.
+        return match retry_state {
+            Some(state) => CatchUpRetryScanDecision::Proceed(Some(state)),
+            None => CatchUpRetryScanDecision::SkipConsumed,
+        };
     };
     retry_state = Some(merge_catch_up_retry_state(retry_state, pending_retry_state));
     CatchUpRetryScanDecision::Proceed(retry_state)
@@ -1798,8 +1804,9 @@ mod catch_up_recovery_tests {
                 &HashMap::from([(channel_id, consumed)]),
                 &pending_retry_channels,
             ),
-            CatchUpRetryScanDecision::SkipConsumed,
-            "a stale caller-local retry copy must not be used after remove loses the race"
+            CatchUpRetryScanDecision::Proceed(Some(consumed)),
+            "a caller-supplied retry_checkpoints entry is owned by this scan and \
+             survives losing the pending-map race"
         );
 
         let fetch_attempts = Arc::new(AtomicUsize::new(0));
