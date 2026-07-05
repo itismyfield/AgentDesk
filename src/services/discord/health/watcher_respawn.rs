@@ -105,6 +105,7 @@ pub(super) fn force_clean_respawn_offset_floor(
     committed_frontier_for_current_generation.filter(|offset| *offset > 0)
 }
 
+#[cfg(unix)]
 fn generation_fenced_respawn_frontier(
     shared: &SharedData,
     channel_id: ChannelId,
@@ -116,6 +117,18 @@ fn generation_fenced_respawn_frontier(
         channel_id,
         tmux_session,
     )
+}
+
+// `discord::tmux` (and the on-disk generation fence it reads) is unix-only;
+// without it there is no provable same-generation frontier, so respawn floors
+// stay disabled rather than falling back to the unfenced snapshot value.
+#[cfg(not(unix))]
+fn generation_fenced_respawn_frontier(
+    _shared: &SharedData,
+    _channel_id: ChannelId,
+    _snapshot: &WatcherStateSnapshot,
+) -> Option<u64> {
+    None
 }
 
 fn is_agentdesk_tmux_session(tmux_session: Option<&str>) -> bool {
@@ -726,6 +739,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // exercises the unix-only `discord::tmux` generation fence
     #[test]
     fn force_clean_respawn_offset_floor_ignores_stale_prior_generation_frontier() {
         let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
