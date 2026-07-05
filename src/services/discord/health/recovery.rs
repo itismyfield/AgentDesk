@@ -107,7 +107,7 @@ type IdleTmuxStaleTurnInflightCandidateHook =
 
 #[cfg(test)]
 type IdleTmuxStaleTurnPostClearHook =
-    Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()>>> + Send + Sync>;
+    Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
 
 #[cfg(test)]
 fn idle_tmux_stale_turn_inflight_candidate_hook()
@@ -1024,12 +1024,16 @@ pub async fn clear_idle_tmux_stale_turn(
         return None;
     }
     #[cfg(test)]
-    if let Some(hook) = idle_tmux_stale_turn_post_clear_hook()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .clone()
     {
-        hook().await;
+        // Bind the cloned hook first so the mutex guard (a non-Send temporary
+        // in an `if let` scrutinee would live across the await) drops here.
+        let hook = idle_tmux_stale_turn_post_clear_hook()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        if let Some(hook) = hook {
+            hook().await;
+        }
     }
     let expected_user_msg_id = inflight_pin
         .as_ref()
@@ -4352,7 +4356,7 @@ mod stall_watchdog_auto_heal_tests {
             .unwrap_or_else(|poison| poison.into_inner());
         let tempdir = tempfile::tempdir().expect("runtime root tempdir");
         let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
-        let provider = ProviderKind::Codex;
+        let provider = ProviderKind::Claude;
         let registry = HealthRegistry::new();
         let shared = super::super::super::make_shared_data_for_tests();
         registry
@@ -4413,7 +4417,7 @@ mod stall_watchdog_auto_heal_tests {
             .unwrap_or_else(|poison| poison.into_inner());
         let tempdir = tempfile::tempdir().expect("runtime root tempdir");
         let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
-        let provider = ProviderKind::Codex;
+        let provider = ProviderKind::Claude;
         let registry = HealthRegistry::new();
         let shared = super::super::super::make_shared_data_for_tests();
         registry
@@ -4494,7 +4498,7 @@ mod stall_watchdog_auto_heal_tests {
             .unwrap_or_else(|poison| poison.into_inner());
         let tempdir = tempfile::tempdir().expect("runtime root tempdir");
         let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
-        let provider = ProviderKind::Codex;
+        let provider = ProviderKind::Claude;
         let registry = HealthRegistry::new();
         let shared = super::super::super::make_shared_data_for_tests();
         registry
