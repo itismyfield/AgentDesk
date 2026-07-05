@@ -145,8 +145,7 @@ pub(in crate::services::discord) fn take_catch_up_retry_checkpoint_after_queue_d
 }
 
 fn arm_catch_up_retry_pending(shared: &SharedData, channel_id: ChannelId, retry_after: u64) -> u64 {
-    arm_catch_up_retry_state(shared, channel_id, CatchUpRetryState::new(retry_after))
-        .checkpoint
+    arm_catch_up_retry_state(shared, channel_id, CatchUpRetryState::new(retry_after)).checkpoint
 }
 
 fn arm_catch_up_retry_state(
@@ -195,10 +194,8 @@ fn merge_catch_up_retry_pending_into(
         let Some((_, retry_state)) = shared.catch_up_retry_pending.remove(&channel_id) else {
             continue;
         };
-        let merged = merge_catch_up_retry_state(
-            retry_checkpoints.get(&channel_id).copied(),
-            retry_state,
-        );
+        let merged =
+            merge_catch_up_retry_state(retry_checkpoints.get(&channel_id).copied(), retry_state);
         retry_checkpoints.insert(channel_id, merged);
         consumed += 1;
     }
@@ -1237,18 +1234,16 @@ mod catch_up_recovery_tests {
     use super::{
         CATCH_UP_RECENT_MAX_PAGES, CATCH_UP_RETRY_FETCH_FAILURE_LIMIT,
         CATCH_UP_SCAN_PACE_DEFAULT_MS, CatchUpChannelCandidate, CatchUpClassification,
-        CatchUpDiscordApi, CatchUpFetchMode, CatchUpMessageView, CatchUpRetryState,
-        ChannelId, MessageId,
-        Phase2EnqueueCommit, ProviderKind, RuntimeChannelBindingStatus,
+        CatchUpDiscordApi, CatchUpFetchMode, CatchUpMessageView, CatchUpRetryState, ChannelId,
+        MessageId, Phase2EnqueueCommit, ProviderKind, RuntimeChannelBindingStatus,
         advance_phase2_checkpoint, arm_catch_up_retry_pending, catch_up_enqueue_accepted,
         catch_up_fetch_mode_for_scan, catch_up_message_age_reference_time,
         catch_up_missed_messages_inner_with_api, catch_up_remaining_queue_capacity,
         classify_catch_up_message, classify_phase2_enqueue_commit,
         insert_configured_catch_up_candidate, merge_catch_up_retry_checkpoint,
-        merge_catch_up_retry_pending_into, parse_catch_up_scan_pace,
-        phase2_retry_after_checkpoint, rearm_catch_up_retry_after_fetch_failure,
-        should_fetch_older_recent_page, should_pace_before_scan,
-        take_catch_up_retry_checkpoint_after_queue_drain,
+        merge_catch_up_retry_pending_into, parse_catch_up_scan_pace, phase2_retry_after_checkpoint,
+        rearm_catch_up_retry_after_fetch_failure, should_fetch_older_recent_page,
+        should_pace_before_scan, take_catch_up_retry_checkpoint_after_queue_drain,
     };
     use crate::services::turn_orchestrator::EnqueueRefusalReason;
     use poise::serenity_prelude as serenity;
@@ -1304,8 +1299,11 @@ mod catch_up_recovery_tests {
             .join("last_message")
             .join(provider.as_str());
         std::fs::create_dir_all(&dir).expect("create last_message provider dir");
-        std::fs::write(dir.join(format!("{}.txt", channel_id.get())), checkpoint.to_string())
-            .expect("write last_message checkpoint");
+        std::fs::write(
+            dir.join(format!("{}.txt", channel_id.get())),
+            checkpoint.to_string(),
+        )
+        .expect("write last_message checkpoint");
     }
 
     struct TestCatchUpDiscordApi {
@@ -1712,11 +1710,8 @@ mod catch_up_recovery_tests {
             armed_at,
         };
 
-        let normal_reference = catch_up_message_age_reference_time(
-            scan_wall_time,
-            scan_instant,
-            None,
-        );
+        let normal_reference =
+            catch_up_message_age_reference_time(scan_wall_time, scan_instant, None);
         assert_eq!(
             normal_reference
                 .signed_duration_since(message_time)
@@ -1724,11 +1719,8 @@ mod catch_up_recovery_tests {
             400
         );
 
-        let retry_reference = catch_up_message_age_reference_time(
-            scan_wall_time,
-            scan_instant,
-            Some(retry_state),
-        );
+        let retry_reference =
+            catch_up_message_age_reference_time(scan_wall_time, scan_instant, Some(retry_state));
         assert_eq!(
             retry_reference
                 .signed_duration_since(message_time)
@@ -1817,12 +1809,8 @@ mod catch_up_recovery_tests {
             arm_catch_up_retry_pending(&shared, channel_id, checkpoint),
             checkpoint
         );
-        let first_retry = take_catch_up_retry_checkpoint_after_queue_drain(
-            &shared,
-            channel_id,
-            0,
-        )
-        .expect("pending retry should be consumed by the first drain");
+        let first_retry = take_catch_up_retry_checkpoint_after_queue_drain(&shared, channel_id, 0)
+            .expect("pending retry should be consumed by the first drain");
         assert_eq!(first_retry.checkpoint, checkpoint);
         assert_eq!(first_retry.fetch_failures, 0);
         assert!(!shared.catch_up_retry_pending.contains_key(&channel_id));
@@ -1833,12 +1821,8 @@ mod catch_up_recovery_tests {
         assert_eq!(rearmed.fetch_failures, 1);
         assert_eq!(rearmed.armed_at, first_retry.armed_at);
 
-        let second_retry = take_catch_up_retry_checkpoint_after_queue_drain(
-            &shared,
-            channel_id,
-            0,
-        )
-        .expect("subsequent drain should retry the over-cap backlog again");
+        let second_retry = take_catch_up_retry_checkpoint_after_queue_drain(&shared, channel_id, 0)
+            .expect("subsequent drain should retry the over-cap backlog again");
         assert_eq!(second_retry, rearmed);
     }
 
@@ -1854,7 +1838,8 @@ mod catch_up_recovery_tests {
         };
 
         assert!(
-            rearm_catch_up_retry_after_fetch_failure(&shared, channel_id, exhausted_retry).is_none(),
+            rearm_catch_up_retry_after_fetch_failure(&shared, channel_id, exhausted_retry)
+                .is_none(),
             "retry fetch failures must not re-arm forever"
         );
         assert!(!shared.catch_up_retry_pending.contains_key(&channel_id));
