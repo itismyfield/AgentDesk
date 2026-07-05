@@ -395,6 +395,11 @@
       "path": "migrations/postgres/0076_pipeline_stages_backoff.sql",
       "sha256": "38275062039f5a29a8d5103cc3622e7d348d1273b0e3be780568aa44f624903f",
       "version": 76
+    },
+    {
+      "path": "migrations/postgres/0077_session_selector_watermark.sql",
+      "sha256": "3119674f1d0ebcc0b57151800035ceaff4db4caf46d6b76262f184aa569d4156",
+      "version": 77
     }
   ],
   "version": 1

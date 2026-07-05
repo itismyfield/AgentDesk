@@ -422,8 +422,13 @@ pub async fn get_claude_session_id(
         {
             Ok(Some(ids)) => {
                 let selected_session_id =
-                    selected_provider_resume_selector_for_provider(provider, &ids)
-                        .map(str::to_string);
+                    selected_provider_resume_selector_for_provider_recording_observation(
+                        pool,
+                        &params.session_key,
+                        provider,
+                        &ids,
+                    )
+                    .await;
                 (
                     StatusCode::OK,
                     Json(json!({
@@ -1121,8 +1126,7 @@ pub(crate) fn latest_runtime_activity_unix_nanos(tmux_session_name: &str) -> i64
     // actively appending to the real transcript.
     if let Some(binding) =
         crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name)
-        && binding.runtime_kind
-            == crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui
+        && binding.runtime_kind == crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui
     {
         latest = latest.max(mtime_nanos(&binding.output_path));
     }
@@ -1147,6 +1151,25 @@ pub(crate) fn selected_provider_resume_selector_for_provider<'a>(
     } else {
         selected_provider_resume_selector(ids)
     }
+}
+
+pub(crate) async fn selected_provider_resume_selector_for_provider_recording_observation(
+    pool: &sqlx::PgPool,
+    session_key: &str,
+    provider_name: Option<&str>,
+    ids: &dispatched_sessions_db::ProviderSessionIds,
+) -> Option<String> {
+    let selected =
+        selected_provider_resume_selector_for_provider(provider_name, ids).map(str::to_string);
+    record_raw_provider_transcript_len_watermark_if_observed(
+        pool,
+        session_key,
+        provider_name,
+        ids,
+        None,
+    )
+    .await;
+    selected
 }
 
 fn selected_provider_resume_selector(
@@ -1181,12 +1204,17 @@ fn selected_provider_resume_selector_with_claude_home<'a>(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    let cached_activity = cwd
-        .zip(cached)
-        .and_then(|(cwd, selector)| claude_selector_file_activity(cwd, selector, claude_home));
-    let raw_activity = cwd
-        .zip(raw)
-        .and_then(|(cwd, selector)| claude_selector_file_activity(cwd, selector, claude_home));
+    let cached_activity = cwd.zip(cached).and_then(|(cwd, selector)| {
+        claude_selector_file_activity(cwd, selector, claude_home, None)
+    });
+    let raw_activity = cwd.zip(raw).and_then(|(cwd, selector)| {
+        claude_selector_file_activity(
+            cwd,
+            selector,
+            claude_home,
+            positive_raw_transcript_len_watermark(ids),
+        )
+    });
 
     crate::services::session_selector_validity::choose_provider_session_selector(
         cached,
@@ -1199,6 +1227,21 @@ fn selected_provider_resume_selector_with_claude_home<'a>(
 }
 
 fn claude_selector_file_activity(
+    cwd: &str,
+    selector: &str,
+    claude_home: Option<&std::path::Path>,
+    persisted_len_watermark: Option<u64>,
+) -> Option<crate::services::session_selector_validity::SelectorFileActivity> {
+    claude_selector_file_activity_sample(cwd, selector, claude_home).map(|activity| {
+        crate::services::session_selector_validity::activity_with_observed_growth(
+            selector,
+            activity,
+            persisted_len_watermark,
+        )
+    })
+}
+
+fn claude_selector_file_activity_sample(
     cwd: &str,
     selector: &str,
     claude_home: Option<&std::path::Path>,
@@ -1220,16 +1263,67 @@ fn claude_selector_file_activity(
         );
     };
     Some(
-        crate::services::session_selector_validity::activity_with_observed_growth(
-            selector,
-            crate::services::session_selector_validity::SelectorFileActivity {
-                exists: true,
-                len: metadata.len(),
-                mtime_age_secs: file_mtime_age_secs(&metadata),
-                observed_growth_since_previous_sample: false,
-            },
-        ),
+        crate::services::session_selector_validity::SelectorFileActivity {
+            exists: true,
+            len: metadata.len(),
+            mtime_age_secs: file_mtime_age_secs(&metadata),
+            observed_growth_since_previous_sample: false,
+        },
     )
+}
+
+fn positive_raw_transcript_len_watermark(
+    ids: &dispatched_sessions_db::ProviderSessionIds,
+) -> Option<u64> {
+    ids.raw_provider_transcript_len_watermark
+        .and_then(|value| u64::try_from(value).ok())
+        .filter(|value| *value > 0)
+}
+
+async fn record_raw_provider_transcript_len_watermark_if_observed(
+    pool: &sqlx::PgPool,
+    session_key: &str,
+    provider_name: Option<&str>,
+    ids: &dispatched_sessions_db::ProviderSessionIds,
+    claude_home: Option<&std::path::Path>,
+) {
+    if !provider_is_claude(provider_name) {
+        return;
+    }
+    let Some(cwd) = ids
+        .cwd
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    let Some(raw) = raw_provider_resume_selector(ids) else {
+        return;
+    };
+    let Some(activity) = claude_selector_file_activity_sample(cwd, raw, claude_home) else {
+        return;
+    };
+    if !activity.exists || activity.len == 0 {
+        return;
+    }
+    if let Err(error) = dispatched_sessions_db::update_raw_provider_transcript_len_watermark_pg(
+        pool,
+        session_key,
+        provider_name,
+        activity.len,
+    )
+    .await
+    {
+        tracing::warn!(
+            session_key,
+            provider = provider_name.unwrap_or(""),
+            raw_provider_session_id = raw,
+            observed_len = activity.len,
+            error,
+            "failed to update raw provider transcript length watermark"
+        );
+    }
 }
 
 fn file_mtime_age_secs(metadata: &std::fs::Metadata) -> Option<i64> {
@@ -1487,7 +1581,18 @@ async fn kill_tmux_session_impl(
     )
     .await
     {
-        Ok(Some(ids)) => provider_resume_selector_is_effective(effective_provider_name, &ids),
+        Ok(Some(ids)) => {
+            let resumable = provider_resume_selector_is_effective(effective_provider_name, &ids);
+            record_raw_provider_transcript_len_watermark_if_observed(
+                pool,
+                session_key,
+                effective_provider_name,
+                &ids,
+                None,
+            )
+            .await;
+            resumable
+        }
         Ok(None) => false,
         Err(error) => {
             tracing::warn!(
@@ -1662,12 +1767,14 @@ mod kill_tmux_resume_tests {
         claude_session_id: Option<&str>,
         raw_provider_session_id: Option<&str>,
         cwd: Option<&std::path::Path>,
+        raw_provider_transcript_len_watermark: Option<i64>,
     ) -> ProviderSessionIds {
         ProviderSessionIds {
             claude_session_id: claude_session_id.map(str::to_string),
             raw_provider_session_id: raw_provider_session_id.map(str::to_string),
             cwd: cwd.map(|path| path.display().to_string()),
             cache_entry_age_secs: Some(3_600),
+            raw_provider_transcript_len_watermark,
         }
     }
 
@@ -1716,8 +1823,7 @@ mod kill_tmux_resume_tests {
         let tmux = format!("AgentDesk-claude-runtime-{}", uuid::Uuid::new_v4());
         let dir = tempfile::tempdir().expect("tempdir");
         let transcript = dir.path().join("claude-transcript.jsonl");
-        std::fs::write(&transcript, "{\"type\":\"assistant\"}\n")
-            .expect("write transcript");
+        std::fs::write(&transcript, "{\"type\":\"assistant\"}\n").expect("write transcript");
         let transcript_time = filetime::FileTime::from_unix_time(1_700_001_000, 0);
         filetime::set_file_mtime(&transcript, transcript_time).expect("set transcript mtime");
         crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
@@ -1823,16 +1929,13 @@ mod kill_tmux_resume_tests {
         .expect("raw transcript path");
         std::fs::create_dir_all(cached_path.parent().expect("cached parent"))
             .expect("create cached parent");
-        std::fs::create_dir_all(raw_path.parent().expect("raw parent"))
-            .expect("create raw parent");
+        std::fs::create_dir_all(raw_path.parent().expect("raw parent")).expect("create raw parent");
         std::fs::write(&cached_path, b"cached\n").expect("write cached transcript");
         std::fs::write(&raw_path, b"raw\n").expect("write raw transcript");
         let now = std::time::SystemTime::now();
         filetime::set_file_mtime(
             &cached_path,
-            filetime::FileTime::from_system_time(
-                now - std::time::Duration::from_secs(700),
-            ),
+            filetime::FileTime::from_system_time(now - std::time::Duration::from_secs(700)),
         )
         .expect("set cached mtime");
         filetime::set_file_mtime(
@@ -1840,7 +1943,12 @@ mod kill_tmux_resume_tests {
             filetime::FileTime::from_system_time(now - std::time::Duration::from_secs(5)),
         )
         .expect("set raw mtime");
-        let ids = ids(Some(&cached_session_id), Some(&raw_session_id), Some(cwd.path()));
+        let ids = ids(
+            Some(&cached_session_id),
+            Some(&raw_session_id),
+            Some(cwd.path()),
+            None,
+        );
 
         assert_eq!(
             selected_provider_resume_selector_with_claude_home(&ids, Some(claude_home.path())),
@@ -1863,6 +1971,105 @@ mod kill_tmux_resume_tests {
     }
 
     #[test]
+    fn claude_selector_uses_raw_growth_from_persisted_watermark_after_restart() {
+        crate::services::session_selector_validity::clear_selector_observations_for_tests();
+        let cwd = tempfile::tempdir().expect("cwd tempdir");
+        let claude_home = tempfile::tempdir().expect("claude home tempdir");
+        let cached_session_id = uuid::Uuid::new_v4().to_string();
+        let raw_session_id = uuid::Uuid::new_v4().to_string();
+        let cached_path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+            cwd.path(),
+            &cached_session_id,
+            Some(claude_home.path()),
+        )
+        .expect("cached transcript path");
+        let raw_path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+            cwd.path(),
+            &raw_session_id,
+            Some(claude_home.path()),
+        )
+        .expect("raw transcript path");
+        std::fs::create_dir_all(cached_path.parent().expect("cached parent"))
+            .expect("create cached parent");
+        std::fs::create_dir_all(raw_path.parent().expect("raw parent")).expect("create raw parent");
+        std::fs::write(&cached_path, b"cached\n").expect("write cached transcript");
+        std::fs::write(&raw_path, b"raw\ngrown\n").expect("write raw transcript");
+        let now = std::time::SystemTime::now();
+        filetime::set_file_mtime(
+            &cached_path,
+            filetime::FileTime::from_system_time(now - std::time::Duration::from_secs(700)),
+        )
+        .expect("set cached mtime");
+        filetime::set_file_mtime(
+            &raw_path,
+            filetime::FileTime::from_system_time(now - std::time::Duration::from_secs(5)),
+        )
+        .expect("set raw mtime");
+        let ids = ids(
+            Some(&cached_session_id),
+            Some(&raw_session_id),
+            Some(cwd.path()),
+            Some(4),
+        );
+
+        assert_eq!(
+            selected_provider_resume_selector_with_claude_home(&ids, Some(claude_home.path())),
+            Some(raw_session_id.as_str()),
+            "a persisted raw length watermark below the current length is durable growth evidence"
+        );
+    }
+
+    #[test]
+    fn claude_selector_keeps_cached_when_raw_len_equals_persisted_watermark() {
+        crate::services::session_selector_validity::clear_selector_observations_for_tests();
+        let cwd = tempfile::tempdir().expect("cwd tempdir");
+        let claude_home = tempfile::tempdir().expect("claude home tempdir");
+        let cached_session_id = uuid::Uuid::new_v4().to_string();
+        let raw_session_id = uuid::Uuid::new_v4().to_string();
+        let cached_path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+            cwd.path(),
+            &cached_session_id,
+            Some(claude_home.path()),
+        )
+        .expect("cached transcript path");
+        let raw_path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+            cwd.path(),
+            &raw_session_id,
+            Some(claude_home.path()),
+        )
+        .expect("raw transcript path");
+        std::fs::create_dir_all(cached_path.parent().expect("cached parent"))
+            .expect("create cached parent");
+        std::fs::create_dir_all(raw_path.parent().expect("raw parent")).expect("create raw parent");
+        std::fs::write(&cached_path, b"cached\n").expect("write cached transcript");
+        std::fs::write(&raw_path, b"raw\n").expect("write raw transcript");
+        let raw_len = std::fs::metadata(&raw_path).expect("raw metadata").len() as i64;
+        let now = std::time::SystemTime::now();
+        filetime::set_file_mtime(
+            &cached_path,
+            filetime::FileTime::from_system_time(now - std::time::Duration::from_secs(700)),
+        )
+        .expect("set cached mtime");
+        filetime::set_file_mtime(
+            &raw_path,
+            filetime::FileTime::from_system_time(now - std::time::Duration::from_secs(5)),
+        )
+        .expect("set raw mtime");
+        let ids = ids(
+            Some(&cached_session_id),
+            Some(&raw_session_id),
+            Some(cwd.path()),
+            Some(raw_len),
+        );
+
+        assert_eq!(
+            selected_provider_resume_selector_with_claude_home(&ids, Some(claude_home.path())),
+            Some(cached_session_id.as_str()),
+            "an equal persisted watermark means the raw transcript has not grown"
+        );
+    }
+
+    #[test]
     fn claude_resumable_requires_existing_transcript_for_selected_selector() {
         let cwd = tempfile::tempdir().expect("cwd tempdir");
         let claude_home = tempfile::tempdir().expect("claude home tempdir");
@@ -1878,7 +2085,7 @@ mod kill_tmux_resume_tests {
             .expect("create transcript parent");
         std::fs::write(&transcript_path, b"{}\n").expect("write transcript");
 
-        let ids = ids(Some(&session_id), None, Some(cwd.path()));
+        let ids = ids(Some(&session_id), None, Some(cwd.path()), None);
         assert!(provider_resume_selector_is_effective_with_claude_home(
             Some("claude"),
             &ids,
@@ -1892,14 +2099,14 @@ mod kill_tmux_resume_tests {
         let claude_home = tempfile::tempdir().expect("claude home tempdir");
         let session_id = uuid::Uuid::new_v4().to_string();
 
-        let missing_transcript = ids(Some(&session_id), None, Some(cwd.path()));
+        let missing_transcript = ids(Some(&session_id), None, Some(cwd.path()), None);
         assert!(!provider_resume_selector_is_effective_with_claude_home(
             Some("claude"),
             &missing_transcript,
             Some(claude_home.path()),
         ));
 
-        let missing_cwd = ids(Some(&session_id), None, None);
+        let missing_cwd = ids(Some(&session_id), None, None, None);
         assert!(!provider_resume_selector_is_effective_with_claude_home(
             Some("claude"),
             &missing_cwd,
@@ -1909,14 +2116,14 @@ mod kill_tmux_resume_tests {
 
     #[test]
     fn non_claude_resumable_uses_existing_selector_presence_contract() {
-        let codex_ids = ids(None, Some("codex-selector"), None);
+        let codex_ids = ids(None, Some("codex-selector"), None, None);
         assert!(provider_resume_selector_is_effective_with_claude_home(
             Some("codex"),
             &codex_ids,
             None,
         ));
 
-        let no_selector = ids(None, Some("   "), None);
+        let no_selector = ids(None, Some("   "), None, None);
         assert!(!provider_resume_selector_is_effective_with_claude_home(
             Some("codex"),
             &no_selector,

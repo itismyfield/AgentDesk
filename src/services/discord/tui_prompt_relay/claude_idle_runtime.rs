@@ -440,6 +440,11 @@ pub(super) fn resolved_claude_idle_relay_transcript_path(
             &transcript_path,
             resolved_session_id,
         );
+    } else if transcript_path.exists() {
+        crate::services::tui_prompt_dedupe::refresh_tmux_runtime_binding_activity(
+            tmux_session_name,
+            &binding.output_path,
+        );
     }
     Some(transcript_path)
 }

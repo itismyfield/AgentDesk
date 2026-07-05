@@ -984,7 +984,10 @@
     normal long SILENT tool run (e.g. a big build) is never mistaken for an idle
     hang, with the 4h hard ceiling as the real backstop, and noted the limitation
     in the idle-kill error message + a delayed-event test).
-  - `src/services/tui_prompt_dedupe.rs` (1824 lines; shared TUI prompt
+  - `src/services/tui_prompt_dedupe.rs` (1847 lines; +23 from #4091 r3
+    refresh_runtime_binding_activity so live transcript activity extends the
+    24h binding-mapping TTL even when the relay offset never advances (the
+    exact relay-dead state the anchor protects); shared TUI prompt
     fingerprinting/dedupe state for hook and rollout relay paths, bugfix only
     outside an extraction plan; +60 from #3956: add the
     `touch_prompt_anchor_on_activity` refresh primitive — an ANCHOR-ONLY single-map
@@ -1730,8 +1733,12 @@
   - `src/db/kanban_cards/` (1932 total lines; kanban card persistence and
     GitHub sync lookup surface).
   - `src/db/postgres.rs` (1280 lines; #3651: the `FOREGROUND_RESERVE` process-global, the `background_should_yield` backpressure predicate + pure `should_yield_for_counters` helper, the `clamp_foreground_reserve` helper that keeps the background budget >= 1 for small `pool_max` configs, reserve install+clamp in `connect`, and the predicate + clamp unit tests; #3690: preferred_intake_node_labels upsert/sync + COALESCE preserve; #3692: `agent_roster_sync_enabled` leader-ownership gate on the roster sync; #3722 adds the bounded startup advisory lock wrapper plus concurrency coverage for migration/config-audit/reseed startup sections).
-  - `src/db/dispatched_sessions.rs` (1633 lines; dispatched session
-    persistence helpers. #4091 r2: +6 exposing cache-entry age on provider-session
+  - `src/db/dispatched_sessions.rs` (1671 lines; dispatched session
+    persistence helpers. #4091 r3: +38 for claude_session_id_recorded_at (upsert
+    bumps it only when the cached id value changes, so heartbeats stop extending
+    the flip-back window) and the monotonic raw_provider_transcript_len_watermark
+    accessors backing restart-surviving growth evidence (migration 0077);
+    #4091 r2: +6 exposing cache-entry age on provider-session
     rows so the selector flip-back window can prefer a recently written cached id;
     #3306: +48 for the narrow `load_session_channel_id_pg`
     durable-truth accessor the idle-relay drift self-heal reads; #3693: +2 to

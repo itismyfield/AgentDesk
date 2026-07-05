@@ -730,6 +730,29 @@ pub(crate) fn runtime_binding_for_tmux_session(
         .map(|entry| entry.value.clone())
 }
 
+pub(crate) fn refresh_tmux_runtime_binding_activity(
+    tmux_session_name: &str,
+    output_path: &str,
+) -> bool {
+    let tmux_session_name = tmux_session_name.trim();
+    let output_path = output_path.trim();
+    if tmux_session_name.is_empty() || output_path.is_empty() {
+        return false;
+    }
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.purge_expired();
+    let Some(entry) = state.runtime_by_tmux.get_mut(tmux_session_name) else {
+        return false;
+    };
+    if entry.value.output_path == output_path
+        || entry.value.relay_output_path.as_deref() == Some(output_path)
+    {
+        entry.recorded_at = Instant::now();
+        return true;
+    }
+    false
+}
+
 pub(crate) fn clear_tmux_runtime_binding(tmux_session_name: &str) -> bool {
     let tmux_session_name = tmux_session_name.trim();
     if tmux_session_name.is_empty() {
@@ -2077,6 +2100,54 @@ mod tests {
         let after_wrong = runtime_binding_for_tmux_session("tmux-cold").unwrap();
         assert_eq!(after_wrong.last_offset, 500);
         assert_eq!(after_wrong.relay_last_offset, Some(900));
+    }
+
+    #[test]
+    fn refresh_runtime_binding_activity_extends_mapping_ttl_without_offset_advance() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+
+        register_tmux_runtime_binding(
+            "tmux-runtime-activity",
+            TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                output_path: "/tmp/live-transcript.jsonl".to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some("session-activity".to_string()),
+                last_offset: 123,
+                relay_last_offset: None,
+            },
+        );
+        {
+            let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+            state
+                .runtime_by_tmux
+                .get_mut("tmux-runtime-activity")
+                .expect("runtime binding")
+                .recorded_at = Instant::now() - SESSION_MAPPING_TTL + Duration::from_secs(1);
+        }
+
+        assert!(refresh_tmux_runtime_binding_activity(
+            "tmux-runtime-activity",
+            "/tmp/live-transcript.jsonl",
+        ));
+        let refreshed_age = {
+            let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+            state
+                .runtime_by_tmux
+                .get("tmux-runtime-activity")
+                .expect("runtime binding")
+                .recorded_at
+                .elapsed()
+        };
+        assert!(
+            refreshed_age < Duration::from_secs(1),
+            "fresh transcript activity should refresh the purge timestamp"
+        );
+        let binding = runtime_binding_for_tmux_session("tmux-runtime-activity")
+            .expect("binding survives purge after refresh");
+        assert_eq!(binding.last_offset, 123);
     }
 
     #[test]

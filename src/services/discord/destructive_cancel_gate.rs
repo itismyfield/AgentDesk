@@ -252,6 +252,7 @@ pub(in crate::services::discord) async fn evaluate(
     let Some(expected_output_len) = snapshot.output_len else {
         return DestructiveCancelGate::Denied("halt_evidence_incomplete");
     };
+    let mut previous_relay_frontier = snapshot.relay_frontier;
     for _ in 0..DESTRUCTIVE_CANCEL_REPROBE_ATTEMPTS {
         tokio::time::sleep(DESTRUCTIVE_CANCEL_REPROBE_DELAY).await;
 
@@ -288,17 +289,15 @@ pub(in crate::services::discord) async fn evaluate(
         if output_len_now != Some(expected_output_len) {
             return DestructiveCancelGate::Denied("capture_progress_on_reprobe");
         }
-        if let (Some(expected_relay_frontier), Some(current_relay_frontier)) = (
-            snapshot.relay_frontier,
-            relay_frontier_for_current_generation(
-                shared,
-                watcher_owner_channel,
-                snapshot.pin.tmux_session_name.as_deref(),
-            ),
-        ) && current_relay_frontier > expected_relay_frontier
-        {
+        let current_relay_frontier = relay_frontier_for_current_generation(
+            shared,
+            watcher_owner_channel,
+            snapshot.pin.tmux_session_name.as_deref(),
+        );
+        if relay_frontier_advanced(previous_relay_frontier, current_relay_frontier) {
             return DestructiveCancelGate::Denied("relay_frontier_progress_on_reprobe");
         }
+        previous_relay_frontier = current_relay_frontier;
     }
 
     let Some(tmux_session) = snapshot.pin.tmux_session_name.as_deref() else {
@@ -316,6 +315,14 @@ pub(in crate::services::discord) async fn evaluate(
         return DestructiveCancelGate::Allowed("capture_and_jsonl_halted_with_stale_watcher");
     }
     DestructiveCancelGate::Allowed("capture_and_jsonl_halted")
+}
+
+fn relay_frontier_advanced(previous: Option<u64>, current: Option<u64>) -> bool {
+    match (previous, current) {
+        (Some(previous), Some(current)) => current > previous,
+        (None, Some(current)) => current > 0,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -523,7 +530,10 @@ mod tests {
             );
             write_generation_marker(tmux);
             let current_generation = super::super::tmux::read_generation_file_mtime_ns(tmux);
-            assert!(current_generation > 0, "generation marker mtime is observable");
+            assert!(
+                current_generation > 0,
+                "generation marker mtime is observable"
+            );
             let coord = shared.tmux_relay_coord(channel);
             coord
                 .confirmed_end_offset
@@ -540,12 +550,8 @@ mod tests {
                 &output_path,
                 len,
             );
-            let snapshot = DestructiveCancelProbeSnapshot::from_state(
-                &shared,
-                &state,
-                None,
-                channel,
-            );
+            let snapshot =
+                DestructiveCancelProbeSnapshot::from_state(&shared, &state, None, channel);
             assert_eq!(snapshot.relay_frontier, None);
 
             let gate = evaluate(&shared, &provider, channel, channel, &snapshot).await;
@@ -555,6 +561,61 @@ mod tests {
                 Some("capture_and_jsonl_halted"),
                 "a stale prior-generation relay frontier must not become reprobe progress evidence"
             );
+        });
+    }
+
+    #[test]
+    fn current_generation_relay_frontier_after_empty_snapshot_denies_destructive_cancel() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::TempDir::new().expect("runtime root");
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root.path()) };
+        current_thread_rt().block_on(async {
+            let shared = super::super::make_shared_data_for_tests();
+            let provider = ProviderKind::Claude;
+            let channel = ChannelId::new(4_035_014);
+            let tmux = "tmux-4035-frontier-after-snapshot";
+            let output_path = root.path().join("frontier-after-snapshot.jsonl");
+            let len = write_jsonl(
+                &output_path,
+                &[r#"{"type":"system","subtype":"init","session_id":"s"}"#],
+            );
+            let state = save_gate_state(
+                provider.clone(),
+                channel.get(),
+                4_035_114,
+                tmux,
+                &output_path,
+                len,
+            );
+            let snapshot =
+                DestructiveCancelProbeSnapshot::from_state(&shared, &state, None, channel);
+            assert_eq!(snapshot.relay_frontier, None);
+
+            let generation_path = write_generation_marker(tmux);
+            let current_generation = super::super::tmux::read_generation_file_mtime_ns(tmux);
+            assert!(
+                current_generation > 0,
+                "generation marker mtime is observable"
+            );
+            let coord = shared.tmux_relay_coord(channel);
+            coord
+                .confirmed_end_offset
+                .store(4096, std::sync::atomic::Ordering::Release);
+            coord
+                .confirmed_end_generation_mtime_ns
+                .store(current_generation, std::sync::atomic::Ordering::Release);
+
+            let gate = evaluate(&shared, &provider, channel, channel, &snapshot).await;
+
+            assert_eq!(
+                gate.denied_reason(),
+                Some("relay_frontier_progress_on_reprobe"),
+                "a current-generation frontier appearing after a None snapshot is progress"
+            );
+            let _ = std::fs::remove_file(generation_path);
         });
     }
 

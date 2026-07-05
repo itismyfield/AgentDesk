@@ -17,6 +17,8 @@ pub(super) enum SavedOutputPathDecision {
 struct SessionCacheSelectorState {
     selector_present: bool,
     selected_session_id: Option<String>,
+    cached_session_id: Option<String>,
+    raw_provider_session_id: Option<String>,
     cwd: Option<String>,
 }
 
@@ -61,7 +63,7 @@ pub(super) async fn saved_output_path_for_rebind_resolution<'a>(
     existing_saved_output_path: Option<&'a str>,
     existing_session_id: Option<&str>,
     tmux_session_name: &str,
-) -> Option<&'a str> {
+) -> Option<String> {
     let session_cache_selector_state =
         session_cache_selector_state_for_rebind(shared, provider, tmux_session_name).await;
     let session_cache_selector_present = session_cache_selector_state
@@ -85,7 +87,7 @@ fn saved_output_path_for_rebind_resolution_with_cache_state<'a>(
     tmux_session_name: &str,
     session_cache_selector_state: Option<&SessionCacheSelectorState>,
     claude_home: Option<&std::path::Path>,
-) -> Option<&'a str> {
+) -> Option<String> {
     let saved_path_present = existing_saved_output_path
         .map(str::trim)
         .is_some_and(|path| !path.is_empty());
@@ -102,7 +104,7 @@ fn saved_output_path_for_rebind_resolution_with_cache_state<'a>(
         crate::services::tui_turn_state::STALE_USER_SUBMITTED_RECLAIM_SECS,
     );
     match decision {
-        SavedOutputPathDecision::Keep => existing_saved_output_path,
+        SavedOutputPathDecision::Keep => existing_saved_output_path.map(str::to_string),
         SavedOutputPathDecision::ReResolve(reason) => {
             if let Some(path) = existing_saved_output_path {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -112,6 +114,14 @@ fn saved_output_path_for_rebind_resolution_with_cache_state<'a>(
                     path,
                     reason
                 );
+            }
+            if let Some(transcript_path) = fresher_claude_tui_selector_transcript_path(
+                provider,
+                tmux_session_name,
+                session_cache_selector_state,
+                claude_home,
+            ) {
+                return Some(transcript_path.display().to_string());
             }
             None
         }
@@ -187,19 +197,42 @@ fn claude_tui_selector_transcript_activity_unix_nanos(
     session_cache_selector_state: Option<&SessionCacheSelectorState>,
     claude_home: Option<&std::path::Path>,
 ) -> i64 {
+    claude_tui_selector_transcript_candidates(provider, session_cache_selector_state, claude_home)
+        .into_iter()
+        .filter_map(|path| metadata_mtime_unix_nanos(&path))
+        .max()
+        .unwrap_or(0)
+}
+
+fn fresher_claude_tui_selector_transcript_path(
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+    session_cache_selector_state: Option<&SessionCacheSelectorState>,
+    claude_home: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
+    let wrapper_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl");
+    let wrapper_activity =
+        metadata_mtime_unix_nanos(std::path::Path::new(&wrapper_path)).unwrap_or(0);
+    claude_tui_selector_transcript_candidates(provider, session_cache_selector_state, claude_home)
+        .into_iter()
+        .filter_map(|path| {
+            let activity = metadata_mtime_unix_nanos(&path)?;
+            (activity > wrapper_activity).then_some((activity, path))
+        })
+        .max_by_key(|(activity, _)| *activity)
+        .map(|(_, path)| path)
+}
+
+fn claude_tui_selector_transcript_candidates(
+    provider: &ProviderKind,
+    session_cache_selector_state: Option<&SessionCacheSelectorState>,
+    claude_home: Option<&std::path::Path>,
+) -> Vec<std::path::PathBuf> {
     if provider != &ProviderKind::Claude {
-        return 0;
+        return Vec::new();
     }
     let Some(state) = session_cache_selector_state else {
-        return 0;
-    };
-    let Some(session_id) = state
-        .selected_session_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return 0;
+        return Vec::new();
     };
     let Some(cwd) = state
         .cwd
@@ -207,21 +240,40 @@ fn claude_tui_selector_transcript_activity_unix_nanos(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     else {
-        return 0;
+        return Vec::new();
     };
-    let Ok(path) = crate::services::claude_tui::transcript_tail::claude_transcript_path(
-        std::path::Path::new(cwd),
-        session_id,
-        claude_home,
-    ) else {
-        return 0;
-    };
+    let mut candidates = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for session_id in [
+        state.cached_session_id.as_deref(),
+        state.raw_provider_session_id.as_deref(),
+        state.selected_session_id.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .filter(|value| !value.is_empty())
+    {
+        if !seen.insert(session_id.to_string()) {
+            continue;
+        }
+        if let Ok(path) = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+            std::path::Path::new(cwd),
+            session_id,
+            claude_home,
+        ) {
+            candidates.push(path);
+        }
+    }
+    candidates
+}
+
+fn metadata_mtime_unix_nanos(path: &std::path::Path) -> Option<i64> {
     std::fs::metadata(path)
         .and_then(|metadata| metadata.modified())
         .ok()
         .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
         .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
-        .unwrap_or(0)
 }
 
 async fn session_cache_selector_state_for_rebind(
@@ -244,14 +296,18 @@ async fn session_cache_selector_state_for_rebind(
         {
             Ok(Some(ids)) => {
                 let selected_session_id =
-                    crate::services::dispatched_sessions::selected_provider_resume_selector_for_provider(
+                    crate::services::dispatched_sessions::selected_provider_resume_selector_for_provider_recording_observation(
+                        pool,
+                        &session_key,
                         Some(provider.as_str()),
                         &ids,
                     )
-                    .map(str::to_string);
+                    .await;
                 return Some(SessionCacheSelectorState {
                     selector_present: provider_session_ids_have_any_selector(&ids),
                     selected_session_id,
+                    cached_session_id: ids.claude_session_id,
+                    raw_provider_session_id: ids.raw_provider_session_id,
                     cwd: ids.cwd,
                 });
             }
@@ -270,6 +326,8 @@ async fn session_cache_selector_state_for_rebind(
     Some(SessionCacheSelectorState {
         selector_present: false,
         selected_session_id: None,
+        cached_session_id: None,
+        raw_provider_session_id: None,
         cwd: None,
     })
 }
@@ -378,10 +436,13 @@ mod tests {
         .expect("fresh transcript mtime");
         let selector_state = SessionCacheSelectorState {
             selector_present: true,
-            selected_session_id: Some(session_id),
+            selected_session_id: Some(session_id.clone()),
+            cached_session_id: Some(session_id.clone()),
+            raw_provider_session_id: None,
             cwd: Some(cwd.path().display().to_string()),
         };
         let saved_path_string = saved_path.display().to_string();
+        let transcript_path_string = transcript_path.display().to_string();
 
         assert!(
             claude_tui_selector_transcript_activity_unix_nanos(
@@ -399,8 +460,80 @@ mod tests {
                 Some(&selector_state),
                 Some(claude_home.path()),
             ),
-            None,
-            "manual rebind must ignore a stale saved wrapper path when the selected Claude transcript is fresh"
+            Some(transcript_path_string),
+            "manual rebind must adopt the fresh Claude transcript instead of falling back to the wrapper jsonl"
+        );
+    }
+
+    #[test]
+    fn claude_tui_selector_transcript_activity_probes_cached_and_raw_candidates() {
+        let saved_dir = tempfile::tempdir().expect("saved output tempdir");
+        let saved_path = saved_dir.path().join("old-wrapper.jsonl");
+        std::fs::write(&saved_path, b"old wrapper\n").expect("write saved output");
+        filetime::set_file_mtime(
+            &saved_path,
+            filetime::FileTime::from_system_time(
+                std::time::SystemTime::now() - std::time::Duration::from_secs(700),
+            ),
+        )
+        .expect("stale saved mtime");
+
+        let cwd = tempfile::tempdir().expect("cwd tempdir");
+        let claude_home = tempfile::tempdir().expect("claude home tempdir");
+        let cached_session_id = uuid::Uuid::new_v4().to_string();
+        let raw_session_id = uuid::Uuid::new_v4().to_string();
+        let cached_path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+            cwd.path(),
+            &cached_session_id,
+            Some(claude_home.path()),
+        )
+        .expect("cached transcript path");
+        let raw_path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+            cwd.path(),
+            &raw_session_id,
+            Some(claude_home.path()),
+        )
+        .expect("raw transcript path");
+        std::fs::create_dir_all(cached_path.parent().expect("cached parent"))
+            .expect("create cached parent");
+        std::fs::create_dir_all(raw_path.parent().expect("raw parent")).expect("create raw parent");
+        std::fs::write(&cached_path, b"stale cached transcript\n")
+            .expect("write cached transcript");
+        std::fs::write(&raw_path, b"fresh raw transcript\n").expect("write raw transcript");
+        filetime::set_file_mtime(
+            &cached_path,
+            filetime::FileTime::from_system_time(
+                std::time::SystemTime::now() - std::time::Duration::from_secs(700),
+            ),
+        )
+        .expect("stale cached mtime");
+        filetime::set_file_mtime(
+            &raw_path,
+            filetime::FileTime::from_system_time(
+                std::time::SystemTime::now() - std::time::Duration::from_secs(5),
+            ),
+        )
+        .expect("fresh raw mtime");
+        let selector_state = SessionCacheSelectorState {
+            selector_present: true,
+            selected_session_id: Some(cached_session_id.clone()),
+            cached_session_id: Some(cached_session_id),
+            raw_provider_session_id: Some(raw_session_id),
+            cwd: Some(cwd.path().display().to_string()),
+        };
+        let saved_path_string = saved_path.display().to_string();
+
+        assert_eq!(
+            saved_output_path_for_rebind_resolution_with_cache_state(
+                Some(saved_path_string.as_str()),
+                true,
+                &crate::services::provider::ProviderKind::Claude,
+                "tmux-with-stale-selected-cached-transcript",
+                Some(&selector_state),
+                Some(claude_home.path()),
+            ),
+            Some(raw_path.display().to_string()),
+            "manual rebind must probe the raw transcript even when the selected cached id is stale"
         );
     }
 }

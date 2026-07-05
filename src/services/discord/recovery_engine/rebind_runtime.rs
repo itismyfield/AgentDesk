@@ -161,6 +161,57 @@ pub(super) fn resolve_rebind_runtime_state(
         });
     }
 
+    if provider == &ProviderKind::Claude {
+        if let Some(transcript_path) =
+            existing_saved_output_path.and_then(claude_rebind_transcript_path)
+            && let Ok(metadata) = std::fs::metadata(transcript_path)
+        {
+            return Ok(RebindRuntimeState {
+                output_path: transcript_path.to_string(),
+                synthetic_initial_offset: metadata.len(),
+                input_fifo_path: None,
+                runtime_kind: Some(RuntimeHandoffKind::ClaudeTui),
+                session_id: existing_session_id.or_else(|| {
+                    std::path::Path::new(transcript_path)
+                        .file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .map(str::to_string)
+                }),
+                codex_rollout_path: None,
+                codex_rollout_resume_offset: None,
+                codex_rollout_resume_offset_from_marker: false,
+                force_initial_offset: None,
+                rebase_existing_offsets_to_output: false,
+            });
+        }
+
+        if let Some((binding, output_len)) = existing_runtime_binding
+            .as_ref()
+            .filter(|binding| binding.runtime_kind == RuntimeHandoffKind::ClaudeTui)
+            .filter(|binding| {
+                claude_rebind_binding_session_matches(binding, existing_session_id.as_deref())
+            })
+            .and_then(|binding| {
+                std::fs::metadata(&binding.output_path)
+                    .ok()
+                    .map(|metadata| (binding, metadata.len()))
+            })
+        {
+            return Ok(RebindRuntimeState {
+                output_path: binding.output_path.clone(),
+                synthetic_initial_offset: output_len,
+                input_fifo_path: None,
+                runtime_kind: Some(RuntimeHandoffKind::ClaudeTui),
+                session_id: existing_session_id.or_else(|| binding.session_id.clone()),
+                codex_rollout_path: None,
+                codex_rollout_resume_offset: None,
+                codex_rollout_resume_offset_from_marker: false,
+                force_initial_offset: None,
+                rebase_existing_offsets_to_output: false,
+            });
+        }
+    }
+
     let (default_output_path, default_input_fifo) = tmux_runtime_paths(tmux_session_name);
     let input_fifo_path = Some(default_input_fifo);
     let runtime_kind = observed_runtime_kind;
@@ -247,6 +298,30 @@ fn codex_rebind_binding_session_matches(
         return false;
     }
     true
+}
+
+fn claude_rebind_binding_session_matches(
+    binding: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+    existing_session_id: Option<&str>,
+) -> bool {
+    let Some(existing_session_id) = normalized_non_empty(existing_session_id) else {
+        return true;
+    };
+    binding
+        .session_id
+        .as_deref()
+        .and_then(|session_id| normalized_non_empty(Some(session_id)))
+        .is_none_or(|binding_session_id| binding_session_id == existing_session_id)
+}
+
+fn claude_rebind_transcript_path(path: &str) -> Option<&str> {
+    let path = path.trim();
+    if path.is_empty() {
+        return None;
+    }
+    let file_name = std::path::Path::new(path).file_name()?.to_str()?;
+    let stem = file_name.strip_suffix(".jsonl")?;
+    uuid::Uuid::parse_str(stem).is_ok().then_some(path)
 }
 
 fn normalized_non_empty(value: Option<&str>) -> Option<&str> {
@@ -944,11 +1019,49 @@ mod tests {
     }
 
     #[test]
-    fn claude_rebind_without_saved_path_uses_default_wrapper_output_path() {
+    fn claude_rebind_with_selector_transcript_uses_claude_tui_output_path() {
         let _guard = lock_test_env();
         let tmp = tempfile::tempdir().expect("tempdir");
         let _root = EnvGuard::set_path("AGENTDESK_ROOT_DIR", tmp.path());
         let tmux_session_name = "AgentDesk-claude-adk-cc-manual-rebind";
+        let cwd = tempfile::tempdir().expect("cwd tempdir");
+        let claude_home = tempfile::tempdir().expect("claude home tempdir");
+        let session_id = "c62c2dc8-0000-4000-8000-000000000000";
+        let transcript_path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+            cwd.path(),
+            session_id,
+            Some(claude_home.path()),
+        )
+        .expect("transcript path");
+        std::fs::create_dir_all(transcript_path.parent().expect("transcript parent"))
+            .expect("create transcript parent");
+        std::fs::write(&transcript_path, b"fresh transcript\n").expect("write transcript");
+
+        let result = resolve_rebind_runtime_state(
+            &ProviderKind::Claude,
+            tmux_session_name,
+            Some(transcript_path.to_str().expect("utf8 transcript path")),
+            Some(session_id.to_string()),
+        )
+        .expect("claude rebind with selector transcript should use Claude TUI output path");
+
+        assert_eq!(result.output_path, transcript_path.display().to_string());
+        assert_eq!(
+            result.synthetic_initial_offset,
+            b"fresh transcript\n".len() as u64
+        );
+        assert_eq!(result.input_fifo_path, None);
+        assert_eq!(result.runtime_kind, Some(RuntimeHandoffKind::ClaudeTui));
+        assert_eq!(result.session_id.as_deref(), Some(session_id));
+        assert_eq!(result.codex_rollout_path, None);
+    }
+
+    #[test]
+    fn claude_rebind_without_transcript_candidate_uses_default_wrapper_output_path() {
+        let _guard = lock_test_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _root = EnvGuard::set_path("AGENTDESK_ROOT_DIR", tmp.path());
+        let tmux_session_name = "AgentDesk-claude-adk-cc-manual-rebind-no-transcript";
 
         let result = resolve_rebind_runtime_state(
             &ProviderKind::Claude,
@@ -956,7 +1069,7 @@ mod tests {
             None,
             Some("c62c2dc8-0000-4000-8000-000000000000".to_string()),
         )
-        .expect("claude rebind without saved path should use wrapper output path");
+        .expect("claude rebind without transcript candidate should use wrapper output path");
 
         assert_eq!(
             result.output_path,

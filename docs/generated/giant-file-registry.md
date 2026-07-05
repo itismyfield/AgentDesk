@@ -57,7 +57,7 @@
 | `src/config.rs` | 2705 |
 | `src/db/auto_queue/entries.rs` | 1508 |
 | `src/db/auto_queue/phase_gates.rs` | 1639 |
-| `src/db/dispatched_sessions.rs` | 1633 |
+| `src/db/dispatched_sessions.rs` | 1671 |
 | `src/db/dispatches/mod.rs` | 1028 |
 | `src/db/postgres.rs` | 1280 |
 | `src/dispatch/dispatch_context.rs` | 2817 |
@@ -94,7 +94,7 @@
 | `src/services/discord/mod.rs` | 4168 |
 | `src/services/discord/router/message_handler/headless_turn.rs` | 1337 |
 | `src/services/discord_config_audit.rs` | 1288 |
-| `src/services/dispatched_sessions.rs` | 1650 |
+| `src/services/dispatched_sessions.rs` | 1755 |
 | `src/services/dispatches/discord_delivery/orchestration.rs` | 1496 |
 | `src/services/dispatches/outbox_route.rs` | 1172 |
 | `src/services/gemini.rs` | 1358 |
@@ -108,6 +108,6 @@
 | `src/services/routines/discord_log.rs` | 1589 |
 | `src/services/routines/store.rs` | 3684 |
 | `src/services/settings.rs` | 1114 |
-| `src/services/tui_prompt_dedupe.rs` | 1824 |
+| `src/services/tui_prompt_dedupe.rs` | 1847 |
 | `src/services/turn_orchestrator.rs` | 3185 |
 | `src/voice/receiver.rs` | 1108 |
