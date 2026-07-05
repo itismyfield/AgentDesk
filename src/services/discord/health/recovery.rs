@@ -2444,7 +2444,7 @@ async fn maybe_recover_completed_stale_leak(
         discord::inflight::persist_leak_recovery_response_offset_if_matches_identity_locked(
             provider,
             channel_id.get(),
-            &discord::inflight::InflightTurnIdentity::from_state(state),
+            &discord::inflight::InflightTurnIdentity::from_state(&state),
             state.current_msg_id,
             end,
         );
