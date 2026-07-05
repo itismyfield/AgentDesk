@@ -1,9 +1,16 @@
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::cluster::session_matcher::MatchedChannel;
+use crate::services::discord::inflight::InflightTurnState;
 use crate::services::provider::ProviderKind;
+
+const MISMATCHED_INFLIGHT_LOG_THROTTLE: Duration = Duration::from_secs(60);
+static MISMATCHED_INFLIGHT_LOGGED_AT: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
 
 /// REAL loop ordering: classification gates run on the WHOLE payload FIRST (an
 /// `init` event anywhere keeps the range relayable), the offset-authority dedup
@@ -53,6 +60,57 @@ pub(super) fn idle_jsonl_relay_source_for_matched(
         path: matched.expected_rollout_path.clone(),
         allow_continued_session_without_init: false,
     }
+}
+
+pub(super) fn idle_jsonl_inflight_mismatches_session(
+    inflight: &InflightTurnState,
+    tmux_session_name: &str,
+) -> bool {
+    tmux_session_name.trim().is_empty()
+        || inflight.tmux_session_name.as_deref() != Some(tmux_session_name)
+}
+
+pub(super) fn idle_jsonl_should_skip_mismatched_inflight(
+    last_inflight_seen_at: &mut HashMap<String, Instant>,
+    matched: &MatchedChannel,
+    channel_id: u64,
+    inflight: &InflightTurnState,
+) -> bool {
+    let tmux_session_name = &matched.expected_session_name;
+    if !idle_jsonl_inflight_mismatches_session(inflight, tmux_session_name) {
+        return false;
+    }
+    last_inflight_seen_at.remove(tmux_session_name);
+    log_mismatched_inflight_skip(&matched.provider, channel_id, tmux_session_name, inflight);
+    true
+}
+
+fn log_mismatched_inflight_skip(
+    provider: &ProviderKind,
+    channel_id: u64,
+    tmux_session_name: &str,
+    inflight: &InflightTurnState,
+) {
+    let logged_at = MISMATCHED_INFLIGHT_LOGGED_AT.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut logged_at) = logged_at.lock() else {
+        return;
+    };
+    if let Some(last_logged_at) = logged_at.get_mut(tmux_session_name) {
+        if last_logged_at.elapsed() < MISMATCHED_INFLIGHT_LOG_THROTTLE {
+            return;
+        }
+        *last_logged_at = Instant::now();
+    } else {
+        logged_at.insert(tmux_session_name.to_string(), Instant::now());
+    }
+    tracing::debug!(
+        provider = provider.as_str(),
+        channel = channel_id,
+        tmux_session = %tmux_session_name,
+        inflight_tmux_session = %inflight.tmux_session_name.as_deref().unwrap_or("(none)"),
+        user_msg_id = inflight.user_msg_id,
+        "idle JSONL relay skipped session because channel inflight belongs to another tmux session"
+    );
 }
 
 /// Pure decision for the idle relay's classification + offset-authority dedup,

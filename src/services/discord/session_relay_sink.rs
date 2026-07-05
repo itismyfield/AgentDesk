@@ -39,6 +39,7 @@ use self::idle_jsonl::{
     IdleRelayRangeAction, idle_jsonl_payload_contains_init_event,
     idle_jsonl_payload_contains_schedule_wakeup_setup, idle_jsonl_payload_contains_user_event,
     idle_jsonl_relay_source_for_matched, idle_relay_range_action, read_jsonl_range,
+    idle_jsonl_should_skip_mismatched_inflight as skip_x,
 };
 
 static SESSION_BOUND_DISCORD_DELIVERY_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -1256,6 +1257,7 @@ async fn run_idle_jsonl_relay_loop(
             if let Some(mut inflight) =
                 super::inflight::load_inflight_state(&matched.provider, channel_id)
             {
+                if skip_x(&mut last_inflight_seen_at, &matched, channel_id, &inflight) { continue; }
                 // #3960: a `SessionBoundRelay` TUI-direct row whose claim-time
                 // producer has since died is a black-hole — its owner is not
                 // `None`, so the ownerless reclaim below never fires. Re-check
@@ -2371,6 +2373,44 @@ mod tests {
             idle_relay_range_action(full_bytes, start, end, committed, true, true),
             super::IdleRelayRangeAction::SkipClassified
         );
+    }
+
+    /// #4116: when channel C has an inflight turn owned by tmux session X, the
+    /// idle JSONL relay must not consume new bytes observed while iterating a
+    /// different session Y for the same channel/provider. Leaving the offset
+    /// unchanged lets the next no-inflight tick relay Y's wake output instead of
+    /// permanently losing it.
+    #[test]
+    fn idle_jsonl_relay_skips_cross_session_inflight_without_consuming_offset() {
+        let owner_session = "AgentDesk-claude-channel-c-main-x";
+        let background_session = "AgentDesk-claude-channel-c-bg-y";
+        let inflight = inflight_for(owner_session, RelayOwnerKind::Watcher, false);
+        let mut offset = 128u64;
+        let wake_payload = concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"wake-y\"}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"wake answer from Y\"}]}}\n"
+        );
+        let end = offset + wake_payload.len() as u64;
+
+        assert!(
+            idle_jsonl::idle_jsonl_inflight_mismatches_session(&inflight, background_session),
+            "session Y must skip while channel inflight belongs to session X"
+        );
+        if !idle_jsonl::idle_jsonl_inflight_mismatches_session(&inflight, background_session) {
+            offset = end;
+        }
+        assert_eq!(
+            offset, 128,
+            "cross-session inflight skip must leave Y's offset untouched"
+        );
+
+        assert_eq!(
+            idle_relay_range_action(wake_payload.as_bytes(), offset, end, 0, false, false),
+            super::IdleRelayRangeAction::SendFull,
+            "the preserved Y bytes relay on the next no-inflight tick"
+        );
+        offset = end;
+        assert_eq!(offset, end, "Y's offset advances only after relay eligibility");
     }
 
     #[tokio::test]
