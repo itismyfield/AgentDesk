@@ -111,7 +111,7 @@ fn generation_fenced_respawn_frontier(
     snapshot: &WatcherStateSnapshot,
 ) -> Option<u64> {
     let tmux_session = snapshot.tmux_session.as_deref()?;
-    crate::services::discord::tmux_session_files::committed_frontier_for_current_generation(
+    crate::services::discord::tmux::committed_frontier_for_current_generation(
         shared,
         channel_id,
         tmux_session,
