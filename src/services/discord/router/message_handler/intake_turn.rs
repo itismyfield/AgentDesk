@@ -2336,6 +2336,12 @@ pub(in crate::services::discord) async fn handle_text_message(
         } else if enqueue_outcome.enqueued {
             let _ = channel_id.delete_message(http, placeholder_msg_id).await;
         } else {
+            put_back_session_retry_context(
+                shared,
+                channel_id,
+                session_retry_context.as_ref(),
+                enqueue_outcome.refusal_reason.map(|reason| reason.as_str()),
+            );
             let notice = claude_tui_busy_followup_refusal_notice(enqueue_outcome.refusal_reason);
             let _ = super::super::super::http::edit_channel_message(
                 http,
@@ -2895,6 +2901,23 @@ mod recovery_context_take_order_tests {
         assert!(
             take_pos < manifest_use_pos,
             "active intake turn must take recovery context before prompt manifest capture"
+        );
+    }
+
+    #[test]
+    fn tui_busy_enqueue_refusal_puts_back_recovery_context_for_next_turn() {
+        let module_src = include_str!("intake_turn.rs");
+        let put_back_pos = module_src
+            .find("} else {\n            put_back_session_retry_context(")
+            .expect("TUI-busy enqueue refusal puts back recovery context");
+        let notice_pos = put_back_pos
+            + module_src[put_back_pos..]
+                .find("claude_tui_busy_followup_refusal_notice")
+                .expect("TUI-busy refusal notice exists");
+
+        assert!(
+            put_back_pos < notice_pos,
+            "TUI-busy enqueue refusal, including dup-guard refusal, must restore recovery context before returning the notice"
         );
     }
 }

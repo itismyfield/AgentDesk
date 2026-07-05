@@ -90,7 +90,8 @@ pub(super) use completion_guard::{
     runtime_db_fallback_complete_with_result, streaming_final_complete_dispatch_with_result,
 };
 pub(super) use recovery_text::{
-    auto_retry_with_history, release_retry_pending, take_session_retry_context_for_turn_with_audit,
+    auto_retry_with_history, release_retry_pending, restore_session_retry_context_after_take,
+    take_session_retry_context_for_turn_with_audit,
 };
 use single_message_footer::*;
 pub(super) use stale_resume::result_event_has_stale_resume_error;

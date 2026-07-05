@@ -143,11 +143,10 @@ fn take_session_retry_context_runtime_pg(key: &str) -> Option<String> {
     .flatten()
 }
 
-fn store_session_retry_context_impl(
+fn store_session_retry_context_kv_only(
     pg_pool: Option<&sqlx::PgPool>,
     channel_id: u64,
     history: &str,
-    session_key: Option<&str>,
 ) -> Result<(), String> {
     let history = history.trim();
     if history.is_empty() {
@@ -166,6 +165,21 @@ fn store_session_retry_context_impl(
         }
         Err(err) => Err(err),
     }?;
+
+    Ok(())
+}
+
+fn store_session_retry_context_impl(
+    pg_pool: Option<&sqlx::PgPool>,
+    channel_id: u64,
+    history: &str,
+    session_key: Option<&str>,
+) -> Result<(), String> {
+    let history = history.trim();
+    if history.is_empty() {
+        return Ok(());
+    }
+    store_session_retry_context_kv_only(pg_pool, channel_id, history)?;
 
     if let Some(pg_pool) = pg_pool {
         insert_recovery_audit_pg(pg_pool, channel_id, session_key, history)?;
@@ -191,6 +205,14 @@ pub(in crate::services::discord) fn store_session_retry_context_with_audit(
     session_key: Option<&str>,
 ) -> Result<(), String> {
     store_session_retry_context_impl(pg_pool, channel_id, history, session_key)
+}
+
+pub(in crate::services::discord) fn restore_session_retry_context_after_take(
+    pg_pool: Option<&sqlx::PgPool>,
+    channel_id: u64,
+    history: &str,
+) -> Result<(), String> {
+    store_session_retry_context_kv_only(pg_pool, channel_id, history)
 }
 
 fn mark_recovery_audit_consumed_pg(
