@@ -1906,7 +1906,11 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   `shared_state::RestartLifecycle`, leaving a single `restart: RestartLifecycle`
   group field on `SharedData` with the type re-exported for surface freeze),
   `src/services/discord_config_audit.rs` (1288; +15 from #3692 leader-ownership gate on the config-audit agent sync path).
-- `src/services/discord/catch_up.rs` (1007) — catch-up phase 1/2 scan and
+- `src/services/discord/catch_up.rs` (1077; +70 from #4118 bugfix — retry-mode
+  REST fetch failure re-arms `catch_up_retry_pending` with a bounded attempt
+  cap (4) instead of one-shot consumption, so a transient fetch error no longer
+  permanently drops the over-cap backlog into next-restart TooOld loss; state
+  widened to `{checkpoint, fetch_failures}`) — catch-up phase 1/2 scan and
   checkpoint orchestration. Keep growth bugfix-only and prefer `catch_up/*`
   helpers for new classification or commit policy.
 - `src/services/turn_orchestrator.rs` (3194; +3 from #3293 declaring the
