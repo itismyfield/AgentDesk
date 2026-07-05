@@ -1303,10 +1303,9 @@ mod catch_up_recovery_tests {
         catch_up_remaining_queue_capacity, classify_catch_up_message,
         classify_phase2_enqueue_commit, collect_catch_up_retry_pending_channels,
         consume_catch_up_retry_state_for_scan, insert_configured_catch_up_candidate,
-        merge_catch_up_retry_checkpoint, parse_catch_up_scan_pace,
-        phase2_retry_after_checkpoint, rearm_catch_up_retry_after_fetch_failure,
-        should_fetch_older_recent_page, should_pace_before_scan,
-        take_catch_up_retry_checkpoint_after_queue_drain,
+        merge_catch_up_retry_checkpoint, parse_catch_up_scan_pace, phase2_retry_after_checkpoint,
+        rearm_catch_up_retry_after_fetch_failure, should_fetch_older_recent_page,
+        should_pace_before_scan, take_catch_up_retry_checkpoint_after_queue_drain,
     };
     use crate::services::turn_orchestrator::EnqueueRefusalReason;
     use poise::serenity_prelude as serenity;
