@@ -9,7 +9,7 @@ use crate::services::provider::ProviderKind;
 use super::super::formatting::{build_streaming_placeholder_text, truncate_str};
 use super::super::placeholder_cleanup::{
     PlaceholderCleanupOperation, PlaceholderCleanupOutcome, PlaceholderCleanupRecord,
-    classify_delete_error,
+    classify_delete_error, committed_terminal_anchor_protects_delete,
 };
 use super::super::{SharedData, rate_limit_wait};
 use crate::services::discord;
@@ -195,6 +195,28 @@ pub(super) fn placeholder_real_body_exposure_evidence(
     } else {
         Some("last_edit_text_body")
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GuardedNonterminalDeleteDecision {
+    Preserve { evidence: &'static str },
+    Delete,
+}
+
+pub(super) fn guarded_nonterminal_delete_decision(
+    provider: &ProviderKind,
+    response_sent_offset: usize,
+    last_edit_text: &str,
+    committed_terminal_anchor: bool,
+) -> GuardedNonterminalDeleteDecision {
+    if committed_terminal_anchor {
+        return GuardedNonterminalDeleteDecision::Preserve {
+            evidence: "committed_terminal_anchor",
+        };
+    }
+    placeholder_real_body_exposure_evidence(provider, response_sent_offset, last_edit_text)
+        .map(|evidence| GuardedNonterminalDeleteDecision::Preserve { evidence })
+        .unwrap_or(GuardedNonterminalDeleteDecision::Delete)
 }
 
 pub(super) fn decide_placeholder_suppression(
@@ -484,6 +506,57 @@ pub(super) async fn delete_nonterminal_placeholder(
         source,
     )
     .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn delete_nonterminal_placeholder_unless_delivered(
+    http: &Arc<serenity::Http>,
+    channel_id: ChannelId,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+    message_id: MessageId,
+    response_sent_offset: usize,
+    last_edit_text: &str,
+    source: &'static str,
+) -> Option<PlaceholderCleanupOutcome> {
+    let committed_terminal_anchor = committed_terminal_anchor_protects_delete(
+        &shared.ui.placeholder_cleanup,
+        provider,
+        channel_id,
+        message_id,
+        None,
+    );
+    match guarded_nonterminal_delete_decision(
+        provider,
+        response_sent_offset,
+        last_edit_text,
+        committed_terminal_anchor,
+    ) {
+        GuardedNonterminalDeleteDecision::Preserve { evidence } => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                message_id = message_id.get(),
+                evidence = %evidence,
+                source = source,
+                response_sent_offset = response_sent_offset,
+                "  [{ts}] 👁 preserved delivered placeholder during guarded nonterminal cleanup for {tmux_session_name}"
+            );
+            None
+        }
+        GuardedNonterminalDeleteDecision::Delete => Some(
+            delete_nonterminal_placeholder(
+                http,
+                channel_id,
+                shared,
+                provider,
+                tmux_session_name,
+                message_id,
+                source,
+            )
+            .await,
+        ),
+    }
 }
 
 /// #3871: which streamed rollover-prefix message ids the watcher MUST delete
@@ -881,6 +954,60 @@ mod placeholder_suppression_tests {
                 &placeholder,
                 &ProviderKind::Claude
             )
+        );
+    }
+
+    #[test]
+    fn late_epoch_guard_preserves_real_body_exposure_evidence() {
+        assert_eq!(
+            guarded_nonterminal_delete_decision(&ProviderKind::Claude, 1, "", false),
+            GuardedNonterminalDeleteDecision::Preserve {
+                evidence: "response_sent_offset"
+            }
+        );
+    }
+
+    #[test]
+    fn late_epoch_guard_preserves_committed_terminal_anchor_evidence() {
+        let placeholder = footer_only_placeholder();
+
+        assert_eq!(
+            guarded_nonterminal_delete_decision(&ProviderKind::Claude, 0, &placeholder, true),
+            GuardedNonterminalDeleteDecision::Preserve {
+                evidence: "committed_terminal_anchor"
+            }
+        );
+    }
+
+    #[test]
+    fn late_epoch_guard_deletes_placeholder_without_evidence() {
+        let placeholder = footer_only_placeholder();
+
+        assert_eq!(
+            guarded_nonterminal_delete_decision(&ProviderKind::Claude, 0, &placeholder, false),
+            GuardedNonterminalDeleteDecision::Delete
+        );
+    }
+
+    #[test]
+    fn duplicate_relay_guard_preserves_real_body_exposure_evidence() {
+        let placeholder = body_with_footer("visible assistant body");
+
+        assert_eq!(
+            guarded_nonterminal_delete_decision(&ProviderKind::Claude, 0, &placeholder, false),
+            GuardedNonterminalDeleteDecision::Preserve {
+                evidence: "last_edit_text_body"
+            }
+        );
+    }
+
+    #[test]
+    fn duplicate_relay_guard_deletes_placeholder_without_evidence() {
+        let placeholder = footer_only_placeholder();
+
+        assert_eq!(
+            guarded_nonterminal_delete_decision(&ProviderKind::Claude, 0, &placeholder, false),
+            GuardedNonterminalDeleteDecision::Delete
         );
     }
 

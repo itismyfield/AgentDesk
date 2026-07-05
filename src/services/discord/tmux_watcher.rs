@@ -3629,13 +3629,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             deferred_monitor_ready,
         ) {
             if let Some(msg_id) = placeholder_msg_id {
-                let _ = delete_nonterminal_placeholder(
+                let _ = delete_nonterminal_placeholder_unless_delivered(
                     &http,
                     channel_id,
                     &shared,
                     &watcher_provider,
                     &tmux_session_name,
                     msg_id,
+                    response_sent_offset,
+                    &last_edit_text,
                     "watcher_late_epoch_guard_cleanup",
                 )
                 .await;
@@ -3767,13 +3769,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     last_relayed_offset,
                 );
                 if let Some(msg_id) = placeholder_msg_id {
-                    let _ = delete_nonterminal_placeholder(
+                    let _ = delete_nonterminal_placeholder_unless_delivered(
                         &http,
                         channel_id,
                         &shared,
                         &watcher_provider,
                         &tmux_session_name,
                         msg_id,
+                        response_sent_offset,
+                        &last_edit_text,
                         "watcher_duplicate_relay_guard_cleanup",
                     )
                     .await;
