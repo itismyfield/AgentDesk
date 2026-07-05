@@ -143,11 +143,10 @@ fn take_session_retry_context_runtime_pg(key: &str) -> Option<String> {
     .flatten()
 }
 
-fn store_session_retry_context_impl(
+fn store_session_retry_context_kv_only(
     pg_pool: Option<&sqlx::PgPool>,
     channel_id: u64,
     history: &str,
-    session_key: Option<&str>,
 ) -> Result<(), String> {
     let history = history.trim();
     if history.is_empty() {
@@ -166,6 +165,21 @@ fn store_session_retry_context_impl(
         }
         Err(err) => Err(err),
     }?;
+
+    Ok(())
+}
+
+fn store_session_retry_context_impl(
+    pg_pool: Option<&sqlx::PgPool>,
+    channel_id: u64,
+    history: &str,
+    session_key: Option<&str>,
+) -> Result<(), String> {
+    let history = history.trim();
+    if history.is_empty() {
+        return Ok(());
+    }
+    store_session_retry_context_kv_only(pg_pool, channel_id, history)?;
 
     if let Some(pg_pool) = pg_pool {
         insert_recovery_audit_pg(pg_pool, channel_id, session_key, history)?;
@@ -191,6 +205,19 @@ pub(in crate::services::discord) fn store_session_retry_context_with_audit(
     session_key: Option<&str>,
 ) -> Result<(), String> {
     store_session_retry_context_impl(pg_pool, channel_id, history, session_key)
+}
+
+pub(in crate::services::discord) fn restore_session_retry_context_after_take(
+    pg_pool: Option<&sqlx::PgPool>,
+    channel_id: u64,
+    history: &str,
+) -> Result<(), String> {
+    // Blind upsert race: `intake_turn.rs:2201` releases the mailbox before
+    // the put-back call at `intake_turn.rs:2339`, so a same-channel turn could
+    // store a fresh context in that tiny gap and this stale snapshot would
+    // clobber it. Accepted risk: the window is negligible, both payloads are
+    // equivalent recent-message snapshots, and no locking should be added here.
+    store_session_retry_context_kv_only(pg_pool, channel_id, history)
 }
 
 fn mark_recovery_audit_consumed_pg(
@@ -321,6 +348,8 @@ async fn emit_session_resume_failed_with_recovery(
 mod tests {
     use super::{
         build_discord_recent_recovery_context_from_parts, direct_runtime_context_unavailable,
+        restore_session_retry_context_after_take, store_session_retry_context_with_audit,
+        take_session_retry_context_for_turn_with_audit,
     };
 
     #[test]
@@ -379,6 +408,43 @@ mod tests {
             "recovery context store must not enqueue the duplicate recovery-context \
              user notification body"
         );
+    }
+
+    #[tokio::test]
+    async fn session_retry_context_restore_after_take_round_trips_raw_context_pg() {
+        let pg_db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_recovery_text",
+            "recovery text session retry context round trip",
+        )
+        .await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        let channel_id = 9_000_000_000_004_148;
+        let original_context =
+            "alice: first recovered message\nbot: retry context survives\nalice: final message";
+        store_session_retry_context_with_audit(
+            Some(&pool),
+            channel_id,
+            original_context,
+            Some("session-retry-round-trip"),
+        )
+        .expect("store session retry context");
+
+        let first_take =
+            take_session_retry_context_for_turn_with_audit(Some(&pool), channel_id, None)
+                .expect("first take returns stored context");
+        assert_eq!(first_take.raw_context, original_context);
+
+        restore_session_retry_context_after_take(Some(&pool), channel_id, &first_take.raw_context)
+            .expect("restore session retry context after take");
+
+        let second_take =
+            take_session_retry_context_for_turn_with_audit(Some(&pool), channel_id, None)
+                .expect("second take returns restored context");
+        assert_eq!(second_take.raw_context, original_context);
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 }
 

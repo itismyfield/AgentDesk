@@ -12,7 +12,7 @@ mod memory_lifecycle;
 mod output_lifecycle;
 mod panel_lifecycle;
 mod recall_feedback;
-mod recovery_text;
+pub(in crate::services::discord) mod recovery_text;
 mod retry_state;
 mod single_message_footer;
 mod skill_usage;
