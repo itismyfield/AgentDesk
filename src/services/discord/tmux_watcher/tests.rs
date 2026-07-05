@@ -3,8 +3,9 @@ use super::{
     WatcherTerminalKind, build_watcher_streaming_edit_text,
     discard_restored_response_seed_before_no_inflight_terminal_relay,
     legacy_wrapper_prompt_candidates_from_pane, local_cmd_no_output,
-    mark_watcher_terminal_delivery_committed, reacquire_watcher_inflight_for_active_stream,
-    should_probe_tmux_liveness, terminal_relay_decision, watcher_batch_contains_assistant_event,
+    mark_watcher_terminal_delivery_committed, merge_persisted_rollover_frozen_msg_ids,
+    reacquire_watcher_inflight_for_active_stream, should_probe_tmux_liveness,
+    terminal_relay_decision, watcher_batch_contains_assistant_event,
     watcher_batch_contains_relayable_response,
     watcher_fallback_edit_failure_can_delete_original_placeholder,
     watcher_fresh_idle_finalize_decision, watcher_handle_no_dispatch_post_work_idle_body,
@@ -45,6 +46,37 @@ impl Drop for AgentdeskRootGuard {
             None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
         }
     }
+}
+
+#[test]
+fn persisted_bridge_frozen_prefix_ids_merge_into_watcher_cleanup_list() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+    let tmux_session_name = "AgentDesk-claude-adk-cc";
+    let mut state = InflightTurnState::new(
+        ProviderKind::Claude,
+        42,
+        Some("adk-cc".to_string()),
+        7,
+        1001,
+        1002,
+        "prompt".to_string(),
+        Some("session".to_string()),
+        Some(tmux_session_name.to_string()),
+        Some("/tmp/out.jsonl".to_string()),
+        None,
+        64,
+    );
+    state.streaming_rollover_frozen_msg_ids = vec![10, 11];
+    let mut local = vec![MessageId::new(10)];
+
+    merge_persisted_rollover_frozen_msg_ids(&mut local, Some(&state), tmux_session_name);
+
+    assert_eq!(local, vec![MessageId::new(10), MessageId::new(11)]);
 }
 
 #[test]

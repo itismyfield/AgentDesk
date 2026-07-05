@@ -46,6 +46,34 @@ pub(super) fn sync_response_delivery_state(
     inflight_state.response_sent_offset = *response_sent_offset;
 }
 
+pub(super) fn sync_terminal_error_delivery_state(
+    full_response: &str,
+    response_sent_offset: &mut usize,
+    inflight_state: &mut InflightTurnState,
+) {
+    *response_sent_offset = 0;
+    sync_response_delivery_state(full_response, response_sent_offset, inflight_state);
+}
+
+pub(super) fn rewind_delivery_on_reclaim(
+    full_response: &str,
+    bridge_confirmed_response_sent_offset: usize,
+    response_sent_offset: &mut usize,
+    inflight_state: &mut InflightTurnState,
+    channel_id: ChannelId,
+) {
+    if *response_sent_offset <= bridge_confirmed_response_sent_offset {
+        return;
+    }
+    *response_sent_offset = bridge_confirmed_response_sent_offset;
+    sync_response_delivery_state(full_response, response_sent_offset, inflight_state);
+    tracing::warn!(
+        channel = channel_id.get(),
+        response_sent_offset,
+        "turn_bridge rewound response_sent_offset after reclaiming missing watcher"
+    );
+}
+
 pub(super) fn clear_response_delivery_state(
     full_response: &mut String,
     response_sent_offset: &mut usize,
@@ -187,5 +215,50 @@ pub(super) async fn reset_session_for_auto_retry(
             &name,
             &format!("forcing fresh session before auto-retry: {reason}"),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn inflight(full_response: &str, response_sent_offset: usize) -> InflightTurnState {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            1,
+            Some("adk-cc".to_string()),
+            42,
+            5001,
+            5002,
+            "prompt".to_string(),
+            Some("session".to_string()),
+            Some("AgentDesk-claude-adk-cc-1".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            10,
+        );
+        state.full_response = full_response.to_string();
+        state.response_sent_offset = response_sent_offset;
+        state
+    }
+
+    #[test]
+    fn reclaim_rewinds_watcher_suppression_offset_to_bridge_confirmed_point() {
+        let full_response = "visible prefix\nhidden tail";
+        let bridge_confirmed = "visible prefix\n".len();
+        let mut response_sent_offset = full_response.len();
+        let mut state = inflight(full_response, response_sent_offset);
+
+        rewind_delivery_on_reclaim(
+            full_response,
+            bridge_confirmed,
+            &mut response_sent_offset,
+            &mut state,
+            ChannelId::new(1),
+        );
+
+        assert_eq!(response_sent_offset, bridge_confirmed);
+        assert_eq!(&full_response[response_sent_offset..], "hidden tail");
+        assert_eq!(state.response_sent_offset, bridge_confirmed);
     }
 }

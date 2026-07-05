@@ -278,6 +278,40 @@ pub(super) fn should_fail_dispatch_after_terminal_delivery(
     fail_candidate && terminal_delivery_committed && !preserve_inflight_for_cleanup_retry
 }
 
+pub(super) fn empty_sink_preserves_retry(
+    full_response: &str,
+    resume_retry_queued: bool,
+    response_sent_offset: usize,
+    channel_id: ChannelId,
+) -> bool {
+    if full_response.is_empty() && resume_retry_queued {
+        return false;
+    }
+    tracing::warn!(
+        channel = channel_id.get(),
+        full_response_len = full_response.len(),
+        response_sent_offset,
+        "turn_bridge reached empty terminal delivery without queued resume retry; preserving inflight for retry"
+    );
+    true
+}
+
+pub(super) fn mirror_frozen_prefix_ids(
+    frozen_msg_ids: &[MessageId],
+    inflight_state: &mut InflightTurnState,
+) {
+    for msg_id in frozen_msg_ids.iter().map(|msg_id| msg_id.get()) {
+        if !inflight_state
+            .streaming_rollover_frozen_msg_ids
+            .contains(&msg_id)
+        {
+            inflight_state
+                .streaming_rollover_frozen_msg_ids
+                .push(msg_id);
+        }
+    }
+}
+
 pub(super) fn warn_preserved_uncommitted(
     terminal_delivery_committed: bool,
     preserve_inflight_for_cleanup_retry: bool,
@@ -698,15 +732,18 @@ impl Drop for BridgeDeliveryLease {
 mod tests {
     use super::{
         bridge_epilogue_clears_inflight, bridge_epilogue_marks_watcher_delivered,
-        bridge_epilogue_skip_save_is_identity_guarded,
-        record_stopped_turn_terminal_replace_delivery, replace_outcome_commits_terminal_delivery,
-        send_ordered_long_terminal_chunks, should_complete_work_dispatch_after_terminal_delivery,
+        bridge_epilogue_skip_save_is_identity_guarded, empty_sink_preserves_retry,
+        mirror_frozen_prefix_ids, record_stopped_turn_terminal_replace_delivery,
+        replace_outcome_commits_terminal_delivery, send_ordered_long_terminal_chunks,
+        should_complete_work_dispatch_after_terminal_delivery,
         should_fail_dispatch_after_terminal_delivery, terminal_delivery_should_send_new_chunks,
     };
     use crate::services::discord::formatting;
     use crate::services::discord::formatting::ReplaceLongMessageOutcome;
     use crate::services::discord::gateway::{GatewayFuture, TurnGateway};
-    use crate::services::discord::{DeliveryLeaseKey, make_shared_data_for_tests};
+    use crate::services::discord::{
+        DeliveryLeaseKey, InflightTurnState, make_shared_data_for_tests,
+    };
     use crate::services::provider::ProviderKind;
     use poise::serenity_prelude::{ChannelId, MessageId};
     use std::sync::{Arc, Mutex};
@@ -917,6 +954,41 @@ mod tests {
     // identity-guarded ONLY on a Skip (the holder owns the inflight lifecycle and
     // may have cleared the row on success). Bridge-owned preserve sites and the
     // delegated-owner path keep the blind save (no competing holder).
+    #[test]
+    fn empty_sink_preserves_retry_unless_resume_retry_was_queued() {
+        let channel = ChannelId::new(42);
+        assert!(empty_sink_preserves_retry(
+            "Error: transport failed",
+            false,
+            4096,
+            channel,
+        ));
+        assert!(!empty_sink_preserves_retry("", true, 0, channel));
+    }
+
+    #[test]
+    fn bridge_rollover_frozen_prefix_ids_are_mirrored_for_watcher_cleanup() {
+        let mut inflight = InflightTurnState::new(
+            ProviderKind::Codex,
+            42,
+            Some("agentdesk-test".to_string()),
+            7,
+            1001,
+            1002,
+            "prompt".to_string(),
+            None,
+            Some("AgentDesk-codex-prefix-cleanup".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            0,
+        );
+        inflight.streaming_rollover_frozen_msg_ids = vec![10];
+
+        mirror_frozen_prefix_ids(&[MessageId::new(10), MessageId::new(11)], &mut inflight);
+
+        assert_eq!(inflight.streaming_rollover_frozen_msg_ids, vec![10, 11]);
+    }
+
     #[test]
     fn bridge_skip_save_is_identity_guarded_only_when_holder_owns_inflight() {
         // Skip → holder (watcher) owns inflight → the save MUST be identity-guarded

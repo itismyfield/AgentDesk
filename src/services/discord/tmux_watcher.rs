@@ -3944,6 +3944,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         );
         let inflight_identity_before_relay =
             matching_watcher_turn_identity(inflight_before_relay.as_ref(), &tmux_session_name);
+        merge_persisted_rollover_frozen_msg_ids(
+            &mut watcher_streaming_rollover_frozen_msg_ids,
+            inflight_before_relay.as_ref(),
+            &tmux_session_name,
+        );
         let should_adopt_inflight_terminal_message_ids = !external_input_lease_before_relay
             || watcher_inflight_represents_external_input(inflight_before_relay.as_ref());
         // #3142: skip adopting the pre-relay snapshot's terminal message ids when it
