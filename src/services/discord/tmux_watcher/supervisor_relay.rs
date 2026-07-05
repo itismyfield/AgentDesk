@@ -555,6 +555,13 @@ pub(super) fn terminal_event_consumed_offset(current_offset: u64, unprocessed_ta
     current_offset.saturating_sub(unprocessed_tail.len() as u64)
 }
 
+pub(super) fn suppressed_terminal_confirmed_end(
+    current_offset: u64,
+    unprocessed_tail: &str,
+) -> u64 {
+    terminal_event_consumed_offset(current_offset, unprocessed_tail)
+}
+
 /// #3041 P1-3 (Part a, B1 — frame-carried commit fence): build the
 /// `TerminalCommitFence` to ride on the RESULT-bearing chunk's frame, or `None`
 /// when this chunk is not the terminal one / has no real consumed range / has no

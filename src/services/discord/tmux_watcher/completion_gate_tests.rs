@@ -1580,6 +1580,35 @@ fn split_decoded_chunk_isolates_terminal_turn_from_trailing_tail() {
     assert_eq!(format!("{head}{tail}"), multibyte, "no bytes dropped");
 }
 
+fn unprocessed_tail_after_first_terminal(batch: &str) -> String {
+    let mut buffer = batch.to_string();
+    let mut state = StreamLineState::new();
+    let mut full_response = String::new();
+    let mut tool_state = WatcherToolState::new();
+    let outcome =
+        process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+    assert!(
+        outcome.found_result,
+        "fixture must contain a terminal event"
+    );
+    buffer
+}
+
+fn assert_suppression_arm_uses_confirmed_end_helper(reason: &str) {
+    let module_src = include_str!("../tmux_watcher.rs");
+    let reason_idx = module_src
+        .find(reason)
+        .unwrap_or_else(|| panic!("missing suppression reason {reason}"));
+    let call_start = module_src[..reason_idx]
+        .rfind("advance_watcher_confirmed_end(")
+        .unwrap_or_else(|| panic!("missing advance call for {reason}"));
+    let call_src = &module_src[call_start..reason_idx];
+    assert!(
+        call_src.contains("suppressed_terminal_confirmed_end(current_offset, &all_data)"),
+        "suppression arm {reason} must advance only to the consumed terminal end"
+    );
+}
+
 #[test]
 fn silent_turn_suppression_watermark_stops_before_co_read_followup_turn() {
     let silent_turn = "{\"type\":\"result\",\"result\":\"silent A done\"}\n";
@@ -1590,8 +1619,10 @@ fn silent_turn_suppression_watermark_stops_before_co_read_followup_turn() {
     let batch_start = 10_000u64;
     let current_offset = batch_start + (silent_turn.len() + followup_turn.len()) as u64;
     let followup_start = batch_start + silent_turn.len() as u64;
+    let all_data = unprocessed_tail_after_first_terminal(&format!("{silent_turn}{followup_turn}"));
+    assert_eq!(all_data, followup_turn);
 
-    let confirmed_end = terminal_event_consumed_offset(current_offset, followup_turn);
+    let confirmed_end = suppressed_terminal_confirmed_end(current_offset, &all_data);
     assert_eq!(
         confirmed_end, followup_start,
         "silent-turn suppression must consume only turn A and leave turn B's tail uncommitted"
@@ -1618,8 +1649,10 @@ fn recent_stop_suppression_watermark_stops_before_co_read_followup_turn() {
     let batch_start = 20_000u64;
     let current_offset = batch_start + (stopped_turn.len() + followup_turn.len()) as u64;
     let followup_start = batch_start + stopped_turn.len() as u64;
+    let all_data = unprocessed_tail_after_first_terminal(&format!("{stopped_turn}{followup_turn}"));
+    assert_eq!(all_data, followup_turn);
 
-    let confirmed_end = terminal_event_consumed_offset(current_offset, followup_turn);
+    let confirmed_end = suppressed_terminal_confirmed_end(current_offset, &all_data);
     assert_eq!(
         confirmed_end, followup_start,
         "recent-stop suppression must consume only turn A and leave turn B's tail uncommitted"
@@ -1633,6 +1666,66 @@ fn recent_stop_suppression_watermark_stops_before_co_read_followup_turn() {
         watcher_terminal_resend_action(current_offset, followup_start, current_offset),
         WatcherTerminalResendAction::SkipAlreadyCommitted,
         "document the regression: advancing to raw batch end would falsely skip turn B"
+    );
+}
+
+#[test]
+fn post_terminal_suppression_watermark_stops_before_co_read_followup_turn() {
+    let suppressed_turn = "{\"type\":\"result\",\"result\":\"ghost A done\"}\n";
+    let followup_turn = concat!(
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"visible B\"}]}}\n",
+        "{\"type\":\"result\",\"result\":\"visible B\"}\n",
+    );
+    let batch_start = 30_000u64;
+    let current_offset = batch_start + (suppressed_turn.len() + followup_turn.len()) as u64;
+    let followup_start = batch_start + suppressed_turn.len() as u64;
+    let all_data =
+        unprocessed_tail_after_first_terminal(&format!("{suppressed_turn}{followup_turn}"));
+    assert_eq!(all_data, followup_turn);
+
+    let confirmed_end = suppressed_terminal_confirmed_end(current_offset, &all_data);
+    assert_eq!(
+        confirmed_end, followup_start,
+        "post-terminal suppression must consume only turn A and leave turn B's tail uncommitted"
+    );
+    assert_eq!(
+        watcher_terminal_resend_action(confirmed_end, followup_start, current_offset),
+        WatcherTerminalResendAction::SendFull,
+        "turn B remains uncovered and is sent normally on its pass"
+    );
+    assert!(
+        watcher_batch_contains_assistant_event(all_data.as_bytes()),
+        "leftover turn B must count as assistant continuation even when no new disk bytes arrive"
+    );
+    assert!(
+        !should_suppress_post_terminal_output_without_inflight(
+            true,
+            true,
+            false,
+            false,
+            watcher_batch_contains_assistant_event(all_data.as_bytes()),
+            false,
+            false,
+        ),
+        "the post-terminal no-inflight arm must not suppress leftover assistant continuation"
+    );
+    assert_eq!(
+        watcher_terminal_resend_action(current_offset, followup_start, current_offset),
+        WatcherTerminalResendAction::SkipAlreadyCommitted,
+        "document the regression: advancing to raw batch end would falsely skip turn B"
+    );
+}
+
+#[test]
+fn suppression_arms_are_wired_to_consumed_end_helper() {
+    assert_suppression_arm_uses_confirmed_end_helper(
+        "src/services/discord/tmux.rs:post_terminal_no_inflight_suppressed_output",
+    );
+    assert_suppression_arm_uses_confirmed_end_helper(
+        "src/services/discord/tmux.rs:silent_turn_suppressed_terminal_output",
+    );
+    assert_suppression_arm_uses_confirmed_end_helper(
+        "src/services/discord/tmux.rs:cancel_tombstone_suppressed_terminal_output",
     );
 }
 
