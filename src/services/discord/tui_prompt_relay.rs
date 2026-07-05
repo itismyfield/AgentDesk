@@ -436,7 +436,7 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         .await;
     }
     // #3164 / #750 invariant: the `⏳` MUST be added by the SAME bot identity that
-    // later removes it (`remove_reaction_raw` only removes `@me`'s reaction; a
+    // later removes it (the shared reaction remove path only removes `@me`; a
     // different bot leaves the hourglass forever). The note BODY may be any bot
     // (`notify_http`), but the reaction never falls back to it — on resolve failure
     // we skip the add (warn). R2 issue-1: resolve the add-bot from the SAME source

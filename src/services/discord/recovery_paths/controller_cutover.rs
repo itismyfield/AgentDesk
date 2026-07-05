@@ -385,22 +385,7 @@ mod tests {
         ) -> GatewayFuture<'a, Result<(), String>> {
             panic!("Active lifecycle → post_send_finalize no-op → no edit")
         }
-        fn add_reaction<'a>(
-            &'a self,
-            _c: ChannelId,
-            _m: MessageId,
-            _e: char,
-        ) -> GatewayFuture<'a, ()> {
-            panic!("unused TurnGateway method on the recovery short-replace path")
-        }
-        fn remove_reaction<'a>(
-            &'a self,
-            _c: ChannelId,
-            _m: MessageId,
-            _e: char,
-        ) -> GatewayFuture<'a, ()> {
-            panic!("unused TurnGateway method on the recovery short-replace path")
-        }
+
         fn schedule_retry_with_history<'a>(
             &'a self,
             _c: ChannelId,

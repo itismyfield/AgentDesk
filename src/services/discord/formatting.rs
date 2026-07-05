@@ -25,11 +25,9 @@ const TOOL_STATUS_MAX_BYTES: usize = 300;
 /// with the same handoff header text.
 pub(super) const PLACEHOLDER_PROBE_MARKER: &str = "\u{2063}\u{2062}\u{2063}\u{2062}";
 
+pub(super) use super::reaction_lifecycle::is_real_discord_message_id;
 #[cfg(test)]
 pub(super) use super::reaction_lifecycle::reaction_target_channel_for_shared;
-pub(super) use super::reaction_lifecycle::{
-    add_reaction_raw, is_real_discord_message_id, remove_reaction_raw,
-};
 
 static REPLACE_CONTINUATION_ROLLBACKS: LazyLock<
     Mutex<HashMap<(u64, u64), ReplaceContinuationRollback>>,

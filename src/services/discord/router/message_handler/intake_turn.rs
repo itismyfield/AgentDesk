@@ -1331,13 +1331,8 @@ pub(in crate::services::discord) async fn handle_text_message(
             channel_id,
             user_msg_id,
         );
-        super::super::super::reaction_lifecycle::note_auxiliary_reaction_added(
-            http,
-            channel_id,
-            user_msg_id,
-            super::super::super::queue_exit_feedback_emoji(stale.queue_exit_kind),
-        )
-        .await;
+        let emoji = super::super::super::queue_exit_feedback_emoji(stale.queue_exit_kind);
+        queue_marker::note_exit_feedback_added(shared, http, channel_id, user_msg_id, emoji).await;
         if finish.has_pending {
             super::super::super::schedule_deferred_idle_queue_kickoff(
                 shared.clone(),

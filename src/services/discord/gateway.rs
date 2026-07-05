@@ -107,20 +107,6 @@ pub(super) trait TurnGateway: Send + Sync {
         content: &'a str,
     ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>>;
 
-    fn add_reaction<'a>(
-        &'a self,
-        channel_id: ChannelId,
-        message_id: MessageId,
-        emoji: char,
-    ) -> GatewayFuture<'a, ()>;
-
-    fn remove_reaction<'a>(
-        &'a self,
-        channel_id: ChannelId,
-        message_id: MessageId,
-        emoji: char,
-    ) -> GatewayFuture<'a, ()>;
-
     fn schedule_retry_with_history<'a>(
         &'a self,
         channel_id: ChannelId,
@@ -650,28 +636,6 @@ impl TurnGateway for DiscordGateway {
         })
     }
 
-    fn add_reaction<'a>(
-        &'a self,
-        channel_id: ChannelId,
-        message_id: MessageId,
-        emoji: char,
-    ) -> GatewayFuture<'a, ()> {
-        Box::pin(async move {
-            formatting::add_reaction_raw(&self.http, channel_id, message_id, emoji).await;
-        })
-    }
-
-    fn remove_reaction<'a>(
-        &'a self,
-        channel_id: ChannelId,
-        message_id: MessageId,
-        emoji: char,
-    ) -> GatewayFuture<'a, ()> {
-        Box::pin(async move {
-            formatting::remove_reaction_raw(&self.http, channel_id, message_id, emoji).await;
-        })
-    }
-
     fn schedule_retry_with_history<'a>(
         &'a self,
         channel_id: ChannelId,
@@ -926,24 +890,6 @@ impl TurnGateway for HeadlessGateway {
         Box::pin(async move { Ok(()) })
     }
 
-    fn add_reaction<'a>(
-        &'a self,
-        _channel_id: ChannelId,
-        _message_id: MessageId,
-        _emoji: char,
-    ) -> GatewayFuture<'a, ()> {
-        Box::pin(async move {})
-    }
-
-    fn remove_reaction<'a>(
-        &'a self,
-        _channel_id: ChannelId,
-        _message_id: MessageId,
-        _emoji: char,
-    ) -> GatewayFuture<'a, ()> {
-        Box::pin(async move {})
-    }
-
     fn schedule_retry_with_history<'a>(
         &'a self,
         channel_id: ChannelId,
@@ -1050,24 +996,6 @@ mod tests {
             _content: &'a str,
         ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
             Box::pin(async { Ok(ReplaceLongMessageOutcome::EditedOriginal) })
-        }
-
-        fn add_reaction<'a>(
-            &'a self,
-            _channel_id: ChannelId,
-            _message_id: MessageId,
-            _emoji: char,
-        ) -> GatewayFuture<'a, ()> {
-            Box::pin(async {})
-        }
-
-        fn remove_reaction<'a>(
-            &'a self,
-            _channel_id: ChannelId,
-            _message_id: MessageId,
-            _emoji: char,
-        ) -> GatewayFuture<'a, ()> {
-            Box::pin(async {})
         }
 
         fn schedule_retry_with_history<'a>(

@@ -635,24 +635,6 @@ mod edit_retry_tests {
             })
         }
 
-        fn add_reaction<'a>(
-            &'a self,
-            _channel_id: ChannelId,
-            _message_id: MessageId,
-            _emoji: char,
-        ) -> GatewayFuture<'a, ()> {
-            Box::pin(async {})
-        }
-
-        fn remove_reaction<'a>(
-            &'a self,
-            _channel_id: ChannelId,
-            _message_id: MessageId,
-            _emoji: char,
-        ) -> GatewayFuture<'a, ()> {
-            Box::pin(async {})
-        }
-
         fn schedule_retry_with_history<'a>(
             &'a self,
             _channel_id: ChannelId,
@@ -867,24 +849,6 @@ mod live_events_tests {
             Box::pin(async {
                 Ok(crate::services::discord::formatting::ReplaceLongMessageOutcome::EditedOriginal)
             })
-        }
-
-        fn add_reaction<'a>(
-            &'a self,
-            _channel_id: ChannelId,
-            _message_id: MessageId,
-            _emoji: char,
-        ) -> GatewayFuture<'a, ()> {
-            Box::pin(async {})
-        }
-
-        fn remove_reaction<'a>(
-            &'a self,
-            _channel_id: ChannelId,
-            _message_id: MessageId,
-            _emoji: char,
-        ) -> GatewayFuture<'a, ()> {
-            Box::pin(async {})
         }
 
         fn schedule_retry_with_history<'a>(

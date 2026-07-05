@@ -1555,22 +1555,6 @@ mod tests {
             })
         }
 
-        fn add_reaction<'a>(
-            &'a self,
-            _c: ChannelId,
-            _m: MessageId,
-            _e: char,
-        ) -> GatewayFuture<'a, ()> {
-            Box::pin(async move {})
-        }
-        fn remove_reaction<'a>(
-            &'a self,
-            _c: ChannelId,
-            _m: MessageId,
-            _e: char,
-        ) -> GatewayFuture<'a, ()> {
-            Box::pin(async move {})
-        }
         fn schedule_retry_with_history<'a>(
             &'a self,
             _c: ChannelId,
@@ -1878,22 +1862,7 @@ mod tests {
         ) -> GatewayFuture<'a, Result<(), String>> {
             Box::pin(async move { Ok(()) })
         }
-        fn add_reaction<'a>(
-            &'a self,
-            _c: ChannelId,
-            _m: MessageId,
-            _e: char,
-        ) -> GatewayFuture<'a, ()> {
-            Box::pin(async move {})
-        }
-        fn remove_reaction<'a>(
-            &'a self,
-            _c: ChannelId,
-            _m: MessageId,
-            _e: char,
-        ) -> GatewayFuture<'a, ()> {
-            Box::pin(async move {})
-        }
+
         fn schedule_retry_with_history<'a>(
             &'a self,
             _c: ChannelId,

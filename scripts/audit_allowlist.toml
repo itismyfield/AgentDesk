@@ -87,19 +87,6 @@ direct_discord_sends = [
   "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:96efc64ae5a0f315"
 ]
 
-# Direct Discord reactions: permanent transport seams. These are the single raw
-# reaction I/O layer driven by reaction_lifecycle / turn_view_reconciler and
-# must not be migrated into semantic call sites. Entries use line-independent
-# stable keys.
-direct_discord_reactions = [
-  "src/services/discord/discord_io.rs#direct_discord_reactions:e01f4c2f7b0935cb",
-  "src/services/discord/discord_io.rs#direct_discord_reactions:c80562ff7808cb8c",
-  "src/services/discord/gateway.rs#direct_discord_reactions:def371963f71d782",
-  "src/services/discord/gateway.rs#direct_discord_reactions:d8eb644833217308",
-  "src/services/discord/tui_prompt_relay/bridge_gateway.rs#direct_discord_reactions:c2509c171c7efedd",
-  "src/services/discord/tui_prompt_relay/bridge_gateway.rs#direct_discord_reactions:20c65e9299f28a47"
-]
-
 # Footer view writes: #4049 S4-b1 intentionally centralizes only the completion
 # path. These live in-progress footer/status-panel write paths are S4-b2-owned
 # and must be removed from this allowlist when the live footer cascade moves into

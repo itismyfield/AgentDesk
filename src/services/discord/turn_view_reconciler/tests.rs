@@ -219,6 +219,46 @@ async fn queue_cancel_removes_mailbox_marker() {
 }
 
 #[tokio::test]
+async fn regression_4109_pre_migration_untracked_queue_markers_still_remove_reaction() {
+    let _root = scoped_runtime_root();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+
+    for (index, emoji) in ['➕', '🔄'].into_iter().enumerate() {
+        let reconciler = TurnViewReconciler::default();
+        let target = target_with(
+            100_000_000_000_131 + index as u64,
+            100_000_000_000_135 + index as u64,
+        );
+        clear_persisted(target);
+
+        let delivered = reconciler
+            .note_queue_marker_removed(
+                &shared,
+                target,
+                owner(35 + index as u64, "pre-migration-untracked"),
+                TurnViewIdentity::Test("fallback-caller"),
+                emoji,
+                "test_pre_migration_untracked_queue_marker_clear",
+            )
+            .await;
+
+        assert!(delivered);
+        assert_eq!(
+            reconciler.ops(),
+            vec![TestReactionOp {
+                target,
+                emoji,
+                add: false,
+                identity: "fallback-caller".to_string(),
+            }]
+        );
+        assert!(!persisted_exists(target));
+        assert!(!reconciler.targets.contains_key(&target));
+        assert_eq!(reconciler.target_lock_count(target), 0);
+    }
+}
+
+#[tokio::test]
 async fn regression_4049_start_rollback_to_queued_swaps_hourglass_to_mailbox_and_cancel_cleans() {
     let _root = scoped_runtime_root();
     let reconciler = TurnViewReconciler::default();
@@ -273,11 +313,12 @@ async fn regression_4049_start_rollback_to_queued_swaps_hourglass_to_mailbox_and
     assert_eq!(persisted_applied(target), TurnViewState::Queued);
 
     reconciler
-        .note_queued_message_cancelled(
+        .note_queue_marker_removed(
             &shared,
             target,
             owner,
             TurnViewIdentity::Test("ignored-cancel"),
+            '📬',
             "test_queue_exit_after_rollback",
         )
         .await;
@@ -726,11 +767,12 @@ async fn regression_4049_late_queued_after_started_and_cancel_are_noops() {
     );
 
     reconciler
-        .note_queued_message_cancelled(
+        .note_queue_marker_removed(
             &shared,
             target,
             owner,
             TurnViewIdentity::Test("ignored-cancel"),
+            '📬',
             "test",
         )
         .await;
@@ -778,11 +820,12 @@ async fn queued_cancel_ignores_nonmatching_generation() {
     let ops_after_queue = reconciler.ops().len();
 
     reconciler
-        .note_queued_message_cancelled(
+        .note_queue_marker_removed(
             &shared,
             target,
             stale_cancel_owner,
             TurnViewIdentity::Test("ignored-cancel"),
+            '📬',
             "test",
         )
         .await;

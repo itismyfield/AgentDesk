@@ -410,24 +410,6 @@ async fn live_long_chunk_delivery_fingerprint_uses_raw_body_4081() {
             panic!("long-chunk pin must not edit")
         }
 
-        fn add_reaction<'a>(
-            &'a self,
-            _channel_id: ChannelId,
-            _message_id: MessageId,
-            _emoji: char,
-        ) -> GatewayFuture<'a, ()> {
-            panic!("long-chunk pin must not add reactions")
-        }
-
-        fn remove_reaction<'a>(
-            &'a self,
-            _channel_id: ChannelId,
-            _message_id: MessageId,
-            _emoji: char,
-        ) -> GatewayFuture<'a, ()> {
-            panic!("long-chunk pin must not remove reactions")
-        }
-
         fn schedule_retry_with_history<'a>(
             &'a self,
             _channel_id: ChannelId,

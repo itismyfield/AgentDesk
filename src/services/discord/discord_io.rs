@@ -354,32 +354,6 @@ pub(super) async fn rate_limit_wait(shared: &Arc<SharedData>, channel_id: Channe
     tokio::time::sleep_until(sleep_until).await;
 }
 
-/// Add a reaction to a message
-#[allow(dead_code)]
-pub(super) async fn add_reaction(
-    http: &Arc<serenity::http::Http>,
-    channel_id: ChannelId,
-    message_id: MessageId,
-    emoji: char,
-) {
-    if !crate::services::discord::formatting::is_real_discord_message_id(message_id) {
-        tracing::debug!(
-            channel = channel_id.get(),
-            message = message_id.get(),
-            emoji = %emoji,
-            "discord reaction add skipped for non-Discord/synthetic message id"
-        );
-        return;
-    }
-    let reaction = serenity::ReactionType::Unicode(emoji.to_string());
-    if let Err(e) = channel_id.create_reaction(http, message_id, reaction).await {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!(
-            "  [{ts}] ⚠ Failed to add reaction '{emoji}' to msg {message_id} in channel {channel_id}: {e}"
-        );
-    }
-}
-
 /// Send a file to a Discord channel (called from CLI --discord-sendfile)
 pub async fn send_file_to_channel(
     token: &str,
