@@ -14,6 +14,7 @@
 //! re-export glob) keep calling them by their original names. `InflightTurnState`
 //! and the rank-1 `SessionBoundRelayAckTarget` resolve through `use super::*`.
 
+use super::super::RestoredWatcherTurn;
 use super::*;
 
 pub(super) fn adopt_watcher_terminal_message_ids_from_inflight(
@@ -72,6 +73,208 @@ pub(super) fn merge_persisted_rollover_frozen_msg_ids(
             local.push(msg_id);
         }
     }
+}
+
+pub(super) struct WatcherTerminalRewindSeedInput<'a> {
+    pub(super) placeholder_msg_id: Option<serenity::MessageId>,
+    pub(super) status_panel_msg_id: Option<serenity::MessageId>,
+    pub(super) response_sent_offset: usize,
+    pub(super) last_edit_text: &'a str,
+    pub(super) task_notification_kind:
+        Option<crate::services::agent_protocol::TaskNotificationKind>,
+    pub(super) finish_mailbox_on_completion: bool,
+    pub(super) injected_prompt_message_id: Option<u64>,
+    pub(super) streaming_rollover_frozen_msg_ids: &'a [serenity::MessageId],
+}
+
+#[allow(clippy::too_many_arguments)] // thin hot-file wiring seam; fields documented on the input struct
+pub(super) fn watcher_terminal_rewind_seed_from_parts(
+    placeholder_msg_id: Option<serenity::MessageId>,
+    status_panel_msg_id: Option<serenity::MessageId>,
+    response_sent_offset: usize,
+    last_edit_text: &str,
+    task_notification_kind: Option<crate::services::agent_protocol::TaskNotificationKind>,
+    finish_mailbox_on_completion: bool,
+    injected_prompt_message_id: Option<u64>,
+    streaming_rollover_frozen_msg_ids: &[serenity::MessageId],
+) -> Option<RestoredWatcherTurn> {
+    watcher_terminal_rewind_seed(WatcherTerminalRewindSeedInput {
+        placeholder_msg_id,
+        status_panel_msg_id,
+        response_sent_offset,
+        last_edit_text,
+        task_notification_kind,
+        finish_mailbox_on_completion,
+        injected_prompt_message_id,
+        streaming_rollover_frozen_msg_ids,
+    })
+}
+
+pub(super) fn watcher_terminal_rewind_seed(
+    input: WatcherTerminalRewindSeedInput<'_>,
+) -> Option<RestoredWatcherTurn> {
+    input
+        .placeholder_msg_id
+        .map(|current_msg_id| RestoredWatcherTurn {
+            current_msg_id,
+            status_message_id: input.status_panel_msg_id,
+            response_sent_offset: input.response_sent_offset,
+            full_response: String::new(),
+            last_edit_text: input.last_edit_text.to_string(),
+            task_notification_kind: input.task_notification_kind,
+            finish_mailbox_on_completion: input.finish_mailbox_on_completion,
+            injected_prompt_message_id: input.injected_prompt_message_id,
+            streaming_rollover_frozen_msg_ids: input.streaming_rollover_frozen_msg_ids.to_vec(),
+        })
+}
+
+pub(super) fn reset_rewind_attempts(
+    terminal_rewind_attempt_turn_start: &mut Option<u64>,
+    terminal_rewind_attempts: &mut u8,
+    turn_data_start_offset: u64,
+) {
+    if *terminal_rewind_attempt_turn_start != Some(turn_data_start_offset) {
+        *terminal_rewind_attempt_turn_start = Some(turn_data_start_offset);
+        *terminal_rewind_attempts = 0;
+    }
+}
+
+pub(super) fn take_pending_or_restored_rewind_seed(
+    pending_terminal_rewind_seed: &mut Option<RestoredWatcherTurn>,
+    restored_turn: &mut Option<RestoredWatcherTurn>,
+) -> Option<RestoredWatcherTurn> {
+    pending_terminal_rewind_seed
+        .take()
+        .or_else(|| restored_turn.take())
+}
+
+pub(super) fn watcher_rollback_anchor_msg_id(
+    prompt_anchor_reference: Option<&(serenity::ChannelId, serenity::MessageId)>,
+    watcher_lease_user_msg_id: u64,
+    watcher_lease_start: u64,
+) -> serenity::MessageId {
+    prompt_anchor_reference
+        .map(|(_, message_id)| *message_id)
+        .unwrap_or_else(|| {
+            serenity::MessageId::new(watcher_lease_user_msg_id.max(watcher_lease_start.max(1)))
+        })
+}
+
+/// Which watcher send-failure arm is asking for a no-rewind WARN.
+pub(super) enum WatcherNoRewindWarnSite {
+    Partial,
+    EditFull,
+    PlaceholderlessFull,
+}
+
+/// Resolve the retry plan for a classified send failure and, when the class is
+/// non-retryable (no rewind), emit the arm-appropriate WARN. Single call-site
+/// seam so the hot watcher loop carries one call per failure arm.
+pub(super) fn watcher_send_failure_plan_warned(
+    failure_class: WatcherSendFailureClass,
+    site: WatcherNoRewindWarnSite,
+    watcher_provider: &crate::services::provider::ProviderKind,
+    channel_id: serenity::ChannelId,
+    tmux_session_name: &str,
+    error: impl std::fmt::Display,
+) -> crate::services::discord::replace_outcome_policy::WatcherTerminalRelayPlan {
+    let plan = watcher_send_failure_retry_plan(failure_class);
+    if !plan.retry_offset {
+        match site {
+            WatcherNoRewindWarnSite::Partial => warn_terminal_partial_no_rewind(
+                watcher_provider,
+                channel_id,
+                tmux_session_name,
+                failure_class,
+                error,
+            ),
+            WatcherNoRewindWarnSite::EditFull => warn_terminal_edit_full_no_rewind(
+                watcher_provider,
+                channel_id,
+                tmux_session_name,
+                failure_class,
+                error,
+            ),
+            WatcherNoRewindWarnSite::PlaceholderlessFull => {
+                warn_terminal_placeholderless_full_no_rewind(
+                    watcher_provider,
+                    channel_id,
+                    tmux_session_name,
+                    failure_class,
+                    error,
+                )
+            }
+        }
+    }
+    plan
+}
+
+pub(super) fn warn_terminal_partial_no_rewind(
+    watcher_provider: &crate::services::provider::ProviderKind,
+    channel_id: serenity::ChannelId,
+    tmux_session_name: &str,
+    failure_class: WatcherSendFailureClass,
+    error: impl std::fmt::Display,
+) {
+    tracing::warn!(
+        provider = %watcher_provider.as_str(),
+        channel = channel_id.get(),
+        tmux_session = %tmux_session_name,
+        failure_class = failure_class.as_str(),
+        error = %error,
+        "watcher: terminal partial-send failure will not rewind"
+    );
+}
+
+pub(super) fn warn_terminal_edit_full_no_rewind(
+    watcher_provider: &crate::services::provider::ProviderKind,
+    channel_id: serenity::ChannelId,
+    tmux_session_name: &str,
+    failure_class: WatcherSendFailureClass,
+    error: impl std::fmt::Display,
+) {
+    tracing::warn!(
+        provider = %watcher_provider.as_str(),
+        channel = channel_id.get(),
+        tmux_session = %tmux_session_name,
+        failure_class = failure_class.as_str(),
+        error = %error,
+        "watcher: terminal edit/fallback full-send failure will not rewind"
+    );
+}
+
+pub(super) fn warn_terminal_placeholderless_full_no_rewind(
+    watcher_provider: &crate::services::provider::ProviderKind,
+    channel_id: serenity::ChannelId,
+    tmux_session_name: &str,
+    failure_class: WatcherSendFailureClass,
+    error: impl std::fmt::Display,
+) {
+    tracing::warn!(
+        provider = %watcher_provider.as_str(),
+        channel = channel_id.get(),
+        tmux_session = %tmux_session_name,
+        failure_class = failure_class.as_str(),
+        error = %error,
+        "watcher: placeholder-less terminal full-send failure will not rewind"
+    );
+}
+
+pub(super) fn warn_terminal_rewind_give_up(
+    watcher_provider: &crate::services::provider::ProviderKind,
+    channel_id: serenity::ChannelId,
+    tmux_session_name: &str,
+    turn_data_start_offset: u64,
+    terminal_rewind_attempts: u8,
+) {
+    tracing::warn!(
+        provider = %watcher_provider.as_str(),
+        channel = channel_id.get(),
+        tmux_session = %tmux_session_name,
+        turn_data_start_offset,
+        attempts = terminal_rewind_attempts,
+        "watcher: terminal delivery rewind cap exceeded; permanent give-up without rewind"
+    );
 }
 
 pub(super) fn watcher_inflight_represents_external_input(

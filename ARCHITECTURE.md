@@ -439,6 +439,8 @@ src/
 │   │   ├── footer_view_reconciler/
 │   │   │   ├── mod.rs
 │   │   │   └── registry.rs
+│   │   ├── formatting/
+│   │   │   └── long_send_rollback.rs
 │   │   ├── health/
 │   │   │   ├── recovery/
 │   │   │   │   ├── leak_recovery_ledger.rs

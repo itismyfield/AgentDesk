@@ -7,7 +7,7 @@
 //!
 //!   1. relay_ok          — is the response considered delivered/committed?
 //!   2. retry_from_offset — must the watcher reset the offset and retry the
-//!                          SAME range after no confirmed full delivery?
+//!                          SAME range after a retry-safe transient failure?
 //!   3. preserve_original — after `SentFallbackAfterEditFailure` the original
 //!                          msg_id is NEVER deleted (#2757): a transient edit
 //!                          failure must not vacuum a message that may already
@@ -21,6 +21,8 @@
 //! value equals the literal the call site previously assigned.
 
 use super::formatting::ReplaceLongMessageOutcome;
+
+pub(super) const WATCHER_FULL_SEND_REWIND_ATTEMPT_CAP: u8 = 3;
 
 /// Variant discriminant of the `Result<ReplaceLongMessageOutcome, _>` the
 /// surfaces match on. Lets the pure policy decide disposition from the variant
@@ -62,9 +64,164 @@ pub(super) struct WatcherTerminalRelayPlan {
     pub(super) retry_offset: bool,
 }
 
-/// The watcher's post-edit disposition for each outcome of
-/// `replace_long_message_raw_with_outcome`. Any uncommitted full-delivery
-/// failure resets the offset; committed edit/fallback outcomes do not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WatcherSendFailureClass {
+    Transient,
+    Permanent,
+    RollbackIncomplete,
+}
+
+impl WatcherSendFailureClass {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Transient => "transient",
+            Self::Permanent => "permanent",
+            Self::RollbackIncomplete => "rollback_incomplete",
+        }
+    }
+}
+
+/// Pure status classifier for watcher terminal send failures. Retry is allowed
+/// only for Discord rate limits, server errors, and request-timeout style
+/// failures; ordinary 4xx responses are permanent for this turn.
+pub(super) fn classify_watcher_send_failure_status(status: u16) -> WatcherSendFailureClass {
+    if status == 429 || status == 408 || (500..=599).contains(&status) {
+        WatcherSendFailureClass::Transient
+    } else if (400..=499).contains(&status) {
+        WatcherSendFailureClass::Permanent
+    } else {
+        WatcherSendFailureClass::Transient
+    }
+}
+
+/// Pure string classifier for flattened send errors. Serenity often drops the
+/// HTTP status from Display, so match the durable Discord error text first and
+/// keep known network/timeout/server strings retryable.
+pub(super) fn classify_watcher_send_failure_message(message: &str) -> WatcherSendFailureClass {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("cleanup incomplete")
+        || lower.contains("cleanup in progress")
+        || lower.contains("rollback state was not durable")
+        || lower.contains("rollback state was not cleared")
+    {
+        return WatcherSendFailureClass::RollbackIncomplete;
+    }
+    if lower.contains("rate limit")
+        || lower.contains("rate-limit")
+        || lower.contains("ratelimit")
+        || lower.contains("rate limited")
+        || lower.contains("too many requests")
+        || lower.contains("429")
+    {
+        return WatcherSendFailureClass::Transient;
+    }
+    const TRANSIENT_PATTERNS: &[&str] = &[
+        "5xx",
+        "500",
+        "502",
+        "503",
+        "504",
+        "bad gateway",
+        "gateway timeout",
+        "internal server error",
+        "server error",
+        "service unavailable",
+        "timeout",
+        "timed out",
+        "temporary",
+        "temporarily",
+        "connection",
+        "network",
+        "transport",
+        "error while sending http request",
+    ];
+    if TRANSIENT_PATTERNS
+        .iter()
+        .any(|pattern| lower.contains(pattern))
+        || lower.trim().is_empty()
+    {
+        return WatcherSendFailureClass::Transient;
+    }
+    const PERMANENT_PATTERNS: &[&str] = &[
+        "400",
+        "401",
+        "403",
+        "404",
+        "405",
+        "410",
+        "422",
+        "unknown channel",
+        "unknown message",
+        "missing access",
+        "missing permissions",
+        "invalid form body",
+        "invalid webhook",
+        "cannot send messages",
+        "cannot edit a message authored by another user",
+        "base_type_max_length",
+        "2000 or fewer in length",
+        "you are not allowed",
+    ];
+    if PERMANENT_PATTERNS
+        .iter()
+        .any(|pattern| lower.contains(pattern))
+    {
+        return WatcherSendFailureClass::Permanent;
+    }
+    WatcherSendFailureClass::Permanent
+}
+
+/// Classify a boxed send error: prefer typed serenity HTTP status when the
+/// source chain still has it, then fall back to the flattened Display string.
+pub(super) fn classify_watcher_send_failure(
+    error: &(dyn std::error::Error + 'static),
+) -> WatcherSendFailureClass {
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(err) = current {
+        if let Some(poise::serenity_prelude::Error::Http(http_err)) =
+            err.downcast_ref::<poise::serenity_prelude::Error>()
+        {
+            if let Some(status) = http_err.status_code() {
+                return classify_watcher_send_failure_status(status.as_u16());
+            }
+        }
+        current = err.source();
+    }
+    classify_watcher_send_failure_message(&error.to_string())
+}
+
+pub(super) fn watcher_send_failure_retry_plan(
+    class: WatcherSendFailureClass,
+) -> WatcherTerminalRelayPlan {
+    match class {
+        WatcherSendFailureClass::Transient => watcher_full_send_failure_retry_plan(),
+        WatcherSendFailureClass::Permanent | WatcherSendFailureClass::RollbackIncomplete => {
+            WatcherTerminalRelayPlan {
+                relay_ok: false,
+                retry_offset: false,
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WatcherRewindAttemptDisposition {
+    Retry,
+    GiveUp,
+}
+
+pub(super) fn watcher_rewind_attempt_disposition(attempts: u8) -> WatcherRewindAttemptDisposition {
+    if attempts <= WATCHER_FULL_SEND_REWIND_ATTEMPT_CAP {
+        WatcherRewindAttemptDisposition::Retry
+    } else {
+        WatcherRewindAttemptDisposition::GiveUp
+    }
+}
+
+/// The watcher's base post-edit disposition for each outcome of
+/// `replace_long_message_raw_with_outcome`. Committed edit/fallback outcomes do
+/// not retry; uncommitted failures still need concrete error classification
+/// before production code rewinds.
 pub(super) fn watcher_terminal_relay_plan(kind: ReplaceOutcomeKind) -> WatcherTerminalRelayPlan {
     match kind {
         // Committed in their own arms (edit consumed / fallback preserved the
@@ -76,7 +233,10 @@ pub(super) fn watcher_terminal_relay_plan(kind: ReplaceOutcomeKind) -> WatcherTe
                 retry_offset: false,
             }
         }
-        // No confirmed full delivery: reset offset and retry the SAME range next loop.
+        // Partial continuation failures are retry-safe only after their sender
+        // reports successful cleanup. TransportError alone is not proof that no
+        // bytes landed; callers must classify the concrete error surface before
+        // applying this retry plan.
         ReplaceOutcomeKind::PartialContinuationFailure | ReplaceOutcomeKind::TransportError => {
             WatcherTerminalRelayPlan {
                 relay_ok: false,
@@ -102,7 +262,9 @@ pub(super) fn watcher_partial_continuation_retry_plan() -> WatcherTerminalRelayP
 }
 
 /// The watcher's plan for failed full-send paths where no body is confirmed
-/// delivered: preserve failure semantics and rewind for a re-read/re-send.
+/// delivered by the caller's rollback-safe send surface. TransportError by
+/// itself is ambiguous; use [`watcher_send_failure_retry_plan`] after
+/// classification for real send errors.
 pub(super) fn watcher_full_send_failure_retry_plan() -> WatcherTerminalRelayPlan {
     watcher_terminal_relay_plan(ReplaceOutcomeKind::TransportError)
 }
@@ -149,8 +311,11 @@ mod a0_replace_outcome_policy_tests {
     //!     dropping the delivered status flips the High-2 assertions.
     use super::super::formatting::ReplaceLongMessageOutcome;
     use super::{
-        EditFailFallbackDisposition, ReplaceOutcomeKind, edit_fail_fallback_disposition,
-        relay_outcome_is_committed, watcher_terminal_relay_plan,
+        EditFailFallbackDisposition, ReplaceOutcomeKind, WatcherRewindAttemptDisposition,
+        WatcherSendFailureClass, classify_watcher_send_failure_message,
+        classify_watcher_send_failure_status, edit_fail_fallback_disposition,
+        relay_outcome_is_committed, watcher_rewind_attempt_disposition,
+        watcher_send_failure_retry_plan, watcher_terminal_relay_plan,
     };
 
     fn partial_continuation() -> ReplaceLongMessageOutcome {
@@ -225,6 +390,93 @@ mod a0_replace_outcome_policy_tests {
             watcher_terminal_relay_plan(ReplaceOutcomeKind::SentFallbackAfterEditFailure);
         assert!(fallback.relay_ok, "a preserved fallback is committed");
         assert!(!fallback.retry_offset);
+    }
+
+    #[test]
+    fn watcher_send_failure_status_classifies_transient_vs_permanent_4154() {
+        for status in [408, 429, 500, 502, 503, 504] {
+            assert_eq!(
+                classify_watcher_send_failure_status(status),
+                WatcherSendFailureClass::Transient,
+                "{status} should rewind"
+            );
+        }
+        for status in [400, 401, 403, 404, 410, 422] {
+            assert_eq!(
+                classify_watcher_send_failure_status(status),
+                WatcherSendFailureClass::Permanent,
+                "{status} should not rewind"
+            );
+        }
+    }
+
+    #[test]
+    fn watcher_send_failure_message_classifies_flattened_discord_errors_4154() {
+        for message in [
+            "Missing Access",
+            "Unknown Channel",
+            "Invalid Form Body",
+            "403 Forbidden",
+            "404 Not Found",
+        ] {
+            assert_eq!(
+                classify_watcher_send_failure_message(message),
+                WatcherSendFailureClass::Permanent,
+                "{message:?} should not rewind"
+            );
+        }
+        for message in [
+            "Error while sending HTTP request.",
+            "operation timed out",
+            "discord 5xx",
+            "Internal Server Error",
+            "503 Service Unavailable",
+            "You are being rate limited.",
+            "",
+        ] {
+            assert_eq!(
+                classify_watcher_send_failure_message(message),
+                WatcherSendFailureClass::Transient,
+                "{message:?} should rewind"
+            );
+        }
+        assert_eq!(
+            classify_watcher_send_failure_message("previous chunk cleanup incomplete"),
+            WatcherSendFailureClass::RollbackIncomplete
+        );
+    }
+
+    #[test]
+    fn watcher_send_failure_plan_rewinds_only_transient_4154() {
+        let transient = watcher_send_failure_retry_plan(WatcherSendFailureClass::Transient);
+        assert!(!transient.relay_ok);
+        assert!(transient.retry_offset);
+
+        for class in [
+            WatcherSendFailureClass::Permanent,
+            WatcherSendFailureClass::RollbackIncomplete,
+        ] {
+            let plan = watcher_send_failure_retry_plan(class);
+            assert!(!plan.relay_ok);
+            assert!(
+                !plan.retry_offset,
+                "{class:?} must fall through without rewind"
+            );
+        }
+    }
+
+    #[test]
+    fn watcher_rewind_attempt_cap_gives_up_after_three_4154() {
+        for attempts in [1, 2, 3] {
+            assert_eq!(
+                watcher_rewind_attempt_disposition(attempts),
+                WatcherRewindAttemptDisposition::Retry
+            );
+        }
+        assert_eq!(
+            watcher_rewind_attempt_disposition(4),
+            WatcherRewindAttemptDisposition::GiveUp
+        );
     }
 
     // -- High 2: sink/standby #2757 preserve arm ------------------------------
