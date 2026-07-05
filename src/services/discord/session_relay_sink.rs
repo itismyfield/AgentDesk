@@ -38,8 +38,8 @@ mod relay_format;
 use self::idle_jsonl::{
     IdleRelayRangeAction, idle_jsonl_payload_contains_init_event,
     idle_jsonl_payload_contains_schedule_wakeup_setup, idle_jsonl_payload_contains_user_event,
-    idle_jsonl_relay_source_for_matched, idle_relay_range_action, read_jsonl_range,
-    idle_jsonl_should_skip_mismatched_inflight as skip_x,
+    idle_jsonl_relay_source_for_matched, idle_jsonl_should_skip_mismatched_inflight as skip_x,
+    idle_relay_range_action, read_jsonl_range,
 };
 
 static SESSION_BOUND_DISCORD_DELIVERY_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -1257,7 +1257,9 @@ async fn run_idle_jsonl_relay_loop(
             if let Some(mut inflight) =
                 super::inflight::load_inflight_state(&matched.provider, channel_id)
             {
-                if skip_x(&mut last_inflight_seen_at, &matched, channel_id, &inflight) { continue; }
+                if skip_x(&mut last_inflight_seen_at, &matched, channel_id, &inflight) {
+                    continue;
+                }
                 // #3960: a `SessionBoundRelay` TUI-direct row whose claim-time
                 // producer has since died is a black-hole — its owner is not
                 // `None`, so the ownerless reclaim below never fires. Re-check
@@ -2410,7 +2412,10 @@ mod tests {
             "the preserved Y bytes relay on the next no-inflight tick"
         );
         offset = end;
-        assert_eq!(offset, end, "Y's offset advances only after relay eligibility");
+        assert_eq!(
+            offset, end,
+            "Y's offset advances only after relay eligibility"
+        );
     }
 
     #[tokio::test]
