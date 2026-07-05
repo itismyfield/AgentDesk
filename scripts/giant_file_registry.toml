@@ -281,9 +281,10 @@ deadline = "2026-10-31"
 decompose_issue = "#3832"
 
 [[entry]]
-# #3721 first-batch promotion: restart/runtime/manual-rebind recovery paths
-# remain in one high-risk recovery engine root.
-file = "src/services/discord/recovery_engine.rs"
+# #3834 r2: restart-path scan moved out of the recovery_engine root, but the
+# verbatim `restore_inflight_turns` body remains a tracked giant until follow-up
+# slices can split the scan/session-retry internals without behavior changes.
+file = "src/services/discord/recovery_engine/restore_inflight.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
 decompose_issue = "#3834"
