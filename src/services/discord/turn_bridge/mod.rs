@@ -190,8 +190,10 @@ use recall_feedback::{
     transcript_contains_explicit_memento_tool_call,
 };
 use retry_state::{
+    bridge_confirmed_response_sent_offset_seed, bridge_should_reclaim_relay_from_missing_watcher,
     clear_local_session_state, handle_gemini_retry_boundary, reset_session_for_auto_retry,
-    sync_response_delivery_state,
+    rewind_and_persist_delivery_on_reclaim, sync_response_delivery_state,
+    sync_terminal_error_delivery_state_for_bridge_owner,
 };
 use skill_usage::record_skill_usage_from_tool_use;
 use stale_resume::{
@@ -206,7 +208,8 @@ use status_panel::{
 use terminal_delivery::{
     BridgeLeaseAcquire, bridge_delivery_lease_for_inflight, bridge_delivery_lease_key_for_inflight,
     bridge_epilogue_clears_inflight, bridge_epilogue_marks_watcher_delivered,
-    bridge_epilogue_skip_save_is_identity_guarded, send_ordered_long_terminal_response,
+    bridge_epilogue_skip_save_is_identity_guarded, empty_sink_commits_fully_consumed_response,
+    empty_sink_preserves_retry, mirror_frozen_prefix_ids, send_ordered_long_terminal_response,
     should_complete_work_dispatch_after_terminal_delivery,
     should_fail_dispatch_after_terminal_delivery, silent_turn_skip_marks_committed,
     terminal_delivery_should_send_new_chunks, turn_bridge_replace_outcome_committed,
@@ -612,14 +615,6 @@ mod streaming_edit_text_tests {
         assert_eq!(rendered, "(No response)");
         assert!(full_response.is_empty());
     }
-}
-
-fn bridge_should_reclaim_relay_from_missing_watcher(
-    watcher_owns_assistant_relay: bool,
-    standby_relay_owns_output: bool,
-    live_watcher_registered: bool,
-) -> bool {
-    watcher_owns_assistant_relay && !standby_relay_owns_output && !live_watcher_registered
 }
 
 #[cfg(test)]
@@ -1383,21 +1378,9 @@ pub(super) fn spawn_turn_bridge(
         let mut api_friction_reports = Vec::new();
         let mut transcript_events = Vec::<SessionTranscriptEvent>::new();
         let mut resume_failure_detected = false;
-        // #2451 H5 graduation: `StreamMessage::Init { session_id, .. }` is
-        // the explicit provider handshake — it lands as soon as the
-        // provider has a live session bound to the new turn. We use its
-        // arrival as the authoritative "resume succeeded" witness so the
-        // empty-response classification no longer has to guess from
-        // `turn_start.elapsed() < 10s`. The elapsed-time heuristic is
-        // retained only as a 30s safety backstop.
+        // #2451: Init is the authoritative resume-success witness; elapsed
+        // time is only a backstop. Snapshot prior session state before any reset.
         let mut session_handshake_seen = false;
-        // #2451: snapshot whether the channel had a prior provider
-        // session_id at turn-start time. The previous logic re-read
-        // `shared.core.sessions` at empty-response classification time,
-        // which races with `reset_session_for_auto_retry` and produces
-        // false negatives ("session was already cleared, so we never
-        // attempted resume"). Capturing this once at the top closes the
-        // race.
         let had_prior_session_id_at_turn_start = {
             let data = shared_owned.core.lock().await;
             data.sessions
@@ -1429,13 +1412,8 @@ pub(super) fn spawn_turn_bridge(
         let mut terminal_control_ready_observed = false;
         let mut terminal_control_drain_until: Option<std::time::Instant> = None;
         let mut bridge_created_response_placeholder_msg_id: Option<MessageId> = None;
-        // A recovery turn with no anchored placeholder (current_msg_id == 0,
-        // e.g. a TUI-direct turn) reaches the bridge with `None`. The bridge
-        // streams into a concrete placeholder, so create a fresh one now; if
-        // creation fails we fall back to the channel and the first streaming
-        // edit re-creates it. This keeps the working `current_msg_id` a real
-        // `MessageId` for the ~30 downstream relay sites without panicking on
-        // `MessageId::new(0)`.
+        // Recovery turns without an anchored placeholder create one up front;
+        // on failure the synthetic sentinel lets the first streaming edit retry.
         let mut current_msg_id = match bridge.current_msg_id {
             Some(id) => id,
             None => {
@@ -1462,6 +1440,8 @@ pub(super) fn spawn_turn_bridge(
             }
         };
         let mut response_sent_offset = bridge.response_sent_offset;
+        let mut bridge_confirmed_response_sent_offset =
+            bridge_confirmed_response_sent_offset_seed(initial_relay_owner_kind, response_sent_offset);
         let mut streamed_assistant_text_this_turn = false;
         let mut streaming_rollover_frozen_msg_ids: Vec<MessageId> = Vec::new();
         let mut terminal_full_replay_cleanup_msg_ids: Vec<MessageId> = Vec::new();
@@ -2665,21 +2645,8 @@ pub(super) fn spawn_turn_bridge(
                             }
                             state_dirty = true;
                             done = true;
-                            // #2449 H4 graduation: only arm the 250ms drain
-                            // window when handoff is genuinely ambiguous.
-                            // If a runtime handoff has already been observed
-                            // (`tmux_handed_off` flipped or
-                            // `inflight_state.runtime_kind` stamped), the
-                            // ownership question is already settled and any
-                            // further drain just delays bridge exit by up to
-                            // 250ms. The drain remains armed for
-                            // warm-followup providers that emit `Done` before
-                            // their handoff frame — in those cases the
-                            // handoff arm clears the deadline to `None` as
-                            // soon as the frame lands. Do not use persisted
-                            // `runtime_kind` as this signal: fresh managed
-                            // turns can be pre-stamped before the control
-                            // frame arrives.
+                            // #2449: only arm the 250ms drain when handoff is still
+                            // ambiguous; fresh managed turns may pre-stamp runtime_kind.
                             if !terminal_control_ready_observed {
                                 terminal_control_drain_until = Some(
                                     std::time::Instant::now()
@@ -2730,6 +2697,14 @@ pub(super) fn spawn_turn_bridge(
                             } else {
                                 full_response = format!("Error: {}", message);
                             }
+                            sync_terminal_error_delivery_state_for_bridge_owner(
+                                &full_response,
+                                &mut response_sent_offset,
+                                &mut bridge_confirmed_response_sent_offset,
+                                &mut inflight_state,
+                                channel_id,
+                                watcher_owns_assistant_relay && watcher_relay_available_for_turn,
+                            );
                             push_transcript_event(
                                 &mut transcript_events,
                                 SessionTranscriptEvent {
@@ -2759,7 +2734,6 @@ pub(super) fn spawn_turn_bridge(
                                     channel_id,
                                 );
                             }
-                            inflight_state.full_response = full_response.clone();
                             close_all_tracked_background_children(
                                 shared_owned.pg_pool.as_ref(),
                                 &mut active_background_child_session_ids,
@@ -3499,7 +3473,12 @@ pub(super) fn spawn_turn_bridge(
                                     "src/services/discord/turn_bridge/mod.rs:rollover_response_sent_offset",
                                 );
                                 response_sent_offset = next_response_sent_offset;
+                                bridge_confirmed_response_sent_offset = response_sent_offset;
                                 streaming_rollover_frozen_msg_ids.push(current_msg_id);
+                                mirror_frozen_prefix_ids(
+                                    &streaming_rollover_frozen_msg_ids,
+                                    &mut inflight_state,
+                                );
                                 current_msg_id = next_msg_id;
                                 rolled_over_this_interval = true;
                                 last_edit_text = status_block;
@@ -3700,6 +3679,13 @@ pub(super) fn spawn_turn_bridge(
                 watcher_owns_assistant_relay = false;
                 watcher_relay_available_for_turn = false;
                 inflight_state.set_relay_owner_kind(super::inflight::RelayOwnerKind::None);
+                rewind_and_persist_delivery_on_reclaim(
+                    &full_response,
+                    bridge_confirmed_response_sent_offset,
+                    &mut response_sent_offset,
+                    &mut inflight_state,
+                    channel_id,
+                );
                 state_dirty = true;
             }
 
@@ -5104,6 +5090,7 @@ pub(super) fn spawn_turn_bridge(
                 tracing::warn!("  [{ts}] ⚠ invalid API_FRICTION marker: {error}");
             }
 
+            let resume_retry_queued = (recovery_retry || resume_failure_detected) && user_msg_id.is_some();
             let mut delivery_response = terminal_delivery_response_after_offset(
                 &full_response,
                 response_sent_offset,
@@ -5187,14 +5174,23 @@ pub(super) fn spawn_turn_bridge(
                     }
                 }
             } else if delivery_response.trim().is_empty() {
-                if gateway
-                    .edit_message(
-                        channel_id,
-                        current_msg_id,
-                        "↻ 세션 복구 중... 잠시 후 자동으로 이어갑니다.",
-                    )
-                    .await
-                    .is_ok()
+                if empty_sink_commits_fully_consumed_response(&full_response, response_sent_offset) {
+                    (terminal_delivery_committed, terminal_body_visible) = (true, true);
+                } else if empty_sink_preserves_retry(
+                    &full_response,
+                    resume_retry_queued,
+                    response_sent_offset,
+                    channel_id,
+                ) {
+                    preserve_inflight_for_cleanup_retry = true;
+                } else if TurnGateway::edit_message(
+                    gateway.as_ref(),
+                    channel_id,
+                    current_msg_id,
+                    "↻ 세션 복구 중... 잠시 후 자동으로 이어갑니다.",
+                )
+                .await
+                .is_ok()
                 {
                     terminal_delivery_committed = true;
                     terminal_body_visible = true;

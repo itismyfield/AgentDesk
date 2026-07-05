@@ -3962,6 +3962,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             && !inflight_before_relay_is_stale_newer_turn
             && let Some(inflight) = inflight_before_relay.as_ref()
         {
+            merge_persisted_rollover_frozen_msg_ids(
+                &mut watcher_streaming_rollover_frozen_msg_ids,
+                Some(inflight),
+                &tmux_session_name,
+            );
             adopt_watcher_terminal_message_ids_from_inflight(
                 &mut placeholder_msg_id,
                 &mut placeholder_from_restored_inflight,

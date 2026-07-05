@@ -92,6 +92,37 @@ mod tests {
     }
 
     #[test]
+    fn terminal_error_after_rollover_delivers_error_text_not_recovery_notice() {
+        let error = "Error: transport failed".to_string();
+        let mut response_sent_offset = 900usize;
+        let mut state = crate::services::discord::InflightTurnState::new(
+            crate::services::provider::ProviderKind::Claude,
+            1,
+            Some("adk-cc".to_string()),
+            42,
+            5001,
+            5002,
+            "prompt".to_string(),
+            Some("session".to_string()),
+            Some("AgentDesk-claude-adk-cc-1".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            10,
+        );
+
+        super::super::retry_state::sync_terminal_error_delivery_state(
+            &error,
+            &mut response_sent_offset,
+            &mut state,
+        );
+        let delivered = terminal_delivery_response_after_offset(&error, response_sent_offset, None);
+
+        assert_eq!(response_sent_offset, 0);
+        assert_eq!(delivered, error);
+        assert!(!delivered.contains("세션 복구 중"));
+    }
+
+    #[test]
     fn long_authoritative_done_after_rollover_replays_full_body() {
         let frozen_prefix = "probe 품질 ".repeat(220);
         let terminal_tail = "기준으로는 실패입니다";

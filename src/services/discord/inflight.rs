@@ -26,6 +26,7 @@ mod store;
 // (root callers only) and is brought in via a plain import. `InflightStateFileLock`
 // is named nowhere outside `store` (it only flows as a return type), so it keeps
 // its module-tree visibility there without a parent re-export.
+pub(in crate::services::discord) use store::InflightDeliveryRewindReason;
 use store::inflight_provider_dir;
 pub(in crate::services::discord::inflight) use store::inflight_state_path;
 pub(crate) use store::lock_inflight_state_path;
@@ -111,15 +112,15 @@ mod save_store;
 // `validate_inflight_state_for_save` (via `use super::*`) unchanged.
 use self::store::{
     load_inflight_state_unlocked, persist_under_lock, persist_under_lock_preserving_updated_at,
-    validate_inflight_state_for_save,
+    validate_inflight_state_for_save, validate_inflight_state_for_save_with_delivery_rewind_reason,
 };
 
 // Save cluster re-exports (original visibility mirrored). The save child declares
 // these `pub(in crate::services::discord)` (the absolute spelling of the parent's
 // original `pub(super)`), so this `pub(super)` re-export does not widen the surface.
 pub(super) use self::save_store::{
-    CreateNewInflightError, save_inflight_state, save_inflight_state_create_new,
-    save_inflight_state_if_absent,
+    CreateNewInflightError, save_inflight_delivery_rewind_if_matches_identity, save_inflight_state,
+    save_inflight_state_create_new, save_inflight_state_if_absent,
 };
 pub(in crate::services::discord) use self::save_store::{
     GuardedSaveOutcome, bind_recovery_anchor_if_matches_identity,

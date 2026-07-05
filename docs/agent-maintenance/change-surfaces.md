@@ -1173,7 +1173,9 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6164 lines; production LoC; -16
+  - `src/services/discord/turn_bridge/mod.rs` (6160 lines; production LoC; -2
+    from #4110 — empty-sink hardening moved delivery-state reset/rewind logic
+    into `retry_state.rs`/`terminal_delivery.rs` children; prior: -16
     from #4049 S4-a1 — reaction mutations replaced by turn_view_reconciler
     notifications (tv_clear/tv_stop/tv_fail/tv_done) and
     `record_status_panel_events` moved verbatim to the `status_panel.rs` child
