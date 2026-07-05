@@ -212,6 +212,11 @@ pub fn should_recreate_session_after_stdin_error(err: &str) -> bool {
     if err.contains("stdin already closed") {
         return true;
     }
+    // ProcessBackend stopped markers intentionally force a cold start on the
+    // next message instead of trying to reuse a cancelled wrapper pipe.
+    if err.contains("Process session ") && err.contains(" was stopped") {
+        return true;
+    }
     // Write/flush failures that indicate dead process
     if err.contains("Failed to write to child stdin") || err.contains("Failed to flush child stdin")
     {
@@ -237,5 +242,17 @@ pub fn build_tmux_death_diagnostic(
         None
     } else {
         Some(parts.join("; "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_recreate_session_after_stdin_error;
+
+    #[test]
+    fn process_backend_stopped_error_forces_recreate() {
+        assert!(should_recreate_session_after_stdin_error(
+            "Process session AgentDesk-claude-123 was stopped"
+        ));
     }
 }

@@ -5,9 +5,13 @@
 //! no-tmux path explicit so a Discord stop cannot mark a turn stopped while the
 //! underlying wrapper keeps generating.
 
-use super::interrupt_policy::ProviderTurnInterruptOutcome;
+use super::interrupt_policy::{
+    ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON, ProviderTurnInterruptOutcome,
+};
 use super::pid_exit::wait_for_pid_exit;
-use super::process_table::send_sigint;
+use super::process_table::{
+    provider_cli_pid_for_process_backend, send_sigint, send_sigint_to_process_group_or_pid,
+};
 use crate::services::provider::{CancelToken, ProviderKind};
 use std::sync::Arc;
 
@@ -16,6 +20,21 @@ pub(super) fn interrupt_process_backend_turn(
     child_pid: Option<u32>,
     reason: &str,
 ) -> ProviderTurnInterruptOutcome {
+    if reason == ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON {
+        tracing::info!(
+            "process backend interrupt suppressed: provider={} reason={} detail=anonymous_turn_bridge_teardown",
+            provider.as_str(),
+            reason
+        );
+        return ProviderTurnInterruptOutcome {
+            tmux_session: None,
+            sent_keys: false,
+            fallback_sigint_pid: None,
+            missing_tmux_session: true,
+            sigint_target_missing: false,
+        };
+    }
+
     let Some(child_pid) = child_pid else {
         tracing::error!(
             "provider turn interrupt skipped: provider={} reason={} error=cancel_token_missing_runtime_target",
@@ -35,25 +54,57 @@ pub(super) fn interrupt_process_backend_turn(
         crate::services::session_backend::mark_process_sessions_stopped_by_pid(child_pid);
     if stopped_sessions.is_empty() {
         tracing::warn!(
-            "process backend interrupt found no registry entry for pid: provider={} pid={} reason={}",
+            "process backend interrupt skipped SIGINT: provider={} pid={} reason={} error=registry_entry_missing_or_identity_mismatch",
             provider.as_str(),
             child_pid,
             reason
         );
+        return ProviderTurnInterruptOutcome {
+            tmux_session: None,
+            sent_keys: false,
+            fallback_sigint_pid: None,
+            missing_tmux_session: true,
+            sigint_target_missing: true,
+        };
     }
 
-    if let Err(error) = send_sigint(child_pid) {
+    let signal_target = provider_cli_pid_for_process_backend(child_pid, provider);
+    let (target_pid, target_kind) = match signal_target {
+        Some(pid) => (pid, "provider_cli"),
+        None => {
+            tracing::warn!(
+                "process backend interrupt could not resolve provider CLI pid; falling back to verified wrapper signal: provider={} wrapper_pid={} reason={} stopped_sessions={:?}",
+                provider.as_str(),
+                child_pid,
+                reason,
+                stopped_sessions
+            );
+            (child_pid, "wrapper")
+        }
+    };
+
+    let signal_result = if signal_target.is_some() {
+        send_sigint_to_process_group_or_pid(target_pid)
+    } else {
+        send_sigint(target_pid)
+    };
+
+    if let Err(error) = signal_result {
         tracing::warn!(
-            "process backend interrupt SIGINT failed: provider={} pid={} reason={} error={}",
+            "process backend interrupt SIGINT failed: provider={} target_kind={} pid={} wrapper_pid={} reason={} error={}",
             provider.as_str(),
+            target_kind,
+            target_pid,
             child_pid,
             reason,
             error
         );
     } else {
         tracing::info!(
-            "process backend interrupt SIGINT sent: provider={} pid={} reason={} stopped_sessions={:?}",
+            "process backend interrupt SIGINT sent: provider={} target_kind={} pid={} wrapper_pid={} reason={} stopped_sessions={:?}",
             provider.as_str(),
+            target_kind,
+            target_pid,
             child_pid,
             reason,
             stopped_sessions
@@ -63,7 +114,7 @@ pub(super) fn interrupt_process_backend_turn(
     ProviderTurnInterruptOutcome {
         tmux_session: None,
         sent_keys: false,
-        fallback_sigint_pid: Some(child_pid),
+        fallback_sigint_pid: Some(target_pid),
         missing_tmux_session: true,
         sigint_target_missing: false,
     }
@@ -75,29 +126,31 @@ pub(super) async fn hard_stop_unresponsive_process_backend_turn(
     interrupt_outcome: &ProviderTurnInterruptOutcome,
     reason: &str,
 ) {
-    let child_pid = interrupt_outcome
-        .fallback_sigint_pid
-        .or_else(|| token.child_pid.lock().ok().and_then(|guard| *guard));
-    let Some(child_pid) = child_pid else {
+    let Some(target_pid) = interrupt_outcome.fallback_sigint_pid else {
         tracing::error!(
-            "provider hard-stop skipped: provider={} reason={} error=cancel_token_missing_runtime_target interrupt_missing_tmux_session={}",
+            "provider hard-stop skipped: provider={} reason={} error=no_verified_process_backend_target interrupt_missing_tmux_session={} sigint_target_missing={}",
             provider.as_str(),
             reason,
-            interrupt_outcome.missing_tmux_session
+            interrupt_outcome.missing_tmux_session,
+            interrupt_outcome.sigint_target_missing
         );
         return;
     };
+    let wrapper_pid = token.child_pid.lock().ok().and_then(|guard| *guard);
 
-    if wait_for_pid_exit(child_pid, super::PROVIDER_HARD_STOP_GRACE).await {
+    if wait_for_pid_exit(target_pid, super::PROVIDER_HARD_STOP_GRACE).await {
         return;
     }
 
     tracing::warn!(
-        "process backend turn did not stop after SIGINT; killing process tree: provider={} pid={} reason={}",
+        "process backend turn did not stop after SIGINT; killing process tree: provider={} pid={} wrapper_pid={:?} reason={}",
         provider.as_str(),
-        child_pid,
+        target_pid,
+        wrapper_pid,
         reason
     );
-    crate::services::session_backend::mark_process_sessions_stopped_by_pid(child_pid);
-    crate::services::process::kill_pid_tree(child_pid);
+    if let Some(wrapper_pid) = wrapper_pid {
+        crate::services::session_backend::mark_process_sessions_stopped_by_pid(wrapper_pid);
+    }
+    crate::services::process::kill_pid_tree(target_pid);
 }

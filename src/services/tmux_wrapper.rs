@@ -20,10 +20,35 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::utils::format::safe_prefix;
+
+#[cfg(unix)]
+static WRAPPER_SIGNAL: AtomicI32 = AtomicI32::new(0);
+
+#[cfg(unix)]
+extern "C" fn handle_wrapper_signal(signal: libc::c_int) {
+    let _ = WRAPPER_SIGNAL.compare_exchange(0, signal, Ordering::SeqCst, Ordering::SeqCst);
+}
+
+#[cfg(unix)]
+fn install_wrapper_signal_handlers() {
+    WRAPPER_SIGNAL.store(0, Ordering::SeqCst);
+    #[allow(unsafe_code)]
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = handle_wrapper_signal as *const () as libc::sighandler_t;
+        action.sa_flags = 0;
+        libc::sigemptyset(&mut action.sa_mask);
+        libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
+        libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut());
+    }
+}
+
+#[cfg(not(unix))]
+fn install_wrapper_signal_handlers() {}
 
 /// Input mode for the wrapper subprocess.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -43,6 +68,8 @@ pub fn run(
     claude_cmd: &[String],
     input_mode: InputMode,
 ) {
+    install_wrapper_signal_handlers();
+
     // Banner
     let mode_label = match input_mode {
         InputMode::Fifo => "bidirectional",
@@ -103,6 +130,7 @@ pub fn run(
             std::process::exit(1);
         }
     };
+    let child_pid = child.id();
 
     // Take stdin — keep it open for multi-turn via stream-json
     let claude_stdin = match child.stdin.take() {
@@ -142,6 +170,27 @@ pub fn run(
     // Shared state
     let claude_exited = Arc::new(AtomicBool::new(false));
     let ready_for_input = Arc::new(AtomicBool::new(false));
+
+    #[cfg(unix)]
+    let _signal_thread = {
+        let exited = claude_exited.clone();
+        std::thread::Builder::new()
+            .name("tmux-wrapper-signal-monitor".to_string())
+            .spawn(move || {
+                while !exited.load(Ordering::Relaxed) {
+                    let signal = WRAPPER_SIGNAL.load(Ordering::SeqCst);
+                    if signal != 0 {
+                        eprintln!(
+                            "\x1b[33m[wrapper signal {signal} received — terminating Claude tree]\x1b[0m"
+                        );
+                        crate::services::process::kill_pid_tree(child_pid);
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            })
+            .ok()
+    };
 
     // === Thread 1: Output — read Claude stdout → output file + terminal ===
     let output_file_path = output_file.to_string();

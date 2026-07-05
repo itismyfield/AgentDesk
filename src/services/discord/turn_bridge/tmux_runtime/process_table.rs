@@ -18,11 +18,32 @@ static SIGINT_TEST_EVENTS: std::sync::LazyLock<std::sync::Mutex<Vec<u32>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
 
 #[cfg(test)]
+static PROCESS_BACKEND_PROVIDER_PID_TEST_OVERRIDES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<u32, u32>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(test)]
 pub(super) fn take_sigint_test_events() -> Vec<u32> {
     let mut events = SIGINT_TEST_EVENTS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     std::mem::take(&mut *events)
+}
+
+#[cfg(test)]
+pub(super) fn set_process_backend_provider_pid_for_test(wrapper_pid: u32, provider_pid: u32) {
+    PROCESS_BACKEND_PROVIDER_PID_TEST_OVERRIDES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(wrapper_pid, provider_pid);
+}
+
+#[cfg(test)]
+pub(super) fn clear_process_backend_provider_pid_for_test(wrapper_pid: u32) {
+    PROCESS_BACKEND_PROVIDER_PID_TEST_OVERRIDES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(&wrapper_pid);
 }
 
 #[cfg(unix)]
@@ -42,6 +63,24 @@ pub(super) fn provider_cli_pid_in_tmux(
     let pane_pid = crate::services::platform::tmux::pane_pid(tmux_session_name)?;
     let rows = process_table();
     select_provider_pid_in_pane(pane_pid, &rows, provider, tracked_child_pid)
+}
+
+#[cfg(unix)]
+pub(super) fn provider_cli_pid_for_process_backend(
+    wrapper_pid: u32,
+    provider: &ProviderKind,
+) -> Option<u32> {
+    #[cfg(test)]
+    if let Some(pid) = PROCESS_BACKEND_PROVIDER_PID_TEST_OVERRIDES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&wrapper_pid)
+        .copied()
+    {
+        return Some(pid);
+    }
+    let rows = process_table();
+    select_provider_pid_in_process_tree(wrapper_pid, &rows, provider)
 }
 
 /// #3207 (part 1): is the tmux pane foreground the `agentdesk tmux-wrapper`
@@ -142,11 +181,41 @@ fn select_provider_pid_in_pane(
         .map(|row| row.pid)
 }
 
+#[cfg(unix)]
+fn select_provider_pid_in_process_tree(
+    root_pid: u32,
+    rows: &[ProcessRow],
+    provider: &ProviderKind,
+) -> Option<u32> {
+    let descendants = descendant_processes(root_pid, rows);
+    descendants
+        .into_iter()
+        .filter(|row| !command_is_agentdesk_provider_wrapper(&row.command))
+        .filter(|row| command_matches_provider(&row.command, provider))
+        .max_by_key(|row| provider_command_match_score(&row.command, provider))
+        .map(|row| row.pid)
+        .or_else(|| {
+            rows.iter()
+                .find(|row| row.pid == root_pid)
+                .filter(|row| !command_is_agentdesk_provider_wrapper(&row.command))
+                .filter(|row| command_matches_provider(&row.command, provider))
+                .map(|row| row.pid)
+        })
+}
+
 #[cfg(not(unix))]
 pub(super) fn provider_cli_pid_in_tmux(
     _tmux_session_name: &str,
     _provider: &ProviderKind,
     _tracked_child_pid: Option<u32>,
+) -> Option<u32> {
+    None
+}
+
+#[cfg(not(unix))]
+pub(super) fn provider_cli_pid_for_process_backend(
+    _wrapper_pid: u32,
+    _provider: &ProviderKind,
 ) -> Option<u32> {
     None
 }
@@ -254,6 +323,28 @@ pub(super) fn send_sigint(pid: u32) -> Result<(), String> {
     }
 }
 
+#[cfg(all(unix, not(test)))]
+pub(super) fn send_sigint_to_process_group_or_pid(pid: u32) -> Result<(), String> {
+    #[allow(unsafe_code)]
+    unsafe {
+        let group_result = libc::kill(-(pid as libc::pid_t), libc::SIGINT);
+        if group_result == 0 {
+            return Ok(());
+        }
+        let group_error = std::io::Error::last_os_error();
+        let pid_result = libc::kill(pid as libc::pid_t, libc::SIGINT);
+        if pid_result == 0 {
+            Ok(())
+        } else {
+            Err(format!(
+                "process_group_error={}; pid_error={}",
+                group_error,
+                std::io::Error::last_os_error()
+            ))
+        }
+    }
+}
+
 #[cfg(all(unix, test))]
 pub(super) fn send_sigint(pid: u32) -> Result<(), String> {
     SIGINT_TEST_EVENTS
@@ -263,7 +354,17 @@ pub(super) fn send_sigint(pid: u32) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(all(unix, test))]
+pub(super) fn send_sigint_to_process_group_or_pid(pid: u32) -> Result<(), String> {
+    send_sigint(pid)
+}
+
 #[cfg(not(unix))]
 pub(super) fn send_sigint(_pid: u32) -> Result<(), String> {
+    Err("SIGINT fallback is only supported on Unix".to_string())
+}
+
+#[cfg(not(unix))]
+pub(super) fn send_sigint_to_process_group_or_pid(_pid: u32) -> Result<(), String> {
     Err("SIGINT fallback is only supported on Unix".to_string())
 }

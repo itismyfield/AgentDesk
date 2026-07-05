@@ -9,9 +9,10 @@ use crate::db::turns::TurnTokenUsage;
 use crate::services::agent_protocol::{
     StreamMessage, TaskNotificationKind, status_events_from_workflow_json,
 };
+use crate::services::process::ProcessIdentity;
 use crate::services::provider::{CancelToken, ReadOutputResult, SessionProbe};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -56,6 +57,49 @@ pub enum SessionHandle {
         pid: u32,
         alive: Arc<std::sync::atomic::AtomicBool>,
     },
+}
+
+struct ProcessSessionEntry {
+    handle: SessionHandle,
+    identity: ProcessIdentity,
+}
+
+#[derive(Default)]
+struct ProcessSessionRegistry {
+    handles: HashMap<String, ProcessSessionEntry>,
+    stopped: HashSet<String>,
+    stopped_order: VecDeque<String>,
+}
+
+const MAX_STOPPED_PROCESS_SESSIONS: usize = 1024;
+
+impl ProcessSessionRegistry {
+    fn insert(&mut self, session_name: String, handle: SessionHandle) {
+        self.remove_stopped_marker(&session_name);
+        let identity = ProcessIdentity::capture(handle.pid());
+        self.handles
+            .insert(session_name, ProcessSessionEntry { handle, identity });
+    }
+
+    fn mark_stopped(&mut self, session_name: String) {
+        if self.stopped.insert(session_name.clone()) {
+            self.stopped_order.push_back(session_name);
+            self.prune_stopped_markers();
+        }
+    }
+
+    fn remove_stopped_marker(&mut self, session_name: &str) {
+        self.stopped.remove(session_name);
+    }
+
+    fn prune_stopped_markers(&mut self) {
+        while self.stopped.len() > MAX_STOPPED_PROCESS_SESSIONS {
+            let Some(candidate) = self.stopped_order.pop_front() else {
+                break;
+            };
+            self.stopped.remove(&candidate);
+        }
+    }
 }
 
 /// Backend for managing AI provider sessions.
@@ -226,83 +270,93 @@ impl SessionHandle {
     }
 }
 
-static PROCESS_HANDLES: LazyLock<Mutex<HashMap<String, SessionHandle>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-static STOPPED_PROCESS_SESSIONS: LazyLock<Mutex<HashSet<String>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
+static PROCESS_SESSIONS: LazyLock<Mutex<ProcessSessionRegistry>> =
+    LazyLock::new(|| Mutex::new(ProcessSessionRegistry::default()));
 
-fn process_handles() -> MutexGuard<'static, HashMap<String, SessionHandle>> {
-    PROCESS_HANDLES.lock().unwrap_or_else(|error| {
-        tracing::warn!("Recovered poisoned PROCESS_HANDLES mutex; continuing with inner state");
-        error.into_inner()
-    })
-}
-
-fn stopped_process_sessions() -> MutexGuard<'static, HashSet<String>> {
-    STOPPED_PROCESS_SESSIONS.lock().unwrap_or_else(|error| {
-        tracing::warn!(
-            "Recovered poisoned STOPPED_PROCESS_SESSIONS mutex; continuing with inner state"
-        );
+fn process_sessions() -> MutexGuard<'static, ProcessSessionRegistry> {
+    PROCESS_SESSIONS.lock().unwrap_or_else(|error| {
+        tracing::warn!("Recovered poisoned PROCESS_SESSIONS mutex; continuing with inner state");
         error.into_inner()
     })
 }
 
 pub fn insert_process_session(session_name: impl Into<String>, handle: SessionHandle) {
-    let session_name = session_name.into();
-    stopped_process_sessions().remove(&session_name);
-    process_handles().insert(session_name, handle);
+    process_sessions().insert(session_name.into(), handle);
 }
 
 pub fn remove_process_session(session_name: &str) -> Option<SessionHandle> {
-    process_handles().remove(session_name)
+    process_sessions()
+        .handles
+        .remove(session_name)
+        .map(|entry| entry.handle)
 }
 
 pub fn process_session_was_stopped(session_name: &str) -> bool {
-    stopped_process_sessions().contains(session_name)
+    process_sessions().stopped.contains(session_name)
 }
 
 #[cfg(test)]
 fn mark_process_session_stopped(session_name: impl Into<String>) {
-    stopped_process_sessions().insert(session_name.into());
+    process_sessions().mark_stopped(session_name.into());
 }
 
 pub fn mark_process_sessions_stopped_by_pid(pid: u32) -> Vec<String> {
-    let mut handles = process_handles();
-    let session_names = handles
+    let mut registry = process_sessions();
+    let session_names = registry
+        .handles
         .iter()
-        .filter_map(|(session_name, handle)| (handle.pid() == pid).then(|| session_name.clone()))
+        .filter_map(|(session_name, entry)| {
+            if entry.handle.pid() != pid {
+                return None;
+            }
+            if !entry.identity.matches(pid) {
+                tracing::warn!(
+                    "process backend stopped marker skipped: session={} pid={} reason=identity_mismatch",
+                    session_name,
+                    pid
+                );
+                return None;
+            }
+            Some(session_name.clone())
+        })
         .collect::<Vec<_>>();
 
+    let mut stopped_handles = Vec::new();
     for session_name in &session_names {
-        handles.remove(session_name);
-    }
-    drop(handles);
-
-    if !session_names.is_empty() {
-        let mut stopped = stopped_process_sessions();
-        for session_name in &session_names {
-            stopped.insert(session_name.clone());
+        if let Some(entry) = registry.handles.remove(session_name) {
+            stopped_handles.push(entry.handle);
         }
+        registry.mark_stopped(session_name.clone());
+    }
+    drop(registry);
+
+    for handle in stopped_handles {
+        reap_stopped_process_handle(handle);
     }
 
     session_names
 }
 
 pub fn process_session_pid(session_name: &str) -> Option<u32> {
-    if process_session_was_stopped(session_name) {
+    let registry = process_sessions();
+    if registry.stopped.contains(session_name) {
         return None;
     }
-    process_handles().get(session_name).map(SessionHandle::pid)
+    registry
+        .handles
+        .get(session_name)
+        .map(|entry| entry.handle.pid())
 }
 
 pub fn process_session_is_alive(session_name: &str) -> bool {
-    if process_session_was_stopped(session_name) {
+    let registry = process_sessions();
+    if registry.stopped.contains(session_name) {
         return false;
     }
-    let handles = process_handles();
-    handles
+    registry
+        .handles
         .get(session_name)
-        .map(|handle| ProcessBackend::new().is_alive(handle))
+        .map(|entry| ProcessBackend::new().is_alive(&entry.handle))
         .unwrap_or(false)
 }
 
@@ -317,14 +371,15 @@ pub fn process_session_available_for_followup(session_name: &str) -> bool {
 }
 
 pub fn send_process_session_input(session_name: &str, message: &str) -> Result<(), String> {
-    if process_session_was_stopped(session_name) {
+    let registry = process_sessions();
+    if registry.stopped.contains(session_name) {
         return Err(format!("Process session {session_name} was stopped"));
     }
-    let handles = process_handles();
-    let handle = handles
+    let handle = registry
+        .handles
         .get(session_name)
         .ok_or_else(|| format!("No process handle found for session {}", session_name))?;
-    ProcessBackend::new().send_input(handle, message)
+    ProcessBackend::new().send_input(&handle.handle, message)
 }
 
 pub fn process_session_probe(session_name: &str) -> SessionProbe {
@@ -334,15 +389,49 @@ pub fn process_session_probe(session_name: &str) -> SessionProbe {
 
 pub fn terminate_process_handle(handle: SessionHandle) {
     match handle {
-        SessionHandle::Process { child, .. } => {
+        SessionHandle::Process {
+            child_stdin, child, ..
+        } => {
+            if let Ok(mut stdin_guard) = child_stdin.lock() {
+                let _ = stdin_guard.take();
+            }
             let mut child_guard = match child.lock() {
                 Ok(guard) => guard,
                 Err(_) => return,
             };
-            if let Some(ref mut process) = *child_guard {
+            if let Some(mut process) = child_guard.take() {
                 let _ = process.kill();
                 let _ = process.wait();
             }
+        }
+        #[cfg(test)]
+        SessionHandle::TestProcess { alive, .. } => {
+            alive.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+fn reap_stopped_process_handle(handle: SessionHandle) {
+    match handle {
+        SessionHandle::Process {
+            child_stdin,
+            child,
+            pid,
+        } => {
+            let _ = std::thread::Builder::new()
+                .name(format!("process-session-reaper-{pid}"))
+                .spawn(move || {
+                    if let Ok(mut stdin_guard) = child_stdin.lock() {
+                        let _ = stdin_guard.take();
+                    }
+                    let mut child_guard = match child.lock() {
+                        Ok(guard) => guard,
+                        Err(_) => return,
+                    };
+                    if let Some(mut process) = child_guard.take() {
+                        let _ = process.wait();
+                    }
+                });
         }
         #[cfg(test)]
         SessionHandle::TestProcess { alive, .. } => {
@@ -383,7 +472,7 @@ mod process_registry_stop_tests {
             session_name.clone(),
             SessionHandle::TestProcess {
                 pid: 424_243,
-                alive,
+                alive: Arc::new(AtomicBool::new(true)),
             },
         );
         assert!(!process_session_was_stopped(&session_name));
@@ -417,6 +506,12 @@ mod process_registry_stop_tests {
         );
         assert!(process_session_was_stopped(&session_name));
         assert!(!alive.load(Ordering::Relaxed));
+        assert!(
+            crate::services::tmux_diagnostics::should_recreate_session_after_stdin_error(&format!(
+                "Process session {session_name} was stopped"
+            )),
+            "Claude ProcessBackend follow-up maps stopped pipe sessions to cold-start recreation"
+        );
 
         insert_process_session(
             session_name.clone(),

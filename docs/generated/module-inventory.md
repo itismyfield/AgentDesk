@@ -737,11 +737,11 @@
 | `services::discord::turn_bridge::task_notification_lifecycle` | `src/services/discord/turn_bridge/task_notification_lifecycle.rs` | 221 | 104 | 117 |  |
 | `services::discord::turn_bridge::terminal_controller_cutover` | `src/services/discord/turn_bridge/terminal_controller_cutover.rs` | 1830 | 960 | 870 |  |
 | `services::discord::turn_bridge::terminal_delivery` | `src/services/discord/turn_bridge/terminal_delivery.rs` | 1881 | 696 | 1185 |  |
-| `services::discord::turn_bridge::tmux_runtime` | `src/services/discord/turn_bridge/tmux_runtime.rs` | 1101 | 980 | 121 |  |
+| `services::discord::turn_bridge::tmux_runtime` | `src/services/discord/turn_bridge/tmux_runtime.rs` | 1267 | 983 | 284 |  |
 | `services::discord::turn_bridge::tmux_runtime::interrupt_policy` | `src/services/discord/turn_bridge/tmux_runtime/interrupt_policy.rs` | 374 | 225 | 149 |  |
 | `services::discord::turn_bridge::tmux_runtime::pid_exit` | `src/services/discord/turn_bridge/tmux_runtime/pid_exit.rs` | 282 | 176 | 106 |  |
-| `services::discord::turn_bridge::tmux_runtime::process_backend_cancel` | `src/services/discord/turn_bridge/tmux_runtime/process_backend_cancel.rs` | 103 | 103 | 0 |  |
-| `services::discord::turn_bridge::tmux_runtime::process_table` | `src/services/discord/turn_bridge/tmux_runtime/process_table.rs` | 269 | 269 | 0 |  |
+| `services::discord::turn_bridge::tmux_runtime::process_backend_cancel` | `src/services/discord/turn_bridge/tmux_runtime/process_backend_cancel.rs` | 156 | 156 | 0 |  |
+| `services::discord::turn_bridge::tmux_runtime::process_table` | `src/services/discord/turn_bridge/tmux_runtime/process_table.rs` | 370 | 370 | 0 |  |
 | `services::discord::turn_bridge::turn_analytics` | `src/services/discord/turn_bridge/turn_analytics.rs` | 419 | 348 | 71 |  |
 | `services::discord::turn_bridge::two_message_panel` | `src/services/discord/turn_bridge/two_message_panel.rs` | 791 | 265 | 526 |  |
 | `services::discord::turn_bridge::voice_completion` | `src/services/discord/turn_bridge/voice_completion.rs` | 385 | 385 | 0 |  |
@@ -908,7 +908,7 @@
 | `services::routines::store` | `src/services/routines/store.rs` | 4428 | 3684 | 744 | giant-file |
 | `services::service_error` | `src/services/service_error.rs` | 1 | 1 | 0 |  |
 | `services::session_activity` | `src/services/session_activity.rs` | 354 | 275 | 79 |  |
-| `services::session_backend` | `src/services/session_backend.rs` | 780 | 483 | 297 |  |
+| `services::session_backend` | `src/services/session_backend.rs` | 875 | 572 | 303 |  |
 | `services::session_backend::stream_line` | `src/services/session_backend/stream_line.rs` | 682 | 568 | 114 |  |
 | `services::session_backend::terminal_usage` | `src/services/session_backend/terminal_usage.rs` | 212 | 106 | 106 |  |
 | `services::session_forwarding` | `src/services/session_forwarding.rs` | 493 | 315 | 178 |  |
@@ -917,8 +917,8 @@
 | `services::slo` | `src/services/slo/mod.rs` | 530 | 503 | 27 |  |
 | `services::termination_audit` | `src/services/termination_audit.rs` | 192 | 192 | 0 |  |
 | `services::tmux_common` | `src/services/tmux_common.rs` | 1951 | 1099 | 852 | giant-file |
-| `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 241 | 241 | 0 |  |
-| `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 720 | 677 | 43 |  |
+| `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 258 | 247 | 11 |  |
+| `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 769 | 726 | 43 |  |
 | `services::tool_output_guard` | `src/services/tool_output_guard.rs` | 100 | 100 | 0 |  |
 | `services::tui_prompt_dedupe` | `src/services/tui_prompt_dedupe.rs` | 4119 | 1824 | 2295 | giant-file |
 | `services::tui_prompt_dedupe::synthetic_prompt` | `src/services/tui_prompt_dedupe/synthetic_prompt.rs` | 34 | 34 | 0 |  |
