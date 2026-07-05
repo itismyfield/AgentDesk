@@ -979,7 +979,11 @@ async fn catch_up_missed_messages_inner_with_api_and_pending_retry_channels<
                 }
                 Phase2EnqueueCommit::Deferred => {
                     log_catch_up_enqueue_not_accepted("phase1", channel_id, msg.id, &enqueue);
-                    continue;
+                    let retry_after = max_recovered_id
+                        .or(scan_checkpoint)
+                        .unwrap_or_else(|| mid.saturating_sub(1));
+                    arm_catch_up_retry_pending(shared, channel_id, retry_after);
+                    break;
                 }
             }
         }
@@ -1379,6 +1383,7 @@ mod catch_up_recovery_tests {
         current_user_id: Option<u64>,
         binding_status: RuntimeChannelBindingStatus,
         fetch_error: Option<&'static str>,
+        messages: Vec<serenity::Message>,
         fetch_attempts: Option<Arc<AtomicUsize>>,
     }
 
@@ -1388,6 +1393,7 @@ mod catch_up_recovery_tests {
                 current_user_id: Some(9001),
                 binding_status: RuntimeChannelBindingStatus::Owned,
                 fetch_error: Some("temporary test fetch failure"),
+                messages: Vec::new(),
                 fetch_attempts: None,
             }
         }
@@ -1397,6 +1403,7 @@ mod catch_up_recovery_tests {
                 current_user_id: Some(9001),
                 binding_status: RuntimeChannelBindingStatus::Unknown,
                 fetch_error: None,
+                messages: Vec::new(),
                 fetch_attempts: None,
             }
         }
@@ -1425,7 +1432,7 @@ mod catch_up_recovery_tests {
             }
             match self.fetch_error {
                 Some(error) => Err(error.to_string()),
-                None => Ok(Vec::new()),
+                None => Ok(self.messages.clone()),
             }
         }
 
@@ -1436,6 +1443,33 @@ mod catch_up_recovery_tests {
             _message_id: MessageId,
         ) {
         }
+    }
+
+    fn recent_message_id(sequence: u64) -> MessageId {
+        const DISCORD_EPOCH_MS: i64 = 1_420_070_400_000;
+        let timestamp_ms = chrono::Utc::now().timestamp_millis() - 30_000;
+        let discord_ms = u64::try_from(timestamp_ms - DISCORD_EPOCH_MS)
+            .expect("test timestamp must be after Discord epoch");
+        MessageId::new((discord_ms << 22) | sequence)
+    }
+
+    fn catch_up_test_message(
+        channel_id: ChannelId,
+        message_id: MessageId,
+        author_id: u64,
+        text: &str,
+    ) -> serenity::Message {
+        let mut author = serenity::User::default();
+        author.id = serenity::UserId::new(author_id);
+        author.name = format!("user-{author_id}");
+
+        let mut message = serenity::Message::default();
+        message.id = message_id;
+        message.channel_id = channel_id;
+        message.author = author;
+        message.content = text.to_string();
+        message.timestamp = message_id.created_at();
+        message
     }
 
     #[test]
@@ -1814,6 +1848,7 @@ mod catch_up_recovery_tests {
             current_user_id: Some(9001),
             binding_status: RuntimeChannelBindingStatus::Owned,
             fetch_error: None,
+            messages: Vec::new(),
             fetch_attempts: Some(Arc::clone(&fetch_attempts)),
         };
         let retry_checkpoints = HashMap::new();
@@ -1834,6 +1869,71 @@ mod catch_up_recovery_tests {
             fetch_attempts.load(Ordering::SeqCst),
             1,
             "lost point-of-use remove must skip the phase-1 retry scan (phase-2 backstop fetch only)"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn phase1_deferred_commit_arms_retry_and_stops_before_later_message() {
+        let root = scoped_runtime_root();
+        let shared = super::super::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(1479671298497183835);
+        let author_id = 343742347365974026;
+        let first_id = recent_message_id(1);
+        let deferred_id = recent_message_id(2);
+        let later_id = recent_message_id(3);
+        let checkpoint = first_id.get() - 1;
+        write_last_message_checkpoint(root.path(), &provider, channel_id, checkpoint);
+
+        let api = TestCatchUpDiscordApi {
+            current_user_id: Some(9001),
+            binding_status: RuntimeChannelBindingStatus::Owned,
+            fetch_error: None,
+            messages: vec![
+                catch_up_test_message(channel_id, first_id, author_id, "repeat turn"),
+                catch_up_test_message(channel_id, deferred_id, author_id, "repeat turn"),
+                catch_up_test_message(channel_id, later_id, author_id, "later turn"),
+            ],
+            fetch_attempts: None,
+        };
+        let retry_checkpoints = HashMap::new();
+
+        catch_up_missed_messages_inner_with_api(&api, &shared, &provider, &retry_checkpoints).await;
+
+        let saved_checkpoint = *shared
+            .last_message_ids
+            .get(&channel_id)
+            .expect("phase1 should checkpoint the first committed message");
+        assert_eq!(saved_checkpoint, first_id.get());
+        assert!(
+            saved_checkpoint < deferred_id.get(),
+            "phase1 checkpoint must stay below the deferred message"
+        );
+
+        let pending = shared
+            .catch_up_retry_pending
+            .get(&channel_id)
+            .expect("phase1 deferred commit should arm catch-up retry");
+        assert_eq!(pending.checkpoint, first_id.get());
+        assert!(pending.checkpoint < deferred_id.get());
+        assert_eq!(pending.fetch_failures, 0);
+
+        let snapshot = super::super::mailbox_snapshot(&shared, channel_id).await;
+        assert_eq!(
+            snapshot.intervention_queue.len(),
+            1,
+            "phase1 must stop before committing the later message"
+        );
+        assert_eq!(snapshot.intervention_queue[0].message_id, first_id);
+        assert_eq!(
+            snapshot.intervention_queue[0].source_message_ids,
+            vec![first_id]
+        );
+        assert!(
+            !snapshot.intervention_queue[0]
+                .source_message_ids
+                .contains(&later_id),
+            "later message must not be merged or committed in the deferred pass"
         );
     }
 
