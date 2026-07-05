@@ -800,5 +800,3 @@ mod no_anchored_placeholder_recovery_tests {
         );
     }
 }
-
-/// Retry-aware tmux session check for recovery after dcserver restart.

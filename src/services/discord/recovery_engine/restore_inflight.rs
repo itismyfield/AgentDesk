@@ -10,7 +10,7 @@
 use super::*;
 
 /// The first check can false-negative if tmux CLI hasn't fully initialized yet.
-fn tmux_session_alive_with_retry(name: &str) -> bool {
+pub(super) fn tmux_session_alive_with_retry(name: &str) -> bool {
     if tmux_session_has_live_pane(name) {
         return true;
     }
@@ -117,7 +117,7 @@ fn tmux_pane_pid(tmux_session_name: &str) -> Option<u32> {
 }
 
 #[cfg(unix)]
-fn detect_live_tmux_output_path(
+pub(super) fn detect_live_tmux_output_path(
     tmux_session_name: &str,
     fallback_path: &str,
 ) -> Result<Option<DetectedRebindOutputPath>, StaleOutputCandidate> {
