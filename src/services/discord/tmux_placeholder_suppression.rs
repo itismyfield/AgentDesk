@@ -180,6 +180,23 @@ fn strip_placeholder_indicators_for_preserve(text: &str, provider: &ProviderKind
         .to_string()
 }
 
+pub(super) fn placeholder_real_body_exposure_evidence(
+    provider: &ProviderKind,
+    response_sent_offset: usize,
+    last_edit_text: &str,
+) -> Option<&'static str> {
+    if response_sent_offset > 0 {
+        return Some("response_sent_offset");
+    }
+    let stripped_body =
+        discord::single_message_panel::strip_placeholder_terminal_status(last_edit_text, provider);
+    if stripped_body.trim().is_empty() {
+        None
+    } else {
+        Some("last_edit_text_body")
+    }
+}
+
 pub(super) fn decide_placeholder_suppression(
     ctx: &PlaceholderSuppressContext<'_>,
 ) -> PlaceholderSuppressDecision {
@@ -224,8 +241,11 @@ pub(super) fn decide_placeholder_suppression(
             ) {
                 SuppressedPlaceholderAction::None => PlaceholderSuppressDecision::None,
                 SuppressedPlaceholderAction::Delete => PlaceholderSuppressDecision::Delete,
-                SuppressedPlaceholderAction::Edit(content) if footer_only_was_exposed => {
-                    PlaceholderSuppressDecision::Edit(content)
+                SuppressedPlaceholderAction::Edit(_) if footer_only_was_exposed => {
+                    // The active bridge route may still edit `inflight.current_msg_id`,
+                    // and the restored watcher seed can point at that same id. Leave
+                    // footer-only chrome untouched for the bridge overwrite.
+                    PlaceholderSuppressDecision::None
                 }
                 // #3533: this duplicate-relay guard fires because a bridge turn
                 // already owns delivery, so an exposed body was/will be delivered by
@@ -241,9 +261,9 @@ pub(super) fn decide_placeholder_suppression(
             }
         }
         PlaceholderSuppressOrigin::TaskNotificationTerminal => {
-            // #1708/#4144: Background, Subagent, MonitorAutoTurn, and a missing
-            // task kind after watcher restart are not positive evidence that a
-            // streamed body is disposable. Preserve exposed body unless a future
+            // #1708/#4144: production suppression currently reaches this origin
+            // only with Some(kind); the None arm is a defensive guard, not a known
+            // watcher-restart path. Preserve exposed body unless a future
             // task-notification kind explicitly opts into destructive stamping.
             let (preserves_body, preserve_reason) = match ctx.task_notification_kind {
                 None => (true, "unclassified-task-notification-kind"),
@@ -292,6 +312,7 @@ pub(super) async fn apply_placeholder_suppression(
     decision: PlaceholderSuppressDecision,
     detail: Option<&str>,
 ) {
+    let detail_suffix = detail.map(|d| format!(" — {d}")).unwrap_or_default();
     match decision {
         PlaceholderSuppressDecision::None => {}
         PlaceholderSuppressDecision::Preserve {
@@ -299,7 +320,6 @@ pub(super) async fn apply_placeholder_suppression(
             cleaned_body,
         } => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            let detail_suffix = detail.map(|d| format!(" — {d}")).unwrap_or_default();
             tracing::info!(
                 "  [{ts}] 👁 {} preserved placeholder ({reason}){detail_suffix}",
                 origin.log_scope()
@@ -332,14 +352,8 @@ pub(super) async fn apply_placeholder_suppression(
             }
         }
         PlaceholderSuppressDecision::Delete => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            let detail_suffix = detail.map(|d| format!(" — {d}")).unwrap_or_default();
-            tracing::info!(
-                "  [{ts}] 👁 {} deleted placeholder{detail_suffix}",
-                origin.log_scope()
-            );
             if let Some(msg_id) = placeholder_msg_id {
-                delete_terminal_placeholder(
+                let outcome = delete_terminal_placeholder(
                     http,
                     channel_id,
                     shared,
@@ -349,17 +363,24 @@ pub(super) async fn apply_placeholder_suppression(
                     origin.log_scope(),
                 )
                 .await;
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    message_id = msg_id.get(),
+                    outcome = ?outcome,
+                    "  [{ts}] 👁 {} delete placeholder result{detail_suffix}",
+                    origin.log_scope()
+                );
+            } else {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] 👁 {} delete placeholder skipped (no placeholder_msg_id){detail_suffix}",
+                    origin.log_scope()
+                );
             }
         }
         PlaceholderSuppressDecision::Edit(content) => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            let detail_suffix = detail.map(|d| format!(" — {d}")).unwrap_or_default();
-            tracing::info!(
-                "  [{ts}] 👁 {} edited placeholder{detail_suffix}",
-                origin.log_scope()
-            );
             if let Some(msg_id) = placeholder_msg_id {
-                edit_terminal_placeholder(
+                let outcome = edit_terminal_placeholder(
                     http,
                     channel_id,
                     shared,
@@ -370,6 +391,19 @@ pub(super) async fn apply_placeholder_suppression(
                     origin.log_scope(),
                 )
                 .await;
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    message_id = msg_id.get(),
+                    outcome = ?outcome,
+                    "  [{ts}] 👁 {} edit placeholder result{detail_suffix}",
+                    origin.log_scope()
+                );
+            } else {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] 👁 {} edit placeholder skipped (no placeholder_msg_id){detail_suffix}",
+                    origin.log_scope()
+                );
             }
         }
     }
@@ -638,13 +672,13 @@ fn suppressed_placeholder_action(
         return SuppressedPlaceholderAction::None;
     }
 
-    let placeholder_was_exposed = response_sent_offset > 0
-        || !discord::single_message_panel::strip_placeholder_terminal_status(
-            last_edit_text,
-            provider,
-        )
-        .trim()
-        .is_empty()
+    let real_body_was_exposed = placeholder_real_body_exposure_evidence(
+        provider,
+        response_sent_offset,
+        last_edit_text,
+    )
+    .is_some();
+    let placeholder_was_exposed = real_body_was_exposed
         || discord::single_message_panel::streaming_footer_only_surface_was_exposed(
             last_edit_text,
             provider,
@@ -824,6 +858,34 @@ mod placeholder_suppression_tests {
     }
 
     #[test]
+    fn no_response_cleanup_preserves_real_body_exposure_evidence() {
+        let placeholder = body_with_footer("visible assistant body");
+
+        assert_eq!(
+            placeholder_real_body_exposure_evidence(&ProviderKind::Claude, 0, &placeholder),
+            Some("last_edit_text_body")
+        );
+        assert_eq!(
+            placeholder_real_body_exposure_evidence(&ProviderKind::Claude, 1, ""),
+            Some("response_sent_offset")
+        );
+    }
+
+    #[test]
+    fn no_response_cleanup_deletes_footer_only_chrome() {
+        let placeholder = footer_only_placeholder();
+
+        assert_eq!(
+            placeholder_real_body_exposure_evidence(&ProviderKind::Claude, 0, &placeholder),
+            None
+        );
+        assert!(discord::single_message_panel::streaming_footer_only_surface_was_exposed(
+            &placeholder,
+            &ProviderKind::Claude
+        ));
+    }
+
+    #[test]
     fn orphan_restart_status_only_placeholder_deletes() {
         let (_lock, _tempdir, _env) = scoped_runtime_root_for_test();
         let state = orphan_state("", 0);
@@ -974,23 +1036,24 @@ No response requested.\n\
     }
 
     #[test]
-    fn active_bridge_footer_only_placeholder_edits_to_preserve_target() {
+    fn active_bridge_footer_only_placeholder_preserves_bridge_target_without_label() {
         // No body and no sent offset still carries a visible single-message
-        // footer. Keep the Discord message id alive so the bridge-owned
+        // footer. Keep the Discord message id untouched so the bridge-owned
         // completion footer can edit the same target instead of hitting 404.
         let placeholder = footer_only_placeholder();
         let ctx = active_bridge_ctx(&placeholder, 0, false);
-        let PlaceholderSuppressDecision::Edit(content) = decide_placeholder_suppression(&ctx)
-        else {
-            panic!("footer-only active bridge placeholder should edit, not delete");
-        };
-        assert_eq!(content, SUPPRESSED_INTERNAL_LABEL);
+
+        assert_eq!(
+            decide_placeholder_suppression(&ctx),
+            PlaceholderSuppressDecision::None
+        );
     }
 
     #[test]
     fn task_notification_none_kind_exposed_body_preserves() {
-        // #4144: a respawned watcher can miss the earlier kind marker, leaving
-        // kind=None. That is not positive evidence for internal-label stamping.
+        // #4144 defensive guard: terminal suppression is currently gated by
+        // task_notification_kind.is_some(), so None should not be reached in
+        // production. If a future caller reaches it, still preserve exposed body.
         let placeholder = body_with_footer("visible assistant body");
         let ctx = task_notification_terminal_ctx(&placeholder, 0, None);
 
