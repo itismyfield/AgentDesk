@@ -1,9 +1,21 @@
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use std::sync::Arc;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+use serenity::model::id::ChannelId;
 
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::cluster::session_matcher::MatchedChannel;
+use crate::services::discord::SharedData;
+use crate::services::discord::health::HealthRegistry;
+use crate::services::discord::inflight::InflightTurnState;
 use crate::services::provider::ProviderKind;
+
+const MISMATCHED_INFLIGHT_LOG_THROTTLE: Duration = Duration::from_secs(60);
+static MISMATCHED_INFLIGHT_LOGGED_AT: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
 
 /// REAL loop ordering: classification gates run on the WHOLE payload FIRST (an
 /// `init` event anywhere keeps the range relayable), the offset-authority dedup
@@ -24,6 +36,18 @@ pub(super) enum IdleRelayRangeAction {
     SendSuffixFrom(u64),
     /// Nothing covered (`committed <= start`): relay the whole `[start, end)`.
     SendFull,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum IdleJsonlInflightGateDecision {
+    SuppressWithoutConsuming,
+    ConsumeToEnd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum IdleJsonlSessionInitRearm {
+    Keep,
+    Clear,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,10 +79,201 @@ pub(super) fn idle_jsonl_relay_source_for_matched(
     }
 }
 
+pub(super) fn idle_jsonl_inflight_mismatches_session(
+    inflight: &InflightTurnState,
+    tmux_session_name: &str,
+) -> bool {
+    if tmux_session_name.trim().is_empty() {
+        return true;
+    }
+    match inflight.tmux_session_name.as_deref() {
+        Some(inflight_tmux_session) => inflight_tmux_session != tmux_session_name,
+        None => true,
+    }
+}
+
+pub(super) fn idle_jsonl_should_skip_mismatched_inflight(
+    _last_inflight_seen_at: &mut HashMap<String, Instant>,
+    matched: &MatchedChannel,
+    channel_id: u64,
+    inflight: &InflightTurnState,
+) -> bool {
+    let tmux_session_name = &matched.expected_session_name;
+    if !idle_jsonl_inflight_mismatches_session(inflight, tmux_session_name) {
+        return false;
+    }
+    log_mismatched_inflight_skip(&matched.provider, channel_id, tmux_session_name, inflight);
+    true
+}
+
+pub(super) fn idle_jsonl_apply_active_inflight_gate(
+    last_inflight_seen_at: &mut HashMap<String, Instant>,
+    matched: &MatchedChannel,
+    channel_id: u64,
+    inflight: &InflightTurnState,
+    len: u64,
+    offset: &mut u64,
+) -> IdleJsonlInflightGateDecision {
+    if idle_jsonl_should_skip_mismatched_inflight(
+        last_inflight_seen_at,
+        matched,
+        channel_id,
+        inflight,
+    ) {
+        return IdleJsonlInflightGateDecision::SuppressWithoutConsuming;
+    }
+    last_inflight_seen_at.insert(matched.expected_session_name.clone(), Instant::now());
+    *offset = len;
+    IdleJsonlInflightGateDecision::ConsumeToEnd
+}
+
+pub(super) fn idle_jsonl_session_has_init(
+    session_init_seen: &mut HashSet<String>,
+    tmux_session_name: &str,
+    payload: &[u8],
+) -> bool {
+    if idle_jsonl_payload_contains_init_event(payload) {
+        session_init_seen.insert(tmux_session_name.to_string());
+        return true;
+    }
+    session_init_seen.contains(tmux_session_name)
+}
+
+pub(super) fn idle_jsonl_consume_offset(
+    session_init_seen: &mut HashSet<String>,
+    tmux_session_name: &str,
+    offset: &mut u64,
+    consumed_to: u64,
+    rearm: IdleJsonlSessionInitRearm,
+) {
+    *offset = consumed_to;
+    if rearm == IdleJsonlSessionInitRearm::Clear {
+        session_init_seen.remove(tmux_session_name);
+    }
+}
+
+pub(super) fn idle_jsonl_clear_session_init_on_generation_signature_change(
+    session_init_seen: &mut HashSet<String>,
+    session_generation_signatures: &mut HashMap<String, i64>,
+    tmux_session_name: &str,
+    current_generation_signature: i64,
+) -> bool {
+    let generation_changed = session_generation_signatures
+        .insert(tmux_session_name.to_string(), current_generation_signature)
+        .is_some_and(|previous_generation_signature| {
+            previous_generation_signature != current_generation_signature
+        });
+    if generation_changed {
+        session_init_seen.remove(tmux_session_name);
+    }
+    generation_changed
+}
+
+pub(super) fn idle_jsonl_clear_session_init_on_generation_reset(
+    session_init_seen: &mut HashSet<String>,
+    tmux_session_name: &str,
+    generation_reset: bool,
+) {
+    if generation_reset {
+        session_init_seen.remove(tmux_session_name);
+    }
+}
+
+pub(super) async fn idle_jsonl_prepare_dedup_shared(
+    health_registry: &HealthRegistry,
+    matched: &MatchedChannel,
+    channel: ChannelId,
+    tmux_session_name: &str,
+    len: u64,
+    session_init_seen: &mut HashSet<String>,
+) -> Option<Arc<SharedData>> {
+    let shared_for_dedup = health_registry
+        .shared_for_provider_on_channel(&matched.provider, channel)
+        .await
+        .or(health_registry.shared_for_provider(&matched.provider).await);
+    if let Some(shared) = shared_for_dedup.as_ref() {
+        super::super::tmux::reset_stale_relay_watermark_if_output_regressed(
+            shared.as_ref(),
+            channel,
+            tmux_session_name,
+            len,
+            "idle_jsonl_relay",
+        );
+        let generation_reset = super::super::tmux::reset_relay_watermark_on_generation_change(
+            shared.as_ref(),
+            channel,
+            tmux_session_name,
+            "idle_jsonl_relay",
+        );
+        idle_jsonl_clear_session_init_on_generation_reset(
+            session_init_seen,
+            tmux_session_name,
+            generation_reset,
+        );
+    }
+    shared_for_dedup
+}
+
+pub(super) fn prune_idle_jsonl_session_state(
+    seen_sessions: &HashSet<String>,
+    offsets: &mut HashMap<String, u64>,
+    first_seen_at: &mut HashMap<String, Instant>,
+    last_inflight_seen_at: &mut HashMap<String, Instant>,
+    session_init_seen: &mut HashSet<String>,
+    session_generation_signatures: &mut HashMap<String, i64>,
+) {
+    offsets.retain(|session, _| seen_sessions.contains(session));
+    first_seen_at.retain(|session, _| seen_sessions.contains(session));
+    last_inflight_seen_at.retain(|session, _| seen_sessions.contains(session));
+    session_init_seen.retain(|session| seen_sessions.contains(session));
+    session_generation_signatures.retain(|session, _| seen_sessions.contains(session));
+    prune_mismatched_inflight_log_sessions(seen_sessions);
+}
+
+pub(super) fn prune_mismatched_inflight_log_sessions(seen_sessions: &HashSet<String>) {
+    let Some(logged_at) = MISMATCHED_INFLIGHT_LOGGED_AT.get() else {
+        return;
+    };
+    let Ok(mut logged_at) = logged_at.lock() else {
+        return;
+    };
+    logged_at.retain(|session, _| seen_sessions.contains(session));
+}
+
+fn log_mismatched_inflight_skip(
+    provider: &ProviderKind,
+    channel_id: u64,
+    tmux_session_name: &str,
+    inflight: &InflightTurnState,
+) {
+    let logged_at = MISMATCHED_INFLIGHT_LOGGED_AT.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut logged_at) = logged_at.lock() else {
+        return;
+    };
+    if let Some(last_logged_at) = logged_at.get_mut(tmux_session_name) {
+        if last_logged_at.elapsed() < MISMATCHED_INFLIGHT_LOG_THROTTLE {
+            return;
+        }
+        *last_logged_at = Instant::now();
+    } else {
+        logged_at.insert(tmux_session_name.to_string(), Instant::now());
+    }
+    tracing::debug!(
+        provider = provider.as_str(),
+        channel = channel_id,
+        tmux_session = %tmux_session_name,
+        inflight_tmux_session = %inflight.tmux_session_name.as_deref().unwrap_or("(none)"),
+        user_msg_id = inflight.user_msg_id,
+        "idle JSONL relay skipped session because channel inflight belongs to another tmux session"
+    );
+}
+
 /// Pure decision for the idle relay's classification + offset-authority dedup,
 /// in the loop's real order. `payload` is the full `[start, end)` bytes.
 /// `in_new_session_grace` mirrors the runtime `first_seen.elapsed() < grace`
 /// gate. `committed` is the offset authority's `committed_relay_offset`.
+/// `session_init_seen` means this session already passed an init-bearing range,
+/// so later chunks from the same file are not dropped solely for lacking init.
 pub(super) fn idle_relay_range_action(
     payload: &[u8],
     start: u64,
@@ -66,6 +281,7 @@ pub(super) fn idle_relay_range_action(
     committed: u64,
     in_new_session_grace: bool,
     allow_continued_session_without_init: bool,
+    session_init_seen: bool,
 ) -> IdleRelayRangeAction {
     // Classification first, on the WHOLE payload (matches the loop's gate
     // ordering at the top of `run_idle_jsonl_relay_loop`).
@@ -73,6 +289,7 @@ pub(super) fn idle_relay_range_action(
         || idle_jsonl_payload_contains_user_event(payload)
         || idle_jsonl_payload_contains_schedule_wakeup_setup(payload)
         || (!allow_continued_session_without_init
+            && !session_init_seen
             && !idle_jsonl_payload_contains_init_event(payload))
     {
         return IdleRelayRangeAction::SkipClassified;
@@ -166,4 +383,28 @@ pub(super) fn idle_jsonl_payload_contains_init_event(payload: &[u8]) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mismatched_inflight_log_prune_drops_unseen_sessions() {
+        let logged_at = MISMATCHED_INFLIGHT_LOGGED_AT.get_or_init(|| Mutex::new(HashMap::new()));
+        {
+            let mut logged_at = logged_at.lock().expect("logged_at lock");
+            logged_at.insert("session-prune-seen".to_string(), Instant::now());
+            logged_at.insert("session-prune-gone".to_string(), Instant::now());
+        }
+
+        let mut seen_sessions = HashSet::new();
+        seen_sessions.insert("session-prune-seen".to_string());
+        prune_mismatched_inflight_log_sessions(&seen_sessions);
+
+        let mut logged_at = logged_at.lock().expect("logged_at lock");
+        assert!(logged_at.contains_key("session-prune-seen"));
+        assert!(!logged_at.contains_key("session-prune-gone"));
+        logged_at.remove("session-prune-seen");
+    }
 }

@@ -25,7 +25,7 @@
 | `src/services/discord/relay_recovery.rs` | 1287 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/router/intake_gate.rs` | 1607 | discord-relay | 2026-10-31 | #3838 |
 | `src/services/discord/router/message_handler/intake_turn.rs` | 2824 | discord-relay | 2026-10-31 | #3837 |
-| `src/services/discord/session_relay_sink.rs` | 1676 | discord-relay | 2026-08-31 | #3405 |
+| `src/services/discord/session_relay_sink.rs` | 1695 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/tmux.rs` | 1482 | discord-relay | 2026-10-31 | #3841 |
 | `src/services/discord/tmux_watcher.rs` | 7203 | discord-relay | 2026-10-31 | #3832 |
 | `src/services/discord/tui_direct_pending_start.rs` | 1491 | discord-relay | 2026-08-31 | #3540 |
@@ -83,7 +83,7 @@
 | `src/services/auto_queue.rs` | 1545 |
 | `src/services/auto_queue/activate_command.rs` | 1506 |
 | `src/services/auto_queue/cancel_run.rs` | 1031 |
-| `src/services/claude.rs` | 2969 |
+| `src/services/claude.rs` | 2960 |
 | `src/services/claude_tui/input.rs` | 1932 |
 | `src/services/codex.rs` | 3049 |
 | `src/services/codex_tmux_wrapper.rs` | 1403 |
