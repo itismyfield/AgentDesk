@@ -521,6 +521,7 @@ src/
 │   │   │   ├── completion_delivery.rs
 │   │   │   ├── jsonl_extract.rs
 │   │   │   ├── manual_rebind.rs
+│   │   │   ├── manual_rebind_output_path.rs
 │   │   │   ├── output_path_detect.rs
 │   │   │   ├── phase_policy.rs
 │   │   │   ├── rebind_runtime.rs
@@ -733,6 +734,7 @@ src/
 │   │   ├── answer_flush_barrier.rs
 │   │   ├── catch_up.rs
 │   │   ├── delivery_lease_key.rs
+│   │   ├── destructive_cancel_capture.rs
 │   │   ├── destructive_cancel_gate.rs
 │   │   ├── discord_io.rs
 │   │   ├── dispatch_policy.rs
@@ -1003,6 +1005,7 @@ src/
 │   ├── session_activity.rs
 │   ├── session_backend.rs
 │   ├── session_forwarding.rs
+│   ├── session_selector_validity.rs
 │   ├── settings.rs
 │   ├── shell_guard.rs
 │   ├── termination_audit.rs

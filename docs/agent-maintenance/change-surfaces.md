@@ -1763,7 +1763,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   `src/services/auto_queue/cancel_run.rs` (1031) is also giant-file territory;
   split before further non-bugfix growth.
 - `src/services/onboarding/mod.rs` (2937),
-  `src/services/dispatched_sessions.rs` (1546), and
+  `src/services/dispatched_sessions.rs` (1633), and
   `src/services/settings.rs` (1114) — service-layer route support surfaces
   split out of the large dashboard route modules. (`src/services/onboarding.rs`
   and `src/services/api_friction.rs` have been removed/decomposed.)
@@ -1851,7 +1851,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   the AUTHORITATIVE transcript turn-state in `claude_tui_followup_stranded_prompt_
   draft_state`, not by the pane.)
 - `src/services/memory/memento.rs` (1893).
-- `src/services/dispatched_sessions.rs` (1546) — dispatched session domain
+- `src/services/dispatched_sessions.rs` (1633; +87 from #4091 server-selected session id — freshness cross-check picks the growing raw transcript over a stale cached claude_session_id) — dispatched session domain
   service. This is the post-#1515 SRP extraction target for route/database
   callsites, but the module itself is now giant-file territory; split focused
   helpers before adding non-bugfix behavior. (+5 from #3169 exposing the idle-

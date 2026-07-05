@@ -91,10 +91,10 @@
 | `src/services/discord/commands/text_commands.rs` | 1476 |
 | `src/services/discord/formatting.rs` | 2854 |
 | `src/services/discord/meeting_orchestrator.rs` | 3222 |
-| `src/services/discord/mod.rs` | 4168 |
+| `src/services/discord/mod.rs` | 4169 |
 | `src/services/discord/router/message_handler/headless_turn.rs` | 1337 |
 | `src/services/discord_config_audit.rs` | 1288 |
-| `src/services/dispatched_sessions.rs` | 1546 |
+| `src/services/dispatched_sessions.rs` | 1633 |
 | `src/services/dispatches/discord_delivery/orchestration.rs` | 1496 |
 | `src/services/dispatches/outbox_route.rs` | 1172 |
 | `src/services/gemini.rs` | 1358 |
