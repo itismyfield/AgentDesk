@@ -2909,11 +2909,15 @@ mod recovery_context_take_order_tests {
             .find("} else {\n            apply_tui_busy_enqueue_refusal(")
             .expect("TUI-busy enqueue refusal routes through the put-back helper");
 
-        let helper_src = include_str!("../tui_followup.rs");
-        let put_back_pos = helper_src
+        let helper_src = include_str!("tui_followup.rs");
+        let helper_fn_pos = helper_src
+            .find("async fn apply_tui_busy_enqueue_refusal(")
+            .expect("refusal helper exists in tui_followup.rs");
+        let helper_body = &helper_src[helper_fn_pos..];
+        let put_back_pos = helper_body
             .find("put_back_session_retry_context(")
             .expect("refusal helper restores recovery context");
-        let notice_pos = helper_src
+        let notice_pos = helper_body
             .find("claude_tui_busy_followup_refusal_notice(")
             .expect("refusal helper renders the notice");
         assert!(
