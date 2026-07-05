@@ -644,6 +644,7 @@ mod tests {
 
         let lock_path = temp
             .path()
+            .join("runtime")
             .join("discord_inflight")
             .join(ProviderKind::Claude.as_str())
             .join(format!("{}.json.lock", channel.get()));
