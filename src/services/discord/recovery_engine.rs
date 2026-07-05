@@ -146,7 +146,7 @@ pub(in crate::services::discord) use self::completion_delivery::{
     relay_recovered_terminal_text_to_placeholder,
 };
 pub(in crate::services::discord) use self::restore_inflight::{finish_recovered_turn_mailbox, restore_inflight_turns};
-pub(super) use self::restore_inflight::{detect_live_tmux_output_path, tmux_session_alive_with_retry};
+use self::restore_inflight::{detect_live_tmux_output_path, tmux_session_alive_with_retry};
 pub(in crate::services::discord) use self::terminal_text_idempotency::RecoveryDeliveryContext;
 // #3479: re-import the analytics + transcript helpers so root call sites stay
 // byte-identical. `recovered_transcript_turn_id` is gated on cfg(test) — the root
