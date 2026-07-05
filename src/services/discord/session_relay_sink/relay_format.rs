@@ -5,6 +5,7 @@
 use super::super::formatting;
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::provider::ProviderKind;
+use serenity::model::id::{ChannelId, MessageId};
 
 pub(super) fn session_bound_relay_text(
     shared: &super::super::SharedData,
@@ -25,4 +26,39 @@ pub(super) fn session_bound_relay_text(
     } else {
         formatted
     }
+}
+
+pub(super) fn ssh_direct_prompt_anchor_for_response(
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+    channel_id: u64,
+) -> Option<crate::services::tui_prompt_dedupe::TuiPromptAnchor> {
+    crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
+        provider.as_str(),
+        tmux_session_name,
+        channel_id,
+    )
+}
+
+pub(super) fn clear_ssh_direct_prompt_anchor(
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+    anchor: crate::services::tui_prompt_dedupe::TuiPromptAnchor,
+) {
+    crate::services::tui_prompt_dedupe::clear_prompt_anchor_for_response(
+        provider.as_str(),
+        tmux_session_name,
+        anchor,
+    );
+}
+
+pub(super) fn prompt_anchor_reference(
+    anchor: Option<crate::services::tui_prompt_dedupe::TuiPromptAnchor>,
+) -> Option<(ChannelId, MessageId)> {
+    anchor.map(|anchor| {
+        (
+            ChannelId::new(anchor.channel_id),
+            MessageId::new(anchor.message_id),
+        )
+    })
 }

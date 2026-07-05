@@ -70,6 +70,7 @@ import {
 } from "lucide-react";
 import { AgentQualityWidget } from "./dashboard/ExtraWidgets";
 import ReceiptWidget from "./dashboard/ReceiptWidget";
+import ClaudeAccountsWidget from "./dashboard/ClaudeAccountsWidget";
 
 interface StatsPageViewProps {
   settings: CompanySettings;
@@ -451,6 +452,10 @@ export default function StatsPageView({
             tokenMomentumDelta={tokenMomentumDelta}
             cacheSavingsDelta={cacheSavingsDelta}
           />
+
+          <div data-testid="stats-claude-accounts">
+            <ClaudeAccountsWidget t={t} />
+          </div>
 
           {/* Codex review (PR #1258): grid-feature uses 2fr 1fr on desktop;
               after hiding DailyCacheHitCard the second column was empty.

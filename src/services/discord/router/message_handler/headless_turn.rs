@@ -405,10 +405,6 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     };
 
     let turn_id = reservation.turn_id(channel_id);
-    let session_retry_context = take_session_retry_context(shared, channel_id, Some(&turn_id));
-    let reply_context = session_retry_context
-        .as_ref()
-        .map(|context| context.formatted_context.clone());
     let role_binding = {
         let data = shared.core.lock().await;
         let channel_name = data
@@ -617,6 +613,10 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
             status: HeadlessTurnStartStatus::Consumed,
         });
     }
+    let session_retry_context = take_session_retry_context(shared, channel_id, Some(&turn_id));
+    let reply_context = session_retry_context
+        .as_ref()
+        .map(|context| context.formatted_context.clone());
     let goal_fresh = matches!(headless_goal_kind, GoalCommandKind::FreshStart);
     // #family-profile-probe (codex review P1/R2): a fresh DM routine turn must
     // route through the SAME proven fresh-session machinery as `/goal fresh`, so
@@ -1331,6 +1331,70 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         turn_id: reservation.turn_id(channel_id),
         status: HeadlessTurnStartStatus::Started,
     })
+}
+
+#[cfg(test)]
+mod recovery_context_take_order_tests {
+    fn recovery_context_take_call() -> String {
+        format!(
+            "{}{}",
+            "let session_retry_context = ",
+            "take_session_retry_context(shared, channel_id, Some(&turn_id));"
+        )
+    }
+
+    #[test]
+    fn recovery_context_survives_headless_goal_lifecycle_consumed_return() {
+        let root = tempfile::tempdir().expect("create temp runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let module_src = include_str!("headless_turn.rs");
+        let lifecycle_pos = module_src
+            .find("if let GoalCommandKind::Lifecycle(command) = headless_goal_kind")
+            .expect("headless lifecycle command branch exists");
+        let consumed_return_pos = lifecycle_pos
+            + module_src[lifecycle_pos..]
+                .find("status: HeadlessTurnStartStatus::Consumed")
+                .expect("headless lifecycle consumed return exists");
+        let take_call = recovery_context_take_call();
+        let take_pos = module_src
+            .find(&take_call)
+            .expect("headless recovery context take exists");
+
+        assert!(
+            consumed_return_pos < take_pos,
+            "headless lifecycle Consumed return must happen before the destructive recovery-context take"
+        );
+    }
+
+    #[test]
+    fn headless_real_turn_consumes_recovery_context_once_before_prompt_use() {
+        let root = tempfile::tempdir().expect("create temp runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let module_src = include_str!("headless_turn.rs");
+        let take_call = recovery_context_take_call();
+        let take_positions: Vec<_> = module_src.match_indices(&take_call).collect();
+        assert_eq!(
+            take_positions.len(),
+            1,
+            "headless turn start must have exactly one destructive recovery-context take"
+        );
+        let take_pos = take_positions[0].0;
+        let reply_context_use_pos = module_src
+            .find("context_chunks.push(reply_context);")
+            .expect("headless prompt includes recovered reply context");
+        let manifest_use_pos = module_src
+            .find("let recovery_context_for_manifest =")
+            .expect("headless prompt manifest receives recovery context");
+
+        assert!(
+            take_pos < reply_context_use_pos,
+            "headless real turn must take recovery context before adding it to the prompt"
+        );
+        assert!(
+            take_pos < manifest_use_pos,
+            "headless real turn must take recovery context before prompt manifest capture"
+        );
+    }
 }
 
 #[cfg(test)]

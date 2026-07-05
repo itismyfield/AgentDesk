@@ -134,7 +134,9 @@ pub(super) use self::state_extractors::save_missing_session_handoff;
 // #3834: `rebind_inflight_for_channel` is re-exported (not just re-imported) so the
 // `recovery_engine::rebind_inflight_for_channel` path stays valid for its `health`
 // caller. Its private cluster (`codex_tui_*`, `Pending*`) is not re-exported.
-pub(crate) use self::manual_rebind::rebind_inflight_for_channel;
+pub(crate) use self::manual_rebind::{
+    rebind_inflight_for_channel, rebind_inflight_for_channel_with_minimum_start_offset,
+};
 // #3834: `reregister_active_turn_from_inflight` is re-exported (not just
 // re-imported) so the `recovery_engine::reregister_active_turn_from_inflight`
 // path stays valid for its `watchers::lifecycle` caller (via the `recovery`

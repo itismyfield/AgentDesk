@@ -8,7 +8,8 @@ use crate::services::process::{configure_child_process_group, wait_with_output_t
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
-use std::time::Duration;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 /// Format session name as an exact-match target (prefix with `=`, suffix with
 /// `:` so the target also resolves in pane-context commands).
@@ -70,14 +71,12 @@ fn wait_for_tmux_output(
     wait_with_output_timeout(child, timeout, label)
 }
 
-/// Check if tmux is available on the system.
-pub fn is_available() -> bool {
-    tmux_command()
-        .arg("-V")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
+mod availability;
+
+pub use availability::{
+    cached_unavailable_due_to_missing, invalidate_cache as invalidate_availability_cache,
+    is_available, mark_available_from_live_session,
+};
 
 /// Get tmux version string (e.g. "tmux 3.4").
 pub fn version() -> Result<String, String> {

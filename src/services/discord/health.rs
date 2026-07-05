@@ -405,6 +405,31 @@ impl HealthRegistry {
         )
     }
 
+    pub(crate) async fn rebind_inflight_after_force_clean(
+        &self,
+        provider: &crate::services::provider::ProviderKind,
+        channel_id: u64,
+        tmux_override: Option<String>,
+        minimum_initial_offset: Option<u64>,
+    ) -> Option<Result<super::recovery_engine::RebindOutcome, super::recovery_engine::RebindError>>
+    {
+        let (http, shared) =
+            resolve_direct_meeting_runtime(self, ChannelId::new(channel_id), provider)
+                .await
+                .ok()?;
+        Some(
+            super::recovery_engine::rebind_inflight_for_channel_with_minimum_start_offset(
+                &http,
+                &shared,
+                provider,
+                channel_id,
+                tmux_override,
+                minimum_initial_offset,
+            )
+            .await,
+        )
+    }
+
     /// Load announce + notify bot tokens from the canonical runtime credential path.
     /// Call once at startup before the axum server begins accepting requests.
     pub async fn init_bot_tokens(&self) {

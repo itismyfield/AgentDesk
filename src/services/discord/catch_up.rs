@@ -4,7 +4,7 @@
 //! during the restart window, classifies them, and enqueues the eligible ones.
 //! Behavior-preserving move only; logic is unchanged.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,6 +18,101 @@ use crate::services::provider::ProviderKind;
 use super::*;
 
 const CATCH_UP_RETRY_QUEUE_THRESHOLD: usize = MAX_INTERVENTIONS_PER_CHANNEL / 2;
+const CATCH_UP_RETRY_FETCH_FAILURE_LIMIT: u8 = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services) struct CatchUpRetryState {
+    checkpoint: u64,
+    fetch_failures: u8,
+    armed_at: Instant,
+}
+
+impl CatchUpRetryState {
+    fn new(checkpoint: u64) -> Self {
+        Self {
+            checkpoint,
+            fetch_failures: 0,
+            armed_at: Instant::now(),
+        }
+    }
+
+    fn after_fetch_failure(self) -> Option<Self> {
+        let fetch_failures = self.fetch_failures.saturating_add(1);
+        (fetch_failures <= CATCH_UP_RETRY_FETCH_FAILURE_LIMIT).then_some(Self {
+            checkpoint: self.checkpoint,
+            fetch_failures,
+            armed_at: self.armed_at,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+trait CatchUpDiscordApi: Sync {
+    async fn current_user_id(&self) -> Result<Option<u64>, String>;
+
+    async fn resolve_runtime_channel_binding_status(
+        &self,
+        channel_id: ChannelId,
+    ) -> RuntimeChannelBindingStatus;
+
+    async fn fetch_messages(
+        &self,
+        channel_id: ChannelId,
+        request: serenity::builder::GetMessages,
+    ) -> Result<Vec<serenity::Message>, String>;
+
+    async fn cleanup_recovered_catch_up_hourglass(
+        &self,
+        shared: &Arc<SharedData>,
+        channel_id: ChannelId,
+        message_id: MessageId,
+    );
+}
+
+struct SerenityCatchUpDiscordApi<'a> {
+    http: &'a Arc<serenity::Http>,
+}
+
+#[async_trait::async_trait]
+impl CatchUpDiscordApi for SerenityCatchUpDiscordApi<'_> {
+    async fn current_user_id(&self) -> Result<Option<u64>, String> {
+        self.http
+            .get_current_user()
+            .await
+            .map(|user| Some(user.id.get()))
+            .map_err(|err| err.to_string())
+    }
+
+    async fn resolve_runtime_channel_binding_status(
+        &self,
+        channel_id: ChannelId,
+    ) -> RuntimeChannelBindingStatus {
+        resolve_runtime_channel_binding_status(self.http, channel_id).await
+    }
+
+    async fn fetch_messages(
+        &self,
+        channel_id: ChannelId,
+        request: serenity::builder::GetMessages,
+    ) -> Result<Vec<serenity::Message>, String> {
+        channel_id
+            .messages(self.http, request)
+            .await
+            .map_err(|err| err.to_string())
+    }
+
+    async fn cleanup_recovered_catch_up_hourglass(
+        &self,
+        shared: &Arc<SharedData>,
+        channel_id: ChannelId,
+        message_id: MessageId,
+    ) {
+        reaction_cleanup::cleanup_recovered_catch_up_hourglass(
+            self.http, shared, channel_id, message_id,
+        )
+        .await;
+    }
+}
 
 mod classification;
 mod phase2;
@@ -39,7 +134,7 @@ pub(in crate::services::discord) fn take_catch_up_retry_checkpoint_after_queue_d
     shared: &SharedData,
     channel_id: ChannelId,
     queue_len_after: usize,
-) -> Option<u64> {
+) -> Option<CatchUpRetryState> {
     if !should_trigger_catch_up_retry(queue_len_after) {
         return None;
     }
@@ -50,16 +145,126 @@ pub(in crate::services::discord) fn take_catch_up_retry_checkpoint_after_queue_d
 }
 
 fn arm_catch_up_retry_pending(shared: &SharedData, channel_id: ChannelId, retry_after: u64) -> u64 {
+    arm_catch_up_retry_state(shared, channel_id, CatchUpRetryState::new(retry_after)).checkpoint
+}
+
+fn arm_catch_up_retry_state(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    retry_state: CatchUpRetryState,
+) -> CatchUpRetryState {
     let mut pending = shared
         .catch_up_retry_pending
         .entry(channel_id)
-        .or_insert(retry_after);
-    *pending = merge_catch_up_retry_checkpoint(Some(*pending), retry_after);
+        .or_insert(retry_state);
+    *pending = merge_catch_up_retry_state(Some(*pending), retry_state);
     *pending
+}
+
+fn merge_catch_up_retry_state(
+    existing: Option<CatchUpRetryState>,
+    retry_state: CatchUpRetryState,
+) -> CatchUpRetryState {
+    let Some(existing) = existing else {
+        return retry_state;
+    };
+    CatchUpRetryState {
+        checkpoint: merge_catch_up_retry_checkpoint(
+            Some(existing.checkpoint),
+            retry_state.checkpoint,
+        ),
+        // A merged older checkpoint inherits the most exhausted budget so the
+        // same old backlog cannot gain unbounded retries through fresh arms.
+        fetch_failures: existing.fetch_failures.max(retry_state.fetch_failures),
+        armed_at: existing.armed_at.min(retry_state.armed_at),
+    }
+}
+
+fn collect_catch_up_retry_pending_channels(shared: &SharedData) -> HashSet<ChannelId> {
+    shared
+        .catch_up_retry_pending
+        .iter()
+        .map(|entry| *entry.key())
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CatchUpRetryScanDecision {
+    Proceed(Option<CatchUpRetryState>),
+    SkipConsumed,
+}
+
+fn consume_catch_up_retry_state_for_scan(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    retry_checkpoints: &HashMap<ChannelId, CatchUpRetryState>,
+    pending_retry_channels: &HashSet<ChannelId>,
+) -> CatchUpRetryScanDecision {
+    let mut retry_state = retry_checkpoints.get(&channel_id).copied();
+    if !pending_retry_channels.contains(&channel_id) {
+        return CatchUpRetryScanDecision::Proceed(retry_state);
+    }
+
+    let Some((_, pending_retry_state)) = shared.catch_up_retry_pending.remove(&channel_id) else {
+        // A concurrent drain-path take consumed the pending entry. A caller-
+        // supplied `retry_checkpoints` entry was handed to THIS scan though —
+        // losing the DashMap race must not discard it.
+        return match retry_state {
+            Some(state) => CatchUpRetryScanDecision::Proceed(Some(state)),
+            None => CatchUpRetryScanDecision::SkipConsumed,
+        };
+    };
+    retry_state = Some(merge_catch_up_retry_state(retry_state, pending_retry_state));
+    CatchUpRetryScanDecision::Proceed(retry_state)
+}
+
+fn rearm_catch_up_retry_after_fetch_failure(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    retry_state: CatchUpRetryState,
+) -> Option<CatchUpRetryState> {
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    let attempted_failures = retry_state.fetch_failures.saturating_add(1);
+    let Some(next_retry_state) = retry_state.after_fetch_failure() else {
+        tracing::warn!(
+            "  [{ts}] ⚠ catch-up: retry scan for channel {} failed {} time(s); giving up after {} re-arm(s) at checkpoint {}",
+            channel_id,
+            attempted_failures,
+            CATCH_UP_RETRY_FETCH_FAILURE_LIMIT,
+            retry_state.checkpoint
+        );
+        return None;
+    };
+    let rearmed = arm_catch_up_retry_state(shared, channel_id, next_retry_state);
+    tracing::warn!(
+        "  [{ts}] 🔁 catch-up: retry scan failed for channel {}; re-armed after checkpoint {} (failure {}/{})",
+        channel_id,
+        rearmed.checkpoint,
+        rearmed.fetch_failures,
+        CATCH_UP_RETRY_FETCH_FAILURE_LIMIT
+    );
+    Some(rearmed)
 }
 
 fn merge_catch_up_retry_checkpoint(existing: Option<u64>, retry_after: u64) -> u64 {
     existing.map_or(retry_after, |checkpoint| checkpoint.min(retry_after))
+}
+
+fn catch_up_message_age_reference_time(
+    scan_wall_time: chrono::DateTime<chrono::Utc>,
+    scan_instant: Instant,
+    retry_state: Option<CatchUpRetryState>,
+) -> chrono::DateTime<chrono::Utc> {
+    let Some(retry_state) = retry_state else {
+        return scan_wall_time;
+    };
+    let elapsed_since_arm = scan_instant
+        .checked_duration_since(retry_state.armed_at)
+        .unwrap_or_default();
+    let Ok(elapsed_since_arm) = chrono::Duration::from_std(elapsed_since_arm) else {
+        return scan_wall_time;
+    };
+    scan_wall_time - elapsed_since_arm
 }
 
 fn catch_up_checkpoint_for_scan(
@@ -384,14 +589,69 @@ pub(in crate::services::discord) async fn catch_up_missed_messages(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
 ) {
-    catch_up_missed_messages_inner(http, shared, provider, &HashMap::new()).await;
+    let retry_checkpoints = HashMap::new();
+    let pending_retry_channels = collect_catch_up_retry_pending_channels(shared);
+    let pending_count = pending_retry_channels.len();
+    if pending_count > 0 {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] 🔁 catch-up: sweep observed {pending_count} pending retry checkpoint(s)"
+        );
+    }
+    let api = SerenityCatchUpDiscordApi { http };
+    catch_up_missed_messages_inner_with_api_and_pending_retry_channels(
+        &api,
+        shared,
+        provider,
+        &retry_checkpoints,
+        &pending_retry_channels,
+    )
+    .await;
 }
 
 pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
-    retry_checkpoints: &HashMap<ChannelId, u64>,
+    retry_checkpoints: &HashMap<ChannelId, CatchUpRetryState>,
+) {
+    let pending_retry_channels = HashSet::new();
+    let api = SerenityCatchUpDiscordApi { http };
+    catch_up_missed_messages_inner_with_api_and_pending_retry_channels(
+        &api,
+        shared,
+        provider,
+        retry_checkpoints,
+        &pending_retry_channels,
+    )
+    .await;
+}
+
+async fn catch_up_missed_messages_inner_with_api<A: CatchUpDiscordApi + ?Sized>(
+    api: &A,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    retry_checkpoints: &HashMap<ChannelId, CatchUpRetryState>,
+) {
+    let pending_retry_channels = HashSet::new();
+    catch_up_missed_messages_inner_with_api_and_pending_retry_channels(
+        api,
+        shared,
+        provider,
+        retry_checkpoints,
+        &pending_retry_channels,
+    )
+    .await;
+}
+
+async fn catch_up_missed_messages_inner_with_api_and_pending_retry_channels<
+    A: CatchUpDiscordApi + ?Sized,
+>(
+    api: &A,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    retry_checkpoints: &HashMap<ChannelId, CatchUpRetryState>,
+    pending_retry_channels: &HashSet<ChannelId>,
 ) {
     let Some(root) = runtime_store::last_message_root() else {
         return;
@@ -401,8 +661,8 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
     let mut total_recovered = 0usize;
     let now = Instant::now();
     let max_age = std::time::Duration::from_secs(300); // Only catch up messages within 5 minutes
-    let current_bot_user_id = match http.get_current_user().await {
-        Ok(user) => Some(user.id.get()),
+    let current_bot_user_id = match api.current_user_id().await {
+        Ok(user_id) => user_id,
         Err(err) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!("  [{ts}] ⚠ catch-up: failed to resolve current bot user id: {err}");
@@ -433,7 +693,21 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
         tracing::warn!("  [{ts}] 🧹 catch-up: pruned {pruned} stale checkpoint(s) (>10min old)");
     }
 
-    let candidates = collect_catch_up_channel_candidates(&dir, provider);
+    let mut candidates = collect_catch_up_channel_candidates(&dir, provider);
+    for channel_id in retry_checkpoints
+        .keys()
+        .copied()
+        .chain(pending_retry_channels.iter().copied())
+    {
+        candidates
+            .entry(channel_id.get())
+            .or_insert_with(|| CatchUpChannelCandidate {
+                channel_id,
+                fallback_name: None,
+                checkpoint_path: None,
+                disk_checkpoint: None,
+            });
+    }
     if candidates.is_empty() {
         return;
     }
@@ -444,10 +718,6 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
     let mut paced_scan = false;
     for candidate in candidates.values() {
         let channel_id = candidate.channel_id;
-        let retry_checkpoint = retry_checkpoints.get(&channel_id).copied();
-        let live_checkpoint = shared.last_message_ids.get(&channel_id).map(|entry| *entry);
-        let fetch_mode = catch_up_fetch_mode_for_scan(candidate, live_checkpoint, retry_checkpoint);
-        let scan_checkpoint = fetch_mode.checkpoint();
 
         // #429: skip channels this bot cannot access.  Utility bots
         // (notify/announce) share the claude provider checkpoint dir but
@@ -462,9 +732,23 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
         if should_pace_before_scan(paced_scan) {
             catch_up_scan_pace_gap().await;
         }
-        paced_scan = true;
 
-        match resolve_runtime_channel_binding_status(http, channel_id).await {
+        let retry_state = match consume_catch_up_retry_state_for_scan(
+            shared,
+            channel_id,
+            retry_checkpoints,
+            pending_retry_channels,
+        ) {
+            CatchUpRetryScanDecision::Proceed(retry_state) => retry_state,
+            CatchUpRetryScanDecision::SkipConsumed => continue,
+        };
+        paced_scan = true;
+        let retry_checkpoint = retry_state.map(|state| state.checkpoint);
+        let live_checkpoint = shared.last_message_ids.get(&channel_id).map(|entry| *entry);
+        let fetch_mode = catch_up_fetch_mode_for_scan(candidate, live_checkpoint, retry_checkpoint);
+        let scan_checkpoint = fetch_mode.checkpoint();
+
+        match api.resolve_runtime_channel_binding_status(channel_id).await {
             RuntimeChannelBindingStatus::Owned => {}
             RuntimeChannelBindingStatus::Unowned => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -482,7 +766,12 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
                 }
                 continue;
             }
-            RuntimeChannelBindingStatus::Unknown => continue,
+            RuntimeChannelBindingStatus::Unknown => {
+                if let Some(retry_state) = retry_state {
+                    rearm_catch_up_retry_after_fetch_failure(shared, channel_id, retry_state);
+                }
+                continue;
+            }
         }
 
         // Fetch messages after the saved cursor when one exists. Configured
@@ -500,19 +789,20 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
         if let CatchUpFetchMode::After(last_id) = fetch_mode {
             request = request.after(MessageId::new(last_id));
         }
-        let mut messages = match channel_id.messages(http, request).await {
+        let mut messages = match api.fetch_messages(channel_id, request).await {
             Ok(msgs) => msgs,
             Err(e) => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                let msg = e.to_string();
                 tracing::warn!(
                     "  [{ts}] ⚠ catch-up: failed to fetch messages for channel {channel_id}: {e}"
                 );
                 // #429: permanent errors — remove checkpoint to avoid retrying every restart
-                if msg.contains("Missing Access") || msg.contains("Unknown Channel") {
+                if e.contains("Missing Access") || e.contains("Unknown Channel") {
                     if let Some(path) = candidate.checkpoint_path.as_ref() {
                         let _ = fs::remove_file(path);
                     }
+                } else if let Some(retry_state) = retry_state {
+                    rearm_catch_up_retry_after_fetch_failure(shared, channel_id, retry_state);
                 }
                 continue;
             }
@@ -549,7 +839,7 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
                 let older_request = serenity::builder::GetMessages::new()
                     .limit(CATCH_UP_FETCH_LIMIT)
                     .before(oldest_id);
-                match channel_id.messages(http, older_request).await {
+                match api.fetch_messages(channel_id, older_request).await {
                     Ok(older) if !older.is_empty() => {
                         pages_fetched += 1;
                         messages.extend(older);
@@ -601,9 +891,12 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
         for msg in &messages {
             let text = msg.content.trim().to_string();
             let msg_ts = msg.id.created_at();
-            let age_secs = chrono::Utc::now()
-                .signed_duration_since(*msg_ts)
-                .num_seconds();
+            let age_reference = catch_up_message_age_reference_time(
+                chrono::Utc::now(),
+                Instant::now(),
+                retry_state,
+            );
+            let age_secs = age_reference.signed_duration_since(*msg_ts).num_seconds();
             let view = CatchUpMessageView {
                 message_id: msg.id.get(),
                 author_id: msg.author.id.get(),
@@ -672,10 +965,8 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
             match classify_phase2_enqueue_commit(&enqueue) {
                 Phase2EnqueueCommit::Accepted => {
                     stats.record(CatchUpClassification::Recover);
-                    reaction_cleanup::cleanup_recovered_catch_up_hourglass(
-                        http, shared, channel_id, msg.id,
-                    )
-                    .await;
+                    api.cleanup_recovered_catch_up_hourglass(shared, channel_id, msg.id)
+                        .await;
                     if max_recovered_id.map(|m| mid > m).unwrap_or(true) {
                         max_recovered_id = Some(mid);
                     }
@@ -779,24 +1070,23 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
         }
         paced_scan_phase2 = true;
 
-        match resolve_runtime_channel_binding_status(http, channel_id).await {
+        match api.resolve_runtime_channel_binding_status(channel_id).await {
             RuntimeChannelBindingStatus::Owned => {}
             RuntimeChannelBindingStatus::Unowned | RuntimeChannelBindingStatus::Unknown => continue,
         }
 
         // Fetch last 20 messages (newest first — default Discord order)
-        let recent = match channel_id
-            .messages(http, serenity::builder::GetMessages::new().limit(20))
+        let recent = match api
+            .fetch_messages(channel_id, serenity::builder::GetMessages::new().limit(20))
             .await
         {
             Ok(msgs) => msgs,
             Err(e) => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                let msg = e.to_string();
                 tracing::warn!(
                     "  [{ts}] ⚠ catch-up phase2: failed to fetch recent messages for channel {channel_id}: {e}"
                 );
-                if msg.contains("Missing Access") || msg.contains("Unknown Channel") {
+                if e.contains("Missing Access") || e.contains("Unknown Channel") {
                     if let Some(path) = candidate.checkpoint_path.as_ref() {
                         let _ = fs::remove_file(path);
                     }
@@ -1008,16 +1298,145 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
 #[cfg(test)]
 mod catch_up_recovery_tests {
     use super::{
-        CATCH_UP_RECENT_MAX_PAGES, CATCH_UP_SCAN_PACE_DEFAULT_MS, CatchUpChannelCandidate,
-        CatchUpClassification, CatchUpFetchMode, CatchUpMessageView, ChannelId,
-        Phase2EnqueueCommit, ProviderKind, advance_phase2_checkpoint, catch_up_enqueue_accepted,
-        catch_up_fetch_mode_for_scan, catch_up_remaining_queue_capacity, classify_catch_up_message,
-        classify_phase2_enqueue_commit, insert_configured_catch_up_candidate,
+        CATCH_UP_RECENT_MAX_PAGES, CATCH_UP_RETRY_FETCH_FAILURE_LIMIT,
+        CATCH_UP_SCAN_PACE_DEFAULT_MS, CatchUpChannelCandidate, CatchUpClassification,
+        CatchUpDiscordApi, CatchUpFetchMode, CatchUpMessageView, CatchUpRetryScanDecision,
+        CatchUpRetryState, ChannelId, MessageId, Phase2EnqueueCommit, ProviderKind,
+        RuntimeChannelBindingStatus, advance_phase2_checkpoint, arm_catch_up_retry_pending,
+        catch_up_enqueue_accepted, catch_up_fetch_mode_for_scan,
+        catch_up_message_age_reference_time, catch_up_missed_messages_inner_with_api,
+        catch_up_missed_messages_inner_with_api_and_pending_retry_channels,
+        catch_up_remaining_queue_capacity, classify_catch_up_message,
+        classify_phase2_enqueue_commit, collect_catch_up_retry_pending_channels,
+        consume_catch_up_retry_state_for_scan, insert_configured_catch_up_candidate,
         merge_catch_up_retry_checkpoint, parse_catch_up_scan_pace, phase2_retry_after_checkpoint,
-        should_fetch_older_recent_page, should_pace_before_scan,
+        rearm_catch_up_retry_after_fetch_failure, should_fetch_older_recent_page,
+        should_pace_before_scan, take_catch_up_retry_checkpoint_after_queue_drain,
     };
     use crate::services::turn_orchestrator::EnqueueRefusalReason;
-    use std::collections::{BTreeMap, HashSet};
+    use poise::serenity_prelude as serenity;
+    use std::collections::{BTreeMap, HashMap, HashSet};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    struct ScopedRuntimeRoot {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        temp: tempfile::TempDir,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl ScopedRuntimeRoot {
+        fn path(&self) -> &std::path::Path {
+            self.temp.path()
+        }
+    }
+
+    impl Drop for ScopedRuntimeRoot {
+        fn drop(&mut self) {
+            unsafe {
+                match self.previous.take() {
+                    Some(value) => std::env::set_var("AGENTDESK_ROOT_DIR", value),
+                    None => std::env::remove_var("AGENTDESK_ROOT_DIR"),
+                }
+            }
+        }
+    }
+
+    fn scoped_runtime_root() -> ScopedRuntimeRoot {
+        let lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
+        let temp = tempfile::tempdir().expect("create catch-up test runtime root");
+        unsafe {
+            std::env::set_var("AGENTDESK_ROOT_DIR", temp.path());
+        }
+        ScopedRuntimeRoot {
+            _lock: lock,
+            temp,
+            previous,
+        }
+    }
+
+    fn write_last_message_checkpoint(
+        root: &std::path::Path,
+        provider: &ProviderKind,
+        channel_id: ChannelId,
+        checkpoint: u64,
+    ) {
+        let dir = root
+            .join("runtime")
+            .join("last_message")
+            .join(provider.as_str());
+        std::fs::create_dir_all(&dir).expect("create last_message provider dir");
+        std::fs::write(
+            dir.join(format!("{}.txt", channel_id.get())),
+            checkpoint.to_string(),
+        )
+        .expect("write last_message checkpoint");
+    }
+
+    struct TestCatchUpDiscordApi {
+        current_user_id: Option<u64>,
+        binding_status: RuntimeChannelBindingStatus,
+        fetch_error: Option<&'static str>,
+        fetch_attempts: Option<Arc<AtomicUsize>>,
+    }
+
+    impl TestCatchUpDiscordApi {
+        fn transient_fetch_failure() -> Self {
+            Self {
+                current_user_id: Some(9001),
+                binding_status: RuntimeChannelBindingStatus::Owned,
+                fetch_error: Some("temporary test fetch failure"),
+                fetch_attempts: None,
+            }
+        }
+
+        fn unknown_binding() -> Self {
+            Self {
+                current_user_id: Some(9001),
+                binding_status: RuntimeChannelBindingStatus::Unknown,
+                fetch_error: None,
+                fetch_attempts: None,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CatchUpDiscordApi for TestCatchUpDiscordApi {
+        async fn current_user_id(&self) -> Result<Option<u64>, String> {
+            Ok(self.current_user_id)
+        }
+
+        async fn resolve_runtime_channel_binding_status(
+            &self,
+            _channel_id: ChannelId,
+        ) -> RuntimeChannelBindingStatus {
+            self.binding_status
+        }
+
+        async fn fetch_messages(
+            &self,
+            _channel_id: ChannelId,
+            _request: serenity::builder::GetMessages,
+        ) -> Result<Vec<serenity::Message>, String> {
+            if let Some(fetch_attempts) = &self.fetch_attempts {
+                fetch_attempts.fetch_add(1, Ordering::SeqCst);
+            }
+            match self.fetch_error {
+                Some(error) => Err(error.to_string()),
+                None => Ok(Vec::new()),
+            }
+        }
+
+        async fn cleanup_recovered_catch_up_hourglass(
+            &self,
+            _shared: &Arc<super::super::SharedData>,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+        ) {
+        }
+    }
 
     #[test]
     fn scan_pace_parses_valid_zero_invalid_and_missing() {
@@ -1308,6 +1727,263 @@ mod catch_up_recovery_tests {
         assert_eq!(merge_catch_up_retry_checkpoint(None, 150), 150);
         assert_eq!(merge_catch_up_retry_checkpoint(Some(100), 150), 100);
         assert_eq!(merge_catch_up_retry_checkpoint(Some(200), 150), 150);
+    }
+
+    #[test]
+    fn periodic_sweep_consumes_pending_retry_checkpoints() {
+        let shared = super::super::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(1479671298497183835);
+        let older_armed_at = Instant::now()
+            .checked_sub(Duration::from_secs(30))
+            .expect("test instant can subtract old arm age");
+        let newer_armed_at = Instant::now()
+            .checked_sub(Duration::from_secs(5))
+            .expect("test instant can subtract fresh arm age");
+        shared.catch_up_retry_pending.insert(
+            channel_id,
+            CatchUpRetryState {
+                checkpoint: 1504812094456070200,
+                fetch_failures: 2,
+                armed_at: older_armed_at,
+            },
+        );
+
+        let retry_checkpoints = HashMap::from([(
+            channel_id,
+            CatchUpRetryState {
+                checkpoint: 1504812094456070300,
+                fetch_failures: 1,
+                armed_at: newer_armed_at,
+            },
+        )]);
+
+        let pending_retry_channels = collect_catch_up_retry_pending_channels(&shared);
+        assert_eq!(pending_retry_channels.len(), 1);
+        assert!(shared.catch_up_retry_pending.contains_key(&channel_id));
+
+        let merged = match consume_catch_up_retry_state_for_scan(
+            &shared,
+            channel_id,
+            &retry_checkpoints,
+            &pending_retry_channels,
+        ) {
+            CatchUpRetryScanDecision::Proceed(Some(retry_state)) => retry_state,
+            other => panic!("expected pending retry to be consumed for scan, got {other:?}"),
+        };
+        assert!(!shared.catch_up_retry_pending.contains_key(&channel_id));
+        assert_eq!(merged.checkpoint, 1504812094456070200);
+        assert_eq!(merged.fetch_failures, 2);
+        assert_eq!(merged.armed_at, older_armed_at);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn periodic_sweep_skips_retry_scan_when_pending_retry_already_consumed() {
+        let root = scoped_runtime_root();
+        let shared = super::super::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(1479671298497183835);
+        let checkpoint = 1504812094456070200;
+        write_last_message_checkpoint(root.path(), &provider, channel_id, checkpoint);
+        shared.catch_up_retry_pending.insert(
+            channel_id,
+            CatchUpRetryState {
+                checkpoint,
+                fetch_failures: 1,
+                armed_at: Instant::now(),
+            },
+        );
+
+        let pending_retry_channels = collect_catch_up_retry_pending_channels(&shared);
+        let consumed = take_catch_up_retry_checkpoint_after_queue_drain(&shared, channel_id, 0)
+            .expect("concurrent drain should consume the pending retry first");
+        assert_eq!(consumed.checkpoint, checkpoint);
+        assert_eq!(
+            consume_catch_up_retry_state_for_scan(
+                &shared,
+                channel_id,
+                &HashMap::from([(channel_id, consumed)]),
+                &pending_retry_channels,
+            ),
+            CatchUpRetryScanDecision::Proceed(Some(consumed)),
+            "a caller-supplied retry_checkpoints entry is owned by this scan and \
+             survives losing the pending-map race"
+        );
+
+        let fetch_attempts = Arc::new(AtomicUsize::new(0));
+        let api = TestCatchUpDiscordApi {
+            current_user_id: Some(9001),
+            binding_status: RuntimeChannelBindingStatus::Owned,
+            fetch_error: None,
+            fetch_attempts: Some(Arc::clone(&fetch_attempts)),
+        };
+        let retry_checkpoints = HashMap::new();
+        catch_up_missed_messages_inner_with_api_and_pending_retry_channels(
+            &api,
+            &shared,
+            &provider,
+            &retry_checkpoints,
+            &pending_retry_channels,
+        )
+        .await;
+
+        // Phase 2's fixed 20-message backstop scan legitimately fetches once for
+        // every candidate regardless of retry mode; the phase-1 retry-mode pinned
+        // fetch would make this 2. Exactly one attempt proves the retry scan was
+        // skipped after the point-of-use remove lost the race.
+        assert_eq!(
+            fetch_attempts.load(Ordering::SeqCst),
+            1,
+            "lost point-of-use remove must skip the phase-1 retry scan (phase-2 backstop fetch only)"
+        );
+    }
+
+    #[test]
+    fn retry_age_window_uses_original_arm_time() {
+        let scan_instant = Instant::now();
+        let armed_at = scan_instant
+            .checked_sub(Duration::from_secs(240))
+            .expect("test instant can subtract retry age");
+        let scan_wall_time = chrono::Utc::now();
+        let message_time = scan_wall_time - chrono::Duration::seconds(400);
+        let retry_state = CatchUpRetryState {
+            checkpoint: 1504812094456070130,
+            fetch_failures: 1,
+            armed_at,
+        };
+
+        let normal_reference =
+            catch_up_message_age_reference_time(scan_wall_time, scan_instant, None);
+        assert_eq!(
+            normal_reference
+                .signed_duration_since(message_time)
+                .num_seconds(),
+            400
+        );
+
+        let retry_reference =
+            catch_up_message_age_reference_time(scan_wall_time, scan_instant, Some(retry_state));
+        assert_eq!(
+            retry_reference
+                .signed_duration_since(message_time)
+                .num_seconds(),
+            160
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn catch_up_inner_rearms_pending_on_retry_fetch_failure() {
+        let root = scoped_runtime_root();
+        let shared = super::super::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(1479671298497183835);
+        let checkpoint = 1504812094456070130;
+        write_last_message_checkpoint(root.path(), &provider, channel_id, checkpoint);
+        let armed_at = Instant::now()
+            .checked_sub(Duration::from_secs(20))
+            .expect("test instant can subtract retry age");
+        let retry_state = CatchUpRetryState {
+            checkpoint,
+            fetch_failures: 1,
+            armed_at,
+        };
+        let retry_checkpoints = HashMap::from([(channel_id, retry_state)]);
+
+        catch_up_missed_messages_inner_with_api(
+            &TestCatchUpDiscordApi::transient_fetch_failure(),
+            &shared,
+            &provider,
+            &retry_checkpoints,
+        )
+        .await;
+
+        let pending = shared
+            .catch_up_retry_pending
+            .get(&channel_id)
+            .expect("retry fetch failure should re-arm pending retry");
+        assert_eq!(pending.checkpoint, checkpoint);
+        assert_eq!(pending.fetch_failures, 2);
+        assert_eq!(pending.armed_at, armed_at);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn catch_up_inner_rearms_pending_on_retry_unknown_binding() {
+        let root = scoped_runtime_root();
+        let shared = super::super::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(1479671298497183835);
+        let checkpoint = 1504812094456070130;
+        write_last_message_checkpoint(root.path(), &provider, channel_id, checkpoint);
+        let armed_at = Instant::now()
+            .checked_sub(Duration::from_secs(20))
+            .expect("test instant can subtract retry age");
+        let retry_state = CatchUpRetryState {
+            checkpoint,
+            fetch_failures: 1,
+            armed_at,
+        };
+        let retry_checkpoints = HashMap::from([(channel_id, retry_state)]);
+
+        catch_up_missed_messages_inner_with_api(
+            &TestCatchUpDiscordApi::unknown_binding(),
+            &shared,
+            &provider,
+            &retry_checkpoints,
+        )
+        .await;
+
+        let pending = shared
+            .catch_up_retry_pending
+            .get(&channel_id)
+            .expect("unknown binding in retry mode should re-arm pending retry");
+        assert_eq!(pending.checkpoint, checkpoint);
+        assert_eq!(pending.fetch_failures, 2);
+        assert_eq!(pending.armed_at, armed_at);
+    }
+
+    #[test]
+    fn retry_fetch_failure_rearms_pending_for_next_drain() {
+        let shared = super::super::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(1479671298497183835);
+        let checkpoint = 1504812094456070130;
+
+        assert_eq!(
+            arm_catch_up_retry_pending(&shared, channel_id, checkpoint),
+            checkpoint
+        );
+        let first_retry = take_catch_up_retry_checkpoint_after_queue_drain(&shared, channel_id, 0)
+            .expect("pending retry should be consumed by the first drain");
+        assert_eq!(first_retry.checkpoint, checkpoint);
+        assert_eq!(first_retry.fetch_failures, 0);
+        assert!(!shared.catch_up_retry_pending.contains_key(&channel_id));
+
+        let rearmed = rearm_catch_up_retry_after_fetch_failure(&shared, channel_id, first_retry)
+            .expect("transient retry fetch failure should re-arm the same backlog cursor");
+        assert_eq!(rearmed.checkpoint, checkpoint);
+        assert_eq!(rearmed.fetch_failures, 1);
+        assert_eq!(rearmed.armed_at, first_retry.armed_at);
+
+        let second_retry = take_catch_up_retry_checkpoint_after_queue_drain(&shared, channel_id, 0)
+            .expect("subsequent drain should retry the over-cap backlog again");
+        assert_eq!(second_retry, rearmed);
+    }
+
+    #[test]
+    fn retry_fetch_failure_gives_up_after_bounded_attempts() {
+        let shared = super::super::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(1479671298497183835);
+        let checkpoint = 1504812094456070130;
+        let exhausted_retry = CatchUpRetryState {
+            checkpoint,
+            fetch_failures: CATCH_UP_RETRY_FETCH_FAILURE_LIMIT,
+            armed_at: Instant::now(),
+        };
+
+        assert!(
+            rearm_catch_up_retry_after_fetch_failure(&shared, channel_id, exhausted_retry)
+                .is_none(),
+            "retry fetch failures must not re-arm forever"
+        );
+        assert!(!shared.catch_up_retry_pending.contains_key(&channel_id));
     }
 
     #[test]
