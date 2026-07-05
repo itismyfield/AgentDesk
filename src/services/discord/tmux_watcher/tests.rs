@@ -1,6 +1,7 @@
 use super::{
     FreshIdleFinalizeDecision, SessionBoundRelayAckOutcome, TuiCompletionGateOutcome,
     WatcherTerminalKind, build_watcher_streaming_edit_text,
+    committed_anchor_cleanup_is_stale_for_newer_turn,
     discard_restored_response_seed_before_no_inflight_terminal_relay,
     legacy_wrapper_prompt_candidates_from_pane, local_cmd_no_output,
     mark_watcher_terminal_delivery_committed, merge_persisted_rollover_frozen_msg_ids,
@@ -77,6 +78,52 @@ fn persisted_bridge_frozen_prefix_ids_merge_into_watcher_cleanup_list() {
     merge_persisted_rollover_frozen_msg_ids(&mut local, Some(&state), tmux_session_name);
 
     assert_eq!(local, vec![MessageId::new(10), MessageId::new(11)]);
+}
+
+#[test]
+fn terminal_readiness_stale_newer_frozen_prefix_ids_do_not_merge() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+    let tmux_session_name = "AgentDesk-claude-adk-cc";
+    let current_offset = 100;
+    let mut state = InflightTurnState::new(
+        ProviderKind::Claude,
+        42,
+        Some("adk-cc".to_string()),
+        7,
+        1001,
+        1002,
+        "prompt".to_string(),
+        Some("session".to_string()),
+        Some(tmux_session_name.to_string()),
+        Some("/tmp/out.jsonl".to_string()),
+        None,
+        150,
+    );
+    state.turn_start_offset = Some(150);
+    state.streaming_rollover_frozen_msg_ids = vec![10, 11];
+    let should_adopt = true;
+    let stale_newer = committed_anchor_cleanup_is_stale_for_newer_turn(
+        Some(&state),
+        None,
+        tmux_session_name,
+        current_offset,
+    );
+    let mut local = Vec::new();
+
+    if should_adopt && !stale_newer {
+        merge_persisted_rollover_frozen_msg_ids(&mut local, Some(&state), tmux_session_name);
+    }
+
+    assert!(stale_newer);
+    assert!(
+        local.is_empty(),
+        "stale newer frozen prefix ids must not enter the old turn cleanup list"
+    );
 }
 
 #[test]

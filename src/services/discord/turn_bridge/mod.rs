@@ -190,8 +190,10 @@ use recall_feedback::{
     transcript_contains_explicit_memento_tool_call,
 };
 use retry_state::{
+    bridge_confirmed_response_sent_offset_seed, bridge_should_reclaim_relay_from_missing_watcher,
     clear_local_session_state, handle_gemini_retry_boundary, reset_session_for_auto_retry,
-    rewind_delivery_on_reclaim, sync_response_delivery_state, sync_terminal_error_delivery_state,
+    rewind_and_persist_delivery_on_reclaim, sync_response_delivery_state,
+    sync_terminal_error_delivery_state_for_bridge_owner,
 };
 use skill_usage::record_skill_usage_from_tool_use;
 use stale_resume::{
@@ -206,8 +208,8 @@ use status_panel::{
 use terminal_delivery::{
     BridgeLeaseAcquire, bridge_delivery_lease_for_inflight, bridge_delivery_lease_key_for_inflight,
     bridge_epilogue_clears_inflight, bridge_epilogue_marks_watcher_delivered,
-    bridge_epilogue_skip_save_is_identity_guarded, empty_sink_preserves_retry,
-    mirror_frozen_prefix_ids, send_ordered_long_terminal_response,
+    bridge_epilogue_skip_save_is_identity_guarded, empty_sink_commits_fully_consumed_response,
+    empty_sink_preserves_retry, mirror_frozen_prefix_ids, send_ordered_long_terminal_response,
     should_complete_work_dispatch_after_terminal_delivery,
     should_fail_dispatch_after_terminal_delivery, silent_turn_skip_marks_committed,
     terminal_delivery_should_send_new_chunks, turn_bridge_replace_outcome_committed,
@@ -613,14 +615,6 @@ mod streaming_edit_text_tests {
         assert_eq!(rendered, "(No response)");
         assert!(full_response.is_empty());
     }
-}
-
-fn bridge_should_reclaim_relay_from_missing_watcher(
-    watcher_owns_assistant_relay: bool,
-    standby_relay_owns_output: bool,
-    live_watcher_registered: bool,
-) -> bool {
-    watcher_owns_assistant_relay && !standby_relay_owns_output && !live_watcher_registered
 }
 
 #[cfg(test)]
@@ -1446,7 +1440,8 @@ pub(super) fn spawn_turn_bridge(
             }
         };
         let mut response_sent_offset = bridge.response_sent_offset;
-        let mut bridge_confirmed_response_sent_offset = response_sent_offset;
+        let mut bridge_confirmed_response_sent_offset =
+            bridge_confirmed_response_sent_offset_seed(initial_relay_owner_kind, response_sent_offset);
         let mut streamed_assistant_text_this_turn = false;
         let mut streaming_rollover_frozen_msg_ids: Vec<MessageId> = Vec::new();
         let mut terminal_full_replay_cleanup_msg_ids: Vec<MessageId> = Vec::new();
@@ -2702,12 +2697,14 @@ pub(super) fn spawn_turn_bridge(
                             } else {
                                 full_response = format!("Error: {}", message);
                             }
-                            sync_terminal_error_delivery_state(
+                            sync_terminal_error_delivery_state_for_bridge_owner(
                                 &full_response,
                                 &mut response_sent_offset,
+                                &mut bridge_confirmed_response_sent_offset,
                                 &mut inflight_state,
+                                channel_id,
+                                watcher_owns_assistant_relay && watcher_relay_available_for_turn,
                             );
-                            bridge_confirmed_response_sent_offset = response_sent_offset;
                             push_transcript_event(
                                 &mut transcript_events,
                                 SessionTranscriptEvent {
@@ -3683,7 +3680,7 @@ pub(super) fn spawn_turn_bridge(
                 watcher_owns_assistant_relay = false;
                 watcher_relay_available_for_turn = false;
                 inflight_state.set_relay_owner_kind(super::inflight::RelayOwnerKind::None);
-                rewind_delivery_on_reclaim(
+                rewind_and_persist_delivery_on_reclaim(
                     &full_response,
                     bridge_confirmed_response_sent_offset,
                     &mut response_sent_offset,
@@ -5178,7 +5175,9 @@ pub(super) fn spawn_turn_bridge(
                     }
                 }
             } else if delivery_response.trim().is_empty() {
-                if empty_sink_preserves_retry(
+                if empty_sink_commits_fully_consumed_response(&full_response, response_sent_offset) {
+                    (terminal_delivery_committed, terminal_body_visible) = (true, true);
+                } else if empty_sink_preserves_retry(
                     &full_response,
                     resume_retry_queued,
                     response_sent_offset,

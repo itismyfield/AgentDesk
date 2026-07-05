@@ -8,6 +8,21 @@
 
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum InflightDeliveryRewindReason {
+    TerminalErrorReset,
+    MissingWatcherReclaim,
+}
+
+impl InflightDeliveryRewindReason {
+    pub(in crate::services::discord) fn as_str(self) -> &'static str {
+        match self {
+            Self::TerminalErrorReset => "terminal_error_reset",
+            Self::MissingWatcherReclaim => "missing_watcher_reclaim",
+        }
+    }
+}
+
 pub(super) fn inflight_provider_dir(root: &Path, provider: &ProviderKind) -> PathBuf {
     root.join(provider.as_str())
 }
@@ -80,6 +95,22 @@ pub(super) fn validate_inflight_state_for_save(
     state: &InflightTurnState,
     code_location: &'static str,
 ) -> bool {
+    validate_inflight_state_for_save_with_delivery_rewind_reason(
+        root,
+        path,
+        state,
+        code_location,
+        None,
+    )
+}
+
+pub(super) fn validate_inflight_state_for_save_with_delivery_rewind_reason(
+    root: &Path,
+    path: &Path,
+    state: &InflightTurnState,
+    code_location: &'static str,
+    delivery_rewind_reason: Option<InflightDeliveryRewindReason>,
+) -> bool {
     let offset_in_bounds = state.response_sent_offset <= state.full_response.len()
         && state
             .full_response
@@ -147,13 +178,26 @@ pub(super) fn validate_inflight_state_for_save(
     // change — so the guard stays self-contained.
     let is_legitimate_full_reset =
         same_turn_identity && state.full_response.is_empty() && state.response_sent_offset == 0;
+    // #4110: terminal-error reset and dead-watcher reclaim intentionally lower a
+    // same-turn delivery frontier while keeping a non-empty response body. Those
+    // are not generic saves: the bridge first performs an identity-checked,
+    // lock-held RMW save carrying this reason marker. Only that path may carve
+    // out the non-empty backward move; ordinary stale snapshots still have no
+    // marker and remain blocked by authority.
+    let is_legitimate_reasoned_delivery_rewind = delivery_rewind_reason.is_some()
+        && same_turn_identity
+        && !state.full_response.is_empty()
+        && state.response_sent_offset < existing.response_sent_offset
+        && last_offset_monotonic;
+    let is_legitimate_delivery_rewind =
+        is_legitimate_full_reset || is_legitimate_reasoned_delivery_rewind;
     use crate::services::discord::outbound::delivery_record as dr;
     let authority = dr::delivery_record_authority_enabled();
     let enforce_skips_backward_write = dr::authority_blocks_backward_inflight_write(
         authority,
         monotonic_offset,
         last_offset_monotonic,
-        is_legitimate_full_reset,
+        is_legitimate_delivery_rewind,
     );
     // #3933: a legitimate full reset PERSISTS its backward write (it is a permitted
     // re-stream rewind, so the enforce guard does NOT skip it —
@@ -164,7 +208,7 @@ pub(super) fn validate_inflight_state_for_save(
     // still keys off `enforce_skips_backward_write`), and the on-disk schema are
     // all unchanged.
     let monotonic_violation_safely_handled =
-        enforce_skips_backward_write || is_legitimate_full_reset;
+        enforce_skips_backward_write || is_legitimate_delivery_rewind;
     let offset_monotonic_severity =
         offset_monotonic_invariant_severity(monotonic_violation_safely_handled);
 
@@ -179,6 +223,7 @@ pub(super) fn validate_inflight_state_for_save(
             "next": state.response_sent_offset,
             "same_turn_identity": same_turn_identity,
             "path": path.display().to_string(),
+            "delivery_rewind_reason": delivery_rewind_reason.map(InflightDeliveryRewindReason::as_str),
         }),
         offset_monotonic_severity,
     );
@@ -189,7 +234,7 @@ pub(super) fn validate_inflight_state_for_save(
     // permitted legitimate reset in release) still trips it, preserving the
     // tripwire's purpose and every existing observe-only test verbatim.
     debug_assert!(
-        monotonic_offset || enforce_skips_backward_write,
+        monotonic_offset || enforce_skips_backward_write || is_legitimate_reasoned_delivery_rewind,
         "inflight response_sent_offset must not move backwards for the same turn identity"
     );
 

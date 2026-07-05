@@ -296,6 +296,13 @@ pub(super) fn empty_sink_preserves_retry(
     true
 }
 
+pub(super) fn empty_sink_commits_fully_consumed_response(
+    full_response: &str,
+    response_sent_offset: usize,
+) -> bool {
+    !full_response.trim().is_empty() && response_sent_offset >= full_response.len()
+}
+
 pub(super) fn mirror_frozen_prefix_ids(
     frozen_msg_ids: &[MessageId],
     inflight_state: &mut InflightTurnState,
@@ -732,10 +739,10 @@ impl Drop for BridgeDeliveryLease {
 mod tests {
     use super::{
         bridge_epilogue_clears_inflight, bridge_epilogue_marks_watcher_delivered,
-        bridge_epilogue_skip_save_is_identity_guarded, empty_sink_preserves_retry,
-        mirror_frozen_prefix_ids, record_stopped_turn_terminal_replace_delivery,
-        replace_outcome_commits_terminal_delivery, send_ordered_long_terminal_chunks,
-        should_complete_work_dispatch_after_terminal_delivery,
+        bridge_epilogue_skip_save_is_identity_guarded, empty_sink_commits_fully_consumed_response,
+        empty_sink_preserves_retry, mirror_frozen_prefix_ids,
+        record_stopped_turn_terminal_replace_delivery, replace_outcome_commits_terminal_delivery,
+        send_ordered_long_terminal_chunks, should_complete_work_dispatch_after_terminal_delivery,
         should_fail_dispatch_after_terminal_delivery, terminal_delivery_should_send_new_chunks,
     };
     use crate::services::discord::formatting;
@@ -964,6 +971,23 @@ mod tests {
             channel,
         ));
         assert!(!empty_sink_preserves_retry("", true, 0, channel));
+    }
+
+    #[test]
+    fn empty_sink_commits_nonempty_response_that_was_already_fully_consumed() {
+        assert!(empty_sink_commits_fully_consumed_response(
+            "already delivered",
+            "already delivered".len()
+        ));
+        assert!(empty_sink_commits_fully_consumed_response(
+            "already delivered",
+            "already delivered".len() + 10
+        ));
+        assert!(!empty_sink_commits_fully_consumed_response("", 0));
+        assert!(!empty_sink_commits_fully_consumed_response(
+            "tail remains",
+            "tail ".len()
+        ));
     }
 
     #[test]
