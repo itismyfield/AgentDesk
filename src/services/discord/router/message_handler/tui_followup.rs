@@ -773,3 +773,32 @@ mod readiness_wait_status_tests {
         }
     }
 }
+
+/// #4139: the enqueue-refusal branch restores the taken recovery context and
+/// rewrites the placeholder into the refusal notice. Lives here (non-baselined
+/// sibling) so the baselined intake root carries only the call.
+pub(super) async fn apply_tui_busy_enqueue_refusal(
+    shared: &Arc<SharedData>,
+    http: &Arc<serenity::http::Http>,
+    channel_id: ChannelId,
+    placeholder_msg_id: MessageId,
+    session_retry_context: Option<
+        &crate::services::discord::router::turn_start::FormattedSessionRetryContext,
+    >,
+    refusal_reason: Option<crate::services::turn_orchestrator::EnqueueRefusalReason>,
+) {
+    put_back_session_retry_context(
+        shared,
+        channel_id,
+        session_retry_context,
+        refusal_reason.map(|reason| reason.as_str()),
+    );
+    let notice = claude_tui_busy_followup_refusal_notice(refusal_reason);
+    let _ = super::super::super::http::edit_channel_message(
+        http,
+        channel_id,
+        placeholder_msg_id,
+        notice,
+    )
+    .await;
+}

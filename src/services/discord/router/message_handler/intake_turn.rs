@@ -2336,12 +2336,13 @@ pub(in crate::services::discord) async fn handle_text_message(
         } else if enqueue_outcome.enqueued {
             let _ = channel_id.delete_message(http, placeholder_msg_id).await;
         } else {
-            let notice = claude_tui_busy_followup_refusal_notice(enqueue_outcome.refusal_reason);
-            let _ = super::super::super::http::edit_channel_message(
+            apply_tui_busy_enqueue_refusal(
+                shared,
                 http,
                 channel_id,
                 placeholder_msg_id,
-                notice,
+                session_retry_context.as_ref(),
+                enqueue_outcome.refusal_reason,
             )
             .await;
         }
@@ -2895,6 +2896,33 @@ mod recovery_context_take_order_tests {
         assert!(
             take_pos < manifest_use_pos,
             "active intake turn must take recovery context before prompt manifest capture"
+        );
+    }
+
+    #[test]
+    fn tui_busy_enqueue_refusal_puts_back_recovery_context_for_next_turn() {
+        // The refusal else-branch must route through the sibling helper, which
+        // puts the taken recovery context back BEFORE rewriting the refusal
+        // notice (put-back-then-notice ordering pinned in tui_followup.rs).
+        let module_src = include_str!("intake_turn.rs");
+        module_src
+            .find("} else {\n            apply_tui_busy_enqueue_refusal(")
+            .expect("TUI-busy enqueue refusal routes through the put-back helper");
+
+        let helper_src = include_str!("tui_followup.rs");
+        let helper_fn_pos = helper_src
+            .find("async fn apply_tui_busy_enqueue_refusal(")
+            .expect("refusal helper exists in tui_followup.rs");
+        let helper_body = &helper_src[helper_fn_pos..];
+        let put_back_pos = helper_body
+            .find("put_back_session_retry_context(")
+            .expect("refusal helper restores recovery context");
+        let notice_pos = helper_body
+            .find("claude_tui_busy_followup_refusal_notice(")
+            .expect("refusal helper renders the notice");
+        assert!(
+            put_back_pos < notice_pos,
+            "TUI-busy enqueue refusal, including dup-guard refusal, must restore recovery context before returning the notice"
         );
     }
 }

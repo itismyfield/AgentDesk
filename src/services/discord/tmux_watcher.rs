@@ -5595,17 +5595,31 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             false
         } else {
             if let Some(msg_id) = placeholder_msg_id {
-                // No response text but placeholder exists — clean up
-                let _ = delete_terminal_placeholder(
-                    &http,
-                    channel_id,
-                    &shared,
+                if let Some(evidence) = placeholder_real_body_exposure_evidence(
                     &watcher_provider,
-                    &tmux_session_name,
-                    msg_id,
-                    "watcher_no_response_cleanup",
-                )
-                .await;
+                    response_sent_offset,
+                    &last_edit_text,
+                ) {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::info!(
+                        message_id = msg_id.get(),
+                        evidence = %evidence,
+                        response_sent_offset = response_sent_offset,
+                        "  [{ts}] 👁 watcher_no_response_cleanup preserved exposed placeholder for {tmux_session_name}"
+                    );
+                } else {
+                    // No response text but placeholder exists — clean up
+                    let _ = delete_terminal_placeholder(
+                        &http,
+                        channel_id,
+                        &shared,
+                        &watcher_provider,
+                        &tmux_session_name,
+                        msg_id,
+                        "watcher_no_response_cleanup",
+                    )
+                    .await;
+                }
             }
             false
         };

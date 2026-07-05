@@ -93,7 +93,7 @@ pub(super) async fn reclaim_orphaned_session_bound_relay_if_dead(
     };
     // #3876 producer-liveness, re-checked at THIS tick: a live producer (the
     // original or a replacement) still owns delivery → never reclaim.
-    let producer_gone = producers.get_producer(owner_session_name).is_none();
+    let producer_gone = producers.get_live_producer(owner_session_name).is_none();
     if !producer_gone {
         return false;
     }
@@ -279,6 +279,83 @@ mod tests {
         assert!(
             inflight::ownerless_external_input_inflight_is_stale(&reloaded),
             "Y's next idle tick sees a stale ownerless blocker and can proceed to its own JSONL backlog"
+        );
+    }
+
+    #[tokio::test]
+    async fn registered_but_shutdown_producer_is_reclaimed_as_dead() {
+        use crate::services::cluster::session_matcher::{
+            MatchedChannel, expected_rollout_path_for,
+        };
+        use crate::services::cluster::stream_relay::{DiscardSink, RelaySink, spawn_stream_relay};
+        use std::sync::Arc;
+
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        struct EnvReset(Option<std::ffi::OsString>);
+        impl Drop for EnvReset {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+                }
+            }
+        }
+        let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let temp = tempfile::TempDir::new().expect("temp runtime root");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
+        let provider = ProviderKind::Claude;
+        let channel_id = 4_140_117;
+        let owner_session = provider.build_tmux_session_name("dead-producer-owner");
+        let iterating_session = "AgentDesk-claude-live-iterator-z";
+        let inflight = stale_session_bound_relay_row(channel_id, &owner_session);
+        write_inflight_row_verbatim(temp.path(), &provider, channel_id, &inflight);
+
+        let health_registry = HealthRegistry::new();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        health_registry
+            .register(provider.as_str().to_string(), shared)
+            .await;
+        let producers = RelayProducerRegistry::new();
+        let matched = MatchedChannel {
+            channel_id: "dead-producer-owner".to_string(),
+            agent_id: "agent-dead-producer-owner".to_string(),
+            provider: provider.clone(),
+            expected_session_name: owner_session.clone(),
+            expected_rollout_path: expected_rollout_path_for(&owner_session),
+        };
+        let sink: Arc<dyn RelaySink> = Arc::new(DiscardSink);
+        let handle = spawn_stream_relay(matched, sink);
+        producers.register(owner_session.clone(), handle.producer());
+        handle.shutdown().await;
+        assert!(
+            producers
+                .get_producer(&owner_session)
+                .is_some_and(|producer| !producer.is_alive()),
+            "registry must still contain a non-live producer before reclaim"
+        );
+
+        assert!(
+            reclaim_orphaned_session_bound_relay_if_dead(
+                &health_registry,
+                &producers,
+                &provider,
+                channel_id,
+                iterating_session,
+                &inflight,
+            )
+            .await,
+            "a registered but shutdown producer is dead for orphan reclaim"
+        );
+
+        let reloaded =
+            inflight::load_inflight_state(&provider, channel_id).expect("downgraded row survives");
+        assert_eq!(
+            reloaded.effective_relay_owner_kind(),
+            inflight::RelayOwnerKind::None,
+            "dead registered producer reclaim downgrades the row to ownerless"
         );
     }
 
