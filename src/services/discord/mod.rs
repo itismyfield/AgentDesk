@@ -8,7 +8,6 @@ mod answer_flush_barrier;
 mod catch_up;
 mod commands;
 mod delivery_lease_key;
-mod destructive_cancel_capture;
 mod destructive_cancel_gate;
 mod discord_io;
 mod dispatch_policy;

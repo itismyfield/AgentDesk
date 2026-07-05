@@ -1,10 +1,12 @@
 use std::path::Path;
 use std::time::Duration;
 
-use super::destructive_cancel_capture::{
-    CaptureProgressEvidence, fresh_watcher_heartbeat_blocks_rebind,
-};
+// Child module (file lives alongside in discord/) — declared here instead of
+// the ratcheted discord/mod.rs; this gate is its only consumer.
+#[path = "destructive_cancel_capture.rs"]
+mod destructive_cancel_capture;
 use super::{SharedData, inflight, mailbox_snapshot};
+use destructive_cancel_capture::{CaptureProgressEvidence, fresh_watcher_heartbeat_blocks_rebind};
 use poise::serenity_prelude::{ChannelId, MessageId};
 
 use crate::services::provider::ProviderKind;
