@@ -648,6 +648,9 @@ mod tests {
             .join("discord_inflight")
             .join(ProviderKind::Claude.as_str())
             .join(format!("{}.json.lock", channel.get()));
+        // The seed save above already created the lock file; replace it with a
+        // directory so the RMW lock open fails with a real IO error.
+        let _ = std::fs::remove_file(&lock_path);
         std::fs::create_dir(&lock_path).expect("turn lock path into directory");
 
         let error_response = "Error: provider transport failed";
