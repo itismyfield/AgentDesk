@@ -3569,6 +3569,10 @@ mod stall_recovery_tests {
         // FIX: birth carried up to the committed frontier → re-claim is forward/
         // equal, ZERO invariant violations, offsets end at the frontier.
         let temp = TempDir::new().unwrap();
+        // The refresh path records inflight-invariant observability via the
+        // PROCESS-WIDE runtime root (#3293 guard) — pin it to the tempdir so a
+        // standalone/parallel run never resolves the live release root.
+        let _env_reset = set_agentdesk_root_for_test(temp.path());
         let relay_last_offset: u64 = 2_821_677;
         let committed_frontier: u64 = 2_838_484;
         // Drive the ACTUAL production carry-forward helper (not an inline copy) so
