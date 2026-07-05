@@ -241,20 +241,18 @@ pub(super) fn decide_placeholder_suppression(
             }
         }
         PlaceholderSuppressOrigin::TaskNotificationTerminal => {
-            // #1708: Background, Subagent, and MonitorAutoTurn task notifications
-            // are all auto-fired by tooling, not by the user. If the main turn is
-            // streaming user-facing body when one of them terminates, we must
-            // preserve that body — otherwise the SUPPRESSED_INTERNAL_LABEL edit
-            // overwrites the actual response (Monitor stream-end was the trigger
-            // observed in the 2026-05-04 adk-cc incident).
-            let preserves_body = matches!(
-                ctx.task_notification_kind,
+            // #1708/#4144: Background, Subagent, MonitorAutoTurn, and a missing
+            // task kind after watcher restart are not positive evidence that a
+            // streamed body is disposable. Preserve exposed body unless a future
+            // task-notification kind explicitly opts into destructive stamping.
+            let (preserves_body, preserve_reason) = match ctx.task_notification_kind {
+                None => (true, "unclassified-task-notification-kind"),
                 Some(
                     TaskNotificationKind::Background
-                        | TaskNotificationKind::Subagent
-                        | TaskNotificationKind::MonitorAutoTurn
-                )
-            );
+                    | TaskNotificationKind::Subagent
+                    | TaskNotificationKind::MonitorAutoTurn,
+                ) => (true, "auto-task-notification-kind"),
+            };
             match suppressed_placeholder_action(
                 ctx.placeholder_msg_id.is_some(),
                 ctx.provider,
@@ -265,7 +263,7 @@ pub(super) fn decide_placeholder_suppression(
                 SuppressedPlaceholderAction::Delete => PlaceholderSuppressDecision::Delete,
                 SuppressedPlaceholderAction::Edit(_) if preserves_body => {
                     PlaceholderSuppressDecision::Preserve {
-                        reason: "auto-task-notification-kind",
+                        reason: preserve_reason,
                         cleaned_body: strip_placeholder_indicators_for_preserve(
                             ctx.last_edit_text,
                             ctx.provider,
@@ -273,6 +271,9 @@ pub(super) fn decide_placeholder_suppression(
                     }
                 }
                 SuppressedPlaceholderAction::Edit(content) => {
+                    // Defensive only: every current task-notification kind plus
+                    // unclassified None preserves exposed bodies. Reaching this
+                    // requires a future kind to explicitly opt out above.
                     PlaceholderSuppressDecision::Edit(content)
                 }
             }
@@ -331,6 +332,12 @@ pub(super) async fn apply_placeholder_suppression(
             }
         }
         PlaceholderSuppressDecision::Delete => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            let detail_suffix = detail.map(|d| format!(" — {d}")).unwrap_or_default();
+            tracing::info!(
+                "  [{ts}] 👁 {} deleted placeholder{detail_suffix}",
+                origin.log_scope()
+            );
             if let Some(msg_id) = placeholder_msg_id {
                 delete_terminal_placeholder(
                     http,
@@ -345,6 +352,12 @@ pub(super) async fn apply_placeholder_suppression(
             }
         }
         PlaceholderSuppressDecision::Edit(content) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            let detail_suffix = detail.map(|d| format!(" — {d}")).unwrap_or_default();
+            tracing::info!(
+                "  [{ts}] 👁 {} edited placeholder{detail_suffix}",
+                origin.log_scope()
+            );
             if let Some(msg_id) = placeholder_msg_id {
                 edit_terminal_placeholder(
                     http,
@@ -909,6 +922,25 @@ No response requested.\n\
         }
     }
 
+    fn task_notification_terminal_ctx<'a>(
+        placeholder: &'a str,
+        response_sent_offset: usize,
+        task_notification_kind: Option<TaskNotificationKind>,
+    ) -> PlaceholderSuppressContext<'a> {
+        PlaceholderSuppressContext {
+            origin: PlaceholderSuppressOrigin::TaskNotificationTerminal,
+            provider: &ProviderKind::Claude,
+            placeholder_msg_id: Some(MessageId::new(1)),
+            response_sent_offset,
+            last_edit_text: placeholder,
+            inflight_state: None,
+            has_active_turn: false,
+            tmux_session_name: TEST_SESSION,
+            task_notification_kind,
+            reattach_offset_match: false,
+        }
+    }
+
     #[test]
     fn active_bridge_exposed_body_preserves_instead_of_internal_label() {
         // #3533: a duplicate-relay guard on an already-exposed body (e.g. the
@@ -953,6 +985,36 @@ No response requested.\n\
             panic!("footer-only active bridge placeholder should edit, not delete");
         };
         assert_eq!(content, SUPPRESSED_INTERNAL_LABEL);
+    }
+
+    #[test]
+    fn task_notification_none_kind_exposed_body_preserves() {
+        // #4144: a respawned watcher can miss the earlier kind marker, leaving
+        // kind=None. That is not positive evidence for internal-label stamping.
+        let placeholder = body_with_footer("visible assistant body");
+        let ctx = task_notification_terminal_ctx(&placeholder, 0, None);
+
+        let PlaceholderSuppressDecision::Preserve {
+            reason,
+            cleaned_body,
+        } = decide_placeholder_suppression(&ctx)
+        else {
+            panic!("unclassified task notification with exposed body should preserve");
+        };
+        assert_eq!(reason, "unclassified-task-notification-kind");
+        assert_eq!(cleaned_body, "visible assistant body");
+        assert!(!cleaned_body.contains(SUPPRESSED_INTERNAL_LABEL));
+        assert!(!cleaned_body.contains("진행 중 — Claude"));
+    }
+
+    #[test]
+    fn task_notification_none_kind_unexposed_placeholder_deletes() {
+        let ctx = task_notification_terminal_ctx("⠋ 계속 처리 중", 0, None);
+
+        assert_eq!(
+            decide_placeholder_suppression(&ctx),
+            PlaceholderSuppressDecision::Delete
+        );
     }
 
     // #3871: a >DISCORD_MSG_LIMIT answer rolls over mid-stream (the prefix is
