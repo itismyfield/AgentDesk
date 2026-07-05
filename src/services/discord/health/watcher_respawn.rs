@@ -747,9 +747,7 @@ mod tests {
         .expect("create runtime session directory");
         std::fs::write(&generation_path, b"new-generation").expect("write generation marker");
         let current_generation =
-            crate::services::discord::tmux_session_files::read_generation_file_mtime_ns(
-                tmux_session,
-            );
+            crate::services::discord::tmux::read_generation_file_mtime_ns(tmux_session);
         assert_ne!(current_generation, 0, "generation marker must be readable");
 
         let shared = crate::services::discord::make_shared_data_for_tests();
