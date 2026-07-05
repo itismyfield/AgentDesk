@@ -475,6 +475,10 @@ pub(in crate::services::discord) fn delete_record(
 /// default OFF). Telemetry ONLY when enabled (the default-OFF first eval has no
 /// observable side effect — deploy no-op), mirroring the A-phase flag idiom.
 pub(in crate::services::discord) fn delivery_record_shadow_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(forced) = shadow_test_seam::current_override() {
+        return forced;
+    }
     static CACHED: OnceLock<bool> = OnceLock::new();
     *CACHED.get_or_init(|| {
         let on = std::env::var("AGENTDESK_DELIVERY_RECORD_SHADOW")
@@ -486,6 +490,39 @@ pub(in crate::services::discord) fn delivery_record_shadow_enabled() -> bool {
         }
         on
     })
+}
+
+/// #4130 test seam: a per-thread override of
+/// `delivery_record_shadow_enabled()` so default-OFF tests stay deterministic
+/// even when the developer shell exports `AGENTDESK_DELIVERY_RECORD_SHADOW=1`.
+#[cfg(test)]
+pub(in crate::services::discord) mod shadow_test_seam {
+    use std::cell::Cell;
+
+    thread_local! {
+        static OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+
+    pub(in crate::services::discord) fn current_override() -> Option<bool> {
+        OVERRIDE.with(Cell::get)
+    }
+
+    #[must_use]
+    pub(in crate::services::discord) fn force(value: bool) -> Guard {
+        Guard {
+            previous: OVERRIDE.with(|cell| cell.replace(Some(value))),
+        }
+    }
+
+    pub(in crate::services::discord) struct Guard {
+        previous: Option<bool>,
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            OVERRIDE.with(|cell| cell.set(self.previous));
+        }
+    }
 }
 
 /// #3089 B2b read-authority flag (`AGENTDESK_DELIVERY_RECORD_AUTHORITY`, OnceLock,

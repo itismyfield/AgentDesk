@@ -39,7 +39,7 @@ use super::{
     ChannelMailboxHandle, ChannelMailboxMsg, ChannelMailboxRegistry, ChannelMailboxState,
     EnqueueInterventionResult, EnqueueRefusalReason, GLOBAL_CHANNEL_MAILBOXES,
     GLOBAL_RECOVERY_DONE_SIGNALS, GLOBAL_TURN_FINISHED_SIGNALS, Intervention,
-    QueuePersistenceContext, RecoveryKickoffResult,
+    QueuePersistenceContext, RecoveryKickoffResult, TryStartTurnResult,
 };
 use crate::services::provider::CancelToken;
 
@@ -86,7 +86,7 @@ pub(super) fn gate_closed_arm(
     match msg {
         // Mirrors the lost-race reply of a slot already held (#3297 r2).
         ChannelMailboxMsg::TryStartTurn { reply, .. } => {
-            let _ = reply.send(false);
+            let _ = reply.send(TryStartTurnResult::default());
             None
         }
         // Fire-and-forget restore: the only refusal shape is a no-op ack.

@@ -560,3 +560,12 @@ file = "src/services/discord/tui_task_card.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
 decompose_issue = "#3405"
+
+[[entry]]
+# Crossed the 1000-prod-LoC giant threshold while catch-up phase1/phase2
+# admission semantics were aligned for #4107. Decomposition should split the
+# scan/admission commit paths from durable cleanup and checkpoint bookkeeping.
+file = "src/services/discord/catch_up.rs"
+owner = "discord-relay"
+deadline = "2026-10-31"
+decompose_issue = "#3405"

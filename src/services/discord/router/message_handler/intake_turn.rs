@@ -2197,6 +2197,12 @@ pub(in crate::services::discord) async fn handle_text_message(
     #[cfg(unix)]
     if let Some(diagnostic) = tui_busy_diagnostic {
         let bot_owner_provider = super::super::super::resolve_discord_bot_provider(token);
+        let queue_kickoff_scheduled_by_release = release_mailbox_after_hosted_tui_busy_pre_submit(
+            shared,
+            &bot_owner_provider,
+            channel_id,
+        )
+        .await;
         let enqueue_outcome = enqueue_busy_tui_followup_for_retry(
             shared,
             &bot_owner_provider,
@@ -2338,12 +2344,8 @@ pub(in crate::services::discord) async fn handle_text_message(
             )
             .await;
         }
-        let queue_kickoff_scheduled = release_mailbox_after_hosted_tui_busy_pre_submit(
-            shared,
-            &bot_owner_provider,
-            channel_id,
-        )
-        .await;
+        let queue_kickoff_scheduled =
+            queue_kickoff_scheduled_by_release || enqueue_outcome.enqueued;
         let mut diagnostic_json = diagnostic.to_json();
         if let Some(object) = diagnostic_json.as_object_mut() {
             object.insert(

@@ -11,9 +11,14 @@ use tokio::sync::{Notify, mpsc, oneshot};
 use crate::services::provider::{CancelToken, ProviderKind};
 
 // #3293: non-creating registry lookup + operator-gated idle-entry purge.
+mod active_source_dedup;
 mod dispatch_reservation;
 mod pending_queue_persistence;
 pub(crate) mod registry_purge;
+use active_source_dedup::{
+    intervention_has_active_source, intervention_sources_all_match_active,
+    purge_active_source_from_queue, strip_source_message_id_from_intervention,
+};
 pub(crate) use dispatch_reservation::{
     PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER, VALVE_CLEARED_DISPATCH_MARKER_GRACE,
 };
@@ -238,9 +243,23 @@ fn should_merge_intervention(last: &Intervention, incoming: &Intervention) -> bo
 pub(crate) fn enqueue_intervention(
     queue: &mut Vec<Intervention>,
     mut intervention: Intervention,
+    active_user_message_id: Option<MessageId>,
 ) -> EnqueueInterventionResult {
     let mut queue_exit_events = prune_interventions(queue);
     ensure_source_message_ids(&mut intervention);
+
+    if intervention_sources_all_match_active(&intervention, active_user_message_id) {
+        return EnqueueInterventionResult {
+            enqueued: false,
+            merged: false,
+            refusal_reason: Some(EnqueueRefusalReason::AlreadyActiveTurn),
+            queue_exit_events,
+            persistence_error: None,
+        };
+    }
+    if let Some(active_id) = intervention_has_active_source(&intervention, active_user_message_id) {
+        strip_source_message_id_from_intervention(&mut intervention, active_id);
+    }
 
     if queue
         .iter()
@@ -512,6 +531,13 @@ pub(crate) struct RecoveryKickoffResult {
     pub(crate) refused_closed: bool,
 }
 
+#[derive(Default)]
+pub(crate) struct TryStartTurnResult {
+    pub(crate) started: bool,
+    pub(crate) queue_exit_events: Vec<QueueExitEvent>,
+    pub(crate) persistence_error: Option<String>,
+}
+
 pub(crate) struct RestartDrainResult {
     pub(crate) queued_count: usize,
     pub(crate) persistence_error: Option<String>,
@@ -535,6 +561,10 @@ pub(crate) struct RestartDrainAllResult {
 /// path A / B / C classification instead of code-only inference.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EnqueueRefusalReason {
+    /// The incoming source message is already the mailbox's active user turn.
+    /// Re-enqueuing it would let the deferred drain dispatch the same user input
+    /// again after the active turn finishes.
+    AlreadyActiveTurn,
     /// The incoming `message_id` is already present in some queued entry's
     /// `source_message_ids` — duplicate insert from a re-entry or rehydrated
     /// queue.
@@ -554,6 +584,7 @@ pub(crate) enum EnqueueRefusalReason {
 impl EnqueueRefusalReason {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
+            EnqueueRefusalReason::AlreadyActiveTurn => "already_active_turn",
             EnqueueRefusalReason::SourceIdAlreadyQueued => "source_id_already_queued",
             EnqueueRefusalReason::LastItemDedup => "last_item_dedup",
             EnqueueRefusalReason::ActorUnreachable => "actor_unreachable",
@@ -769,6 +800,7 @@ impl ChannelMailboxHandle {
         .await
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn try_start_turn(
         &self,
         cancel_token: Arc<CancelToken>,
@@ -776,11 +808,31 @@ impl ChannelMailboxHandle {
         user_message_id: MessageId,
     ) -> bool {
         // #3167 — default callers claim the slot as a real user/agent turn.
-        self.try_start_turn_kinded(
+        self.try_start_turn_kinded_result(
             cancel_token,
             request_owner,
             user_message_id,
             ActiveTurnKind::UserOrAgent,
+            None,
+        )
+        .await
+        .started
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn try_start_turn_with_persistence(
+        &self,
+        cancel_token: Arc<CancelToken>,
+        request_owner: UserId,
+        user_message_id: MessageId,
+        persistence: QueuePersistenceContext,
+    ) -> TryStartTurnResult {
+        self.try_start_turn_kinded_result(
+            cancel_token,
+            request_owner,
+            user_message_id,
+            ActiveTurnKind::UserOrAgent,
+            Some(persistence),
         )
         .await
     }
@@ -789,6 +841,7 @@ impl ChannelMailboxHandle {
     /// auto-turn and the self-paced TUI loop pass background kinds so a queued
     /// external USER intervention is not perpetually deferred behind the
     /// continuously-cycling background turn.
+    #[allow(dead_code)]
     pub(crate) async fn try_start_turn_kinded(
         &self,
         cancel_token: Arc<CancelToken>,
@@ -796,15 +849,53 @@ impl ChannelMailboxHandle {
         user_message_id: MessageId,
         turn_kind: ActiveTurnKind,
     ) -> bool {
+        self.try_start_turn_kinded_result(
+            cancel_token,
+            request_owner,
+            user_message_id,
+            turn_kind,
+            None,
+        )
+        .await
+        .started
+    }
+
+    pub(crate) async fn try_start_turn_kinded_with_persistence(
+        &self,
+        cancel_token: Arc<CancelToken>,
+        request_owner: UserId,
+        user_message_id: MessageId,
+        turn_kind: ActiveTurnKind,
+        persistence: QueuePersistenceContext,
+    ) -> TryStartTurnResult {
+        self.try_start_turn_kinded_result(
+            cancel_token,
+            request_owner,
+            user_message_id,
+            turn_kind,
+            Some(persistence),
+        )
+        .await
+    }
+
+    async fn try_start_turn_kinded_result(
+        &self,
+        cancel_token: Arc<CancelToken>,
+        request_owner: UserId,
+        user_message_id: MessageId,
+        turn_kind: ActiveTurnKind,
+        persistence: Option<QueuePersistenceContext>,
+    ) -> TryStartTurnResult {
         self.request(
             |reply| ChannelMailboxMsg::TryStartTurn {
                 cancel_token,
                 request_owner,
                 user_message_id,
                 turn_kind,
+                persistence,
                 reply,
             },
-            false,
+            TryStartTurnResult::default(),
         )
         .await
     }
@@ -1660,7 +1751,8 @@ enum ChannelMailboxMsg {
         user_message_id: MessageId,
         /// #3167 — priority class to record on the success branch.
         turn_kind: ActiveTurnKind,
-        reply: oneshot::Sender<bool>,
+        persistence: Option<QueuePersistenceContext>,
+        reply: oneshot::Sender<TryStartTurnResult>,
     },
     // Constructed only via the dormant restore wrapper / `#[cfg(test)]` tests.
     #[allow(dead_code)]
@@ -2325,6 +2417,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     request_owner,
                     user_message_id,
                     turn_kind,
+                    persistence,
                     reply,
                 } => {
                     // #3167 BLOCKER-2 — background yields to a queued backlog AND
@@ -2367,7 +2460,30 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             }
                         }
                     }
-                    let started = if state.cancel_token.is_some() || background_yields {
+                    let mut queue_exit_events = Vec::new();
+                    let mut persistence_error = None;
+                    let can_start = state.cancel_token.is_none() && !background_yields;
+                    if can_start && turn_kind == ActiveTurnKind::UserOrAgent {
+                        let previous_queue = state.intervention_queue.clone();
+                        queue_exit_events = purge_active_source_from_queue(
+                            &mut state.intervention_queue,
+                            user_message_id,
+                        );
+                        if !queue_exit_events.is_empty()
+                            && let Some(persistence) = persistence.as_ref()
+                            && let Err(error) = persist_queue_or_restore(
+                                &mut state,
+                                channel_id,
+                                persistence,
+                                previous_queue,
+                                "try_start_turn_active_source_purge",
+                            )
+                        {
+                            queue_exit_events.clear();
+                            persistence_error = Some(error);
+                        }
+                    }
+                    let started = if !can_start || persistence_error.is_some() {
                         false
                     } else {
                         reset_turn_finished_signal(channel_id);
@@ -2395,7 +2511,11 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         reset_watchdog_extension_state(&mut state);
                         true
                     };
-                    let _ = reply.send(started);
+                    let _ = reply.send(TryStartTurnResult {
+                        started,
+                        queue_exit_events,
+                        persistence_error,
+                    });
                 }
                 ChannelMailboxMsg::RestoreActiveTurn {
                     cancel_token,
@@ -2445,11 +2565,28 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     let _ = reply.send(());
                 }
                 ChannelMailboxMsg::Enqueue {
-                    intervention,
+                    mut intervention,
                     persistence,
                     reply,
                 } => {
                     state.last_persistence = Some(persistence.clone());
+                    ensure_source_message_ids(&mut intervention);
+                    // Intentional pre-hydrate guard: a pure self-requeue of the
+                    // active message is never durable work, so it must not prune,
+                    // hydrate, or otherwise mutate queue state before refusal.
+                    if intervention_sources_all_match_active(
+                        &intervention,
+                        state.active_user_message_id,
+                    ) {
+                        let _ = reply.send(EnqueueInterventionResult {
+                            enqueued: false,
+                            merged: false,
+                            refusal_reason: Some(EnqueueRefusalReason::AlreadyActiveTurn),
+                            queue_exit_events: Vec::new(),
+                            persistence_error: None,
+                        });
+                        continue;
+                    }
                     let hydrate_result = hydrate_pending_queue_from_disk_if_present(
                         &mut state,
                         channel_id,
@@ -2466,8 +2603,11 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         continue;
                     }
                     let previous_queue = state.intervention_queue.clone();
-                    let mut enqueue_result =
-                        enqueue_intervention(&mut state.intervention_queue, intervention);
+                    let mut enqueue_result = enqueue_intervention(
+                        &mut state.intervention_queue,
+                        intervention,
+                        state.active_user_message_id,
+                    );
                     if enqueue_result.enqueued
                         && let Err(error) = persist_queue_or_restore(
                             &mut state,
@@ -3216,6 +3356,122 @@ mod actor_hydrate_regression_tests {
             .build()
             .unwrap()
             .block_on(fut)
+    }
+
+    #[test]
+    fn try_start_turn_purges_prequeued_same_source_from_memory_and_disk() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        run_async(async {
+            let registry = ChannelMailboxRegistry::default();
+            let channel_id = ChannelId::new(4_107_201);
+            let handle = registry.handle(channel_id);
+            let provider = ProviderKind::Claude;
+            let token_hash = "try_start_active_source_purge";
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+            let message_id = MessageId::new(4_107_202);
+
+            let enqueue = handle
+                .enqueue(
+                    make_intervention(message_id.get(), "catch-up copy", Instant::now()),
+                    persistence.clone(),
+                )
+                .await;
+            assert!(enqueue.enqueued);
+
+            let started = handle
+                .try_start_turn_with_persistence(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(4_107),
+                    message_id,
+                    persistence.clone(),
+                )
+                .await;
+
+            assert!(
+                started.started,
+                "live try_start_turn must win the idle slot"
+            );
+            assert_eq!(started.queue_exit_events.len(), 1);
+            assert_eq!(
+                started.queue_exit_events[0].intervention.source_message_ids,
+                vec![message_id],
+            );
+            assert!(
+                handle.snapshot().await.intervention_queue.is_empty(),
+                "active source must not remain queued in memory"
+            );
+            assert!(
+                load_channel_pending_queue(&provider, token_hash, channel_id)
+                    .0
+                    .is_empty(),
+                "active source must not remain queued on disk"
+            );
+        });
+    }
+
+    #[test]
+    fn try_start_turn_strips_active_source_from_merged_tail() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        run_async(async {
+            let registry = ChannelMailboxRegistry::default();
+            let channel_id = ChannelId::new(4_107_211);
+            let handle = registry.handle(channel_id);
+            let provider = ProviderKind::Claude;
+            let token_hash = "try_start_active_source_strip_tail";
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+            let active_id = MessageId::new(4_107_212);
+            let tail_id = MessageId::new(4_107_213);
+
+            let enqueue = handle
+                .enqueue(
+                    make_intervention_with_sources(
+                        tail_id.get(),
+                        &[active_id.get(), tail_id.get()],
+                        "active copy\ntail copy",
+                        Instant::now(),
+                    ),
+                    persistence.clone(),
+                )
+                .await;
+            assert!(enqueue.enqueued);
+
+            let started = handle
+                .try_start_turn_with_persistence(
+                    Arc::new(CancelToken::new()),
+                    UserId::new(4_107),
+                    active_id,
+                    persistence.clone(),
+                )
+                .await;
+
+            assert!(started.started);
+            assert_eq!(started.queue_exit_events.len(), 1);
+            assert_eq!(
+                started.queue_exit_events[0].intervention.source_message_ids,
+                vec![active_id],
+                "queue-exit feedback is scoped to the active source only"
+            );
+            let snapshot = handle.snapshot().await;
+            assert_eq!(snapshot.intervention_queue.len(), 1);
+            assert_eq!(
+                snapshot.intervention_queue[0].source_message_ids,
+                vec![tail_id],
+                "merged tail must remain queued without the active source id"
+            );
+            assert_eq!(snapshot.intervention_queue[0].message_id, tail_id);
+
+            let (persisted, _) = load_channel_pending_queue(&provider, token_hash, channel_id);
+            assert_eq!(persisted.len(), 1);
+            assert_eq!(persisted[0].source_message_ids, vec![tail_id]);
+        });
     }
 
     #[test]
@@ -4627,12 +4883,25 @@ mod enqueue_refusal_reason_tests {
         }
     }
 
+    fn intervention_with_sources(
+        message_id: u64,
+        source_ids: &[u64],
+        text: &str,
+        created_at: Instant,
+    ) -> Intervention {
+        Intervention {
+            source_message_ids: source_ids.iter().copied().map(MessageId::new).collect(),
+            source_message_queued_generations: Vec::new(),
+            ..intervention(message_id, text, created_at)
+        }
+    }
+
     #[test]
     fn source_id_already_queued_is_tagged() {
         let now = Instant::now();
         let mut queue = vec![intervention(1, "hello", now)];
         let incoming = intervention(1, "hello again", now);
-        let result = enqueue_intervention(&mut queue, incoming);
+        let result = enqueue_intervention(&mut queue, incoming, None);
         assert!(!result.enqueued);
         assert_eq!(
             result.refusal_reason,
@@ -4645,12 +4914,82 @@ mod enqueue_refusal_reason_tests {
         let now = Instant::now();
         let mut queue = vec![intervention(1, "same text", now)];
         let incoming = intervention(2, "same text", now);
-        let result = enqueue_intervention(&mut queue, incoming);
+        let result = enqueue_intervention(&mut queue, incoming, None);
         assert!(!result.enqueued);
         assert_eq!(
             result.refusal_reason,
             Some(EnqueueRefusalReason::LastItemDedup),
         );
+    }
+
+    #[test]
+    fn active_turn_source_id_is_tagged() {
+        let now = Instant::now();
+        let mut queue = Vec::new();
+        let incoming = intervention(7, "already running", now);
+
+        let result = enqueue_intervention(&mut queue, incoming, Some(MessageId::new(7)));
+
+        assert!(!result.enqueued);
+        assert_eq!(
+            result.refusal_reason,
+            Some(EnqueueRefusalReason::AlreadyActiveTurn),
+        );
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn active_turn_partial_source_id_is_stripped_and_tail_enqueued() {
+        let now = Instant::now();
+        let mut queue = Vec::new();
+        let active_id = MessageId::new(7);
+        let tail_id = MessageId::new(8);
+        let incoming =
+            intervention_with_sources(tail_id.get(), &[active_id.get(), tail_id.get()], "M+N", now);
+
+        let result = enqueue_intervention(&mut queue, incoming, Some(active_id));
+
+        assert!(result.enqueued);
+        assert_eq!(result.refusal_reason, None);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(
+            queue[0].source_message_ids,
+            vec![tail_id],
+            "partial active-source matches preserve the undelivered tail instead of refusing all"
+        );
+        assert_eq!(queue[0].message_id, tail_id);
+    }
+
+    #[tokio::test]
+    async fn mailbox_enqueue_refuses_active_turn_source_id() {
+        let registry = ChannelMailboxRegistry::default();
+        let channel_id = ChannelId::new(4_107_001);
+        let handle = registry.handle(channel_id);
+        let active_msg_id = MessageId::new(4_107_101);
+
+        assert!(
+            handle
+                .try_start_turn(Arc::new(CancelToken::new()), UserId::new(1), active_msg_id,)
+                .await
+        );
+
+        let result = handle
+            .enqueue(
+                intervention(active_msg_id.get(), "already running", Instant::now()),
+                QueuePersistenceContext::new(
+                    &ProviderKind::Claude,
+                    "already-active-turn-test",
+                    None,
+                ),
+            )
+            .await;
+
+        assert!(!result.enqueued);
+        assert_eq!(
+            result.refusal_reason,
+            Some(EnqueueRefusalReason::AlreadyActiveTurn),
+        );
+        assert!(handle.snapshot().await.intervention_queue.is_empty());
     }
 
     #[test]
@@ -4664,7 +5003,7 @@ mod enqueue_refusal_reason_tests {
             vec!["[File uploaded] two.png → /tmp/two.png (2 bytes)".to_string()];
         let mut queue = vec![first];
 
-        let result = enqueue_intervention(&mut queue, second);
+        let result = enqueue_intervention(&mut queue, second, None);
 
         assert!(result.enqueued);
         assert_eq!(result.refusal_reason, None);
@@ -4676,7 +5015,7 @@ mod enqueue_refusal_reason_tests {
         let now = Instant::now();
         let mut queue: Vec<Intervention> = Vec::new();
         let incoming = intervention(1, "first", now);
-        let result = enqueue_intervention(&mut queue, incoming);
+        let result = enqueue_intervention(&mut queue, incoming, None);
         assert!(result.enqueued);
         assert_eq!(result.refusal_reason, None);
     }

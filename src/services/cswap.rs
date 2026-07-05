@@ -97,7 +97,8 @@ pub struct ClaudeAccount {
     pub usage_status: Option<String>,
     pub usage: Option<ClaudeAccountUsage>,
     pub usage_fetched_at: Option<String>,
-    pub usage_age_seconds: Option<u64>,
+    // cswap 0.17+ emits fractional seconds (e.g. 5.4) — must stay f64 (#4126).
+    pub usage_age_seconds: Option<f64>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -505,10 +506,11 @@ fn response_for_serve(
 }
 
 fn recompute_usage_age_seconds(response: &mut ClaudeAccountsResponse, served_at: DateTime<Utc>) {
-    let base_elapsed = served_at
+    let base_elapsed = (served_at
         .signed_duration_since(response.fetched_at)
-        .num_seconds()
-        .max(0) as u64;
+        .num_milliseconds()
+        .max(0) as f64)
+        / 1000.0;
     for account in &mut response.accounts {
         if let Some(fetched_at) = account
             .usage_fetched_at
@@ -516,13 +518,14 @@ fn recompute_usage_age_seconds(response: &mut ClaudeAccountsResponse, served_at:
             .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
         {
             account.usage_age_seconds = Some(
-                served_at
+                (served_at
                     .signed_duration_since(fetched_at.with_timezone(&Utc))
-                    .num_seconds()
-                    .max(0) as u64,
+                    .num_milliseconds()
+                    .max(0) as f64)
+                    / 1000.0,
             );
         } else if let Some(age) = account.usage_age_seconds {
-            account.usage_age_seconds = Some(age.saturating_add(base_elapsed));
+            account.usage_age_seconds = Some(age.max(0.0) + base_elapsed);
         }
     }
 }
@@ -777,7 +780,7 @@ mod tests {
                 usage_status: Some("ok".to_string()),
                 usage: None,
                 usage_fetched_at: Some("2026-06-22T20:29:00Z".to_string()),
-                usage_age_seconds: Some(12),
+                usage_age_seconds: Some(12.0),
                 extra: BTreeMap::new(),
             }],
         };
@@ -785,7 +788,44 @@ mod tests {
         let served = response_for_serve(&response, served_at);
 
         assert_eq!(served.served_at, served_at);
-        assert_eq!(served.accounts[0].usage_age_seconds, Some(135));
+        assert_eq!(served.accounts[0].usage_age_seconds, Some(135.0));
+    }
+
+    #[test]
+    fn list_payload_accepts_fractional_usage_age_seconds_4126() {
+        // Shape observed from cswap 0.17.1 `--list --json` on a host with
+        // registered accounts: usageAgeSeconds is fractional (5.4), which the
+        // original u64 field rejected and turned every list call into a 502.
+        let raw = r#"{
+            "schemaVersion": 1,
+            "activeAccountNumber": 3,
+            "accounts": [
+                {
+                    "number": 1,
+                    "email": "you@example.com",
+                    "organizationName": "Example Org",
+                    "isOrganization": true,
+                    "active": false,
+                    "usageStatus": "ok",
+                    "usage": {
+                        "fiveHour": {"pct": 96.0, "resetsAt": "2026-07-05T04:40:00+00:00", "countdown": "47m"},
+                        "sevenDay": {"pct": 39.0, "resetsAt": "2026-07-06T07:00:00+00:00"}
+                    },
+                    "usageFetchedAt": "2026-07-05T03:52:27Z",
+                    "usageAgeSeconds": 5.4
+                },
+                {
+                    "number": 2,
+                    "active": true,
+                    "usageAgeSeconds": 0.0
+                }
+            ]
+        }"#;
+
+        let payload = parse_list_json(raw).expect("fractional usageAgeSeconds must parse");
+        let accounts = payload.accounts.expect("accounts present");
+        assert_eq!(accounts[0].usage_age_seconds, Some(5.4));
+        assert_eq!(accounts[1].usage_age_seconds, Some(0.0));
     }
 
     #[tokio::test(start_paused = true)]

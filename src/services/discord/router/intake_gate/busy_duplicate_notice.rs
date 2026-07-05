@@ -12,13 +12,17 @@ pub(super) fn silence_if_already_queued(
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
         reason = reason.map(|reason| reason.as_str()),
-        "  [{ts}] ↪ BUSY-QUEUE: silently ignored already-queued source message {message_id} in channel {channel_id}"
+        "  [{ts}] ↪ BUSY-QUEUE: silently ignored already-active/queued source message {message_id} in channel {channel_id}"
     );
     true
 }
 
 fn should_silence(reason: Option<EnqueueRefusalReason>) -> bool {
-    matches!(reason, Some(EnqueueRefusalReason::SourceIdAlreadyQueued))
+    matches!(
+        reason,
+        Some(EnqueueRefusalReason::AlreadyActiveTurn)
+            | Some(EnqueueRefusalReason::SourceIdAlreadyQueued)
+    )
 }
 
 #[cfg(test)]
@@ -29,6 +33,9 @@ mod tests {
     fn silences_already_queued_source_id_duplicate_notice() {
         assert!(should_silence(Some(
             EnqueueRefusalReason::SourceIdAlreadyQueued
+        )));
+        assert!(should_silence(Some(
+            EnqueueRefusalReason::AlreadyActiveTurn
         )));
     }
 

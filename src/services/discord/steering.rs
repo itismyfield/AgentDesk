@@ -378,6 +378,7 @@ mod tests {
     fn enqueue_result_classification_covers_queued_and_refusals() {
         assert_eq!(classify_enqueue_result(true, None), SteeringOutcome::Queued);
         for reason in [
+            EnqueueRefusalReason::AlreadyActiveTurn,
             EnqueueRefusalReason::SourceIdAlreadyQueued,
             EnqueueRefusalReason::LastItemDedup,
             EnqueueRefusalReason::ActorUnreachable,

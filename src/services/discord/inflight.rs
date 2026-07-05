@@ -3072,20 +3072,13 @@ mod stall_recovery_tests {
         )
     }
 
-    struct EnvReset(Option<std::ffi::OsString>);
-    impl Drop for EnvReset {
-        fn drop(&mut self) {
-            match self.0.take() {
-                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-            }
-        }
-    }
+    type EnvReset = crate::config::TestEnvVarGuard;
 
     fn set_agentdesk_root_for_test(path: &Path) -> EnvReset {
-        let reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", path) };
-        reset
+        crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            path,
+        )
     }
 
     fn status_panel_test_root() -> (std::sync::MutexGuard<'static, ()>, TempDir, EnvReset) {
@@ -3567,6 +3560,9 @@ mod stall_recovery_tests {
         let _serialized = monotonic_3358_test_mutex()
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         // FIX: birth carried up to the committed frontier → re-claim is forward/
         // equal, ZERO invariant violations, offsets end at the frontier.
         let temp = TempDir::new().unwrap();
@@ -5037,17 +5033,10 @@ mod wave_a_cleanup_tests {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let temp = TempDir::new().unwrap();
-        struct EnvReset(Option<std::ffi::OsString>);
-        impl Drop for EnvReset {
-            fn drop(&mut self) {
-                match self.0.take() {
-                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-                }
-            }
-        }
-        let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        let _env_reset = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            temp.path(),
+        );
 
         // With the root isolated to `temp` (no generation file → 0), the load
         // path's `stale_removal_reason` planned-restart branch hits its
@@ -5899,17 +5888,10 @@ mod rebind_origin_reap_tests {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let temp = TempDir::new().unwrap();
-        struct EnvReset(Option<std::ffi::OsString>);
-        impl Drop for EnvReset {
-            fn drop(&mut self) {
-                match self.0.take() {
-                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-                }
-            }
-        }
-        let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        let _env_reset = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            temp.path(),
+        );
 
         let snapshot = watcher_owned_rebind(7102, 4096, 1); // prior gen, snapshot looked dead
         save_inflight_state_in_root(temp.path(), &snapshot).expect("save");
@@ -5955,17 +5937,10 @@ mod rebind_origin_reap_tests {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let temp = TempDir::new().unwrap();
-        struct EnvReset(Option<std::ffi::OsString>);
-        impl Drop for EnvReset {
-            fn drop(&mut self) {
-                match self.0.take() {
-                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-                }
-            }
-        }
-        let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        let _env_reset = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            temp.path(),
+        );
 
         let dead_shape = watcher_owned_rebind(7103, 4096, 1); // prior gen
         save_inflight_state_in_root(temp.path(), &dead_shape).expect("save");
@@ -6028,22 +6003,6 @@ mod recovery_relay_attempts_tests {
         )
     }
 
-    /// RAII guard that points `AGENTDESK_ROOT_DIR` at an isolated tempdir under
-    /// the shared env lock and restores the previous value on drop.
-    struct IsolatedRootEnv {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        previous: Option<String>,
-    }
-
-    impl Drop for IsolatedRootEnv {
-        fn drop(&mut self) {
-            match self.previous.take() {
-                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-            }
-        }
-    }
-
     /// #3860/#3293: isolate the process-global runtime root for a test. Any test
     /// whose path reaches `InflightTurnState::new` (via `make_state`) or
     /// `set_restart_mode` must hold one of these: both call
@@ -6053,16 +6012,8 @@ mod recovery_relay_attempts_tests {
     /// makes such tests order-independent (the prior failure mode: these tests
     /// passed only when a sibling env-touching test happened to have a tempdir
     /// root set at the same moment).
-    fn isolated_root_env(temp: &TempDir) -> IsolatedRootEnv {
-        let lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let previous = std::env::var("AGENTDESK_ROOT_DIR").ok();
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
-        IsolatedRootEnv {
-            _lock: lock,
-            previous,
-        }
+    fn isolated_root_env(temp: &TempDir) -> crate::config::TestEnvVarGuard {
+        crate::config::set_agentdesk_root_for_test(temp.path())
     }
 
     #[test]
@@ -6187,20 +6138,11 @@ mod recovery_relay_attempts_tests {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let previous_root = std::env::var("AGENTDESK_ROOT_DIR").ok();
         let temp = TempDir::new().unwrap();
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
-
-        struct EnvRestore(Option<String>);
-        impl Drop for EnvRestore {
-            fn drop(&mut self) {
-                match self.0.take() {
-                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-                }
-            }
-        }
-        let _restore = EnvRestore(previous_root);
+        let _restore = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            temp.path(),
+        );
 
         // `mark_all_…` scans `$AGENTDESK_ROOT_DIR/runtime/discord_inflight`;
         // seed the row under that exact root.
