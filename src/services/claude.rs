@@ -31,9 +31,17 @@ use crate::services::session_backend::{
     remove_process_session, send_process_session_input, terminate_process_handle,
 };
 #[cfg(unix)]
+mod backend_routing;
+#[cfg(unix)]
 use crate::services::tmux_diagnostics::{
     record_tmux_exit_reason, should_recreate_session_after_followup_fifo_error,
     tmux_session_exists, tmux_session_has_live_pane,
+};
+#[cfg(unix)]
+use self::backend_routing::{
+    LocalTmuxStartupPlan, cleanup_process_backend_before_tmux,
+    classify_local_tmux_startup_plan, should_preserve_live_reused_provider_session,
+    should_refuse_process_backend_demotion,
 };
 
 #[cfg(unix)]
@@ -764,14 +772,17 @@ IMPORTANT: Format your responses using Markdown for better readability:
     // Session execution path: wrap Claude in a managed session
     if let Some(tmux_name) = tmux_session_name {
         #[cfg(unix)]
+        let tmux_available = is_tmux_available();
+        #[cfg(unix)]
         {
             if remote_profile.is_none()
-                && is_tmux_available()
+                && tmux_available
                 && session_selection.driver == ProviderSessionDriver::TuiHosting
             {
                 if let Some(hook_endpoint) =
                     crate::services::claude_tui::hook_server::current_hook_endpoint()
                 {
+                    cleanup_process_backend_before_tmux(tmux_name);
                     debug_log(&format!("Claude TUI hosting session: {}", tmux_name));
                     return execute_streaming_local_tui_tmux(
                         prompt,
@@ -802,7 +813,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
         {
             if let Some(profile) = remote_profile {
                 // Remote sessions always use tmux (TmuxBackend only)
-                if is_tmux_available() {
+                if tmux_available {
                     debug_log(&format!("Remote tmux session: {}", tmux_name));
                     return execute_streaming_remote_tmux(
                         profile,
@@ -816,8 +827,9 @@ IMPORTANT: Format your responses using Markdown for better readability:
                 } else {
                     debug_log("Remote session requested but tmux not available");
                 }
-            } else if is_tmux_available() {
+            } else if tmux_available {
                 // Local with tmux → TmuxBackend (existing path)
+                cleanup_process_backend_before_tmux(tmux_name);
                 debug_log(&format!("TmuxBackend session: {}", tmux_name));
                 return execute_streaming_local_tmux(
                     &args,
@@ -833,6 +845,21 @@ IMPORTANT: Format your responses using Markdown for better readability:
                     cache_ttl_minutes,
                 );
             } else {
+                let session_exists = tmux_session_exists(tmux_name);
+                let has_live_pane = session_exists && tmux_session_has_live_pane(tmux_name);
+                if should_refuse_process_backend_demotion(
+                    tmux_available,
+                    session_exists,
+                    has_live_pane,
+                ) {
+                    tracing::warn!(
+                        tmux_session_name = tmux_name,
+                        "refusing ProcessBackend demotion while an existing live tmux session is present"
+                    );
+                    return Err(format!(
+                        "live tmux session {tmux_name} exists but tmux availability probe is unavailable; refusing ProcessBackend demotion"
+                    ));
+                }
                 // Local without tmux → ProcessBackend (new path)
                 debug_log(&format!("ProcessBackend session (no tmux): {}", tmux_name));
                 return execute_streaming_local_process(
@@ -1632,53 +1659,6 @@ fn execute_streaming_remote(
 #[cfg(unix)]
 pub fn is_tmux_available() -> bool {
     crate::services::platform::tmux::is_available()
-}
-
-#[cfg(unix)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LocalTmuxStartupPlan {
-    /// Existing tmux pane plus both runtime paths are present. The provider
-    /// writes the prompt to FIFO, reads this turn from the current JSONL
-    /// offset, then emits `TmuxReady` for watcher handoff.
-    WarmFollowup,
-    /// A tmux session name exists, but the pane or runtime paths are stale.
-    /// The provider kills it and recreates it through the cold-start path.
-    RecreateStaleSession,
-    /// No usable existing session exists. The provider starts a new wrapper
-    /// and hands JSONL ownership to the watcher from offset 0.
-    ColdStart,
-}
-
-#[cfg(unix)]
-fn classify_local_tmux_startup_plan(
-    session_exists: bool,
-    has_live_pane: bool,
-    has_output_path: bool,
-    has_input_fifo_path: bool,
-) -> LocalTmuxStartupPlan {
-    if session_exists && has_live_pane && has_output_path && has_input_fifo_path {
-        LocalTmuxStartupPlan::WarmFollowup
-    } else if session_exists {
-        LocalTmuxStartupPlan::RecreateStaleSession
-    } else {
-        LocalTmuxStartupPlan::ColdStart
-    }
-}
-
-/// Decide whether a stale-classified tmux session must be preserved rather than
-/// killed-and-recreated. Mirrors the Codex (`codex.rs`) and Qwen (`qwen.rs`)
-/// guards: a pane that is still live (`has_live_pane`) AND was selected for
-/// provider-session reuse (a non-empty resume id) is carrying an active
-/// conversation, so missing wrapper I/O files alone must not trigger a kill.
-#[cfg(unix)]
-fn should_preserve_live_reused_provider_session(
-    resume_session_id: Option<&str>,
-    has_live_pane: bool,
-) -> bool {
-    resume_session_id
-        .map(str::trim)
-        .is_some_and(|value| !value.is_empty())
-        && has_live_pane
 }
 
 #[cfg(unix)]
@@ -3305,6 +3285,39 @@ mod local_tmux_lifecycle_tests {
             Some(""),
             true
         ));
+    }
+
+    #[test]
+    fn issue_4113_refuses_process_demotion_when_live_tmux_session_exists() {
+        assert!(should_refuse_process_backend_demotion(false, true, true));
+
+        assert!(!should_refuse_process_backend_demotion(true, true, true));
+        assert!(!should_refuse_process_backend_demotion(false, false, true));
+        assert!(!should_refuse_process_backend_demotion(false, true, false));
+    }
+
+    #[test]
+    fn issue_4113_process_wrapper_is_cleaned_when_tmux_returns() {
+        let session_name = format!("claude-tmux-return-cleanup-{}", uuid::Uuid::new_v4());
+        let alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        crate::services::session_backend::insert_process_session(
+            session_name.clone(),
+            crate::services::session_backend::SessionHandle::TestProcess {
+                pid: 4113,
+                alive: alive.clone(),
+            },
+        );
+
+        assert!(crate::services::session_backend::process_session_is_alive(
+            &session_name
+        ));
+        assert!(cleanup_process_backend_before_tmux(&session_name));
+
+        assert!(!alive.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(!crate::services::session_backend::process_session_is_alive(
+            &session_name
+        ));
+        assert!(!cleanup_process_backend_before_tmux(&session_name));
     }
 
     #[test]

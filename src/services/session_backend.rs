@@ -291,6 +291,14 @@ pub fn remove_process_session(session_name: &str) -> Option<SessionHandle> {
         .map(|entry| entry.handle)
 }
 
+pub fn terminate_process_session(session_name: &str) -> bool {
+    let Some(handle) = remove_process_session(session_name) else {
+        return false;
+    };
+    terminate_process_handle(handle);
+    true
+}
+
 pub fn process_session_was_stopped(session_name: &str) -> bool {
     process_sessions().stopped.contains(session_name)
 }
@@ -523,6 +531,29 @@ mod process_registry_stop_tests {
         if let Some(handle) = remove_process_session(&session_name) {
             terminate_process_handle(handle);
         }
+    }
+
+    #[test]
+    fn issue_4113_process_session_cleanup_terminates_registered_wrapper() {
+        let session_name = format!("process-tmux-return-cleanup-{}", uuid::Uuid::new_v4());
+        let alive = Arc::new(AtomicBool::new(true));
+        insert_process_session(
+            session_name.clone(),
+            SessionHandle::TestProcess {
+                pid: 424_246,
+                alive: alive.clone(),
+            },
+        );
+
+        assert!(process_session_is_alive(&session_name));
+        assert!(terminate_process_session(&session_name));
+
+        assert!(!alive.load(Ordering::Relaxed));
+        assert!(!process_session_is_alive(&session_name));
+        assert!(
+            !terminate_process_session(&session_name),
+            "second cleanup is idempotent after registry removal"
+        );
     }
 }
 
