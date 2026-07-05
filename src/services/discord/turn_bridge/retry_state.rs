@@ -76,8 +76,21 @@ pub(super) fn bridge_should_reclaim_relay_from_missing_watcher(
     watcher_owns_assistant_relay && !standby_relay_owns_output && !live_watcher_registered
 }
 
+fn refresh_delivery_rewind_state(inflight_state: &mut InflightTurnState) -> bool {
+    let Some(provider) = inflight_state.provider_kind() else {
+        return false;
+    };
+    let Some(reloaded) =
+        super::super::inflight::load_inflight_state(&provider, inflight_state.channel_id)
+    else {
+        return false;
+    };
+    *inflight_state = reloaded;
+    true
+}
+
 fn persist_delivery_rewind(
-    inflight_state: &InflightTurnState,
+    inflight_state: &mut InflightTurnState,
     reason: super::super::inflight::InflightDeliveryRewindReason,
     channel_id: ChannelId,
 ) -> bool {
@@ -85,7 +98,12 @@ fn persist_delivery_rewind(
         inflight_state,
         reason,
     ) {
-        Ok(saved) => saved,
+        Ok(saved) => {
+            if saved {
+                refresh_delivery_rewind_state(inflight_state);
+            }
+            saved
+        }
         Err(error) => {
             tracing::warn!(
                 channel = channel_id.get(),
@@ -99,7 +117,7 @@ fn persist_delivery_rewind(
 }
 
 pub(super) fn persist_terminal_error_delivery_rewind(
-    inflight_state: &InflightTurnState,
+    inflight_state: &mut InflightTurnState,
     channel_id: ChannelId,
 ) -> bool {
     persist_delivery_rewind(
@@ -110,7 +128,7 @@ pub(super) fn persist_terminal_error_delivery_rewind(
 }
 
 pub(super) fn persist_reclaim_delivery_rewind(
-    inflight_state: &InflightTurnState,
+    inflight_state: &mut InflightTurnState,
     channel_id: ChannelId,
 ) -> bool {
     persist_delivery_rewind(
@@ -129,12 +147,16 @@ pub(super) fn sync_terminal_error_delivery_state_for_bridge_owner(
     watcher_relay_owns_output: bool,
 ) -> bool {
     if watcher_relay_owns_output {
-        return false;
+        inflight_state.set_relay_owner_kind(super::super::inflight::RelayOwnerKind::None);
     }
     sync_terminal_error_delivery_state(full_response, response_sent_offset, inflight_state);
-    persist_terminal_error_delivery_rewind(inflight_state, channel_id);
+    let persisted = persist_terminal_error_delivery_rewind(inflight_state, channel_id);
+    if !persisted {
+        refresh_delivery_rewind_state(inflight_state);
+    }
+    *response_sent_offset = inflight_state.response_sent_offset;
     *bridge_confirmed_response_sent_offset = *response_sent_offset;
-    true
+    persisted
 }
 
 pub(super) fn rewind_delivery_on_reclaim(
@@ -164,6 +186,8 @@ pub(super) fn rewind_and_persist_delivery_on_reclaim(
     inflight_state: &mut InflightTurnState,
     channel_id: ChannelId,
 ) -> bool {
+    let pre_reclaim_state = inflight_state.clone();
+    let pre_reclaim_response_sent_offset = *response_sent_offset;
     if !rewind_delivery_on_reclaim(
         full_response,
         bridge_confirmed_response_sent_offset,
@@ -173,8 +197,17 @@ pub(super) fn rewind_and_persist_delivery_on_reclaim(
     ) {
         return false;
     }
-    persist_reclaim_delivery_rewind(inflight_state, channel_id);
-    true
+    if persist_reclaim_delivery_rewind(inflight_state, channel_id) {
+        *response_sent_offset = inflight_state.response_sent_offset;
+        return true;
+    }
+    if refresh_delivery_rewind_state(inflight_state) {
+        *response_sent_offset = inflight_state.response_sent_offset;
+    } else {
+        *inflight_state = pre_reclaim_state;
+        *response_sent_offset = pre_reclaim_response_sent_offset;
+    }
+    false
 }
 
 pub(super) fn clear_response_delivery_state(
@@ -428,14 +461,20 @@ mod tests {
             super::super::super::inflight::RelayOwnerKind::Watcher,
             response_sent_offset,
         );
-        assert!(rewind_delivery_on_reclaim(
+        assert!(rewind_and_persist_delivery_on_reclaim(
             full_response,
             bridge_confirmed,
             &mut response_sent_offset,
             &mut state,
             channel,
         ));
-        assert!(persist_reclaim_delivery_rewind(&state, channel));
+        assert_eq!(
+            state.status_message_id,
+            Some(41_100_091),
+            "RMW result must refresh in-memory state before any later full save"
+        );
+        super::super::super::inflight::save_inflight_state(&state)
+            .expect("later full save must be harmless");
 
         let persisted = super::super::super::inflight::load_inflight_state(
             &ProviderKind::Claude,
@@ -449,6 +488,43 @@ mod tests {
             Some(41_100_091),
             "delivery rewind must not overwrite unrelated same-turn durable fields"
         );
+    }
+
+    #[test]
+    fn retry_state_reclaim_rewind_refuses_watcher_committed_row() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempfile::TempDir::new().expect("temp root");
+        let _root = set_runtime_root(temp.path());
+
+        let full_response = "watcher already delivered this body";
+        let channel = ChannelId::new(41_100_004);
+        let mut committed = inflight(full_response, full_response.len());
+        committed.channel_id = channel.get();
+        committed.terminal_delivery_committed = true;
+        committed.set_relay_owner_kind(super::super::super::inflight::RelayOwnerKind::Watcher);
+        super::super::super::inflight::save_inflight_state(&committed)
+            .expect("seed watcher committed row");
+
+        let mut stale_reclaim = committed.clone();
+        stale_reclaim.response_sent_offset = 0;
+        stale_reclaim.terminal_delivery_committed = false;
+        stale_reclaim.set_relay_owner_kind(super::super::super::inflight::RelayOwnerKind::None);
+
+        assert!(
+            !persist_reclaim_delivery_rewind(&mut stale_reclaim, channel),
+            "reclaim RMW must not reopen an already committed watcher row"
+        );
+
+        let persisted = super::super::super::inflight::load_inflight_state(
+            &ProviderKind::Claude,
+            channel.get(),
+        )
+        .expect("persisted committed row");
+        assert!(persisted.terminal_delivery_committed);
+        assert_eq!(persisted.response_sent_offset, full_response.len());
+        assert_eq!(persisted.full_response, full_response);
     }
 
     #[test]
@@ -472,7 +548,7 @@ mod tests {
         sync_terminal_error_delivery_state(error_response, &mut response_sent_offset, &mut state);
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            persist_terminal_error_delivery_rewind(&state, channel)
+            persist_terminal_error_delivery_rewind(&mut state, channel)
         }));
         assert!(result.expect("reasoned rewind must not trip debug assert"));
 
@@ -486,23 +562,60 @@ mod tests {
     }
 
     #[test]
-    fn watcher_relay_error_frame_does_not_reset_delivery_frontier() {
-        let full_response = "already delivered by watcher";
-        let mut response_sent_offset = full_response.len();
-        let mut bridge_confirmed = response_sent_offset;
-        let mut state = inflight(full_response, response_sent_offset);
+    fn watcher_relay_error_frame_reclaims_bridge_delivery_frontier() {
+        use crate::services::discord::outbound::delivery_record as dr;
 
-        assert!(!sync_terminal_error_delivery_state_for_bridge_owner(
-            "Error: provider failed",
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempfile::TempDir::new().expect("temp root");
+        let _root = set_runtime_root(temp.path());
+        let _authority = dr::authority_test_seam::force(true);
+
+        let full_response = "w".repeat(500);
+        let mut response_sent_offset = full_response.len();
+        let mut bridge_confirmed = 0;
+        let channel = ChannelId::new(41_100_003);
+        let mut state = inflight(&full_response, response_sent_offset);
+        state.channel_id = channel.get();
+        state.set_relay_owner_kind(super::super::super::inflight::RelayOwnerKind::Watcher);
+        super::super::super::inflight::save_inflight_state(&state)
+            .expect("seed watcher-owned inflight");
+        let error_response = "Error: provider failed";
+
+        assert!(sync_terminal_error_delivery_state_for_bridge_owner(
+            error_response,
             &mut response_sent_offset,
             &mut bridge_confirmed,
             &mut state,
-            ChannelId::new(41_100_003),
+            channel,
             true,
         ));
-        assert_eq!(response_sent_offset, full_response.len());
-        assert_eq!(bridge_confirmed, full_response.len());
-        assert_eq!(state.response_sent_offset, full_response.len());
-        assert_eq!(state.full_response, full_response);
+        assert_eq!(response_sent_offset, 0);
+        assert_eq!(bridge_confirmed, 0);
+        assert_eq!(state.response_sent_offset, 0);
+        assert_eq!(state.full_response, error_response);
+        assert_eq!(
+            state.effective_relay_owner_kind(),
+            super::super::super::inflight::RelayOwnerKind::None
+        );
+        let delivered = super::super::response_delivery::terminal_delivery_response_after_offset(
+            error_response,
+            response_sent_offset,
+            None,
+        );
+        assert_eq!(delivered, error_response);
+
+        let persisted = super::super::super::inflight::load_inflight_state(
+            &ProviderKind::Claude,
+            channel.get(),
+        )
+        .expect("persisted terminal error reset");
+        assert_eq!(persisted.response_sent_offset, 0);
+        assert_eq!(persisted.full_response, error_response);
+        assert_eq!(
+            persisted.effective_relay_owner_kind(),
+            super::super::super::inflight::RelayOwnerKind::None
+        );
     }
 }

@@ -2734,7 +2734,6 @@ pub(super) fn spawn_turn_bridge(
                                     channel_id,
                                 );
                             }
-                            inflight_state.full_response = full_response.clone();
                             close_all_tracked_background_children(
                                 shared_owned.pg_pool.as_ref(),
                                 &mut active_background_child_session_ids,

@@ -257,6 +257,9 @@ pub(super) fn save_inflight_delivery_rewind_if_matches_identity_in_root(
     if !expected.matches_state(&on_disk) {
         return Ok(false);
     }
+    if on_disk.terminal_delivery_committed {
+        return Ok(false);
+    }
     let mut updated = on_disk;
     updated.full_response = state.full_response.clone();
     updated.response_sent_offset = state.response_sent_offset;
