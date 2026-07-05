@@ -1851,6 +1851,12 @@ mod kill_tmux_resume_tests {
             .unwrap_or(0)
     }
 
+    fn selector_observation_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
     #[test]
     fn latest_runtime_activity_uses_codex_tui_rollout_marker_target() {
         let _lock = crate::config::shared_test_env_lock()
@@ -1884,6 +1890,9 @@ mod kill_tmux_resume_tests {
 
     #[test]
     fn latest_runtime_activity_uses_claude_tui_bound_transcript() {
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let tmux = format!("AgentDesk-claude-runtime-{}", uuid::Uuid::new_v4());
         let dir = tempfile::tempdir().expect("tempdir");
         let transcript = dir.path().join("claude-transcript.jsonl");
@@ -1975,6 +1984,7 @@ mod kill_tmux_resume_tests {
 
     #[test]
     fn claude_selector_switches_to_raw_only_after_observed_growth() {
+        let _selector_guard = selector_observation_test_lock();
         let cwd = tempfile::tempdir().expect("cwd tempdir");
         let claude_home = tempfile::tempdir().expect("claude home tempdir");
         let cached_session_id = uuid::Uuid::new_v4().to_string();
@@ -2037,6 +2047,7 @@ mod kill_tmux_resume_tests {
 
     #[test]
     fn claude_selector_uses_raw_growth_from_persisted_watermark_after_restart() {
+        let _selector_guard = selector_observation_test_lock();
         crate::services::session_selector_validity::clear_selector_observations_for_tests();
         let cwd = tempfile::tempdir().expect("cwd tempdir");
         let claude_home = tempfile::tempdir().expect("claude home tempdir");
@@ -2087,6 +2098,7 @@ mod kill_tmux_resume_tests {
 
     #[test]
     fn claude_selector_keeps_cached_when_raw_len_equals_persisted_watermark() {
+        let _selector_guard = selector_observation_test_lock();
         crate::services::session_selector_validity::clear_selector_observations_for_tests();
         let cwd = tempfile::tempdir().expect("cwd tempdir");
         let claude_home = tempfile::tempdir().expect("claude home tempdir");
@@ -2138,6 +2150,7 @@ mod kill_tmux_resume_tests {
 
     #[test]
     fn claude_selector_ignores_raw_growth_evidence_for_different_raw_id() {
+        let _selector_guard = selector_observation_test_lock();
         crate::services::session_selector_validity::clear_selector_observations_for_tests();
         let cwd = tempfile::tempdir().expect("cwd tempdir");
         let claude_home = tempfile::tempdir().expect("claude home tempdir");
@@ -2190,6 +2203,7 @@ mod kill_tmux_resume_tests {
 
     #[test]
     fn claude_resumable_requires_existing_transcript_for_selected_selector() {
+        let _selector_guard = selector_observation_test_lock();
         let cwd = tempfile::tempdir().expect("cwd tempdir");
         let claude_home = tempfile::tempdir().expect("claude home tempdir");
         let session_id = uuid::Uuid::new_v4().to_string();
@@ -2214,6 +2228,7 @@ mod kill_tmux_resume_tests {
 
     #[test]
     fn claude_resumable_rejects_missing_transcript_or_cwd() {
+        let _selector_guard = selector_observation_test_lock();
         let cwd = tempfile::tempdir().expect("cwd tempdir");
         let claude_home = tempfile::tempdir().expect("claude home tempdir");
         let session_id = uuid::Uuid::new_v4().to_string();

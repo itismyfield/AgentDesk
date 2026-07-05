@@ -192,4 +192,37 @@ mod tests {
         assert_eq!(current_len, 900);
         assert!(truncated);
     }
+
+    #[test]
+    fn recovery_start_offset_for_adopted_transcript_uses_persisted_eof_after_restart() {
+        let wrapper_last_offset = 128;
+        let transcript_eof = 512_000;
+        let file = temp_file_with_len(transcript_eof);
+        let mut state = crate::services::discord::inflight::InflightTurnState::new(
+            crate::services::provider::ProviderKind::Claude,
+            44_153_002,
+            Some("adk-cc".to_string()),
+            123,
+            456,
+            789,
+            "continue".to_string(),
+            Some("88fdb7f3-0000-4000-8000-000000000000".to_string()),
+            Some("AgentDesk-claude-recovery-start-offset-adopted-transcript-44153002".to_string()),
+            Some(file.path().display().to_string()),
+            None,
+            wrapper_last_offset,
+        );
+        state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+        state.last_offset = transcript_eof as u64;
+        state.turn_start_offset = Some(transcript_eof as u64);
+        state.last_watcher_relayed_offset = None;
+
+        let (offset, current_len, truncated) =
+            super::recovery_watcher_start_offset_for_state(file.path().to_str().unwrap(), &state);
+
+        assert_eq!(offset, transcript_eof as u64);
+        assert_ne!(offset, wrapper_last_offset);
+        assert_eq!(current_len, transcript_eof as u64);
+        assert!(!truncated);
+    }
 }

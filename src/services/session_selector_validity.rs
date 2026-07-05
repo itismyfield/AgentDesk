@@ -151,6 +151,12 @@ fn selector_file_recently_growing(
 mod tests {
     use super::*;
 
+    fn selector_observation_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
     #[test]
     fn stale_cache_but_growing_raw_id_selects_raw_provider_session_id() {
         let stale_after_secs = 600;
@@ -281,6 +287,7 @@ mod tests {
 
     #[test]
     fn selector_growth_evidence_requires_two_length_samples() {
+        let _selector_guard = selector_observation_test_lock();
         clear_selector_observations_for_tests();
         let first = SelectorFileActivity {
             exists: true,
@@ -322,6 +329,7 @@ mod tests {
 
     #[test]
     fn persisted_watermark_proves_growth_after_observation_reset() {
+        let _selector_guard = selector_observation_test_lock();
         clear_selector_observations_for_tests();
         let raw = SelectorFileActivity {
             exists: true,
@@ -343,6 +351,7 @@ mod tests {
 
     #[test]
     fn sticky_persisted_growth_flag_proves_growth_at_equal_watermark() {
+        let _selector_guard = selector_observation_test_lock();
         clear_selector_observations_for_tests();
         let raw = SelectorFileActivity {
             exists: true,
@@ -364,6 +373,7 @@ mod tests {
 
     #[test]
     fn equal_persisted_watermark_without_sticky_flag_is_not_growth_evidence() {
+        let _selector_guard = selector_observation_test_lock();
         clear_selector_observations_for_tests();
         let raw = SelectorFileActivity {
             exists: true,

@@ -315,7 +315,7 @@ fn claude_rebind_binding_session_matches(
         .is_none_or(|binding_session_id| binding_session_id == existing_session_id)
 }
 
-fn claude_rebind_transcript_path(path: &str) -> Option<&str> {
+pub(super) fn claude_rebind_transcript_path(path: &str) -> Option<&str> {
     let path = path.trim();
     if path.is_empty() {
         return None;
@@ -1005,6 +1005,12 @@ mod tests {
             .unwrap_or_else(|poison| poison.into_inner())
     }
 
+    fn lock_tui_prompt_dedupe() -> std::sync::MutexGuard<'static, ()> {
+        crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
     fn write_codex_tui_runtime_marker(tmux_session_name: &str) {
         crate::services::tmux_common::write_tmux_runtime_kind_marker(
             tmux_session_name,
@@ -1220,12 +1226,13 @@ mod tests {
     #[test]
     fn direct_codex_tui_rebind_adopts_existing_runtime_binding_and_clamps_offset() {
         let _guard = lock_test_env();
+        let _dedupe_guard = lock_tui_prompt_dedupe();
         crate::services::tui_prompt_dedupe::reset_state_for_tests();
         let tmp = tempfile::tempdir().expect("tempdir");
         let _root = EnvGuard::set_path("AGENTDESK_ROOT_DIR", tmp.path());
         let rollout_path = tmp.path().join("rollout.jsonl");
         let rollout_len = write_rollout(&rollout_path);
-        let tmux_session_name = "AgentDesk-codex-adk-cdx";
+        let tmux_session_name = "AgentDesk-codex-adk-cdx-existing-runtime-binding";
         crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
             tmux_session_name,
             TuiRuntimeBinding {
@@ -1261,6 +1268,7 @@ mod tests {
     #[test]
     fn direct_codex_tui_rebind_uses_rollout_marker_offset_before_binding_eof() {
         let _guard = lock_test_env();
+        let _dedupe_guard = lock_tui_prompt_dedupe();
         crate::services::tui_prompt_dedupe::reset_state_for_tests();
         let tmp = tempfile::tempdir().expect("tempdir");
         let _root = EnvGuard::set_path("AGENTDESK_ROOT_DIR", tmp.path());
@@ -1311,6 +1319,7 @@ mod tests {
     #[test]
     fn direct_codex_tui_rebind_ignores_stale_marker_before_raw_binding_cursor() {
         let _guard = lock_test_env();
+        let _dedupe_guard = lock_tui_prompt_dedupe();
         crate::services::tui_prompt_dedupe::reset_state_for_tests();
         let tmp = tempfile::tempdir().expect("tempdir");
         let _root = EnvGuard::set_path("AGENTDESK_ROOT_DIR", tmp.path());
@@ -1356,6 +1365,7 @@ mod tests {
     #[test]
     fn direct_codex_tui_rebind_respawns_writer_for_existing_normalized_relay_output() {
         let _guard = lock_test_env();
+        let _dedupe_guard = lock_tui_prompt_dedupe();
         crate::services::tui_prompt_dedupe::reset_state_for_tests();
         let tmp = tempfile::tempdir().expect("tempdir");
         let _root = EnvGuard::set_path("AGENTDESK_ROOT_DIR", tmp.path());
@@ -1399,6 +1409,7 @@ mod tests {
     #[test]
     fn direct_codex_tui_rebind_does_not_use_eof_binding_for_empty_normalized_relay() {
         let _guard = lock_test_env();
+        let _dedupe_guard = lock_tui_prompt_dedupe();
         crate::services::tui_prompt_dedupe::reset_state_for_tests();
         let tmp = tempfile::tempdir().expect("tempdir");
         let _root = EnvGuard::set_path("AGENTDESK_ROOT_DIR", tmp.path());
@@ -1448,6 +1459,7 @@ mod tests {
     #[test]
     fn direct_codex_tui_rebind_uses_saved_output_path_after_restart() {
         let _guard = lock_test_env();
+        let _dedupe_guard = lock_tui_prompt_dedupe();
         crate::services::tui_prompt_dedupe::reset_state_for_tests();
         let tmp = tempfile::tempdir().expect("tempdir");
         let _root = EnvGuard::set_path("AGENTDESK_ROOT_DIR", tmp.path());
@@ -1476,6 +1488,7 @@ mod tests {
     #[test]
     fn direct_codex_tui_rebind_rejects_existing_binding_for_old_rollout() {
         let _guard = lock_test_env();
+        let _dedupe_guard = lock_tui_prompt_dedupe();
         crate::services::tui_prompt_dedupe::reset_state_for_tests();
         let tmp = tempfile::tempdir().expect("tempdir");
         let _root = EnvGuard::set_path("AGENTDESK_ROOT_DIR", tmp.path());
@@ -1518,6 +1531,7 @@ mod tests {
     #[test]
     fn direct_codex_tui_rebind_falls_back_from_stale_binding_to_saved_output_path() {
         let _guard = lock_test_env();
+        let _dedupe_guard = lock_tui_prompt_dedupe();
         crate::services::tui_prompt_dedupe::reset_state_for_tests();
         let tmp = tempfile::tempdir().expect("tempdir");
         let _root = EnvGuard::set_path("AGENTDESK_ROOT_DIR", tmp.path());
@@ -1562,6 +1576,7 @@ mod tests {
     #[test]
     fn direct_codex_tui_rebind_uses_rollout_marker_before_saved_normalized_relay() {
         let _guard = lock_test_env();
+        let _dedupe_guard = lock_tui_prompt_dedupe();
         crate::services::tui_prompt_dedupe::reset_state_for_tests();
         let tmp = tempfile::tempdir().expect("tempdir");
         let _root = EnvGuard::set_path("AGENTDESK_ROOT_DIR", tmp.path());
@@ -1616,6 +1631,7 @@ mod tests {
     #[test]
     fn direct_codex_tui_rebind_finds_rollout_by_session_id_after_restart() {
         let _guard = lock_test_env();
+        let _dedupe_guard = lock_tui_prompt_dedupe();
         crate::services::tui_prompt_dedupe::reset_state_for_tests();
         let tmp = tempfile::tempdir().expect("tempdir");
         let codex_home = tmp.path().join("codex-home");

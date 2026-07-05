@@ -1075,11 +1075,14 @@
   - `src/services/discord/recovery_engine/completion_delivery.rs` (sub-1000;
     behavior-preserving #3834 r2 extraction of recovery terminal relay,
     visible completion/status-panel completion helpers, and their tests.)
-  - `src/services/discord/recovery_engine/manual_rebind.rs` (1057 lines; crossed
+  - `src/services/discord/recovery_engine/manual_rebind.rs` (1084 lines; crossed
     the giant threshold in #4091 r3/r4 when manual rebind gained ClaudeTui
     transcript adoption — candidate probing, EOF-forced start offsets for
     adopted transcripts (never reuse wrapper-jsonl coordinates on a different
-    file), and runtime-binding re-registration. Registered in
+    file), and runtime-binding re-registration; +27 from r5 driving the durable
+    guarded CAS save (persisted last_offset/turn_start_offset := EOF +
+    runtime_kind/session_id in the same locked save) so a restart cannot
+    resurrect wrapper coordinates against the adopted transcript. Registered in
     scripts/giant_file_registry.toml; decompose_issue #4157.)
   - `src/services/discord/health.rs` (417 prod lines after the #3038 Phase A
     directory decomposition; module root keeps the `HealthRegistry` core +

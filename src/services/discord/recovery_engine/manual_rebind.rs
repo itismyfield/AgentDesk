@@ -309,21 +309,44 @@ fn rebind_initial_offset_with_floor_unless_forced(
 
 fn claude_tui_force_initial_offset_for_adopted_transcript(
     runtime_kind: Option<RuntimeHandoffKind>,
-    existing_saved_output_path: Option<&str>,
+    existing_inflight: Option<&super::inflight::InflightTurnState>,
     output_path: &str,
     synthetic_initial_offset: u64,
-    existing_inflight_present: bool,
 ) -> Option<u64> {
-    if !existing_inflight_present || runtime_kind != Some(RuntimeHandoffKind::ClaudeTui) {
+    let existing = existing_inflight?;
+    if runtime_kind != Some(RuntimeHandoffKind::ClaudeTui)
+        || claude_rebind_transcript_path(output_path).is_none()
+    {
         return None;
     }
-    let existing_saved_output_path = existing_saved_output_path
+
+    let existing_saved_output_path = existing
+        .output_path
+        .as_deref()
         .map(str::trim)
-        .filter(|path| !path.is_empty())?;
-    if rebind_output_paths_same(existing_saved_output_path, output_path) {
+        .filter(|path| !path.is_empty());
+    let already_durable_claude_transcript = existing_saved_output_path
+        .is_some_and(|saved_path| rebind_output_paths_same(saved_path, output_path))
+        && existing.runtime_kind == Some(RuntimeHandoffKind::ClaudeTui)
+        && existing
+            .input_fifo_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .is_none();
+    if already_durable_claude_transcript {
         return None;
     }
+
     Some(synthetic_initial_offset)
+}
+
+fn claude_tui_rebind_should_reregister_runtime_binding(
+    runtime_kind: Option<RuntimeHandoffKind>,
+    output_path: &str,
+) -> bool {
+    runtime_kind == Some(RuntimeHandoffKind::ClaudeTui)
+        && claude_rebind_transcript_path(output_path).is_some()
 }
 
 fn rebind_output_paths_same(left: &str, right: &str) -> bool {
@@ -549,13 +572,13 @@ async fn rebind_inflight_for_channel_inner(
     let runtime_kind_for_state = runtime_state.runtime_kind;
     let session_id_for_state = runtime_state.session_id;
     let mut force_initial_offset = runtime_state.force_initial_offset;
+    let mut forced_adopted_transcript_rebase_offset = None;
     if force_initial_offset.is_none()
         && let Some(offset) = claude_tui_force_initial_offset_for_adopted_transcript(
             runtime_kind_for_state,
-            existing_saved_output_path.as_deref(),
+            existing_inflight.as_ref(),
             &output_path,
             synthetic_initial_offset,
-            existing_inflight.is_some(),
         )
     {
         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -567,10 +590,14 @@ async fn rebind_inflight_for_channel_inner(
             offset
         );
         force_initial_offset = Some(offset);
+        forced_adopted_transcript_rebase_offset = Some(offset);
     }
-    let mut existing_offset_rebase_to_output: Option<u64> = runtime_state
-        .rebase_existing_offsets_to_output
-        .then_some(force_initial_offset.unwrap_or(synthetic_initial_offset));
+    let mut existing_offset_rebase_to_output: Option<u64> = forced_adopted_transcript_rebase_offset
+        .or_else(|| {
+            runtime_state
+                .rebase_existing_offsets_to_output
+                .then_some(force_initial_offset.unwrap_or(synthetic_initial_offset))
+        });
     let mut pending_codex_tui_rebind_relay: Option<PendingCodexTuiRebindRelay> = None;
     if let Some(rollout_path) = runtime_state.codex_rollout_path.as_deref() {
         let normalized_relay_prompt_replay_start_offset = existing_inflight
@@ -725,7 +752,7 @@ async fn rebind_inflight_for_channel_inner(
         existing.input_fifo_path = input_fifo_for_state.clone();
         if let Some(rebased_last_offset) = existing_offset_rebase_to_output {
             existing.last_offset = rebased_last_offset;
-            existing.turn_start_offset = Some(0);
+            existing.turn_start_offset = Some(rebased_last_offset);
             existing.last_watcher_relayed_offset = None;
             existing.last_watcher_relayed_generation_mtime_ns = None;
         }
@@ -899,7 +926,7 @@ async fn rebind_inflight_for_channel_inner(
         false
     };
 
-    if runtime_kind_for_state == Some(RuntimeHandoffKind::ClaudeTui) {
+    if claude_tui_rebind_should_reregister_runtime_binding(runtime_kind_for_state, &output_path) {
         crate::services::tui_prompt_dedupe::register_rehydrated_tmux_runtime_binding(
             provider.as_str(),
             &tmux_session_name,
@@ -1194,13 +1221,26 @@ mod post_work_evidence_tests {
         let transcript_eof = std::fs::metadata(&transcript_path)
             .expect("transcript metadata")
             .len();
+        let existing = inflight::InflightTurnState::new(
+            ProviderKind::Claude,
+            42_001,
+            Some("adk-cc".to_string()),
+            123,
+            456,
+            789,
+            "continue".to_string(),
+            Some("old-session".to_string()),
+            Some("AgentDesk-claude-adopted-transcript-eof-42001".to_string()),
+            Some(wrapper_path.display().to_string()),
+            Some("/tmp/wrapper.input".to_string()),
+            128,
+        );
 
         let forced = claude_tui_force_initial_offset_for_adopted_transcript(
             Some(RuntimeHandoffKind::ClaudeTui),
-            Some(wrapper_path.to_str().expect("utf8 wrapper path")),
+            Some(&existing),
             transcript_path.to_str().expect("utf8 transcript path"),
             transcript_eof,
-            true,
         );
         let initial_offset = rebind_initial_offset_with_floor_unless_forced(
             forced.expect("adopted transcript must force EOF"),
@@ -1213,6 +1253,118 @@ mod post_work_evidence_tests {
             initial_offset, transcript_eof,
             "existing wrapper offsets are not valid coordinates in the adopted Claude transcript"
         );
+    }
+
+    #[test]
+    fn claude_tui_adopted_transcript_rebind_forces_eof_when_saved_output_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let transcript_path = tmp
+            .path()
+            .join("58fdb7f3-0000-4000-8000-000000000000.jsonl");
+        std::fs::write(&transcript_path, vec![b't'; 4096]).expect("write transcript");
+        let transcript_eof = std::fs::metadata(&transcript_path).unwrap().len();
+        let mut existing = inflight::InflightTurnState::new(
+            ProviderKind::Claude,
+            43_001,
+            Some("adk-cc".to_string()),
+            123,
+            456,
+            789,
+            "continue".to_string(),
+            Some("old-session".to_string()),
+            Some("AgentDesk-claude-adopted-transcript-missing-output-43001".to_string()),
+            None,
+            Some("/tmp/wrapper.input".to_string()),
+            128,
+        );
+
+        assert_eq!(
+            claude_tui_force_initial_offset_for_adopted_transcript(
+                Some(RuntimeHandoffKind::ClaudeTui),
+                Some(&existing),
+                transcript_path.to_str().unwrap(),
+                transcript_eof,
+            ),
+            Some(transcript_eof),
+            "adopting a transcript from an empty saved output path must still rebase old coordinates"
+        );
+
+        existing.output_path = Some("   ".to_string());
+        assert_eq!(
+            claude_tui_force_initial_offset_for_adopted_transcript(
+                Some(RuntimeHandoffKind::ClaudeTui),
+                Some(&existing),
+                transcript_path.to_str().unwrap(),
+                transcript_eof,
+            ),
+            Some(transcript_eof),
+            "blank saved output paths are equivalent to missing paths for transcript adoption"
+        );
+    }
+
+    #[test]
+    fn claude_tui_same_transcript_without_durable_runtime_stamp_forces_eof() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let transcript_path = tmp
+            .path()
+            .join("68fdb7f3-0000-4000-8000-000000000000.jsonl");
+        std::fs::write(&transcript_path, vec![b't'; 8192]).expect("write transcript");
+        let transcript_eof = std::fs::metadata(&transcript_path).unwrap().len();
+        let mut existing = inflight::InflightTurnState::new(
+            ProviderKind::Claude,
+            44_001,
+            Some("adk-cc".to_string()),
+            123,
+            456,
+            789,
+            "continue".to_string(),
+            Some("old-session".to_string()),
+            Some("AgentDesk-claude-same-transcript-runtime-stamp-44001".to_string()),
+            Some(transcript_path.display().to_string()),
+            Some("/tmp/wrapper.input".to_string()),
+            128,
+        );
+        existing.runtime_kind = None;
+
+        assert_eq!(
+            claude_tui_force_initial_offset_for_adopted_transcript(
+                Some(RuntimeHandoffKind::ClaudeTui),
+                Some(&existing),
+                transcript_path.to_str().unwrap(),
+                transcript_eof,
+            ),
+            Some(transcript_eof),
+            "path equality alone does not prove persisted offsets are transcript-space"
+        );
+
+        existing.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+        existing.input_fifo_path = None;
+        assert_eq!(
+            claude_tui_force_initial_offset_for_adopted_transcript(
+                Some(RuntimeHandoffKind::ClaudeTui),
+                Some(&existing),
+                transcript_path.to_str().unwrap(),
+                transcript_eof,
+            ),
+            None,
+            "a durable ClaudeTui transcript row can safely resume from its saved transcript offsets"
+        );
+    }
+
+    #[test]
+    fn claude_tui_rebind_reregister_requires_transcript_output_path() {
+        assert!(claude_tui_rebind_should_reregister_runtime_binding(
+            Some(RuntimeHandoffKind::ClaudeTui),
+            "/tmp/78fdb7f3-0000-4000-8000-000000000000.jsonl",
+        ));
+        assert!(!claude_tui_rebind_should_reregister_runtime_binding(
+            Some(RuntimeHandoffKind::ClaudeTui),
+            "/tmp/AgentDesk-claude-reregister-wrapper-output-1355.jsonl",
+        ));
+        assert!(!claude_tui_rebind_should_reregister_runtime_binding(
+            Some(RuntimeHandoffKind::LegacyTmuxWrapper),
+            "/tmp/78fdb7f3-0000-4000-8000-000000000000.jsonl",
+        ));
     }
 
     #[test]

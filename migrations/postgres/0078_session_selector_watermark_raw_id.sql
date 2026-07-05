@@ -14,9 +14,6 @@ ALTER TABLE sessions
 ALTER TABLE sessions
   ADD COLUMN IF NOT EXISTS raw_provider_transcript_growth_proven BOOLEAN NOT NULL DEFAULT FALSE;
 
-UPDATE sessions
-   SET raw_provider_transcript_watermark_session_id = raw_provider_session_id
- WHERE raw_provider_session_id IS NOT NULL
-   AND BTRIM(raw_provider_session_id) != ''
-   AND COALESCE(raw_provider_transcript_len_watermark, 0) > 0
-   AND raw_provider_transcript_watermark_session_id IS NULL;
+-- Do not backfill raw_provider_transcript_watermark_session_id. Existing
+-- watermarks may belong to a previously rotated raw_provider_session_id; leaving
+-- the owner NULL lets the first post-deploy observation re-baseline cleanly.
