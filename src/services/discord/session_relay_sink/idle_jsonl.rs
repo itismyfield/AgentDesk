@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::{Mutex, OnceLock};
@@ -66,12 +66,17 @@ pub(super) fn idle_jsonl_inflight_mismatches_session(
     inflight: &InflightTurnState,
     tmux_session_name: &str,
 ) -> bool {
-    tmux_session_name.trim().is_empty()
-        || inflight.tmux_session_name.as_deref() != Some(tmux_session_name)
+    if tmux_session_name.trim().is_empty() {
+        return true;
+    }
+    inflight
+        .tmux_session_name
+        .as_deref()
+        .is_some_and(|inflight_tmux_session| inflight_tmux_session != tmux_session_name)
 }
 
 pub(super) fn idle_jsonl_should_skip_mismatched_inflight(
-    last_inflight_seen_at: &mut HashMap<String, Instant>,
+    _last_inflight_seen_at: &mut HashMap<String, Instant>,
     matched: &MatchedChannel,
     channel_id: u64,
     inflight: &InflightTurnState,
@@ -80,9 +85,44 @@ pub(super) fn idle_jsonl_should_skip_mismatched_inflight(
     if !idle_jsonl_inflight_mismatches_session(inflight, tmux_session_name) {
         return false;
     }
-    last_inflight_seen_at.remove(tmux_session_name);
     log_mismatched_inflight_skip(&matched.provider, channel_id, tmux_session_name, inflight);
     true
+}
+
+pub(super) fn idle_jsonl_session_has_init(
+    session_init_seen: &mut HashSet<String>,
+    tmux_session_name: &str,
+    payload: &[u8],
+) -> bool {
+    if idle_jsonl_payload_contains_init_event(payload) {
+        session_init_seen.insert(tmux_session_name.to_string());
+        return true;
+    }
+    session_init_seen.contains(tmux_session_name)
+}
+
+pub(super) fn prune_idle_jsonl_session_state(
+    seen_sessions: &HashSet<String>,
+    offsets: &mut HashMap<String, u64>,
+    first_seen_at: &mut HashMap<String, Instant>,
+    last_inflight_seen_at: &mut HashMap<String, Instant>,
+    session_init_seen: &mut HashSet<String>,
+) {
+    offsets.retain(|session, _| seen_sessions.contains(session));
+    first_seen_at.retain(|session, _| seen_sessions.contains(session));
+    last_inflight_seen_at.retain(|session, _| seen_sessions.contains(session));
+    session_init_seen.retain(|session| seen_sessions.contains(session));
+    prune_mismatched_inflight_log_sessions(seen_sessions);
+}
+
+pub(super) fn prune_mismatched_inflight_log_sessions(seen_sessions: &HashSet<String>) {
+    let Some(logged_at) = MISMATCHED_INFLIGHT_LOGGED_AT.get() else {
+        return;
+    };
+    let Ok(mut logged_at) = logged_at.lock() else {
+        return;
+    };
+    logged_at.retain(|session, _| seen_sessions.contains(session));
 }
 
 fn log_mismatched_inflight_skip(
@@ -117,6 +157,8 @@ fn log_mismatched_inflight_skip(
 /// in the loop's real order. `payload` is the full `[start, end)` bytes.
 /// `in_new_session_grace` mirrors the runtime `first_seen.elapsed() < grace`
 /// gate. `committed` is the offset authority's `committed_relay_offset`.
+/// `session_init_seen` means this session already passed an init-bearing range,
+/// so later chunks from the same file are not dropped solely for lacking init.
 pub(super) fn idle_relay_range_action(
     payload: &[u8],
     start: u64,
@@ -124,6 +166,7 @@ pub(super) fn idle_relay_range_action(
     committed: u64,
     in_new_session_grace: bool,
     allow_continued_session_without_init: bool,
+    session_init_seen: bool,
 ) -> IdleRelayRangeAction {
     // Classification first, on the WHOLE payload (matches the loop's gate
     // ordering at the top of `run_idle_jsonl_relay_loop`).
@@ -131,6 +174,7 @@ pub(super) fn idle_relay_range_action(
         || idle_jsonl_payload_contains_user_event(payload)
         || idle_jsonl_payload_contains_schedule_wakeup_setup(payload)
         || (!allow_continued_session_without_init
+            && !session_init_seen
             && !idle_jsonl_payload_contains_init_event(payload))
     {
         return IdleRelayRangeAction::SkipClassified;
@@ -224,4 +268,28 @@ pub(super) fn idle_jsonl_payload_contains_init_event(payload: &[u8]) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mismatched_inflight_log_prune_drops_unseen_sessions() {
+        let logged_at = MISMATCHED_INFLIGHT_LOGGED_AT.get_or_init(|| Mutex::new(HashMap::new()));
+        {
+            let mut logged_at = logged_at.lock().expect("logged_at lock");
+            logged_at.insert("session-prune-seen".to_string(), Instant::now());
+            logged_at.insert("session-prune-gone".to_string(), Instant::now());
+        }
+
+        let mut seen_sessions = HashSet::new();
+        seen_sessions.insert("session-prune-seen".to_string());
+        prune_mismatched_inflight_log_sessions(&seen_sessions);
+
+        let mut logged_at = logged_at.lock().expect("logged_at lock");
+        assert!(logged_at.contains_key("session-prune-seen"));
+        assert!(!logged_at.contains_key("session-prune-gone"));
+        logged_at.remove("session-prune-seen");
+    }
 }

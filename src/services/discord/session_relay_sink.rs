@@ -38,8 +38,9 @@ mod relay_format;
 use self::idle_jsonl::{
     IdleRelayRangeAction, idle_jsonl_payload_contains_init_event,
     idle_jsonl_payload_contains_schedule_wakeup_setup, idle_jsonl_payload_contains_user_event,
-    idle_jsonl_relay_source_for_matched, idle_jsonl_should_skip_mismatched_inflight as skip_x,
-    idle_relay_range_action, read_jsonl_range,
+    idle_jsonl_relay_source_for_matched, idle_jsonl_session_has_init,
+    idle_jsonl_should_skip_mismatched_inflight as skip_x, idle_relay_range_action,
+    prune_idle_jsonl_session_state, read_jsonl_range,
 };
 
 static SESSION_BOUND_DISCORD_DELIVERY_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -1231,6 +1232,7 @@ async fn run_idle_jsonl_relay_loop(
     let mut offsets: HashMap<String, u64> = HashMap::new();
     let mut first_seen_at: HashMap<String, Instant> = HashMap::new();
     let mut last_inflight_seen_at: HashMap<String, Instant> = HashMap::new();
+    let mut session_init_seen: HashSet<String> = HashSet::new();
 
     while !shutdown.load(Ordering::Acquire) {
         let mut seen_sessions = HashSet::new();
@@ -1252,22 +1254,15 @@ async fn run_idle_jsonl_relay_loop(
             let offset = offsets.entry(session_name.clone()).or_insert(len);
             if len < *offset {
                 *offset = 0;
+                session_init_seen.remove(&session_name);
             }
 
             if let Some(mut inflight) =
                 super::inflight::load_inflight_state(&matched.provider, channel_id)
             {
-                if skip_x(&mut last_inflight_seen_at, &matched, channel_id, &inflight) {
-                    continue;
-                }
-                // #3960: a `SessionBoundRelay` TUI-direct row whose claim-time
-                // producer has since died is a black-hole — its owner is not
-                // `None`, so the ownerless reclaim below never fires. Re-check
-                // producer liveness + the committed-offset authority at THIS tick
-                // and, if the body was never delivered, downgrade the orphaned
-                // owner to the bridge backstop so the row rejoins ownerless
-                // recovery (double-relay-safe; the in-lock re-check aborts if a
-                // delivery committed in the window).
+                // #3960: if a SessionBoundRelay claim lost its producer before
+                // commit, downgrade it to the ownerless backstop after fresh
+                // liveness/offset checks; the send point still re-gates delivery.
                 if orphan_reclaim::reclaim_orphaned_session_bound_relay_if_dead(
                     &health_registry,
                     &producers,
@@ -1281,6 +1276,9 @@ async fn run_idle_jsonl_relay_loop(
                     inflight.set_relay_owner_kind(super::inflight::RelayOwnerKind::None);
                 }
                 if !super::inflight::ownerless_external_input_inflight_is_stale(&inflight) {
+                    if skip_x(&mut last_inflight_seen_at, &matched, channel_id, &inflight) {
+                        continue;
+                    }
                     last_inflight_seen_at.insert(session_name.clone(), Instant::now());
                     *offset = len;
                     continue;
@@ -1353,9 +1351,9 @@ async fn run_idle_jsonl_relay_loop(
                 );
                 continue;
             }
-            if !relay_source.allow_continued_session_without_init
-                && !idle_jsonl_payload_contains_init_event(&payload)
-            {
+            let session_has_init =
+                idle_jsonl_session_has_init(&mut session_init_seen, &session_name, &payload);
+            if !relay_source.allow_continued_session_without_init && !session_has_init {
                 *offset = end;
                 tracing::debug!(
                     provider = matched.provider.as_str(),
@@ -1416,6 +1414,7 @@ async fn run_idle_jsonl_relay_loop(
                     committed,
                     false,
                     relay_source.allow_continued_session_without_init,
+                    session_has_init,
                 ) {
                     IdleRelayRangeAction::SkipAlreadyRelayed => {
                         // Whole range already delivered by the watcher → skip.
@@ -1477,9 +1476,13 @@ async fn run_idle_jsonl_relay_loop(
             }
         }
 
-        offsets.retain(|session, _| seen_sessions.contains(session));
-        first_seen_at.retain(|session, _| seen_sessions.contains(session));
-        last_inflight_seen_at.retain(|session, _| seen_sessions.contains(session));
+        prune_idle_jsonl_session_state(
+            &seen_sessions,
+            &mut offsets,
+            &mut first_seen_at,
+            &mut last_inflight_seen_at,
+            &mut session_init_seen,
+        );
         tokio::time::sleep(IDLE_JSONL_RELAY_POLL_INTERVAL).await;
     }
 }
@@ -2325,7 +2328,8 @@ mod tests {
 
         // REAL loop decision on the WHOLE classified payload: relay only the
         // uncommitted suffix `[committed, end)` — NOT a re-classify-and-drop.
-        let action = idle_relay_range_action(full_bytes, start, end, committed, false, false);
+        let action =
+            idle_relay_range_action(full_bytes, start, end, committed, false, false, false);
         assert_eq!(
             action,
             super::IdleRelayRangeAction::SendSuffixFrom(committed),
@@ -2348,33 +2352,57 @@ mod tests {
         // it: classified as non-init → dropped. The fix avoids the bounce so the
         // suffix is never re-gated this way.
         let suffix_only_action =
-            idle_relay_range_action(suffix, 0, suffix.len() as u64, 0, false, false);
+            idle_relay_range_action(suffix, 0, suffix.len() as u64, 0, false, false, false);
         assert_eq!(
             suffix_only_action,
             super::IdleRelayRangeAction::SkipClassified,
             "re-gating the init-less suffix as a fresh payload WOULD black-hole it (the old bug)"
         );
         assert_eq!(
-            idle_relay_range_action(suffix, 0, suffix.len() as u64, 0, false, true),
+            idle_relay_range_action(suffix, 0, suffix.len() as u64, 0, false, true, false,),
             super::IdleRelayRangeAction::SendFull,
             "a known continued Codex TUI runtime binding may relay assistant-only suffixes without init"
         );
 
         // Whole range uncommitted → relay the full payload (control case).
         assert_eq!(
-            idle_relay_range_action(full_bytes, start, end, 0, false, false),
+            idle_relay_range_action(full_bytes, start, end, 0, false, false, false),
             super::IdleRelayRangeAction::SendFull
         );
         // Whole range already committed → skip (control case).
         assert_eq!(
-            idle_relay_range_action(full_bytes, start, end, end, false, false),
+            idle_relay_range_action(full_bytes, start, end, end, false, false, false),
             super::IdleRelayRangeAction::SkipAlreadyRelayed
         );
         // New-session grace still wins over everything (ordering preserved).
         assert_eq!(
-            idle_relay_range_action(full_bytes, start, end, committed, true, true),
+            idle_relay_range_action(full_bytes, start, end, committed, true, true, false),
             super::IdleRelayRangeAction::SkipClassified
         );
+    }
+
+    #[test]
+    fn idle_relay_allows_later_large_backlog_chunk_after_session_init_seen() {
+        let continued_chunk = b"{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"continued answer\"}]}}\n";
+        let start = IDLE_JSONL_RELAY_MAX_BYTES_PER_TICK;
+        let end = start + continued_chunk.len() as u64;
+
+        assert_eq!(
+            idle_relay_range_action(continued_chunk, start, end, 0, false, false, false),
+            super::IdleRelayRangeAction::SkipClassified,
+            "without session-level init state, a later init-less chunk would be dropped"
+        );
+        assert_eq!(
+            idle_relay_range_action(continued_chunk, start, end, 0, false, false, true),
+            super::IdleRelayRangeAction::SendFull,
+            "once the session has accepted an init chunk, later chunks are not re-gated by init"
+        );
+    }
+
+    fn matched_with_session(channel_id: &str, session_name: &str) -> MatchedChannel {
+        let mut matched = matched(channel_id);
+        matched.expected_session_name = session_name.to_string();
+        matched
     }
 
     /// #4116: when channel C has an inflight turn owned by tmux session X, the
@@ -2383,10 +2411,12 @@ mod tests {
     /// unchanged lets the next no-inflight tick relay Y's wake output instead of
     /// permanently losing it.
     #[test]
-    fn idle_jsonl_relay_skips_cross_session_inflight_without_consuming_offset() {
+    fn idle_jsonl_relay_resumes_after_mismatched_inflight_clears() {
         let owner_session = "AgentDesk-claude-channel-c-main-x";
         let background_session = "AgentDesk-claude-channel-c-bg-y";
+        let background = matched_with_session("42", background_session);
         let inflight = inflight_for(owner_session, RelayOwnerKind::Watcher, false);
+        let mut last_inflight_seen_at = HashMap::new();
         let mut offset = 128u64;
         let wake_payload = concat!(
             "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"wake-y\"}\n",
@@ -2394,27 +2424,84 @@ mod tests {
         );
         let end = offset + wake_payload.len() as u64;
 
-        assert!(
-            idle_jsonl::idle_jsonl_inflight_mismatches_session(&inflight, background_session),
-            "session Y must skip while channel inflight belongs to session X"
-        );
-        if !idle_jsonl::idle_jsonl_inflight_mismatches_session(&inflight, background_session) {
-            offset = end;
-        }
+        assert!(idle_jsonl::idle_jsonl_should_skip_mismatched_inflight(
+            &mut last_inflight_seen_at,
+            &background,
+            42,
+            &inflight,
+        ));
         assert_eq!(
             offset, 128,
             "cross-session inflight skip must leave Y's offset untouched"
         );
 
         assert_eq!(
-            idle_relay_range_action(wake_payload.as_bytes(), offset, end, 0, false, false),
+            idle_relay_range_action(wake_payload.as_bytes(), offset, end, 0, false, false, false,),
             super::IdleRelayRangeAction::SendFull,
             "the preserved Y bytes relay on the next no-inflight tick"
         );
         offset = end;
         assert_eq!(
             offset, end,
-            "Y's offset advances only after relay eligibility"
+            "Y's offset advances only after the inflight clears and relay eligibility is rechecked"
+        );
+    }
+
+    #[test]
+    fn idle_jsonl_should_not_skip_matching_inflight() {
+        let matched = matched("42");
+        let inflight = inflight_for(
+            &matched.expected_session_name,
+            RelayOwnerKind::Watcher,
+            false,
+        );
+        let mut last_inflight_seen_at = HashMap::new();
+
+        assert!(!idle_jsonl::idle_jsonl_should_skip_mismatched_inflight(
+            &mut last_inflight_seen_at,
+            &matched,
+            42,
+            &inflight,
+        ));
+    }
+
+    #[test]
+    fn idle_jsonl_should_not_skip_none_tmux_inflight_wildcard() {
+        let matched = matched("42");
+        let mut inflight = inflight_for("AgentDesk-claude-other", RelayOwnerKind::Watcher, false);
+        inflight.tmux_session_name = None;
+        let mut last_inflight_seen_at = HashMap::new();
+
+        assert!(!idle_jsonl::idle_jsonl_inflight_mismatches_session(
+            &inflight,
+            &matched.expected_session_name,
+        ));
+        assert!(!idle_jsonl::idle_jsonl_should_skip_mismatched_inflight(
+            &mut last_inflight_seen_at,
+            &matched,
+            42,
+            &inflight,
+        ));
+    }
+
+    #[test]
+    fn idle_jsonl_mismatched_skip_preserves_recent_inflight_grace_marker() {
+        let owner_session = "AgentDesk-claude-channel-c-main-x";
+        let background_session = "AgentDesk-claude-channel-c-bg-y";
+        let background = matched_with_session("42", background_session);
+        let inflight = inflight_for(owner_session, RelayOwnerKind::Watcher, false);
+        let mut last_inflight_seen_at = HashMap::new();
+        last_inflight_seen_at.insert(background_session.to_string(), Instant::now());
+
+        assert!(idle_jsonl::idle_jsonl_should_skip_mismatched_inflight(
+            &mut last_inflight_seen_at,
+            &background,
+            42,
+            &inflight,
+        ));
+        assert!(
+            last_inflight_seen_at.contains_key(background_session),
+            "mismatched skip must not erase the session's existing post-inflight grace marker"
         );
     }
 

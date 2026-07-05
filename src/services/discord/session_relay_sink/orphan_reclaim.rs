@@ -178,6 +178,7 @@ mod tests {
                 body_end,
                 committed_advanced,
                 false,
+                false,
                 false
             ),
             IdleRelayRangeAction::SkipAlreadyRelayed,
@@ -207,6 +208,7 @@ mod tests {
                 turn_floor,
                 body_end,
                 committed_advanced,
+                false,
                 false,
                 false
             ),
