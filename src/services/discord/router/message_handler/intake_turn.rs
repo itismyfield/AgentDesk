@@ -2336,18 +2336,13 @@ pub(in crate::services::discord) async fn handle_text_message(
         } else if enqueue_outcome.enqueued {
             let _ = channel_id.delete_message(http, placeholder_msg_id).await;
         } else {
-            put_back_session_retry_context(
+            apply_tui_busy_enqueue_refusal(
                 shared,
-                channel_id,
-                session_retry_context.as_ref(),
-                enqueue_outcome.refusal_reason.map(|reason| reason.as_str()),
-            );
-            let notice = claude_tui_busy_followup_refusal_notice(enqueue_outcome.refusal_reason);
-            let _ = super::super::super::http::edit_channel_message(
                 http,
                 channel_id,
                 placeholder_msg_id,
-                notice,
+                session_retry_context.as_ref(),
+                enqueue_outcome.refusal_reason,
             )
             .await;
         }
