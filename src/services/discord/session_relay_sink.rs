@@ -1075,12 +1075,12 @@ impl SessionBoundDiscordRelaySink {
                 Err(error) => Err(RelaySinkError::Transient(error.to_string())),
             }
         } else {
-            let prompt_anchor = ssh_direct_prompt_anchor_for_response(
+            let prompt_anchor = relay_format::ssh_direct_prompt_anchor_for_response(
                 &provider,
                 &delivery.session_name,
                 channel_id,
             );
-            let prompt_anchor_reference = prompt_anchor_reference(prompt_anchor);
+            let prompt_anchor_reference = relay_format::prompt_anchor_reference(prompt_anchor);
             formatting::send_long_message_raw_with_reference(
                 &http,
                 channel,
@@ -1091,7 +1091,11 @@ impl SessionBoundDiscordRelaySink {
             .await
             .map_err(|error| RelaySinkError::Transient(error.to_string()))?;
             if let Some(prompt_anchor) = prompt_anchor {
-                clear_ssh_direct_prompt_anchor(&provider, &delivery.session_name, prompt_anchor);
+                relay_format::clear_ssh_direct_prompt_anchor(
+                    &provider,
+                    &delivery.session_name,
+                    prompt_anchor,
+                );
             }
             self.delivered_total.fetch_add(1, Ordering::AcqRel);
             // #3041 P1-4 (§4-④): lease released by the RAII guard on exit.
@@ -1640,41 +1644,6 @@ fn delivery_lease_key_for_frame(
         delivery.frame_turn_start_offset,
         "sink",
     )
-}
-
-fn ssh_direct_prompt_anchor_for_response(
-    provider: &ProviderKind,
-    tmux_session_name: &str,
-    channel_id: u64,
-) -> Option<crate::services::tui_prompt_dedupe::TuiPromptAnchor> {
-    crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
-        provider.as_str(),
-        tmux_session_name,
-        channel_id,
-    )
-}
-
-fn clear_ssh_direct_prompt_anchor(
-    provider: &ProviderKind,
-    tmux_session_name: &str,
-    anchor: crate::services::tui_prompt_dedupe::TuiPromptAnchor,
-) {
-    crate::services::tui_prompt_dedupe::clear_prompt_anchor_for_response(
-        provider.as_str(),
-        tmux_session_name,
-        anchor,
-    );
-}
-
-fn prompt_anchor_reference(
-    anchor: Option<crate::services::tui_prompt_dedupe::TuiPromptAnchor>,
-) -> Option<(ChannelId, MessageId)> {
-    anchor.map(|anchor| {
-        (
-            ChannelId::new(anchor.channel_id),
-            MessageId::new(anchor.message_id),
-        )
-    })
 }
 
 fn merge_task_notification_kind(
