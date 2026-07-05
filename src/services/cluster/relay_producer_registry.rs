@@ -92,6 +92,26 @@ impl RelayProducerRegistry {
             .and_then(|guard| guard.get(session_name).cloned())
     }
 
+    /// Return a registered producer only if its relay is still alive. Shutdown
+    /// producer clones can outlive supervisor teardown; using this gate for
+    /// ownership decisions prevents new turns from being stamped
+    /// `SessionBoundRelay` when no producer can commit them.
+    pub fn get_live_producer(&self, session_name: &str) -> Option<RelayProducer> {
+        let producer = self.get_producer(session_name)?;
+        if producer.is_alive() {
+            return Some(producer);
+        }
+        if let Ok(mut guard) = self.by_session.write() {
+            let stale = guard
+                .get(session_name)
+                .is_some_and(|registered| !registered.is_alive());
+            if stale {
+                guard.remove(session_name);
+            }
+        }
+        None
+    }
+
     /// Snapshot of `(session_name, frames_received)` pairs — used by the
     /// `/api/cluster/sessions` diagnostic so operators can confirm the
     /// supervisor-owned relay is no longer a zero-frame path.
@@ -180,6 +200,34 @@ mod tests {
     async fn get_producer_returns_none_for_unknown_session() {
         let registry = RelayProducerRegistry::new();
         assert!(registry.get_producer("AgentDesk-claude-nope").is_none());
+    }
+
+    #[tokio::test]
+    async fn get_live_producer_filters_shutdown_entries() {
+        let registry = RelayProducerRegistry::new();
+        let m = matched("c-dead-producer");
+        let sink: Arc<dyn RelaySink> = Arc::new(DiscardSink);
+        let handle = spawn_stream_relay(m.clone(), sink);
+        registry.register(m.expected_session_name.clone(), handle.producer());
+
+        assert!(
+            registry
+                .get_live_producer(&m.expected_session_name)
+                .is_some(),
+            "a newly registered relay producer is live"
+        );
+        handle.shutdown().await;
+
+        assert!(
+            registry
+                .get_live_producer(&m.expected_session_name)
+                .is_none(),
+            "a shutdown producer clone must not be treated as live for SessionBoundRelay ownership"
+        );
+        assert!(
+            registry.get_producer(&m.expected_session_name).is_none(),
+            "live lookup prunes stale shutdown entries so later orphan checks see producer-dead"
+        );
     }
 
     #[tokio::test]
