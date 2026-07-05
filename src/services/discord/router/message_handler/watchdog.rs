@@ -125,6 +125,296 @@ inflight_updated_at: {updated_at}\n\
     )
 }
 
+pub(super) fn build_watchdog_timeout_notice_message(
+    elapsed_mins: i64,
+    has_queued: bool,
+) -> String {
+    if has_queued {
+        format!(
+            "⚠️ 턴이 {elapsed_mins}분 타임아웃으로 자동 중단되었습니다. 대기 중인 메시지로 다음 턴을 시작합니다.",
+        )
+    } else {
+        format!("⚠️ 턴이 {elapsed_mins}분 타임아웃으로 자동 중단되었습니다.",)
+    }
+}
+
+pub(super) async fn send_watchdog_timeout_notice(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    http: &Arc<serenity::http::Http>,
+    elapsed_mins: i64,
+) {
+    let has_queued =
+        super::super::super::mailbox_has_pending_soft_queue(shared, provider, channel_id)
+            .await
+            .has_pending;
+    let message = build_watchdog_timeout_notice_message(elapsed_mins, has_queued);
+    if let Err(error) = channel_id.say(http, message).await {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::warn!(
+            "  [{ts}] ⏰ WATCHDOG: failed timeout notice for channel {}: {}",
+            channel_id,
+            error
+        );
+    }
+}
+
+fn headless_inflight_has_watchdog_visible_surface(inflight: &InflightTurnState) -> bool {
+    if inflight.rebind_origin || inflight.relay_ownership_only {
+        return false;
+    }
+    inflight.long_running_placeholder_active
+        || inflight.task_notification_kind.is_some()
+        || (inflight.current_msg_id != 0
+            && !super::super::super::is_synthetic_headless_message_id_raw(inflight.current_msg_id))
+}
+
+pub(super) fn headless_watchdog_timeout_notice_visible_from_surfaces(
+    inflight: Option<&InflightTurnState>,
+    footer_has_unfinished_entries: bool,
+) -> bool {
+    footer_has_unfinished_entries
+        || inflight.is_some_and(headless_inflight_has_watchdog_visible_surface)
+}
+
+pub(super) fn headless_watchdog_timeout_notice_visible(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+) -> bool {
+    let inflight = super::super::super::inflight::load_inflight_state(provider, channel_id.get());
+    let footer_has_unfinished_entries = shared.ui.status_panel_v2_enabled
+        && shared
+            .ui
+            .placeholder_live_events
+            .render_completion_footer(channel_id, provider, "⠸")
+            .has_unfinished_entries;
+    headless_watchdog_timeout_notice_visible_from_surfaces(
+        inflight.as_ref(),
+        footer_has_unfinished_entries,
+    )
+}
+
+pub(super) async fn maybe_send_headless_watchdog_timeout_notice(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    http: &Arc<serenity::http::Http>,
+    timeout: std::time::Duration,
+    current_deadline: i64,
+    now: i64,
+    visible: bool,
+) {
+    let elapsed_mins = (now - (current_deadline - timeout.as_millis() as i64)) / 1000 / 60;
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::warn!(
+        "  [{ts}] ⏰ Headless watchdog timeout reconciled via cancel path for channel {}",
+        channel_id
+    );
+    if visible {
+        send_watchdog_timeout_notice(shared, provider, channel_id, http, elapsed_mins).await;
+    }
+}
+
+pub(super) fn spawn_headless_turn_watchdog(
+    cancel_token: &Arc<CancelToken>,
+    shared: &Arc<SharedData>,
+    http: &Arc<serenity::http::Http>,
+    channel_id: serenity::ChannelId,
+    provider: &ProviderKind,
+    provider_label: &str,
+) {
+    let watchdog_token = cancel_token.clone();
+    let watchdog_shared = shared.clone();
+    let watchdog_http = http.clone();
+    let timeout = super::super::super::turn_watchdog_timeout();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let turn_started_ms = now_ms;
+    let ceiling_deadline_ms =
+        super::super::super::turn_hard_ceiling_deadline_ms(turn_started_ms, provider);
+    let proposed_initial_dl = now_ms + timeout.as_millis() as i64;
+    let deadline_ms = std::cmp::min(proposed_initial_dl, ceiling_deadline_ms);
+    let max_deadline_ms = deadline_ms;
+    if proposed_initial_dl > ceiling_deadline_ms {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        let ceiling_min = (ceiling_deadline_ms - now_ms) / 1000 / 60;
+        tracing::warn!(
+            "  [{ts}] ⛔ WATCHDOG: hard ceiling ({ceiling_min}m) caps initial deadline for headless channel {} (provider={}) — turn will be reconciled at the ceiling",
+            channel_id.get(),
+            provider_label
+        );
+    }
+    watchdog_token.mark_async_managed();
+    watchdog_token
+        .watchdog_deadline_ms
+        .store(deadline_ms, std::sync::atomic::Ordering::Relaxed);
+    watchdog_token
+        .watchdog_max_deadline_ms
+        .store(max_deadline_ms, std::sync::atomic::Ordering::Relaxed);
+
+    let watchdog_channel_id_num = channel_id.get();
+    let watchdog_provider = provider.clone();
+    super::super::super::task_supervisor::spawn_observed(
+        "headless_turn_watchdog",
+        async move {
+            const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+            let mut last_deadlock_prealert_deadline_ms: Option<i64> = None;
+
+            loop {
+                tokio::time::sleep(CHECK_INTERVAL).await;
+                if watchdog_token
+                    .cancelled
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    super::super::super::clear_watchdog_deadline_override(
+                        watchdog_channel_id_num,
+                    )
+                    .await;
+                    return;
+                }
+                if let Some(extension) =
+                    super::super::super::take_watchdog_deadline_override(watchdog_channel_id_num)
+                        .await
+                {
+                    apply_watchdog_deadline_extension(&watchdog_token, extension);
+                    last_deadlock_prealert_deadline_ms = None;
+                }
+                {
+                    let current_dl = watchdog_token
+                        .watchdog_deadline_ms
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let now_ms_check = chrono::Utc::now().timestamp_millis();
+                    if now_ms_check > current_dl - 120_000
+                        && let Some(inflight) = super::super::super::inflight::load_inflight_state(
+                            &watchdog_provider,
+                            watchdog_channel_id_num,
+                        )
+                        && let Ok(updated) =
+                            chrono::NaiveDateTime::parse_from_str(&inflight.updated_at, "%Y-%m-%d %H:%M:%S")
+                    {
+                        let updated_ms = updated.and_utc().timestamp_millis();
+                        let age_ms = now_ms_check - updated_ms;
+                        if age_ms < 300_000 {
+                            let ceiling_ms = super::super::super::turn_hard_ceiling_deadline_ms(
+                                turn_started_ms,
+                                &watchdog_provider,
+                            );
+                            let proposed_dl = now_ms_check + timeout.as_millis() as i64;
+                            let (new_dl, clamped) =
+                                super::super::super::clamp_auto_extend_deadline_ms(
+                                    proposed_dl,
+                                    ceiling_ms,
+                                );
+                            if clamped && current_dl < ceiling_ms {
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                tracing::warn!(
+                                    "  [{ts}] ⛔ WATCHDOG: hard ceiling reached for headless channel {} — auto-extend clamped, turn will be reconciled at deadline",
+                                    watchdog_channel_id_num
+                                );
+                            }
+                            if new_dl > current_dl {
+                                watchdog_token
+                                    .watchdog_deadline_ms
+                                    .store(new_dl, std::sync::atomic::Ordering::Relaxed);
+                                watchdog_token.watchdog_max_deadline_ms.store(
+                                    std::cmp::max(
+                                        watchdog_token
+                                            .watchdog_max_deadline_ms
+                                            .load(std::sync::atomic::Ordering::Relaxed),
+                                        new_dl,
+                                    ),
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
+                                last_deadlock_prealert_deadline_ms = None;
+                            }
+                        }
+                    }
+                }
+
+                let current_deadline = watchdog_token
+                    .watchdog_deadline_ms
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let now = chrono::Utc::now().timestamp_millis();
+                if should_send_watchdog_deadlock_prealert(
+                    now,
+                    current_deadline,
+                    last_deadlock_prealert_deadline_ms,
+                ) {
+                    let is_current_token =
+                        super::super::super::mailbox_cancel_token(&watchdog_shared, channel_id)
+                            .await
+                            .is_some_and(|current| Arc::ptr_eq(&watchdog_token, &current));
+                    if !is_current_token {
+                        super::super::super::clear_watchdog_deadline_override(
+                            watchdog_channel_id_num,
+                        )
+                        .await;
+                        return;
+                    }
+                    let current_max_deadline = watchdog_token
+                        .watchdog_max_deadline_ms
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    if maybe_send_watchdog_deadlock_prealert(
+                        &watchdog_shared,
+                        &watchdog_provider,
+                        channel_id,
+                        now,
+                        current_deadline,
+                        turn_started_ms,
+                        current_max_deadline,
+                    )
+                    .await
+                    {
+                        last_deadlock_prealert_deadline_ms = Some(current_deadline);
+                    }
+                }
+                if let Some(extension) =
+                    super::super::super::take_watchdog_deadline_override(watchdog_channel_id_num)
+                        .await
+                {
+                    apply_watchdog_deadline_extension(&watchdog_token, extension);
+                    last_deadlock_prealert_deadline_ms = None;
+                }
+                let current_deadline = watchdog_token
+                    .watchdog_deadline_ms
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let now = chrono::Utc::now().timestamp_millis();
+                if now < current_deadline {
+                    continue;
+                }
+
+                let should_emit_timeout_notice = headless_watchdog_timeout_notice_visible(
+                    watchdog_shared.as_ref(),
+                    &watchdog_provider,
+                    channel_id,
+                );
+                let disposition = reconcile_watchdog_timeout(
+                    &watchdog_shared,
+                    &watchdog_provider,
+                    channel_id,
+                    &watchdog_token,
+                )
+                .await;
+                if disposition == WatchdogTimeoutCancelDisposition::Cancelled {
+                    maybe_send_headless_watchdog_timeout_notice(
+                        &watchdog_shared,
+                        &watchdog_provider,
+                        channel_id,
+                        &watchdog_http,
+                        timeout,
+                        current_deadline,
+                        now,
+                        should_emit_timeout_notice,
+                    )
+                    .await;
+                }
+                return;
+            }
+        },
+    );
+}
+
 pub(super) async fn maybe_send_watchdog_deadlock_prealert(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -673,6 +963,93 @@ fn attach_paused_turn_watcher_inner(
     }
 
     watcher_owner_channel_id
+}
+
+#[cfg(test)]
+mod timeout_notice_tests {
+    use super::*;
+
+    fn headless_inflight(
+        current_msg_id: u64,
+    ) -> crate::services::discord::inflight::InflightTurnState {
+        crate::services::discord::inflight::InflightTurnState::new(
+            ProviderKind::Claude,
+            9_000_000_000_411_900,
+            Some("headless-watchdog-test".to_string()),
+            123,
+            456,
+            current_msg_id,
+            "run the routine".to_string(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        )
+    }
+
+    #[test]
+    fn watchdog_timeout_notice_message_matches_foreground_copy() {
+        assert_eq!(
+            build_watchdog_timeout_notice_message(17, false),
+            "⚠️ 턴이 17분 타임아웃으로 자동 중단되었습니다."
+        );
+        assert_eq!(
+            build_watchdog_timeout_notice_message(17, true),
+            "⚠️ 턴이 17분 타임아웃으로 자동 중단되었습니다. 대기 중인 메시지로 다음 턴을 시작합니다."
+        );
+    }
+
+    #[test]
+    fn headless_watchdog_timeout_notice_visibility_requires_visible_surface() {
+        assert!(
+            !headless_watchdog_timeout_notice_visible_from_surfaces(None, false),
+            "no inflight and no footer slots means fully background/log-only"
+        );
+
+        let synthetic_id = crate::services::discord::SYNTHETIC_HEADLESS_MESSAGE_ID_FLOOR + 10;
+        let invisible = headless_inflight(synthetic_id);
+        assert!(
+            !headless_watchdog_timeout_notice_visible_from_surfaces(Some(&invisible), false),
+            "synthetic headless id alone is not a user-visible placeholder"
+        );
+
+        assert!(
+            headless_watchdog_timeout_notice_visible_from_surfaces(Some(&invisible), true),
+            "unfinished footer slots are a visible headless surface"
+        );
+
+        let mut long_running_placeholder = headless_inflight(synthetic_id);
+        long_running_placeholder.long_running_placeholder_active = true;
+        assert!(
+            headless_watchdog_timeout_notice_visible_from_surfaces(
+                Some(&long_running_placeholder),
+                false
+            ),
+            "explicit long-running placeholder is a visible status surface"
+        );
+
+        let mut task_notification = headless_inflight(synthetic_id);
+        task_notification.task_notification_kind =
+            Some(crate::services::agent_protocol::TaskNotificationKind::Background);
+        assert!(
+            headless_watchdog_timeout_notice_visible_from_surfaces(Some(&task_notification), false),
+            "task-notification status is the same explicit background surface used by #4100"
+        );
+
+        let real_placeholder = headless_inflight(123_456_789);
+        assert!(
+            headless_watchdog_timeout_notice_visible_from_surfaces(Some(&real_placeholder), false),
+            "a real Discord placeholder id is visible"
+        );
+
+        let mut relay_only = headless_inflight(123_456_789);
+        relay_only.relay_ownership_only = true;
+        assert!(
+            !headless_watchdog_timeout_notice_visible_from_surfaces(Some(&relay_only), false),
+            "internal relay-ownership rows must not create user-facing timeout noise"
+        );
+    }
 }
 
 #[cfg(all(test, unix))]

@@ -241,22 +241,14 @@ pub(super) fn spawn_text_turn_watchdog(
                     channel_id
                 );
 
-                // Notify Discord
-                let has_queued = crate::services::discord::mailbox_has_pending_soft_queue(
+                send_watchdog_timeout_notice(
                     &watchdog_shared,
                     &watchdog_provider,
                     channel_id,
+                    &watchdog_http,
+                    elapsed_mins,
                 )
-                .await
-                .has_pending;
-                let msg = if has_queued {
-                    format!(
-                        "⚠️ 턴이 {elapsed_mins}분 타임아웃으로 자동 중단되었습니다. 대기 중인 메시지로 다음 턴을 시작합니다.",
-                    )
-                } else {
-                    format!("⚠️ 턴이 {elapsed_mins}분 타임아웃으로 자동 중단되었습니다.",)
-                };
-                let _ = channel_id.say(&watchdog_http, msg).await;
+                .await;
             }
             return; // Watchdog done regardless
         }
