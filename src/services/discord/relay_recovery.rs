@@ -898,19 +898,19 @@ pub(in crate::services::discord) fn idle_tmux_repair_ready_for_input(
         provider,
         channel_id,
         tmux_session,
-        |tmux_session, provider| {
-            // Pre-existing recovery override for long-frozen Busy JSONL. This is
-            // intentionally not `FallbackPaneReadiness`: the override is scoped
-            // by `frozen_busy_jsonl_allows_pane_fallback` below.
-            crate::services::platform::tmux::capture_pane(tmux_session, -80)
-                .map(|pane| {
-                    crate::services::provider::tmux_capture_indicates_ready_for_input(
-                        &pane, provider,
-                    )
-                })
-                .unwrap_or(false)
-        },
+        idle_tmux_repair_pane_ready_for_input,
     )
+}
+
+fn idle_tmux_repair_pane_ready_for_input(tmux_session: &str, provider: &ProviderKind) -> bool {
+    // Pre-existing recovery override for long-frozen Busy JSONL. This is
+    // intentionally not `FallbackPaneReadiness`: the override is scoped by
+    // `frozen_busy_jsonl_allows_pane_fallback` below.
+    crate::services::platform::tmux::capture_pane(tmux_session, -80)
+        .map(|pane| {
+            crate::services::provider::tmux_capture_indicates_ready_for_input(&pane, provider)
+        })
+        .unwrap_or(false)
 }
 
 fn idle_tmux_repair_ready_for_input_with_pane_probe(
@@ -922,6 +922,22 @@ fn idle_tmux_repair_ready_for_input_with_pane_probe(
     let Some(state) = super::inflight::load_inflight_state(provider, channel_id) else {
         return pane_ready_for_input(tmux_session, provider);
     };
+    idle_tmux_repair_snapshot_ready_for_input(
+        provider,
+        channel_id,
+        tmux_session,
+        &state,
+        pane_ready_for_input,
+    )
+}
+
+fn idle_tmux_repair_snapshot_ready_for_input(
+    provider: &ProviderKind,
+    channel_id: u64,
+    tmux_session: &str,
+    state: &super::inflight::InflightTurnState,
+    pane_ready_for_input: impl Fn(&str, &ProviderKind) -> bool,
+) -> bool {
     let Some(output_path) = state
         .output_path
         .as_deref()
@@ -1008,12 +1024,8 @@ fn output_file_quiescent_for_duration_at(
 /// failure / IO error the function returns false → existing behavior (only the
 /// genuinely-empty tail still clears), so this is behavior-preserving.
 pub(crate) fn idle_tmux_repair_has_unrelayed_tail_answer(
-    provider: &ProviderKind,
-    channel_id: u64,
+    state: &super::inflight::InflightTurnState,
 ) -> bool {
-    let Some(state) = super::inflight::load_inflight_state(provider, channel_id) else {
-        return false;
-    };
     let Some(output_path) = state
         .output_path
         .as_deref()
@@ -1113,22 +1125,53 @@ async fn apply_relay_recovery_decision(
             if let Some(tmux_session) = decision.affected.tmux_session.as_deref()
                 && decision.evidence.unread_bytes.unwrap_or(0) == 0
                 // This branch intentionally does not route through
-                // `destructive_cancel_gate`: `idle_tmux_repair_ready_for_input`
-                // is the turn-scope proof that the provider prompt has returned
+                // `destructive_cancel_gate`: the snapshot readiness check is
+                // the turn-scope proof that the provider prompt has returned
                 // (structured JSONL ready state, or tmux prompt fallback), and the
                 // following inflight/tail guards prove there is no deliverable
                 // assistant body left to preserve. The cleanup below only retires
                 // stale mailbox/inflight bookkeeping for an already-idle turn.
-                && idle_tmux_repair_ready_for_input(provider, decision.channel_id, tmux_session)
                 && let Some(inflight_clear_state) =
                     load_idle_tmux_reattach_inflight_clear_candidate(provider, decision.channel_id)
+                && idle_tmux_repair_snapshot_ready_for_input(
+                    provider,
+                    decision.channel_id,
+                    tmux_session,
+                    &inflight_clear_state,
+                    idle_tmux_repair_pane_ready_for_input,
+                )
                 // #3668 F2: never destructively clear when a final answer is
                 // still persisted in JSONL after `last_offset` — fall through to
                 // the non-destructive rebind path so normal relay delivers it.
-                && !idle_tmux_repair_has_unrelayed_tail_answer(provider, decision.channel_id)
+                && !idle_tmux_repair_has_unrelayed_tail_answer(&inflight_clear_state)
             {
                 let inflight_clear_pin =
                     capture_idle_tmux_reattach_inflight_clear_pin(&inflight_clear_state);
+                let inflight_clear_outcome = clear_idle_tmux_reattach_inflight_if_pinned(
+                    provider,
+                    decision.channel_id,
+                    inflight_clear_pin.as_ref(),
+                );
+                if !matches!(
+                    inflight_clear_outcome,
+                    super::inflight::GuardedClearOutcome::Cleared
+                ) {
+                    let after = mailbox_snapshot(shared, channel).await;
+                    return RelayRecoveryApplyResult {
+                        status: idle_tmux_reattach_clear_status(inflight_clear_outcome),
+                        removed_thread_proofs: 0,
+                        removed_mailbox_token: false,
+                        post_mailbox_has_cancel_token: Some(after.cancel_token.is_some()),
+                        post_mailbox_queue_depth: Some(after.intervention_queue.len()),
+                        reattach_watcher_spawned: Some(false),
+                        reattach_watcher_replaced: Some(false),
+                        reattach_initial_offset: None,
+                        reattach_error: None,
+                    };
+                }
+                if let Some((_, watcher)) = shared.tmux_watchers.remove(&channel) {
+                    watcher.cancel.store(true, Ordering::Relaxed);
+                }
                 let finish = mailbox_finish_turn(shared, provider, channel).await;
                 if let Some(token) = finish.removed_token.as_ref() {
                     token.cancelled.store(true, Ordering::Relaxed);
@@ -1149,14 +1192,6 @@ async fn apply_relay_recovery_decision(
                 if !finish.has_pending {
                     shared.dispatch.role_overrides.remove(&channel);
                 }
-                if let Some((_, watcher)) = shared.tmux_watchers.remove(&channel) {
-                    watcher.cancel.store(true, Ordering::Relaxed);
-                }
-                let inflight_clear_outcome = clear_idle_tmux_reattach_inflight_if_pinned(
-                    provider,
-                    decision.channel_id,
-                    inflight_clear_pin.as_ref(),
-                );
                 mailbox_clear_recovery_marker(shared, channel).await;
                 let after = mailbox_snapshot(shared, channel).await;
                 return RelayRecoveryApplyResult {
@@ -2109,7 +2144,7 @@ mod tests {
             tmux
         ));
         assert!(
-            !idle_tmux_repair_has_unrelayed_tail_answer(&provider, channel.get()),
+            !idle_tmux_repair_has_unrelayed_tail_answer(&state),
             "consumed-at-EOF terminal JSONL must not block idle-tmux cleanup"
         );
 
@@ -2243,11 +2278,14 @@ mod tests {
         let hook_provider = provider.clone();
         let hook_tmux = tmux.to_string();
         let hook_output_path = output_path.to_string_lossy().to_string();
+        let (watcher, watcher_cancel) = test_watcher_handle(tmux, &output_path);
+        shared.tmux_watchers.insert(channel, watcher);
+
         let _hook = set_idle_tmux_reattach_inflight_candidate_hook_for_tests(Arc::new(
             move |predicate_snapshot| {
                 assert_eq!(
                     predicate_snapshot.user_msg_id, stale_user_msg_id,
-                    "hook must run after the stale row was evaluated by the idle predicate"
+                    "hook must receive the stale readiness snapshot before pin capture"
                 );
                 let mut newer = super::super::inflight::InflightTurnState::new(
                     hook_provider.clone(),
@@ -2302,8 +2340,25 @@ mod tests {
         );
         assert!(!relay_recovery_status_counts_as_applied(result.status));
         assert_ne!(result.status, "cleared_idle_tmux_stale_turn");
-        assert!(result.removed_mailbox_token);
-        assert!(token.cancelled.load(Ordering::Relaxed));
+        assert!(!result.removed_mailbox_token);
+        assert_eq!(result.post_mailbox_has_cancel_token, Some(true));
+        assert!(!token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+        assert!(
+            shared.tmux_watchers.contains_key(&channel),
+            "skipped clear must preserve the watcher binding for the next watchdog pass"
+        );
+        assert!(
+            !watcher_cancel.load(Ordering::Relaxed),
+            "skipped clear must not cancel the watcher binding"
+        );
+        assert!(
+            super::super::mailbox_snapshot(&shared, channel)
+                .await
+                .cancel_token
+                .is_some(),
+            "skipped clear must preserve the active mailbox token"
+        );
         let persisted = super::super::inflight::load_inflight_state(&provider, channel_id)
             .expect("newer idle-shaped row must survive stale pinned clear");
         assert_eq!(persisted.user_msg_id, newer_user_msg_id);
@@ -2314,6 +2369,100 @@ mod tests {
         assert_eq!(
             persisted.effective_relay_owner_kind(),
             super::super::inflight::RelayOwnerKind::Watcher
+        );
+    }
+
+    #[tokio::test]
+    async fn reattach_idle_tmux_clear_success_tears_down_after_guarded_clear() {
+        let _guard = auto_heal_test_lock().lock().await;
+        clear_auto_heal_attempts_for_tests();
+        let (_root_guard, root_dir) = isolated_agentdesk_root();
+        let provider = ProviderKind::Claude;
+        let (registry, shared) = registry_with_shared(provider.clone()).await;
+        let channel = ChannelId::new(4_111_005);
+        let user_msg = MessageId::new(4_111_105);
+        let tmux = "AgentDesk-claude-4111-idle-clear-success";
+        let output_path = root_dir.path().join("idle-clear-success.jsonl");
+        let body = "{\"type\":\"system\",\"subtype\":\"turn_duration\",\"session_id\":\"s\"}\n";
+        std::fs::write(&output_path, body).expect("write ready output fixture");
+        let output_len = std::fs::metadata(&output_path)
+            .expect("output fixture metadata")
+            .len();
+        let token = start_test_turn(&shared, channel, user_msg).await;
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+
+        let mut state = super::super::inflight::InflightTurnState::new(
+            provider.clone(),
+            channel.get(),
+            None,
+            1,
+            user_msg.get(),
+            4_111_305,
+            "idle tmux guarded cleanup success".to_string(),
+            Some("session-4111-idle-clear-success".to_string()),
+            Some(tmux.to_string()),
+            Some(output_path.to_string_lossy().to_string()),
+            None,
+            output_len,
+        );
+        state.set_relay_owner_kind(super::super::inflight::RelayOwnerKind::Watcher);
+        super::super::inflight::save_inflight_state(&state).expect("seed idle-clear row");
+        let (watcher, watcher_cancel) = test_watcher_handle(tmux, &output_path);
+        shared.tmux_watchers.insert(channel, watcher);
+
+        let snapshot = RelayHealthSnapshot {
+            provider: provider.as_str().to_string(),
+            channel_id: channel.get(),
+            active_turn: RelayActiveTurn::Foreground,
+            tmux_session: Some(tmux.to_string()),
+            tmux_alive: Some(true),
+            watcher_attached: true,
+            watcher_attached_stale: true,
+            watcher_owner_channel_id: Some(channel.get()),
+            watcher_owns_live_relay: true,
+            bridge_inflight_present: true,
+            mailbox_has_cancel_token: true,
+            mailbox_active_user_msg_id: Some(user_msg.get()),
+            last_capture_offset: Some(output_len),
+            last_relay_offset: output_len,
+            unread_bytes: Some(0),
+            desynced: true,
+            ..snapshot()
+        };
+        let decision = plan_relay_recovery(&snapshot, RelayStallState::TmuxAliveRelayDead, 1_000);
+        assert_eq!(decision.action, RelayRecoveryActionKind::ReattachWatcher);
+
+        let result = apply_relay_recovery_decision(
+            &registry,
+            &shared,
+            &provider,
+            &decision,
+            RelayRecoveryApplySource::ProbeAutoHeal,
+        )
+        .await;
+
+        assert_eq!(result.status, "cleared_idle_tmux_stale_turn");
+        assert!(relay_recovery_status_counts_as_applied(result.status));
+        assert!(result.removed_mailbox_token);
+        assert_eq!(result.post_mailbox_has_cancel_token, Some(false));
+        assert_eq!(result.reattach_watcher_replaced, Some(true));
+        assert!(token.cancelled.load(Ordering::Relaxed));
+        assert!(watcher_cancel.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+        assert!(
+            !shared.tmux_watchers.contains_key(&channel),
+            "successful guarded clear must remove the retired watcher binding"
+        );
+        assert!(
+            super::super::mailbox_snapshot(&shared, channel)
+                .await
+                .cancel_token
+                .is_none(),
+            "successful guarded clear must release the mailbox token"
+        );
+        assert!(
+            super::super::inflight::load_inflight_state(&provider, channel.get()).is_none(),
+            "successful guarded clear must remove the pinned inflight row before teardown completes"
         );
     }
 
@@ -3091,9 +3240,11 @@ mod tests {
             last_offset,
             &format!("{pre}{post}"),
         );
+        let state = super::super::inflight::load_inflight_state(&provider, channel_id)
+            .expect("tail-answer guard fixture must save an inflight row");
 
         assert!(
-            idle_tmux_repair_has_unrelayed_tail_answer(&provider, channel_id),
+            idle_tmux_repair_has_unrelayed_tail_answer(&state),
             "JSONL terminal answer after last_offset must block destructive clear"
         );
     }
@@ -3113,9 +3264,11 @@ mod tests {
         let body = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"old\"}]}}\n";
         let last_offset = body.len() as u64;
         write_inflight_with_output(&provider, channel_id, &output_path, last_offset, body);
+        let state = super::super::inflight::load_inflight_state(&provider, channel_id)
+            .expect("empty-tail guard fixture must save an inflight row");
 
         assert!(
-            !idle_tmux_repair_has_unrelayed_tail_answer(&provider, channel_id),
+            !idle_tmux_repair_has_unrelayed_tail_answer(&state),
             "empty JSONL tail must not block the existing destructive clear path"
         );
     }
@@ -3144,9 +3297,11 @@ mod tests {
             last_offset,
             &format!("{pre}{post}"),
         );
+        let state = super::super::inflight::load_inflight_state(&provider, channel_id)
+            .expect("partial-tail guard fixture must save an inflight row");
 
         assert!(
-            !idle_tmux_repair_has_unrelayed_tail_answer(&provider, channel_id),
+            !idle_tmux_repair_has_unrelayed_tail_answer(&state),
             "partial assistant text without a terminal success result must not block force-clean"
         );
     }

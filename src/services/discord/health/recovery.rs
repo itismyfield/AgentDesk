@@ -1646,10 +1646,11 @@ pub(crate) async fn run_stall_watchdog_pass(
         }
         // #3668 F2: if JSONL still holds an unrelayed final answer after
         // `last_offset`, skip destructive watchdog branches this tick.
-        if crate::services::discord::relay_recovery::idle_tmux_repair_has_unrelayed_tail_answer(
-            provider,
-            channel_id.get(),
-        ) {
+        if let Some(state) = discord::inflight::load_inflight_state(provider, channel_id.get())
+            && crate::services::discord::relay_recovery::idle_tmux_repair_has_unrelayed_tail_answer(
+                &state,
+            )
+        {
             continue;
         }
         // #2965: a ready-for-input TUI can still look "desynced" when the
