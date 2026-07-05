@@ -1063,8 +1063,8 @@
     recovery-context take helper remains in `turn_bridge/recovery_text.rs`.
     Further work should split internal scan/session-retry helpers out of this
     child before adding behavior.)
-  - `src/services/discord/recovery_engine.rs` (472 lines after #3834 r2; no
-    longer a prod giant. The facade keeps module declarations, re-imports, and
+  - `src/services/discord/recovery_engine.rs` (417 prod lines after #3834 r2;
+    no longer a prod giant. The facade keeps module declarations, re-imports, and
     the shared `RecoveryPhase` / `RebindOutcome` / `RebindError` types.
     `relay_recovered_terminal_text_to_placeholder`, `finish_recovered_turn_mailbox`,
     and `restore_inflight_turns` remain available through the same

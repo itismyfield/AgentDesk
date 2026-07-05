@@ -551,15 +551,15 @@
 | `services::discord::queued_placeholders_store` | `src/services/discord/queued_placeholders_store.rs` | 251 | 251 | 0 |  |
 | `services::discord::reaction_cleanup` | `src/services/discord/reaction_cleanup.rs` | 49 | 24 | 25 |  |
 | `services::discord::reaction_lifecycle` | `src/services/discord/reaction_lifecycle.rs` | 363 | 321 | 42 |  |
-| `services::discord::recovery_engine` | `src/services/discord/recovery_engine.rs` | 472 | 416 | 56 |  |
+| `services::discord::recovery_engine` | `src/services/discord/recovery_engine.rs` | 473 | 417 | 56 |  |
 | `services::discord::recovery_engine::analytics_transcript` | `src/services/discord/recovery_engine/analytics_transcript.rs` | 110 | 110 | 0 |  |
-| `services::discord::recovery_engine::completion_delivery` | `src/services/discord/recovery_engine/completion_delivery.rs` | 804 | 302 | 502 |  |
+| `services::discord::recovery_engine::completion_delivery` | `src/services/discord/recovery_engine/completion_delivery.rs` | 802 | 300 | 502 |  |
 | `services::discord::recovery_engine::jsonl_extract` | `src/services/discord/recovery_engine/jsonl_extract.rs` | 137 | 137 | 0 |  |
 | `services::discord::recovery_engine::manual_rebind` | `src/services/discord/recovery_engine/manual_rebind.rs` | 1725 | 889 | 836 |  |
 | `services::discord::recovery_engine::output_path_detect` | `src/services/discord/recovery_engine/output_path_detect.rs` | 177 | 177 | 0 |  |
 | `services::discord::recovery_engine::phase_policy` | `src/services/discord/recovery_engine/phase_policy.rs` | 210 | 138 | 72 |  |
 | `services::discord::recovery_engine::rebind_runtime` | `src/services/discord/recovery_engine/rebind_runtime.rs` | 1801 | 888 | 913 |  |
-| `services::discord::recovery_engine::restore_inflight` | `src/services/discord/recovery_engine/restore_inflight.rs` | 2335 | 2335 | 0 | giant-file |
+| `services::discord::recovery_engine::restore_inflight` | `src/services/discord/recovery_engine/restore_inflight.rs` | 2334 | 2334 | 0 | giant-file |
 | `services::discord::recovery_engine::routing_orphan` | `src/services/discord/recovery_engine/routing_orphan.rs` | 218 | 146 | 72 |  |
 | `services::discord::recovery_engine::runtime` | `src/services/discord/recovery_engine/runtime.rs` | 341 | 137 | 204 |  |
 | `services::discord::recovery_engine::state_extractors` | `src/services/discord/recovery_engine/state_extractors.rs` | 220 | 220 | 0 |  |
