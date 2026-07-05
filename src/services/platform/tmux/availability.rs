@@ -39,20 +39,22 @@ fn mark_cache_available_from_live_session(cache: &mut TmuxAvailabilityCache, now
     cache.last_probe_missing = false;
 }
 
+fn classify_probe_spawn_error(error: &std::io::Error) -> TmuxAvailabilityProbe {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return TmuxAvailabilityProbe::Missing;
+    }
+    tracing::warn!(
+        error = %error,
+        "tmux availability probe failed to spawn; preserving cached availability"
+    );
+    TmuxAvailabilityProbe::Unknown
+}
+
 fn probe_tmux_availability() -> TmuxAvailabilityProbe {
     match tmux_command().arg("-V").output() {
         Ok(output) if output.status.success() => TmuxAvailabilityProbe::Available,
         Ok(_) => TmuxAvailabilityProbe::Unavailable,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            TmuxAvailabilityProbe::Missing
-        }
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                "tmux availability probe failed to spawn; preserving cached availability"
-            );
-            TmuxAvailabilityProbe::Unknown
-        }
+        Err(error) => classify_probe_spawn_error(&error),
     }
 }
 
@@ -192,6 +194,25 @@ mod availability_cache_tests {
         assert_eq!(cache.cached, Some(false));
         assert_eq!(cache.consecutive_failures, 0);
         assert!(cache.last_probe_missing);
+    }
+
+    #[test]
+    fn spawn_error_classifier_maps_only_not_found_to_missing() {
+        assert_eq!(
+            classify_probe_spawn_error(&std::io::Error::from(std::io::ErrorKind::NotFound)),
+            TmuxAvailabilityProbe::Missing
+        );
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::WouldBlock,
+            std::io::ErrorKind::OutOfMemory,
+        ] {
+            assert_eq!(
+                classify_probe_spawn_error(&std::io::Error::from(kind)),
+                TmuxAvailabilityProbe::Unknown,
+                "transient spawn error {kind:?} must stay threshold-gated Unknown"
+            );
+        }
     }
 
     #[test]
