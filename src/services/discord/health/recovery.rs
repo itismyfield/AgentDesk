@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use poise::serenity_prelude as serenity;
 use serde::Serialize;
@@ -983,6 +984,7 @@ pub async fn clear_idle_tmux_stale_turn(
     tmux_session: &str,
     stop_source: &'static str,
 ) -> Option<IdleTmuxStaleTurnRepairResult> {
+    let repair_started_at = Instant::now();
     let provider = ProviderKind::from_str(provider_name)?;
     let inflight_clear_state =
         load_idle_tmux_stale_turn_inflight_clear_candidate(&provider, channel_id)?;
@@ -1040,11 +1042,12 @@ pub async fn clear_idle_tmux_stale_turn(
         .map(|pin| pin.identity.user_msg_id)
         .unwrap_or(0);
     let finish = if expected_user_msg_id != 0 {
-        discord::mailbox_finish_turn_if_matches(
+        discord::mailbox_finish_turn_if_matches_started_before(
             &shared,
             &provider,
             channel_id,
             MessageId::new(expected_user_msg_id),
+            repair_started_at,
         )
         .await
     } else {
@@ -4488,6 +4491,86 @@ mod stall_watchdog_auto_heal_tests {
             crate::services::discord::inflight::load_inflight_state(&provider, channel.get())
                 .expect("fresh row must survive guarded finish mismatch");
         assert_eq!(persisted.user_msg_id, fresh_msg.get());
+        assert_eq!(persisted.session_id.as_deref(), Some("fresh-session"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn idle_tmux_stale_turn_guarded_finish_preserves_new_same_id_mailbox_claim() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tempdir = tempfile::tempdir().expect("runtime root tempdir");
+        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+        let provider = ProviderKind::Claude;
+        let registry = HealthRegistry::new();
+        let shared = super::super::super::make_shared_data_for_tests();
+        registry
+            .register(provider.as_str().to_string(), shared.clone())
+            .await;
+        let channel = ChannelId::new(4_111_404);
+        let user_msg = MessageId::new(4_111_504);
+        let tmux = "AgentDesk-codex-4111-health-guarded-finish-same-id";
+        let output_path = tempdir.path().join("health-guarded-finish-same-id.jsonl");
+        std::fs::write(&output_path, result_line("")).expect("write ready output fixture");
+        seed_idle_inflight(
+            &provider,
+            channel,
+            user_msg.get(),
+            tmux,
+            &output_path,
+            0,
+            "stale-session",
+        );
+
+        let fresh_token = Arc::new(std::sync::Mutex::new(None::<Arc<CancelToken>>));
+        let hook_token = fresh_token.clone();
+        let hook_shared = shared.clone();
+        let hook_provider = provider.clone();
+        let hook_output = output_path.clone();
+        let _hook = set_idle_tmux_post_clear_hook(Arc::new(move || {
+            let shared = hook_shared.clone();
+            let provider = hook_provider.clone();
+            let output_path = hook_output.clone();
+            let token_slot = hook_token.clone();
+            Box::pin(async move {
+                let token = seed_active_mailbox_and_session(&shared, channel, user_msg).await;
+                seed_idle_inflight(
+                    &provider,
+                    channel,
+                    user_msg.get(),
+                    tmux,
+                    &output_path,
+                    0,
+                    "fresh-session",
+                );
+                *token_slot
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner()) = Some(token);
+            })
+        }));
+
+        let result = super::clear_idle_tmux_stale_turn(
+            &registry,
+            provider.as_str(),
+            channel.get(),
+            tmux,
+            "health_guarded_finish_same_id_test",
+        )
+        .await
+        .expect("stale inflight clear should complete");
+
+        assert!(!result.had_active_turn);
+        assert!(!result.runtime_session_cleared);
+        let fresh_token = fresh_token
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+            .expect("fresh same-id turn token should be seeded in the post-clear gap");
+        assert_mailbox_and_session_preserved(&shared, channel, user_msg, &fresh_token).await;
+        let persisted =
+            crate::services::discord::inflight::load_inflight_state(&provider, channel.get())
+                .expect("fresh same-id row must survive guarded finish");
+        assert_eq!(persisted.user_msg_id, user_msg.get());
         assert_eq!(persisted.session_id.as_deref(), Some("fresh-session"));
     }
 

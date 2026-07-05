@@ -3765,6 +3765,29 @@ async fn mailbox_finish_turn_if_matches(
     result
 }
 
+async fn mailbox_finish_turn_if_matches_started_before(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    expected_user_message_id: serenity::model::id::MessageId,
+    active_started_before: std::time::Instant,
+) -> FinishTurnResult {
+    let result = shared
+        .mailbox(channel_id)
+        .finish_turn_if_matches_started_before(
+            expected_user_message_id,
+            active_started_before,
+            queue_persistence_context(shared, provider, channel_id),
+        )
+        .await;
+    apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
+    if result.removed_token.is_some() {
+        shared.mailboxes.recovery_done(channel_id).mark_done();
+    }
+    turn_completion_events::publish_mailbox_release_completion_event(shared, channel_id, &result);
+    result
+}
+
 async fn mailbox_finish_cancelled_turn(
     shared: &SharedData,
     channel_id: ChannelId,
