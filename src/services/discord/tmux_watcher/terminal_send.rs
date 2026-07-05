@@ -590,6 +590,9 @@ mod tests {
     /// `record_long_chunk_terminal_delivery_off_is_noop_3610c`.
     #[test]
     fn watcher_long_chunk_delivery_off_is_noop_3610d() {
+        let temp = tempfile::TempDir::new().expect("temp runtime root");
+        let _root_guard = crate::config::set_agentdesk_root_for_test(temp.path());
+        let _shadow = dr::shadow_test_seam::force(false);
         let shared = crate::services::discord::make_shared_data_for_tests();
         let channel = ChannelId::new(556_677_889);
         // Does not panic; OFF → writes nothing.
@@ -611,6 +614,9 @@ mod tests {
     /// input to the watcher wrapper (range-only record when the flag is ON).
     #[test]
     fn watcher_long_chunk_delivery_none_anchor_is_noop_3610d() {
+        let temp = tempfile::TempDir::new().expect("temp runtime root");
+        let _root_guard = crate::config::set_agentdesk_root_for_test(temp.path());
+        let _shadow = dr::shadow_test_seam::force(false);
         let shared = crate::services::discord::make_shared_data_for_tests();
         let channel = ChannelId::new(112_233_445);
         record_watcher_long_chunk_terminal_delivery(
