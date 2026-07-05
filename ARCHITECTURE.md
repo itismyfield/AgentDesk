@@ -940,6 +940,7 @@ src/
 │   ├── tui_turn_state/
 │   │   └── completion_scan.rs
 │   ├── turn_orchestrator/
+│   │   ├── active_source_dedup.rs
 │   │   ├── dispatch_reservation.rs
 │   │   ├── pending_queue_persistence.rs
 │   │   └── registry_purge.rs

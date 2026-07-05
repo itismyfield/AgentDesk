@@ -2701,10 +2701,15 @@ async fn mailbox_try_start_turn(
     request_owner: UserId,
     user_message_id: MessageId,
 ) -> bool {
-    shared
-        .mailbox(channel_id)
-        .try_start_turn(cancel_token, request_owner, user_message_id)
-        .await
+    mailbox_try_start_turn_kinded(
+        shared,
+        channel_id,
+        cancel_token,
+        request_owner,
+        user_message_id,
+        ActiveTurnKind::UserOrAgent,
+    )
+    .await
 }
 
 /// #3167 — kinded variant of [`mailbox_try_start_turn`]. The monitor auto-turn
@@ -2719,10 +2724,15 @@ async fn mailbox_try_start_turn_kinded(
     user_message_id: MessageId,
     turn_kind: ActiveTurnKind,
 ) -> bool {
-    shared
-        .mailbox(channel_id)
-        .try_start_turn_kinded(cancel_token, request_owner, user_message_id, turn_kind)
-        .await
+    queue_io::mailbox_try_start_turn_kinded_with_feedback(
+        shared,
+        channel_id,
+        cancel_token,
+        request_owner,
+        user_message_id,
+        turn_kind,
+    )
+    .await
 }
 
 // #3034: dormant production restore path (wraps `mailbox.restore_active_turn`,

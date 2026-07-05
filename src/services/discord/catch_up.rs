@@ -23,8 +23,10 @@ mod classification;
 mod phase2;
 
 use classification::{CatchUpClassification, CatchUpScanStats};
+#[cfg(test)]
+use phase2::catch_up_enqueue_accepted;
 use phase2::{
-    Phase2EnqueueCommit, Phase2RecoveryStats, advance_phase2_checkpoint, catch_up_enqueue_accepted,
+    Phase2EnqueueCommit, Phase2RecoveryStats, advance_phase2_checkpoint,
     catch_up_remaining_queue_capacity, classify_phase2_enqueue_commit,
     log_catch_up_enqueue_not_accepted, phase2_retry_after_checkpoint,
 };
@@ -666,20 +668,28 @@ pub(in crate::services::discord) async fn catch_up_missed_messages_inner(
                 },
             )
             .await;
-            if !catch_up_enqueue_accepted(&enqueue) {
-                log_catch_up_enqueue_not_accepted("phase1", channel_id, msg.id, &enqueue);
-                continue;
-            }
-
-            stats.record(CatchUpClassification::Recover);
-            reaction_cleanup::cleanup_recovered_catch_up_hourglass(
-                http, shared, channel_id, msg.id,
-            )
-            .await;
-            // Track the newest actually-recovered message for checkpoint
             let mid = msg.id.get();
-            if max_recovered_id.map(|m| mid > m).unwrap_or(true) {
-                max_recovered_id = Some(mid);
+            match classify_phase2_enqueue_commit(&enqueue) {
+                Phase2EnqueueCommit::Accepted => {
+                    stats.record(CatchUpClassification::Recover);
+                    reaction_cleanup::cleanup_recovered_catch_up_hourglass(
+                        http, shared, channel_id, msg.id,
+                    )
+                    .await;
+                    if max_recovered_id.map(|m| mid > m).unwrap_or(true) {
+                        max_recovered_id = Some(mid);
+                    }
+                }
+                Phase2EnqueueCommit::Duplicate => {
+                    stats.record(CatchUpClassification::Duplicate);
+                    if max_recovered_id.map(|m| mid > m).unwrap_or(true) {
+                        max_recovered_id = Some(mid);
+                    }
+                }
+                Phase2EnqueueCommit::Deferred => {
+                    log_catch_up_enqueue_not_accepted("phase1", channel_id, msg.id, &enqueue);
+                    continue;
+                }
             }
         }
 
