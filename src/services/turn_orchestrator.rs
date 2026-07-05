@@ -200,6 +200,14 @@ fn ensure_source_message_ids(intervention: &mut Intervention) {
     }
 }
 
+fn intervention_source_matches_active(
+    intervention: &Intervention,
+    active_user_message_id: Option<MessageId>,
+) -> bool {
+    active_user_message_id
+        .is_some_and(|active_id| intervention.source_message_ids.contains(&active_id))
+}
+
 fn push_unique_message_ids(
     existing: &mut Vec<MessageId>,
     incoming: impl IntoIterator<Item = MessageId>,
@@ -238,9 +246,20 @@ fn should_merge_intervention(last: &Intervention, incoming: &Intervention) -> bo
 pub(crate) fn enqueue_intervention(
     queue: &mut Vec<Intervention>,
     mut intervention: Intervention,
+    active_user_message_id: Option<MessageId>,
 ) -> EnqueueInterventionResult {
     let mut queue_exit_events = prune_interventions(queue);
     ensure_source_message_ids(&mut intervention);
+
+    if intervention_source_matches_active(&intervention, active_user_message_id) {
+        return EnqueueInterventionResult {
+            enqueued: false,
+            merged: false,
+            refusal_reason: Some(EnqueueRefusalReason::AlreadyActiveTurn),
+            queue_exit_events,
+            persistence_error: None,
+        };
+    }
 
     if queue
         .iter()
@@ -535,6 +554,10 @@ pub(crate) struct RestartDrainAllResult {
 /// path A / B / C classification instead of code-only inference.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EnqueueRefusalReason {
+    /// The incoming source message is already the mailbox's active user turn.
+    /// Re-enqueuing it would let the deferred drain dispatch the same user input
+    /// again after the active turn finishes.
+    AlreadyActiveTurn,
     /// The incoming `message_id` is already present in some queued entry's
     /// `source_message_ids` — duplicate insert from a re-entry or rehydrated
     /// queue.
@@ -554,6 +577,7 @@ pub(crate) enum EnqueueRefusalReason {
 impl EnqueueRefusalReason {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
+            EnqueueRefusalReason::AlreadyActiveTurn => "already_active_turn",
             EnqueueRefusalReason::SourceIdAlreadyQueued => "source_id_already_queued",
             EnqueueRefusalReason::LastItemDedup => "last_item_dedup",
             EnqueueRefusalReason::ActorUnreachable => "actor_unreachable",
@@ -2445,11 +2469,25 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     let _ = reply.send(());
                 }
                 ChannelMailboxMsg::Enqueue {
-                    intervention,
+                    mut intervention,
                     persistence,
                     reply,
                 } => {
                     state.last_persistence = Some(persistence.clone());
+                    ensure_source_message_ids(&mut intervention);
+                    if intervention_source_matches_active(
+                        &intervention,
+                        state.active_user_message_id,
+                    ) {
+                        let _ = reply.send(EnqueueInterventionResult {
+                            enqueued: false,
+                            merged: false,
+                            refusal_reason: Some(EnqueueRefusalReason::AlreadyActiveTurn),
+                            queue_exit_events: Vec::new(),
+                            persistence_error: None,
+                        });
+                        continue;
+                    }
                     let hydrate_result = hydrate_pending_queue_from_disk_if_present(
                         &mut state,
                         channel_id,
@@ -2466,8 +2504,11 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         continue;
                     }
                     let previous_queue = state.intervention_queue.clone();
-                    let mut enqueue_result =
-                        enqueue_intervention(&mut state.intervention_queue, intervention);
+                    let mut enqueue_result = enqueue_intervention(
+                        &mut state.intervention_queue,
+                        intervention,
+                        state.active_user_message_id,
+                    );
                     if enqueue_result.enqueued
                         && let Err(error) = persist_queue_or_restore(
                             &mut state,
@@ -4632,7 +4673,7 @@ mod enqueue_refusal_reason_tests {
         let now = Instant::now();
         let mut queue = vec![intervention(1, "hello", now)];
         let incoming = intervention(1, "hello again", now);
-        let result = enqueue_intervention(&mut queue, incoming);
+        let result = enqueue_intervention(&mut queue, incoming, None);
         assert!(!result.enqueued);
         assert_eq!(
             result.refusal_reason,
@@ -4645,12 +4686,60 @@ mod enqueue_refusal_reason_tests {
         let now = Instant::now();
         let mut queue = vec![intervention(1, "same text", now)];
         let incoming = intervention(2, "same text", now);
-        let result = enqueue_intervention(&mut queue, incoming);
+        let result = enqueue_intervention(&mut queue, incoming, None);
         assert!(!result.enqueued);
         assert_eq!(
             result.refusal_reason,
             Some(EnqueueRefusalReason::LastItemDedup),
         );
+    }
+
+    #[test]
+    fn active_turn_source_id_is_tagged() {
+        let now = Instant::now();
+        let mut queue = Vec::new();
+        let incoming = intervention(7, "already running", now);
+
+        let result = enqueue_intervention(&mut queue, incoming, Some(MessageId::new(7)));
+
+        assert!(!result.enqueued);
+        assert_eq!(
+            result.refusal_reason,
+            Some(EnqueueRefusalReason::AlreadyActiveTurn),
+        );
+        assert!(queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mailbox_enqueue_refuses_active_turn_source_id() {
+        let registry = ChannelMailboxRegistry::default();
+        let channel_id = ChannelId::new(4_107_001);
+        let handle = registry.handle(channel_id);
+        let active_msg_id = MessageId::new(4_107_101);
+
+        assert!(
+            handle
+                .try_start_turn(Arc::new(CancelToken::new()), UserId::new(1), active_msg_id,)
+                .await
+        );
+
+        let result = handle
+            .enqueue(
+                intervention(active_msg_id.get(), "already running", Instant::now()),
+                QueuePersistenceContext::new(
+                    &ProviderKind::Claude,
+                    "already-active-turn-test",
+                    None,
+                ),
+            )
+            .await;
+
+        assert!(!result.enqueued);
+        assert_eq!(
+            result.refusal_reason,
+            Some(EnqueueRefusalReason::AlreadyActiveTurn),
+        );
+        assert!(handle.snapshot().await.intervention_queue.is_empty());
     }
 
     #[test]
@@ -4664,7 +4753,7 @@ mod enqueue_refusal_reason_tests {
             vec!["[File uploaded] two.png → /tmp/two.png (2 bytes)".to_string()];
         let mut queue = vec![first];
 
-        let result = enqueue_intervention(&mut queue, second);
+        let result = enqueue_intervention(&mut queue, second, None);
 
         assert!(result.enqueued);
         assert_eq!(result.refusal_reason, None);
@@ -4676,7 +4765,7 @@ mod enqueue_refusal_reason_tests {
         let now = Instant::now();
         let mut queue: Vec<Intervention> = Vec::new();
         let incoming = intervention(1, "first", now);
-        let result = enqueue_intervention(&mut queue, incoming);
+        let result = enqueue_intervention(&mut queue, incoming, None);
         assert!(result.enqueued);
         assert_eq!(result.refusal_reason, None);
     }

@@ -108,5 +108,5 @@
 | `src/services/routines/store.rs` | 3684 |
 | `src/services/settings.rs` | 1114 |
 | `src/services/tui_prompt_dedupe.rs` | 1824 |
-| `src/services/turn_orchestrator.rs` | 3045 |
+| `src/services/turn_orchestrator.rs` | 3086 |
 | `src/voice/receiver.rs` | 1108 |

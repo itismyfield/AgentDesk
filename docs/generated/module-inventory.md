@@ -409,9 +409,9 @@
 | `services::discord::agent_handoff` | `src/services/discord/agent_handoff.rs` | 928 | 574 | 354 |  |
 | `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 1083 | 982 | 101 |  |
 | `services::discord::answer_flush_barrier` | `src/services/discord/answer_flush_barrier.rs` | 511 | 209 | 302 |  |
-| `services::discord::catch_up` | `src/services/discord/catch_up.rs` | 1370 | 997 | 373 |  |
+| `services::discord::catch_up` | `src/services/discord/catch_up.rs` | 1381 | 997 | 384 |  |
 | `services::discord::catch_up::classification` | `src/services/discord/catch_up/classification.rs` | 48 | 48 | 0 |  |
-| `services::discord::catch_up::phase2` | `src/services/discord/catch_up/phase2.rs` | 87 | 87 | 0 |  |
+| `services::discord::catch_up::phase2` | `src/services/discord/catch_up/phase2.rs` | 88 | 88 | 0 |  |
 | `services::discord::commands` | `src/services/discord/commands/mod.rs` | 120 | 120 | 0 |  |
 | `services::discord::commands::command_policy` | `src/services/discord/commands/command_policy.rs` | 221 | 209 | 12 |  |
 | `services::discord::commands::config` | `src/services/discord/commands/config.rs` | 1224 | 956 | 268 |  |
@@ -440,7 +440,7 @@
 | `services::discord::commands::session` | `src/services/discord/commands/session.rs` | 230 | 230 | 0 |  |
 | `services::discord::commands::sidecar` | `src/services/discord/commands/sidecar.rs` | 41 | 41 | 0 |  |
 | `services::discord::commands::skill` | `src/services/discord/commands/skill.rs` | 395 | 395 | 0 |  |
-| `services::discord::commands::steer` | `src/services/discord/commands/steer.rs` | 146 | 146 | 0 |  |
+| `services::discord::commands::steer` | `src/services/discord/commands/steer.rs` | 147 | 147 | 0 |  |
 | `services::discord::commands::text_commands` | `src/services/discord/commands/text_commands.rs` | 1476 | 1476 | 0 | giant-file |
 | `services::discord::commands::tui_passthrough` | `src/services/discord/commands/tui_passthrough.rs` | 412 | 357 | 55 |  |
 | `services::discord::commands::voice` | `src/services/discord/commands/voice.rs` | 1025 | 967 | 58 |  |
@@ -584,7 +584,7 @@
 | `services::discord::router::authorization` | `src/services/discord/router/authorization.rs` | 48 | 48 | 0 |  |
 | `services::discord::router::dispatch_trigger` | `src/services/discord/router/dispatch_trigger.rs` | 203 | 143 | 60 |  |
 | `services::discord::router::intake_gate` | `src/services/discord/router/intake_gate.rs` | 1645 | 1607 | 38 | giant-file |
-| `services::discord::router::intake_gate::busy_duplicate_notice` | `src/services/discord/router/intake_gate/busy_duplicate_notice.rs` | 48 | 23 | 25 |  |
+| `services::discord::router::intake_gate::busy_duplicate_notice` | `src/services/discord/router/intake_gate/busy_duplicate_notice.rs` | 55 | 27 | 28 |  |
 | `services::discord::router::intake_gate::component_events` | `src/services/discord/router/intake_gate/component_events.rs` | 41 | 41 | 0 |  |
 | `services::discord::router::intake_gate::gate` | `src/services/discord/router/intake_gate/gate.rs` | 79 | 79 | 0 |  |
 | `services::discord::router::intake_gate::node_override_routing` | `src/services/discord/router/intake_gate/node_override_routing.rs` | 62 | 62 | 0 |  |
@@ -603,7 +603,7 @@
 | `services::discord::router::message_handler::intake_turn::voice_intake` | `src/services/discord/router/message_handler/intake_turn/voice_intake.rs` | 155 | 155 | 0 |  |
 | `services::discord::router::message_handler::latency_spans` | `src/services/discord/router/message_handler/latency_spans.rs` | 230 | 158 | 72 |  |
 | `services::discord::router::message_handler::provider_isolation` | `src/services/discord/router/message_handler/provider_isolation.rs` | 505 | 505 | 0 |  |
-| `services::discord::router::message_handler::tui_followup` | `src/services/discord/router/message_handler/tui_followup.rs` | 770 | 744 | 26 |  |
+| `services::discord::router::message_handler::tui_followup` | `src/services/discord/router/message_handler/tui_followup.rs` | 775 | 749 | 26 |  |
 | `services::discord::router::message_handler::turn_lifecycle` | `src/services/discord/router/message_handler/turn_lifecycle.rs` | 183 | 183 | 0 |  |
 | `services::discord::router::message_handler::voice_announcement_route` | `src/services/discord/router/message_handler/voice_announcement_route.rs` | 444 | 106 | 338 |  |
 | `services::discord::router::message_handler::voice_announcement_scope` | `src/services/discord/router/message_handler/voice_announcement_scope.rs` | 125 | 73 | 52 |  |
@@ -652,7 +652,7 @@
 | `services::discord::standby_relay` | `src/services/discord/standby_relay.rs` | 1623 | 890 | 733 |  |
 | `services::discord::startup_reclaim` | `src/services/discord/startup_reclaim.rs` | 541 | 324 | 217 |  |
 | `services::discord::status_panel_orphan_store` | `src/services/discord/status_panel_orphan_store.rs` | 700 | 700 | 0 |  |
-| `services::discord::steering` | `src/services/discord/steering.rs` | 444 | 329 | 115 |  |
+| `services::discord::steering` | `src/services/discord/steering.rs` | 445 | 329 | 116 |  |
 | `services::discord::streaming_finalizer` | `src/services/discord/streaming_finalizer.rs` | 250 | 186 | 64 |  |
 | `services::discord::subagent_notification_card` | `src/services/discord/subagent_notification_card.rs` | 363 | 264 | 99 |  |
 | `services::discord::task_supervisor` | `src/services/discord/task_supervisor.rs` | 105 | 83 | 22 |  |
@@ -928,7 +928,7 @@
 | `services::tui_turn_state::completion_scan` | `src/services/tui_turn_state/completion_scan.rs` | 360 | 360 | 0 |  |
 | `services::turn_cancel_finalizer` | `src/services/turn_cancel_finalizer.rs` | 479 | 150 | 329 |  |
 | `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 564 | 436 | 128 |  |
-| `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 6565 | 3045 | 3520 | giant-file |
+| `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 6654 | 3086 | 3568 | giant-file |
 | `services::turn_orchestrator::dispatch_reservation` | `src/services/turn_orchestrator/dispatch_reservation.rs` | 431 | 431 | 0 |  |
 | `services::turn_orchestrator::pending_queue_persistence` | `src/services/turn_orchestrator/pending_queue_persistence.rs` | 669 | 669 | 0 |  |
 | `services::turn_orchestrator::registry_purge` | `src/services/turn_orchestrator/registry_purge.rs` | 818 | 293 | 525 |  |

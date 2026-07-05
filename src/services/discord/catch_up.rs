@@ -1330,6 +1330,17 @@ mod catch_up_recovery_tests {
             classify_phase2_enqueue_commit(&duplicate),
             Phase2EnqueueCommit::Duplicate
         );
+
+        let already_active = super::super::MailboxEnqueueOutcome {
+            enqueued: false,
+            merged: false,
+            refusal_reason: Some(EnqueueRefusalReason::AlreadyActiveTurn),
+            persistence_error: None,
+        };
+        assert_eq!(
+            classify_phase2_enqueue_commit(&already_active),
+            Phase2EnqueueCommit::Duplicate
+        );
     }
 
     #[test]
