@@ -45,14 +45,24 @@ pub(super) fn should_preserve_live_reused_provider_session(
         && has_live_pane
 }
 
+/// Decide whether ProcessBackend demotion must be refused when tmux is not
+/// currently reported available. A live pane always wins over cached-missing
+/// state because it proves a tmux-owned conversation exists. A probe spawn
+/// failure under cached-missing, however, only corroborates that tmux is missing;
+/// treating it as new unknown state would strand genuinely tmux-less hosts on
+/// the tmux path forever.
+///
+/// Accepted residual risk: if the tmux binary is transiently absent while a live
+/// tmux server is still running within the 45s cache TTL window, this can allow
+/// ProcessBackend demotion and therefore a narrow double-resume risk.
 pub(super) fn should_refuse_process_backend_demotion(
     tmux_available: bool,
-    _tmux_missing: bool,
+    tmux_missing: bool,
     pane_liveness: PaneLiveness,
 ) -> bool {
-    // A recorded pane probe is stronger than the cached availability answer:
-    // Live proves tmux is usable, and ProbeError is unknown rather than dead.
-    !tmux_available && matches!(pane_liveness, PaneLiveness::Live | PaneLiveness::ProbeError)
+    !tmux_available
+        && (matches!(pane_liveness, PaneLiveness::Live)
+            || (!tmux_missing && matches!(pane_liveness, PaneLiveness::ProbeError)))
 }
 
 pub(super) fn process_backend_demotion_guard_liveness_from_cached_missing(

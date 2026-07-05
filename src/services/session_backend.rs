@@ -76,6 +76,15 @@ const MAX_STOPPED_PROCESS_SESSIONS: usize = 1024;
 
 impl ProcessSessionRegistry {
     fn insert(&mut self, session_name: String, handle: SessionHandle) {
+        self.insert_with_active_turns(session_name, handle, 0);
+    }
+
+    fn insert_with_active_turns(
+        &mut self,
+        session_name: String,
+        handle: SessionHandle,
+        active_turns: usize,
+    ) {
         self.remove_stopped_marker(&session_name);
         let identity = ProcessIdentity::capture(handle.pid());
         self.handles.insert(
@@ -83,7 +92,7 @@ impl ProcessSessionRegistry {
             ProcessSessionEntry {
                 handle,
                 identity,
-                active_turns: 0,
+                active_turns,
             },
         );
     }
@@ -314,6 +323,17 @@ pub fn mark_process_session_active_turn(
 
 pub fn insert_process_session(session_name: impl Into<String>, handle: SessionHandle) {
     process_sessions().insert(session_name.into(), handle);
+}
+
+pub fn insert_process_session_and_mark_active_turn(
+    session_name: impl Into<String>,
+    handle: SessionHandle,
+) -> ProcessSessionActiveTurnGuard {
+    let session_name = session_name.into();
+    let mut registry = process_sessions();
+    registry.insert_with_active_turns(session_name.clone(), handle, 1);
+    drop(registry);
+    ProcessSessionActiveTurnGuard { session_name }
 }
 
 pub fn remove_process_session(session_name: &str) -> Option<SessionHandle> {
@@ -656,6 +676,28 @@ mod process_registry_stop_tests {
             },
         );
         let active_turn = mark_process_session_active_turn(&session_name);
+
+        assert!(!terminate_process_session_before_tmux(&session_name));
+        assert!(alive.load(Ordering::Relaxed));
+        assert!(process_session_is_alive(&session_name));
+
+        drop(active_turn);
+        assert!(terminate_process_session_before_tmux(&session_name));
+        assert!(!alive.load(Ordering::Relaxed));
+        assert!(!process_session_is_alive(&session_name));
+    }
+
+    #[test]
+    fn issue_4134_insert_process_session_active_turn_skips_tmux_cleanup_until_guard_drop() {
+        let session_name = format!("process-tmux-insert-active-skip-{}", uuid::Uuid::new_v4());
+        let alive = Arc::new(AtomicBool::new(true));
+        let active_turn = insert_process_session_and_mark_active_turn(
+            session_name.clone(),
+            SessionHandle::TestProcess {
+                pid: 424_250,
+                alive: alive.clone(),
+            },
+        );
 
         assert!(!terminate_process_session_before_tmux(&session_name));
         assert!(alive.load(Ordering::Relaxed));

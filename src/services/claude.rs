@@ -24,12 +24,12 @@ use crate::services::provider::{
 use crate::services::provider_hosting::ProviderSessionDriver;
 use crate::services::remote::RemoteProfile;
 use crate::services::session_backend::{
-    ReadHarvestStats, StreamLineState, emit_status_events_from_stream_json, insert_process_session,
-    mark_process_session_active_turn, observe_stream_context, parse_assistant_extra_tool_uses,
-    parse_stream_message_with_state, process_session_available_for_followup, process_session_pid,
-    process_session_probe, read_output_file_until_result,
-    read_output_file_until_result_with_harvest, remove_process_session, send_process_session_input,
-    terminate_process_handle,
+    ReadHarvestStats, StreamLineState, emit_status_events_from_stream_json,
+    insert_process_session_and_mark_active_turn, mark_process_session_active_turn,
+    observe_stream_context, parse_assistant_extra_tool_uses, parse_stream_message_with_state,
+    process_session_available_for_followup, process_session_pid, process_session_probe,
+    read_output_file_until_result, read_output_file_until_result_with_harvest,
+    remove_process_session, send_process_session_input, terminate_process_handle,
 };
 #[cfg(unix)]
 mod backend_routing;
@@ -3106,11 +3106,10 @@ pub(crate) fn execute_streaming_local_process(
         *token.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle.pid());
     }
 
-    // Store handle for follow-up messages
-    insert_process_session(session_name.to_string(), handle);
+    // Store handle for follow-up messages and protect it from tmux-takeover cleanup.
+    let active_turn = insert_process_session_and_mark_active_turn(session_name.to_string(), handle);
 
     // Poll output file until result
-    let active_turn = mark_process_session_active_turn(session_name);
     let read_result = read_output_file_until_result(
         &output_path,
         0,
@@ -3300,41 +3299,35 @@ mod local_tmux_lifecycle_tests {
     }
 
     #[test]
-    fn issue_4113_refuses_process_demotion_when_live_tmux_session_exists() {
-        assert!(should_refuse_process_backend_demotion(
-            false,
-            false,
-            crate::services::platform::tmux::PaneLiveness::Live,
-        ));
+    fn issue_4113_process_demotion_guard_truth_table_pins_cached_missing_cells() {
+        use crate::services::platform::tmux::PaneLiveness;
+
+        let cases = [
+            (PaneLiveness::Live, false, true),
+            (PaneLiveness::Live, true, true),
+            (PaneLiveness::DeadOrAbsent, false, false),
+            (PaneLiveness::DeadOrAbsent, true, false),
+            (PaneLiveness::ProbeError, false, true),
+            (PaneLiveness::ProbeError, true, false),
+        ];
+
+        for (pane_liveness, tmux_missing, expected_refuse) in cases {
+            assert_eq!(
+                should_refuse_process_backend_demotion(false, tmux_missing, pane_liveness),
+                expected_refuse,
+                "pane_liveness={pane_liveness:?}, tmux_missing={tmux_missing}"
+            );
+        }
 
         assert!(!should_refuse_process_backend_demotion(
             true,
             false,
-            crate::services::platform::tmux::PaneLiveness::Live,
-        ));
-        assert!(should_refuse_process_backend_demotion(
-            false,
-            true,
-            crate::services::platform::tmux::PaneLiveness::Live,
-        ));
-        assert!(!should_refuse_process_backend_demotion(
-            false,
-            false,
-            crate::services::platform::tmux::PaneLiveness::DeadOrAbsent,
+            PaneLiveness::Live,
         ));
     }
 
     #[test]
-    fn issue_4113_probe_error_refuses_process_backend_demotion() {
-        assert!(should_refuse_process_backend_demotion(
-            false,
-            false,
-            crate::services::platform::tmux::PaneLiveness::ProbeError,
-        ));
-    }
-
-    #[test]
-    fn issue_4113_cached_missing_with_recorded_session_probe_error_refuses_demotion() {
+    fn issue_4113_cached_missing_probe_error_allows_process_fallback() {
         let (tmux_missing, pane_liveness) =
             backend_routing::process_backend_demotion_guard_liveness_from_cached_missing(
                 true,
@@ -3347,7 +3340,7 @@ mod local_tmux_lifecycle_tests {
             pane_liveness,
             crate::services::platform::tmux::PaneLiveness::ProbeError
         );
-        assert!(should_refuse_process_backend_demotion(
+        assert!(!should_refuse_process_backend_demotion(
             false,
             tmux_missing,
             pane_liveness,
