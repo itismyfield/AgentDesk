@@ -717,17 +717,20 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         } else {
             false
         };
-        let post_terminal_payload_allows_external_relay =
-            if turn_result_relayed && post_terminal_inflight_missing {
+        let post_terminal_payload =
+            (turn_result_relayed && post_terminal_inflight_missing).then(|| {
                 let mut post_terminal_payload = String::with_capacity(all_data.len() + data.len());
                 post_terminal_payload.push_str(&all_data);
                 post_terminal_payload.push_str(&String::from_utf8_lossy(&data));
-                post_terminal_jsonl_payload_contains_init_without_user_event(
-                    post_terminal_payload.as_bytes(),
-                )
-            } else {
-                false
-            };
+                post_terminal_payload
+            });
+        let post_terminal_payload_allows_external_relay =
+            post_terminal_payload.as_deref().is_some_and(|payload| {
+                post_terminal_jsonl_payload_contains_init_without_user_event(payload.as_bytes())
+            });
+        let post_terminal_payload_contains_assistant_event = post_terminal_payload
+            .as_deref()
+            .is_some_and(|payload| watcher_batch_contains_assistant_event(payload.as_bytes()));
         // #3107: lazy pane-busy probe — capture the pane only when the cheap
         // (terminal + no-inflight) prefix already holds (keeps `tmux capture-pane` off the hot path).
         let post_terminal_pane_actively_streaming = turn_result_relayed
@@ -779,7 +782,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 post_terminal_inflight_missing,
                 ssh_direct_prompt_pending,
                 external_input_lease_present,
-                watcher_batch_contains_assistant_event(&data),
+                post_terminal_payload_contains_assistant_event,
                 post_terminal_pane_actively_streaming,
                 pending_synthetic_start_present,
             ) && !post_terminal_payload_allows_external_relay;
@@ -821,7 +824,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 &watcher_provider,
                 channel_id,
                 &tmux_session_name,
-                current_offset,
+                suppressed_terminal_confirmed_end(current_offset, &all_data),
                 "src/services/discord/tmux.rs:post_terminal_no_inflight_suppressed_output",
             );
             // #3053: suppressing post-terminal output is NOT idleness — the
@@ -4156,7 +4159,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     &watcher_provider,
                     channel_id,
                     &tmux_session_name,
-                    current_offset,
+                    suppressed_terminal_confirmed_end(current_offset, &all_data),
                     "src/services/discord/tmux.rs:silent_turn_suppressed_terminal_output",
                 );
             }
@@ -4226,7 +4229,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     &watcher_provider,
                     channel_id,
                     &tmux_session_name,
-                    current_offset,
+                    suppressed_terminal_confirmed_end(current_offset, &all_data),
                     "src/services/discord/tmux.rs:cancel_tombstone_suppressed_terminal_output",
                 );
             }
