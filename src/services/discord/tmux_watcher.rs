@@ -4156,7 +4156,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     &watcher_provider,
                     channel_id,
                     &tmux_session_name,
-                    current_offset,
+                    terminal_event_consumed_offset(current_offset, &all_data),
                     "src/services/discord/tmux.rs:silent_turn_suppressed_terminal_output",
                 );
             }
@@ -4226,7 +4226,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     &watcher_provider,
                     channel_id,
                     &tmux_session_name,
-                    current_offset,
+                    terminal_event_consumed_offset(current_offset, &all_data),
                     "src/services/discord/tmux.rs:cancel_tombstone_suppressed_terminal_output",
                 );
             }

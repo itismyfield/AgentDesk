@@ -1581,6 +1581,62 @@ fn split_decoded_chunk_isolates_terminal_turn_from_trailing_tail() {
 }
 
 #[test]
+fn silent_turn_suppression_watermark_stops_before_co_read_followup_turn() {
+    let silent_turn = "{\"type\":\"result\",\"result\":\"silent A done\"}\n";
+    let followup_turn = concat!(
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"visible B\"}]}}\n",
+        "{\"type\":\"result\",\"result\":\"visible B\"}\n",
+    );
+    let batch_start = 10_000u64;
+    let current_offset = batch_start + (silent_turn.len() + followup_turn.len()) as u64;
+    let followup_start = batch_start + silent_turn.len() as u64;
+
+    let confirmed_end = terminal_event_consumed_offset(current_offset, followup_turn);
+    assert_eq!(
+        confirmed_end, followup_start,
+        "silent-turn suppression must consume only turn A and leave turn B's tail uncommitted"
+    );
+    assert_eq!(
+        watcher_terminal_resend_action(confirmed_end, followup_start, current_offset),
+        WatcherTerminalResendAction::SendFull,
+        "turn B remains uncovered and is sent normally on its pass"
+    );
+    assert_eq!(
+        watcher_terminal_resend_action(current_offset, followup_start, current_offset),
+        WatcherTerminalResendAction::SkipAlreadyCommitted,
+        "document the regression: advancing to raw batch end would falsely skip turn B"
+    );
+}
+
+#[test]
+fn recent_stop_suppression_watermark_stops_before_co_read_followup_turn() {
+    let stopped_turn = "{\"type\":\"result\",\"result\":\"stopped A done\"}\n";
+    let followup_turn = concat!(
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"visible B\"}]}}\n",
+        "{\"type\":\"result\",\"result\":\"visible B\"}\n",
+    );
+    let batch_start = 20_000u64;
+    let current_offset = batch_start + (stopped_turn.len() + followup_turn.len()) as u64;
+    let followup_start = batch_start + stopped_turn.len() as u64;
+
+    let confirmed_end = terminal_event_consumed_offset(current_offset, followup_turn);
+    assert_eq!(
+        confirmed_end, followup_start,
+        "recent-stop suppression must consume only turn A and leave turn B's tail uncommitted"
+    );
+    assert_eq!(
+        watcher_terminal_resend_action(confirmed_end, followup_start, current_offset),
+        WatcherTerminalResendAction::SendFull,
+        "turn B remains uncovered and is sent normally on its pass"
+    );
+    assert_eq!(
+        watcher_terminal_resend_action(current_offset, followup_start, current_offset),
+        WatcherTerminalResendAction::SkipAlreadyCommitted,
+        "document the regression: advancing to raw batch end would falsely skip turn B"
+    );
+}
+
+#[test]
 fn watcher_terminal_resend_degenerate_range_defers_to_full() {
     // A zero/inverted range manufactures NO skip — it defers to the existing
     // downstream zero-range guards (which never lease/advance).
