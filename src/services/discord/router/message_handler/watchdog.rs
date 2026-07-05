@@ -374,6 +374,8 @@ pub(super) fn spawn_headless_turn_watchdog(
                 continue;
             }
 
+            // Must be computed BEFORE reconcile_watchdog_timeout: reconcile
+            // clears the inflight row, and the visibility surfaces live on it.
             let should_emit_timeout_notice = headless_watchdog_timeout_notice_visible(
                 watchdog_shared.as_ref(),
                 &watchdog_provider,
@@ -1037,6 +1039,13 @@ mod timeout_notice_tests {
         assert!(
             !headless_watchdog_timeout_notice_visible_from_surfaces(Some(&relay_only), false),
             "internal relay-ownership rows must not create user-facing timeout noise"
+        );
+
+        let mut rebind_origin = headless_inflight(123_456_789);
+        rebind_origin.rebind_origin = true;
+        assert!(
+            !headless_watchdog_timeout_notice_visible_from_surfaces(Some(&rebind_origin), false),
+            "rebind-origin rows must not create user-facing timeout noise even with a real placeholder id"
         );
     }
 }
