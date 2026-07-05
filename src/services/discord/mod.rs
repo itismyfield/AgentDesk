@@ -132,6 +132,7 @@ pub(crate) use meeting_orchestrator as meeting;
 // #3479 item-2: re-export the catch-up subsystem entry points referenced
 // outside the extracted cluster (`maybe_schedule_catch_up_retry_after_queue_drain`
 // here in mod.rs and `catch_up_missed_messages` in runtime_bootstrap recovery).
+pub(super) use catch_up::CatchUpRetryState;
 pub(in crate::services::discord) use catch_up::{
     catch_up_missed_messages, catch_up_missed_messages_inner, should_trigger_catch_up_retry,
     take_catch_up_retry_checkpoint_after_queue_drain,
@@ -2090,10 +2091,11 @@ pub(crate) struct SharedData {
     /// Per-channel last processed message ID — used for startup catch-up polling.
     pub(super) last_message_ids: dashmap::DashMap<ChannelId, u64>,
     /// Channels where catch-up stopped because the intervention queue was at
-    /// capacity. The value is the pinned `after` checkpoint for the next
-    /// in-process catch-up pass, independent of live message checkpoints that
-    /// may advance while the queued backlog drains.
-    pub(super) catch_up_retry_pending: dashmap::DashMap<ChannelId, u64>,
+    /// capacity. The value carries the pinned `after` checkpoint and bounded
+    /// transient fetch-failure count for the next in-process catch-up pass,
+    /// independent of live message checkpoints that may advance while the queued
+    /// backlog drains.
+    pub(super) catch_up_retry_pending: dashmap::DashMap<ChannelId, CatchUpRetryState>,
     /// Per-channel turn start time — used for metrics duration calculation.
     pub(super) turn_start_times: dashmap::DashMap<ChannelId, std::time::Instant>,
     /// Per-channel known speakers collected lazily from incoming messages.
@@ -3294,7 +3296,7 @@ fn maybe_schedule_catch_up_retry_after_queue_drain(
         return false;
     };
 
-    let Some(retry_checkpoint) =
+    let Some(retry_state) =
         take_catch_up_retry_checkpoint_after_queue_drain(shared, channel_id, queue_len_after)
     else {
         return false;
@@ -3303,7 +3305,7 @@ fn maybe_schedule_catch_up_retry_after_queue_drain(
     let shared = Arc::clone(shared);
     let provider = provider.clone();
     task_supervisor::spawn_observed("catch_up_retry_after_queue_drain", async move {
-        let retry_checkpoints = HashMap::from([(channel_id, retry_checkpoint)]);
+        let retry_checkpoints = HashMap::from([(channel_id, retry_state)]);
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(
             "  [{ts}] 🔁 catch-up: retrying channel {} after queue drained to {} item(s)",
