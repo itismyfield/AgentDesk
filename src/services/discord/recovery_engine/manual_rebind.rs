@@ -290,6 +290,22 @@ fn rebind_initial_offset_with_floor(
     }
 }
 
+fn rebind_initial_offset_with_floor_unless_forced(
+    initial_offset: u64,
+    minimum_initial_offset: Option<u64>,
+    output_len: Option<u64>,
+    force_initial_offset: Option<u64>,
+) -> u64 {
+    if force_initial_offset.is_some() {
+        return initial_offset;
+    }
+    rebind_initial_offset_with_floor(
+        initial_offset,
+        minimum_initial_offset,
+        output_len.unwrap_or(0),
+    )
+}
+
 fn codex_tui_existing_normalized_relay_replay_events(
     relay_path: &str,
     turn_start_offset: Option<u64>,
@@ -611,12 +627,27 @@ async fn rebind_inflight_for_channel_inner(
     } else {
         synthetic_initial_offset
     };
-    let initial_offset = rebind_initial_offset_with_floor(
+    let output_len_for_floor = if force_initial_offset.is_some() {
+        // A forced initial offset is already expressed in the coordinate space
+        // the watcher must use. In the Codex-TUI rebuild path we deliberately
+        // set it to 0 before `spawn_codex_tui_rebind_relay_output` truncates the
+        // normalized relay file; applying a durable floor here would mix the old
+        // pre-truncation file coordinates into the new zero-based relay stream.
+        // This exemption also covers remembered retry floors, which arrive
+        // through `minimum_initial_offset`.
+        None
+    } else {
+        Some(
+            std::fs::metadata(&output_path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+        )
+    };
+    let initial_offset = rebind_initial_offset_with_floor_unless_forced(
         initial_offset_without_floor,
         minimum_initial_offset,
-        std::fs::metadata(&output_path)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0),
+        output_len_for_floor,
+        force_initial_offset,
     );
     if initial_offset != initial_offset_without_floor {
         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -1053,6 +1084,30 @@ mod post_work_evidence_tests {
             "if the output file was truncated below the durable frontier, keep the boot-path safe restart behavior"
         );
         assert_eq!(rebind_initial_offset_with_floor(512, None, 4096), 512);
+    }
+
+    #[test]
+    fn codex_tui_truncate_rebind_force_initial_offset_skips_floor() {
+        assert_eq!(
+            rebind_initial_offset_with_floor_unless_forced(
+                0,
+                Some(13_400_000),
+                Some(14_930_326),
+                Some(0),
+            ),
+            0,
+            "Codex-TUI truncate rebuild resets relay coordinates, so a durable old-space frontier must not raise the forced zero offset"
+        );
+        assert_eq!(
+            rebind_initial_offset_with_floor_unless_forced(
+                0,
+                Some(13_400_000),
+                Some(14_930_326),
+                None,
+            ),
+            13_400_000,
+            "non-forced rebinds still honor an in-file durable floor"
+        );
     }
 
     #[test]

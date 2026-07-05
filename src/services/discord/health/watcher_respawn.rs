@@ -94,10 +94,28 @@ pub(super) fn force_clean_should_respawn_watcher(snapshot: &WatcherStateSnapshot
 
 pub(super) fn force_clean_respawn_offset_floor(
     snapshot: &WatcherStateSnapshot,
-    committed_relay_offset: u64,
+    committed_frontier_for_current_generation: Option<u64>,
 ) -> Option<u64> {
-    let offset = snapshot.last_relay_offset.max(committed_relay_offset);
-    (offset > 0).then_some(offset)
+    // `snapshot.last_relay_offset` is health telemetry sourced from the raw
+    // in-memory relay coord. It is not generation-fenced, so after a wrapper
+    // restart it can name the old coordinate space even when the new file has
+    // grown past that byte count. Respawn floors must only use the same-generation
+    // frontier from `committed_frontier_for_current_generation`.
+    let _unfenced_snapshot_frontier = snapshot.last_relay_offset;
+    committed_frontier_for_current_generation.filter(|offset| *offset > 0)
+}
+
+fn generation_fenced_respawn_frontier(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    snapshot: &WatcherStateSnapshot,
+) -> Option<u64> {
+    let tmux_session = snapshot.tmux_session.as_deref()?;
+    crate::services::discord::tmux_session_files::committed_frontier_for_current_generation(
+        shared,
+        channel_id,
+        tmux_session,
+    )
 }
 
 fn is_agentdesk_tmux_session(tmux_session: Option<&str>) -> bool {
@@ -127,8 +145,10 @@ pub(super) async fn complete_force_clean_watcher_recovery(
     if !force_clean_should_respawn_watcher(snapshot) {
         return;
     }
-    let minimum_initial_offset =
-        force_clean_respawn_offset_floor(snapshot, shared.committed_relay_offset(channel_id));
+    let minimum_initial_offset = force_clean_respawn_offset_floor(
+        snapshot,
+        generation_fenced_respawn_frontier(shared.as_ref(), channel_id, snapshot),
+    );
     let watcher_spawned = respawn_watcher_after_force_clean(
         registry,
         provider,
@@ -415,6 +435,21 @@ fn max_offset_floor(left: Option<u64>, right: Option<u64>) -> Option<u64> {
     }
 }
 
+fn retry_minimum_initial_offset_floor(
+    remembered_floor: Option<u64>,
+    snapshot_floor: Option<u64>,
+    snapshot_available: bool,
+) -> Option<u64> {
+    // If a current snapshot exists but its committed frontier fails the
+    // generation fence, any remembered floor is also unproven in the current
+    // coordinate space. Snapshotless retries keep the remembered floor because
+    // there is no current-generation evidence to evaluate yet.
+    if snapshot_available && snapshot_floor.is_none() {
+        return None;
+    }
+    max_offset_floor(remembered_floor, snapshot_floor)
+}
+
 /// Channels currently tracked as watcher-absent for `provider`. The absence
 /// map is the durable cross-tick retry queue: a channel whose force-clean
 /// respawn FAILED stays here (its tmux is still alive, just watcher-less) so
@@ -471,7 +506,8 @@ async fn retry_pending_watcher_respawn(
     // No owner: snapshot from any runtime to read the provider+channel-global
     // inflight/tmux liveness. A `None` snapshot does NOT clear the absence — it
     // is "not yet resolvable", and the channel-aware respawn below still runs.
-    let snapshot = match runtimes.first() {
+    let snapshot_runtime = runtimes.first().cloned();
+    let snapshot = match snapshot_runtime.as_ref() {
         Some(snapshot_runtime) => {
             registry
                 .snapshot_watcher_state_for_shared(
@@ -506,11 +542,20 @@ async fn retry_pending_watcher_respawn(
     // entry for the next tick (never stranded). The tmux override falls back to
     // the persisted inflight state inside `rebind_inflight` when the snapshot is
     // `None`.
-    let minimum_initial_offset = max_offset_floor(
+    let snapshot_floor = match (snapshot_runtime.as_ref(), snapshot.as_ref()) {
+        (Some(snapshot_runtime), Some(snapshot)) => force_clean_respawn_offset_floor(
+            snapshot,
+            generation_fenced_respawn_frontier(snapshot_runtime.as_ref(), channel_id, snapshot),
+        ),
+        _ => None,
+    };
+    // Remembered retry floors are replayed only as `minimum_initial_offset`; the
+    // manual rebind path ignores that value when a forced initial offset resets
+    // coordinates (for example Codex-TUI truncate rebuilds).
+    let minimum_initial_offset = retry_minimum_initial_offset_floor(
         remembered_watcher_absence_offset_floor(provider, channel_id),
-        snapshot
-            .as_ref()
-            .and_then(|snap| force_clean_respawn_offset_floor(snap, 0)),
+        snapshot_floor,
+        snapshot.is_some(),
     );
     respawn_watcher_after_force_clean(
         registry,
@@ -660,7 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn force_clean_respawn_offset_floor_uses_committed_frontier() {
+    fn force_clean_respawn_offset_floor_uses_generation_fenced_frontier() {
         let mut snap = snapshot(
             4,
             Some("AgentDesk-claude-adk-cc"),
@@ -670,21 +715,81 @@ mod tests {
         );
         snap.last_relay_offset = 13_400_000;
         assert_eq!(
-            force_clean_respawn_offset_floor(&snap, 0),
-            Some(13_400_000),
-            "force-clean respawn must carry the snapshot's committed relay frontier"
-        );
-        assert_eq!(
-            force_clean_respawn_offset_floor(&snap, 14_930_326),
+            force_clean_respawn_offset_floor(&snap, Some(14_930_326)),
             Some(14_930_326),
-            "a fresher in-memory confirmed_end_offset must win over the snapshot"
+            "same-generation committed frontier is the only respawn floor source"
         );
-        snap.last_relay_offset = 0;
         assert_eq!(
-            force_clean_respawn_offset_floor(&snap, 0),
+            force_clean_respawn_offset_floor(&snap, Some(0)),
             None,
             "offset zero is not a useful floor"
         );
+    }
+
+    #[test]
+    fn force_clean_respawn_offset_floor_ignores_stale_prior_generation_frontier() {
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let _env = EnvRootGuard(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let tmp = tempfile::tempdir().expect("temp runtime root");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(4_140_002);
+        let tmux_session = "AgentDesk-codex-stale-generation-floor";
+        let generation_path = std::path::PathBuf::from(
+            crate::services::tmux_common::session_temp_path(tmux_session, "generation"),
+        );
+        std::fs::create_dir_all(
+            generation_path
+                .parent()
+                .expect("generation marker has a parent directory"),
+        )
+        .expect("create runtime session directory");
+        std::fs::write(&generation_path, b"new-generation").expect("write generation marker");
+        let current_generation =
+            crate::services::discord::tmux_session_files::read_generation_file_mtime_ns(
+                tmux_session,
+            );
+        assert_ne!(current_generation, 0, "generation marker must be readable");
+
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let coord = shared.tmux_relay_coord(channel);
+        coord
+            .confirmed_end_offset
+            .store(13_400_000, Ordering::Release);
+        coord
+            .confirmed_end_generation_mtime_ns
+            .store(current_generation.saturating_sub(1), Ordering::Release);
+
+        let mut snap = snapshot(
+            channel.get(),
+            Some(tmux_session),
+            Some(true),
+            true,
+            Some(9001),
+        );
+        snap.last_relay_offset = 13_400_000;
+        snap.relay_health.last_relay_offset = 13_400_000;
+        snap.last_capture_offset = Some(14_930_326);
+        snap.relay_health.last_capture_offset = Some(14_930_326);
+
+        let committed_frontier =
+            generation_fenced_respawn_frontier(shared.as_ref(), channel, &snap);
+        assert_eq!(
+            committed_frontier, None,
+            "prior-generation committed offset must not survive the generation fence"
+        );
+        assert_eq!(
+            force_clean_respawn_offset_floor(&snap, committed_frontier),
+            None,
+            "a stale prior-generation snapshot frontier must not floor a new-generation file that already grew past it"
+        );
+        assert_eq!(
+            retry_minimum_initial_offset_floor(Some(13_400_000), committed_frontier, true),
+            None,
+            "a remembered prior-generation floor must be dropped when a current snapshot fails the generation fence"
+        );
+        clear_watcher_absence(&provider, channel);
     }
 
     #[test]
@@ -702,12 +807,13 @@ mod tests {
         );
 
         assert_eq!(
-            max_offset_floor(
+            retry_minimum_initial_offset_floor(
                 remembered_watcher_absence_offset_floor(&provider, channel),
-                None
+                None,
+                false,
             ),
             Some(13_400_000),
-            "retry must preserve the force-clean offset floor even when re-snapshot returns None"
+            "retry must preserve the force-clean offset floor when re-snapshot returns None"
         );
         clear_watcher_absence(&provider, channel);
     }
