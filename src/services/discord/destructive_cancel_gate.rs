@@ -297,7 +297,8 @@ pub(in crate::services::discord) async fn evaluate(
         if relay_frontier_advanced(previous_relay_frontier, current_relay_frontier) {
             return DestructiveCancelGate::Denied("relay_frontier_progress_on_reprobe");
         }
-        previous_relay_frontier = current_relay_frontier;
+        previous_relay_frontier =
+            relay_frontier_high_water(previous_relay_frontier, current_relay_frontier);
     }
 
     let Some(tmux_session) = snapshot.pin.tmux_session_name.as_deref() else {
@@ -322,6 +323,15 @@ fn relay_frontier_advanced(previous: Option<u64>, current: Option<u64>) -> bool 
         (Some(previous), Some(current)) => current > previous,
         (None, Some(current)) => current > 0,
         _ => false,
+    }
+}
+
+fn relay_frontier_high_water(previous: Option<u64>, current: Option<u64>) -> Option<u64> {
+    match (previous, current) {
+        (Some(previous), Some(current)) => Some(previous.max(current)),
+        (Some(previous), None) => Some(previous),
+        (None, Some(current)) => Some(current),
+        (None, None) => None,
     }
 }
 
@@ -353,6 +363,16 @@ mod tests {
         body.push('\n');
         std::fs::write(path, body).expect("write jsonl");
         std::fs::metadata(path).expect("jsonl metadata").len()
+    }
+
+    #[test]
+    fn relay_frontier_flap_to_none_then_same_value_is_not_progress() {
+        let mut previous = Some(4096);
+        assert!(!relay_frontier_advanced(previous, None));
+        previous = relay_frontier_high_water(previous, None);
+        assert_eq!(previous, Some(4096));
+        assert!(!relay_frontier_advanced(previous, Some(4096)));
+        assert!(relay_frontier_advanced(previous, Some(4097)));
     }
 
     fn save_gate_state(

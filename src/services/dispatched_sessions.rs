@@ -1167,6 +1167,7 @@ pub(crate) async fn selected_provider_resume_selector_for_provider_recording_obs
         provider_name,
         ids,
         None,
+        RawProviderTranscriptObservationMode::AdvanceWatermark,
     )
     .await;
     selected
@@ -1205,14 +1206,16 @@ fn selected_provider_resume_selector_with_claude_home<'a>(
         .map(str::trim)
         .filter(|value| !value.is_empty());
     let cached_activity = cwd.zip(cached).and_then(|(cwd, selector)| {
-        claude_selector_file_activity(cwd, selector, claude_home, None)
+        claude_selector_file_activity(cwd, selector, claude_home, None, false)
     });
     let raw_activity = cwd.zip(raw).and_then(|(cwd, selector)| {
+        let evidence = raw_transcript_persisted_growth_evidence(ids, selector);
         claude_selector_file_activity(
             cwd,
             selector,
             claude_home,
-            positive_raw_transcript_len_watermark(ids),
+            evidence.len_watermark,
+            evidence.growth_proven,
         )
     });
 
@@ -1231,12 +1234,14 @@ fn claude_selector_file_activity(
     selector: &str,
     claude_home: Option<&std::path::Path>,
     persisted_len_watermark: Option<u64>,
+    persisted_growth_proven: bool,
 ) -> Option<crate::services::session_selector_validity::SelectorFileActivity> {
     claude_selector_file_activity_sample(cwd, selector, claude_home).map(|activity| {
         crate::services::session_selector_validity::activity_with_observed_growth(
             selector,
             activity,
             persisted_len_watermark,
+            persisted_growth_proven,
         )
     })
 }
@@ -1280,12 +1285,47 @@ fn positive_raw_transcript_len_watermark(
         .filter(|value| *value > 0)
 }
 
+struct RawTranscriptPersistedGrowthEvidence {
+    len_watermark: Option<u64>,
+    growth_proven: bool,
+}
+
+fn raw_transcript_persisted_growth_evidence(
+    ids: &dispatched_sessions_db::ProviderSessionIds,
+    raw_provider_session_id: &str,
+) -> RawTranscriptPersistedGrowthEvidence {
+    let raw_provider_session_id = raw_provider_session_id.trim();
+    let watermark_matches_raw_id = !raw_provider_session_id.is_empty()
+        && ids
+            .raw_provider_transcript_watermark_session_id
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|watermark_session_id| watermark_session_id == raw_provider_session_id);
+    if !watermark_matches_raw_id {
+        return RawTranscriptPersistedGrowthEvidence {
+            len_watermark: None,
+            growth_proven: false,
+        };
+    }
+    RawTranscriptPersistedGrowthEvidence {
+        len_watermark: positive_raw_transcript_len_watermark(ids),
+        growth_proven: ids.raw_provider_transcript_growth_proven,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RawProviderTranscriptObservationMode {
+    AdvanceWatermark,
+    GrowthFlagOnly,
+}
+
 async fn record_raw_provider_transcript_len_watermark_if_observed(
     pool: &sqlx::PgPool,
     session_key: &str,
     provider_name: Option<&str>,
     ids: &dispatched_sessions_db::ProviderSessionIds,
     claude_home: Option<&std::path::Path>,
+    mode: RawProviderTranscriptObservationMode,
 ) {
     if !provider_is_claude(provider_name) {
         return;
@@ -1307,21 +1347,40 @@ async fn record_raw_provider_transcript_len_watermark_if_observed(
     if !activity.exists || activity.len == 0 {
         return;
     }
-    if let Err(error) = dispatched_sessions_db::update_raw_provider_transcript_len_watermark_pg(
-        pool,
-        session_key,
-        provider_name,
-        activity.len,
-    )
-    .await
-    {
+    let update_result = match mode {
+        RawProviderTranscriptObservationMode::AdvanceWatermark => {
+            dispatched_sessions_db::update_raw_provider_transcript_len_watermark_pg(
+                pool,
+                session_key,
+                provider_name,
+                raw,
+                activity.len,
+            )
+            .await
+        }
+        RawProviderTranscriptObservationMode::GrowthFlagOnly => {
+            dispatched_sessions_db::mark_raw_provider_transcript_growth_if_observed_pg(
+                pool,
+                session_key,
+                provider_name,
+                raw,
+                activity.len,
+            )
+            .await
+        }
+    };
+    if let Err(error) = update_result {
         tracing::warn!(
             session_key,
             provider = provider_name.unwrap_or(""),
             raw_provider_session_id = raw,
             observed_len = activity.len,
             error,
-            "failed to update raw provider transcript length watermark"
+            mode = match mode {
+                RawProviderTranscriptObservationMode::AdvanceWatermark => "advance_watermark",
+                RawProviderTranscriptObservationMode::GrowthFlagOnly => "growth_flag_only",
+            },
+            "failed to record raw provider transcript length observation"
         );
     }
 }
@@ -1589,6 +1648,7 @@ async fn kill_tmux_session_impl(
                 effective_provider_name,
                 &ids,
                 None,
+                RawProviderTranscriptObservationMode::GrowthFlagOnly,
             )
             .await;
             resumable
@@ -1768,6 +1828,7 @@ mod kill_tmux_resume_tests {
         raw_provider_session_id: Option<&str>,
         cwd: Option<&std::path::Path>,
         raw_provider_transcript_len_watermark: Option<i64>,
+        raw_provider_transcript_growth_proven: bool,
     ) -> ProviderSessionIds {
         ProviderSessionIds {
             claude_session_id: claude_session_id.map(str::to_string),
@@ -1775,6 +1836,9 @@ mod kill_tmux_resume_tests {
             cwd: cwd.map(|path| path.display().to_string()),
             cache_entry_age_secs: Some(3_600),
             raw_provider_transcript_len_watermark,
+            raw_provider_transcript_watermark_session_id: raw_provider_session_id
+                .map(str::to_string),
+            raw_provider_transcript_growth_proven,
         }
     }
 
@@ -1948,6 +2012,7 @@ mod kill_tmux_resume_tests {
             Some(&raw_session_id),
             Some(cwd.path()),
             None,
+            false,
         );
 
         assert_eq!(
@@ -2010,6 +2075,7 @@ mod kill_tmux_resume_tests {
             Some(&raw_session_id),
             Some(cwd.path()),
             Some(4),
+            false,
         );
 
         assert_eq!(
@@ -2060,12 +2126,65 @@ mod kill_tmux_resume_tests {
             Some(&raw_session_id),
             Some(cwd.path()),
             Some(raw_len),
+            false,
         );
 
         assert_eq!(
             selected_provider_resume_selector_with_claude_home(&ids, Some(claude_home.path())),
             Some(cached_session_id.as_str()),
             "an equal persisted watermark means the raw transcript has not grown"
+        );
+    }
+
+    #[test]
+    fn claude_selector_ignores_raw_growth_evidence_for_different_raw_id() {
+        crate::services::session_selector_validity::clear_selector_observations_for_tests();
+        let cwd = tempfile::tempdir().expect("cwd tempdir");
+        let claude_home = tempfile::tempdir().expect("claude home tempdir");
+        let cached_session_id = uuid::Uuid::new_v4().to_string();
+        let raw_session_id = uuid::Uuid::new_v4().to_string();
+        let stale_watermark_session_id = uuid::Uuid::new_v4().to_string();
+        let cached_path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+            cwd.path(),
+            &cached_session_id,
+            Some(claude_home.path()),
+        )
+        .expect("cached transcript path");
+        let raw_path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+            cwd.path(),
+            &raw_session_id,
+            Some(claude_home.path()),
+        )
+        .expect("raw transcript path");
+        std::fs::create_dir_all(cached_path.parent().expect("cached parent"))
+            .expect("create cached parent");
+        std::fs::create_dir_all(raw_path.parent().expect("raw parent")).expect("create raw parent");
+        std::fs::write(&cached_path, b"cached\n").expect("write cached transcript");
+        std::fs::write(&raw_path, b"raw\ngrown\n").expect("write raw transcript");
+        let now = std::time::SystemTime::now();
+        filetime::set_file_mtime(
+            &cached_path,
+            filetime::FileTime::from_system_time(now - std::time::Duration::from_secs(700)),
+        )
+        .expect("set cached mtime");
+        filetime::set_file_mtime(
+            &raw_path,
+            filetime::FileTime::from_system_time(now - std::time::Duration::from_secs(5)),
+        )
+        .expect("set raw mtime");
+        let mut ids = ids(
+            Some(&cached_session_id),
+            Some(&raw_session_id),
+            Some(cwd.path()),
+            Some(1),
+            true,
+        );
+        ids.raw_provider_transcript_watermark_session_id = Some(stale_watermark_session_id);
+
+        assert_eq!(
+            selected_provider_resume_selector_with_claude_home(&ids, Some(claude_home.path())),
+            Some(cached_session_id.as_str()),
+            "watermark and sticky growth proof belong only to their recorded raw id"
         );
     }
 
@@ -2085,7 +2204,7 @@ mod kill_tmux_resume_tests {
             .expect("create transcript parent");
         std::fs::write(&transcript_path, b"{}\n").expect("write transcript");
 
-        let ids = ids(Some(&session_id), None, Some(cwd.path()), None);
+        let ids = ids(Some(&session_id), None, Some(cwd.path()), None, false);
         assert!(provider_resume_selector_is_effective_with_claude_home(
             Some("claude"),
             &ids,
@@ -2099,14 +2218,14 @@ mod kill_tmux_resume_tests {
         let claude_home = tempfile::tempdir().expect("claude home tempdir");
         let session_id = uuid::Uuid::new_v4().to_string();
 
-        let missing_transcript = ids(Some(&session_id), None, Some(cwd.path()), None);
+        let missing_transcript = ids(Some(&session_id), None, Some(cwd.path()), None, false);
         assert!(!provider_resume_selector_is_effective_with_claude_home(
             Some("claude"),
             &missing_transcript,
             Some(claude_home.path()),
         ));
 
-        let missing_cwd = ids(Some(&session_id), None, None, None);
+        let missing_cwd = ids(Some(&session_id), None, None, None, false);
         assert!(!provider_resume_selector_is_effective_with_claude_home(
             Some("claude"),
             &missing_cwd,
@@ -2116,14 +2235,14 @@ mod kill_tmux_resume_tests {
 
     #[test]
     fn non_claude_resumable_uses_existing_selector_presence_contract() {
-        let codex_ids = ids(None, Some("codex-selector"), None, None);
+        let codex_ids = ids(None, Some("codex-selector"), None, None, false);
         assert!(provider_resume_selector_is_effective_with_claude_home(
             Some("codex"),
             &codex_ids,
             None,
         ));
 
-        let no_selector = ids(None, Some("   "), None, None);
+        let no_selector = ids(None, Some("   "), None, None, false);
         assert!(!provider_resume_selector_is_effective_with_claude_home(
             Some("codex"),
             &no_selector,

@@ -923,9 +923,10 @@ mod dispatch_surface_tests {
 #[cfg(test)]
 mod selector_cleanup_tests {
     use super::{
-        HookSessionUpsert, disconnect_session_and_prepare_retry_pg,
-        disconnect_stale_fixed_session_by_key_pg, gc_stale_fixed_working_sessions_db_pg,
-        load_provider_session_ids_pg, reconcile_orphaned_tmuxless_session_pg,
+        HookSessionUpsert, clear_session_id_by_key_pg, clear_stale_session_id_pg,
+        disconnect_session_and_prepare_retry_pg, disconnect_stale_fixed_session_by_key_pg,
+        gc_stale_fixed_working_sessions_db_pg, load_provider_session_ids_pg,
+        mark_raw_provider_transcript_growth_if_observed_pg, reconcile_orphaned_tmuxless_session_pg,
         update_raw_provider_transcript_len_watermark_pg, upsert_hook_session_pg,
     };
 
@@ -1302,35 +1303,272 @@ mod selector_cleanup_tests {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let session_key = "host:raw-selector-watermark";
+        let raw_session_id = "48fdb7f3-0000-4000-8000-000000000000";
 
         upsert_claude_selector_session(
             &pool,
             session_key,
             Some("c62c2dc8-0000-4000-8000-000000000000"),
-            Some("48fdb7f3-0000-4000-8000-000000000000"),
+            Some(raw_session_id),
         )
         .await;
 
-        update_raw_provider_transcript_len_watermark_pg(&pool, session_key, Some("claude"), 10)
-            .await
-            .expect("write initial watermark"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
-        update_raw_provider_transcript_len_watermark_pg(&pool, session_key, Some("claude"), 8)
-            .await
-            .expect("write lower watermark"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
+        update_raw_provider_transcript_len_watermark_pg(
+            &pool,
+            session_key,
+            Some("claude"),
+            raw_session_id,
+            10,
+        )
+        .await
+        .expect("write initial watermark"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
+        update_raw_provider_transcript_len_watermark_pg(
+            &pool,
+            session_key,
+            Some("claude"),
+            raw_session_id,
+            8,
+        )
+        .await
+        .expect("write lower watermark"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
         let ids = load_provider_session_ids_pg(&pool, session_key, Some("claude"))
             .await
             .expect("load provider ids") // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
             .expect("session row"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
         assert_eq!(ids.raw_provider_transcript_len_watermark, Some(10));
+        assert_eq!(
+            ids.raw_provider_transcript_watermark_session_id.as_deref(),
+            Some(raw_session_id)
+        );
+        assert!(
+            !ids.raw_provider_transcript_growth_proven,
+            "lower/equal observations do not prove growth"
+        );
 
-        update_raw_provider_transcript_len_watermark_pg(&pool, session_key, Some("claude"), 12)
-            .await
-            .expect("write higher watermark"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
+        update_raw_provider_transcript_len_watermark_pg(
+            &pool,
+            session_key,
+            Some("claude"),
+            raw_session_id,
+            12,
+        )
+        .await
+        .expect("write higher watermark"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
         let ids = load_provider_session_ids_pg(&pool, session_key, Some("claude"))
             .await
             .expect("load provider ids after growth") // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
             .expect("session row after growth"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
         assert_eq!(ids.raw_provider_transcript_len_watermark, Some(12));
+        assert!(
+            ids.raw_provider_transcript_growth_proven,
+            "growth proof must stay sticky after the watermark advances to the observed length"
+        );
+
+        update_raw_provider_transcript_len_watermark_pg(
+            &pool,
+            session_key,
+            Some("claude"),
+            raw_session_id,
+            12,
+        )
+        .await
+        .expect("record equal watermark after proof"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
+        let ids = load_provider_session_ids_pg(&pool, session_key, Some("claude"))
+            .await
+            .expect("load provider ids after equal proof") // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
+            .expect("session row after equal proof"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
+        assert_eq!(ids.raw_provider_transcript_len_watermark, Some(12));
+        assert!(
+            ids.raw_provider_transcript_growth_proven,
+            "recording the current final length must not erase prior growth proof"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn raw_provider_transcript_watermark_raw_id_mismatch_resets_baseline() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let session_key = "host:raw-selector-watermark-id-reset";
+        let raw_session_a = "48fdb7f3-0000-4000-8000-000000000000";
+        let raw_session_b = "8f0e3a1c-0000-4000-8000-000000000000";
+
+        upsert_claude_selector_session(
+            &pool,
+            session_key,
+            Some("c62c2dc8-0000-4000-8000-000000000000"),
+            Some(raw_session_a),
+        )
+        .await;
+        update_raw_provider_transcript_len_watermark_pg(
+            &pool,
+            session_key,
+            Some("claude"),
+            raw_session_a,
+            10_000_000,
+        )
+        .await
+        .expect("write raw A watermark"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
+        update_raw_provider_transcript_len_watermark_pg(
+            &pool,
+            session_key,
+            Some("claude"),
+            raw_session_a,
+            10_000_001,
+        )
+        .await
+        .expect("prove raw A growth"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
+
+        update_raw_provider_transcript_len_watermark_pg(
+            &pool,
+            session_key,
+            Some("claude"),
+            raw_session_b,
+            50_000,
+        )
+        .await
+        .expect("raw B mismatch resets baseline"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
+        let ids = load_provider_session_ids_pg(&pool, session_key, Some("claude"))
+            .await
+            .expect("load provider ids after id reset") // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
+            .expect("session row after id reset"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
+
+        assert_eq!(ids.raw_provider_transcript_len_watermark, Some(50_000));
+        assert_eq!(
+            ids.raw_provider_transcript_watermark_session_id.as_deref(),
+            Some(raw_session_b)
+        );
+        assert!(
+            !ids.raw_provider_transcript_growth_proven,
+            "a fresh raw id starts from its own baseline, not the old file's proof"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn raw_provider_transcript_growth_flag_only_observation_does_not_raise_watermark() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let session_key = "host:raw-selector-watermark-kill-path";
+        let raw_session_id = "48fdb7f3-0000-4000-8000-000000000000";
+
+        upsert_claude_selector_session(
+            &pool,
+            session_key,
+            Some("c62c2dc8-0000-4000-8000-000000000000"),
+            Some(raw_session_id),
+        )
+        .await;
+        update_raw_provider_transcript_len_watermark_pg(
+            &pool,
+            session_key,
+            Some("claude"),
+            raw_session_id,
+            10,
+        )
+        .await
+        .expect("write baseline watermark"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
+
+        mark_raw_provider_transcript_growth_if_observed_pg(
+            &pool,
+            session_key,
+            Some("claude"),
+            raw_session_id,
+            12,
+        )
+        .await
+        .expect("kill path records sticky proof only"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
+        let ids = load_provider_session_ids_pg(&pool, session_key, Some("claude"))
+            .await
+            .expect("load provider ids after growth-only observation") // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
+            .expect("session row after growth-only observation"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
+
+        assert_eq!(
+            ids.raw_provider_transcript_len_watermark,
+            Some(10),
+            "kill-path evidence must not record the dead transcript's final length"
+        );
+        assert!(
+            ids.raw_provider_transcript_growth_proven,
+            "kill-path evidence may preserve growth proof without raising the watermark"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn clearing_session_ids_resets_raw_transcript_watermark_evidence() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let rows = [
+            (
+                "host:raw-selector-clear-by-id",
+                "48fdb7f3-0000-4000-8000-000000000000",
+            ),
+            (
+                "host:raw-selector-clear-by-key",
+                "8f0e3a1c-0000-4000-8000-000000000000",
+            ),
+        ];
+
+        for (session_key, raw_session_id) in rows {
+            upsert_claude_selector_session(
+                &pool,
+                session_key,
+                Some("c62c2dc8-0000-4000-8000-000000000000"),
+                Some(raw_session_id),
+            )
+            .await;
+            update_raw_provider_transcript_len_watermark_pg(
+                &pool,
+                session_key,
+                Some("claude"),
+                raw_session_id,
+                10,
+            )
+            .await
+            .expect("write baseline before clear"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
+            update_raw_provider_transcript_len_watermark_pg(
+                &pool,
+                session_key,
+                Some("claude"),
+                raw_session_id,
+                11,
+            )
+            .await
+            .expect("prove growth before clear"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
+        }
+
+        clear_stale_session_id_pg(&pool, rows[0].1)
+            .await
+            .expect("clear by raw session id"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
+        let ids =
+            load_provider_session_ids_pg(&pool, "host:raw-selector-clear-by-id", Some("claude"))
+                .await
+                .expect("load clear-by-id row") // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
+                .expect("clear-by-id row"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
+        assert_eq!(ids.raw_provider_session_id, None);
+        assert_eq!(ids.raw_provider_transcript_len_watermark, Some(0));
+        assert_eq!(ids.raw_provider_transcript_watermark_session_id, None);
+        assert!(!ids.raw_provider_transcript_growth_proven);
+
+        clear_session_id_by_key_pg(&pool, "host:raw-selector-clear-by-key")
+            .await
+            .expect("clear by session key"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
+        let ids =
+            load_provider_session_ids_pg(&pool, "host:raw-selector-clear-by-key", Some("claude"))
+                .await
+                .expect("load clear-by-key row") // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
+                .expect("clear-by-key row"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
+        assert_eq!(ids.raw_provider_session_id, None);
+        assert_eq!(ids.raw_provider_transcript_len_watermark, Some(0));
+        assert_eq!(ids.raw_provider_transcript_watermark_session_id, None);
+        assert!(!ids.raw_provider_transcript_growth_proven);
 
         pool.close().await;
         pg_db.drop().await;
@@ -2015,6 +2253,8 @@ pub(crate) struct ProviderSessionIds {
     pub(crate) cwd: Option<String>,
     pub(crate) cache_entry_age_secs: Option<i64>,
     pub(crate) raw_provider_transcript_len_watermark: Option<i64>,
+    pub(crate) raw_provider_transcript_watermark_session_id: Option<String>,
+    pub(crate) raw_provider_transcript_growth_proven: bool,
 }
 
 pub(crate) struct UpdateSessionParams<'a> {
@@ -2162,7 +2402,9 @@ pub(crate) async fn load_provider_session_ids_pg(
             "SELECT claude_session_id, raw_provider_session_id, cwd,
                     EXTRACT(EPOCH FROM (NOW() - COALESCE(claude_session_id_recorded_at, created_at)))::BIGINT
                         AS cache_entry_age_secs,
-                    raw_provider_transcript_len_watermark
+                    raw_provider_transcript_len_watermark,
+                    raw_provider_transcript_watermark_session_id,
+                    raw_provider_transcript_growth_proven
              FROM sessions
              WHERE session_key = $1 AND provider = $2",
         )
@@ -2175,7 +2417,9 @@ pub(crate) async fn load_provider_session_ids_pg(
             "SELECT claude_session_id, raw_provider_session_id, cwd,
                     EXTRACT(EPOCH FROM (NOW() - COALESCE(claude_session_id_recorded_at, created_at)))::BIGINT
                         AS cache_entry_age_secs,
-                    raw_provider_transcript_len_watermark
+                    raw_provider_transcript_len_watermark,
+                    raw_provider_transcript_watermark_session_id,
+                    raw_provider_transcript_growth_proven
              FROM sessions
              WHERE session_key = $1",
         )
@@ -2193,6 +2437,10 @@ pub(crate) async fn load_provider_session_ids_pg(
             cache_entry_age_secs: row.try_get("cache_entry_age_secs")?,
             raw_provider_transcript_len_watermark: row
                 .try_get("raw_provider_transcript_len_watermark")?,
+            raw_provider_transcript_watermark_session_id: row
+                .try_get("raw_provider_transcript_watermark_session_id")?,
+            raw_provider_transcript_growth_proven: row
+                .try_get("raw_provider_transcript_growth_proven")?,
         })
     })
     .transpose()
@@ -2203,18 +2451,65 @@ pub(crate) async fn update_raw_provider_transcript_len_watermark_pg(
     pool: &PgPool,
     session_key: &str,
     provider: Option<&str>,
+    raw_provider_session_id: &str,
     observed_len: u64,
 ) -> Result<u64, String> {
     let observed_len = i64::try_from(observed_len).unwrap_or(i64::MAX);
     sqlx::query(
         "UPDATE sessions
-         SET raw_provider_transcript_len_watermark =
-             GREATEST(COALESCE(raw_provider_transcript_len_watermark, 0), $3)
+         SET raw_provider_transcript_len_watermark = CASE
+               WHEN NULLIF(BTRIM($3), '') IS NULL THEN raw_provider_transcript_len_watermark
+               WHEN NULLIF(BTRIM(raw_provider_transcript_watermark_session_id), '')
+                    IS DISTINCT FROM NULLIF(BTRIM($3), '') THEN $4
+               ELSE GREATEST(COALESCE(raw_provider_transcript_len_watermark, 0), $4)
+             END,
+             raw_provider_transcript_watermark_session_id = CASE
+               WHEN NULLIF(BTRIM($3), '') IS NULL THEN raw_provider_transcript_watermark_session_id
+               ELSE NULLIF(BTRIM($3), '')
+             END,
+             raw_provider_transcript_growth_proven = CASE
+               WHEN NULLIF(BTRIM($3), '') IS NULL THEN raw_provider_transcript_growth_proven
+               WHEN NULLIF(BTRIM(raw_provider_transcript_watermark_session_id), '')
+                    IS DISTINCT FROM NULLIF(BTRIM($3), '') THEN FALSE
+               ELSE COALESCE(raw_provider_transcript_growth_proven, FALSE)
+                    OR ($4 > COALESCE(raw_provider_transcript_len_watermark, 0))
+             END
          WHERE session_key = $1
            AND ($2::TEXT IS NULL OR provider = $2)",
     )
     .bind(session_key)
     .bind(provider)
+    .bind(raw_provider_session_id)
+    .bind(observed_len)
+    .execute(pool)
+    .await
+    .map(|result| result.rows_affected())
+    .map_err(|error| format!("{error}"))
+}
+
+pub(crate) async fn mark_raw_provider_transcript_growth_if_observed_pg(
+    pool: &PgPool,
+    session_key: &str,
+    provider: Option<&str>,
+    raw_provider_session_id: &str,
+    observed_len: u64,
+) -> Result<u64, String> {
+    let observed_len = i64::try_from(observed_len).unwrap_or(i64::MAX);
+    sqlx::query(
+        "UPDATE sessions
+         SET raw_provider_transcript_growth_proven = CASE
+               WHEN NULLIF(BTRIM(raw_provider_transcript_watermark_session_id), '')
+                    = NULLIF(BTRIM($3), '')
+                AND $4 > COALESCE(raw_provider_transcript_len_watermark, 0)
+               THEN TRUE
+               ELSE raw_provider_transcript_growth_proven
+             END
+         WHERE session_key = $1
+           AND ($2::TEXT IS NULL OR provider = $2)",
+    )
+    .bind(session_key)
+    .bind(provider)
+    .bind(raw_provider_session_id)
     .bind(observed_len)
     .execute(pool)
     .await
@@ -2230,7 +2525,10 @@ pub(crate) async fn clear_stale_session_id_pg(
         "UPDATE sessions
          SET claude_session_id = NULL,
              raw_provider_session_id = NULL,
-             claude_session_id_recorded_at = NULL
+             claude_session_id_recorded_at = NULL,
+             raw_provider_transcript_len_watermark = 0,
+             raw_provider_transcript_watermark_session_id = NULL,
+             raw_provider_transcript_growth_proven = FALSE
          WHERE claude_session_id = $1
             OR raw_provider_session_id = $1",
     )
@@ -2249,7 +2547,10 @@ pub(crate) async fn clear_session_id_by_key_pg(
         "UPDATE sessions
          SET claude_session_id = NULL,
              raw_provider_session_id = NULL,
-             claude_session_id_recorded_at = NULL
+             claude_session_id_recorded_at = NULL,
+             raw_provider_transcript_len_watermark = 0,
+             raw_provider_transcript_watermark_session_id = NULL,
+             raw_provider_transcript_growth_proven = FALSE
          WHERE session_key = $1",
     )
     .bind(session_key)

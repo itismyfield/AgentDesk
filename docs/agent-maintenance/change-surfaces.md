@@ -1075,6 +1075,12 @@
   - `src/services/discord/recovery_engine/completion_delivery.rs` (sub-1000;
     behavior-preserving #3834 r2 extraction of recovery terminal relay,
     visible completion/status-panel completion helpers, and their tests.)
+  - `src/services/discord/recovery_engine/manual_rebind.rs` (1057 lines; crossed
+    the giant threshold in #4091 r3/r4 when manual rebind gained ClaudeTui
+    transcript adoption — candidate probing, EOF-forced start offsets for
+    adopted transcripts (never reuse wrapper-jsonl coordinates on a different
+    file), and runtime-binding re-registration. Registered in
+    scripts/giant_file_registry.toml; decompose_issue #4157.)
   - `src/services/discord/health.rs` (417 prod lines after the #3038 Phase A
     directory decomposition; module root keeps the `HealthRegistry` core +
     re-export surface, and the former monolith body lives in flat
@@ -1733,8 +1739,12 @@
   - `src/db/kanban_cards/` (1932 total lines; kanban card persistence and
     GitHub sync lookup surface).
   - `src/db/postgres.rs` (1280 lines; #3651: the `FOREGROUND_RESERVE` process-global, the `background_should_yield` backpressure predicate + pure `should_yield_for_counters` helper, the `clamp_foreground_reserve` helper that keeps the background budget >= 1 for small `pool_max` configs, reserve install+clamp in `connect`, and the predicate + clamp unit tests; #3690: preferred_intake_node_labels upsert/sync + COALESCE preserve; #3692: `agent_roster_sync_enabled` leader-ownership gate on the roster sync; #3722 adds the bounded startup advisory lock wrapper plus concurrency coverage for migration/config-audit/reseed startup sections).
-  - `src/db/dispatched_sessions.rs` (1671 lines; dispatched session
-    persistence helpers. #4091 r3: +38 for claude_session_id_recorded_at (upsert
+  - `src/db/dispatched_sessions.rs` (1734 lines; dispatched session
+    persistence helpers. #4091 r4: +63 keying the watermark to its raw session id
+    with mismatch reset, the sticky raw_provider_transcript_growth_proven flag
+    (non-destructive growth evidence), compare/flag-only observation for the kill
+    path, and watermark+flag clears in the session-id clear APIs (migration 0078);
+    #4091 r3: +38 for claude_session_id_recorded_at (upsert
     bumps it only when the cached id value changes, so heartbeats stop extending
     the flip-back window) and the monotonic raw_provider_transcript_len_watermark
     accessors backing restart-surviving growth evidence (migration 0077);

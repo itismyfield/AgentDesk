@@ -307,6 +307,33 @@ fn rebind_initial_offset_with_floor_unless_forced(
     )
 }
 
+fn claude_tui_force_initial_offset_for_adopted_transcript(
+    runtime_kind: Option<RuntimeHandoffKind>,
+    existing_saved_output_path: Option<&str>,
+    output_path: &str,
+    synthetic_initial_offset: u64,
+    existing_inflight_present: bool,
+) -> Option<u64> {
+    if !existing_inflight_present || runtime_kind != Some(RuntimeHandoffKind::ClaudeTui) {
+        return None;
+    }
+    let existing_saved_output_path = existing_saved_output_path
+        .map(str::trim)
+        .filter(|path| !path.is_empty())?;
+    if rebind_output_paths_same(existing_saved_output_path, output_path) {
+        return None;
+    }
+    Some(synthetic_initial_offset)
+}
+
+fn rebind_output_paths_same(left: &str, right: &str) -> bool {
+    let left_path = std::path::Path::new(left);
+    let right_path = std::path::Path::new(right);
+    let left_path = std::fs::canonicalize(left_path).unwrap_or_else(|_| left_path.to_path_buf());
+    let right_path = std::fs::canonicalize(right_path).unwrap_or_else(|_| right_path.to_path_buf());
+    left_path == right_path
+}
+
 fn codex_tui_existing_normalized_relay_replay_events(
     relay_path: &str,
     turn_start_offset: Option<u64>,
@@ -522,6 +549,25 @@ async fn rebind_inflight_for_channel_inner(
     let runtime_kind_for_state = runtime_state.runtime_kind;
     let session_id_for_state = runtime_state.session_id;
     let mut force_initial_offset = runtime_state.force_initial_offset;
+    if force_initial_offset.is_none()
+        && let Some(offset) = claude_tui_force_initial_offset_for_adopted_transcript(
+            runtime_kind_for_state,
+            existing_saved_output_path.as_deref(),
+            &output_path,
+            synthetic_initial_offset,
+            existing_inflight.is_some(),
+        )
+    {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] ♻ rebind starting adopted Claude transcript at EOF for {}: {:?} -> {} (offset {})",
+            tmux_session_name,
+            existing_saved_output_path,
+            output_path,
+            offset
+        );
+        force_initial_offset = Some(offset);
+    }
     let mut existing_offset_rebase_to_output: Option<u64> = runtime_state
         .rebase_existing_offsets_to_output
         .then_some(force_initial_offset.unwrap_or(synthetic_initial_offset));
@@ -853,6 +899,23 @@ async fn rebind_inflight_for_channel_inner(
         false
     };
 
+    if runtime_kind_for_state == Some(RuntimeHandoffKind::ClaudeTui) {
+        crate::services::tui_prompt_dedupe::register_rehydrated_tmux_runtime_binding(
+            provider.as_str(),
+            &tmux_session_name,
+            channel_id,
+            crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                output_path: output_path.clone(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: session_id_for_state.clone(),
+                last_offset: initial_offset,
+                relay_last_offset: None,
+            },
+        );
+    }
+
     // #1135: claim with the single-watcher policy. A live watcher for this
     // same tmux session is reused; a cancelled same-session handle or a
     // different-session channel incumbent is replaced so recovery is not
@@ -1116,6 +1179,39 @@ mod post_work_evidence_tests {
             ),
             13_400_000,
             "non-forced rebinds still honor an in-file durable floor"
+        );
+    }
+
+    #[test]
+    fn claude_tui_adopted_transcript_rebind_starts_existing_inflight_at_eof() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let wrapper_path = tmp.path().join("wrapper.jsonl");
+        let transcript_path = tmp
+            .path()
+            .join("48fdb7f3-0000-4000-8000-000000000000.jsonl");
+        std::fs::write(&wrapper_path, vec![b'w'; 128]).expect("write wrapper");
+        std::fs::write(&transcript_path, vec![b't'; 512_000]).expect("write transcript");
+        let transcript_eof = std::fs::metadata(&transcript_path)
+            .expect("transcript metadata")
+            .len();
+
+        let forced = claude_tui_force_initial_offset_for_adopted_transcript(
+            Some(RuntimeHandoffKind::ClaudeTui),
+            Some(wrapper_path.to_str().expect("utf8 wrapper path")),
+            transcript_path.to_str().expect("utf8 transcript path"),
+            transcript_eof,
+            true,
+        );
+        let initial_offset = rebind_initial_offset_with_floor_unless_forced(
+            forced.expect("adopted transcript must force EOF"),
+            Some(64),
+            Some(transcript_eof),
+            forced,
+        );
+
+        assert_eq!(
+            initial_offset, transcript_eof,
+            "existing wrapper offsets are not valid coordinates in the adopted Claude transcript"
         );
     }
 

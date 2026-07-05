@@ -56,11 +56,13 @@ pub(crate) fn activity_with_observed_growth(
     selector: &str,
     activity: SelectorFileActivity,
     persisted_len_watermark: Option<u64>,
+    persisted_growth_proven: bool,
 ) -> SelectorFileActivity {
     let mut activity = activity;
     let persisted_growth = activity.exists
         && activity.len > 0
-        && persisted_len_watermark.is_some_and(|watermark| activity.len > watermark);
+        && (persisted_growth_proven
+            || persisted_len_watermark.is_some_and(|watermark| activity.len > watermark));
     activity.observed_growth_since_previous_sample =
         persisted_growth || selector_file_observed_growth(selector, activity);
     activity
@@ -290,14 +292,20 @@ mod tests {
         let third_grown = SelectorFileActivity { len: 11, ..first };
 
         assert!(
-            !activity_with_observed_growth("48fdb7f3-0000-4000-8000-000000000000", first, None,)
-                .observed_growth_since_previous_sample
+            !activity_with_observed_growth(
+                "48fdb7f3-0000-4000-8000-000000000000",
+                first,
+                None,
+                false,
+            )
+            .observed_growth_since_previous_sample
         );
         assert!(
             !activity_with_observed_growth(
                 "48fdb7f3-0000-4000-8000-000000000000",
                 second_same,
                 None,
+                false,
             )
             .observed_growth_since_previous_sample
         );
@@ -306,6 +314,7 @@ mod tests {
                 "48fdb7f3-0000-4000-8000-000000000000",
                 third_grown,
                 None,
+                false,
             )
             .observed_growth_since_previous_sample
         );
@@ -322,13 +331,18 @@ mod tests {
         };
 
         assert!(
-            activity_with_observed_growth("48fdb7f3-0000-4000-8000-000000000000", raw, Some(10),)
-                .observed_growth_since_previous_sample
+            activity_with_observed_growth(
+                "48fdb7f3-0000-4000-8000-000000000000",
+                raw,
+                Some(10),
+                false,
+            )
+            .observed_growth_since_previous_sample
         );
     }
 
     #[test]
-    fn equal_persisted_watermark_is_not_growth_evidence() {
+    fn sticky_persisted_growth_flag_proves_growth_at_equal_watermark() {
         clear_selector_observations_for_tests();
         let raw = SelectorFileActivity {
             exists: true,
@@ -338,8 +352,34 @@ mod tests {
         };
 
         assert!(
-            !activity_with_observed_growth("48fdb7f3-0000-4000-8000-000000000000", raw, Some(11),)
-                .observed_growth_since_previous_sample
+            activity_with_observed_growth(
+                "48fdb7f3-0000-4000-8000-000000000000",
+                raw,
+                Some(11),
+                true,
+            )
+            .observed_growth_since_previous_sample
+        );
+    }
+
+    #[test]
+    fn equal_persisted_watermark_without_sticky_flag_is_not_growth_evidence() {
+        clear_selector_observations_for_tests();
+        let raw = SelectorFileActivity {
+            exists: true,
+            len: 11,
+            mtime_age_secs: Some(1),
+            observed_growth_since_previous_sample: false,
+        };
+
+        assert!(
+            !activity_with_observed_growth(
+                "48fdb7f3-0000-4000-8000-000000000000",
+                raw,
+                Some(11),
+                false,
+            )
+            .observed_growth_since_previous_sample
         );
     }
 }

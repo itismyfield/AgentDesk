@@ -161,22 +161,20 @@ pub(super) fn resolve_rebind_runtime_state(
         });
     }
 
-    if provider == &ProviderKind::Claude {
+    if provider == &ProviderKind::Claude
+        && observed_runtime_kind == Some(RuntimeHandoffKind::ClaudeTui)
+    {
         if let Some(transcript_path) =
             existing_saved_output_path.and_then(claude_rebind_transcript_path)
             && let Ok(metadata) = std::fs::metadata(transcript_path)
         {
+            let transcript_session_id = claude_transcript_session_id(transcript_path);
             return Ok(RebindRuntimeState {
                 output_path: transcript_path.to_string(),
                 synthetic_initial_offset: metadata.len(),
                 input_fifo_path: None,
                 runtime_kind: Some(RuntimeHandoffKind::ClaudeTui),
-                session_id: existing_session_id.or_else(|| {
-                    std::path::Path::new(transcript_path)
-                        .file_stem()
-                        .and_then(|stem| stem.to_str())
-                        .map(str::to_string)
-                }),
+                session_id: transcript_session_id.or(existing_session_id),
                 codex_rollout_path: None,
                 codex_rollout_resume_offset: None,
                 codex_rollout_resume_offset_from_marker: false,
@@ -197,12 +195,15 @@ pub(super) fn resolve_rebind_runtime_state(
                     .map(|metadata| (binding, metadata.len()))
             })
         {
+            let transcript_session_id = claude_transcript_session_id(&binding.output_path);
             return Ok(RebindRuntimeState {
                 output_path: binding.output_path.clone(),
                 synthetic_initial_offset: output_len,
                 input_fifo_path: None,
                 runtime_kind: Some(RuntimeHandoffKind::ClaudeTui),
-                session_id: existing_session_id.or_else(|| binding.session_id.clone()),
+                session_id: transcript_session_id
+                    .or_else(|| binding.session_id.clone())
+                    .or(existing_session_id),
                 codex_rollout_path: None,
                 codex_rollout_resume_offset: None,
                 codex_rollout_resume_offset_from_marker: false,
@@ -322,6 +323,14 @@ fn claude_rebind_transcript_path(path: &str) -> Option<&str> {
     let file_name = std::path::Path::new(path).file_name()?.to_str()?;
     let stem = file_name.strip_suffix(".jsonl")?;
     uuid::Uuid::parse_str(stem).is_ok().then_some(path)
+}
+
+fn claude_transcript_session_id(path: &str) -> Option<String> {
+    let path = claude_rebind_transcript_path(path)?;
+    std::path::Path::new(path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(str::to_string)
 }
 
 fn normalized_non_empty(value: Option<&str>) -> Option<&str> {
@@ -1004,6 +1013,14 @@ mod tests {
         .expect("write runtime kind marker");
     }
 
+    fn write_runtime_kind_marker(tmux_session_name: &str, runtime_kind: RuntimeHandoffKind) {
+        crate::services::tmux_common::write_tmux_runtime_kind_marker(
+            tmux_session_name,
+            runtime_kind,
+        )
+        .expect("write runtime kind marker");
+    }
+
     fn write_rollout(path: &Path) -> u64 {
         let body = "{\"type\":\"session_meta\",\"payload\":{\"id\":\"sess-1\"}}\n{\"type\":\"response\"}\n";
         std::fs::write(path, body).expect("write rollout");
@@ -1024,6 +1041,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let _root = EnvGuard::set_path("AGENTDESK_ROOT_DIR", tmp.path());
         let tmux_session_name = "AgentDesk-claude-adk-cc-manual-rebind";
+        write_runtime_kind_marker(tmux_session_name, RuntimeHandoffKind::ClaudeTui);
         let cwd = tempfile::tempdir().expect("cwd tempdir");
         let claude_home = tempfile::tempdir().expect("claude home tempdir");
         let session_id = "c62c2dc8-0000-4000-8000-000000000000";
@@ -1054,6 +1072,120 @@ mod tests {
         assert_eq!(result.runtime_kind, Some(RuntimeHandoffKind::ClaudeTui));
         assert_eq!(result.session_id.as_deref(), Some(session_id));
         assert_eq!(result.codex_rollout_path, None);
+    }
+
+    #[test]
+    fn claude_rebind_with_legacy_runtime_marker_does_not_adopt_transcript_as_claude_tui() {
+        let _guard = lock_test_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _root = EnvGuard::set_path("AGENTDESK_ROOT_DIR", tmp.path());
+        let tmux_session_name = "AgentDesk-claude-adk-legacy-manual-rebind";
+        write_runtime_kind_marker(tmux_session_name, RuntimeHandoffKind::LegacyTmuxWrapper);
+        let cwd = tempfile::tempdir().expect("cwd tempdir");
+        let claude_home = tempfile::tempdir().expect("claude home tempdir");
+        let session_id = "c62c2dc8-0000-4000-8000-000000000000";
+        let transcript_path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+            cwd.path(),
+            session_id,
+            Some(claude_home.path()),
+        )
+        .expect("transcript path");
+        std::fs::create_dir_all(transcript_path.parent().expect("transcript parent"))
+            .expect("create transcript parent");
+        std::fs::write(&transcript_path, b"legacy transcript\n").expect("write transcript");
+
+        let result = resolve_rebind_runtime_state(
+            &ProviderKind::Claude,
+            tmux_session_name,
+            Some(transcript_path.to_str().expect("utf8 transcript path")),
+            Some(session_id.to_string()),
+        )
+        .expect("legacy Claude wrapper rebind should retain wrapper semantics");
+
+        assert_eq!(
+            result.runtime_kind,
+            Some(RuntimeHandoffKind::LegacyTmuxWrapper)
+        );
+        assert!(
+            result.input_fifo_path.is_some(),
+            "legacy wrapper rebind must not lose its input FIFO"
+        );
+        assert_ne!(
+            result.runtime_kind,
+            Some(RuntimeHandoffKind::ClaudeTui),
+            "a transcript candidate alone must not promote LegacyTmuxWrapper to ClaudeTui"
+        );
+    }
+
+    #[test]
+    fn claude_rebind_without_runtime_marker_does_not_promote_transcript_to_claude_tui() {
+        let _guard = lock_test_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _root = EnvGuard::set_path("AGENTDESK_ROOT_DIR", tmp.path());
+        let tmux_session_name = "AgentDesk-claude-adk-unknown-kind-manual-rebind";
+        let cwd = tempfile::tempdir().expect("cwd tempdir");
+        let claude_home = tempfile::tempdir().expect("claude home tempdir");
+        let session_id = "c62c2dc8-0000-4000-8000-000000000000";
+        let transcript_path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+            cwd.path(),
+            session_id,
+            Some(claude_home.path()),
+        )
+        .expect("transcript path");
+        std::fs::create_dir_all(transcript_path.parent().expect("transcript parent"))
+            .expect("create transcript parent");
+        std::fs::write(&transcript_path, b"unknown-kind transcript\n").expect("write transcript");
+
+        let result = resolve_rebind_runtime_state(
+            &ProviderKind::Claude,
+            tmux_session_name,
+            Some(transcript_path.to_str().expect("utf8 transcript path")),
+            Some(session_id.to_string()),
+        )
+        .expect("unknown runtime kind should keep non-ClaudeTui semantics");
+
+        assert_eq!(result.runtime_kind, None);
+        assert!(
+            result.input_fifo_path.is_some(),
+            "unknown runtime kind fails closed instead of dropping FIFO semantics"
+        );
+    }
+
+    #[test]
+    fn claude_rebind_adopted_transcript_session_id_follows_transcript_stem() {
+        let _guard = lock_test_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _root = EnvGuard::set_path("AGENTDESK_ROOT_DIR", tmp.path());
+        let tmux_session_name = "AgentDesk-claude-adk-raw-session-id-rebind";
+        write_runtime_kind_marker(tmux_session_name, RuntimeHandoffKind::ClaudeTui);
+        let cwd = tempfile::tempdir().expect("cwd tempdir");
+        let claude_home = tempfile::tempdir().expect("claude home tempdir");
+        let cached_session_id = "c62c2dc8-0000-4000-8000-000000000000";
+        let raw_session_id = "48fdb7f3-0000-4000-8000-000000000000";
+        let transcript_path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+            cwd.path(),
+            raw_session_id,
+            Some(claude_home.path()),
+        )
+        .expect("raw transcript path");
+        std::fs::create_dir_all(transcript_path.parent().expect("transcript parent"))
+            .expect("create transcript parent");
+        std::fs::write(&transcript_path, b"raw transcript\n").expect("write transcript");
+
+        let result = resolve_rebind_runtime_state(
+            &ProviderKind::Claude,
+            tmux_session_name,
+            Some(transcript_path.to_str().expect("utf8 transcript path")),
+            Some(cached_session_id.to_string()),
+        )
+        .expect("claude rebind should adopt raw transcript");
+
+        assert_eq!(result.output_path, transcript_path.display().to_string());
+        assert_eq!(
+            result.session_id.as_deref(),
+            Some(raw_session_id),
+            "adopting raw transcript B must not keep stale cached session id A"
+        );
     }
 
     #[test]

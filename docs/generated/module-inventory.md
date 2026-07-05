@@ -5,7 +5,7 @@
 
 - Production Rust modules: `925`
 - Giant-file threshold: `>= 1000` production lines
-- Giant files: `93`
+- Giant files: `94`
 
 > `Prod` excludes lines inside `#[cfg(test)] mod` blocks; the
 > giant-file flag tracks `Prod` so inline test fixtures do not freeze a
@@ -98,7 +98,7 @@
 | `db::automation_candidates` | `src/db/automation_candidates.rs` | 1003 | 1003 | 0 | giant-file |
 | `db::cancel_tombstones` | `src/db/cancel_tombstones.rs` | 193 | 193 | 0 |  |
 | `db::dispatch_semaphores` | `src/db/dispatch_semaphores.rs` | 331 | 298 | 33 |  |
-| `db::dispatched_sessions` | `src/db/dispatched_sessions.rs` | 2301 | 1671 | 630 | giant-file |
+| `db::dispatched_sessions` | `src/db/dispatched_sessions.rs` | 2602 | 1734 | 868 | giant-file |
 | `db::dispatches` | `src/db/dispatches/mod.rs` | 1028 | 1028 | 0 | giant-file |
 | `db::dispatches::delivery_events` | `src/db/dispatches/delivery_events.rs` | 490 | 251 | 239 |  |
 | `db::dispatches::metadata` | `src/db/dispatches/metadata.rs` | 262 | 235 | 27 |  |
@@ -447,7 +447,7 @@
 | `services::discord::commands::voice` | `src/services/discord/commands/voice.rs` | 1025 | 967 | 58 |  |
 | `services::discord::delivery_lease_key` | `src/services/discord/delivery_lease_key.rs` | 156 | 156 | 0 |  |
 | `services::discord::destructive_cancel_capture` | `src/services/discord/destructive_cancel_capture.rs` | 63 | 34 | 29 |  |
-| `services::discord::destructive_cancel_gate` | `src/services/discord/destructive_cancel_gate.rs` | 668 | 327 | 341 |  |
+| `services::discord::destructive_cancel_gate` | `src/services/discord/destructive_cancel_gate.rs` | 688 | 337 | 351 |  |
 | `services::discord::discord_io` | `src/services/discord/discord_io.rs` | 507 | 507 | 0 |  |
 | `services::discord::dispatch_policy` | `src/services/discord/dispatch_policy.rs` | 351 | 218 | 133 |  |
 | `services::discord::footer_view_reconciler` | `src/services/discord/footer_view_reconciler/mod.rs` | 660 | 473 | 187 |  |
@@ -557,11 +557,11 @@
 | `services::discord::recovery_engine::analytics_transcript` | `src/services/discord/recovery_engine/analytics_transcript.rs` | 110 | 110 | 0 |  |
 | `services::discord::recovery_engine::completion_delivery` | `src/services/discord/recovery_engine/completion_delivery.rs` | 802 | 300 | 502 |  |
 | `services::discord::recovery_engine::jsonl_extract` | `src/services/discord/recovery_engine/jsonl_extract.rs` | 137 | 137 | 0 |  |
-| `services::discord::recovery_engine::manual_rebind` | `src/services/discord/recovery_engine/manual_rebind.rs` | 1874 | 994 | 880 |  |
+| `services::discord::recovery_engine::manual_rebind` | `src/services/discord/recovery_engine/manual_rebind.rs` | 1970 | 1057 | 913 | giant-file |
 | `services::discord::recovery_engine::manual_rebind_output_path` | `src/services/discord/recovery_engine/manual_rebind_output_path.rs` | 539 | 348 | 191 |  |
 | `services::discord::recovery_engine::output_path_detect` | `src/services/discord/recovery_engine/output_path_detect.rs` | 177 | 177 | 0 |  |
 | `services::discord::recovery_engine::phase_policy` | `src/services/discord/recovery_engine/phase_policy.rs` | 210 | 138 | 72 |  |
-| `services::discord::recovery_engine::rebind_runtime` | `src/services/discord/recovery_engine/rebind_runtime.rs` | 1943 | 963 | 980 |  |
+| `services::discord::recovery_engine::rebind_runtime` | `src/services/discord/recovery_engine/rebind_runtime.rs` | 2075 | 972 | 1103 |  |
 | `services::discord::recovery_engine::restore_inflight` | `src/services/discord/recovery_engine/restore_inflight.rs` | 2335 | 2335 | 0 | giant-file |
 | `services::discord::recovery_engine::routing_orphan` | `src/services/discord/recovery_engine/routing_orphan.rs` | 218 | 146 | 72 |  |
 | `services::discord::recovery_engine::runtime` | `src/services/discord/recovery_engine/runtime.rs` | 341 | 137 | 204 |  |
@@ -703,7 +703,7 @@
 | `services::discord::tui_prompt_relay::bridge_completion` | `src/services/discord/tui_prompt_relay/bridge_completion.rs` | 167 | 81 | 86 |  |
 | `services::discord::tui_prompt_relay::bridge_gateway` | `src/services/discord/tui_prompt_relay/bridge_gateway.rs` | 185 | 185 | 0 |  |
 | `services::discord::tui_prompt_relay::claude_idle_bridge` | `src/services/discord/tui_prompt_relay/claude_idle_bridge.rs` | 678 | 678 | 0 |  |
-| `services::discord::tui_prompt_relay::claude_idle_runtime` | `src/services/discord/tui_prompt_relay/claude_idle_runtime.rs` | 611 | 611 | 0 |  |
+| `services::discord::tui_prompt_relay::claude_idle_runtime` | `src/services/discord/tui_prompt_relay/claude_idle_runtime.rs` | 664 | 628 | 36 |  |
 | `services::discord::tui_prompt_relay::claude_idle_tail` | `src/services/discord/tui_prompt_relay/claude_idle_tail.rs` | 478 | 478 | 0 |  |
 | `services::discord::tui_prompt_relay::codex_idle_rollout` | `src/services/discord/tui_prompt_relay/codex_idle_rollout.rs` | 613 | 613 | 0 |  |
 | `services::discord::tui_prompt_relay::idle_offset_resolution` | `src/services/discord/tui_prompt_relay/idle_offset_resolution.rs` | 100 | 100 | 0 |  |
@@ -789,7 +789,7 @@
 | `services::disk_monitor` | `src/services/disk_monitor.rs` | 234 | 234 | 0 |  |
 | `services::dispatch_gate` | `src/services/dispatch_gate.rs` | 1440 | 828 | 612 |  |
 | `services::dispatch_watchdog` | `src/services/dispatch_watchdog.rs` | 254 | 198 | 56 |  |
-| `services::dispatched_sessions` | `src/services/dispatched_sessions.rs` | 2133 | 1755 | 378 | giant-file |
+| `services::dispatched_sessions` | `src/services/dispatched_sessions.rs` | 2252 | 1815 | 437 | giant-file |
 | `services::dispatches` | `src/services/dispatches/mod.rs` | 169 | 169 | 0 |  |
 | `services::dispatches::discord_delivery` | `src/services/dispatches/discord_delivery/mod.rs` | 26 | 26 | 0 |  |
 | `services::dispatches::discord_delivery::guard` | `src/services/dispatches/discord_delivery/guard.rs` | 1606 | 645 | 961 |  |
@@ -920,7 +920,7 @@
 | `services::session_backend::stream_line` | `src/services/session_backend/stream_line.rs` | 682 | 568 | 114 |  |
 | `services::session_backend::terminal_usage` | `src/services/session_backend/terminal_usage.rs` | 212 | 106 | 106 |  |
 | `services::session_forwarding` | `src/services/session_forwarding.rs` | 493 | 315 | 178 |  |
-| `services::session_selector_validity` | `src/services/session_selector_validity.rs` | 345 | 147 | 198 |  |
+| `services::session_selector_validity` | `src/services/session_selector_validity.rs` | 385 | 149 | 236 |  |
 | `services::settings` | `src/services/settings.rs` | 1273 | 1114 | 159 | giant-file |
 | `services::shell_guard` | `src/services/shell_guard.rs` | 419 | 419 | 0 |  |
 | `services::slo` | `src/services/slo/mod.rs` | 530 | 503 | 27 |  |
