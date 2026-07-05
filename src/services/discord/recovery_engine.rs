@@ -145,7 +145,7 @@ use self::completion_delivery::{
 pub(in crate::services::discord) use self::completion_delivery::{
     relay_recovered_terminal_text_to_placeholder,
 };
-pub(super) use self::restore_inflight::{finish_recovered_turn_mailbox, restore_inflight_turns};
+pub(in crate::services::discord) use self::restore_inflight::{finish_recovered_turn_mailbox, restore_inflight_turns};
 pub(in crate::services::discord) use self::terminal_text_idempotency::RecoveryDeliveryContext;
 // #3479: re-import the analytics + transcript helpers so root call sites stay
 // byte-identical. `recovered_transcript_turn_id` is gated on cfg(test) — the root

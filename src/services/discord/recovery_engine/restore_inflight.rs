@@ -55,7 +55,7 @@ fn build_tmux_death_diagnostic(_name: &str, _output_path: Option<&str>) -> Optio
     None
 }
 
-pub(super) async fn finish_recovered_turn_mailbox(
+pub(in crate::services::discord) async fn finish_recovered_turn_mailbox(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -141,7 +141,7 @@ fn detect_live_tmux_output_path(
     detect_rebind_output_path_from_candidates(fallback_path, candidates)
 }
 
-pub(super) async fn restore_inflight_turns(
+pub(in crate::services::discord) async fn restore_inflight_turns(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
