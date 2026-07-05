@@ -25,6 +25,7 @@ pub(super) fn classify_phase2_enqueue_commit(
             outcome.refusal_reason,
             Some(EnqueueRefusalReason::AlreadyActiveTurn)
                 | Some(EnqueueRefusalReason::SourceIdAlreadyQueued)
+                | Some(EnqueueRefusalReason::LastItemDedup)
         )
     {
         return Phase2EnqueueCommit::Duplicate;
