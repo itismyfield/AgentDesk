@@ -672,12 +672,9 @@ fn suppressed_placeholder_action(
         return SuppressedPlaceholderAction::None;
     }
 
-    let real_body_was_exposed = placeholder_real_body_exposure_evidence(
-        provider,
-        response_sent_offset,
-        last_edit_text,
-    )
-    .is_some();
+    let real_body_was_exposed =
+        placeholder_real_body_exposure_evidence(provider, response_sent_offset, last_edit_text)
+            .is_some();
     let placeholder_was_exposed = real_body_was_exposed
         || discord::single_message_panel::streaming_footer_only_surface_was_exposed(
             last_edit_text,
@@ -879,10 +876,12 @@ mod placeholder_suppression_tests {
             placeholder_real_body_exposure_evidence(&ProviderKind::Claude, 0, &placeholder),
             None
         );
-        assert!(discord::single_message_panel::streaming_footer_only_surface_was_exposed(
-            &placeholder,
-            &ProviderKind::Claude
-        ));
+        assert!(
+            discord::single_message_panel::streaming_footer_only_surface_was_exposed(
+                &placeholder,
+                &ProviderKind::Claude
+            )
+        );
     }
 
     #[test]
@@ -1083,11 +1082,8 @@ No response requested.\n\
     #[test]
     fn task_notification_subagent_kind_exposed_body_preserves() {
         let placeholder = body_with_footer("visible assistant body");
-        let ctx = task_notification_terminal_ctx(
-            &placeholder,
-            0,
-            Some(TaskNotificationKind::Subagent),
-        );
+        let ctx =
+            task_notification_terminal_ctx(&placeholder, 0, Some(TaskNotificationKind::Subagent));
 
         let PlaceholderSuppressDecision::Preserve {
             reason,
@@ -1119,11 +1115,8 @@ No response requested.\n\
     #[test]
     fn task_notification_background_kind_exposed_body_preserves() {
         let placeholder = body_with_footer("visible assistant body");
-        let ctx = task_notification_terminal_ctx(
-            &placeholder,
-            0,
-            Some(TaskNotificationKind::Background),
-        );
+        let ctx =
+            task_notification_terminal_ctx(&placeholder, 0, Some(TaskNotificationKind::Background));
 
         let PlaceholderSuppressDecision::Preserve {
             reason,
