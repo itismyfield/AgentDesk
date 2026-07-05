@@ -1,4 +1,5 @@
-use crate::services::session_backend::terminate_process_session;
+use crate::services::platform::tmux::PaneLiveness;
+use crate::services::session_backend::terminate_process_session_before_tmux;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LocalTmuxStartupPlan {
@@ -46,14 +47,51 @@ pub(super) fn should_preserve_live_reused_provider_session(
 
 pub(super) fn should_refuse_process_backend_demotion(
     tmux_available: bool,
-    session_exists: bool,
-    has_live_pane: bool,
+    tmux_missing: bool,
+    pane_liveness: PaneLiveness,
 ) -> bool {
-    !tmux_available && session_exists && has_live_pane
+    // ProbeError is unknown, not dead. Preserve the tmux route unless the
+    // availability probe specifically proved the tmux binary is missing.
+    !tmux_available
+        && !tmux_missing
+        && matches!(pane_liveness, PaneLiveness::Live | PaneLiveness::ProbeError)
+}
+
+pub(super) fn process_backend_demotion_guard_liveness(
+    tmux_session_name: &str,
+) -> (bool, PaneLiveness) {
+    let tmux_missing = crate::services::platform::tmux::cached_unavailable_due_to_missing();
+    let pane_liveness = if tmux_missing {
+        PaneLiveness::DeadOrAbsent
+    } else {
+        crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux_session_name)
+    };
+    (tmux_missing, pane_liveness)
+}
+
+pub(super) fn prepare_tmux_backend_after_refused_process_demotion(
+    tmux_session_name: &str,
+    pane_liveness: PaneLiveness,
+) {
+    match pane_liveness {
+        PaneLiveness::Live => {
+            crate::services::platform::tmux::mark_available_from_live_session();
+        }
+        PaneLiveness::ProbeError => {
+            crate::services::platform::tmux::invalidate_availability_cache();
+        }
+        PaneLiveness::DeadOrAbsent => {}
+    }
+    tracing::warn!(
+        tmux_session_name = tmux_session_name,
+        pane_liveness = ?pane_liveness,
+        "routing through tmux backend instead of ProcessBackend demotion"
+    );
+    cleanup_process_backend_before_tmux(tmux_session_name);
 }
 
 pub(super) fn cleanup_process_backend_before_tmux(session_name: &str) -> bool {
-    let cleaned = terminate_process_session(session_name);
+    let cleaned = terminate_process_session_before_tmux(session_name);
     if cleaned {
         tracing::warn!(
             tmux_session_name = session_name,

@@ -299,6 +299,41 @@ pub fn terminate_process_session(session_name: &str) -> bool {
     true
 }
 
+pub fn terminate_process_session_before_tmux(session_name: &str) -> bool {
+    let mut registry = process_sessions();
+    if registry.stopped.contains(session_name) {
+        let handle = registry
+            .handles
+            .remove(session_name)
+            .map(|entry| entry.handle);
+        drop(registry);
+        if let Some(handle) = handle {
+            terminate_process_handle(handle);
+            return true;
+        }
+        return false;
+    }
+
+    let Some(entry) = registry.handles.get(session_name) else {
+        return false;
+    };
+    if ProcessBackend::new().is_alive(&entry.handle) {
+        tracing::warn!(
+            session_name = session_name,
+            wrapper_pid = entry.handle.pid(),
+            "skipping ProcessBackend cleanup before tmux because active wrapper is not stopped"
+        );
+        return false;
+    }
+
+    let Some(entry) = registry.handles.remove(session_name) else {
+        return false;
+    };
+    drop(registry);
+    terminate_process_handle(entry.handle);
+    true
+}
+
 pub fn process_session_was_stopped(session_name: &str) -> bool {
     process_sessions().stopped.contains(session_name)
 }
@@ -554,6 +589,46 @@ mod process_registry_stop_tests {
             !terminate_process_session(&session_name),
             "second cleanup is idempotent after registry removal"
         );
+    }
+
+    #[test]
+    fn issue_4134_tmux_cleanup_skips_active_wrapper_without_stopped_marker() {
+        let session_name = format!("process-tmux-active-skip-{}", uuid::Uuid::new_v4());
+        let alive = Arc::new(AtomicBool::new(true));
+        insert_process_session(
+            session_name.clone(),
+            SessionHandle::TestProcess {
+                pid: 424_247,
+                alive: alive.clone(),
+            },
+        );
+
+        assert!(!terminate_process_session_before_tmux(&session_name));
+        assert!(alive.load(Ordering::Relaxed));
+        assert!(process_session_is_alive(&session_name));
+
+        if let Some(handle) = remove_process_session(&session_name) {
+            terminate_process_handle(handle);
+        }
+    }
+
+    #[test]
+    fn issue_4134_tmux_cleanup_terminates_stopped_wrapper() {
+        let session_name = format!("process-tmux-stopped-cleanup-{}", uuid::Uuid::new_v4());
+        let alive = Arc::new(AtomicBool::new(true));
+        insert_process_session(
+            session_name.clone(),
+            SessionHandle::TestProcess {
+                pid: 424_248,
+                alive: alive.clone(),
+            },
+        );
+        mark_process_session_stopped(session_name.clone());
+
+        assert!(terminate_process_session_before_tmux(&session_name));
+        assert!(!alive.load(Ordering::Relaxed));
+        assert!(!process_session_is_alive(&session_name));
+        assert!(process_session_was_stopped(&session_name));
     }
 }
 

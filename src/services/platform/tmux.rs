@@ -73,7 +73,10 @@ fn wait_for_tmux_output(
 
 mod availability;
 
-pub use availability::is_available;
+pub use availability::{
+    cached_unavailable_due_to_missing, invalidate_cache as invalidate_availability_cache,
+    is_available, mark_available_from_live_session,
+};
 
 /// Get tmux version string (e.g. "tmux 3.4").
 pub fn version() -> Result<String, String> {

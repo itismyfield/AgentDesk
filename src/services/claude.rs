@@ -35,6 +35,7 @@ mod backend_routing;
 #[cfg(unix)]
 use self::backend_routing::{
     LocalTmuxStartupPlan, classify_local_tmux_startup_plan, cleanup_process_backend_before_tmux,
+    prepare_tmux_backend_after_refused_process_demotion, process_backend_demotion_guard_liveness,
     should_preserve_live_reused_provider_session, should_refuse_process_backend_demotion,
 };
 #[cfg(unix)]
@@ -844,20 +845,27 @@ IMPORTANT: Format your responses using Markdown for better readability:
                     cache_ttl_minutes,
                 );
             } else {
-                let session_exists = tmux_session_exists(tmux_name);
-                let has_live_pane = session_exists && tmux_session_has_live_pane(tmux_name);
+                let (tmux_missing, pane_liveness) =
+                    process_backend_demotion_guard_liveness(tmux_name);
                 if should_refuse_process_backend_demotion(
                     tmux_available,
-                    session_exists,
-                    has_live_pane,
+                    tmux_missing,
+                    pane_liveness,
                 ) {
-                    tracing::warn!(
-                        tmux_session_name = tmux_name,
-                        "refusing ProcessBackend demotion while an existing live tmux session is present"
+                    prepare_tmux_backend_after_refused_process_demotion(tmux_name, pane_liveness);
+                    return execute_streaming_local_tmux(
+                        &args,
+                        prompt,
+                        session_id,
+                        working_dir,
+                        sender,
+                        cancel_token,
+                        tmux_name,
+                        report_channel_id,
+                        report_provider,
+                        compact_percent,
+                        cache_ttl_minutes,
                     );
-                    return Err(format!(
-                        "live tmux session {tmux_name} exists but tmux availability probe is unavailable; refusing ProcessBackend demotion"
-                    ));
                 }
                 // Local without tmux → ProcessBackend (new path)
                 debug_log(&format!("ProcessBackend session (no tmux): {}", tmux_name));
@@ -3288,15 +3296,40 @@ mod local_tmux_lifecycle_tests {
 
     #[test]
     fn issue_4113_refuses_process_demotion_when_live_tmux_session_exists() {
-        assert!(should_refuse_process_backend_demotion(false, true, true));
+        assert!(should_refuse_process_backend_demotion(
+            false,
+            false,
+            crate::services::platform::tmux::PaneLiveness::Live,
+        ));
 
-        assert!(!should_refuse_process_backend_demotion(true, true, true));
-        assert!(!should_refuse_process_backend_demotion(false, false, true));
-        assert!(!should_refuse_process_backend_demotion(false, true, false));
+        assert!(!should_refuse_process_backend_demotion(
+            true,
+            false,
+            crate::services::platform::tmux::PaneLiveness::Live,
+        ));
+        assert!(!should_refuse_process_backend_demotion(
+            false,
+            true,
+            crate::services::platform::tmux::PaneLiveness::Live,
+        ));
+        assert!(!should_refuse_process_backend_demotion(
+            false,
+            false,
+            crate::services::platform::tmux::PaneLiveness::DeadOrAbsent,
+        ));
     }
 
     #[test]
-    fn issue_4113_process_wrapper_is_cleaned_when_tmux_returns() {
+    fn issue_4113_probe_error_refuses_process_backend_demotion() {
+        assert!(should_refuse_process_backend_demotion(
+            false,
+            false,
+            crate::services::platform::tmux::PaneLiveness::ProbeError,
+        ));
+    }
+
+    #[test]
+    fn issue_4113_active_process_wrapper_is_not_cleaned_when_tmux_returns() {
         let session_name = format!("claude-tmux-return-cleanup-{}", uuid::Uuid::new_v4());
         let alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         crate::services::session_backend::insert_process_session(
@@ -3310,12 +3343,18 @@ mod local_tmux_lifecycle_tests {
         assert!(crate::services::session_backend::process_session_is_alive(
             &session_name
         ));
-        assert!(cleanup_process_backend_before_tmux(&session_name));
+        assert!(!cleanup_process_backend_before_tmux(&session_name));
 
-        assert!(!alive.load(std::sync::atomic::Ordering::Relaxed));
-        assert!(!crate::services::session_backend::process_session_is_alive(
+        assert!(alive.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(crate::services::session_backend::process_session_is_alive(
             &session_name
         ));
+
+        if let Some(handle) =
+            crate::services::session_backend::remove_process_session(&session_name)
+        {
+            crate::services::session_backend::terminate_process_handle(handle);
+        }
         assert!(!cleanup_process_backend_before_tmux(&session_name));
     }
 
