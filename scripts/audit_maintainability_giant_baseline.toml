@@ -419,15 +419,13 @@
 # re-inflation surfaced only when PR #3655 (which bases on it) ran the gate.
 # #3856 split moved TUI prompt relay external-input recovery support into this
 # existing tracked surface; refresh baseline to current main after the merge.
-# #3834: lowered 3899 -> 3039 (behavior-preserving extraction of the manual-rebind
-# recovery path — `rebind_inflight_for_channel` + its private `codex_tui_*` /
-# `Pending*` support cluster and unit tests — into the leaf module
-# recovery_engine/manual_rebind.rs; zero logic change, `rebind_inflight_for_channel`
-# re-exported so `recovery_engine::rebind_inflight_for_channel` stays byte-identical
-# for its `health` caller, and `RebindOutcome` / `RebindError` kept in root since the
-# sibling rebind_runtime.rs + external callers reference them). manual_rebind.rs is
-# 889 prod LoC — under the 1000 giant threshold, so it needs no baseline entry.
-"src/services/discord/recovery_engine.rs" = 3039
+# #3834 r2: lowered the tracked recovery-engine surface 3039 -> 2335 by moving
+# terminal delivery/completion helpers into recovery_engine/completion_delivery.rs
+# and the restart scan path (`restore_inflight_turns` + tmux retry/output-path
+# helpers) into recovery_engine/restore_inflight.rs. The root facade is now below
+# the prod-giant threshold and the remaining restart child stays registered for
+# follow-up #3834 slices.
+"src/services/discord/recovery_engine/restore_inflight.rs" = 2335
 # #3034 batch-8: lowered 3771 -> 3770 (dead-code removal).
 # #3038 S1: +1 (3770 -> 3771) for the mechanical `shared.queued_placeholders` ->
 # `shared.queued.queued_placeholders` re-wire (one extra method-chain line) forced

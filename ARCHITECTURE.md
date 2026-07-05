@@ -516,11 +516,13 @@ src/
 │   │   │   └── section_dedupe.rs
 │   │   ├── recovery_engine/
 │   │   │   ├── analytics_transcript.rs
+│   │   │   ├── completion_delivery.rs
 │   │   │   ├── jsonl_extract.rs
 │   │   │   ├── manual_rebind.rs
 │   │   │   ├── output_path_detect.rs
 │   │   │   ├── phase_policy.rs
 │   │   │   ├── rebind_runtime.rs
+│   │   │   ├── restore_inflight.rs
 │   │   │   ├── routing_orphan.rs
 │   │   │   ├── runtime.rs
 │   │   │   ├── state_extractors.rs

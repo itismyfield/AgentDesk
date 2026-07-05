@@ -1053,114 +1053,25 @@
     and covers frozen nonzero-frontier / empty-capture variants. This admission
     is bugfix-only for PR #4035; further recovery policy expansion should extract
     decision/apply helpers instead of growing this file.)
-  - `src/services/discord/recovery_engine.rs` (3013 lines; +3 from #4049 S4-b1
-    routing completion-footer takeover suppression through
-    `footer_view_reconciler`; net -17 from #4047
-    S2-b: gate-outcome suppression removed, background_agent_pending producer
-    extracted to `recovery_engine/status_panel_completion_producer.rs`; +97
-    from #3998 D1:
-    threaded recovery turn identity into terminal-text relay call sites and
-    declared the new `recovery_engine/terminal_text_idempotency.rs` leaf; the
-    no-anchor lease/send/anchor-persistence body lives in that leaf, while the
-    root keeps the durable-anchor skip decision and anchored fallback replacement
-    re-record hook needed to preserve terminal relay idempotency.
-    +17 from #3869
-    (restart routing-orphan cleanup): the three post-`validate_bot_channel_routing_with_provider_channel`
-    sites no longer bare-`continue`-strand a row whose channel was re-bound to a
-    different provider while dcserver was down — they delegate to the new leaf
-    module `recovery_engine/routing_orphan.rs` (declared here; the finalize logic,
-    three-state pane-liveness disposition guard, and tests live there to keep this
-    frozen giant under its baseline). The leaf finalizes orphaned rows via
-    `dispose_recovery_relay_outcome` gated on `orphans_inflight_on_restart`, so a
-    cross-bot-skip row stays PRESERVED for the owning sibling bot, and derives the
-    DESTRUCTIVE `tmux_alive` guard from `tmux_session_pane_liveness` so a transient
-    `ProbeError` preserves a live re-bound pane instead of budget-clearing it;
-    -19 net from #3918
-    round-3 (codex): the committed-branch anchor-repost call + its row-dispose +
-    storm-guard comment moved out of this file into the new
-    `recovery_paths::restart::recover_committed_anchor_repost` wrapper, leaving the
-    caller a single gated `continue` (the wrapper returns `true` when the row is
-    handled — relayed-and-disposed OR `RefusedPreserveRow`, a non-`Saved` pre-send
-    bump that PRESERVES the inflight row — so a refused send no longer falls
-    through to the unconditional committed-delivery clear that previously dropped
-    an IoError-deferred answer or deleted a newer turn's row on IdentityMismatch);
-    -860 from #3834
-    behavior-preserving extraction of the manual-rebind recovery path
-    (`rebind_inflight_for_channel` + its private `codex_tui_*` / `Pending*`
-    support cluster and unit tests) into the leaf module
-    `recovery_engine/manual_rebind.rs` — `rebind_inflight_for_channel` re-exported
-    so `recovery_engine::rebind_inflight_for_channel` stays byte-identical, and
-    `RebindOutcome` / `RebindError` kept in root (shared with `rebind_runtime` +
-    external callers); +475 from current
-    inventory refresh after the relay split stack landed; -5 net from #3711/#3712 extracting rebind runtime/output-path resolution to
-    `recovery_engine/rebind_runtime.rs` while adding direct Codex TUI detection
-    so rebind can rebuild rollout bindings when possible and return 409 instead
-    of synthesizing inert legacy-wrapper inflight rows; +2 from #3668 re-exporting `success_result_end_offset_after_offset` (pub(in discord)) so the relay_recovery F2 tail-answer guard can require terminal success evidence; +24 from f12b09366 backstop missed turn intake (drain-restart ownerless-inflight recovery: phase_policy/relay_recovery/relay_health predicates); +15 from #3610 PR-2 codex r2 Issue-2 storm-guard comment at the committed-branch anchor-repost dispose (passes `tmux_alive = false` so a transient send-new is budget-bounded, not pane-preserved forever; the now-unused liveness probe is dropped); +33 from #3610 PR-2 anchor-repost fallback (flag-gated, default OFF); +26 from #3680 relay recovery review hardening; +9 from #3582 stamping
-    `set_relay_owner_kind(Watcher)` at the rebind-origin birth site so the
-    STALL-WATCHDOG force-clean -> respawn synthetic row (which lands here with
-    `existing_inflight = None`) is watcher-owned instead of degrading to
-    `relay_owner_kind = None`; +11 from #3581 stamping
-    the three bounded-preservation fields (`rebind_origin_created_at_unix` /
-    `_deadline_secs` / `_birth_generation`) at the rebind-origin birth site so an
-    unadopted, never-progressed orphan can be reaped instead of permanently
-    wedging turn-start; +53 from #3562 threading
-    the recovered-turn identity (`recovered_transcript_turn_id` full-path call) +
-    channel-bound `agent_id` (`resolve_role_binding(...).role_id`) through the
-    `emit_recovery_fired` / `emit_recovery_quality_event` recovery observability
-    pair at all three production fire sites so events back-trace which agent/turn
-    triggered the recovery; the #3479 SPC-shadow
-    removal deleted the dead `StatusPanelController` recovery-completion shadow
-    block + `assert_recovery_completion_parity` fn + its dead test, leaving the
-    legacy `completion_target` let-else and `complete_status_panel_v2_with_http`
-    IO unchanged; #3479 also extracted the
-    recovered-turn analytics + transcript-persistence cluster
-    (`extract_turn_analytics_from_output` wrapper, `recovered_turn_duration_ms`,
-    `lookup_turn_finished_dispatch_kind`, `recovered_transcript_turn_id`,
-    `persist_recovered_transcript`) into the leaf `recovery_engine/analytics_transcript.rs`,
-    re-imported byte-identical; earlier #3479 item-2 extracted
-    the inflight-state derivation helper cluster (handoff message, ready-for-input
-    probes, worktree path/branch/info derivation, spawn-cwd) into the
-    sub-1000-prod-LoC leaf module `recovery_engine/state_extractors.rs` (~150) —
-    behaviour-preserving move, `save_missing_session_handoff` re-exported and
-    root-called helpers re-imported byte-identical; #3479 item-2 also extracted
-    the terminal-success watcher / recovery start-offset helper cluster into the
-    sub-1000-prod-LoC leaf module `recovery_engine/terminal_watcher.rs` (137) —
-    behaviour-preserving move, externally-called helpers re-imported byte-identical;
-    #3479 r8 extracted the
-    pure output-path-detect, phase-policy, and jsonl-extract clusters into the
-    sub-1000-prod-LoC leaf modules `recovery_engine/output_path_detect.rs` (177),
-    `recovery_engine/phase_policy.rs` (120), and `recovery_engine/jsonl_extract.rs`
-    (137) — behaviour-preserving move, call sites re-imported byte-identical; #3016 phase-5b2
-    dropped the `mailbox_finalize_owed` construction from the three recovery
-    watcher-spawn handles; +9 from #3166
-    fetching real context thresholds for the recovered-turn status panel; +36 from #3099
-    task-notification anchor `⏳` cleanup for `user_msg_id == 0` recovery; +4
-    from the #3099 re-review pinned-injected-message-id cleanup target; net ±0
-    from #3078 PR-2 (recovery-completion shadow-parity routing, added then
-    reverted by the #3479 SPC-shadow-substrate removal); +4 from #3017
-    routing the recovery terminal through the single-authority finalizer
-    (`submit_terminal` + `FinalizeContext::monitor`) instead of inline
-    `mailbox_finish_turn`; +60 from #3248 gap-1 adding
-    `reseed_watcher_owned_finalizer_ledger` + two guarded reattach call-sites that
-    re-register the watcher-owned turn in the post-restart finalizer ledger so a
-    mid-turn deploy's live pane auto-reconciles without a new user turn; net ±0
-    from #3293 promoting the recovery terminal relay from `bool` to the 3-state
-    `RecoveryRelayOutcome` — the five notice branches route through
-    `recovery_paths/restart.rs::dispose_recovery_relay_outcome` (permanent
-    Discord 404/403/410 force-clear + 3-restart transient budget); the pure
-    decision matrix lives in `recovery_paths/shared.rs`; -13 from #3089 S4
-    moving single-message status-panel completion targeting into
-    `recovery_engine/status_panel.rs`; +6 from #3089 completion-footer round 2
-    forgetting registered completion-footer targets when recovery takes ownership
-    of a channel's terminal message; net ±0 from #3089 A6a routing the anchored
-    short-replace through the unified controller behind a flag (default ON as of
-    #3998 S1-f1; `=0|false` opt-out) — the
-    one-arm gate at `relay_recovered_terminal_text_to_placeholder` is offset by
-    non-#-tag prose-comment compaction in the same root, the cutover body lives in
-    the sub-1000-prod-LoC sibling `recovery_paths/controller_cutover.rs`; +4 from
-    #3717 guarding completion-footer registry forgets by the exact takeover
-    message id; -13 from #3736 removing legacy remote-profile restore plumbing
-    while remote SSH is disabled).
+  - `src/services/discord/recovery_engine/restore_inflight.rs` (2335 production
+    lines; tracked #3834 follow-up giant after the r2 behavior-preserving split.
+    Owns the restart-path inflight scan: retry-aware tmux liveness probes,
+    `finish_recovered_turn_mailbox`, live output-path detection,
+    `restore_inflight_turns`, watcher reattach, and the session-died generic
+    retry handoff. #4111's codex rollout fallback output-path persist site moved
+    here verbatim; the #4117 session-retry signal path moved here while the
+    recovery-context take helper remains in `turn_bridge/recovery_text.rs`.
+    Further work should split internal scan/session-retry helpers out of this
+    child before adding behavior.)
+  - `src/services/discord/recovery_engine.rs` (472 lines after #3834 r2; no
+    longer a prod giant. The facade keeps module declarations, re-imports, and
+    the shared `RecoveryPhase` / `RebindOutcome` / `RebindError` types.
+    `relay_recovered_terminal_text_to_placeholder`, `finish_recovered_turn_mailbox`,
+    and `restore_inflight_turns` remain available through the same
+    `recovery_engine::...` paths.)
+  - `src/services/discord/recovery_engine/completion_delivery.rs` (sub-1000;
+    behavior-preserving #3834 r2 extraction of recovery terminal relay,
+    visible completion/status-panel completion helpers, and their tests.)
   - `src/services/discord/health.rs` (417 prod lines after the #3038 Phase A
     directory decomposition; module root keeps the `HealthRegistry` core +
     re-export surface, and the former monolith body lives in flat
