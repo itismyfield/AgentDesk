@@ -356,8 +356,8 @@
 | `services::auto_queue::view_admin_routes` | `src/services/auto_queue/view_admin_routes.rs` | 730 | 730 | 0 |  |
 | `services::automation_candidate_contract` | `src/services/automation_candidate_contract.rs` | 127 | 87 | 40 |  |
 | `services::automation_candidate_materializer` | `src/services/automation_candidate_materializer.rs` | 844 | 844 | 0 |  |
-| `services::claude` | `src/services/claude.rs` | 4262 | 2956 | 1306 | giant-file |
-| `services::claude::backend_routing` | `src/services/claude/backend_routing.rs` | 102 | 102 | 0 |  |
+| `services::claude` | `src/services/claude.rs` | 4320 | 2961 | 1359 | giant-file |
+| `services::claude::backend_routing` | `src/services/claude/backend_routing.rs` | 112 | 112 | 0 |  |
 | `services::claude_compact_trigger` | `src/services/claude_compact_trigger.rs` | 428 | 248 | 180 |  |
 | `services::claude_e` | `src/services/claude_e/mod.rs` | 18 | 18 | 0 |  |
 | `services::claude_e::cancellation` | `src/services/claude_e/cancellation.rs` | 3 | 3 | 0 |  |
@@ -862,7 +862,7 @@
 | `services::platform::dump_tool` | `src/services/platform/dump_tool.rs` | 97 | 97 | 0 |  |
 | `services::platform::shell` | `src/services/platform/shell.rs` | 49 | 49 | 0 |  |
 | `services::platform::tmux` | `src/services/platform/tmux.rs` | 1237 | 926 | 311 |  |
-| `services::platform::tmux::availability` | `src/services/platform/tmux/availability.rs` | 248 | 134 | 114 |  |
+| `services::platform::tmux::availability` | `src/services/platform/tmux/availability.rs` | 269 | 136 | 133 |  |
 | `services::pr_summary` | `src/services/pr_summary.rs` | 542 | 321 | 221 |  |
 | `services::process` | `src/services/process.rs` | 1145 | 684 | 461 |  |
 | `services::provider` | `src/services/provider.rs` | 2271 | 1656 | 615 | giant-file |
@@ -912,7 +912,7 @@
 | `services::routines::store` | `src/services/routines/store.rs` | 4428 | 3684 | 744 | giant-file |
 | `services::service_error` | `src/services/service_error.rs` | 1 | 1 | 0 |  |
 | `services::session_activity` | `src/services/session_activity.rs` | 354 | 275 | 79 |  |
-| `services::session_backend` | `src/services/session_backend.rs` | 981 | 615 | 366 |  |
+| `services::session_backend` | `src/services/session_backend.rs` | 1036 | 647 | 389 |  |
 | `services::session_backend::stream_line` | `src/services/session_backend/stream_line.rs` | 682 | 568 | 114 |  |
 | `services::session_backend::terminal_usage` | `src/services/session_backend/terminal_usage.rs` | 212 | 106 | 106 |  |
 | `services::session_forwarding` | `src/services/session_forwarding.rs` | 493 | 315 | 178 |  |
