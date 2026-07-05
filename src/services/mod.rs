@@ -16,6 +16,7 @@ pub mod codex_remote_policy;
 #[cfg(unix)]
 pub mod codex_tmux_wrapper;
 pub mod codex_tui;
+pub mod cswap;
 pub mod discord;
 pub mod discord_config_audit;
 // #1693: `discord_delivery` moved to `dispatches::discord_delivery`. The

@@ -24,6 +24,7 @@ import {
   buildDepartmentPerformanceRows,
 } from "./ExtraWidgets";
 import HealthWidget from "./HealthWidget";
+import ClaudeAccountsWidget from "./ClaudeAccountsWidget";
 import RateLimitWidget from "./RateLimitWidget";
 import TokenAnalyticsSection from "./TokenAnalyticsSection";
 import ReceiptWidget from "./ReceiptWidget";
@@ -212,7 +213,10 @@ export function DashboardPageTabPanels({
           </div>
           <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
             <HealthWidget t={t} localeTag={localeTag} />
-            <RateLimitWidget t={t} onOpenSettings={onOpenSettings} />
+            <div className="grid gap-4">
+              <ClaudeAccountsWidget t={t} />
+              <RateLimitWidget t={t} onOpenSettings={onOpenSettings} />
+            </div>
           </div>
           <AgentQualityWidget agents={agents} t={t} localeTag={localeTag} />
           <DashboardDeptAndSquad

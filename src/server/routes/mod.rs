@@ -5,6 +5,7 @@ pub mod analytics;
 pub mod auth;
 pub mod auto_queue;
 pub mod automation_candidates;
+pub mod claude_accounts_api;
 pub mod cluster;
 pub mod cron_api;
 pub mod departments;

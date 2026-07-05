@@ -4,8 +4,8 @@ use axum::{
 };
 
 use super::super::{
-    ApiRouter, AppState, discord, dm_reply, github, github_dashboard, hooks, meetings, pr_summary,
-    protected_api_domain,
+    ApiRouter, AppState, claude_accounts_api, discord, dm_reply, github, github_dashboard, hooks,
+    meetings, pr_summary, protected_api_domain,
 };
 
 // Category: integrations
@@ -13,6 +13,14 @@ use super::super::{
 pub(crate) fn router(state: AppState) -> ApiRouter {
     protected_api_domain(
         Router::new()
+            .route(
+                "/claude-accounts",
+                get(claude_accounts_api::get_claude_accounts),
+            )
+            .route(
+                "/claude-accounts/switch",
+                post(claude_accounts_api::switch_claude_account),
+            )
             .route("/github/issues/create", post(github::create_issue))
             .route(
                 "/github/repos",

@@ -17,6 +17,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use axum::Router;
 use axum::routing::get;
+use serde::Serialize;
 use sqlx::pool::PoolConnection;
 use sqlx::{PgPool, Postgres, Row};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -992,27 +993,7 @@ async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
         }
         first = false;
 
-        // --- Claude rate limits ---
-        // Priority: 1) OAuth token (Claude Code subscription), 2) ANTHROPIC_API_KEY
-        let claude_result =
-            if let Some(token) = crate::services::provider_auth::claude_oauth_token() {
-                fetch_claude_oauth_usage(&token).await
-            } else if let Ok(api_key) = std::env::var("ANTHROPIC_API_KEY") {
-                fetch_anthropic_rate_limits(&api_key).await
-            } else {
-                Err(anyhow::anyhow!("no Claude credentials found"))
-            };
-        match claude_result {
-            Ok(buckets) => {
-                let data = serde_json::json!({ "buckets": buckets }).to_string();
-                let now = chrono::Utc::now().timestamp();
-                upsert_rate_limit_cache_entry(pg_pool.as_ref(), "claude", &data, now).await;
-                tracing::info!("[rate-limit-sync] Claude: {} buckets cached", buckets.len());
-            }
-            Err(e) => {
-                tracing::warn!("[rate-limit-sync] Claude rate_limit fetch failed: {e}");
-            }
-        }
+        let _ = sync_claude_rate_limit_cache_once(pg_pool.as_ref()).await;
 
         // --- Codex rate limits ---
         // Priority: 1) ~/.codex/auth.json (Codex CLI subscription), 2) OPENAI_API_KEY
@@ -1084,6 +1065,86 @@ async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
         // in-memory pressure + agent→provider snapshots that the auto-queue
         // dispatch gate reads O(1) off the hot path (no DB on dispatch).
         refresh_dispatch_gate_snapshots(pg_pool.as_ref()).await;
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ClaudeRateLimitRefreshOutcome {
+    pub triggered: bool,
+    pub dispatch_gate_refreshed: bool,
+    pub refreshed_at: Option<i64>,
+    pub reason: Option<&'static str>,
+    pub error: Option<String>,
+}
+
+impl ClaudeRateLimitRefreshOutcome {
+    fn skipped(reason: &'static str) -> Self {
+        Self {
+            triggered: false,
+            dispatch_gate_refreshed: false,
+            refreshed_at: None,
+            reason: Some(reason),
+            error: None,
+        }
+    }
+
+    fn failed(error: anyhow::Error) -> Self {
+        Self {
+            triggered: false,
+            dispatch_gate_refreshed: false,
+            refreshed_at: None,
+            reason: Some("sync_failed"),
+            error: Some(error.to_string()),
+        }
+    }
+}
+
+pub(crate) async fn trigger_claude_rate_limit_refresh_if_leader(
+    pg_pool: &PgPool,
+) -> ClaudeRateLimitRefreshOutcome {
+    if !worker_registry::rate_limit_sync_active() {
+        return ClaudeRateLimitRefreshOutcome::skipped("rate_limit_sync_not_active_on_this_node");
+    }
+
+    match sync_claude_rate_limit_cache_once(pg_pool).await {
+        Ok(_) => {
+            refresh_dispatch_gate_snapshots(pg_pool).await;
+            ClaudeRateLimitRefreshOutcome {
+                triggered: true,
+                dispatch_gate_refreshed: true,
+                refreshed_at: Some(chrono::Utc::now().timestamp()),
+                reason: None,
+                error: None,
+            }
+        }
+        Err(error) => ClaudeRateLimitRefreshOutcome::failed(error),
+    }
+}
+
+async fn sync_claude_rate_limit_cache_once(pg_pool: &PgPool) -> Result<usize, anyhow::Error> {
+    // Priority: 1) OAuth token (Claude Code subscription), 2) ANTHROPIC_API_KEY.
+    let claude_result = if let Some(token) = crate::services::provider_auth::claude_oauth_token() {
+        fetch_claude_oauth_usage(&token).await
+    } else if let Ok(api_key) = std::env::var("ANTHROPIC_API_KEY") {
+        fetch_anthropic_rate_limits(&api_key).await
+    } else {
+        Err(anyhow::anyhow!("no Claude credentials found"))
+    };
+
+    match claude_result {
+        Ok(buckets) => {
+            let bucket_count = buckets.len();
+            let data = serde_json::json!({ "buckets": buckets }).to_string();
+            let now = chrono::Utc::now().timestamp();
+            upsert_rate_limit_cache_entry(pg_pool, "claude", &data, now).await;
+            tracing::info!("[rate-limit-sync] Claude: {} buckets cached", bucket_count);
+            Ok(bucket_count)
+        }
+        Err(e) => {
+            tracing::warn!("[rate-limit-sync] Claude rate_limit fetch failed: {e}");
+            Err(e)
+        }
     }
 }
 
