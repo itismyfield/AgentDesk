@@ -1017,6 +1017,114 @@ No response requested.\n\
         );
     }
 
+    #[test]
+    fn task_notification_subagent_kind_exposed_body_preserves() {
+        let placeholder = body_with_footer("visible assistant body");
+        let ctx = task_notification_terminal_ctx(
+            &placeholder,
+            0,
+            Some(TaskNotificationKind::Subagent),
+        );
+
+        let PlaceholderSuppressDecision::Preserve {
+            reason,
+            cleaned_body,
+        } = decide_placeholder_suppression(&ctx)
+        else {
+            panic!("subagent task notification with exposed body should preserve");
+        };
+        assert_eq!(reason, "auto-task-notification-kind");
+        assert_eq!(cleaned_body, "visible assistant body");
+        assert!(!cleaned_body.contains(SUPPRESSED_INTERNAL_LABEL));
+        assert!(!cleaned_body.contains("진행 중 — Claude"));
+    }
+
+    #[test]
+    fn task_notification_subagent_kind_unexposed_placeholder_deletes() {
+        let ctx = task_notification_terminal_ctx(
+            "⠋ 계속 처리 중",
+            0,
+            Some(TaskNotificationKind::Subagent),
+        );
+
+        assert_eq!(
+            decide_placeholder_suppression(&ctx),
+            PlaceholderSuppressDecision::Delete
+        );
+    }
+
+    #[test]
+    fn task_notification_background_kind_exposed_body_preserves() {
+        let placeholder = body_with_footer("visible assistant body");
+        let ctx = task_notification_terminal_ctx(
+            &placeholder,
+            0,
+            Some(TaskNotificationKind::Background),
+        );
+
+        let PlaceholderSuppressDecision::Preserve {
+            reason,
+            cleaned_body,
+        } = decide_placeholder_suppression(&ctx)
+        else {
+            panic!("background task notification with exposed body should preserve");
+        };
+        assert_eq!(reason, "auto-task-notification-kind");
+        assert_eq!(cleaned_body, "visible assistant body");
+        assert!(!cleaned_body.contains(SUPPRESSED_INTERNAL_LABEL));
+        assert!(!cleaned_body.contains("진행 중 — Claude"));
+    }
+
+    #[test]
+    fn task_notification_background_kind_unexposed_placeholder_deletes() {
+        let ctx = task_notification_terminal_ctx(
+            "⠋ 계속 처리 중",
+            0,
+            Some(TaskNotificationKind::Background),
+        );
+
+        assert_eq!(
+            decide_placeholder_suppression(&ctx),
+            PlaceholderSuppressDecision::Delete
+        );
+    }
+
+    #[test]
+    fn task_notification_monitor_auto_turn_kind_exposed_body_preserves() {
+        let placeholder = body_with_footer("visible assistant body");
+        let ctx = task_notification_terminal_ctx(
+            &placeholder,
+            0,
+            Some(TaskNotificationKind::MonitorAutoTurn),
+        );
+
+        let PlaceholderSuppressDecision::Preserve {
+            reason,
+            cleaned_body,
+        } = decide_placeholder_suppression(&ctx)
+        else {
+            panic!("monitor auto-turn task notification with exposed body should preserve");
+        };
+        assert_eq!(reason, "auto-task-notification-kind");
+        assert_eq!(cleaned_body, "visible assistant body");
+        assert!(!cleaned_body.contains(SUPPRESSED_INTERNAL_LABEL));
+        assert!(!cleaned_body.contains("진행 중 — Claude"));
+    }
+
+    #[test]
+    fn task_notification_monitor_auto_turn_kind_unexposed_placeholder_deletes() {
+        let ctx = task_notification_terminal_ctx(
+            "⠋ 계속 처리 중",
+            0,
+            Some(TaskNotificationKind::MonitorAutoTurn),
+        );
+
+        assert_eq!(
+            decide_placeholder_suppression(&ctx),
+            PlaceholderSuppressDecision::Delete
+        );
+    }
+
     // #3871: a >DISCORD_MSG_LIMIT answer rolls over mid-stream (the prefix is
     // FROZEN as a standalone message, a fresh placeholder opens for the
     // remainder), then the terminal full-body fallback re-posts the WHOLE body
