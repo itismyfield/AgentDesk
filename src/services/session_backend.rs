@@ -11,7 +11,7 @@ use crate::services::agent_protocol::{
 };
 use crate::services::provider::{CancelToken, ReadOutputResult, SessionProbe};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -50,6 +50,11 @@ pub enum SessionHandle {
         child_stdin: Arc<Mutex<Option<ChildStdin>>>,
         child: Arc<Mutex<Option<Child>>>,
         pid: u32,
+    },
+    #[cfg(test)]
+    TestProcess {
+        pid: u32,
+        alive: Arc<std::sync::atomic::AtomicBool>,
     },
 }
 
@@ -179,6 +184,14 @@ impl SessionBackend for ProcessBackend {
                     Err("Child stdin already closed".to_string())
                 }
             }
+            #[cfg(test)]
+            SessionHandle::TestProcess { alive, .. } => {
+                if alive.load(std::sync::atomic::Ordering::Relaxed) {
+                    Ok(())
+                } else {
+                    Err("test process is stopped".to_string())
+                }
+            }
         }
     }
 
@@ -195,6 +208,10 @@ impl SessionBackend for ProcessBackend {
                     false
                 }
             }
+            #[cfg(test)]
+            SessionHandle::TestProcess { alive, .. } => {
+                alive.load(std::sync::atomic::Ordering::Relaxed)
+            }
         }
     }
 }
@@ -203,12 +220,16 @@ impl SessionHandle {
     pub fn pid(&self) -> u32 {
         match self {
             SessionHandle::Process { pid, .. } => *pid,
+            #[cfg(test)]
+            SessionHandle::TestProcess { pid, .. } => *pid,
         }
     }
 }
 
 static PROCESS_HANDLES: LazyLock<Mutex<HashMap<String, SessionHandle>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static STOPPED_PROCESS_SESSIONS: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 fn process_handles() -> MutexGuard<'static, HashMap<String, SessionHandle>> {
     PROCESS_HANDLES.lock().unwrap_or_else(|error| {
@@ -217,19 +238,67 @@ fn process_handles() -> MutexGuard<'static, HashMap<String, SessionHandle>> {
     })
 }
 
+fn stopped_process_sessions() -> MutexGuard<'static, HashSet<String>> {
+    STOPPED_PROCESS_SESSIONS.lock().unwrap_or_else(|error| {
+        tracing::warn!(
+            "Recovered poisoned STOPPED_PROCESS_SESSIONS mutex; continuing with inner state"
+        );
+        error.into_inner()
+    })
+}
+
 pub fn insert_process_session(session_name: impl Into<String>, handle: SessionHandle) {
-    process_handles().insert(session_name.into(), handle);
+    let session_name = session_name.into();
+    stopped_process_sessions().remove(&session_name);
+    process_handles().insert(session_name, handle);
 }
 
 pub fn remove_process_session(session_name: &str) -> Option<SessionHandle> {
     process_handles().remove(session_name)
 }
 
+pub fn process_session_was_stopped(session_name: &str) -> bool {
+    stopped_process_sessions().contains(session_name)
+}
+
+#[cfg(test)]
+fn mark_process_session_stopped(session_name: impl Into<String>) {
+    stopped_process_sessions().insert(session_name.into());
+}
+
+pub fn mark_process_sessions_stopped_by_pid(pid: u32) -> Vec<String> {
+    let mut handles = process_handles();
+    let session_names = handles
+        .iter()
+        .filter_map(|(session_name, handle)| (handle.pid() == pid).then(|| session_name.clone()))
+        .collect::<Vec<_>>();
+
+    for session_name in &session_names {
+        handles.remove(session_name);
+    }
+    drop(handles);
+
+    if !session_names.is_empty() {
+        let mut stopped = stopped_process_sessions();
+        for session_name in &session_names {
+            stopped.insert(session_name.clone());
+        }
+    }
+
+    session_names
+}
+
 pub fn process_session_pid(session_name: &str) -> Option<u32> {
+    if process_session_was_stopped(session_name) {
+        return None;
+    }
     process_handles().get(session_name).map(SessionHandle::pid)
 }
 
 pub fn process_session_is_alive(session_name: &str) -> bool {
+    if process_session_was_stopped(session_name) {
+        return false;
+    }
     let handles = process_handles();
     handles
         .get(session_name)
@@ -237,7 +306,20 @@ pub fn process_session_is_alive(session_name: &str) -> bool {
         .unwrap_or(false)
 }
 
+pub fn process_session_available_for_followup(session_name: &str) -> bool {
+    if process_session_was_stopped(session_name) {
+        if let Some(handle) = remove_process_session(session_name) {
+            terminate_process_handle(handle);
+        }
+        return false;
+    }
+    process_session_is_alive(session_name)
+}
+
 pub fn send_process_session_input(session_name: &str, message: &str) -> Result<(), String> {
+    if process_session_was_stopped(session_name) {
+        return Err(format!("Process session {session_name} was stopped"));
+    }
     let handles = process_handles();
     let handle = handles
         .get(session_name)
@@ -251,14 +333,101 @@ pub fn process_session_probe(session_name: &str) -> SessionProbe {
 }
 
 pub fn terminate_process_handle(handle: SessionHandle) {
-    let SessionHandle::Process { child, .. } = handle;
-    let mut child_guard = match child.lock() {
-        Ok(guard) => guard,
-        Err(_) => return,
-    };
-    if let Some(ref mut process) = *child_guard {
-        let _ = process.kill();
-        let _ = process.wait();
+    match handle {
+        SessionHandle::Process { child, .. } => {
+            let mut child_guard = match child.lock() {
+                Ok(guard) => guard,
+                Err(_) => return,
+            };
+            if let Some(ref mut process) = *child_guard {
+                let _ = process.kill();
+                let _ = process.wait();
+            }
+        }
+        #[cfg(test)]
+        SessionHandle::TestProcess { alive, .. } => {
+            alive.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(test)]
+mod process_registry_stop_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn issue_4112_stopped_process_session_by_pid_is_removed_and_guarded_from_followup() {
+        let session_name = format!("process-stop-{}", uuid::Uuid::new_v4());
+        let alive = Arc::new(AtomicBool::new(true));
+        insert_process_session(
+            session_name.clone(),
+            SessionHandle::TestProcess {
+                pid: 424_242,
+                alive: alive.clone(),
+            },
+        );
+
+        assert!(process_session_is_alive(&session_name));
+        assert_eq!(process_session_pid(&session_name), Some(424_242));
+
+        let stopped = mark_process_sessions_stopped_by_pid(424_242);
+
+        assert_eq!(stopped, vec![session_name.clone()]);
+        assert!(process_session_was_stopped(&session_name));
+        assert!(!process_session_is_alive(&session_name));
+        assert_eq!(process_session_pid(&session_name), None);
+        assert!(send_process_session_input(&session_name, "{}").is_err());
+
+        insert_process_session(
+            session_name.clone(),
+            SessionHandle::TestProcess {
+                pid: 424_243,
+                alive,
+            },
+        );
+        assert!(!process_session_was_stopped(&session_name));
+        assert!(process_session_is_alive(&session_name));
+
+        if let Some(handle) = remove_process_session(&session_name) {
+            terminate_process_handle(handle);
+        }
+        assert!(!process_session_is_alive(&session_name));
+        assert!(!process_session_was_stopped(&session_name));
+    }
+
+    #[test]
+    fn issue_4112_stopped_process_session_followup_guard_forces_fresh_session() {
+        let session_name = format!("process-followup-stop-{}", uuid::Uuid::new_v4());
+        let alive = Arc::new(AtomicBool::new(true));
+        insert_process_session(
+            session_name.clone(),
+            SessionHandle::TestProcess {
+                pid: 424_244,
+                alive: alive.clone(),
+            },
+        );
+        assert!(process_session_available_for_followup(&session_name));
+
+        mark_process_session_stopped(session_name.clone());
+
+        assert!(
+            !process_session_available_for_followup(&session_name),
+            "stopped pipe session must cold-start instead of accepting a follow-up"
+        );
+        assert!(process_session_was_stopped(&session_name));
+        assert!(!alive.load(Ordering::Relaxed));
+
+        insert_process_session(
+            session_name.clone(),
+            SessionHandle::TestProcess {
+                pid: 424_245,
+                alive,
+            },
+        );
+        if let Some(handle) = remove_process_session(&session_name) {
+            terminate_process_handle(handle);
+        }
     }
 }
 

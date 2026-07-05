@@ -26,7 +26,7 @@ use crate::services::remote::RemoteProfile;
 use crate::services::session_backend::{
     ReadHarvestStats, StreamLineState, emit_status_events_from_stream_json, insert_process_session,
     observe_stream_context, parse_assistant_extra_tool_uses, parse_stream_message_with_state,
-    process_session_is_alive, process_session_pid, process_session_probe,
+    process_session_available_for_followup, process_session_pid, process_session_probe,
     read_output_file_until_result, read_output_file_until_result_with_harvest,
     remove_process_session, send_process_session_input, terminate_process_handle,
 };
@@ -3034,7 +3034,7 @@ pub(crate) fn execute_streaming_local_process(
 
     // Check for existing process session (follow-up)
     // ProcessBackend sessions don't persist across restarts, so we track via static map
-    if process_session_is_alive(session_name) {
+    if process_session_available_for_followup(session_name) {
         debug_log("Existing process session found — sending follow-up");
         match send_followup_to_process(
             prompt,

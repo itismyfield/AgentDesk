@@ -13,6 +13,18 @@
 
 use super::*;
 
+#[cfg(test)]
+static SIGINT_TEST_EVENTS: std::sync::LazyLock<std::sync::Mutex<Vec<u32>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+#[cfg(test)]
+pub(super) fn take_sigint_test_events() -> Vec<u32> {
+    let mut events = SIGINT_TEST_EVENTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    std::mem::take(&mut *events)
+}
+
 #[cfg(unix)]
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct ProcessRow {
@@ -231,7 +243,7 @@ fn provider_cli_binary_name(provider: &ProviderKind) -> Option<&'static str> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(test)))]
 pub(super) fn send_sigint(pid: u32) -> Result<(), String> {
     #[allow(unsafe_code)]
     let result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGINT) };
@@ -240,6 +252,15 @@ pub(super) fn send_sigint(pid: u32) -> Result<(), String> {
     } else {
         Err(std::io::Error::last_os_error().to_string())
     }
+}
+
+#[cfg(all(unix, test))]
+pub(super) fn send_sigint(pid: u32) -> Result<(), String> {
+    SIGINT_TEST_EVENTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .push(pid);
+    Ok(())
 }
 
 #[cfg(not(unix))]

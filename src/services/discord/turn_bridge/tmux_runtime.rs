@@ -12,10 +12,14 @@ use std::time::Duration;
 // moved items by their original bare names via these glob/explicit re-imports.
 mod interrupt_policy;
 mod pid_exit;
+mod process_backend_cancel;
 mod process_table;
 
 use interrupt_policy::*;
 use pid_exit::wait_for_pid_exit;
+use process_backend_cancel::{
+    hard_stop_unresponsive_process_backend_turn, interrupt_process_backend_turn,
+};
 use process_table::{
     pane_foreground_is_provider_wrapper, provider_cli_pid_in_tmux, send_sigint,
     write_line_to_wrapper_fifo,
@@ -111,6 +115,9 @@ pub(in crate::services::discord) async fn interrupt_provider_cli_turn(
         .ok()
         .and_then(|guard| guard.clone());
     let tracked_child_pid = token.child_pid.lock().ok().and_then(|guard| *guard);
+    if tmux_session.is_none() {
+        return interrupt_process_backend_turn(provider, tracked_child_pid, reason);
+    }
     let Some(tmux_session_name) = tmux_session.as_deref() else {
         tracing::error!(
             "provider turn interrupt skipped: provider={} reason={} error=cancel_token_missing_tmux_session",
@@ -632,12 +639,8 @@ async fn hard_stop_unresponsive_provider_cli_turn(
             .and_then(|guard| guard.clone())
     });
     let Some(tmux_session_name) = tmux_session_name else {
-        tracing::error!(
-            "provider hard-stop skipped: provider={} reason={} error=cancel_token_missing_tmux_session interrupt_missing_tmux_session={}",
-            provider.as_str(),
-            reason,
-            interrupt_outcome.missing_tmux_session
-        );
+        hard_stop_unresponsive_process_backend_turn(provider, token, interrupt_outcome, reason)
+            .await;
         return;
     };
 
@@ -808,6 +811,15 @@ pub(in crate::services::discord) fn cancel_active_token(
     let mut termination_recorded = false;
 
     let child_pid = token.child_pid.lock().ok().and_then(|guard| *guard);
+    let has_tmux_session = token
+        .tmux_session
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .is_some();
+    if !has_tmux_session && let Some(pid) = child_pid {
+        crate::services::session_backend::mark_process_sessions_stopped_by_pid(pid);
+    }
     // `child_pid` is the wrapper PID — i.e. the foreground process of the
     // tmux pane. SIGKILL'ing it tears down the tmux session itself. For
     // `PreserveSession` / `PreserveSessionAndInflight` the caller has
@@ -1015,5 +1027,75 @@ mod tests {
         assert!(handoff.contains("Subagent completed"));
         assert!(!handoff.contains("<subagent_notification>"));
         assert!(!handoff.contains("agent_path"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn issue_4112_pipe_interrupt_sends_sigint_and_marks_stopped() {
+        let _ = process_table::take_sigint_test_events();
+        let session_name = format!("pipe-cancel-{}", uuid::Uuid::new_v4());
+        let alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        crate::services::session_backend::insert_process_session(
+            session_name.clone(),
+            crate::services::session_backend::SessionHandle::TestProcess { pid: 4112, alive },
+        );
+        let token = std::sync::Arc::new(CancelToken::new());
+        *token.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(4112);
+
+        let outcome =
+            interrupt_provider_cli_turn(&ProviderKind::Claude, &token, "explicit_stop").await;
+
+        assert_eq!(process_table::take_sigint_test_events(), vec![4112]);
+        assert_eq!(outcome.tmux_session, None);
+        assert_eq!(outcome.fallback_sigint_pid, Some(4112));
+        assert!(outcome.missing_tmux_session);
+        assert!(!outcome.sigint_target_missing);
+        assert!(crate::services::session_backend::process_session_was_stopped(&session_name));
+        assert!(!crate::services::session_backend::process_session_is_alive(
+            &session_name
+        ));
+    }
+
+    #[test]
+    fn issue_4112_tmux_hard_stop_policy_preserves_existing_provider_behavior() {
+        assert_eq!(
+            hard_stop_pid_for_unresponsive_provider(
+                &ProviderKind::Codex,
+                TmuxCleanupPolicy::PreserveSession,
+                true,
+                false,
+                Some(41),
+                None,
+                Some(7),
+            ),
+            Some(41),
+            "non-pane provider PID remains the tmux hard-stop candidate"
+        );
+        assert_eq!(
+            hard_stop_pid_for_unresponsive_provider(
+                &ProviderKind::Codex,
+                TmuxCleanupPolicy::PreserveSession,
+                true,
+                true,
+                Some(41),
+                None,
+                Some(7),
+            ),
+            None,
+            "ready tmux panes are still not hard-killed"
+        );
+        assert_eq!(
+            hard_stop_pid_for_unresponsive_provider(
+                &ProviderKind::Claude,
+                TmuxCleanupPolicy::PreserveSession,
+                true,
+                false,
+                Some(41),
+                None,
+                Some(7),
+            ),
+            None,
+            "claude preserve-session tmux turns still avoid hard-killing the CLI"
+        );
     }
 }
