@@ -1893,11 +1893,11 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             let finish_mailbox_on_completion =
                 reregister_active_turn_from_inflight(shared, &state).await;
 
-            let output_path =
-                match restore_codex_rollout_output_path(provider, &state, output_path) {
-                    RestorePersistOutcome::UseOutputPath(output_path) => output_path,
-                    RestorePersistOutcome::SkipWatcher => continue,
-                };
+            let output_path = match restore_codex_rollout_output_path(provider, &state, output_path)
+            {
+                RestorePersistOutcome::UseOutputPath(output_path) => output_path,
+                RestorePersistOutcome::SkipWatcher => continue,
+            };
 
             // Immediately spawn watcher to avoid race condition.
             if std::fs::metadata(&output_path).is_ok() {

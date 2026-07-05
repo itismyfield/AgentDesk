@@ -2311,9 +2311,7 @@ mod tests {
         let (watcher, watcher_cancel) = test_watcher_handle(tmux, &output_path);
         shared.tmux_watchers.insert(channel, watcher);
         let footer_msg = MessageId::new(4_111_704);
-        super::super::footer_view_reconciler::completion_footer_forget_registered_target(
-            channel,
-        );
+        super::super::footer_view_reconciler::completion_footer_forget_registered_target(channel);
         let _ = super::super::footer_view_reconciler::register_completion_footer_target(
             channel,
             footer_msg,
@@ -2424,9 +2422,7 @@ mod tests {
             .is_some(),
             "skipped clear must preserve the registered completion footer target"
         );
-        super::super::footer_view_reconciler::completion_footer_forget_registered_target(
-            channel,
-        );
+        super::super::footer_view_reconciler::completion_footer_forget_registered_target(channel);
     }
 
     #[tokio::test]

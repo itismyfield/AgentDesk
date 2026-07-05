@@ -106,13 +106,12 @@ type IdleTmuxStaleTurnInflightCandidateHook =
     Arc<dyn Fn(&discord::inflight::InflightTurnState) + Send + Sync>;
 
 #[cfg(test)]
-type IdleTmuxStaleTurnPostClearHook = Arc<
-    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()>>> + Send + Sync,
->;
+type IdleTmuxStaleTurnPostClearHook =
+    Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()>>> + Send + Sync>;
 
 #[cfg(test)]
-fn idle_tmux_stale_turn_inflight_candidate_hook(
-) -> &'static std::sync::Mutex<Option<IdleTmuxStaleTurnInflightCandidateHook>> {
+fn idle_tmux_stale_turn_inflight_candidate_hook()
+-> &'static std::sync::Mutex<Option<IdleTmuxStaleTurnInflightCandidateHook>> {
     static HOOK: std::sync::OnceLock<
         std::sync::Mutex<Option<IdleTmuxStaleTurnInflightCandidateHook>>,
     > = std::sync::OnceLock::new();
@@ -120,8 +119,8 @@ fn idle_tmux_stale_turn_inflight_candidate_hook(
 }
 
 #[cfg(test)]
-fn idle_tmux_stale_turn_post_clear_hook(
-) -> &'static std::sync::Mutex<Option<IdleTmuxStaleTurnPostClearHook>> {
+fn idle_tmux_stale_turn_post_clear_hook()
+-> &'static std::sync::Mutex<Option<IdleTmuxStaleTurnPostClearHook>> {
     static HOOK: std::sync::OnceLock<std::sync::Mutex<Option<IdleTmuxStaleTurnPostClearHook>>> =
         std::sync::OnceLock::new();
     HOOK.get_or_init(|| std::sync::Mutex::new(None))
@@ -1055,15 +1054,8 @@ pub async fn clear_idle_tmux_stale_turn(
         }
     };
     let runtime_session_cleared = if finish.removed_token.is_some() {
-        apply_runtime_hard_stop_cleanup(
-            &shared,
-            &provider,
-            channel_id,
-            &finish,
-            stop_source,
-            false,
-        )
-        .await
+        apply_runtime_hard_stop_cleanup(&shared, &provider, channel_id, &finish, stop_source, false)
+            .await
     } else {
         false
     };
@@ -3372,11 +3364,7 @@ mod stall_watchdog_pure_tests {
         inflight::save_inflight_state(&fresh).expect("save fresh row in finish-to-clear window");
 
         assert_eq!(
-            clear_idle_tmux_stale_turn_inflight_if_pinned(
-                &provider,
-                channel_id.get(),
-                Some(&pin),
-            ),
+            clear_idle_tmux_stale_turn_inflight_if_pinned(&provider, channel_id.get(), Some(&pin),),
             GuardedClearOutcome::UserMsgMismatch
         );
         let persisted = inflight::load_inflight_state(&provider, channel_id.get())
