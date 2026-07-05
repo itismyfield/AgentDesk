@@ -15,6 +15,7 @@ mod active_source_dedup;
 mod dispatch_reservation;
 mod pending_queue_persistence;
 pub(crate) mod registry_purge;
+mod turn_finished_signal;
 use active_source_dedup::{
     intervention_has_active_source, intervention_sources_all_match_active,
     purge_active_source_from_queue, strip_source_message_id_from_intervention,
@@ -42,6 +43,11 @@ pub(crate) use pending_queue_persistence::{
 #[cfg(test)]
 use pending_queue_persistence::{
     cleanup_stale_pending_queue_tmp_files_in_dir, cleanup_stale_pending_queue_tmp_files_under_root,
+};
+pub(crate) use turn_finished_signal::TurnFinishedSignal;
+use turn_finished_signal::{
+    GLOBAL_TURN_FINISHED_SIGNALS, mark_turn_finished_signal_done, reset_turn_finished_signal,
+    turn_finished_signal,
 };
 
 pub(crate) const MAX_INTERVENTIONS_PER_CHANNEL: usize = 30;
@@ -1489,75 +1495,9 @@ impl RecoveryDoneSignal {
     }
 }
 
-/// #2424 — generic "active turn finished" signal per channel.
-///
-/// Same latch shape as `RecoveryDoneSignal`: a terminal mailbox transition
-/// can happen before a deferred monitor auto-turn subscribes, so late
-/// subscribers must observe the already-finished state without falling back
-/// to mailbox-state polling.
-pub(crate) struct TurnFinishedSignal {
-    notify: Notify,
-    latched: std::sync::atomic::AtomicBool,
-}
-
-impl TurnFinishedSignal {
-    fn new() -> Self {
-        Self {
-            notify: Notify::new(),
-            latched: std::sync::atomic::AtomicBool::new(false),
-        }
-    }
-
-    pub(crate) fn mark_done(&self) {
-        self.latched.store(true, Ordering::Release);
-        self.notify.notify_waiters();
-    }
-
-    pub(crate) fn reset(&self) {
-        self.latched.store(false, Ordering::Release);
-    }
-
-    pub(crate) async fn wait(&self) {
-        if self.latched.load(Ordering::Acquire) {
-            return;
-        }
-        let notified = self.notify.notified();
-        tokio::pin!(notified);
-        if self.latched.load(Ordering::Acquire) {
-            return;
-        }
-        notified.await;
-    }
-}
-
 static GLOBAL_RECOVERY_DONE_SIGNALS: LazyLock<
     dashmap::DashMap<ChannelId, Arc<RecoveryDoneSignal>>,
 > = LazyLock::new(dashmap::DashMap::new);
-static GLOBAL_TURN_FINISHED_SIGNALS: LazyLock<
-    dashmap::DashMap<ChannelId, Arc<TurnFinishedSignal>>,
-> = LazyLock::new(dashmap::DashMap::new);
-
-fn turn_finished_signal(channel_id: ChannelId) -> Arc<TurnFinishedSignal> {
-    if let Some(existing) = GLOBAL_TURN_FINISHED_SIGNALS.get(&channel_id) {
-        return existing.value().clone();
-    }
-    let signal = Arc::new(TurnFinishedSignal::new());
-    match GLOBAL_TURN_FINISHED_SIGNALS.entry(channel_id) {
-        dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
-        dashmap::mapref::entry::Entry::Vacant(entry) => {
-            entry.insert(signal.clone());
-            signal
-        }
-    }
-}
-
-fn reset_turn_finished_signal(channel_id: ChannelId) {
-    turn_finished_signal(channel_id).reset();
-}
-
-fn mark_turn_finished_signal_done(channel_id: ChannelId) {
-    turn_finished_signal(channel_id).mark_done();
-}
 
 #[derive(Clone, Default)]
 pub(crate) struct ChannelMailboxRegistry {

@@ -748,6 +748,7 @@ src/
 │   │   ├── inflight_heartbeat_sweeper.rs
 │   │   ├── internal_api.rs
 │   │   ├── jsonl_watcher.rs
+│   │   ├── mailbox_finish.rs
 │   │   ├── mcp_credential_watcher.rs
 │   │   ├── meeting_artifact_store.rs
 │   │   ├── meeting_orchestrator.rs
@@ -946,7 +947,8 @@ src/
 │   │   ├── active_source_dedup.rs
 │   │   ├── dispatch_reservation.rs
 │   │   ├── pending_queue_persistence.rs
-│   │   └── registry_purge.rs
+│   │   ├── registry_purge.rs
+│   │   └── turn_finished_signal.rs
 │   ├── agent_protocol.rs
 │   ├── analytics.rs
 │   ├── auto_queue.rs
