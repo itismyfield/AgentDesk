@@ -109,6 +109,7 @@ mod synthetic_start;
 mod synthetic_start_wiring; // #4002 shared Path-X wiring with #4082 neutral-note gate
 #[cfg(test)]
 pub(in crate::services::discord) use self::synthetic_start::synthetic_start_offset_carry_forward;
+pub(in crate::services::discord) use self::synthetic_start::tui_direct_watcher_synthetic_inflight_matches;
 use self::synthetic_start::{
     build_tui_direct_synthetic_inflight_state, restore_pending_starts,
     tui_direct_synthetic_inflight_active_for_prompt,
