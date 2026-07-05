@@ -9,6 +9,7 @@
 
 use super::*;
 
+/// Retry-aware tmux session check for recovery after dcserver restart.
 /// The first check can false-negative if tmux CLI hasn't fully initialized yet.
 pub(super) fn tmux_session_alive_with_retry(name: &str) -> bool {
     if tmux_session_has_live_pane(name) {

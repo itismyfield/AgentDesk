@@ -142,7 +142,11 @@ use self::completion_delivery::{
     RecoveryCompletionOutcome, complete_recovery_visible_turn, relay_recovery_terminal_notice,
     should_advance_recovery_dispatch_after_relay,
 };
-use self::restore_inflight::{detect_live_tmux_output_path, tmux_session_alive_with_retry};
+// `detect_live_tmux_output_path` exists only under `#[cfg(unix)]` in the child;
+// a by-name import of a cfg'd-out item is a hard E0432 on non-unix targets.
+#[cfg(unix)]
+use self::restore_inflight::detect_live_tmux_output_path;
+use self::restore_inflight::tmux_session_alive_with_retry;
 pub(in crate::services::discord) use self::restore_inflight::{
     finish_recovered_turn_mailbox, restore_inflight_turns,
 };
