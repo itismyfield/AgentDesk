@@ -137,11 +137,11 @@ pub(in crate::services::discord) use catch_up::{
     catch_up_missed_messages, catch_up_missed_messages_inner, should_trigger_catch_up_retry,
     take_catch_up_retry_checkpoint_after_queue_drain,
 };
-pub(in crate::services::discord) use recovery_engine as recovery;
 pub(in crate::services::discord) use mailbox_finish::{
     mailbox_finish_turn, mailbox_finish_turn_if_matches,
     mailbox_finish_turn_if_matches_started_before,
 };
+pub(in crate::services::discord) use recovery_engine as recovery;
 // #3038 S1: re-export the extracted cluster type so the `SharedData` field
 // declaration and constructor literals reference it without a module-qualified
 // path (surface freeze, #3294/#3295 pattern).
