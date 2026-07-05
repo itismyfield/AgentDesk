@@ -33,15 +33,14 @@ use crate::services::session_backend::{
 #[cfg(unix)]
 mod backend_routing;
 #[cfg(unix)]
+use self::backend_routing::{
+    LocalTmuxStartupPlan, classify_local_tmux_startup_plan, cleanup_process_backend_before_tmux,
+    should_preserve_live_reused_provider_session, should_refuse_process_backend_demotion,
+};
+#[cfg(unix)]
 use crate::services::tmux_diagnostics::{
     record_tmux_exit_reason, should_recreate_session_after_followup_fifo_error,
     tmux_session_exists, tmux_session_has_live_pane,
-};
-#[cfg(unix)]
-use self::backend_routing::{
-    LocalTmuxStartupPlan, cleanup_process_backend_before_tmux,
-    classify_local_tmux_startup_plan, should_preserve_live_reused_provider_session,
-    should_refuse_process_backend_demotion,
 };
 
 #[cfg(unix)]

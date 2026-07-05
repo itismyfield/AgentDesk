@@ -62,4 +62,3 @@ pub(super) fn cleanup_process_backend_before_tmux(session_name: &str) -> bool {
     }
     cleaned
 }
-

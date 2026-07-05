@@ -1000,18 +1000,14 @@ mod availability_cache_tests {
     fn probe_error_preserves_previous_available_state() {
         let mut cache = TmuxAvailabilityCache::default();
         let now = Instant::now();
-        assert!(resolve_tmux_availability(
-            &mut cache,
-            now,
-            || TmuxAvailabilityProbe::Available
-        ));
+        assert!(resolve_tmux_availability(&mut cache, now, || {
+            TmuxAvailabilityProbe::Available
+        }));
 
         let after_ttl = now + TMUX_AVAILABILITY_CACHE_TTL + Duration::from_millis(1);
-        assert!(resolve_tmux_availability(
-            &mut cache,
-            after_ttl,
-            || TmuxAvailabilityProbe::Unknown
-        ));
+        assert!(resolve_tmux_availability(&mut cache, after_ttl, || {
+            TmuxAvailabilityProbe::Unknown
+        }));
 
         assert_eq!(cache.cached, Some(true));
         assert_eq!(cache.consecutive_failures, 1);
@@ -1022,27 +1018,21 @@ mod availability_cache_tests {
         let mut cache = TmuxAvailabilityCache::default();
         let mut now = Instant::now();
         let step = TMUX_AVAILABILITY_CACHE_TTL + Duration::from_millis(1);
-        assert!(resolve_tmux_availability(
-            &mut cache,
-            now,
-            || TmuxAvailabilityProbe::Available
-        ));
+        assert!(resolve_tmux_availability(&mut cache, now, || {
+            TmuxAvailabilityProbe::Available
+        }));
 
         for _ in 1..TMUX_AVAILABILITY_FAILURE_THRESHOLD {
             now = now + step;
-            assert!(resolve_tmux_availability(
-                &mut cache,
-                now,
-                || TmuxAvailabilityProbe::Unknown
-            ));
+            assert!(resolve_tmux_availability(&mut cache, now, || {
+                TmuxAvailabilityProbe::Unknown
+            }));
         }
 
         now = now + step;
-        assert!(!resolve_tmux_availability(
-            &mut cache,
-            now,
-            || TmuxAvailabilityProbe::Unknown
-        ));
+        assert!(!resolve_tmux_availability(&mut cache, now, || {
+            TmuxAvailabilityProbe::Unknown
+        }));
         assert_eq!(cache.cached, Some(false));
     }
 
@@ -1053,36 +1043,28 @@ mod availability_cache_tests {
         let step = TMUX_AVAILABILITY_CACHE_TTL + Duration::from_millis(1);
 
         for _ in 1..TMUX_AVAILABILITY_FAILURE_THRESHOLD {
-            assert!(resolve_tmux_availability(
-                &mut cache,
-                now,
-                || TmuxAvailabilityProbe::Unknown
-            ));
+            assert!(resolve_tmux_availability(&mut cache, now, || {
+                TmuxAvailabilityProbe::Unknown
+            }));
             now = now + step;
         }
 
-        assert!(!resolve_tmux_availability(
-            &mut cache,
-            now,
-            || TmuxAvailabilityProbe::Unknown
-        ));
+        assert!(!resolve_tmux_availability(&mut cache, now, || {
+            TmuxAvailabilityProbe::Unknown
+        }));
     }
 
     #[test]
     fn ttl_hit_reuses_cached_state_without_probe() {
         let mut cache = TmuxAvailabilityCache::default();
         let now = Instant::now();
-        assert!(resolve_tmux_availability(
-            &mut cache,
-            now,
-            || TmuxAvailabilityProbe::Available
-        ));
+        assert!(resolve_tmux_availability(&mut cache, now, || {
+            TmuxAvailabilityProbe::Available
+        }));
 
-        let cached = resolve_tmux_availability(
-            &mut cache,
-            now + Duration::from_secs(1),
-            || panic!("tmux availability probe should be cached"),
-        );
+        let cached = resolve_tmux_availability(&mut cache, now + Duration::from_secs(1), || {
+            panic!("tmux availability probe should be cached")
+        });
 
         assert!(cached);
         assert_eq!(cache.consecutive_failures, 0);
