@@ -630,9 +630,9 @@
 | `services::discord::semantic_boundaries` | `src/services/discord/semantic_boundaries.rs` | 261 | 261 | 0 |  |
 | `services::discord::session_banner` | `src/services/discord/session_banner.rs` | 68 | 68 | 0 |  |
 | `services::discord::session_identity` | `src/services/discord/session_identity.rs` | 214 | 141 | 73 |  |
-| `services::discord::session_relay_sink` | `src/services/discord/session_relay_sink.rs` | 4368 | 1676 | 2692 | giant-file |
-| `services::discord::session_relay_sink::idle_jsonl` | `src/services/discord/session_relay_sink/idle_jsonl.rs` | 169 | 169 | 0 |  |
-| `services::discord::session_relay_sink::orphan_reclaim` | `src/services/discord/session_relay_sink/orphan_reclaim.rs` | 218 | 116 | 102 |  |
+| `services::discord::session_relay_sink` | `src/services/discord/session_relay_sink.rs` | 4500 | 1683 | 2817 | giant-file |
+| `services::discord::session_relay_sink::idle_jsonl` | `src/services/discord/session_relay_sink/idle_jsonl.rs` | 295 | 272 | 23 |  |
+| `services::discord::session_relay_sink::orphan_reclaim` | `src/services/discord/session_relay_sink/orphan_reclaim.rs` | 220 | 116 | 104 |  |
 | `services::discord::session_relay_sink::relay_format` | `src/services/discord/session_relay_sink/relay_format.rs` | 28 | 28 | 0 |  |
 | `services::discord::session_runtime` | `src/services/discord/session_runtime.rs` | 1027 | 501 | 526 |  |
 | `services::discord::session_runtime::channel_routing` | `src/services/discord/session_runtime/channel_routing.rs` | 235 | 235 | 0 |  |

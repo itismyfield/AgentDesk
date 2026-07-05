@@ -78,15 +78,22 @@ pub(super) async fn reclaim_orphaned_session_bound_relay_if_dead(
     producers: &RelayProducerRegistry,
     provider: &ProviderKind,
     channel_id: u64,
-    session_name: &str,
+    _iterating_session_name: &str,
     inflight: &InflightTurnState,
 ) -> bool {
     if !inflight::session_bound_relay_external_input_orphan_shape(inflight) {
         return false;
     }
+    let Some(owner_session_name) = inflight
+        .tmux_session_name
+        .as_deref()
+        .filter(|session| !session.trim().is_empty())
+    else {
+        return false;
+    };
     // #3876 producer-liveness, re-checked at THIS tick: a live producer (the
     // original or a replacement) still owns delivery → never reclaim.
-    let producer_gone = producers.get_producer(session_name).is_none();
+    let producer_gone = producers.get_producer(owner_session_name).is_none();
     if !producer_gone {
         return false;
     }
@@ -98,7 +105,7 @@ pub(super) async fn reclaim_orphaned_session_bound_relay_if_dead(
     else {
         return false;
     };
-    let committed = effective_committed_offset(&shared, provider, channel, session_name);
+    let committed = effective_committed_offset(&shared, provider, channel, owner_session_name);
     let turn_floor = inflight.turn_start_offset.unwrap_or(inflight.last_offset);
     if !should_reclaim_orphaned_session_bound_relay(true, producer_gone, committed, turn_floor) {
         return false;
@@ -108,7 +115,7 @@ pub(super) async fn reclaim_orphaned_session_bound_relay_if_dead(
             provider,
             channel_id,
             &InflightTurnIdentity::from_state(inflight),
-            session_name,
+            owner_session_name,
         ),
         inflight::OrphanRelayReclaimOutcome::Downgraded
     )
@@ -117,6 +124,71 @@ pub(super) async fn reclaim_orphaned_session_bound_relay_if_dead(
 #[cfg(test)]
 mod tests {
     use super::should_reclaim_orphaned_session_bound_relay as decide;
+    use super::*;
+    use serde_json::json;
+
+    fn local_timestamp(unix: i64) -> String {
+        use chrono::TimeZone;
+        chrono::Local
+            .timestamp_opt(unix, 0)
+            .single()
+            .expect("valid local timestamp")
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string()
+    }
+
+    fn stale_session_bound_relay_row(
+        channel_id: u64,
+        owner_session_name: &str,
+    ) -> InflightTurnState {
+        let stale_unix = chrono::Utc::now().timestamp()
+            - (inflight::INFLIGHT_STALENESS_THRESHOLD_SECS as i64)
+            - 1;
+        serde_json::from_value(json!({
+            "version": 9,
+            "provider": "claude",
+            "channel_id": channel_id,
+            "channel_name": "adk-cc",
+            "request_owner_user_id": 7,
+            "user_msg_id": 7001,
+            "current_msg_id": 0,
+            "current_msg_len": 0,
+            "user_text": "typed in TUI",
+            "source": "text",
+            "session_id": null,
+            "tmux_session_name": owner_session_name,
+            "output_path": "/tmp/claude-transcript.jsonl",
+            "input_fifo_path": null,
+            "last_offset": 0,
+            "full_response": "",
+            "response_sent_offset": 0,
+            "started_at": local_timestamp(stale_unix),
+            "updated_at": local_timestamp(stale_unix),
+            "terminal_delivery_committed": false,
+            "relay_owner_kind": "session_bound_relay",
+            "turn_source": "external_input",
+            "injected_prompt_message_id": 8001
+        }))
+        .expect("deserialize stale SessionBoundRelay row")
+    }
+
+    fn write_inflight_row_verbatim(
+        agentdesk_root: &std::path::Path,
+        provider: &ProviderKind,
+        channel_id: u64,
+        state: &InflightTurnState,
+    ) {
+        let path = agentdesk_root
+            .join("runtime")
+            .join("discord_inflight")
+            .join(provider.as_str())
+            .join(format!("{channel_id}.json"));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create inflight dir");
+        }
+        let json = serde_json::to_string_pretty(state).expect("serialize inflight row");
+        std::fs::write(&path, json).expect("write inflight row");
+    }
 
     #[test]
     fn producer_dies_before_commit_with_undelivered_body_is_reclaimed() {
@@ -150,6 +222,64 @@ mod tests {
     fn non_orphan_shape_is_never_reclaimed() {
         assert!(!decide(false, true, 0, 10));
         assert!(!decide(false, false, 0, 10));
+    }
+
+    #[tokio::test]
+    async fn cross_session_reclaim_uses_row_owner_and_unblocks_iterating_session() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        struct EnvReset(Option<std::ffi::OsString>);
+        impl Drop for EnvReset {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+                }
+            }
+        }
+        let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let temp = tempfile::TempDir::new().expect("temp runtime root");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
+        let provider = ProviderKind::Claude;
+        let channel_id = 4_136_116;
+        let owner_session = "AgentDesk-claude-vanished-owner-x";
+        let iterating_session = "AgentDesk-claude-live-iterator-y";
+        let inflight = stale_session_bound_relay_row(channel_id, owner_session);
+        write_inflight_row_verbatim(temp.path(), &provider, channel_id, &inflight);
+
+        let health_registry = HealthRegistry::new();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        health_registry
+            .register(provider.as_str().to_string(), shared)
+            .await;
+        let producers = RelayProducerRegistry::new();
+
+        assert!(
+            reclaim_orphaned_session_bound_relay_if_dead(
+                &health_registry,
+                &producers,
+                &provider,
+                channel_id,
+                iterating_session,
+                &inflight,
+            )
+            .await,
+            "iterating session Y must be able to reclaim a dead orphan owned by vanished session X"
+        );
+
+        let reloaded =
+            inflight::load_inflight_state(&provider, channel_id).expect("downgraded row survives");
+        assert_eq!(
+            reloaded.effective_relay_owner_kind(),
+            inflight::RelayOwnerKind::None,
+            "dead-owner reclaim downgrades the row to ownerless; it never reassigns ownership to Y"
+        );
+        assert!(
+            inflight::ownerless_external_input_inflight_is_stale(&reloaded),
+            "Y's next idle tick sees a stale ownerless blocker and can proceed to its own JSONL backlog"
+        );
     }
 
     /// #3960 — the AUTHORITATIVE no-double-relay guard for the watermark-only
