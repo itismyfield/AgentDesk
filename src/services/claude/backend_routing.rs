@@ -47,26 +47,36 @@ pub(super) fn should_preserve_live_reused_provider_session(
 
 pub(super) fn should_refuse_process_backend_demotion(
     tmux_available: bool,
-    tmux_missing: bool,
+    _tmux_missing: bool,
     pane_liveness: PaneLiveness,
 ) -> bool {
-    // ProbeError is unknown, not dead. Preserve the tmux route unless the
-    // availability probe specifically proved the tmux binary is missing.
-    !tmux_available
-        && !tmux_missing
-        && matches!(pane_liveness, PaneLiveness::Live | PaneLiveness::ProbeError)
+    // A recorded pane probe is stronger than the cached availability answer:
+    // Live proves tmux is usable, and ProbeError is unknown rather than dead.
+    !tmux_available && matches!(pane_liveness, PaneLiveness::Live | PaneLiveness::ProbeError)
+}
+
+pub(super) fn process_backend_demotion_guard_liveness_from_cached_missing(
+    tmux_missing: bool,
+    tmux_session_name: Option<&str>,
+    pane_liveness_probe: impl FnOnce(&str) -> PaneLiveness,
+) -> (bool, PaneLiveness) {
+    let pane_liveness = match tmux_session_name.filter(|name| !name.trim().is_empty()) {
+        // A recorded session name deserves a real pane probe even when the
+        // availability cache says the tmux binary was missing.
+        Some(tmux_session_name) => pane_liveness_probe(tmux_session_name),
+        None => PaneLiveness::DeadOrAbsent,
+    };
+    (tmux_missing, pane_liveness)
 }
 
 pub(super) fn process_backend_demotion_guard_liveness(
-    tmux_session_name: &str,
+    tmux_session_name: Option<&str>,
 ) -> (bool, PaneLiveness) {
-    let tmux_missing = crate::services::platform::tmux::cached_unavailable_due_to_missing();
-    let pane_liveness = if tmux_missing {
-        PaneLiveness::DeadOrAbsent
-    } else {
-        crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux_session_name)
-    };
-    (tmux_missing, pane_liveness)
+    process_backend_demotion_guard_liveness_from_cached_missing(
+        crate::services::platform::tmux::cached_unavailable_due_to_missing(),
+        tmux_session_name,
+        crate::services::tmux_diagnostics::tmux_session_pane_liveness,
+    )
 }
 
 pub(super) fn prepare_tmux_backend_after_refused_process_demotion(

@@ -25,10 +25,11 @@ use crate::services::provider_hosting::ProviderSessionDriver;
 use crate::services::remote::RemoteProfile;
 use crate::services::session_backend::{
     ReadHarvestStats, StreamLineState, emit_status_events_from_stream_json, insert_process_session,
-    observe_stream_context, parse_assistant_extra_tool_uses, parse_stream_message_with_state,
-    process_session_available_for_followup, process_session_pid, process_session_probe,
-    read_output_file_until_result, read_output_file_until_result_with_harvest,
-    remove_process_session, send_process_session_input, terminate_process_handle,
+    mark_process_session_active_turn, observe_stream_context, parse_assistant_extra_tool_uses,
+    parse_stream_message_with_state, process_session_available_for_followup, process_session_pid,
+    process_session_probe, read_output_file_until_result,
+    read_output_file_until_result_with_harvest, remove_process_session, send_process_session_input,
+    terminate_process_handle,
 };
 #[cfg(unix)]
 mod backend_routing;
@@ -846,7 +847,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
                 );
             } else {
                 let (tmux_missing, pane_liveness) =
-                    process_backend_demotion_guard_liveness(tmux_name);
+                    process_backend_demotion_guard_liveness(Some(tmux_name));
                 if should_refuse_process_backend_demotion(
                     tmux_available,
                     tmux_missing,
@@ -3109,6 +3110,7 @@ pub(crate) fn execute_streaming_local_process(
     insert_process_session(session_name.to_string(), handle);
 
     // Poll output file until result
+    let active_turn = mark_process_session_active_turn(session_name);
     let read_result = read_output_file_until_result(
         &output_path,
         0,
@@ -3116,6 +3118,7 @@ pub(crate) fn execute_streaming_local_process(
         cancel_token,
         process_session_probe(session_name),
     )?;
+    drop(active_turn);
 
     fold_read_output_result(
         read_result,
@@ -3166,6 +3169,7 @@ fn send_followup_to_process(
         }
     });
 
+    let active_turn = mark_process_session_active_turn(session_name);
     if let Err(e) = send_process_session_input(session_name, &msg.to_string()) {
         if should_recreate_session_after_stdin_error(&e) {
             debug_log(&format!(
@@ -3191,6 +3195,7 @@ fn send_followup_to_process(
         cancel_token,
         process_session_probe(session_name),
     )?;
+    drop(active_turn);
 
     let outcome = classify_followup_result(
         read_result,
@@ -3307,7 +3312,7 @@ mod local_tmux_lifecycle_tests {
             false,
             crate::services::platform::tmux::PaneLiveness::Live,
         ));
-        assert!(!should_refuse_process_backend_demotion(
+        assert!(should_refuse_process_backend_demotion(
             false,
             true,
             crate::services::platform::tmux::PaneLiveness::Live,
@@ -3329,7 +3334,49 @@ mod local_tmux_lifecycle_tests {
     }
 
     #[test]
-    fn issue_4113_active_process_wrapper_is_not_cleaned_when_tmux_returns() {
+    fn issue_4113_cached_missing_with_recorded_session_probe_error_refuses_demotion() {
+        let (tmux_missing, pane_liveness) =
+            backend_routing::process_backend_demotion_guard_liveness_from_cached_missing(
+                true,
+                Some("claude-existing-session"),
+                |_| crate::services::platform::tmux::PaneLiveness::ProbeError,
+            );
+
+        assert!(tmux_missing);
+        assert_eq!(
+            pane_liveness,
+            crate::services::platform::tmux::PaneLiveness::ProbeError
+        );
+        assert!(should_refuse_process_backend_demotion(
+            false,
+            tmux_missing,
+            pane_liveness,
+        ));
+    }
+
+    #[test]
+    fn issue_4113_cached_missing_without_recorded_session_skips_probe() {
+        let (tmux_missing, pane_liveness) =
+            backend_routing::process_backend_demotion_guard_liveness_from_cached_missing(
+                true,
+                None,
+                |_| panic!("pane liveness must not be probed without a session name"),
+            );
+
+        assert!(tmux_missing);
+        assert_eq!(
+            pane_liveness,
+            crate::services::platform::tmux::PaneLiveness::DeadOrAbsent
+        );
+        assert!(!should_refuse_process_backend_demotion(
+            false,
+            tmux_missing,
+            pane_liveness,
+        ));
+    }
+
+    #[test]
+    fn issue_4113_active_process_wrapper_is_reaped_by_terminal_completion_after_tmux_skip() {
         let session_name = format!("claude-tmux-return-cleanup-{}", uuid::Uuid::new_v4());
         let alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         crate::services::session_backend::insert_process_session(
@@ -3339,6 +3386,8 @@ mod local_tmux_lifecycle_tests {
                 alive: alive.clone(),
             },
         );
+        let active_turn =
+            crate::services::session_backend::mark_process_session_active_turn(&session_name);
 
         assert!(crate::services::session_backend::process_session_is_alive(
             &session_name
@@ -3350,11 +3399,20 @@ mod local_tmux_lifecycle_tests {
             &session_name
         ));
 
-        if let Some(handle) =
-            crate::services::session_backend::remove_process_session(&session_name)
-        {
-            crate::services::session_backend::terminate_process_handle(handle);
-        }
+        alive.store(false, std::sync::atomic::Ordering::Relaxed);
+        fold_read_output_result(
+            ReadOutputResult::SessionDied { offset: 0 },
+            |_| panic!("terminal death path must not emit ProcessReady"),
+            |_| {
+                crate::services::session_backend::remove_process_session(&session_name);
+            },
+        );
+        drop(active_turn);
+        assert_eq!(
+            crate::services::session_backend::process_session_pid(&session_name),
+            None,
+            "terminal completion must remove the process wrapper registry entry"
+        );
         assert!(!cleanup_process_backend_before_tmux(&session_name));
     }
 
