@@ -1819,10 +1819,14 @@ mod catch_up_recovery_tests {
         )
         .await;
 
+        // Phase 2's fixed 20-message backstop scan legitimately fetches once for
+        // every candidate regardless of retry mode; the phase-1 retry-mode pinned
+        // fetch would make this 2. Exactly one attempt proves the retry scan was
+        // skipped after the point-of-use remove lost the race.
         assert_eq!(
             fetch_attempts.load(Ordering::SeqCst),
-            0,
-            "lost point-of-use remove must skip the channel instead of retry-scanning it"
+            1,
+            "lost point-of-use remove must skip the phase-1 retry scan (phase-2 backstop fetch only)"
         );
     }
 
