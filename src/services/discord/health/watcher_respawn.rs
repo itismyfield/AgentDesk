@@ -42,6 +42,7 @@
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use poise::serenity_prelude::ChannelId;
 
@@ -107,12 +108,14 @@ pub(super) async fn complete_force_clean_watcher_recovery(
     channel_id: ChannelId,
     snapshot: &WatcherStateSnapshot,
     now_unix_secs: i64,
+    repair_started_at: Instant,
 ) {
     release_stale_mailbox_ownership_after_force_clean(
         shared,
         provider,
         channel_id,
         snapshot.mailbox_active_user_msg_id,
+        repair_started_at,
     )
     .await;
     if !force_clean_should_respawn_watcher(snapshot) {
@@ -184,13 +187,13 @@ fn runtime_owning_watcher<'a>(
 /// passed the desynced + stall predicate AND the liveness deferral cap), so
 /// this never steals a genuinely live turn. `stale_user_msg_id` is the mailbox
 /// owner captured AT the stall-confirmation snapshot; the release is
-/// identity-guarded (`mailbox_finish_turn_if_matches`) so that if a NEW turn
-/// claimed the mailbox in the await-gap between the old `ClearOrphanPendingToken`
-/// path (`relay_recovery.rs`) and this call, we no-op rather than cancel the
-/// new turn's token + wrongly decrement `global_active` — the same wrong-turn
-/// class the #3016 identity-guarded finalizer (`turn_finalizer/cleanup.rs`)
-/// avoids. Reuses that finalizer's token-cancel / `global_active`-decrement
-/// invariants so every turn-end path stays consistent.
+/// identity- and start-guarded (`mailbox_finish_turn_if_matches_started_before`)
+/// so that if a NEW turn claimed the mailbox in the await-gap between the old
+/// `ClearOrphanPendingToken` path (`relay_recovery.rs`) and this call, we no-op
+/// rather than cancel the new turn's token + wrongly decrement `global_active`
+/// — including a retry that reuses the same user message id. Reuses that
+/// finalizer's token-cancel / `global_active`-decrement invariants so every
+/// turn-end path stays consistent.
 ///
 /// `None` (no owner at the snapshot) means there is nothing stale to release —
 /// any token present now is a NEW turn, so we leave it alone.
@@ -201,13 +204,20 @@ pub(super) async fn release_stale_mailbox_ownership_after_force_clean(
     provider: &ProviderKind,
     channel_id: ChannelId,
     stale_user_msg_id: Option<u64>,
+    repair_started_at: Instant,
 ) -> bool {
     let Some(stale_user_msg_id) = stale_user_msg_id else {
         return false;
     };
     let expected = poise::serenity_prelude::MessageId::new(stale_user_msg_id);
-    let finish =
-        discord::mailbox_finish_turn_if_matches(shared, provider, channel_id, expected).await;
+    let finish = discord::mailbox_finish_turn_if_matches_started_before(
+        shared,
+        provider,
+        channel_id,
+        expected,
+        repair_started_at,
+    )
+    .await;
     let Some(token) = finish.removed_token.as_ref() else {
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(
@@ -215,7 +225,7 @@ pub(super) async fn release_stale_mailbox_ownership_after_force_clean(
             provider = provider.as_str(),
             stale_user_msg_id,
             reason = FORCE_CLEAN_FINALIZER_REASON,
-            "  [{ts}] ℹ STALL-WATCHDOG: skipped stale mailbox release for channel {channel_id} — a new turn already owns the mailbox (identity mismatch), leaving it untouched",
+            "  [{ts}] ℹ STALL-WATCHDOG: skipped stale mailbox release for channel {channel_id} — a new turn already owns the mailbox (identity/start mismatch), leaving it untouched",
         );
         return false;
     };
@@ -659,6 +669,7 @@ mod tests {
                     &provider,
                     channel,
                     Some(1_515_137_342_367_862_825),
+                    Instant::now(),
                 )
                 .await;
                 assert!(
@@ -702,6 +713,7 @@ mod tests {
             &provider,
             channel,
             Some(7_777),
+            Instant::now(),
         )
         .await;
         assert!(!released, "idle mailbox release must be a no-op");
@@ -736,6 +748,7 @@ mod tests {
             &provider,
             channel,
             Some(1_111_111),
+            Instant::now(),
         )
         .await;
         assert!(!released, "identity mismatch must skip the release");
@@ -762,6 +775,7 @@ mod tests {
             &provider,
             channel,
             Some(2_222_222),
+            Instant::now(),
         )
         .await;
         assert!(released_match, "matching stale identity must release");
@@ -776,9 +790,14 @@ mod tests {
         let provider = ProviderKind::Codex;
         let shared = crate::services::discord::make_shared_data_for_tests();
         let channel = ChannelId::new(3_410_207);
-        let released =
-            release_stale_mailbox_ownership_after_force_clean(&shared, &provider, channel, None)
-                .await;
+        let released = release_stale_mailbox_ownership_after_force_clean(
+            &shared,
+            &provider,
+            channel,
+            None,
+            Instant::now(),
+        )
+        .await;
         assert!(!released, "no snapshot owner ⇒ nothing stale to release");
     }
 

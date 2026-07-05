@@ -457,7 +457,7 @@
 | `services::discord::health::headless_turn` | `src/services/discord/health/headless_turn.rs` | 369 | 369 | 0 |  |
 | `services::discord::health::mailbox` | `src/services/discord/health/mailbox.rs` | 111 | 111 | 0 |  |
 | `services::discord::health::provider_probe` | `src/services/discord/health/provider_probe.rs` | 246 | 193 | 53 |  |
-| `services::discord::health::recovery` | `src/services/discord/health/recovery.rs` | 5314 | 2689 | 2625 | giant-file |
+| `services::discord::health::recovery` | `src/services/discord/health/recovery.rs` | 5488 | 2717 | 2771 | giant-file |
 | `services::discord::health::recovery::leak_recovery_ledger` | `src/services/discord/health/recovery/leak_recovery_ledger.rs` | 370 | 370 | 0 |  |
 | `services::discord::health::recovery::watchdog_decisions` | `src/services/discord/health/recovery/watchdog_decisions.rs` | 289 | 289 | 0 |  |
 | `services::discord::health::redaction` | `src/services/discord/health/redaction.rs` | 33 | 23 | 10 |  |
@@ -467,7 +467,7 @@
 | `services::discord::health::session_enrichment` | `src/services/discord/health/session_enrichment.rs` | 226 | 226 | 0 |  |
 | `services::discord::health::snapshot` | `src/services/discord/health/snapshot.rs` | 1065 | 887 | 178 |  |
 | `services::discord::health::stall_liveness` | `src/services/discord/health/stall_liveness.rs` | 1574 | 662 | 912 |  |
-| `services::discord::health::watcher_respawn` | `src/services/discord/health/watcher_respawn.rs` | 1125 | 497 | 628 |  |
+| `services::discord::health::watcher_respawn` | `src/services/discord/health/watcher_respawn.rs` | 1144 | 507 | 637 |  |
 | `services::discord::http` | `src/services/discord/http.rs` | 178 | 138 | 40 |  |
 | `services::discord::idle_detector` | `src/services/discord/idle_detector.rs` | 475 | 401 | 74 |  |
 | `services::discord::idle_recap` | `src/services/discord/idle_recap.rs` | 2585 | 1373 | 1212 | giant-file |

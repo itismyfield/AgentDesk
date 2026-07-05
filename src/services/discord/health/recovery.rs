@@ -111,6 +111,10 @@ type IdleTmuxStaleTurnPostClearHook =
     Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
 
 #[cfg(test)]
+type StallWatchdogForceCleanPostCleanupHook =
+    Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
+
+#[cfg(test)]
 fn idle_tmux_stale_turn_inflight_candidate_hook()
 -> &'static std::sync::Mutex<Option<IdleTmuxStaleTurnInflightCandidateHook>> {
     static HOOK: std::sync::OnceLock<
@@ -124,6 +128,15 @@ fn idle_tmux_stale_turn_post_clear_hook()
 -> &'static std::sync::Mutex<Option<IdleTmuxStaleTurnPostClearHook>> {
     static HOOK: std::sync::OnceLock<std::sync::Mutex<Option<IdleTmuxStaleTurnPostClearHook>>> =
         std::sync::OnceLock::new();
+    HOOK.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[cfg(test)]
+fn stall_watchdog_force_clean_post_cleanup_hook()
+-> &'static std::sync::Mutex<Option<StallWatchdogForceCleanPostCleanupHook>> {
+    static HOOK: std::sync::OnceLock<
+        std::sync::Mutex<Option<StallWatchdogForceCleanPostCleanupHook>>,
+    > = std::sync::OnceLock::new();
     HOOK.get_or_init(|| std::sync::Mutex::new(None))
 }
 
@@ -1725,6 +1738,7 @@ pub(crate) async fn run_stall_watchdog_pass(
     for (channel_id, shared) in candidate_channels {
         // Use the selected runtime so same-provider multi-bot snapshots target
         // the bot that owns this watcher.
+        let repair_started_at = Instant::now();
         let snapshot = match registry
             .snapshot_watcher_state_for_shared(provider, shared.clone(), channel_id.get())
             .await
@@ -2146,6 +2160,19 @@ pub(crate) async fn run_stall_watchdog_pass(
             channel_id,
         )
         .await;
+        #[cfg(test)]
+        {
+            // Bind the cloned hook first so the mutex guard does not cross the
+            // await. This hook models a retry claiming the mailbox in the gap
+            // after force-clean committed and before stale ownership release.
+            let hook = stall_watchdog_force_clean_post_cleanup_hook()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .clone();
+            if let Some(hook) = hook {
+                hook().await;
+            }
+        }
         // #3410: the cleanup above cancelled the watcher and (on the
         // tmux_alive_relay_dead branch) skipped relay recovery — release the
         // stale mailbox ownership it left and respawn the watcher on the still-
@@ -2157,6 +2184,7 @@ pub(crate) async fn run_stall_watchdog_pass(
             channel_id,
             &snapshot,
             now_unix_secs,
+            repair_started_at,
         )
         .await;
         let thread_parent_kickoffs =
@@ -4231,9 +4259,21 @@ mod stall_watchdog_auto_heal_tests {
         previous: Option<super::IdleTmuxStaleTurnPostClearHook>,
     }
 
+    struct ForceCleanPostCleanupHookGuard {
+        previous: Option<super::StallWatchdogForceCleanPostCleanupHook>,
+    }
+
     impl Drop for IdleTmuxPostClearHookGuard {
         fn drop(&mut self) {
             *super::idle_tmux_stale_turn_post_clear_hook()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = self.previous.take();
+        }
+    }
+
+    impl Drop for ForceCleanPostCleanupHookGuard {
+        fn drop(&mut self) {
+            *super::stall_watchdog_force_clean_post_cleanup_hook()
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner()) = self.previous.take();
         }
@@ -4261,8 +4301,36 @@ mod stall_watchdog_auto_heal_tests {
         }
     }
 
+    fn set_force_clean_post_cleanup_hook(
+        hook: super::StallWatchdogForceCleanPostCleanupHook,
+    ) -> ForceCleanPostCleanupHookGuard {
+        let mut slot = super::stall_watchdog_force_clean_post_cleanup_hook()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        ForceCleanPostCleanupHookGuard {
+            previous: slot.replace(hook),
+        }
+    }
+
     fn result_line(text: &str) -> String {
         format!("{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"{text}\"}}\n")
+    }
+
+    fn watcher_handle(
+        tmux_session_name: &str,
+        output_path: &std::path::Path,
+        cancel: Arc<AtomicBool>,
+    ) -> crate::services::discord::TmuxWatcherHandle {
+        crate::services::discord::TmuxWatcherHandle {
+            tmux_session_name: tmux_session_name.to_string(),
+            output_path: output_path.to_string_lossy().to_string(),
+            paused: Arc::new(AtomicBool::new(false)),
+            resume_offset: Arc::new(std::sync::Mutex::new(None)),
+            cancel,
+            pause_epoch: Arc::new(AtomicU64::new(0)),
+            turn_delivered: Arc::new(AtomicBool::new(false)),
+            last_heartbeat_ts_ms: Arc::new(AtomicI64::new(0)),
+        }
     }
 
     fn seed_idle_inflight(
@@ -4632,6 +4700,112 @@ mod stall_watchdog_auto_heal_tests {
                 .is_some(),
             "tail-answer skip must preserve inflight for normal relay"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn force_clean_guarded_finish_preserves_new_same_id_mailbox_claim() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tempdir = tempfile::tempdir().expect("runtime root tempdir");
+        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+        let provider = ProviderKind::Codex;
+        let mut registry = HealthRegistry::new();
+        registry.started_at_unix =
+            chrono::Utc::now().timestamp() - super::STALL_WATCHDOG_THRESHOLD_SECS as i64 - 60;
+        let shared = super::super::super::make_shared_data_for_tests();
+        registry
+            .register(provider.as_str().to_string(), shared.clone())
+            .await;
+        let channel = ChannelId::new(4_111_405);
+        let user_msg = MessageId::new(4_111_505);
+        let stale_tmux = "AgentDesk-codex-4111-force-clean-stale";
+        let fresh_tmux = "AgentDesk-codex-4111-force-clean-fresh";
+        let stale_output = tempdir.path().join("force-clean-stale.jsonl");
+        let fresh_output = tempdir.path().join("force-clean-fresh.jsonl");
+        std::fs::write(&stale_output, "partial stale output\n")
+            .expect("write stale output fixture");
+        std::fs::write(&fresh_output, "fresh retry output\n").expect("write fresh output fixture");
+        let _stale_token = seed_active_mailbox_and_session(&shared, channel, user_msg).await;
+        let mut stale_state = seed_idle_inflight(
+            &provider,
+            channel,
+            user_msg.get(),
+            stale_tmux,
+            &stale_output,
+            0,
+            "stale-session",
+        );
+        let stale_at = (chrono::Local::now() - chrono::Duration::hours(5))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        stale_state.started_at = stale_at.clone();
+        stale_state.updated_at = stale_at;
+        crate::services::discord::inflight::save_inflight_state(&stale_state)
+            .expect("save stale inflight timestamps");
+        shared.tmux_watchers.insert(
+            channel,
+            watcher_handle(stale_tmux, &stale_output, Arc::new(AtomicBool::new(false))),
+        );
+
+        let fresh_token = Arc::new(std::sync::Mutex::new(None::<Arc<CancelToken>>));
+        let hook_token = fresh_token.clone();
+        let hook_shared = shared.clone();
+        let hook_provider = provider.clone();
+        let hook_fresh_output = fresh_output.clone();
+        let _hook = set_force_clean_post_cleanup_hook(Arc::new(move || {
+            let shared = hook_shared.clone();
+            let provider = hook_provider.clone();
+            let fresh_output = hook_fresh_output.clone();
+            let token_slot = hook_token.clone();
+            Box::pin(async move {
+                let finish = super::super::super::mailbox_finish_turn_if_matches_started_before(
+                    &shared,
+                    &provider,
+                    channel,
+                    user_msg,
+                    std::time::Instant::now(),
+                )
+                .await;
+                if let Some(token) = finish.removed_token {
+                    token.cancelled.store(true, Ordering::Relaxed);
+                    super::super::super::saturating_decrement_global_active(&shared);
+                }
+                let token = seed_active_mailbox_and_session(&shared, channel, user_msg).await;
+                seed_idle_inflight(
+                    &provider,
+                    channel,
+                    user_msg.get(),
+                    fresh_tmux,
+                    &fresh_output,
+                    0,
+                    "fresh-session",
+                );
+                shared.tmux_watchers.insert(
+                    channel,
+                    watcher_handle(fresh_tmux, &fresh_output, Arc::new(AtomicBool::new(false))),
+                );
+                *token_slot
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner()) = Some(token);
+            })
+        }));
+
+        let cleaned = super::run_stall_watchdog_pass(&registry, &provider).await;
+
+        assert_eq!(cleaned, 1);
+        let fresh_token = fresh_token
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+            .expect("fresh same-id turn token should be seeded in the force-clean gap");
+        assert_mailbox_and_session_preserved(&shared, channel, user_msg, &fresh_token).await;
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+        let persisted =
+            crate::services::discord::inflight::load_inflight_state(&provider, channel.get())
+                .expect("fresh same-id row must survive force-clean release");
+        assert_eq!(persisted.user_msg_id, user_msg.get());
+        assert_eq!(persisted.session_id.as_deref(), Some("fresh-session"));
     }
 
     #[tokio::test]
