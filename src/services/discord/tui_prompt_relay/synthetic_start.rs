@@ -100,7 +100,7 @@ pub(super) async fn claim_tui_direct_synthetic_turn(
     // session; with no registered producer the bridge tail must stay the deliverer.
     let live_producer_present =
         crate::services::cluster::relay_producer_registry::global_relay_producer_registry()
-            .get_producer(tmux_session_name)
+            .get_live_producer(tmux_session_name)
             .is_some();
     let relay_owner = tui_direct_synthetic_relay_owner(
         tui_direct_watcher_can_own_output(
@@ -1303,7 +1303,7 @@ pub(super) fn tui_direct_watcher_can_own_output(
 ///   `BridgeAdapter`. CRITICAL regression guard (codex review): the session-bound
 ///   StreamRelay is a PASSIVE MPSC consumer fed ONLY by a live production
 ///   tmux watcher (`tmux_watcher::forward_chunk_to_supervisor_relay`); with no
-///   live producer registered (`relay_producer_registry::get_producer` → `None`,
+///   live producer registered (`relay_producer_registry::get_live_producer` → `None`,
 ///   e.g. a STALL-WATCHDOG force-clean detached the watcher) a `SessionBoundRelay`
 ///   stamp would STARVE the sink AND stand the bridge tail down → answer loss.
 ///   `BridgeAdapter` keeps the watcher-INDEPENDENT transcript-direct bridge tail

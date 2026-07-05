@@ -22,8 +22,8 @@
 //! `recovery_engine`/`relay_recovery` deliberately step aside with
 //! `observe_only` when they see "live turn evidence", because their contract
 //! is to never disturb a healthy turn. The STALL-WATCHDOG, by contrast, has
-//! ALREADY adjudicated this turn dead (it passed the force-clean predicate AND
-//! exhausted the positive-liveness deferral cap). Once force-clean commits, the
+//! ALREADY adjudicated this turn dead (it passed the force-clean predicate after
+//! the liveness gate allowed cleanup). Once force-clean commits, the
 //! cleanup is authoritative and therefore OWNS the recovery: it must release
 //! the stale mailbox ownership AND respawn the watcher so the still-alive tmux
 //! session keeps relaying. That is the resolution of the observe_only/cleanup
@@ -70,6 +70,7 @@ struct WatcherAbsenceKey {
 struct WatcherAbsenceState {
     first_seen_unix_secs: i64,
     escalated: bool,
+    minimum_initial_offset: Option<u64>,
 }
 
 static WATCHER_ABSENCE: LazyLock<dashmap::DashMap<WatcherAbsenceKey, WatcherAbsenceState>> =
@@ -89,6 +90,14 @@ const FORCE_CLEAN_FINALIZER_REASON: &str = "3410_stall_watchdog_force_clean_resp
 pub(super) fn force_clean_should_respawn_watcher(snapshot: &WatcherStateSnapshot) -> bool {
     snapshot.tmux_session_alive == Some(true)
         && is_agentdesk_tmux_session(snapshot.tmux_session.as_deref())
+}
+
+pub(super) fn force_clean_respawn_offset_floor(
+    snapshot: &WatcherStateSnapshot,
+    committed_relay_offset: u64,
+) -> Option<u64> {
+    let offset = snapshot.last_relay_offset.max(committed_relay_offset);
+    (offset > 0).then_some(offset)
 }
 
 fn is_agentdesk_tmux_session(tmux_session: Option<&str>) -> bool {
@@ -118,11 +127,14 @@ pub(super) async fn complete_force_clean_watcher_recovery(
     if !force_clean_should_respawn_watcher(snapshot) {
         return;
     }
-    respawn_watcher_after_force_clean(
+    let minimum_initial_offset =
+        force_clean_respawn_offset_floor(snapshot, shared.committed_relay_offset(channel_id));
+    let watcher_spawned = respawn_watcher_after_force_clean(
         registry,
         provider,
         channel_id,
         snapshot.tmux_session.as_deref(),
+        minimum_initial_offset,
     )
     .await;
     // Dead-man switch: if the respawn did not (re)establish a watcher for a
@@ -135,6 +147,9 @@ pub(super) async fn complete_force_clean_watcher_recovery(
         shared.tmux_watchers.contains_key(&channel_id),
         now_unix_secs,
     );
+    if !watcher_spawned {
+        remember_watcher_absence_offset_floor(provider, channel_id, minimum_initial_offset);
+    }
 }
 
 /// Re-attempt a respawn once per watchdog tick for every channel still tracked
@@ -181,7 +196,7 @@ fn runtime_owning_watcher<'a>(
 /// and the ownership leaks, jamming every subsequent synthetic inflight.
 ///
 /// Gated on the caller having already committed force-clean (the snapshot
-/// passed the desynced + stall predicate AND the liveness deferral cap), so
+/// passed the desynced + stall predicate after the liveness gate allowed cleanup), so
 /// this never steals a genuinely live turn. `stale_user_msg_id` is the mailbox
 /// owner captured AT the stall-confirmation snapshot; the release is
 /// identity-guarded (`mailbox_finish_turn_if_matches`) so that if a NEW turn
@@ -244,10 +259,16 @@ pub(super) async fn respawn_watcher_after_force_clean(
     provider: &ProviderKind,
     channel_id: ChannelId,
     tmux_session: Option<&str>,
+    minimum_initial_offset: Option<u64>,
 ) -> bool {
     let ts = chrono::Local::now().format("%H:%M:%S");
     match registry
-        .rebind_inflight(provider, channel_id.get(), tmux_session.map(str::to_string))
+        .rebind_inflight_after_force_clean(
+            provider,
+            channel_id.get(),
+            tmux_session.map(str::to_string),
+            minimum_initial_offset,
+        )
         .await
     {
         Some(Ok(outcome)) => {
@@ -256,6 +277,7 @@ pub(super) async fn respawn_watcher_after_force_clean(
                 provider = provider.as_str(),
                 tmux_session = outcome.tmux_session,
                 initial_offset = outcome.initial_offset,
+                minimum_initial_offset = minimum_initial_offset.unwrap_or(0),
                 watcher_spawned = outcome.watcher_spawned,
                 watcher_replaced = outcome.watcher_replaced,
                 reason = FORCE_CLEAN_FINALIZER_REASON,
@@ -317,6 +339,7 @@ pub(super) fn detect_and_escalate_watcher_absence(
     let mut entry = WATCHER_ABSENCE.entry(key).or_insert(WatcherAbsenceState {
         first_seen_unix_secs: now_unix_secs,
         escalated: false,
+        minimum_initial_offset: None,
     });
     let absence_secs = saturating_age_secs(entry.first_seen_unix_secs, now_unix_secs);
     let ts = chrono::Local::now().format("%H:%M:%S");
@@ -358,6 +381,38 @@ fn watcher_ownership_expected(snapshot: &WatcherStateSnapshot) -> bool {
 
 pub(super) fn clear_watcher_absence(provider: &ProviderKind, channel_id: ChannelId) {
     WATCHER_ABSENCE.remove(&WatcherAbsenceKey::new(provider, channel_id));
+}
+
+fn remember_watcher_absence_offset_floor(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    minimum_initial_offset: Option<u64>,
+) {
+    let Some(offset) = minimum_initial_offset else {
+        return;
+    };
+    let key = WatcherAbsenceKey::new(provider, channel_id);
+    if let Some(mut state) = WATCHER_ABSENCE.get_mut(&key) {
+        state.minimum_initial_offset = Some(state.minimum_initial_offset.unwrap_or(0).max(offset));
+    }
+}
+
+fn remembered_watcher_absence_offset_floor(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> Option<u64> {
+    WATCHER_ABSENCE
+        .get(&WatcherAbsenceKey::new(provider, channel_id))
+        .and_then(|state| state.minimum_initial_offset)
+}
+
+fn max_offset_floor(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
 }
 
 /// Channels currently tracked as watcher-absent for `provider`. The absence
@@ -451,6 +506,12 @@ async fn retry_pending_watcher_respawn(
     // entry for the next tick (never stranded). The tmux override falls back to
     // the persisted inflight state inside `rebind_inflight` when the snapshot is
     // `None`.
+    let minimum_initial_offset = max_offset_floor(
+        remembered_watcher_absence_offset_floor(provider, channel_id),
+        snapshot
+            .as_ref()
+            .and_then(|snap| force_clean_respawn_offset_floor(snap, 0)),
+    );
     respawn_watcher_after_force_clean(
         registry,
         provider,
@@ -458,6 +519,7 @@ async fn retry_pending_watcher_respawn(
         snapshot
             .as_ref()
             .and_then(|snap| snap.tmux_session.as_deref()),
+        minimum_initial_offset,
     )
     .await;
     // Re-resolve registry-wide presence after the respawn attempt. If a snapshot
@@ -595,6 +657,59 @@ mod tests {
             true,
             Some(9001),
         )));
+    }
+
+    #[test]
+    fn force_clean_respawn_offset_floor_uses_committed_frontier() {
+        let mut snap = snapshot(
+            4,
+            Some("AgentDesk-claude-adk-cc"),
+            Some(true),
+            true,
+            Some(9001),
+        );
+        snap.last_relay_offset = 13_400_000;
+        assert_eq!(
+            force_clean_respawn_offset_floor(&snap, 0),
+            Some(13_400_000),
+            "force-clean respawn must carry the snapshot's committed relay frontier"
+        );
+        assert_eq!(
+            force_clean_respawn_offset_floor(&snap, 14_930_326),
+            Some(14_930_326),
+            "a fresher in-memory confirmed_end_offset must win over the snapshot"
+        );
+        snap.last_relay_offset = 0;
+        assert_eq!(
+            force_clean_respawn_offset_floor(&snap, 0),
+            None,
+            "offset zero is not a useful floor"
+        );
+    }
+
+    #[test]
+    fn remembered_absence_offset_floor_survives_snapshotless_retry() {
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(4_140_001);
+        clear_watcher_absence(&provider, channel);
+        WATCHER_ABSENCE.insert(
+            WatcherAbsenceKey::new(&provider, channel),
+            WatcherAbsenceState {
+                first_seen_unix_secs: 1_000_000,
+                escalated: false,
+                minimum_initial_offset: Some(13_400_000),
+            },
+        );
+
+        assert_eq!(
+            max_offset_floor(
+                remembered_watcher_absence_offset_floor(&provider, channel),
+                None
+            ),
+            Some(13_400_000),
+            "retry must preserve the force-clean offset floor even when re-snapshot returns None"
+        );
+        clear_watcher_absence(&provider, channel);
     }
 
     struct EnvRootGuard(Option<std::ffi::OsString>);
@@ -795,6 +910,7 @@ mod tests {
             &provider,
             channel,
             Some("AgentDesk-codex-no-runtime"),
+            None,
         )
         .await;
         assert!(!spawned, "missing runtime must not report a spawn");
@@ -849,6 +965,7 @@ mod tests {
             WatcherAbsenceState {
                 first_seen_unix_secs: 1_000_000,
                 escalated: false,
+                minimum_initial_offset: None,
             },
         );
         let registry = HealthRegistry::new();
@@ -953,6 +1070,7 @@ mod tests {
             WatcherAbsenceState {
                 first_seen_unix_secs: now,
                 escalated: false,
+                minimum_initial_offset: None,
             },
         );
 
@@ -1023,6 +1141,7 @@ mod tests {
             WatcherAbsenceState {
                 first_seen_unix_secs: now,
                 escalated: false,
+                minimum_initial_offset: None,
             },
         );
 

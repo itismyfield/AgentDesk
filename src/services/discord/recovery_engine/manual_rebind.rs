@@ -279,6 +279,17 @@ fn codex_tui_rebind_already_relayed_response_prefix(
     String::new()
 }
 
+fn rebind_initial_offset_with_floor(
+    initial_offset: u64,
+    minimum_initial_offset: Option<u64>,
+    output_len: u64,
+) -> u64 {
+    match minimum_initial_offset {
+        Some(floor) if floor > initial_offset && floor <= output_len => floor,
+        _ => initial_offset,
+    }
+}
+
 fn codex_tui_existing_normalized_relay_replay_events(
     relay_path: &str,
     turn_start_offset: Option<u64>,
@@ -330,6 +341,44 @@ pub(crate) async fn rebind_inflight_for_channel(
     provider: &ProviderKind,
     channel_id: u64,
     tmux_session_override: Option<String>,
+) -> Result<RebindOutcome, RebindError> {
+    rebind_inflight_for_channel_inner(
+        http,
+        shared,
+        provider,
+        channel_id,
+        tmux_session_override,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn rebind_inflight_for_channel_with_minimum_start_offset(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: u64,
+    tmux_session_override: Option<String>,
+    minimum_initial_offset: Option<u64>,
+) -> Result<RebindOutcome, RebindError> {
+    rebind_inflight_for_channel_inner(
+        http,
+        shared,
+        provider,
+        channel_id,
+        tmux_session_override,
+        minimum_initial_offset,
+    )
+    .await
+}
+
+async fn rebind_inflight_for_channel_inner(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: u64,
+    tmux_session_override: Option<String>,
+    minimum_initial_offset: Option<u64>,
 ) -> Result<RebindOutcome, RebindError> {
     let discord_channel_id = ChannelId::new(channel_id);
 
@@ -535,7 +584,7 @@ pub(crate) async fn rebind_inflight_for_channel(
         }
     }
 
-    let initial_offset = if let Some(offset) = force_initial_offset {
+    let initial_offset_without_floor = if let Some(offset) = force_initial_offset {
         offset
     } else if let Some(existing) = existing_inflight.as_ref() {
         let (resume_offset, current_len, truncated) =
@@ -562,6 +611,22 @@ pub(crate) async fn rebind_inflight_for_channel(
     } else {
         synthetic_initial_offset
     };
+    let initial_offset = rebind_initial_offset_with_floor(
+        initial_offset_without_floor,
+        minimum_initial_offset,
+        std::fs::metadata(&output_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0),
+    );
+    if initial_offset != initial_offset_without_floor {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] ♻ rebind raised watcher start offset for {} from {} to {} using durable committed relay frontier",
+            tmux_session_name,
+            initial_offset_without_floor,
+            initial_offset
+        );
+    }
 
     let mut inflight_rollback_on_relay_setup_failure: Option<PendingRebindInflightRollback>;
     let recovered_state_for_session = if let Some(mut existing) = existing_inflight.clone() {
@@ -968,6 +1033,26 @@ mod post_work_evidence_tests {
             }
             other => panic!("expected ClaudeTui handoff, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rebind_initial_offset_floor_uses_committed_frontier_within_output_len() {
+        assert_eq!(
+            rebind_initial_offset_with_floor(0, Some(13_400_000), 14_930_326),
+            13_400_000,
+            "force-clean respawn must not restart from zero when the durable frontier is in-file"
+        );
+        assert_eq!(
+            rebind_initial_offset_with_floor(14_930_326, Some(13_400_000), 14_930_326),
+            14_930_326,
+            "the floor must never move an already-newer resume offset backward"
+        );
+        assert_eq!(
+            rebind_initial_offset_with_floor(0, Some(13_400_000), 1024),
+            0,
+            "if the output file was truncated below the durable frontier, keep the boot-path safe restart behavior"
+        );
+        assert_eq!(rebind_initial_offset_with_floor(512, None, 4096), 512);
     }
 
     #[test]

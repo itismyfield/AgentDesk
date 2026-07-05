@@ -456,6 +456,10 @@ impl RelayProducer {
         &self.metrics
     }
 
+    pub fn is_alive(&self) -> bool {
+        !self.shutdown.load(Ordering::Acquire)
+    }
+
     /// Non-blocking enqueue. See [`StreamRelayHandle::try_send_frame`] for
     /// the contract (drop-on-full, returns `false` only when the relay task
     /// has exited). Callers in production must always go through this entry
