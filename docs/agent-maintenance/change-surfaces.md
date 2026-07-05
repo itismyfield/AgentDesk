@@ -1173,9 +1173,10 @@
     clusters into `tmux_runtime/` child modules (`interrupt_policy.rs`,
     `process_table.rs`, `pid_exit.rs` — see their entries below); no longer a
     giant-file. Bugfix only outside a further extraction plan).
-  - `src/services/discord/turn_bridge/mod.rs` (6161 lines; production LoC; +1
-    from #4139 — expose the KV-only recovery-context restore helper (pub(crate)
-    visibility widening for the intake put-back path, no logic change); -2
+  - `src/services/discord/turn_bridge/mod.rs` (6160 lines; production LoC; ±0
+    from #4139 — `recovery_text` module visibility widened to
+    pub(in crate::services::discord) so the intake put-back path reaches the
+    KV-only restore helper directly (no re-export line, no logic change); -2
     from #4110 — empty-sink hardening moved delivery-state reset/rewind logic
     into `retry_state.rs`/`terminal_delivery.rs` children; prior: -16
     from #4049 S4-a1 — reaction mutations replaced by turn_view_reconciler

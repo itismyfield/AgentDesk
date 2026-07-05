@@ -190,11 +190,13 @@ pub(super) fn put_back_session_retry_context(
     let Some(context) = context else {
         return;
     };
-    if let Err(error) = super::super::turn_bridge::restore_session_retry_context_after_take(
-        shared.pg_pool.as_ref(),
-        channel_id.get(),
-        &context.raw_context,
-    ) {
+    if let Err(error) =
+        super::super::turn_bridge::recovery_text::restore_session_retry_context_after_take(
+            shared.pg_pool.as_ref(),
+            channel_id.get(),
+            &context.raw_context,
+        )
+    {
         tracing::warn!(
             channel_id = channel_id.get(),
             reason = reason.unwrap_or("unknown"),
