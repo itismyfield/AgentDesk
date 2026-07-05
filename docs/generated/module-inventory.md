@@ -79,7 +79,7 @@
 | `compat` | `src/compat/mod.rs` | 39 | 39 | 0 |  |
 | `compat::legacy_db_paths` | `src/compat/legacy_db_paths.rs` | 12 | 12 | 0 |  |
 | `compat::legacy_tmp_paths` | `src/compat/legacy_tmp_paths.rs` | 27 | 27 | 0 |  |
-| `config` | `src/config.rs` | 2996 | 2654 | 342 | giant-file |
+| `config` | `src/config.rs` | 3047 | 2705 | 342 | giant-file |
 | `config_live_reload` | `src/config_live_reload.rs` | 966 | 525 | 441 |  |
 | `crate` | `src/main.rs` | 7 | 7 | 0 |  |
 | `credential` | `src/credential.rs` | 212 | 59 | 153 |  |
@@ -476,7 +476,7 @@
 | `services::discord::idle_recap::scrollback` | `src/services/discord/idle_recap/scrollback.rs` | 301 | 287 | 14 |  |
 | `services::discord::idle_recap_interaction` | `src/services/discord/idle_recap_interaction.rs` | 545 | 494 | 51 |  |
 | `services::discord::idle_relay_drift` | `src/services/discord/idle_relay_drift.rs` | 764 | 529 | 235 |  |
-| `services::discord::inflight` | `src/services/discord/inflight.rs` | 6440 | 931 | 5509 |  |
+| `services::discord::inflight` | `src/services/discord/inflight.rs` | 6382 | 931 | 5451 |  |
 | `services::discord::inflight::anchor_repost` | `src/services/discord/inflight/anchor_repost.rs` | 550 | 189 | 361 |  |
 | `services::discord::inflight::budget` | `src/services/discord/inflight/budget.rs` | 340 | 109 | 231 |  |
 | `services::discord::inflight::clear_store` | `src/services/discord/inflight/clear_store.rs` | 989 | 989 | 0 |  |
@@ -506,7 +506,7 @@
 | `services::discord::outbound::decision` | `src/services/discord/outbound/decision.rs` | 248 | 248 | 0 |  |
 | `services::discord::outbound::delivery` | `src/services/discord/outbound/delivery.rs` | 1271 | 693 | 578 |  |
 | `services::discord::outbound::delivery_frontier_probe` | `src/services/discord/outbound/delivery_frontier_probe.rs` | 75 | 75 | 0 |  |
-| `services::discord::outbound::delivery_record` | `src/services/discord/outbound/delivery_record.rs` | 2703 | 1208 | 1495 | giant-file |
+| `services::discord::outbound::delivery_record` | `src/services/discord/outbound/delivery_record.rs` | 2740 | 1216 | 1524 | giant-file |
 | `services::discord::outbound::manual_delivery` | `src/services/discord/outbound/manual_delivery.rs` | 1176 | 580 | 596 |  |
 | `services::discord::outbound::message` | `src/services/discord/outbound/message.rs` | 426 | 426 | 0 |  |
 | `services::discord::outbound::policy` | `src/services/discord/outbound/policy.rs` | 124 | 124 | 0 |  |
@@ -685,7 +685,7 @@
 | `services::discord::tmux_watcher::supervisor_relay` | `src/services/discord/tmux_watcher/supervisor_relay.rs` | 619 | 619 | 0 |  |
 | `services::discord::tmux_watcher::terminal_long_chunks` | `src/services/discord/tmux_watcher/terminal_long_chunks.rs` | 298 | 298 | 0 |  |
 | `services::discord::tmux_watcher::terminal_readiness` | `src/services/discord/tmux_watcher/terminal_readiness.rs` | 235 | 235 | 0 |  |
-| `services::discord::tmux_watcher::terminal_send` | `src/services/discord/tmux_watcher/terminal_send.rs` | 626 | 578 | 48 |  |
+| `services::discord::tmux_watcher::terminal_send` | `src/services/discord/tmux_watcher/terminal_send.rs` | 632 | 578 | 54 |  |
 | `services::discord::tmux_watcher::turn_identity` | `src/services/discord/tmux_watcher/turn_identity.rs` | 484 | 484 | 0 |  |
 | `services::discord::tmux_watcher::two_message_panel` | `src/services/discord/tmux_watcher/two_message_panel.rs` | 694 | 382 | 312 |  |
 | `services::discord::tmux_watcher::utf8_chunk_decoder` | `src/services/discord/tmux_watcher/utf8_chunk_decoder.rs` | 88 | 88 | 0 |  |
@@ -721,7 +721,7 @@
 | `services::discord::turn_bridge::completion_guard::completion_postgres` | `src/services/discord/turn_bridge/completion_guard/completion_postgres.rs` | 644 | 548 | 96 |  |
 | `services::discord::turn_bridge::context_window` | `src/services/discord/turn_bridge/context_window.rs` | 170 | 100 | 70 |  |
 | `services::discord::turn_bridge::early_tui_completion` | `src/services/discord/turn_bridge/early_tui_completion.rs` | 71 | 71 | 0 |  |
-| `services::discord::turn_bridge::finalize_epilogue` | `src/services/discord/turn_bridge/finalize_epilogue.rs` | 308 | 156 | 152 |  |
+| `services::discord::turn_bridge::finalize_epilogue` | `src/services/discord/turn_bridge/finalize_epilogue.rs` | 305 | 156 | 149 |  |
 | `services::discord::turn_bridge::followup_requeue` | `src/services/discord/turn_bridge/followup_requeue.rs` | 62 | 62 | 0 |  |
 | `services::discord::turn_bridge::headless_delivery` | `src/services/discord/turn_bridge/headless_delivery.rs` | 518 | 442 | 76 |  |
 | `services::discord::turn_bridge::memory_lifecycle` | `src/services/discord/turn_bridge/memory_lifecycle.rs` | 411 | 303 | 108 |  |
