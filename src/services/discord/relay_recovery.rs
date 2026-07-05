@@ -1005,6 +1005,18 @@ fn output_file_quiescent_for_duration_at(
     now.duration_since(modified).is_ok_and(|age| age >= min_age)
 }
 
+/// Channel-scoped entry for callers outside the `discord` subtree (e.g. the
+/// manual stale-mailbox repair route) that cannot reach the `pub(super)`
+/// inflight loader: loads the current row and delegates to the state-based
+/// guard below. Absent row → no tail answer to lose → false.
+pub(crate) fn channel_has_unrelayed_idle_tmux_tail_answer(
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> bool {
+    super::inflight::load_inflight_state(provider, channel_id)
+        .is_some_and(|state| idle_tmux_repair_has_unrelayed_tail_answer(&state))
+}
+
 /// #3668 F2: detect tail answer text that the destructive idle-tmux clear would
 /// permanently lose.
 ///

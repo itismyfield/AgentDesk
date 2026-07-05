@@ -1085,7 +1085,7 @@ pub async fn stale_mailbox_repair_handler(
                     // answer is still persisted in JSONL after `last_offset` —
                     // let normal recovery deliver it instead of dropping it.
                     let unrelayed_tail =
-                        crate::services::discord::relay_recovery::idle_tmux_repair_has_unrelayed_tail_answer(
+                        crate::services::discord::relay_recovery::channel_has_unrelayed_idle_tmux_tail_answer(
                             &provider,
                             request.channel_id,
                         );
