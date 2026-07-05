@@ -37,11 +37,11 @@ mod orphan_reclaim;
 mod relay_format;
 use self::idle_jsonl::{
     IdleJsonlSessionInitRearm, IdleRelayRangeAction, idle_jsonl_apply_active_inflight_gate,
-    idle_jsonl_consume_offset, idle_jsonl_payload_contains_init_event,
-    idle_jsonl_payload_contains_schedule_wakeup_setup, idle_jsonl_payload_contains_user_event,
-    idle_jsonl_prepare_dedup_shared, idle_jsonl_relay_source_for_matched,
-    idle_jsonl_session_has_init, idle_relay_range_action, prune_idle_jsonl_session_state,
-    read_jsonl_range,
+    idle_jsonl_clear_session_init_on_generation_signature_change, idle_jsonl_consume_offset,
+    idle_jsonl_payload_contains_init_event, idle_jsonl_payload_contains_schedule_wakeup_setup,
+    idle_jsonl_payload_contains_user_event, idle_jsonl_prepare_dedup_shared,
+    idle_jsonl_relay_source_for_matched, idle_jsonl_session_has_init, idle_relay_range_action,
+    prune_idle_jsonl_session_state, read_jsonl_range,
 };
 
 static SESSION_BOUND_DISCORD_DELIVERY_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -1234,6 +1234,7 @@ async fn run_idle_jsonl_relay_loop(
     let mut first_seen_at: HashMap<String, Instant> = HashMap::new();
     let mut last_inflight_seen_at: HashMap<String, Instant> = HashMap::new();
     let mut session_init_seen: HashSet<String> = HashSet::new();
+    let mut session_generation_signatures: HashMap<String, i64> = HashMap::new();
 
     while !shutdown.load(Ordering::Acquire) {
         let mut seen_sessions = HashSet::new();
@@ -1257,6 +1258,14 @@ async fn run_idle_jsonl_relay_loop(
                 *offset = 0;
                 session_init_seen.remove(&session_name);
             }
+            let current_generation_signature =
+                super::tmux::read_generation_file_mtime_ns(&session_name);
+            idle_jsonl_clear_session_init_on_generation_signature_change(
+                &mut session_init_seen,
+                &mut session_generation_signatures,
+                &session_name,
+                current_generation_signature,
+            );
             macro_rules! consume_idle_offset {
                 ($to:expr, $rearm:expr) => {
                     idle_jsonl_consume_offset(
@@ -1264,7 +1273,6 @@ async fn run_idle_jsonl_relay_loop(
                         &session_name,
                         offset,
                         $to,
-                        len,
                         $rearm,
                     )
                 };
@@ -1317,7 +1325,6 @@ async fn run_idle_jsonl_relay_loop(
                 continue;
             }
             if len <= *offset {
-                session_init_seen.remove(&session_name);
                 continue;
             }
 
@@ -1486,6 +1493,7 @@ async fn run_idle_jsonl_relay_loop(
             &mut first_seen_at,
             &mut last_inflight_seen_at,
             &mut session_init_seen,
+            &mut session_generation_signatures,
         );
         tokio::time::sleep(IDLE_JSONL_RELAY_POLL_INTERVAL).await;
     }
@@ -2410,7 +2418,6 @@ mod tests {
             session_name,
             &mut offset,
             start,
-            end,
             IdleJsonlSessionInitRearm::Keep,
         );
         assert!(
@@ -2435,12 +2442,11 @@ mod tests {
             session_name,
             &mut offset,
             end,
-            end,
             IdleJsonlSessionInitRearm::Keep,
         );
         assert!(
-            !session_init_seen.contains(session_name),
-            "catch-up at EOF re-arms the next future turn"
+            session_init_seen.contains(session_name),
+            "EOF catch-up must keep the init marker for later chunks in the same growing file"
         );
     }
 
@@ -2485,11 +2491,58 @@ mod tests {
     }
 
     #[test]
+    fn idle_jsonl_generation_signature_pre_commit_respawn_watermark_zero_clears_session_init_seen()
+    {
+        let session_name = "AgentDesk-claude-generation-signature-precommit";
+        let pre_commit_watermark = 0_u64;
+        let mut session_init_seen = HashSet::from([session_name.to_string()]);
+        let mut session_generation_signatures = HashMap::from([(session_name.to_string(), 0_i64)]);
+
+        assert_eq!(
+            pre_commit_watermark, 0,
+            "test models a respawn before any watcher commit"
+        );
+        assert!(
+            idle_jsonl::idle_jsonl_clear_session_init_on_generation_signature_change(
+                &mut session_init_seen,
+                &mut session_generation_signatures,
+                session_name,
+                42,
+            )
+        );
+        assert_eq!(session_generation_signatures.get(session_name), Some(&42));
+        assert!(
+            !session_init_seen.contains(session_name),
+            "signature change must re-arm init detection even when watermark reset CAS would be false"
+        );
+    }
+
+    #[test]
+    fn idle_jsonl_unchanged_generation_signature_keeps_session_init_seen() {
+        let session_name = "AgentDesk-claude-generation-signature-unchanged";
+        let mut session_init_seen = HashSet::from([session_name.to_string()]);
+        let mut session_generation_signatures = HashMap::from([(session_name.to_string(), 42_i64)]);
+
+        assert!(
+            !idle_jsonl::idle_jsonl_clear_session_init_on_generation_signature_change(
+                &mut session_init_seen,
+                &mut session_generation_signatures,
+                session_name,
+                42,
+            )
+        );
+        assert_eq!(session_generation_signatures.get(session_name), Some(&42));
+        assert!(
+            session_init_seen.contains(session_name),
+            "unchanged generation signatures keep the init marker across ticks"
+        );
+    }
+
+    #[test]
     fn idle_jsonl_user_event_consumption_clears_session_init_seen() {
         let session_name = "AgentDesk-claude-user-event-rearm";
         let mut session_init_seen = HashSet::from([session_name.to_string()]);
         let mut offset = 128;
-        let observed_len = 1024;
         let consumed_to = 256;
 
         idle_jsonl_consume_offset(
@@ -2497,7 +2550,6 @@ mod tests {
             session_name,
             &mut offset,
             consumed_to,
-            observed_len,
             IdleJsonlSessionInitRearm::Clear,
         );
 
@@ -2509,25 +2561,74 @@ mod tests {
     }
 
     #[test]
-    fn idle_jsonl_drain_catch_up_clears_session_init_seen() {
-        let session_name = "AgentDesk-claude-catch-up-rearm";
-        let mut session_init_seen = HashSet::from([session_name.to_string()]);
-        let mut offset = 128;
-        let observed_len = 256;
+    fn idle_jsonl_cross_tick_init_then_assistant_append_relays_and_keeps_session_init_seen() {
+        let session_name = "AgentDesk-claude-cross-tick-continuation";
+        let init_chunk = b"{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"split\"}\n";
+        let assistant_chunk = b"{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"continued answer\"}]}}\n";
+        let mut session_init_seen = HashSet::new();
+        let mut offset = 0;
+        let tick_a_end = init_chunk.len() as u64;
 
+        let tick_a_session_has_init =
+            idle_jsonl_session_has_init(&mut session_init_seen, session_name, init_chunk);
+        assert!(tick_a_session_has_init);
+        assert_eq!(
+            idle_relay_range_action(
+                init_chunk,
+                0,
+                tick_a_end,
+                0,
+                false,
+                false,
+                tick_a_session_has_init,
+            ),
+            super::IdleRelayRangeAction::SendFull,
+            "tick A relays the init-only payload"
+        );
         idle_jsonl_consume_offset(
             &mut session_init_seen,
             session_name,
             &mut offset,
-            observed_len,
-            observed_len,
+            tick_a_end,
             IdleJsonlSessionInitRearm::Keep,
         );
-
-        assert_eq!(offset, observed_len);
+        assert_eq!(offset, tick_a_end);
         assert!(
-            !session_init_seen.contains(session_name),
-            "when the drain catches up to EOF, the next future turn must require a fresh init"
+            session_init_seen.contains(session_name),
+            "tick A reaching EOF must not clear the init marker for the growing file"
+        );
+
+        let tick_b_start = offset;
+        let tick_b_end = tick_b_start + assistant_chunk.len() as u64;
+        assert!(!idle_jsonl_payload_contains_init_event(assistant_chunk));
+        assert!(!idle_jsonl_payload_contains_user_event(assistant_chunk));
+        let tick_b_session_has_init =
+            idle_jsonl_session_has_init(&mut session_init_seen, session_name, assistant_chunk);
+        assert!(tick_b_session_has_init);
+        assert_eq!(
+            idle_relay_range_action(
+                assistant_chunk,
+                tick_b_start,
+                tick_b_end,
+                0,
+                false,
+                false,
+                tick_b_session_has_init,
+            ),
+            super::IdleRelayRangeAction::SendFull,
+            "tick B relays the assistant-only continuation without a fresh init/user event/inflight"
+        );
+        idle_jsonl_consume_offset(
+            &mut session_init_seen,
+            session_name,
+            &mut offset,
+            tick_b_end,
+            IdleJsonlSessionInitRearm::Keep,
+        );
+        assert_eq!(offset, tick_b_end);
+        assert!(
+            session_init_seen.contains(session_name),
+            "tick B must leave the init marker intact for later continuations"
         );
     }
 

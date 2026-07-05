@@ -144,13 +144,29 @@ pub(super) fn idle_jsonl_consume_offset(
     tmux_session_name: &str,
     offset: &mut u64,
     consumed_to: u64,
-    observed_len: u64,
     rearm: IdleJsonlSessionInitRearm,
 ) {
     *offset = consumed_to;
-    if rearm == IdleJsonlSessionInitRearm::Clear || observed_len <= *offset {
+    if rearm == IdleJsonlSessionInitRearm::Clear {
         session_init_seen.remove(tmux_session_name);
     }
+}
+
+pub(super) fn idle_jsonl_clear_session_init_on_generation_signature_change(
+    session_init_seen: &mut HashSet<String>,
+    session_generation_signatures: &mut HashMap<String, i64>,
+    tmux_session_name: &str,
+    current_generation_signature: i64,
+) -> bool {
+    let generation_changed = session_generation_signatures
+        .insert(tmux_session_name.to_string(), current_generation_signature)
+        .is_some_and(|previous_generation_signature| {
+            previous_generation_signature != current_generation_signature
+        });
+    if generation_changed {
+        session_init_seen.remove(tmux_session_name);
+    }
+    generation_changed
 }
 
 pub(super) fn idle_jsonl_clear_session_init_on_generation_reset(
@@ -204,11 +220,13 @@ pub(super) fn prune_idle_jsonl_session_state(
     first_seen_at: &mut HashMap<String, Instant>,
     last_inflight_seen_at: &mut HashMap<String, Instant>,
     session_init_seen: &mut HashSet<String>,
+    session_generation_signatures: &mut HashMap<String, i64>,
 ) {
     offsets.retain(|session, _| seen_sessions.contains(session));
     first_seen_at.retain(|session, _| seen_sessions.contains(session));
     last_inflight_seen_at.retain(|session, _| seen_sessions.contains(session));
     session_init_seen.retain(|session| seen_sessions.contains(session));
+    session_generation_signatures.retain(|session, _| seen_sessions.contains(session));
     prune_mismatched_inflight_log_sessions(seen_sessions);
 }
 
