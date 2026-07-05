@@ -1,9 +1,12 @@
 use std::path::Path;
 use std::time::Duration;
 
+use super::destructive_cancel_capture::{
+    CaptureProgressEvidence, fresh_watcher_heartbeat_blocks_rebind,
+};
+use super::{SharedData, inflight, mailbox_snapshot};
 use poise::serenity_prelude::{ChannelId, MessageId};
 
-use super::{SharedData, inflight, mailbox_snapshot};
 use crate::services::provider::ProviderKind;
 
 #[cfg(not(test))]
@@ -114,6 +117,43 @@ pub(in crate::services::discord) fn terminal_envelope_present(
     })
 }
 
+fn fresh_watcher_heartbeat_should_block(
+    shared: &SharedData,
+    watcher_owner_channel: ChannelId,
+    snapshot: &DestructiveCancelProbeSnapshot,
+    watcher_output_path: &str,
+) -> bool {
+    let output_len_now = std::fs::metadata(watcher_output_path)
+        .ok()
+        .map(|metadata| metadata.len());
+    let output_len_at_snapshot = snapshot
+        .output_path
+        .as_deref()
+        .filter(|path| Path::new(path) == Path::new(watcher_output_path))
+        .and(snapshot.output_len);
+    fresh_watcher_heartbeat_blocks_rebind(
+        CaptureProgressEvidence {
+            output_len_at_snapshot,
+            output_len_now,
+            output_mtime_age_secs: output_mtime_age_secs(watcher_output_path),
+            relay_frontier_at_snapshot: snapshot.relay_frontier,
+            relay_frontier_now: Some(shared.committed_relay_offset(watcher_owner_channel)),
+        },
+        crate::services::tui_turn_state::STALE_USER_SUBMITTED_RECLAIM_SECS,
+    )
+}
+
+fn output_mtime_age_secs(output_path: &str) -> Option<i64> {
+    let modified = std::fs::metadata(output_path).ok()?.modified().ok()?;
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(modified)
+            .unwrap_or_default()
+            .as_secs(),
+    )
+    .ok()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::services::discord) enum DestructiveCancelGate {
     Allowed(&'static str),
@@ -157,13 +197,35 @@ pub(in crate::services::discord) async fn evaluate(
     let watcher_heartbeat_stale =
         if let Some(tmux_session) = snapshot.pin.tmux_session_name.as_deref() {
             match shared.tmux_watchers.tmux_session_is_stale(tmux_session) {
-                Some(false) => return DestructiveCancelGate::Denied("fresh_watcher_heartbeat"),
+                Some(false) => {
+                    if let Some(output_path) = shared
+                        .tmux_watchers
+                        .watcher_output_path(tmux_session)
+                    {
+                        if fresh_watcher_heartbeat_should_block(
+                            shared,
+                            watcher_owner_channel,
+                            snapshot,
+                            &output_path,
+                        ) {
+                            return DestructiveCancelGate::Denied("fresh_watcher_heartbeat");
+                        }
+                    }
+                    true
+                }
                 Some(true) => true,
                 None => false,
             }
         } else if let Some(watcher) = shared.tmux_watchers.get(&watcher_owner_channel) {
             if !watcher.heartbeat_stale() {
-                return DestructiveCancelGate::Denied("fresh_watcher_heartbeat");
+                if fresh_watcher_heartbeat_should_block(
+                    shared,
+                    watcher_owner_channel,
+                    snapshot,
+                    &watcher.output_path,
+                ) {
+                    return DestructiveCancelGate::Denied("fresh_watcher_heartbeat");
+                }
             }
             true
         } else {

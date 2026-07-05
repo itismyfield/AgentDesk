@@ -16,6 +16,7 @@
 //! module. Moved verbatim — zero logic change.
 
 use super::*;
+use super::manual_rebind_output_path::saved_output_path_for_rebind_resolution;
 
 struct PendingCodexTuiRebindRelay {
     rollout_path: String,
@@ -501,10 +502,18 @@ async fn rebind_inflight_for_channel_inner(
         return Err(RebindError::ChannelNotBound);
     }
 
+    let existing_saved_output_path_for_resolution = saved_output_path_for_rebind_resolution(
+        shared,
+        provider,
+        existing_saved_output_path.as_deref(),
+        existing_session_id.as_deref(),
+        &tmux_session_name,
+    )
+    .await;
     let runtime_state = resolve_rebind_runtime_state(
         provider,
         &tmux_session_name,
-        existing_saved_output_path.as_deref(),
+        existing_saved_output_path_for_resolution,
         existing_session_id.clone(),
     )?;
     let mut output_path = runtime_state.output_path;

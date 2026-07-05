@@ -60,6 +60,8 @@ mod state_extractors;
 // point is re-exported below so external call sites stay byte-identical.
 #[path = "recovery_engine/manual_rebind.rs"]
 mod manual_rebind;
+#[path = "recovery_engine/manual_rebind_output_path.rs"]
+mod manual_rebind_output_path;
 #[path = "recovery_engine/routing_orphan.rs"] // #3869 routing-orphan finalize
 mod routing_orphan;
 #[path = "recovery_engine/terminal_text_idempotency.rs"]

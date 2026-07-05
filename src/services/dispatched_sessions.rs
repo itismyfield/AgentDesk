@@ -420,14 +420,19 @@ pub async fn get_claude_session_id(
         )
         .await
         {
-            Ok(Some(ids)) => (
-                StatusCode::OK,
-                Json(json!({
-                    "claude_session_id": ids.claude_session_id,
-                    "session_id": ids.claude_session_id,
-                    "raw_provider_session_id": ids.raw_provider_session_id,
-                })),
-            ),
+            Ok(Some(ids)) => {
+                let selected_session_id =
+                    selected_provider_resume_selector_for_provider(provider, &ids)
+                        .map(str::to_string);
+                (
+                    StatusCode::OK,
+                    Json(json!({
+                        "claude_session_id": ids.claude_session_id,
+                        "session_id": selected_session_id,
+                        "raw_provider_session_id": ids.raw_provider_session_id,
+                    })),
+                )
+            }
             Ok(None) => (
                 StatusCode::OK,
                 Json(json!({
@@ -1122,6 +1127,17 @@ fn now_unix_nanos() -> i64 {
         .unwrap_or(0)
 }
 
+fn selected_provider_resume_selector_for_provider<'a>(
+    provider_name: Option<&str>,
+    ids: &'a dispatched_sessions_db::ProviderSessionIds,
+) -> Option<&'a str> {
+    if provider_is_claude(provider_name) {
+        selected_provider_resume_selector_with_claude_home(ids, None)
+    } else {
+        selected_provider_resume_selector(ids)
+    }
+}
+
 fn selected_provider_resume_selector(
     ids: &dispatched_sessions_db::ProviderSessionIds,
 ) -> Option<&str> {
@@ -1129,12 +1145,80 @@ fn selected_provider_resume_selector(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .or_else(|| {
-            ids.raw_provider_session_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-        })
+        .or_else(|| raw_provider_resume_selector(ids))
+}
+
+fn raw_provider_resume_selector(
+    ids: &dispatched_sessions_db::ProviderSessionIds,
+) -> Option<&str> {
+    ids.raw_provider_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn selected_provider_resume_selector_with_claude_home<'a>(
+    ids: &'a dispatched_sessions_db::ProviderSessionIds,
+    claude_home: Option<&std::path::Path>,
+) -> Option<&'a str> {
+    let cached = ids
+        .claude_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let raw = raw_provider_resume_selector(ids);
+    let cwd = ids
+        .cwd
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let cached_activity = cwd
+        .zip(cached)
+        .and_then(|(cwd, selector)| claude_selector_file_activity(cwd, selector, claude_home));
+    let raw_activity = cwd
+        .zip(raw)
+        .and_then(|(cwd, selector)| claude_selector_file_activity(cwd, selector, claude_home));
+
+    crate::services::session_selector_validity::choose_provider_session_selector(
+        cached,
+        raw,
+        cached_activity,
+        raw_activity,
+        crate::services::tui_turn_state::STALE_USER_SUBMITTED_RECLAIM_SECS,
+    )
+}
+
+fn claude_selector_file_activity(
+    cwd: &str,
+    selector: &str,
+    claude_home: Option<&std::path::Path>,
+) -> Option<crate::services::session_selector_validity::SelectorFileActivity> {
+    let path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+        std::path::Path::new(cwd),
+        selector,
+        claude_home,
+    )
+    .ok()?;
+    let Ok(metadata) = std::fs::metadata(&path) else {
+        return Some(crate::services::session_selector_validity::SelectorFileActivity {
+            exists: false,
+            len: 0,
+            mtime_age_secs: None,
+        });
+    };
+    Some(crate::services::session_selector_validity::SelectorFileActivity {
+        exists: true,
+        len: metadata.len(),
+        mtime_age_secs: file_mtime_age_secs(&metadata),
+    })
+}
+
+fn file_mtime_age_secs(metadata: &std::fs::Metadata) -> Option<i64> {
+    let modified = metadata.modified().ok()?;
+    let age = std::time::SystemTime::now()
+        .duration_since(modified)
+        .unwrap_or_default();
+    i64::try_from(age.as_secs()).ok()
 }
 
 fn provider_is_claude(provider_name: Option<&str>) -> bool {
@@ -1153,13 +1237,13 @@ fn provider_resume_selector_is_effective_with_claude_home(
     ids: &dispatched_sessions_db::ProviderSessionIds,
     claude_home: Option<&std::path::Path>,
 ) -> bool {
-    let Some(selector) = selected_provider_resume_selector(ids) else {
+    if !provider_is_claude(provider_name) {
+        return selected_provider_resume_selector(ids).is_some();
+    }
+
+    let Some(selector) = selected_provider_resume_selector_with_claude_home(ids, claude_home) else {
         return false;
     };
-
-    if !provider_is_claude(provider_name) {
-        return true;
-    }
 
     let Some(cwd) = ids
         .cwd
