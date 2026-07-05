@@ -79,6 +79,35 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         .with_example(
             json!({"body": {"action": "confirm_promote", "evidence": "operator approved via Discord"}}),
             json!({"provider": "codex", "action": "confirm_promote", "state": "ProviderAgentsMigrated", "updated_at": "2026-01-01T00:00:00Z"}),
+        ),
+        // claude-accounts (cswap) usage panel + global auth switch (#4089)
+        ep(
+            "GET",
+            "/api/claude-accounts",
+            "claude-accounts",
+            "List Claude accounts with 5h/7d usage from cswap --list --json (60s server cache). Reports installed=false with an install hint when cswap is absent.",
+        )
+        .with_example(
+            json!(null),
+            json!({
+                "installed": true,
+                "hostname": "mac-mini",
+                "fetched_at": "2026-01-01T00:00:00Z",
+                "accounts": [{"email": "user@example.com", "active": true, "usage": {"fiveHour": {"pct": 12, "resetsAt": "2026-01-01T01:00:00Z"}, "sevenDay": {"pct": 40, "resetsAt": "2026-01-04T00:00:00Z"}}}]
+            }),
+        ),
+        ep(
+            "POST",
+            "/api/claude-accounts/switch",
+            "claude-accounts",
+            "Switch the machine-global Claude auth via cswap --switch-to (single-flight, 20s timeout). Schedules a best-effort leader rate-limit refresh; the switch applies on the receiving node only.",
+        )
+        .with_params([
+            ("account", body_param("string", true, "Account number or email as shown by the list endpoint")),
+        ])
+        .with_example(
+            json!({"body": {"account": "user@example.com"}}),
+            json!({"switched": true, "from": "old@example.com", "to": "user@example.com", "reason": null, "hostname": "mac-mini", "rate_limit_refresh": {"scheduled": true}}),
         )
     ]
 }

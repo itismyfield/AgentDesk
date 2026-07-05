@@ -39,7 +39,7 @@ pub(super) fn canonical_category(category: &str) -> &'static str {
         "auto-queue" | "cron" | "queue" => "queue",
         "routines" => "routines",
         "analytics" | "auth" | "cluster" | "docs" | "health" | "monitoring" | "stats" | "v1"
-        | "provider-cli" => "ops",
+        | "provider-cli" | "claude-accounts" => "ops",
         "discord" | "github" | "github-dashboard" | "meetings" => "integrations",
         "departments" | "memory" | "offices" | "onboarding" | "policies" | "settings"
         | "skills" => "admin",
@@ -201,6 +201,9 @@ pub(super) fn category_description(category: &str) -> &'static str {
         "policies" => "Loaded policy inventory.",
         "provider-cli" => {
             "Provider CLI safe migration: channel registry, upgrade orchestration, and operator promote/rollback."
+        }
+        "claude-accounts" => {
+            "Claude account usage listing (cswap) and operator-initiated global auth switch."
         }
         "reviews" => "Review verdict submission, decisions, and tuning aggregation.",
         "routines" => "Durable script-backed routines, run history, and manual routine controls.",
