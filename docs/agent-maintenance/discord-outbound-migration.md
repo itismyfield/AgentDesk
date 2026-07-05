@@ -524,3 +524,5 @@ changing runtime behavior.
    names in a separate operations change. This is not part of S1-f2.
 2. **Legacy retirement:** delete retained legacy arms only in a follow-up slice,
    after the blockers called out in §8.1.1 are resolved.
+
+> Last refreshed: 2026-07-05 (#4130 — delivery_record.rs gains a cfg(test)-only shadow_test_seam override; no production callsite/coverage change.)

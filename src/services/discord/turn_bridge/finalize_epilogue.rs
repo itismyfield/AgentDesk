@@ -254,9 +254,8 @@ mod tests {
 
     #[test]
     fn dispatch_failure_requeue_front_schedules_deferred_kickoff() {
-        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
         let tmp = tempfile::tempdir().expect("runtime root");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+        let _root_guard = crate::config::set_agentdesk_root_for_test(tmp.path());
 
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -302,7 +301,5 @@ mod tests {
                     "requeue-front after dispatch failure must re-arm the drain"
                 );
             });
-
-        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
     }
 }

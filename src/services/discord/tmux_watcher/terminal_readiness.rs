@@ -52,6 +52,28 @@ pub(super) fn adopt_watcher_terminal_message_ids_from_inflight(
     }
 }
 
+pub(super) fn merge_persisted_rollover_frozen_msg_ids(
+    local: &mut Vec<serenity::MessageId>,
+    inflight: Option<&InflightTurnState>,
+    tmux_session_name: &str,
+) {
+    let Some(inflight) = inflight.filter(|state| {
+        state.tmux_session_name.as_deref() == Some(tmux_session_name) && !state.rebind_origin
+    }) else {
+        return;
+    };
+    for msg_id in inflight
+        .streaming_rollover_frozen_msg_ids
+        .iter()
+        .copied()
+        .map(serenity::MessageId::new)
+    {
+        if !local.contains(&msg_id) {
+            local.push(msg_id);
+        }
+    }
+}
+
 pub(super) fn watcher_inflight_represents_external_input(
     inflight: Option<&InflightTurnState>,
 ) -> bool {

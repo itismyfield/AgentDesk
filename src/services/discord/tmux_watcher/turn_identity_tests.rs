@@ -2,20 +2,84 @@ use super::*;
 use crate::services::discord::inflight::InflightTurnState;
 
 fn state_for_turn(user_msg_id: u64, tmux_session_name: &str) -> InflightTurnState {
-    InflightTurnState::new(
-        ProviderKind::Codex,
-        42,
-        Some("adk-cdx".to_string()),
-        7,
+    let started_at = "2026-07-03T00:00:00Z".to_string();
+    let input_fifo_path = Some("/tmp/in.fifo".to_string());
+    InflightTurnState {
+        version: 9,
+        provider: ProviderKind::Codex.as_str().to_string(),
+        channel_id: 42,
+        channel_name: Some("adk-cdx".to_string()),
+        watcher_owner_channel_id: Some(42),
+        logical_channel_id: Some(42),
+        thread_id: None,
+        thread_title: None,
+        request_owner_user_id: 7,
         user_msg_id,
-        user_msg_id + 1,
-        "prompt".to_string(),
-        None,
-        Some(tmux_session_name.to_string()),
-        Some("/tmp/out.jsonl".to_string()),
-        Some("/tmp/in.fifo".to_string()),
-        0,
-    )
+        finalizer_turn_id: if user_msg_id == 0 {
+            1_000_000_000_000_000_042
+        } else {
+            user_msg_id
+        },
+        status_message_id: None,
+        status_panel_generation: 0,
+        current_msg_id: user_msg_id + 1,
+        current_msg_len: 0,
+        user_text: "prompt".to_string(),
+        source: crate::dispatch::Source::Text,
+        session_id: None,
+        tmux_session_name: Some(tmux_session_name.to_string()),
+        output_path: Some("/tmp/out.jsonl".to_string()),
+        input_fifo_path,
+        runtime_kind: Some(crate::services::agent_protocol::RuntimeHandoffKind::LegacyTmuxWrapper),
+        runtime_kind_unknown_on_disk: false,
+        worktree_path: None,
+        worktree_branch: None,
+        base_commit: None,
+        last_offset: 0,
+        turn_start_offset: Some(0),
+        full_response: String::new(),
+        response_sent_offset: 0,
+        terminal_delivery_committed: false,
+        current_tool_line: None,
+        last_tool_name: None,
+        last_tool_summary: None,
+        prev_tool_status: None,
+        task_notification_kind: None,
+        started_at: started_at.clone(),
+        updated_at: started_at,
+        save_generation: 0,
+        born_generation: 0,
+        recovery_relay_attempts: 0,
+        anchor_reposted: false,
+        anchor_repost_attempts: 0,
+        session_bound_delivered: false,
+        any_tool_used: false,
+        has_post_tool_text: false,
+        session_key: None,
+        delivery_bot: None,
+        silent_turn: false,
+        dispatch_id: None,
+        last_watcher_relayed_offset: None,
+        last_watcher_relayed_generation_mtime_ns: None,
+        restart_mode: None,
+        restart_generation: None,
+        rebind_origin: false,
+        rebind_origin_created_at_unix: None,
+        rebind_origin_deadline_secs: None,
+        rebind_origin_birth_generation: None,
+        relay_ownership_only: false,
+        long_running_placeholder_active: false,
+        watcher_owns_live_relay: false,
+        relay_owner_kind: crate::services::discord::inflight::RelayOwnerKind::None,
+        turn_source: crate::services::discord::inflight::TurnSource::Managed,
+        injected_prompt_message_id: None,
+        followup_reply_context: None,
+        followup_has_reply_boundary: false,
+        followup_merge_consecutive: false,
+        followup_pending_uploads: Vec::new(),
+        followup_voice_announcement: None,
+        streaming_rollover_frozen_msg_ids: Vec::new(),
+    }
 }
 
 #[test]
@@ -144,21 +208,8 @@ fn pinned_finalizer_turn_id_uses_synthetic_identity_for_zero_user_msg_id() {
 
 #[test]
 fn pinned_delivery_lease_key_id0_without_offset_acquires_and_commits_delivery() {
-    let _lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    struct EnvReset(Option<std::ffi::OsString>);
-    impl Drop for EnvReset {
-        fn drop(&mut self) {
-            match self.0.take() {
-                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-            }
-        }
-    }
-    let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
     let temp = tempfile::TempDir::new().expect("temp runtime root");
-    unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+    let _root_guard = crate::config::set_agentdesk_root_for_test(temp.path());
 
     let session = "AgentDesk-codex-adk-cdx";
     let channel_id = poise::serenity_prelude::ChannelId::new(7_204);
@@ -203,21 +254,8 @@ fn pinned_delivery_lease_key_id0_without_offset_acquires_and_commits_delivery() 
 
 #[test]
 fn degenerate_key_content_guard_requires_no_fresh_output_4081() {
-    let _lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    struct EnvReset(Option<std::ffi::OsString>);
-    impl Drop for EnvReset {
-        fn drop(&mut self) {
-            match self.0.take() {
-                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-            }
-        }
-    }
-    let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
     let temp = tempfile::TempDir::new().expect("temp runtime root");
-    unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+    let _root_guard = crate::config::set_agentdesk_root_for_test(temp.path());
 
     let provider = ProviderKind::Codex;
     let session = "AgentDesk-codex-adk-cdx-4081";
@@ -281,21 +319,8 @@ fn degenerate_key_content_guard_requires_no_fresh_output_4081() {
 
 #[test]
 fn long_chunk_delivery_fingerprint_refuses_phantom_rerelay_4081() {
-    let _lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    struct EnvReset(Option<std::ffi::OsString>);
-    impl Drop for EnvReset {
-        fn drop(&mut self) {
-            match self.0.take() {
-                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-            }
-        }
-    }
-    let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
     let temp = tempfile::TempDir::new().expect("temp runtime root");
-    unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+    let _root_guard = crate::config::set_agentdesk_root_for_test(temp.path());
 
     let shared = crate::services::discord::make_shared_data_for_tests();
     let provider = ProviderKind::Codex;
@@ -344,18 +369,6 @@ async fn live_long_chunk_delivery_fingerprint_uses_raw_body_4081() {
     use crate::services::discord::gateway::{GatewayFuture, TurnGateway};
     use poise::serenity_prelude::{ChannelId, MessageId};
 
-    let _lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    struct EnvReset(Option<std::ffi::OsString>);
-    impl Drop for EnvReset {
-        fn drop(&mut self) {
-            match self.0.take() {
-                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-            }
-        }
-    }
     struct LongChunkGateway;
     impl TurnGateway for LongChunkGateway {
         fn send_long_message_with_rollback<'a>(
@@ -449,9 +462,8 @@ async fn live_long_chunk_delivery_fingerprint_uses_raw_body_4081() {
         }
     }
 
-    let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
     let temp = tempfile::TempDir::new().expect("temp runtime root");
-    unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+    let _root_guard = crate::config::set_agentdesk_root_for_test(temp.path());
 
     let shared = crate::services::discord::make_shared_data_for_tests();
     let provider = ProviderKind::Codex;
@@ -1065,6 +1077,8 @@ fn anchor_cleanup_skips_when_stale_id0() {
 // the paused flag selects WHICH branch reaches the gate at the call site.)
 #[test]
 fn paused_first_branch_anchor_gate() {
+    let temp = tempfile::TempDir::new().expect("temp runtime root");
+    let _root_guard = crate::config::set_agentdesk_root_for_test(temp.path());
     let session = "AgentDesk-codex-adk-cdx";
     // Newer inflight present (the paused-with-inflight scenario) → stale.
     let newer = state_with_anchor(0, session, Some(50), 50, Some(55), true);

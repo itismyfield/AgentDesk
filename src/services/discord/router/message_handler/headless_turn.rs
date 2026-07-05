@@ -405,10 +405,6 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     };
 
     let turn_id = reservation.turn_id(channel_id);
-    let session_retry_context = take_session_retry_context(shared, channel_id, Some(&turn_id));
-    let reply_context = session_retry_context
-        .as_ref()
-        .map(|context| context.formatted_context.clone());
     let role_binding = {
         let data = shared.core.lock().await;
         let channel_name = data
@@ -617,6 +613,10 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
             status: HeadlessTurnStartStatus::Consumed,
         });
     }
+    let session_retry_context = take_session_retry_context(shared, channel_id, Some(&turn_id));
+    let reply_context = session_retry_context
+        .as_ref()
+        .map(|context| context.formatted_context.clone());
     let goal_fresh = matches!(headless_goal_kind, GoalCommandKind::FreshStart);
     // #family-profile-probe (codex review P1/R2): a fresh DM routine turn must
     // route through the SAME proven fresh-session machinery as `/goal fresh`, so
@@ -934,221 +934,14 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         session_id.is_some(),
     );
 
-    {
-        let watchdog_token = cancel_token.clone();
-        let watchdog_shared = shared.clone();
-        let timeout = super::super::super::turn_watchdog_timeout();
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        let turn_started_ms = now_ms;
-        // #3557 (A) Codex-review r2 fix: mirror the foreground intake_turn.rs
-        // ceiling cap on the headless path. This path also calls
-        // `mark_async_managed()` so the per-provider sync watchdog stops
-        // enforcing the deadline — meaning ONLY this async loop bounds the turn.
-        // Previously the initial deadline was always `now + 6h` and the
-        // auto-extend stored `now + 6h` unclamped, so headless Codex turns
-        // ignored the tighter 4h ceiling and could be re-extended without a
-        // hard backstop. Cap the initial deadline at the provider ceiling so
-        // the bound is honored end to end (same helper as the foreground path).
-        let ceiling_deadline_ms =
-            super::super::super::turn_hard_ceiling_deadline_ms(turn_started_ms, &provider);
-        let proposed_initial_dl = now_ms + timeout.as_millis() as i64;
-        let deadline_ms = std::cmp::min(proposed_initial_dl, ceiling_deadline_ms);
-        let max_deadline_ms = deadline_ms;
-        // When the ceiling already caps the initial deadline (e.g. Codex 4h <
-        // 6h watchdog timeout) the auto-extend clamp warn below never fires
-        // (its `current_dl < ceiling_ms` guard is false once the deadline is
-        // parked at the ceiling), so surface the bound once here instead.
-        if proposed_initial_dl > ceiling_deadline_ms {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            let ceiling_min = (ceiling_deadline_ms - now_ms) / 1000 / 60;
-            tracing::warn!(
-                "  [{ts}] ⛔ WATCHDOG: hard ceiling ({ceiling_min}m) caps initial deadline for headless channel {} (provider={}) — turn will be reconciled at the ceiling",
-                channel_id.get(),
-                provider_label
-            );
-        }
-        // claude-e rollout Phase 1 (counter-review round 3 with Codex):
-        // see the text-watchdog setup above for the rationale.
-        watchdog_token.mark_async_managed();
-        watchdog_token
-            .watchdog_deadline_ms
-            .store(deadline_ms, std::sync::atomic::Ordering::Relaxed);
-        watchdog_token
-            .watchdog_max_deadline_ms
-            .store(max_deadline_ms, std::sync::atomic::Ordering::Relaxed);
-
-        let watchdog_channel_id_num = channel_id.get();
-        let watchdog_provider = provider.clone();
-        super::super::super::task_supervisor::spawn_observed(
-            "headless_turn_watchdog",
-            async move {
-                const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
-                let mut last_deadlock_prealert_deadline_ms: Option<i64> = None;
-
-                loop {
-                    tokio::time::sleep(CHECK_INTERVAL).await;
-                    if watchdog_token
-                        .cancelled
-                        .load(std::sync::atomic::Ordering::Relaxed)
-                    {
-                        super::super::super::clear_watchdog_deadline_override(
-                            watchdog_channel_id_num,
-                        )
-                        .await;
-                        return;
-                    }
-                    if let Some(extension) = super::super::super::take_watchdog_deadline_override(
-                        watchdog_channel_id_num,
-                    )
-                    .await
-                    {
-                        apply_watchdog_deadline_extension(&watchdog_token, extension);
-                        last_deadlock_prealert_deadline_ms = None;
-                    }
-                    {
-                        let current_dl = watchdog_token
-                            .watchdog_deadline_ms
-                            .load(std::sync::atomic::Ordering::Relaxed);
-                        let now_ms_check = chrono::Utc::now().timestamp_millis();
-                        if now_ms_check > current_dl - 120_000 {
-                            if let Some(inflight) =
-                                super::super::super::inflight::load_inflight_state(
-                                    &watchdog_provider,
-                                    watchdog_channel_id_num,
-                                )
-                            {
-                                if let Ok(updated) = chrono::NaiveDateTime::parse_from_str(
-                                    &inflight.updated_at,
-                                    "%Y-%m-%d %H:%M:%S",
-                                ) {
-                                    let updated_ms = updated.and_utc().timestamp_millis();
-                                    let age_ms = now_ms_check - updated_ms;
-                                    if age_ms < 300_000 {
-                                        // #3557 (A) Codex-review r2 fix: clamp the
-                                        // headless auto-extend to the per-turn hard
-                                        // ceiling, exactly like the foreground path.
-                                        // Without this a headless Codex turn that
-                                        // keeps inflight warm could push the deadline
-                                        // past its 4h ceiling indefinitely (this path
-                                        // is `mark_async_managed`, so the sync
-                                        // watchdog does not enforce it either).
-                                        let ceiling_ms =
-                                            super::super::super::turn_hard_ceiling_deadline_ms(
-                                                turn_started_ms,
-                                                &watchdog_provider,
-                                            );
-                                        let proposed_dl = now_ms_check + timeout.as_millis() as i64;
-                                        let (new_dl, clamped) =
-                                            super::super::super::clamp_auto_extend_deadline_ms(
-                                                proposed_dl,
-                                                ceiling_ms,
-                                            );
-                                        // Warn exactly once when the ceiling first
-                                        // bites: `current_dl < ceiling_ms` only holds
-                                        // before the deadline is parked at the ceiling.
-                                        if clamped && current_dl < ceiling_ms {
-                                            let ts = chrono::Local::now().format("%H:%M:%S");
-                                            tracing::warn!(
-                                                "  [{ts}] ⛔ WATCHDOG: hard ceiling reached for headless channel {} — auto-extend clamped, turn will be reconciled at deadline",
-                                                watchdog_channel_id_num
-                                            );
-                                        }
-                                        if new_dl > current_dl {
-                                            watchdog_token.watchdog_deadline_ms.store(
-                                                new_dl,
-                                                std::sync::atomic::Ordering::Relaxed,
-                                            );
-                                            watchdog_token.watchdog_max_deadline_ms.store(
-                                                std::cmp::max(
-                                                    watchdog_token
-                                                        .watchdog_max_deadline_ms
-                                                        .load(std::sync::atomic::Ordering::Relaxed),
-                                                    new_dl,
-                                                ),
-                                                std::sync::atomic::Ordering::Relaxed,
-                                            );
-                                            last_deadlock_prealert_deadline_ms = None;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    let current_deadline = watchdog_token
-                        .watchdog_deadline_ms
-                        .load(std::sync::atomic::Ordering::Relaxed);
-                    let now = chrono::Utc::now().timestamp_millis();
-                    if should_send_watchdog_deadlock_prealert(
-                        now,
-                        current_deadline,
-                        last_deadlock_prealert_deadline_ms,
-                    ) {
-                        let is_current_token =
-                            super::super::super::mailbox_cancel_token(&watchdog_shared, channel_id)
-                                .await
-                                .is_some_and(|current| {
-                                    std::sync::Arc::ptr_eq(&watchdog_token, &current)
-                                });
-                        if !is_current_token {
-                            super::super::super::clear_watchdog_deadline_override(
-                                watchdog_channel_id_num,
-                            )
-                            .await;
-                            return;
-                        }
-                        let current_max_deadline = watchdog_token
-                            .watchdog_max_deadline_ms
-                            .load(std::sync::atomic::Ordering::Relaxed);
-                        if maybe_send_watchdog_deadlock_prealert(
-                            &watchdog_shared,
-                            &watchdog_provider,
-                            channel_id,
-                            now,
-                            current_deadline,
-                            turn_started_ms,
-                            current_max_deadline,
-                        )
-                        .await
-                        {
-                            last_deadlock_prealert_deadline_ms = Some(current_deadline);
-                        }
-                    }
-                    if let Some(extension) = super::super::super::take_watchdog_deadline_override(
-                        watchdog_channel_id_num,
-                    )
-                    .await
-                    {
-                        apply_watchdog_deadline_extension(&watchdog_token, extension);
-                        last_deadlock_prealert_deadline_ms = None;
-                    }
-                    let current_deadline = watchdog_token
-                        .watchdog_deadline_ms
-                        .load(std::sync::atomic::Ordering::Relaxed);
-                    let now = chrono::Utc::now().timestamp_millis();
-                    if now < current_deadline {
-                        continue;
-                    }
-
-                    let disposition = reconcile_watchdog_timeout(
-                        &watchdog_shared,
-                        &watchdog_provider,
-                        channel_id,
-                        &watchdog_token,
-                    )
-                    .await;
-                    if disposition == WatchdogTimeoutCancelDisposition::Cancelled {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::warn!(
-                            "  [{ts}] ⏰ Headless watchdog timeout reconciled via cancel path for channel {}",
-                            channel_id
-                        );
-                    }
-                    return;
-                }
-            },
-        );
-    }
+    spawn_headless_turn_watchdog(
+        &cancel_token,
+        shared,
+        &ctx.http,
+        channel_id,
+        &provider,
+        provider_label,
+    );
 
     let remote_profile = {
         let data = shared.core.lock().await;
@@ -1538,6 +1331,70 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         turn_id: reservation.turn_id(channel_id),
         status: HeadlessTurnStartStatus::Started,
     })
+}
+
+#[cfg(test)]
+mod recovery_context_take_order_tests {
+    fn recovery_context_take_call() -> String {
+        format!(
+            "{}{}",
+            "let session_retry_context = ",
+            "take_session_retry_context(shared, channel_id, Some(&turn_id));"
+        )
+    }
+
+    #[test]
+    fn recovery_context_survives_headless_goal_lifecycle_consumed_return() {
+        let root = tempfile::tempdir().expect("create temp runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let module_src = include_str!("headless_turn.rs");
+        let lifecycle_pos = module_src
+            .find("if let GoalCommandKind::Lifecycle(command) = headless_goal_kind")
+            .expect("headless lifecycle command branch exists");
+        let consumed_return_pos = lifecycle_pos
+            + module_src[lifecycle_pos..]
+                .find("status: HeadlessTurnStartStatus::Consumed")
+                .expect("headless lifecycle consumed return exists");
+        let take_call = recovery_context_take_call();
+        let take_pos = module_src
+            .find(&take_call)
+            .expect("headless recovery context take exists");
+
+        assert!(
+            consumed_return_pos < take_pos,
+            "headless lifecycle Consumed return must happen before the destructive recovery-context take"
+        );
+    }
+
+    #[test]
+    fn headless_real_turn_consumes_recovery_context_once_before_prompt_use() {
+        let root = tempfile::tempdir().expect("create temp runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let module_src = include_str!("headless_turn.rs");
+        let take_call = recovery_context_take_call();
+        let take_positions: Vec<_> = module_src.match_indices(&take_call).collect();
+        assert_eq!(
+            take_positions.len(),
+            1,
+            "headless turn start must have exactly one destructive recovery-context take"
+        );
+        let take_pos = take_positions[0].0;
+        let reply_context_use_pos = module_src
+            .find("context_chunks.push(reply_context);")
+            .expect("headless prompt includes recovered reply context");
+        let manifest_use_pos = module_src
+            .find("let recovery_context_for_manifest =")
+            .expect("headless prompt manifest receives recovery context");
+
+        assert!(
+            take_pos < reply_context_use_pos,
+            "headless real turn must take recovery context before adding it to the prompt"
+        );
+        assert!(
+            take_pos < manifest_use_pos,
+            "headless real turn must take recovery context before prompt manifest capture"
+        );
+    }
 }
 
 #[cfg(test)]

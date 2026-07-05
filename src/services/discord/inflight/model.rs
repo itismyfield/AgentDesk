@@ -1096,10 +1096,7 @@ impl InflightTurnIdentity {
         }
     }
 
-    pub(in crate::services::discord::inflight) fn matches_state(
-        &self,
-        state: &InflightTurnState,
-    ) -> bool {
+    pub(in crate::services::discord) fn matches_state(&self, state: &InflightTurnState) -> bool {
         self.user_msg_id == state.user_msg_id
             && self.started_at == state.started_at
             && self.tmux_session_name == state.tmux_session_name

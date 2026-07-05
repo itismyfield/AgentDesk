@@ -345,6 +345,8 @@ src/
 │   ├── automation_candidate_materializer/
 │   │   ├── allowed_path_tests.rs
 │   │   └── iteration_result_tests.rs
+│   ├── claude/
+│   │   └── backend_routing.rs
 │   ├── claude_e/
 │   │   ├── cancellation.rs
 │   │   ├── jsonl_parser.rs
@@ -516,11 +518,13 @@ src/
 │   │   │   └── section_dedupe.rs
 │   │   ├── recovery_engine/
 │   │   │   ├── analytics_transcript.rs
+│   │   │   ├── completion_delivery.rs
 │   │   │   ├── jsonl_extract.rs
 │   │   │   ├── manual_rebind.rs
 │   │   │   ├── output_path_detect.rs
 │   │   │   ├── phase_policy.rs
 │   │   │   ├── rebind_runtime.rs
+│   │   │   ├── restore_inflight.rs
 │   │   │   ├── routing_orphan.rs
 │   │   │   ├── runtime.rs
 │   │   │   ├── state_extractors.rs
@@ -888,6 +892,8 @@ src/
 │   │   ├── mod.rs
 │   │   └── provider.rs
 │   ├── platform/
+│   │   ├── tmux/
+│   │   │   └── availability.rs
 │   │   ├── binary_resolver.rs
 │   │   ├── dump_tool.rs
 │   │   ├── mod.rs

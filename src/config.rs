@@ -2957,6 +2957,57 @@ pub(crate) fn shared_test_env_lock() -> &'static std::sync::Mutex<()> {
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
+#[cfg(test)]
+pub(crate) struct TestEnvVarGuard {
+    _lock: Option<std::sync::MutexGuard<'static, ()>>,
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl TestEnvVarGuard {
+    pub(crate) fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+        let lock = shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let previous = std::env::var_os(key);
+        unsafe { std::env::set_var(key, value) };
+        Self {
+            _lock: Some(lock),
+            key,
+            previous,
+        }
+    }
+
+    pub(crate) fn set_path_after_shared_test_env_lock(
+        key: &'static str,
+        value: &std::path::Path,
+    ) -> Self {
+        let previous = std::env::var_os(key);
+        unsafe { std::env::set_var(key, value) };
+        Self {
+            _lock: None,
+            key,
+            previous,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestEnvVarGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => unsafe { std::env::set_var(self.key, value) },
+            None => unsafe { std::env::remove_var(self.key) },
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn set_agentdesk_root_for_test(path: &std::path::Path) -> TestEnvVarGuard {
+    TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", path)
+}
+
 /// Compatibility shim for legacy provider signatures that still mention
 /// `remote_profiles`.
 ///

@@ -104,6 +104,8 @@ fn gate_suppresses_for_either_mirror_signal_and_keeps_discord_origin_3964() {
 /// now suppresses.
 #[test]
 fn loop_self_paced_external_input_turn_suppresses_footer_3969() {
+    let temp = tempfile::TempDir::new().expect("temp runtime root");
+    let _root_guard = crate::config::set_agentdesk_root_for_test(temp.path());
     let inflight = inflight_with_turn_source(TurnSource::ExternalInput, Some(ADK_CC_SESSION));
 
     let mirror =
@@ -145,6 +147,8 @@ fn loop_self_paced_external_input_turn_suppresses_footer_3969() {
 /// mirror.
 #[test]
 fn discord_origin_managed_turn_keeps_footer_3969() {
+    let temp = tempfile::TempDir::new().expect("temp runtime root");
+    let _root_guard = crate::config::set_agentdesk_root_for_test(temp.path());
     let inflight = inflight_with_turn_source(TurnSource::Managed, Some(ADK_CC_SESSION));
 
     let mirror =
@@ -164,6 +168,8 @@ fn discord_origin_managed_turn_keeps_footer_3969() {
 /// mirror signal true, so it cannot suppress a footer it does not own.
 #[test]
 fn non_managed_mirror_signal_requires_session_match_3969() {
+    let temp = tempfile::TempDir::new().expect("temp runtime root");
+    let _root_guard = crate::config::set_agentdesk_root_for_test(temp.path());
     let other_session =
         inflight_with_turn_source(TurnSource::ExternalInput, Some("AgentDesk-claude-other"));
     assert!(!watcher_inflight_is_non_managed_tui_mirror_for_session(

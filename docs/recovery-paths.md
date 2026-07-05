@@ -4,10 +4,12 @@ Source-of-truth for the three recovery paths that resurrect an inflight turn
 after tmux, watcher, or dcserver disruption. Tracks issue **#1074** (905-5)
 and absorbs issue #917.
 
-`src/services/discord/recovery_engine.rs` (~4.6k LOC) currently hosts all
-three paths in one file. The goal of #1074 is to establish the per-path
-contract and SSoT for shared helpers **first**, then split the file
-mechanically in follow-up work. This document is the contract.
+`src/services/discord/recovery_engine.rs` is now a facade for the recovery
+paths. The restart scan body lives in
+`src/services/discord/recovery_engine/restore_inflight.rs`; runtime and manual
+rebind bodies live in `recovery_engine/runtime.rs` and
+`recovery_engine/manual_rebind.rs`. This document is the contract for those
+paths and their shared helpers.
 
 ## Path Inventory
 
@@ -17,13 +19,14 @@ mechanically in follow-up work. This document is the contract.
 | runtime          | `recovery_engine::reregister_active_turn_from_inflight` | mid-execution: mailbox rediscovers inflight file it does not own | async |
 | manual_rebind    | `recovery_engine::rebind_inflight_for_channel`      | operator POST `/api/inflight/rebind` or `/rebind` slash    | async        |
 
-Future layout (deferred — scaffold exists at `src/services/discord/recovery_paths/`;
-the `recovery_paths` name avoids shadowing the existing `recovery_engine as recovery`
-alias until the mechanical split lands):
-- `recovery_paths/restart.rs`
-- `recovery_paths/runtime.rs`
-- `recovery_paths/manual_rebind.rs`
-- `recovery_paths/shared.rs`  ← shared helpers once they are used by multiple recovery paths
+Current split layout:
+
+- `recovery_engine/restore_inflight.rs` — restart scan, watcher reattach, and
+  session-died retry handoff.
+- `recovery_engine/runtime.rs` — runtime rediscovery / active turn re-register.
+- `recovery_engine/manual_rebind.rs` — operator-driven rebind/adoption path.
+- `recovery_paths/restart.rs` and `recovery_paths/shared.rs` — restart-path
+  subroutines and shared relay-outcome helpers already consumed by the facade.
 
 ## Entry Conditions
 
@@ -160,10 +163,9 @@ lane (`docs/high-risk-recovery-lane.md`).
 
 ## Deferred Work
 
-Tracked under #1074 follow-ups:
+Tracked under #1074 / #3834 follow-ups:
 
-- Mechanical split of `recovery_engine.rs` into the three path modules.
-- Move `reregister_active_turn_from_inflight` and
-  `rebind_inflight_for_channel` helpers into `recovery::runtime` and
-  `recovery::manual_rebind` respectively, leaving `recovery_engine.rs` as a
-  thin facade during the transition.
+- Continue splitting `recovery_engine/restore_inflight.rs` internally; it still
+  contains the large restart scan and session-retry flow.
+- Keep `recovery_engine.rs` as a thin facade until all external callers can move
+  to narrower recovery-path modules without alias churn.

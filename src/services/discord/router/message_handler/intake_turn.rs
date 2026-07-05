@@ -1278,13 +1278,6 @@ pub(in crate::services::discord) async fn handle_text_message(
         }
     }
     let turn_id = format!("discord:{}:{}", channel_id.get(), user_msg_id.get());
-    let session_retry_context = take_session_retry_context(shared, channel_id, Some(&turn_id));
-    let reply_context = merge_reply_contexts(
-        reply_context,
-        session_retry_context
-            .as_ref()
-            .map(|context| context.formatted_context.clone()),
-    );
 
     // #1332: probe turn liveness BEFORE posting any placeholder so a queued
     // message renders the dedicated `📬 메시지 대기 중` card instead of the
@@ -1638,6 +1631,14 @@ pub(in crate::services::discord) async fn handle_text_message(
             }
         }
     };
+    let session_retry_context = take_session_retry_context(shared, channel_id, Some(&turn_id));
+    let reply_context = merge_reply_contexts(
+        reply_context,
+        session_retry_context
+            .as_ref()
+            .map(|context| context.formatted_context.clone()),
+    );
+
     // #3813 Phase 1a: the intake placeholder POST returned a live id.
     intake_latency.mark_placeholder_posted();
     crate::services::discord::increment_global_active(shared, "intake_after_mailbox_slot");
@@ -2818,6 +2819,84 @@ pub(in crate::services::discord) async fn handle_text_message(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod recovery_context_take_order_tests {
+    fn recovery_context_take_call() -> String {
+        format!(
+            "{}{}",
+            "let session_retry_context = ",
+            "take_session_retry_context(shared, channel_id, Some(&turn_id));"
+        )
+    }
+
+    #[test]
+    fn recovery_context_survives_intake_stale_dispatch_abort() {
+        let root = tempfile::tempdir().expect("create temp runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let module_src = include_str!("intake_turn.rs");
+        let stale_guard_pos = module_src
+            .find("stale_dispatch_turn_for_text(shared.pg_pool.as_ref(), user_text)")
+            .expect("intake stale-dispatch guard exists");
+        let stale_return_pos = stale_guard_pos
+            + module_src[stale_guard_pos..]
+                .find("return Ok(());")
+                .expect("intake stale-dispatch abort return exists");
+        let take_call = recovery_context_take_call();
+        let take_pos = module_src
+            .find(&take_call)
+            .expect("intake recovery context take exists");
+
+        assert!(
+            stale_return_pos < take_pos,
+            "intake stale-dispatch abort must happen before the destructive recovery-context take"
+        );
+    }
+
+    #[test]
+    fn intake_real_turn_consumes_recovery_context_once_after_non_dispatch_guards() {
+        let root = tempfile::tempdir().expect("create temp runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let module_src = include_str!("intake_turn.rs");
+        let take_call = recovery_context_take_call();
+        let take_positions: Vec<_> = module_src.match_indices(&take_call).collect();
+        assert_eq!(
+            take_positions.len(),
+            1,
+            "intake turn start must have exactly one destructive recovery-context take"
+        );
+        let take_pos = take_positions[0].0;
+        let race_loss_return_pos = module_src
+            .find("return race_loss::handle_race_loss_enqueue(")
+            .expect("intake race-loss enqueue return exists");
+        let placeholder_posted_pos = module_src
+            .find("intake_latency.mark_placeholder_posted();")
+            .expect("intake placeholder-post success mark exists");
+        let prompt_use_pos = module_src
+            .find("if let Some(ref reply_ctx) = reply_context")
+            .expect("intake prompt includes reply context");
+        let manifest_use_pos = module_src
+            .find("let recovery_context_for_manifest =")
+            .expect("intake prompt manifest receives recovery context");
+
+        assert!(
+            race_loss_return_pos < take_pos,
+            "queued/race-loss intake turns must not destructively take recovery context before returning"
+        );
+        assert!(
+            take_pos < placeholder_posted_pos,
+            "active intake turn must take recovery context immediately after placeholder success"
+        );
+        assert!(
+            take_pos < prompt_use_pos,
+            "active intake turn must take recovery context before adding it to the prompt"
+        );
+        assert!(
+            take_pos < manifest_use_pos,
+            "active intake turn must take recovery context before prompt manifest capture"
+        );
+    }
 }
 
 #[cfg(test)]
