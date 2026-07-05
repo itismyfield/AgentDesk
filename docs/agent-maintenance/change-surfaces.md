@@ -148,7 +148,10 @@
     "session ended … start a new session" tmux-death notice and its
     `should_send_session_ended_notice`/`session_ended_notice`/
     `TmuxDeathLifecycleDecision` plumbing).
-  - `src/services/discord/tmux.rs` (1482 lines; -7 from #4048 S3 removing the
+  - `src/services/discord/tmux.rs` (1503 lines; +21 from #4115 r4 threading the
+    same-turn rewind-seed origin into the idle-direct-prompt stale-seed discard
+    predicate so a rewind retry keeps its placeholder target while restart-restored
+    stale seeds still discard; -7 from #4048 S3 removing the
     restored-watcher direct queue-kickoff path in favor of the finalizer
     completion-event drain trigger; -12 from #4047 S2-b deleting
     the GateTimeout submit path and adding the shared bounded
@@ -1432,7 +1435,7 @@
     with persisted queue-marker state for notification-only 📬/⏳/✅/⚠/🛑 updates,
     queue cancel cleanup, and requeue coalescing; bugfix-only until a follow-up
     can split persistence/tests from the runtime reconciler).
-  - `src/services/discord/formatting.rs` (2651 lines; -203 net from #4115 r2+r3 — the rollback-aware long-message senders (send_long_message_raw_with_rollback / _with_reference_rollback, added so a mid-chunk send failure cleans up already-posted prefix chunks before the watcher rewind retries) moved verbatim with the pre-existing rollback helpers into the non-giant formatting/long_send_rollback.rs child; -2 from #4049 S4-b doc-comment sync on the reconciler-routed reaction path; +25 from #3998 D1 exposing
+  - `src/services/discord/formatting.rs` (2691 lines; +40 from #4115 r4 classifying typed serenity errors at the send seams before flattening (structured class markers carried to the watcher failure arms); -203 net from #4115 r2+r3 — the rollback-aware long-message senders (send_long_message_raw_with_rollback / _with_reference_rollback, added so a mid-chunk send failure cleans up already-posted prefix chunks before the watcher rewind retries) moved verbatim with the pre-existing rollback helpers into the non-giant formatting/long_send_rollback.rs child; -2 from #4049 S4-b doc-comment sync on the reconciler-routed reaction path; +25 from #3998 D1 exposing
     raw long-send created message ids and fallback replacement anchors for
     recovery anchor persistence while the existing `send_long_message_raw_with_reference`
     surface remains a unit-returning wrapper; presentation/chunking behavior unchanged. -25 from #4019 R1 moving

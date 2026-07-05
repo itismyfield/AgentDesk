@@ -26,6 +26,20 @@ use formatting::ReplaceLongMessageOutcome;
 
 pub(super) type GatewayFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+fn watcher_classified_failure_message(
+    class: super::replace_outcome_policy::WatcherSendFailureClass,
+    message: impl std::fmt::Display,
+) -> String {
+    super::replace_outcome_policy::watcher_send_failure_classified_message(class, message)
+}
+
+fn watcher_classified_error_string(error: &(dyn std::error::Error + 'static)) -> String {
+    watcher_classified_failure_message(
+        super::replace_outcome_policy::classify_watcher_send_failure(error),
+        error,
+    )
+}
+
 #[allow(dead_code)]
 pub(super) trait TurnGateway: Send + Sync {
     fn send_message<'a>(
@@ -51,6 +65,10 @@ pub(super) trait TurnGateway: Send + Sync {
                 match TurnGateway::send_message(self, channel_id, chunk).await {
                     Ok(message_id) => sent_message_ids.push(message_id),
                     Err(error) => {
+                        let failure_class =
+                            super::replace_outcome_policy::classify_watcher_send_failure_message(
+                                &error,
+                            );
                         let mut rollback_errors = Vec::new();
                         for message_id in sent_message_ids.iter().rev() {
                             if let Err(rollback_error) =
@@ -67,15 +85,21 @@ pub(super) trait TurnGateway: Send + Sync {
                         let total = chunks.len();
                         let anchor = rollback_anchor_msg_id.get();
                         if rollback_errors.is_empty() {
-                            return Err(format!(
-                                "send chunk {attempted}/{total} failed for anchor {anchor} in channel {}; sent chunks cleaned before retry: {error}",
-                                channel_id.get()
+                            return Err(watcher_classified_failure_message(
+                                failure_class,
+                                format!(
+                                    "send chunk {attempted}/{total} failed for anchor {anchor} in channel {}; sent chunks cleaned before retry: {error}",
+                                    channel_id.get()
+                                ),
                             ));
                         }
-                        return Err(format!(
-                            "send chunk {attempted}/{total} failed for anchor {anchor} in channel {}; cleanup incomplete after error {error}: {}",
-                            channel_id.get(),
-                            rollback_errors.join("; ")
+                        return Err(watcher_classified_failure_message(
+                            super::replace_outcome_policy::WatcherSendFailureClass::RollbackIncomplete,
+                            format!(
+                                "send chunk {attempted}/{total} failed for anchor {anchor} in channel {}; cleanup incomplete after error {error}: {}",
+                                channel_id.get(),
+                                rollback_errors.join("; ")
+                            ),
                         ));
                     }
                 }
@@ -618,7 +642,7 @@ impl TurnGateway for DiscordGateway {
                 &mut None,
             )
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|error| watcher_classified_error_string(error.as_ref()))
         })
     }
 

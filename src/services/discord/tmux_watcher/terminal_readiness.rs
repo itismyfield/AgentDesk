@@ -16,6 +16,9 @@
 
 use super::super::RestoredWatcherTurn;
 use super::*;
+use crate::services::discord::replace_outcome_policy::{
+    WatcherSendFailureClass, watcher_send_failure_retry_plan,
+};
 
 pub(super) fn adopt_watcher_terminal_message_ids_from_inflight(
     placeholder_msg_id: &mut Option<serenity::MessageId>,
@@ -125,16 +128,37 @@ pub(super) fn watcher_terminal_rewind_seed(
             finish_mailbox_on_completion: input.finish_mailbox_on_completion,
             injected_prompt_message_id: input.injected_prompt_message_id,
             streaming_rollover_frozen_msg_ids: input.streaming_rollover_frozen_msg_ids.to_vec(),
+            same_turn_rewind: true,
         })
 }
 
-pub(super) fn reset_rewind_attempts(
-    terminal_rewind_attempt_turn_start: &mut Option<u64>,
-    terminal_rewind_attempts: &mut u8,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct WatcherRewindAttemptKey {
     turn_data_start_offset: u64,
+    user_msg_id: u64,
+    started_at: Option<String>,
+    inflight_turn_start_offset: Option<u64>,
+}
+
+pub(super) fn watcher_rewind_attempt_key(
+    turn_data_start_offset: u64,
+    identity: Option<&crate::services::discord::inflight::InflightTurnIdentity>,
+) -> WatcherRewindAttemptKey {
+    WatcherRewindAttemptKey {
+        turn_data_start_offset,
+        user_msg_id: identity.map(|identity| identity.user_msg_id).unwrap_or(0),
+        started_at: identity.map(|identity| identity.started_at.clone()),
+        inflight_turn_start_offset: identity.and_then(|identity| identity.turn_start_offset),
+    }
+}
+
+pub(super) fn reset_rewind_attempts(
+    terminal_rewind_attempt_key: &mut Option<WatcherRewindAttemptKey>,
+    terminal_rewind_attempts: &mut u8,
+    key: WatcherRewindAttemptKey,
 ) {
-    if *terminal_rewind_attempt_turn_start != Some(turn_data_start_offset) {
-        *terminal_rewind_attempt_turn_start = Some(turn_data_start_offset);
+    if terminal_rewind_attempt_key.as_ref() != Some(&key) {
+        *terminal_rewind_attempt_key = Some(key);
         *terminal_rewind_attempts = 0;
     }
 }
@@ -146,6 +170,10 @@ pub(super) fn take_pending_or_restored_rewind_seed(
     pending_terminal_rewind_seed
         .take()
         .or_else(|| restored_turn.take())
+}
+
+pub(super) fn restored_seed_from_rewind(seed: Option<&RestoredWatcherTurn>) -> bool {
+    seed.is_some_and(|seed| seed.same_turn_rewind)
 }
 
 pub(super) fn watcher_rollback_anchor_msg_id(
@@ -207,6 +235,23 @@ pub(super) fn watcher_send_failure_plan_warned(
         }
     }
     plan
+}
+
+pub(super) fn watcher_partial_continuation_failure_class(
+    error: &str,
+    cleanup_errors_empty: bool,
+) -> WatcherSendFailureClass {
+    let failure_class =
+        crate::services::discord::replace_outcome_policy::classify_watcher_send_failure_message(
+            error,
+        );
+    if cleanup_errors_empty
+        || crate::services::discord::replace_outcome_policy::watcher_send_failure_message_has_class_marker(error)
+    {
+        failure_class
+    } else {
+        WatcherSendFailureClass::RollbackIncomplete
+    }
 }
 
 pub(super) fn warn_terminal_partial_no_rewind(
@@ -287,6 +332,53 @@ pub(super) fn watcher_inflight_represents_external_input(
                 | crate::services::discord::inflight::TurnSource::ExternalAdopted
         )
     })
+}
+
+#[cfg(test)]
+mod rewind_attempt_key_tests {
+    use super::*;
+
+    fn identity(started_at: &str) -> crate::services::discord::inflight::InflightTurnIdentity {
+        crate::services::discord::inflight::InflightTurnIdentity {
+            user_msg_id: 42,
+            started_at: started_at.to_string(),
+            tmux_session_name: Some("AgentDesk-claude-adk-4115".to_string()),
+            turn_start_offset: Some(128),
+        }
+    }
+
+    #[test]
+    fn reset_rewind_attempts_keys_offset_with_turn_identity_4115() {
+        let first = identity("2026-07-06T00:00:00Z");
+        let second = identity("2026-07-06T00:00:01Z");
+        let mut key = None;
+        let mut attempts = 3;
+
+        reset_rewind_attempts(
+            &mut key,
+            &mut attempts,
+            watcher_rewind_attempt_key(128, Some(&first)),
+        );
+        assert_eq!(attempts, 0);
+
+        attempts = 3;
+        reset_rewind_attempts(
+            &mut key,
+            &mut attempts,
+            watcher_rewind_attempt_key(128, Some(&first)),
+        );
+        assert_eq!(attempts, 3, "same offset and identity keeps the cap");
+
+        reset_rewind_attempts(
+            &mut key,
+            &mut attempts,
+            watcher_rewind_attempt_key(128, Some(&second)),
+        );
+        assert_eq!(
+            attempts, 0,
+            "same offset with a new turn identity resets the rewind cap"
+        );
+    }
 }
 
 /// status-panel-v2 eligibility for a watcher-driven inflight turn.

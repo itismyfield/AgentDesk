@@ -1,5 +1,22 @@
 use super::*;
 
+fn watcher_send_error(
+    class: crate::services::discord::replace_outcome_policy::WatcherSendFailureClass,
+    message: impl std::fmt::Display,
+) -> Error {
+    crate::services::discord::replace_outcome_policy::watcher_send_failure_classified_message(
+        class, message,
+    )
+    .into()
+}
+
+fn watcher_rollback_incomplete_error(message: impl std::fmt::Display) -> Error {
+    watcher_send_error(
+        crate::services::discord::replace_outcome_policy::WatcherSendFailureClass::RollbackIncomplete,
+        message,
+    )
+}
+
 pub(in crate::services::discord) async fn send_long_message_raw_with_rollback(
     http: &serenity::Http,
     channel_id: ChannelId,
@@ -34,13 +51,12 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
     match claim_replace_continuation_rollback(rollback_key) {
         ReplaceContinuationRollbackClaim::None => {}
         ReplaceContinuationRollbackClaim::InProgress(pending_ids) => {
-            return Err(format!(
+            return Err(watcher_rollback_incomplete_error(format!(
                 "previous chunk cleanup in progress for anchor {} in channel {}: {:?}",
                 rollback_anchor_msg_id.get(),
                 channel_id.get(),
                 pending_ids
-            )
-            .into());
+            )));
         }
         ReplaceContinuationRollbackClaim::Owner(pending_ids) => {
             let cleanup =
@@ -49,12 +65,14 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
             if cleanup.failed_message_ids.is_empty() {
                 if let Err(error) = clear_replace_continuation_rollback(rollback_key) {
                     unclaim_replace_continuation_rollback(rollback_key);
-                    return Err(format!(
+                    return Err(watcher_send_error(
+                        crate::services::discord::replace_outcome_policy::WatcherSendFailureClass::Transient,
+                        format!(
                         "previous chunk rollback state was not cleared for anchor {} in channel {}: {error}",
                         rollback_anchor_msg_id.get(),
                         channel_id.get()
-                    )
-                    .into());
+                        ),
+                    ));
                 }
             } else {
                 if let Err(error) = record_replace_continuation_rollback(
@@ -65,20 +83,18 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
                         rollback_key,
                         cleanup.failed_message_ids,
                     );
-                    return Err(format!(
+                    return Err(watcher_rollback_incomplete_error(format!(
                         "previous chunk cleanup incomplete and rollback state was not durable for anchor {} in channel {}: {error}",
                         rollback_anchor_msg_id.get(),
                         channel_id.get()
-                    )
-                    .into());
+                    )));
                 }
-                return Err(format!(
+                return Err(watcher_rollback_incomplete_error(format!(
                     "previous chunk cleanup incomplete for anchor {} in channel {}: {:?}",
                     rollback_anchor_msg_id.get(),
                     channel_id.get(),
                     cleanup.errors
-                )
-                .into());
+                )));
             }
         }
     }
@@ -138,7 +154,8 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
                     .await;
                     let mut errors = cleanup.errors;
                     errors.push(error.clone());
-                    if cleanup.failed_message_ids.is_empty() {
+                    let rollback_cleanup_complete = cleanup.failed_message_ids.is_empty();
+                    if rollback_cleanup_complete {
                         if let Err(clear_error) = clear_replace_continuation_rollback(rollback_key)
                         {
                             errors.push(clear_error);
@@ -153,16 +170,27 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
                         );
                         errors.push(record_error);
                     }
-                    return Err(format!(
-                        "sent chunk but rollback state was not durable for anchor {} in channel {}: {}",
-                        rollback_anchor_msg_id.get(),
-                        channel_id.get(),
-                        errors.join("; ")
-                    )
-                    .into());
+                    let class = if rollback_cleanup_complete {
+                        crate::services::discord::replace_outcome_policy::WatcherSendFailureClass::Transient
+                    } else {
+                        crate::services::discord::replace_outcome_policy::WatcherSendFailureClass::RollbackIncomplete
+                    };
+                    return Err(watcher_send_error(
+                        class,
+                        format!(
+                            "sent chunk but rollback state was not durable for anchor {} in channel {}: {}",
+                            rollback_anchor_msg_id.get(),
+                            channel_id.get(),
+                            errors.join("; ")
+                        ),
+                    ));
                 }
             }
             Err(err) => {
+                let failure_class =
+                    crate::services::discord::replace_outcome_policy::classify_watcher_send_failure(
+                        err.as_ref(),
+                    );
                 let error = err.to_string();
                 tracing::warn!(
                     target: "discord::chunker",
@@ -186,12 +214,14 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
                 if cleanup.failed_message_ids.is_empty() {
                     if let Err(clear_error) = clear_replace_continuation_rollback(rollback_key) {
                         unclaim_replace_continuation_rollback(rollback_key);
-                        return Err(format!(
-                            "send chunk {i}/{total} failed for anchor {} in channel {}, and rollback state was not cleared: {error}; {clear_error}",
-                            rollback_anchor_msg_id.get(),
-                            channel_id.get()
-                        )
-                        .into());
+                        return Err(watcher_send_error(
+                            failure_class,
+                            format!(
+                                "send chunk {i}/{total} failed for anchor {} in channel {}, and rollback state was not cleared: {error}; {clear_error}",
+                                rollback_anchor_msg_id.get(),
+                                channel_id.get()
+                            ),
+                        ));
                     }
                 } else if let Err(record_error) = record_replace_continuation_rollback(
                     rollback_key,
@@ -201,31 +231,35 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
                         rollback_key,
                         cleanup.failed_message_ids,
                     );
-                    return Err(format!(
+                    return Err(watcher_rollback_incomplete_error(format!(
                         "send chunk {i}/{total} failed for anchor {} in channel {}, cleanup incomplete and rollback state was not durable: {error}; {record_error}",
                         rollback_anchor_msg_id.get(),
                         channel_id.get()
-                    )
-                    .into());
+                    )));
                 }
-                return Err(format!(
-                    "send chunk {i}/{total} failed for anchor {} in channel {}; sent chunks cleaned before retry: {error}",
-                    rollback_anchor_msg_id.get(),
-                    channel_id.get()
-                )
-                .into());
+                return Err(watcher_send_error(
+                    failure_class,
+                    format!(
+                        "send chunk {i}/{total} failed for anchor {} in channel {}; sent chunks cleaned before retry: {error}",
+                        rollback_anchor_msg_id.get(),
+                        channel_id.get()
+                    ),
+                ));
             }
         }
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     }
 
     if let Err(error) = clear_replace_continuation_rollback(rollback_key) {
-        return Err(format!(
-            "delivered chunks for anchor {} in channel {}, but rollback state was not cleared: {error}",
-            rollback_anchor_msg_id.get(),
-            channel_id.get()
+        clear_replace_continuation_rollback_memory_only(rollback_key);
+        tracing::warn!(
+            target: "discord::chunker",
+            path = "send_long_message_raw_with_rollback",
+            channel_id = channel_id.get(),
+            anchor_message_id = rollback_anchor_msg_id.get(),
+            error = %error,
+            "discord rollback send delivered all chunks but rollback state cleanup failed"
         )
-        .into());
     }
 
     Ok(sent_message_ids.into_iter().map(MessageId::new).collect())

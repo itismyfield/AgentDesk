@@ -61,7 +61,14 @@ impl TurnGateway for TuiDirectBridgeGateway {
                 &self.shared,
             )
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| {
+                super::super::replace_outcome_policy::watcher_send_failure_classified_message(
+                    super::super::replace_outcome_policy::classify_watcher_send_failure(
+                        error.as_ref(),
+                    ),
+                    error,
+                )
+            })
         })
     }
 
@@ -98,7 +105,14 @@ impl TurnGateway for TuiDirectBridgeGateway {
                 &mut None,
             )
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| {
+                super::super::replace_outcome_policy::watcher_send_failure_classified_message(
+                    super::super::replace_outcome_policy::classify_watcher_send_failure(
+                        error.as_ref(),
+                    ),
+                    error,
+                )
+            })
         })
     }
 

@@ -160,7 +160,8 @@ pub(in crate::services::discord) fn watcher_terminal_lease_range(
 ///   advanced. Reproduce the legacy partial-failure handling: `relay_ok = false` + the
 ///   caller resets `retry_terminal_delivery_from_offset` / `current_offset` / `all_data`
 ///   and abandon-releases (tmux_watcher.rs:6384-6386 / 6546-6579).
-/// - `Skipped` → empty body (excluded by the cut-over gate); unreachable in prod.
+/// - `Skipped` → no-op/no-retry (empty body, or a permanent watcher transport
+///   failure classified by the controller).
 #[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
     G: TurnGateway + ?Sized,
@@ -293,7 +294,7 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
         // false for it (a fallback send commits → Delivered, never reaching this
         // arm) — byte-identical: the watcher ignores the field.
         toc::DeliveryOutcome::Unknown { .. } => WatcherShortReplaceResult::PartialFailureRetry,
-        // Empty body — excluded by the cut-over gate, so this is unreachable in prod.
+        // No-op/no-retry: empty body, or permanent watcher transport failure.
         toc::DeliveryOutcome::Skipped => WatcherShortReplaceResult::Skipped,
     }
 }
@@ -572,7 +573,8 @@ pub(in crate::services::discord) enum WatcherShortReplaceResult {
     /// Partial / ambiguous failure (I2, no advance). `relay_ok = false` and the
     /// caller resets the retry offset (tmux_watcher.rs:6546-6579).
     PartialFailureRetry,
-    /// Empty body (cut-over gate excludes it). Unreachable in prod; mapped to a no-op.
+    /// No-op/no-retry: empty body (cut-over gate excludes it) or permanent
+    /// watcher transport failure from the controller.
     Skipped,
 }
 

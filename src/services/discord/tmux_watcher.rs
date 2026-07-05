@@ -3,9 +3,8 @@ use crate::services::discord::InflightTurnState;
 use crate::services::discord::http::{edit_channel_message, send_channel_message};
 use crate::services::discord::outbound::delivery_record as dr; // #3089 B2b
 use crate::services::discord::replace_outcome_policy::{
-    WatcherRewindAttemptDisposition, WatcherSendFailureClass, classify_watcher_send_failure,
-    classify_watcher_send_failure_message, watcher_rewind_attempt_disposition,
-    watcher_send_failure_retry_plan,
+    WatcherRewindAttemptDisposition, classify_watcher_send_failure,
+    watcher_rewind_attempt_disposition, watcher_send_failure_retry_plan,
 };
 
 #[path = "tmux_watcher/liveness.rs"]
@@ -305,7 +304,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         .as_ref()
         .and_then(|s| s.last_watcher_relayed_generation_mtime_ns);
     let mut pending_terminal_rewind_seed: Option<RestoredWatcherTurn> = None;
-    let mut terminal_rewind_attempt_turn_start: Option<u64> = None;
+    let mut terminal_rewind_attempt_key: Option<WatcherRewindAttemptKey> = None;
     let mut terminal_rewind_attempts: u8 = 0;
     if let Ok(meta) = std::fs::metadata(&output_path) {
         let observed_output_end = meta.len();
@@ -882,9 +881,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         all_data.push_str(&decoded_data.text);
         let turn_data_start_offset = all_data_start_offset;
         reset_rewind_attempts(
-            &mut terminal_rewind_attempt_turn_start,
+            &mut terminal_rewind_attempt_key,
             &mut terminal_rewind_attempts,
-            turn_data_start_offset,
+            watcher_rewind_attempt_key(turn_data_start_offset, watcher_turn_identity.as_ref()),
         );
         // #3041 P1-3 R7: reset carried ACKs after terminal/next-turn splits so later turns cannot inherit them and black-hole.
         let mut split_trailing_turn_follows = false;
@@ -893,6 +892,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             &mut pending_terminal_rewind_seed,
             &mut restored_turn,
         );
+        let seed_from_rewind = restored_seed_from_rewind(restored_turn_seed.as_ref());
         let restored_seed_undelivered_body_len = restored_turn_seed
             .as_ref()
             .and_then(|seed| seed.full_response.get(seed.response_sent_offset..))
@@ -910,6 +910,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             restored_turn_seed.is_some(),
             prompt_anchor_present_for_seed_discard,
             restored_seed_has_body,
+            seed_from_rewind,
         );
         if !discard_restored_seed
             && prompt_anchor_present_for_seed_discard
@@ -5315,11 +5316,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                                         )),
                                         "watcher_terminal_relay_partial_continuation_failure",
                                     );
-                                    let failure_class = if cleanup_errors.is_empty() {
-                                        classify_watcher_send_failure_message(&error)
-                                    } else {
-                                        WatcherSendFailureClass::RollbackIncomplete
-                                    };
+                                    let failure_class = watcher_partial_continuation_failure_class(
+                                        &error,
+                                        cleanup_errors.is_empty(),
+                                    );
                                     let plan = watcher_send_failure_plan_warned(
                                         failure_class,
                                         WatcherNoRewindWarnSite::Partial,

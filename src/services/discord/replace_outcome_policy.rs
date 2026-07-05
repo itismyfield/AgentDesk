@@ -81,6 +81,35 @@ impl WatcherSendFailureClass {
     }
 }
 
+const WATCHER_SEND_FAILURE_CLASS_PREFIX: &str = "[agentdesk-watcher-send-failure-class:";
+
+pub(in crate::services::discord) fn watcher_send_failure_classified_message(
+    class: WatcherSendFailureClass,
+    message: impl std::fmt::Display,
+) -> String {
+    format!(
+        "{WATCHER_SEND_FAILURE_CLASS_PREFIX}{}] {message}",
+        class.as_str()
+    )
+}
+
+fn parse_watcher_send_failure_class_marker(message: &str) -> Option<WatcherSendFailureClass> {
+    let rest = message.strip_prefix(WATCHER_SEND_FAILURE_CLASS_PREFIX)?;
+    let (class, _) = rest.split_once(']')?;
+    match class {
+        "transient" => Some(WatcherSendFailureClass::Transient),
+        "permanent" => Some(WatcherSendFailureClass::Permanent),
+        "rollback_incomplete" => Some(WatcherSendFailureClass::RollbackIncomplete),
+        _ => None,
+    }
+}
+
+pub(in crate::services::discord) fn watcher_send_failure_message_has_class_marker(
+    message: &str,
+) -> bool {
+    parse_watcher_send_failure_class_marker(message).is_some()
+}
+
 /// Pure status classifier for watcher terminal send failures. Retry is allowed
 /// only for Discord rate limits, server errors, and request-timeout style
 /// failures; ordinary 4xx responses are permanent for this turn.
@@ -94,10 +123,24 @@ pub(super) fn classify_watcher_send_failure_status(status: u16) -> WatcherSendFa
     }
 }
 
+fn contains_status_code_token(message: &str, code: &str) -> bool {
+    message.match_indices(code).any(|(index, _)| {
+        let before = message[..index].chars().next_back();
+        let after = message[index + code.len()..].chars().next();
+        !before.is_some_and(|ch| ch.is_ascii_digit())
+            && !after.is_some_and(|ch| ch.is_ascii_digit())
+    })
+}
+
 /// Pure string classifier for flattened send errors. Serenity often drops the
 /// HTTP status from Display, so match the durable Discord error text first and
 /// keep known network/timeout/server strings retryable.
-pub(super) fn classify_watcher_send_failure_message(message: &str) -> WatcherSendFailureClass {
+pub(in crate::services::discord) fn classify_watcher_send_failure_message(
+    message: &str,
+) -> WatcherSendFailureClass {
+    if let Some(class) = parse_watcher_send_failure_class_marker(message) {
+        return class;
+    }
     let lower = message.to_ascii_lowercase();
     if lower.contains("cleanup incomplete")
         || lower.contains("cleanup in progress")
@@ -111,17 +154,14 @@ pub(super) fn classify_watcher_send_failure_message(message: &str) -> WatcherSen
         || lower.contains("ratelimit")
         || lower.contains("rate limited")
         || lower.contains("too many requests")
-        || lower.contains("429")
+        || contains_status_code_token(&lower, "429")
     {
         return WatcherSendFailureClass::Transient;
     }
     const TRANSIENT_PATTERNS: &[&str] = &[
         "5xx",
-        "500",
-        "502",
-        "503",
-        "504",
         "bad gateway",
+        "could not decode json when receiving error response",
         "gateway timeout",
         "internal server error",
         "server error",
@@ -138,18 +178,15 @@ pub(super) fn classify_watcher_send_failure_message(message: &str) -> WatcherSen
     if TRANSIENT_PATTERNS
         .iter()
         .any(|pattern| lower.contains(pattern))
+        || ["500", "502", "503", "504"]
+            .iter()
+            .any(|code| contains_status_code_token(&lower, code))
         || lower.trim().is_empty()
     {
         return WatcherSendFailureClass::Transient;
     }
+    const PERMANENT_STATUS_CODES: &[&str] = &["400", "401", "403", "404", "405", "410", "422"];
     const PERMANENT_PATTERNS: &[&str] = &[
-        "400",
-        "401",
-        "403",
-        "404",
-        "405",
-        "410",
-        "422",
         "unknown channel",
         "unknown message",
         "missing access",
@@ -165,6 +202,9 @@ pub(super) fn classify_watcher_send_failure_message(message: &str) -> WatcherSen
     if PERMANENT_PATTERNS
         .iter()
         .any(|pattern| lower.contains(pattern))
+        || PERMANENT_STATUS_CODES
+            .iter()
+            .any(|code| contains_status_code_token(&lower, code))
     {
         return WatcherSendFailureClass::Permanent;
     }
@@ -173,7 +213,7 @@ pub(super) fn classify_watcher_send_failure_message(message: &str) -> WatcherSen
 
 /// Classify a boxed send error: prefer typed serenity HTTP status when the
 /// source chain still has it, then fall back to the flattened Display string.
-pub(super) fn classify_watcher_send_failure(
+pub(in crate::services::discord) fn classify_watcher_send_failure(
     error: &(dyn std::error::Error + 'static),
 ) -> WatcherSendFailureClass {
     let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error);
@@ -315,7 +355,8 @@ mod a0_replace_outcome_policy_tests {
         WatcherSendFailureClass, classify_watcher_send_failure_message,
         classify_watcher_send_failure_status, edit_fail_fallback_disposition,
         relay_outcome_is_committed, watcher_rewind_attempt_disposition,
-        watcher_send_failure_retry_plan, watcher_terminal_relay_plan,
+        watcher_send_failure_classified_message, watcher_send_failure_retry_plan,
+        watcher_terminal_relay_plan,
     };
 
     fn partial_continuation() -> ReplaceLongMessageOutcome {
@@ -431,6 +472,7 @@ mod a0_replace_outcome_policy_tests {
             "discord 5xx",
             "Internal Server Error",
             "503 Service Unavailable",
+            "[Serenity] Could not decode json when receiving error response from discord:",
             "You are being rate limited.",
             "",
         ] {
@@ -443,6 +485,43 @@ mod a0_replace_outcome_policy_tests {
         assert_eq!(
             classify_watcher_send_failure_message("previous chunk cleanup incomplete"),
             WatcherSendFailureClass::RollbackIncomplete
+        );
+    }
+
+    #[test]
+    fn watcher_send_failure_message_honors_structured_class_marker_4154() {
+        let marked = watcher_send_failure_classified_message(
+            WatcherSendFailureClass::Transient,
+            "[Serenity] Could not decode json when receiving error response from discord:",
+        );
+        assert_eq!(
+            classify_watcher_send_failure_message(&marked),
+            WatcherSendFailureClass::Transient
+        );
+
+        let marked_permanent = watcher_send_failure_classified_message(
+            WatcherSendFailureClass::Permanent,
+            "Error while sending HTTP request.",
+        );
+        assert_eq!(
+            classify_watcher_send_failure_message(&marked_permanent),
+            WatcherSendFailureClass::Permanent,
+            "structured class must beat fallback string sniffing"
+        );
+    }
+
+    #[test]
+    fn watcher_send_failure_message_status_codes_need_digit_boundaries_4154() {
+        assert_eq!(
+            classify_watcher_send_failure_message(
+                "403 Forbidden (Missing Access) in channel 1502429123456789012"
+            ),
+            WatcherSendFailureClass::Permanent,
+            "a snowflake containing 502 must not make Missing Access transient"
+        );
+        assert_eq!(
+            classify_watcher_send_failure_message("discord http 502 bad gateway"),
+            WatcherSendFailureClass::Transient
         );
     }
 

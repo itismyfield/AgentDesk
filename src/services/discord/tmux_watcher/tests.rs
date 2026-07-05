@@ -2311,7 +2311,12 @@ fn placeholderless_rollback_sender_cleans_prefix_before_rewind_4154() {
                 &http, channel_id, anchor_id, &body, &shared, None,
             )
             .await;
-        assert!(first.is_err(), "first pass fails on chunk 2");
+        let first_err = first.expect_err("first pass fails on chunk 2");
+        assert_eq!(
+            classify_watcher_send_failure_message(&first_err.to_string()),
+            WatcherSendFailureClass::Transient,
+            "rollback sender must carry the retryable class through its flattened error"
+        );
         assert_eq!(
             delete_calls.load(Ordering::SeqCst),
             1,
@@ -2345,6 +2350,52 @@ fn placeholderless_rollback_sender_cleans_prefix_before_rewind_4154() {
         assert_eq!(
             joined, body,
             "retry should deliver exactly one copy of the multi-chunk body"
+        );
+    });
+}
+
+#[test]
+fn rollback_sender_marks_serenity_5xx_html_decode_failure_transient_4154() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _root_guard = AgentdeskRootGuard::set(tmp.path());
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("current-thread runtime");
+    runtime.block_on(async {
+        let http = Http::new("test-token");
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(9_154_155);
+        let anchor_id = MessageId::new(41_541);
+        let _hook = crate::services::discord::formatting::rollback_transport_test_hook::install(
+            Box::new(move |seen_channel, _content, _reference| {
+                if seen_channel != channel_id {
+                    return None;
+                }
+                Some(Err(
+                    "[Serenity] Could not decode json when receiving error response from discord:"
+                        .to_string(),
+                ))
+            }),
+            Box::new(move |_seen_channel, _message_id| Some(Ok(()))),
+        );
+
+        let err =
+            crate::services::discord::formatting::send_long_message_raw_with_reference_rollback(
+                &http, channel_id, anchor_id, "body", &shared, None,
+            )
+            .await
+            .expect_err("5xx HTML decode failure should fail the pass");
+        let class = classify_watcher_send_failure_message(&err.to_string());
+        assert_eq!(class, WatcherSendFailureClass::Transient);
+        let plan = watcher_send_failure_retry_plan(class);
+        assert!(
+            plan.retry_offset,
+            "structured transient class should rewind"
         );
     });
 }
@@ -2399,8 +2450,46 @@ fn edit_arm_rewind_seed_preserves_placeholder_context_4154() {
         seed.full_response.is_empty(),
         "retry re-reads JSONL bytes; carrying parsed response would double-append"
     );
+    assert!(
+        seed.same_turn_rewind,
+        "rewind seeds bypass restart stale-seed discard"
+    );
     assert_eq!(seed.last_edit_text, "streamed prefix");
     assert_eq!(seed.streaming_rollover_frozen_msg_ids, frozen);
+}
+
+#[test]
+fn tui_direct_rewind_seed_with_prompt_anchor_reuses_placeholder_4115() {
+    let placeholder = MessageId::new(6_115);
+    let seed = watcher_terminal_rewind_seed(WatcherTerminalRewindSeedInput {
+        placeholder_msg_id: Some(placeholder),
+        status_panel_msg_id: None,
+        response_sent_offset: 64,
+        last_edit_text: "streamed prefix",
+        task_notification_kind: None,
+        finish_mailbox_on_completion: false,
+        injected_prompt_message_id: Some(6_114),
+        streaming_rollover_frozen_msg_ids: &[],
+    })
+    .expect("placeholder context should seed retry");
+
+    let discard = super::super::should_discard_restored_seed_for_idle_direct_prompt(
+        true,
+        true,
+        false,
+        seed.same_turn_rewind,
+    );
+    assert!(
+        !discard,
+        "same-turn rewind seed must survive the idle direct-prompt anchor guard"
+    );
+
+    let stream_seed = super::super::watcher_stream_seed(Some(seed));
+    assert_eq!(
+        stream_seed.placeholder_msg_id,
+        Some(placeholder),
+        "retry pass edits the original placeholder instead of POSTing a second one"
+    );
 }
 
 #[test]
@@ -3086,6 +3175,9 @@ mod watcher_short_replace_controller {
     use crate::services::discord::placeholder_controller::{
         PlaceholderController, PlaceholderKey, PlaceholderLifecycle,
     };
+    use crate::services::discord::replace_outcome_policy::{
+        WatcherSendFailureClass, watcher_send_failure_classified_message,
+    };
     use crate::services::discord::turn_finalizer::TurnKey;
     use crate::services::discord::{
         DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, LeaseSnapshot, lease_now_ms,
@@ -3102,6 +3194,7 @@ mod watcher_short_replace_controller {
     struct ShortReplaceFakeGateway {
         outcome: ReplaceLongMessageOutcome,
         ok: bool,
+        failure_class: WatcherSendFailureClass,
         replace_calls: AtomicUsize,
     }
 
@@ -3117,7 +3210,10 @@ mod watcher_short_replace_controller {
                 if self.ok {
                     Ok(self.outcome.clone())
                 } else {
-                    Err("fake transport failure".to_string())
+                    Err(watcher_send_failure_classified_message(
+                        self.failure_class,
+                        "fake transport failure",
+                    ))
                 }
             })
         }
@@ -3294,9 +3390,18 @@ mod watcher_short_replace_controller {
         }
     }
     fn gateway(outcome: ReplaceLongMessageOutcome, ok: bool) -> ShortReplaceFakeGateway {
+        gateway_with_failure_class(outcome, ok, WatcherSendFailureClass::Transient)
+    }
+
+    fn gateway_with_failure_class(
+        outcome: ReplaceLongMessageOutcome,
+        ok: bool,
+        failure_class: WatcherSendFailureClass,
+    ) -> ShortReplaceFakeGateway {
         ShortReplaceFakeGateway {
             outcome,
             ok,
+            failure_class,
             replace_calls: AtomicUsize::new(0),
         }
     }
@@ -3792,6 +3897,67 @@ mod watcher_short_replace_controller {
         );
         assert!(!relay_ok);
         assert!(retry_terminal_delivery_from_offset);
+        assert!(!direct_send_delivered);
+        assert_eq!(placeholder_msg_id, Some(MessageId::new(MSG)));
+        assert!(placeholder_from_restored_inflight);
+        assert_eq!(last_edit_text, "streamed body");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn watcher_short_replace_permanent_transport_failure_does_not_rewind_4154() {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let cell = Arc::new(DeliveryLeaseCell::new(ch()));
+        let gw = gateway_with_failure_class(
+            ReplaceLongMessageOutcome::EditedOriginal,
+            false,
+            WatcherSendFailureClass::Permanent,
+        );
+        let result = run(&gw, &shared, &cell).await;
+        assert_eq!(
+            result,
+            WatcherShortReplaceResult::Skipped,
+            "permanent controller transport failure must be non-retry"
+        );
+        assert_eq!(gw.replace_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(shared.committed_relay_offset(ch()), 0);
+
+        let mut relay_ok = true;
+        let mut direct_send_delivered = false;
+        let mut tui_direct_anchor_terminal_body_visible = false;
+        let mut external_input_lease_consumed_by_relay = false;
+        let mut placeholder_msg_id = Some(MessageId::new(MSG));
+        let mut placeholder_from_restored_inflight = true;
+        let mut last_edit_text = "streamed body".to_string();
+        let mut completion_footer_terminal_target = None;
+        let mut retry_terminal_delivery_from_offset = false;
+        apply_watcher_short_replace_result(
+            result,
+            &shared,
+            &ProviderKind::Claude,
+            ch(),
+            "AgentDesk-claude-8141",
+            MessageId::new(MSG),
+            "answer",
+            false,
+            None,
+            WatcherShortReplaceLocals {
+                relay_ok: &mut relay_ok,
+                direct_send_delivered: &mut direct_send_delivered,
+                tui_direct_anchor_terminal_body_visible:
+                    &mut tui_direct_anchor_terminal_body_visible,
+                external_input_lease_consumed_by_relay: &mut external_input_lease_consumed_by_relay,
+                placeholder_msg_id: &mut placeholder_msg_id,
+                placeholder_from_restored_inflight: &mut placeholder_from_restored_inflight,
+                last_edit_text: &mut last_edit_text,
+                completion_footer_terminal_target: &mut completion_footer_terminal_target,
+                retry_terminal_delivery_from_offset: &mut retry_terminal_delivery_from_offset,
+            },
+        );
+        assert!(!relay_ok);
+        assert!(
+            !retry_terminal_delivery_from_offset,
+            "permanent controller failure must not request rewind"
+        );
         assert!(!direct_send_delivered);
         assert_eq!(placeholder_msg_id, Some(MessageId::new(MSG)));
         assert!(placeholder_from_restored_inflight);

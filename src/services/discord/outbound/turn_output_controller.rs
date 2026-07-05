@@ -34,6 +34,9 @@ use super::super::inflight::RelayOwnerKind;
 use super::super::placeholder_controller::{
     PlaceholderController, PlaceholderControllerOutcome, PlaceholderKey, PlaceholderLifecycle,
 };
+use super::super::replace_outcome_policy::{
+    WatcherSendFailureClass, classify_watcher_send_failure_message,
+};
 use super::super::turn_finalizer::TurnKey;
 use super::super::{
     DELIVERY_LEASE_DEADLINE_MS, DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, LeaseOutcome,
@@ -750,6 +753,15 @@ where
                 retry_from_offset: start,
             }
         }
+        TransportResult::PermanentFailure => {
+            // Permanent watcher transport failure: release without commit/advance
+            // and return the owner's no-op/no-retry outcome.
+            drop(heartbeat_guard);
+            if let Some(guard) = lease_guard.as_mut() {
+                guard.release_and_disarm();
+            }
+            DeliveryOutcome::Skipped
+        }
         TransportResult::Unknown { fell_back } => {
             // I2: ambiguous — release WITHOUT commit; carry `fell_back` (#3089 A5).
             drop(heartbeat_guard);
@@ -884,9 +896,8 @@ where
 
 /// Internal three-way transport result, before any lease commit.
 ///
-/// A1's conservative classifier (`transient_or_unknown`) only ever produces
-/// `Delivered`/`Unknown`; the `Transient` arm is wired once owners bring a real
-/// transport-error taxonomy at A2.
+/// A1's conservative classifier only ever produced `Delivered`/`Unknown`; the
+/// extra arms are used by owners that bring a real transport-error taxonomy.
 #[allow(dead_code)] // #3089 A1: Transient arm dormant until A2 transport taxonomy.
 enum TransportResult {
     /// Confirmed delivered. `Option<ReplaceDeliveryKind>` carries the replace
@@ -903,6 +914,7 @@ enum TransportResult {
     /// ambiguous `Unknown`.
     NotDelivered,
     Transient,
+    PermanentFailure,
     /// Ambiguous, never advance (I2). `fell_back` (#3089 A5): see
     /// [`DeliveryOutcome::Unknown`] — true only on NoCommitOnFallback fresh-fallback.
     Unknown {
@@ -929,7 +941,7 @@ where
                 .await
             {
                 Ok(outcome) => classify_replace_outcome(&outcome, &ctx.fallback_commit_policy),
-                Err(_) => transient_or_unknown(ctx),
+                Err(error) => classify_transport_failure(ctx, &error),
             }
         }
         // Replace requested but no live placeholder to edit → fall back to a
@@ -941,7 +953,7 @@ where
                     replace_kind: None,
                     new_chunks: None,
                 },
-                Err(_) => transient_or_unknown(ctx),
+                Err(error) => classify_transport_failure(ctx, &error),
             }
         }
         (OutputPlan::SendNewChunks { delete_anchor, .. }, slot) => {
@@ -976,7 +988,7 @@ where
                 // Short chunked write: ambiguous, nothing fell back (#3089 A5).
                 Ok(_) => TransportResult::Unknown { fell_back: false },
                 Err(_) if *delete_anchor => TransportResult::NotDelivered,
-                Err(_) => transient_or_unknown(ctx),
+                Err(error) => classify_transport_failure(ctx, &error),
             }
         }
         (OutputPlan::NoOp, _) => TransportResult::Delivered {
@@ -1077,10 +1089,28 @@ fn classify_replace_outcome(
 /// Classify a transport error into the ambiguous halves. A1 keeps the rule
 /// conservative (design I3): anything we cannot prove transient is `Unknown` so
 /// the offset never advances (the edit-fail policy only affects post-send cleanup).
-fn transient_or_unknown<L: DeliveryLease + ?Sized>(_ctx: &TurnOutputCtx<'_, L>) -> TransportResult {
-    // A1 has no transport-error taxonomy wired (owners land from A2). Be
-    // conservative: a bare Err is ambiguous → Unknown (never advance, I2);
-    // `fell_back = false` (#3089 A5 — a transport error landed no body).
+fn classify_transport_failure<L: DeliveryLease + ?Sized>(
+    ctx: &TurnOutputCtx<'_, L>,
+    error: &str,
+) -> TransportResult {
+    let class = classify_watcher_send_failure_message(error);
+    if ctx.owner == RelayOwnerKind::Watcher
+        && matches!(
+            class,
+            WatcherSendFailureClass::Permanent | WatcherSendFailureClass::RollbackIncomplete
+        )
+    {
+        tracing::warn!(
+            channel = ctx.channel_id.get(),
+            owner = ?ctx.owner,
+            failure_class = class.as_str(),
+            error = %error,
+            "turn-output controller: permanent watcher transport failure will not retry"
+        );
+        return TransportResult::PermanentFailure;
+    }
+    // Unknown keeps the existing retry/no-advance owner behavior for transient
+    // watcher transport failures and for non-watcher owners.
     TransportResult::Unknown { fell_back: false }
 }
 

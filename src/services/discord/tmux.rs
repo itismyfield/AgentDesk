@@ -171,6 +171,10 @@ pub(super) struct RestoredWatcherTurn {
     /// persisted row so a terminal full-body fallback in a later iteration / after
     /// a restart still deletes every accumulated prefix (no residual duplicate).
     streaming_rollover_frozen_msg_ids: Vec<MessageId>,
+    /// Same-process retry seed produced by watcher send-failure rewind. Unlike a
+    /// restart-restored seed, this is the current turn and must not be discarded by
+    /// idle direct-prompt stale-seed cleanup.
+    same_turn_rewind: bool,
 }
 
 #[derive(Debug)]
@@ -252,6 +256,7 @@ pub(super) fn restored_watcher_turn_from_inflight(
             .copied()
             .map(MessageId::new)
             .collect(),
+        same_turn_rewind: false,
     })
 }
 
@@ -284,8 +289,12 @@ fn should_discard_restored_seed_for_idle_direct_prompt(
     restored_turn_present: bool,
     prompt_anchor_present: bool,
     seed_has_undelivered_body: bool,
+    same_turn_rewind_seed: bool,
 ) -> bool {
-    restored_turn_present && prompt_anchor_present && !seed_has_undelivered_body
+    restored_turn_present
+        && prompt_anchor_present
+        && !seed_has_undelivered_body
+        && !same_turn_rewind_seed
 }
 #[cfg(test)]
 mod restored_seed_discard_tests {
@@ -294,30 +303,37 @@ mod restored_seed_discard_tests {
     #[test]
     fn idle_direct_prompt_preserves_restored_seed_with_undelivered_body() {
         assert!(!should_discard_restored_seed_for_idle_direct_prompt(
-            true, true, true,
+            true, true, true, false,
         ));
     }
 
     #[test]
     fn idle_direct_prompt_still_discards_empty_restored_seed_with_anchor() {
         assert!(should_discard_restored_seed_for_idle_direct_prompt(
-            true, true, false,
+            true, true, false, false,
+        ));
+    }
+
+    #[test]
+    fn idle_direct_prompt_preserves_same_turn_rewind_seed_with_anchor() {
+        assert!(!should_discard_restored_seed_for_idle_direct_prompt(
+            true, true, false, true,
         ));
     }
 
     #[test]
     fn idle_direct_prompt_discard_still_requires_restored_turn_and_anchor() {
         assert!(!should_discard_restored_seed_for_idle_direct_prompt(
-            true, false, false,
+            true, false, false, false,
         ));
         assert!(!should_discard_restored_seed_for_idle_direct_prompt(
-            true, false, true,
+            true, false, true, false,
         ));
         assert!(!should_discard_restored_seed_for_idle_direct_prompt(
-            false, true, false,
+            false, true, false, false,
         ));
         assert!(!should_discard_restored_seed_for_idle_direct_prompt(
-            false, true, true,
+            false, true, true, false,
         ));
     }
 }
@@ -1766,6 +1782,18 @@ fn persist_watcher_stream_progress(
     // persisted so a later-iteration / post-restart terminal fallback can delete them.
     streaming_rollover_frozen_msg_ids: &[MessageId],
 ) {
+    if full_response.len() < response_sent_offset {
+        tracing::debug!(
+            provider = %provider.as_str(),
+            channel = channel_id.get(),
+            tmux_session = %tmux_session_name,
+            response_sent_offset,
+            full_response_len = full_response.len(),
+            "watcher: skipping stream-progress persistence until parsed body catches up"
+        );
+        return;
+    }
+
     // #3558: pre-emit the in-bounds telemetry against the caller's snapshot for
     // continuity; the helper re-clamps `response_sent_offset` against the
     // freshly reloaded `full_response` under the lock, so the persisted value is
@@ -2053,6 +2081,59 @@ mod watcher_stream_progress_tests {
             persisted.last_offset, 777,
             "streaming progress must preserve the non-owned last_offset watermark"
         );
+
+        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+    }
+
+    #[test]
+    fn persist_watcher_stream_progress_skips_rewind_seed_before_body_catches_up_4115() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(1509350490461180415);
+        let tmux_session_name = "AgentDesk-claude-adk-issue-4115-rewind-progress";
+        let mut state = InflightTurnState::new(
+            provider.clone(),
+            channel_id.get(),
+            Some("claude-pipe".to_string()),
+            4154,
+            9_415,
+            9_416,
+            "prompt".to_string(),
+            Some("session-4115".to_string()),
+            Some(tmux_session_name.to_string()),
+            Some("/tmp/agentdesk-4115.jsonl".to_string()),
+            None,
+            128,
+        );
+        state.full_response = "already persisted prefix".to_string();
+        state.response_sent_offset = state.full_response.len();
+        super::super::inflight::save_inflight_state(&state).expect("save inflight");
+
+        persist_watcher_stream_progress(
+            &provider,
+            channel_id,
+            tmux_session_name,
+            None,
+            Some(MessageId::new(9_416)),
+            "",
+            128,
+            None,
+            None,
+            None,
+            false,
+            false,
+            &[],
+        );
+
+        let reloaded = super::super::inflight::load_inflight_state(&provider, channel_id.get())
+            .expect("reload row");
+        assert_eq!(reloaded.full_response, "already persisted prefix");
+        assert_eq!(reloaded.response_sent_offset, state.response_sent_offset);
 
         unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
     }
