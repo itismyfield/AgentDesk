@@ -164,7 +164,7 @@ pub(super) async fn handle_race_loss_enqueue(
             .map(|r| r.as_str())
             .unwrap_or("unknown");
         tracing::info!(
-            "  [{ts}] 🔁 RACE: race-lost intervention refused by mailbox (channel {}, refusal_reason={}); skipping placeholder POST",
+            "  [{ts}] 🔁 RACE: race-lost intervention refused by mailbox before placeholder POST (channel {}, refusal_reason={}); no duplicate queue entry retained",
             channel_id,
             refusal_str,
         );
@@ -351,7 +351,7 @@ pub(super) async fn handle_race_loss_enqueue(
             let ts = chrono::Local::now().format("%H:%M:%S");
             if dispatch_already_running_for_our_msg {
                 tracing::info!(
-                    "  [{ts}] 🔁 RACE: dispatch already started turn for our message (channel {}, msg {}); deleting orphan placeholder POST",
+                    "  [{ts}] 🔁 RACE: dispatch already started turn for our message (channel {}, msg {}); deleting orphan placeholder POST after queue handoff",
                     channel_id,
                     user_msg_id
                 );

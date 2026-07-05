@@ -312,6 +312,38 @@ pub(super) fn schedule_post_enqueue_idle_queue_kick(
     });
 }
 
+pub(super) async fn mailbox_try_start_turn_kinded_with_feedback(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    cancel_token: Arc<CancelToken>,
+    request_owner: UserId,
+    user_message_id: MessageId,
+    turn_kind: ActiveTurnKind,
+) -> bool {
+    let result = shared
+        .mailbox(channel_id)
+        .try_start_turn_kinded_with_persistence(
+            cancel_token,
+            request_owner,
+            user_message_id,
+            turn_kind,
+            queue_persistence_context(shared, &shared.provider, channel_id),
+        )
+        .await;
+    apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
+    if let Some(error) = result.persistence_error.as_ref() {
+        tracing::error!(
+            provider = shared.provider.as_str(),
+            channel_id = channel_id.get(),
+            user_message_id = user_message_id.get(),
+            turn_kind = ?turn_kind,
+            error = %error,
+            "mailbox try-start failed durable active-source queue purge"
+        );
+    }
+    result.started
+}
+
 pub(super) async fn kick_idle_queue_channel_if_context_available(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -1466,6 +1498,100 @@ mod presleep_tests {
         assert!(
             snapshot.intervention_queue.is_empty(),
             "completion-event kick consumes the requeued message"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hosted_tui_followup_busy_retry_release_then_enqueue_redelivers_active_message_4107() {
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let tmp = tempfile::tempdir().expect("temp runtime root");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_107_300);
+        let user_msg = MessageId::new(4_107_301);
+        let owner = UserId::new(4_107_302);
+
+        assert!(
+            mailbox_try_start_turn(
+                &shared,
+                channel_id,
+                Arc::new(CancelToken::new()),
+                owner,
+                user_msg,
+            )
+            .await,
+            "hosted-TUI pre-submit path starts as the active message first"
+        );
+
+        let finish = mailbox_finish_turn(&shared, &provider, channel_id).await;
+        assert!(
+            !finish.has_pending,
+            "release happens before retry enqueue, so the active guard cannot refuse self-requeue"
+        );
+
+        let kick_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook_calls = kick_calls.clone();
+        let _hook = set_idle_queue_kick_hook_for_tests(Arc::new(
+            move |shared, provider, channel, reason| {
+                let hook_calls = hook_calls.clone();
+                Box::pin(async move {
+                    if channel != channel_id {
+                        return None;
+                    }
+                    hook_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    assert_eq!(reason, "post_enqueue_idle_snapshot");
+                    let taken = shared
+                        .mailbox(channel)
+                        .take_next_soft(queue_persistence_context(&shared, &provider, channel))
+                        .await;
+                    let intervention = taken
+                        .intervention
+                        .expect("busy retry should remain queued for redispatch");
+                    assert_eq!(intervention.message_id, user_msg);
+                    let started = mailbox_try_start_turn(
+                        &shared,
+                        channel,
+                        Arc::new(CancelToken::new()),
+                        intervention.author_id,
+                        intervention.message_id,
+                    )
+                    .await;
+                    assert!(started, "post-enqueue kick must redispatch the retry");
+                    Some(IdleQueueKickoffChannelOutcome { started })
+                })
+            },
+        ));
+
+        let enqueue = mailbox_enqueue_intervention(
+            &shared,
+            &provider,
+            channel_id,
+            user_intervention(user_msg.get(), "retry after hosted TUI busy pre-submit"),
+        )
+        .await;
+        assert!(enqueue.enqueued);
+        assert_eq!(
+            mailbox_snapshot(&shared, channel_id)
+                .await
+                .intervention_queue
+                .len(),
+            1,
+            "same message id must be durably queued after release"
+        );
+
+        yield_backstop_tasks().await;
+        assert_eq!(
+            kick_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "retry enqueue must schedule one redispatch kick"
+        );
+        let snapshot = mailbox_snapshot(&shared, channel_id).await;
+        assert_eq!(snapshot.active_user_message_id, Some(user_msg));
+        assert!(
+            snapshot.intervention_queue.is_empty(),
+            "redispatch consumes the retry queue entry"
         );
     }
 
