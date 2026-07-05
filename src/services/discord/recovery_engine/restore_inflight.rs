@@ -1923,13 +1923,57 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                             output_path,
                             rollout_str
                         );
-                        output_path = rollout_str.clone();
-                        let _ = inflight::persist_recovery_output_path_if_matches_identity_locked(
-                            provider,
-                            state.channel_id,
-                            &inflight::InflightTurnIdentity::from_state(&state),
-                            rollout_str,
-                        );
+                        let persist_outcome =
+                            inflight::persist_recovery_output_path_if_matches_identity_locked(
+                                provider,
+                                state.channel_id,
+                                &inflight::InflightTurnIdentity::from_state(&state),
+                                rollout_str.clone(),
+                            );
+                        match persist_outcome {
+                            inflight::GuardedSaveOutcome::Saved => {
+                                output_path = rollout_str;
+                            }
+                            inflight::GuardedSaveOutcome::IdentityMismatch => {
+                                tracing::warn!(
+                                    provider = %provider.as_str(),
+                                    channel_id = state.channel_id,
+                                    stale_user_msg_id = state.user_msg_id,
+                                    stale_output_path = %output_path,
+                                    recovered_output_path = %rollout_str,
+                                    persist_outcome = ?persist_outcome,
+                                    "recovery restore skipped stale Codex rollout watcher because the inflight row was replaced during the restore scan"
+                                );
+                                continue;
+                            }
+                            inflight::GuardedSaveOutcome::Missing => {
+                                tracing::info!(
+                                    provider = %provider.as_str(),
+                                    channel_id = state.channel_id,
+                                    stale_user_msg_id = state.user_msg_id,
+                                    stale_output_path = %output_path,
+                                    recovered_output_path = %rollout_str,
+                                    persist_outcome = ?persist_outcome,
+                                    "recovery restore skipped stale Codex rollout watcher because the inflight row disappeared during the restore scan"
+                                );
+                                continue;
+                            }
+                            inflight::GuardedSaveOutcome::IoError => {
+                                // Durable state is unknown after an I/O error. Keep the
+                                // previous best-effort restore behavior so a live rollout
+                                // can still regain relay coverage from memory.
+                                tracing::warn!(
+                                    provider = %provider.as_str(),
+                                    channel_id = state.channel_id,
+                                    stale_user_msg_id = state.user_msg_id,
+                                    stale_output_path = %output_path,
+                                    recovered_output_path = %rollout_str,
+                                    persist_outcome = ?persist_outcome,
+                                    "recovery restore could not persist Codex rollout fallback; proceeding best-effort with in-memory output path"
+                                );
+                                output_path = rollout_str;
+                            }
+                        }
                     }
                 }
             }

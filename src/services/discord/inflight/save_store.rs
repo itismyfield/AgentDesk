@@ -16,15 +16,15 @@ use super::*;
 // Direct production callers of `save_inflight_state` remain intentionally broad
 // while #4111 narrows three RMW sites. Starting inventory for a future
 // write-API restriction, generated with `rg -n "save_inflight_state\("
-// src/services/discord` and excluding test files/modules: 43 callers.
+// src/services/discord` and excluding test-only surfaces: files/modules named
+// `tests.rs` / `*_tests.rs` and any `#[cfg(test)]` or `#[cfg(all(test, unix))]`
+// test modules are not production call sites. Current production inventory: 40
+// callers.
 // - src/services/discord/router/message_handler/headless_turn.rs:1071
 // - src/services/discord/router/message_handler/intake_turn.rs:2515
 // - src/services/discord/router/message_handler/provider_isolation.rs:460
 // - src/services/discord/router/message_handler/watchdog.rs:822
 // - src/services/discord/session_runtime/worktree.rs:599
-// - src/services/discord/tui_prompt_relay/bridge_completion.rs:125
-// - src/services/discord/tui_prompt_relay/bridge_completion.rs:139
-// - src/services/discord/tui_prompt_relay/bridge_completion.rs:154
 // - src/services/discord/tui_prompt_relay/codex_idle_rollout.rs:140
 // - src/services/discord/tui_prompt_relay/synthetic_start.rs:297
 // - src/services/discord/tui_prompt_relay/synthetic_start.rs:344

@@ -379,7 +379,9 @@ fn record_inflight_invariant_with_severity(
     )
 }
 
-fn inflight_state_allows_idle_tmux_repair_state(state: &InflightTurnState) -> bool {
+pub(in crate::services::discord) fn inflight_state_allows_idle_tmux_repair_state(
+    state: &InflightTurnState,
+) -> bool {
     state.full_response.trim().is_empty()
         && state.response_sent_offset == 0
         && state.last_watcher_relayed_offset.is_none()
