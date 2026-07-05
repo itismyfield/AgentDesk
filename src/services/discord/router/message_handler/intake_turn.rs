@@ -2901,15 +2901,21 @@ mod recovery_context_take_order_tests {
 
     #[test]
     fn tui_busy_enqueue_refusal_puts_back_recovery_context_for_next_turn() {
+        // The refusal else-branch must route through the sibling helper, which
+        // puts the taken recovery context back BEFORE rewriting the refusal
+        // notice (put-back-then-notice ordering pinned in tui_followup.rs).
         let module_src = include_str!("intake_turn.rs");
-        let put_back_pos = module_src
-            .find("} else {\n            put_back_session_retry_context(")
-            .expect("TUI-busy enqueue refusal puts back recovery context");
-        let notice_pos = put_back_pos
-            + module_src[put_back_pos..]
-                .find("claude_tui_busy_followup_refusal_notice")
-                .expect("TUI-busy refusal notice exists");
+        module_src
+            .find("} else {\n            apply_tui_busy_enqueue_refusal(")
+            .expect("TUI-busy enqueue refusal routes through the put-back helper");
 
+        let helper_src = include_str!("../tui_followup.rs");
+        let put_back_pos = helper_src
+            .find("put_back_session_retry_context(")
+            .expect("refusal helper restores recovery context");
+        let notice_pos = helper_src
+            .find("claude_tui_busy_followup_refusal_notice(")
+            .expect("refusal helper renders the notice");
         assert!(
             put_back_pos < notice_pos,
             "TUI-busy enqueue refusal, including dup-guard refusal, must restore recovery context before returning the notice"
