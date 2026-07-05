@@ -1854,7 +1854,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
 - `src/services/dispatches/outbox_route.rs` (1172) — dispatch outbox route
   support extracted from the route layer; split before adding non-bugfix
   behavior.
-- `src/services/claude.rs` (2969), `src/services/gemini.rs` (1358),
+- `src/services/claude.rs` (2948; -21 from #4113 backend_routing/availability extraction), `src/services/gemini.rs` (1358),
   `src/services/qwen.rs` (2198), `src/services/codex.rs` (3049),
   `src/services/opencode.rs` (2760), `src/services/provider.rs` (1656) —
   provider adapters. (#3034 removed dead non-cancel `execute_command_simple*`
