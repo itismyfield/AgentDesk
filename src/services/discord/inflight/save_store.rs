@@ -13,6 +13,53 @@
 
 use super::*;
 
+// Direct production callers of `save_inflight_state` remain intentionally broad
+// while #4111 narrows three RMW sites. Starting inventory for a future
+// write-API restriction, generated with `rg -n "save_inflight_state\("
+// src/services/discord` and excluding test files/modules: 43 callers.
+// - src/services/discord/router/message_handler/headless_turn.rs:1071
+// - src/services/discord/router/message_handler/intake_turn.rs:2515
+// - src/services/discord/router/message_handler/provider_isolation.rs:460
+// - src/services/discord/router/message_handler/watchdog.rs:822
+// - src/services/discord/session_runtime/worktree.rs:599
+// - src/services/discord/tui_prompt_relay/bridge_completion.rs:125
+// - src/services/discord/tui_prompt_relay/bridge_completion.rs:139
+// - src/services/discord/tui_prompt_relay/bridge_completion.rs:154
+// - src/services/discord/tui_prompt_relay/codex_idle_rollout.rs:140
+// - src/services/discord/tui_prompt_relay/synthetic_start.rs:297
+// - src/services/discord/tui_prompt_relay/synthetic_start.rs:344
+// - src/services/discord/turn_bridge/mod.rs:1094
+// - src/services/discord/turn_bridge/mod.rs:1139
+// - src/services/discord/turn_bridge/mod.rs:1161
+// - src/services/discord/turn_bridge/mod.rs:1650
+// - src/services/discord/turn_bridge/mod.rs:1694
+// - src/services/discord/turn_bridge/mod.rs:2531
+// - src/services/discord/turn_bridge/mod.rs:2987
+// - src/services/discord/turn_bridge/mod.rs:3040
+// - src/services/discord/turn_bridge/mod.rs:3064
+// - src/services/discord/turn_bridge/mod.rs:3239
+// - src/services/discord/turn_bridge/mod.rs:3270
+// - src/services/discord/turn_bridge/mod.rs:3300
+// - src/services/discord/turn_bridge/mod.rs:3704
+// - src/services/discord/turn_bridge/mod.rs:3725
+// - src/services/discord/turn_bridge/mod.rs:3735
+// - src/services/discord/turn_bridge/mod.rs:3774
+// - src/services/discord/turn_bridge/mod.rs:3829
+// - src/services/discord/turn_bridge/mod.rs:3851
+// - src/services/discord/turn_bridge/mod.rs:3868
+// - src/services/discord/turn_bridge/mod.rs:3897
+// - src/services/discord/turn_bridge/mod.rs:3929
+// - src/services/discord/turn_bridge/mod.rs:4500
+// - src/services/discord/turn_bridge/mod.rs:4524
+// - src/services/discord/turn_bridge/mod.rs:4537
+// - src/services/discord/turn_bridge/mod.rs:4549
+// - src/services/discord/turn_bridge/mod.rs:5536
+// - src/services/discord/turn_bridge/mod.rs:6330
+// - src/services/discord/turn_bridge/mod.rs:6374
+// - src/services/discord/turn_bridge/retry_state.rs:328
+// - src/services/discord/turn_bridge/two_message_panel.rs:205
+// - src/services/discord/turn_bridge/watcher_handoff.rs:427
+// - src/services/discord/turn_bridge/watcher_handoff.rs:451
 pub(in crate::services::discord) fn save_inflight_state(
     state: &InflightTurnState,
 ) -> Result<(), String> {
@@ -450,6 +497,141 @@ pub(in crate::services::discord) fn bind_recovery_anchor_if_matches_identity(
                 channel = channel_id,
                 error = %error,
                 "inflight recovery anchor bind failed; leaving on-disk row untouched"
+            );
+            GuardedSaveOutcome::IoError
+        }
+    }
+}
+
+pub(in crate::services::discord) fn persist_leak_recovery_response_offset_if_matches_identity_locked(
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+    expected_current_msg_id: u64,
+    delivered_offset: usize,
+) -> GuardedSaveOutcome {
+    let Some(root) = inflight_runtime_root() else {
+        return GuardedSaveOutcome::IoError;
+    };
+    persist_leak_recovery_response_offset_if_matches_identity_locked_in_root(
+        &root,
+        provider,
+        channel_id,
+        expected,
+        expected_current_msg_id,
+        delivered_offset,
+    )
+}
+
+pub(super) fn persist_leak_recovery_response_offset_if_matches_identity_locked_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+    expected_current_msg_id: u64,
+    delivered_offset: usize,
+) -> GuardedSaveOutcome {
+    let path = inflight_state_path(root, provider, channel_id);
+    if let Some(parent) = path.parent()
+        && fs::create_dir_all(parent).is_err()
+    {
+        return GuardedSaveOutcome::IoError;
+    }
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return GuardedSaveOutcome::IoError;
+    };
+    let Some(mut on_disk) = load_inflight_state_unlocked(&path) else {
+        return GuardedSaveOutcome::Missing;
+    };
+    if !expected.matches_state(&on_disk) || on_disk.current_msg_id != expected_current_msg_id {
+        return GuardedSaveOutcome::IdentityMismatch;
+    }
+    if on_disk.response_sent_offset >= delivered_offset {
+        return GuardedSaveOutcome::IdentityMismatch;
+    }
+    if delivered_offset > on_disk.full_response.len()
+        || !on_disk.full_response.is_char_boundary(delivered_offset)
+    {
+        return GuardedSaveOutcome::IdentityMismatch;
+    }
+
+    on_disk.response_sent_offset = delivered_offset;
+    match persist_under_lock(
+        root,
+        &path,
+        &on_disk,
+        "src/services/discord/inflight.rs:persist_leak_recovery_response_offset_if_matches_identity_locked_in_root",
+    ) {
+        Ok(()) => GuardedSaveOutcome::Saved,
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = channel_id,
+                expected_user_msg_id = expected.user_msg_id,
+                error = %error,
+                "leak recovery offset patch failed; leaving on-disk row untouched"
+            );
+            GuardedSaveOutcome::IoError
+        }
+    }
+}
+
+pub(in crate::services::discord) fn persist_recovery_output_path_if_matches_identity_locked(
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+    output_path: String,
+) -> GuardedSaveOutcome {
+    let Some(root) = inflight_runtime_root() else {
+        return GuardedSaveOutcome::IoError;
+    };
+    persist_recovery_output_path_if_matches_identity_locked_in_root(
+        &root,
+        provider,
+        channel_id,
+        expected,
+        output_path,
+    )
+}
+
+pub(super) fn persist_recovery_output_path_if_matches_identity_locked_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+    output_path: String,
+) -> GuardedSaveOutcome {
+    let path = inflight_state_path(root, provider, channel_id);
+    if let Some(parent) = path.parent()
+        && fs::create_dir_all(parent).is_err()
+    {
+        return GuardedSaveOutcome::IoError;
+    }
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return GuardedSaveOutcome::IoError;
+    };
+    let Some(mut on_disk) = load_inflight_state_unlocked(&path) else {
+        return GuardedSaveOutcome::Missing;
+    };
+    if !expected.matches_state(&on_disk) {
+        return GuardedSaveOutcome::IdentityMismatch;
+    }
+
+    on_disk.output_path = Some(output_path);
+    match persist_under_lock(
+        root,
+        &path,
+        &on_disk,
+        "src/services/discord/inflight.rs:persist_recovery_output_path_if_matches_identity_locked_in_root",
+    ) {
+        Ok(()) => GuardedSaveOutcome::Saved,
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel = channel_id,
+                expected_user_msg_id = expected.user_msg_id,
+                error = %error,
+                "recovery output-path patch failed; leaving on-disk row untouched"
             );
             GuardedSaveOutcome::IoError
         }

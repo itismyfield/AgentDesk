@@ -2440,18 +2440,22 @@ async fn maybe_recover_completed_stale_leak(
     // restart) treats this tail as delivered and never re-sends it. Re-load and
     // re-check identity first so we never clobber a concurrently-updated row, and
     // skip if another path already advanced past `end`.
-    if let Some(mut fresh) = discord::inflight::load_inflight_state(provider, channel_id.get())
-        && fresh.user_msg_id == state.user_msg_id
-        && fresh.current_msg_id == state.current_msg_id
-        && fresh.response_sent_offset < end
-    {
-        fresh.response_sent_offset = end;
-        if let Err(error) = discord::inflight::save_inflight_state(&fresh) {
-            tracing::warn!(
-                "[leak-recover] delivered answer on channel {} but failed to persist offset: {error}",
-                channel_id
-            );
-        }
+    let offset_save_outcome =
+        discord::inflight::persist_leak_recovery_response_offset_if_matches_identity_locked(
+            provider,
+            channel_id.get(),
+            &discord::inflight::InflightTurnIdentity::from_state(state),
+            state.current_msg_id,
+            end,
+        );
+    if matches!(
+        offset_save_outcome,
+        discord::inflight::GuardedSaveOutcome::IoError
+    ) {
+        tracing::warn!(
+            "[leak-recover] delivered answer on channel {} but failed to persist offset",
+            channel_id
+        );
     }
     if let Err(error) = leak_recovery_clear_chunk_ledger(&ledger_identity) {
         tracing::warn!(
@@ -2757,7 +2761,8 @@ mod stall_watchdog_pure_tests {
         revalidate_and_clear_explicit_background_inflight,
     };
     use crate::services::discord::inflight::{
-        self, GuardedClearOutcome, InflightTurnIdentity, InflightTurnState,
+        self, GuardedClearOutcome, GuardedSaveOutcome, InflightTurnIdentity, InflightTurnState,
+        RelayOwnerKind,
     };
     use crate::services::discord::relay_health::{RelayActiveTurn, RelayStallState};
     use crate::services::discord::{InflightRestartMode, TmuxCleanupPolicy};
@@ -3091,6 +3096,66 @@ mod stall_watchdog_pure_tests {
             leak_recovery_confirmed_prefix_from_ledger(&grown_identity),
             Some(3),
             "appended-chunk confirmation builds on the preserved prefix"
+        );
+    }
+
+    #[test]
+    fn leak_recovery_offset_patch_preserves_concurrent_relay_watermark_update() {
+        let _guard = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let tempdir = tempfile::tempdir().expect("temp runtime root");
+        let _env = EnvVarReset::set("AGENTDESK_ROOT_DIR", tempdir.path());
+
+        let provider = ProviderKind::Codex;
+        let channel_id = ChannelId::new(4_111_001);
+        let mut snapshot = InflightTurnState::new(
+            provider.clone(),
+            channel_id.get(),
+            Some("adk-cc".to_string()),
+            7,
+            4_111_101,
+            4_111_201,
+            "recover leaked answer".to_string(),
+            Some("session-4111-leak".to_string()),
+            Some("AgentDesk-codex-4111-leak".to_string()),
+            Some("/tmp/agentdesk-4111-leak.jsonl".to_string()),
+            None,
+            10,
+        );
+        snapshot.full_response = "already relayed plus recovered tail".to_string();
+        snapshot.response_sent_offset = 7;
+        inflight::save_inflight_state(&snapshot).expect("seed leak snapshot row");
+        let identity = InflightTurnIdentity::from_state(&snapshot);
+        let delivered_offset = snapshot.full_response.len();
+
+        let mut concurrent = inflight::load_inflight_state(&provider, channel_id.get())
+            .expect("seeded row for concurrent update");
+        concurrent.last_watcher_relayed_offset = Some(2_048);
+        concurrent.last_watcher_relayed_generation_mtime_ns = Some(9_999);
+        concurrent.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
+        inflight::save_inflight_state(&concurrent).expect("save concurrent watermark update");
+
+        let outcome = inflight::persist_leak_recovery_response_offset_if_matches_identity_locked(
+            &provider,
+            channel_id.get(),
+            &identity,
+            snapshot.current_msg_id,
+            delivered_offset,
+        );
+
+        assert_eq!(outcome, GuardedSaveOutcome::Saved);
+        let persisted = inflight::load_inflight_state(&provider, channel_id.get())
+            .expect("patched row must survive");
+        assert_eq!(persisted.response_sent_offset, delivered_offset);
+        assert_eq!(persisted.last_watcher_relayed_offset, Some(2_048));
+        assert_eq!(
+            persisted.last_watcher_relayed_generation_mtime_ns,
+            Some(9_999)
+        );
+        assert_eq!(
+            persisted.effective_relay_owner_kind(),
+            RelayOwnerKind::SessionBoundRelay
         );
     }
 

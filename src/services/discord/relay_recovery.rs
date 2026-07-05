@@ -668,6 +668,49 @@ fn relay_frontier_dead_reattach_owner(decision: &RelayRecoveryDecision) -> Optio
     ))
 }
 
+#[derive(Clone, Debug)]
+struct RelayRecoveryInflightClearPin {
+    identity: super::inflight::InflightTurnIdentity,
+    finalizer_turn_id: u64,
+    updated_at: String,
+    save_generation: u64,
+}
+
+fn capture_idle_tmux_reattach_inflight_clear_pin(
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> Option<RelayRecoveryInflightClearPin> {
+    let state = super::inflight::load_inflight_state(provider, channel_id)?;
+    let finalizer_turn_id = state.effective_finalizer_turn_id();
+    (finalizer_turn_id != 0).then(|| RelayRecoveryInflightClearPin {
+        identity: super::inflight::InflightTurnIdentity::from_state(&state),
+        finalizer_turn_id,
+        updated_at: state.updated_at,
+        save_generation: state.save_generation,
+    })
+}
+
+fn clear_idle_tmux_reattach_inflight_if_pinned(
+    provider: &ProviderKind,
+    channel_id: u64,
+    pin: Option<&RelayRecoveryInflightClearPin>,
+) -> bool {
+    let Some(pin) = pin else {
+        return false;
+    };
+    matches!(
+        super::inflight::clear_inflight_state_if_matches_identity_generation(
+            provider,
+            channel_id,
+            &pin.identity,
+            pin.finalizer_turn_id,
+            &pin.updated_at,
+            pin.save_generation,
+        ),
+        super::inflight::GuardedClearOutcome::Cleared
+    )
+}
+
 fn relay_recovery_cancel_finalize_context() -> super::turn_finalizer::FinalizeContext {
     super::turn_finalizer::FinalizeContext {
         clear_inflight: true,
@@ -982,6 +1025,8 @@ async fn apply_relay_recovery_decision(
                 // the non-destructive rebind path so normal relay delivers it.
                 && !idle_tmux_repair_has_unrelayed_tail_answer(provider, decision.channel_id)
             {
+                let inflight_clear_pin =
+                    capture_idle_tmux_reattach_inflight_clear_pin(provider, decision.channel_id);
                 let finish = mailbox_finish_turn(shared, provider, channel).await;
                 if let Some(token) = finish.removed_token.as_ref() {
                     token.cancelled.store(true, Ordering::Relaxed);
@@ -1005,8 +1050,11 @@ async fn apply_relay_recovery_decision(
                 if let Some((_, watcher)) = shared.tmux_watchers.remove(&channel) {
                     watcher.cancel.store(true, Ordering::Relaxed);
                 }
-                let inflight_cleared =
-                    super::inflight::clear_inflight_state(provider, decision.channel_id);
+                let inflight_cleared = clear_idle_tmux_reattach_inflight_if_pinned(
+                    provider,
+                    decision.channel_id,
+                    inflight_clear_pin.as_ref(),
+                );
                 mailbox_clear_recovery_marker(shared, channel).await;
                 let after = mailbox_snapshot(shared, channel).await;
                 return RelayRecoveryApplyResult {
@@ -1987,6 +2035,63 @@ mod tests {
         assert!(
             super::super::inflight::load_inflight_state(&provider, channel.get()).is_none(),
             "idle-tmux cleanup must clear stale inflight after publishing the release edge"
+        );
+    }
+
+    #[test]
+    fn reattach_idle_tmux_clear_generation_guard_preserves_concurrent_inflight_update() {
+        let _guard = auto_heal_test_lock().blocking_lock();
+        clear_auto_heal_attempts_for_tests();
+        let (_root_guard, root_dir) = isolated_agentdesk_root();
+        let provider = ProviderKind::Claude;
+        let channel = ChannelId::new(4_111_003);
+        let user_msg = MessageId::new(4_111_103);
+        let tmux = "AgentDesk-claude-4111-idle-clear-generation";
+        let output_path = root_dir.path().join("idle-clear-generation.jsonl");
+        let body = "{\"type\":\"system\",\"subtype\":\"turn_duration\",\"session_id\":\"s\"}\n";
+        std::fs::write(&output_path, body).expect("write ready output fixture");
+
+        let mut state = super::super::inflight::InflightTurnState::new(
+            provider.clone(),
+            channel.get(),
+            None,
+            1,
+            user_msg.get(),
+            4_111_203,
+            "idle tmux guarded cleanup".to_string(),
+            Some("session-4111-idle-clear".to_string()),
+            Some(tmux.to_string()),
+            Some(output_path.to_string_lossy().to_string()),
+            None,
+            body.len() as u64,
+        );
+        state.set_relay_owner_kind(super::super::inflight::RelayOwnerKind::Watcher);
+        super::super::inflight::save_inflight_state(&state).expect("seed stale idle-clear row");
+
+        let pin = capture_idle_tmux_reattach_inflight_clear_pin(&provider, channel.get())
+            .expect("capture clear pin before concurrent writer");
+        let mut concurrent = super::super::inflight::load_inflight_state(&provider, channel.get())
+            .expect("seeded row for concurrent update");
+        concurrent.last_watcher_relayed_offset = Some(8_192);
+        concurrent.last_watcher_relayed_generation_mtime_ns = Some(77_777);
+        concurrent.set_relay_owner_kind(super::super::inflight::RelayOwnerKind::SessionBoundRelay);
+        super::super::inflight::save_inflight_state(&concurrent)
+            .expect("save concurrent generation-advancing update");
+
+        assert!(
+            !clear_idle_tmux_reattach_inflight_if_pinned(&provider, channel.get(), Some(&pin)),
+            "auto reattach idle clear must fail closed when the row save_generation advanced"
+        );
+        let persisted = super::super::inflight::load_inflight_state(&provider, channel.get())
+            .expect("advanced row must survive stale generation clear");
+        assert_eq!(persisted.last_watcher_relayed_offset, Some(8_192));
+        assert_eq!(
+            persisted.last_watcher_relayed_generation_mtime_ns,
+            Some(77_777)
+        );
+        assert_eq!(
+            persisted.effective_relay_owner_kind(),
+            super::super::inflight::RelayOwnerKind::SessionBoundRelay
         );
     }
 
