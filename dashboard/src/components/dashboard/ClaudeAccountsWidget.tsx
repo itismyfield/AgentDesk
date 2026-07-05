@@ -116,6 +116,89 @@ function formatUnknown(value: unknown): string {
   return JSON.stringify(value);
 }
 
+function switchReasonLabel(reason: string | null | undefined, t: TFunction): string | null {
+  if (!reason) return null;
+  switch (reason) {
+    case "manual":
+      return t({ ko: "수동 전환", en: "Manual switch", ja: "手動切替", zh: "手动切换" });
+    case "already_active":
+    case "unchanged":
+    case "same_account":
+      return t({ ko: "이미 활성 상태", en: "Already active", ja: "すでに有効", zh: "已是活动账号" });
+    default:
+      return null;
+  }
+}
+
+function refreshReasonLabel(reason: string | null | undefined, t: TFunction): string | null {
+  if (!reason) return null;
+  switch (reason) {
+    case "refresh_scheduled":
+      return t({
+        ko: "사용량 새로고침 예약됨",
+        en: "Usage refresh queued",
+        ja: "使用量更新を予約済み",
+        zh: "用量刷新已排队",
+      });
+    case "rate_limit_sync_not_active_on_this_node":
+      return t({
+        ko: "사용량 새로고침은 리더 노드에서 실행됩니다",
+        en: "Usage refresh runs on the leader node",
+        ja: "使用量更新はリーダーノードで実行されます",
+        zh: "用量刷新在主节点执行",
+      });
+    case "postgres_pool_unavailable":
+      return t({
+        ko: "사용량 새로고침을 사용할 수 없습니다",
+        en: "Usage refresh unavailable",
+        ja: "使用量更新を利用できません",
+        zh: "用量刷新不可用",
+      });
+    case "serialization_failure":
+      return t({
+        ko: "새로고침 상태를 표시하지 못했습니다",
+        en: "Unable to report refresh status",
+        ja: "更新状態を表示できません",
+        zh: "无法显示刷新状态",
+      });
+    case "sync_failed":
+      return t({
+        ko: "사용량 새로고침 실패",
+        en: "Usage refresh failed",
+        ja: "使用量更新に失敗しました",
+        zh: "用量刷新失败",
+      });
+    default:
+      return t({
+        ko: "사용량 새로고침 상태를 확인할 수 없습니다",
+        en: "Usage refresh status unavailable",
+        ja: "使用量更新状態を確認できません",
+        zh: "无法确认用量刷新状态",
+      });
+  }
+}
+
+function switchSuccessDescription(result: SwitchResponse, t: TFunction): string {
+  const refreshReason = refreshReasonLabel(result.rateLimitRefresh?.reason, t);
+  if (result.switched === false) {
+    const account = formatUnknown(result.to ?? result.from);
+    const alreadyActive =
+      account === "-"
+        ? t({ ko: "선택한 계정이 이미 활성 상태입니다", en: "Selected account is already active", ja: "選択したアカウントはすでに有効です", zh: "所选账号已是活动账号" })
+        : t({ ko: `${account} 계정이 이미 활성 상태입니다`, en: `${account} is already active`, ja: `${account} はすでに有効です`, zh: `${account} 已是活动账号` });
+    return [alreadyActive, refreshReason].filter(Boolean).join(" · ");
+  }
+
+  const switchReason = switchReasonLabel(result.reason, t);
+  return [
+    `${formatUnknown(result.from)} → ${formatUnknown(result.to)}`,
+    switchReason,
+    refreshReason,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
 function formatTimeRemaining(resetsAt: string | null | undefined): string {
   if (!resetsAt) return "";
   const diff = new Date(resetsAt).getTime() - Date.now();
@@ -448,18 +531,25 @@ function ClaudeAccountsWidgetImpl({ t }: ClaudeAccountsWidgetProps) {
           {switchResult ? (
             <div className="mt-4">
               <WidgetState
-                kind={switchResult.status === "ok" ? "stale" : "error"}
-                tone={switchResult.status === "ok" ? "healthy" : undefined}
+                kind={switchResult.status === "ok" ? (switchResult.switched === false ? "empty" : "stale") : "error"}
+                tone={switchResult.status === "ok" ? (switchResult.switched === false ? "idle" : "healthy") : undefined}
                 compact
-                icon={switchResult.status === "ok" ? <CheckCircle2 size={18} aria-hidden /> : undefined}
+                icon={switchResult.status === "ok" ? (switchResult.switched === false ? <KeyRound size={18} aria-hidden /> : <CheckCircle2 size={18} aria-hidden />) : undefined}
                 title={
                   switchResult.status === "ok"
-                    ? t({
-                        ko: `${switchResult.hostname ?? nodeLabel} 노드에 적용됨`,
-                        en: `Applied on ${switchResult.hostname ?? nodeLabel}`,
-                        ja: `${switchResult.hostname ?? nodeLabel} ノードに適用済み`,
-                        zh: `已应用到 ${switchResult.hostname ?? nodeLabel}`,
-                      })
+                    ? switchResult.switched === false
+                      ? t({
+                          ko: `${switchResult.hostname ?? nodeLabel} 노드에서 이미 활성 상태`,
+                          en: `Already active on ${switchResult.hostname ?? nodeLabel}`,
+                          ja: `${switchResult.hostname ?? nodeLabel} ノードですでに有効`,
+                          zh: `${switchResult.hostname ?? nodeLabel} 节点已是活动账号`,
+                        })
+                      : t({
+                          ko: `${switchResult.hostname ?? nodeLabel} 노드에 적용됨`,
+                          en: `Applied on ${switchResult.hostname ?? nodeLabel}`,
+                          ja: `${switchResult.hostname ?? nodeLabel} ノードに適用済み`,
+                          zh: `已应用到 ${switchResult.hostname ?? nodeLabel}`,
+                        })
                     : t({
                         ko: "계정 전환 실패",
                         en: "Account switch failed",
@@ -469,7 +559,7 @@ function ClaudeAccountsWidgetImpl({ t }: ClaudeAccountsWidgetProps) {
                 }
                 description={
                   switchResult.status === "ok"
-                    ? `${formatUnknown(switchResult.from)} → ${formatUnknown(switchResult.to)}${switchResult.reason ? ` · ${switchResult.reason}` : ""}${switchResult.rateLimitRefresh?.reason ? ` · ${switchResult.rateLimitRefresh.reason}` : ""}`
+                    ? switchSuccessDescription(switchResult, t)
                     : switchResult.error
                 }
               />

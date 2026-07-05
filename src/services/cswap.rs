@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     pin::Pin,
+    process::Stdio,
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
@@ -10,6 +11,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::{Mutex, RwLock};
 
 use crate::runtime_layout::expand_user_path;
@@ -140,6 +142,12 @@ struct CachedList {
     cached_at: Instant,
 }
 
+#[derive(Debug, Clone)]
+struct CompletedListFetch {
+    completed_at: Instant,
+    result: Result<ClaudeAccountsResponse, CswapError>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CswapSwitchResult {
@@ -156,7 +164,12 @@ pub struct CswapSwitchResult {
 }
 
 pub(crate) trait CswapAdapter: Send + Sync {
-    fn run<'a>(&'a self, args: Vec<String>) -> CswapFuture<'a, Result<String, CswapError>>;
+    fn run<'a>(
+        &'a self,
+        args: Vec<String>,
+        timeout: Duration,
+        operation: &'static str,
+    ) -> CswapFuture<'a, Result<String, CswapError>>;
 }
 
 #[derive(Debug, Default)]
@@ -212,7 +225,12 @@ async fn resolve_cswap_path() -> Option<String> {
 }
 
 impl CswapAdapter for CswapCliAdapter {
-    fn run<'a>(&'a self, args: Vec<String>) -> CswapFuture<'a, Result<String, CswapError>> {
+    fn run<'a>(
+        &'a self,
+        args: Vec<String>,
+        timeout: Duration,
+        operation: &'static str,
+    ) -> CswapFuture<'a, Result<String, CswapError>> {
         Box::pin(async move {
             let path = resolve_cswap_path().await.ok_or(CswapError::NotInstalled)?;
             let mut command = tokio::process::Command::new(&path);
@@ -221,23 +239,60 @@ impl CswapAdapter for CswapCliAdapter {
             if let Some(path) = merged_runtime_path() {
                 command.env("PATH", path);
             }
+            command.stdout(Stdio::piped());
+            command.stderr(Stdio::piped());
+            configure_cswap_process_group(&mut command);
 
-            let output = command
-                .output()
-                .await
+            let mut child = command
+                .spawn()
                 .map_err(|err| CswapError::Exec(err.to_string()))?;
-            let stdout = String::from_utf8(output.stdout)
-                .map_err(|err| CswapError::InvalidUtf8(err.to_string()))?;
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let child_pid = child.id();
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| CswapError::Exec("failed to capture cswap stdout".to_string()))?;
+            let stderr = child
+                .stderr
+                .take()
+                .ok_or_else(|| CswapError::Exec("failed to capture cswap stderr".to_string()))?;
+            let stdout_task = tokio::spawn(read_child_pipe(stdout));
+            let stderr_task = tokio::spawn(read_child_pipe(stderr));
 
-            if !output.status.success() {
+            let status = tokio::select! {
+                status = child.wait() => status.map_err(|err| CswapError::Exec(err.to_string()))?,
+                _ = tokio::time::sleep(timeout) => {
+                    kill_cswap_process_group(child_pid);
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                    let _ = stdout_task.await;
+                    let _ = stderr_task.await;
+                    return Err(CswapError::Timeout {
+                        operation,
+                        timeout_secs: timeout.as_secs(),
+                    });
+                }
+            };
+
+            let stdout = stdout_task
+                .await
+                .map_err(|err| CswapError::Exec(err.to_string()))?
+                .map_err(|err| CswapError::Exec(err.to_string()))?;
+            let stderr = stderr_task
+                .await
+                .map_err(|err| CswapError::Exec(err.to_string()))?
+                .map_err(|err| CswapError::Exec(err.to_string()))?;
+            let stdout = String::from_utf8(stdout)
+                .map_err(|err| CswapError::InvalidUtf8(err.to_string()))?;
+            let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
+
+            if !status.success() {
                 let error_message = if stderr.is_empty() {
                     stdout.trim().to_string()
                 } else {
                     stderr
                 };
                 return Err(CswapError::CommandFailed {
-                    status: output.status.to_string(),
+                    status: status.to_string(),
                     stderr: error_message,
                     stdout,
                 });
@@ -251,6 +306,8 @@ impl CswapAdapter for CswapCliAdapter {
 pub struct CswapService {
     adapter: Arc<dyn CswapAdapter>,
     list_cache: RwLock<Option<CachedList>>,
+    list_fetch_lock: Mutex<()>,
+    last_list_fetch: RwLock<Option<CompletedListFetch>>,
     switch_lock: Mutex<()>,
 }
 
@@ -259,6 +316,8 @@ impl CswapService {
         Self {
             adapter,
             list_cache: RwLock::new(None),
+            list_fetch_lock: Mutex::new(()),
+            last_list_fetch: RwLock::new(None),
             switch_lock: Mutex::new(()),
         }
     }
@@ -273,8 +332,17 @@ impl CswapService {
         hostname: String,
         instance_id: Option<String>,
     ) -> Result<ClaudeAccountsResponse, CswapError> {
+        let request_started_at = Instant::now();
         if let Some(cached) = self.fresh_cached_list().await {
             return Ok(cached);
+        }
+
+        let _fetch_guard = self.list_fetch_lock.lock().await;
+        if let Some(cached) = self.fresh_cached_list().await {
+            return Ok(cached);
+        }
+        if let Some(completed) = self.completed_list_fetch_since(request_started_at).await {
+            return completed.map(|response| response_for_serve(&response, Utc::now()));
         }
 
         match self.fetch_list(hostname.clone(), instance_id.clone()).await {
@@ -283,14 +351,23 @@ impl CswapService {
                     response: response.clone(),
                     cached_at: Instant::now(),
                 });
+                *self.last_list_fetch.write().await = Some(CompletedListFetch {
+                    completed_at: Instant::now(),
+                    result: Ok(response.clone()),
+                });
                 Ok(response)
             }
             Err(error) => {
-                if let Some(stale) = self.stale_cached_list(error.to_string()).await {
+                let result = if let Some(stale) = self.stale_cached_list(error.to_string()).await {
                     Ok(stale)
                 } else {
                     Err(error)
-                }
+                };
+                *self.last_list_fetch.write().await = Some(CompletedListFetch {
+                    completed_at: Instant::now(),
+                    result: result.clone(),
+                });
+                result
             }
         }
     }
@@ -299,19 +376,25 @@ impl CswapService {
         let cached = self.list_cache.read().await;
         let cached = cached.as_ref()?;
         if cached.cached_at.elapsed() <= LIST_CACHE_TTL {
-            let mut response = cached.response.clone();
-            response.served_at = Utc::now();
-            return Some(response);
+            return Some(response_for_serve(&cached.response, Utc::now()));
         }
         None
+    }
+
+    async fn completed_list_fetch_since(
+        &self,
+        request_started_at: Instant,
+    ) -> Option<Result<ClaudeAccountsResponse, CswapError>> {
+        let completed = self.last_list_fetch.read().await;
+        let completed = completed.as_ref()?;
+        (completed.completed_at >= request_started_at).then(|| completed.result.clone())
     }
 
     async fn stale_cached_list(&self, stale_reason: String) -> Option<ClaudeAccountsResponse> {
         let cached = self.list_cache.read().await;
         let cached = cached.as_ref()?;
-        let mut response = cached.response.clone();
+        let mut response = response_for_serve(&cached.response, Utc::now());
         response.status = ClaudeAccountsStatus::UsageDataStale;
-        response.served_at = Utc::now();
         response.usage_data_stale = true;
         response.stale_reason = Some(stale_reason);
         Some(response)
@@ -322,16 +405,17 @@ impl CswapService {
         hostname: String,
         instance_id: Option<String>,
     ) -> Result<ClaudeAccountsResponse, CswapError> {
-        let stdout = run_with_timeout(
-            self.adapter.as_ref(),
-            vec!["--list".to_string(), "--json".to_string()],
-            LIST_TIMEOUT,
-            "list",
-        )
-        .await?;
+        let stdout = self
+            .adapter
+            .run(
+                vec!["--list".to_string(), "--json".to_string()],
+                LIST_TIMEOUT,
+                "list",
+            )
+            .await?;
         let payload = parse_list_json(&stdout)?;
         let now = Utc::now();
-        Ok(ClaudeAccountsResponse {
+        let mut response = ClaudeAccountsResponse {
             schema_version: payload.schema_version.unwrap_or(1),
             status: ClaudeAccountsStatus::Ok,
             hostname,
@@ -343,7 +427,9 @@ impl CswapService {
             stale_reason: None,
             active_account_number: payload.active_account_number,
             accounts: payload.accounts.unwrap_or_default(),
-        })
+        };
+        recompute_usage_age_seconds(&mut response, now);
+        Ok(response)
     }
 
     pub async fn switch_account(&self, account: &str) -> Result<CswapSwitchResult, CswapError> {
@@ -356,17 +442,18 @@ impl CswapService {
             .await
             .map_err(|_| CswapError::SwitchInProgress)?;
 
-        let stdout = run_with_timeout(
-            self.adapter.as_ref(),
-            vec![
-                "--switch-to".to_string(),
-                account.to_string(),
-                "--json".to_string(),
-            ],
-            SWITCH_TIMEOUT,
-            "switch",
-        )
-        .await?;
+        let stdout = self
+            .adapter
+            .run(
+                vec![
+                    "--switch-to".to_string(),
+                    account.to_string(),
+                    "--json".to_string(),
+                ],
+                SWITCH_TIMEOUT,
+                "switch",
+            )
+            .await?;
         let result = parse_switch_json(&stdout)?;
         self.invalidate_list_cache().await;
         Ok(result)
@@ -377,18 +464,67 @@ impl CswapService {
     }
 }
 
-async fn run_with_timeout(
-    adapter: &dyn CswapAdapter,
-    args: Vec<String>,
-    timeout: Duration,
-    operation: &'static str,
-) -> Result<String, CswapError> {
-    tokio::time::timeout(timeout, adapter.run(args))
-        .await
-        .map_err(|_| CswapError::Timeout {
-            operation,
-            timeout_secs: timeout.as_secs(),
-        })?
+async fn read_child_pipe<R>(mut pipe: R) -> std::io::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut bytes = Vec::new();
+    pipe.read_to_end(&mut bytes).await?;
+    Ok(bytes)
+}
+
+fn configure_cswap_process_group(command: &mut tokio::process::Command) {
+    #[cfg(unix)]
+    {
+        command.process_group(0);
+    }
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn kill_cswap_process_group(pid: Option<u32>) {
+    let Some(pid) = pid else {
+        return;
+    };
+    unsafe {
+        libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_cswap_process_group(_pid: Option<u32>) {}
+
+fn response_for_serve(
+    response: &ClaudeAccountsResponse,
+    served_at: DateTime<Utc>,
+) -> ClaudeAccountsResponse {
+    let mut response = response.clone();
+    response.served_at = served_at;
+    recompute_usage_age_seconds(&mut response, served_at);
+    response
+}
+
+fn recompute_usage_age_seconds(response: &mut ClaudeAccountsResponse, served_at: DateTime<Utc>) {
+    let base_elapsed = served_at
+        .signed_duration_since(response.fetched_at)
+        .num_seconds()
+        .max(0) as u64;
+    for account in &mut response.accounts {
+        if let Some(fetched_at) = account
+            .usage_fetched_at
+            .as_deref()
+            .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
+        {
+            account.usage_age_seconds = Some(
+                served_at
+                    .signed_duration_since(fetched_at.with_timezone(&Utc))
+                    .num_seconds()
+                    .max(0) as u64,
+            );
+        } else if let Some(age) = account.usage_age_seconds {
+            account.usage_age_seconds = Some(age.saturating_add(base_elapsed));
+        }
+    }
 }
 
 fn parse_list_json(stdout: &str) -> Result<CswapListPayload, CswapError> {
@@ -447,27 +583,39 @@ mod tests {
     }
 
     impl CswapAdapter for MockCswapAdapter {
-        fn run<'a>(&'a self, _args: Vec<String>) -> CswapFuture<'a, Result<String, CswapError>> {
+        fn run<'a>(
+            &'a self,
+            _args: Vec<String>,
+            timeout: Duration,
+            operation: &'static str,
+        ) -> CswapFuture<'a, Result<String, CswapError>> {
             self.calls.fetch_add(1, Ordering::AcqRel);
             let action = self.action.clone();
             Box::pin(async move {
-                match action {
-                    MockAction::Output(output) => Ok(output),
-                    MockAction::Error(error) => Err(error),
-                    MockAction::Sleep(duration) => {
-                        tokio::time::sleep(duration).await;
-                        Ok("{}".to_string())
+                tokio::time::timeout(timeout, async move {
+                    match action {
+                        MockAction::Output(output) => Ok(output),
+                        MockAction::Error(error) => Err(error),
+                        MockAction::Sleep(duration) => {
+                            tokio::time::sleep(duration).await;
+                            Ok("{}".to_string())
+                        }
+                        MockAction::NotifyAndWait {
+                            entered,
+                            release,
+                            output,
+                        } => {
+                            entered.notify_waiters();
+                            release.notified().await;
+                            Ok(output)
+                        }
                     }
-                    MockAction::NotifyAndWait {
-                        entered,
-                        release,
-                        output,
-                    } => {
-                        entered.notify_waiters();
-                        release.notified().await;
-                        Ok(output)
-                    }
-                }
+                })
+                .await
+                .map_err(|_| CswapError::Timeout {
+                    operation,
+                    timeout_secs: timeout.as_secs(),
+                })?
             })
         }
     }
@@ -564,6 +712,80 @@ mod tests {
                 timeout_secs: LIST_TIMEOUT.as_secs(),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn list_cache_miss_is_single_flight() {
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let adapter = MockCswapAdapter::new(MockAction::NotifyAndWait {
+            entered: entered.clone(),
+            release: release.clone(),
+            output: list_fixture().to_string(),
+        });
+        let calls = adapter.calls.clone();
+        let service = Arc::new(CswapService::new(Arc::new(adapter)));
+
+        let first = {
+            let service = service.clone();
+            tokio::spawn(async move { service.list_accounts("mac-mini".to_string(), None).await })
+        };
+        entered.notified().await;
+
+        let second = {
+            let service = service.clone();
+            tokio::spawn(async move { service.list_accounts("mac-mini".to_string(), None).await })
+        };
+        tokio::task::yield_now().await;
+        release.notify_waiters();
+
+        let first_response = first
+            .await
+            .expect("first joins")
+            .expect("first list succeeds");
+        let second_response = second
+            .await
+            .expect("second joins")
+            .expect("second list succeeds");
+
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        assert_eq!(first_response.accounts.len(), 1);
+        assert_eq!(second_response.accounts.len(), 1);
+    }
+
+    #[test]
+    fn usage_age_seconds_recomputes_at_serve_time() {
+        let fetched_at = DateTime::parse_from_rfc3339("2026-06-22T20:30:00Z")
+            .expect("valid timestamp")
+            .with_timezone(&Utc);
+        let served_at = fetched_at + chrono::Duration::seconds(75);
+        let response = ClaudeAccountsResponse {
+            schema_version: 1,
+            status: ClaudeAccountsStatus::Ok,
+            hostname: "mac-mini".to_string(),
+            instance_id: None,
+            fetched_at,
+            served_at: fetched_at,
+            cache_ttl_seconds: LIST_CACHE_TTL.as_secs(),
+            usage_data_stale: false,
+            stale_reason: None,
+            active_account_number: Some(2),
+            accounts: vec![ClaudeAccount {
+                number: Some(2),
+                email: Some("you@example.com".to_string()),
+                active: true,
+                usage_status: Some("ok".to_string()),
+                usage: None,
+                usage_fetched_at: Some("2026-06-22T20:29:00Z".to_string()),
+                usage_age_seconds: Some(12),
+                extra: BTreeMap::new(),
+            }],
+        };
+
+        let served = response_for_serve(&response, served_at);
+
+        assert_eq!(served.served_at, served_at);
+        assert_eq!(served.accounts[0].usage_age_seconds, Some(135));
     }
 
     #[tokio::test(start_paused = true)]

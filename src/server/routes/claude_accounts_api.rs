@@ -55,6 +55,17 @@ pub async fn switch_claude_account(
     let result = match service.switch_account(&body.account).await {
         Ok(result) => result,
         Err(error) => {
+            let failed_at = Utc::now();
+            tracing::warn!(
+                target = "audit.claude_accounts",
+                timestamp = %failed_at.to_rfc3339(),
+                node = %hostname,
+                instance_id = ?instance_id,
+                requested_account = %body.account,
+                code = error.code(),
+                error = %error,
+                "Claude account switch failed via dashboard"
+            );
             return (
                 status_for_error(&error),
                 Json(error_body(error, hostname, instance_id)),
@@ -76,10 +87,10 @@ pub async fn switch_claude_account(
         "Claude account switch requested via dashboard"
     );
 
-    let rate_limit_refresh = if let Some(pg_pool) = state.pg_pool_ref() {
-        match serde_json::to_value(
-            crate::server::trigger_claude_rate_limit_refresh_if_leader(pg_pool).await,
-        ) {
+    let rate_limit_refresh = if let Some(pg_pool) = state.pg_pool.clone() {
+        match serde_json::to_value(crate::server::spawn_claude_rate_limit_refresh_if_leader(
+            pg_pool,
+        )) {
             Ok(value) => value,
             Err(error) => json!({
                 "triggered": false,

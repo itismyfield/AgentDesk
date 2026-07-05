@@ -98,6 +98,13 @@ pub fn claude_oauth_token() -> Option<String> {
     })
 }
 
+pub async fn claude_oauth_token_blocking() -> Option<String> {
+    tokio::task::spawn_blocking(claude_oauth_token)
+        .await
+        .ok()
+        .flatten()
+}
+
 pub fn codex_access_token() -> Option<String> {
     let path = expanded_auth_path("~/.codex/auth.json")?;
     read_json_path(&path)
