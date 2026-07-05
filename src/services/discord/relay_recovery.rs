@@ -902,6 +902,21 @@ pub(in crate::services::discord) fn idle_tmux_repair_ready_for_input(
     )
 }
 
+pub(in crate::services::discord) fn idle_tmux_repair_state_ready_for_input(
+    provider: &ProviderKind,
+    channel_id: u64,
+    tmux_session: &str,
+    state: &super::inflight::InflightTurnState,
+) -> bool {
+    idle_tmux_repair_snapshot_ready_for_input(
+        provider,
+        channel_id,
+        tmux_session,
+        state,
+        idle_tmux_repair_pane_ready_for_input,
+    )
+}
+
 fn idle_tmux_repair_pane_ready_for_input(tmux_session: &str, provider: &ProviderKind) -> bool {
     // Pre-existing recovery override for long-frozen Busy JSONL. This is
     // intentionally not `FallbackPaneReadiness`: the override is scoped by
@@ -1133,7 +1148,6 @@ async fn apply_relay_recovery_decision(
         }
         RelayRecoveryActionKind::ReattachWatcher => {
             let channel = ChannelId::new(decision.channel_id);
-            completion_footer::forget_if_message(channel, decision.affected.bridge_current_msg_id);
             if let Some(tmux_session) = decision.affected.tmux_session.as_deref()
                 && decision.evidence.unread_bytes.unwrap_or(0) == 0
                 // This branch intentionally does not route through
@@ -1181,6 +1195,10 @@ async fn apply_relay_recovery_decision(
                         reattach_error: None,
                     };
                 }
+                completion_footer::forget_if_message(
+                    channel,
+                    decision.affected.bridge_current_msg_id,
+                );
                 if let Some((_, watcher)) = shared.tmux_watchers.remove(&channel) {
                     watcher.cancel.store(true, Ordering::Relaxed);
                 }
@@ -2292,6 +2310,19 @@ mod tests {
         let hook_output_path = output_path.to_string_lossy().to_string();
         let (watcher, watcher_cancel) = test_watcher_handle(tmux, &output_path);
         shared.tmux_watchers.insert(channel, watcher);
+        let footer_msg = MessageId::new(4_111_704);
+        super::super::footer_view_reconciler::completion_footer_forget_registered_target(
+            channel,
+        );
+        let _ = super::super::footer_view_reconciler::register_completion_footer_target(
+            channel,
+            footer_msg,
+            &provider,
+            1_800_000_000,
+            "Final answer",
+            None,
+            true,
+        );
 
         let _hook = set_idle_tmux_reattach_inflight_candidate_hook_for_tests(Arc::new(
             move |predicate_snapshot| {
@@ -2328,6 +2359,7 @@ mod tests {
             bridge_inflight_present: true,
             mailbox_has_cancel_token: true,
             mailbox_active_user_msg_id: Some(stale_user_msg_id),
+            bridge_current_msg_id: Some(footer_msg.get()),
             last_capture_offset: Some(output_len),
             last_relay_offset: output_len,
             unread_bytes: Some(0),
@@ -2381,6 +2413,19 @@ mod tests {
         assert_eq!(
             persisted.effective_relay_owner_kind(),
             super::super::inflight::RelayOwnerKind::Watcher
+        );
+        assert!(
+            super::super::footer_view_reconciler::completion_footer_edit_for_registered_target_at(
+                shared.as_ref(),
+                channel,
+                "progress",
+                1_800_000_005,
+            )
+            .is_some(),
+            "skipped clear must preserve the registered completion footer target"
+        );
+        super::super::footer_view_reconciler::completion_footer_forget_registered_target(
+            channel,
         );
     }
 
