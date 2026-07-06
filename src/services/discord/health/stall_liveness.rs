@@ -12,12 +12,13 @@ use super::snapshot::WatcherStateSnapshot;
 pub(super) const STALL_WATCHDOG_POSITIVE_LIVENESS_SECS: u64 = 120;
 /// Historical deferral-budget field for force-clean deferrals while positive
 /// liveness keeps being observed. A deferral only ever fires when
-/// `has_positive_liveness` is true — i.e. fresh bytes are demonstrably flowing
-/// (pane offset advanced cross-tick, transcript/runtime jsonl mtime inside
-/// `POSITIVE_LIVENESS_SECS`, or a fresh background-synthetic anchor) — so a
-/// genuinely dead relay (every signal stale ⇒ `reason_codes == none`) takes the
-/// `ProceedNoEvidence` branch and is cleaned on the very first tick, untouched by
-/// this field.
+/// `has_positive_liveness` is true: fresh bytes are demonstrably flowing (pane or
+/// relay offset advanced cross-tick, transcript/runtime jsonl mtime inside
+/// `POSITIVE_LIVENESS_SECS`, or a fresh background-synthetic anchor), or an
+/// undelivered backlog is still inside the short no-progress observation grace
+/// used to prove whether it is draining. Once that backlog grace expires without
+/// relay-offset progress, `reason_codes == none` and the first eligible cleanup
+/// tick proceeds instead of waiting for the absolute backstop.
 ///
 /// #3582: raised 3 -> 20. At the old value a *live* turn that kept emitting output
 /// for longer than `THRESHOLD_SECS + 3 * INTERVAL_SECS` (~600s + ~90s) was killed
@@ -60,9 +61,17 @@ pub(super) const STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS: u8 = 20;
 /// ceiling is overridden away.
 pub(super) const STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS: u64 = 4 * 3600;
 pub(super) const STALL_LIVENESS_STATE_TTL_SECS: u64 = 1800;
+pub(super) const STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS: u64 = 180;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum OffsetObservationKind {
+    PaneCapture,
+    RelayDelivered,
+}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct StallLivenessKey {
+    offset_kind: OffsetObservationKind,
     provider: String,
     channel_id: u64,
     tmux_session: Option<String>,
@@ -74,7 +83,15 @@ struct StallLivenessKey {
 struct OffsetObservation {
     offset: u64,
     advanced_at_unix_secs: Option<i64>,
+    unchanged_since_unix_secs: i64,
     last_updated_unix_secs: i64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct OffsetObservationResult {
+    previous_offset: Option<u64>,
+    advanced_age_secs: Option<u64>,
+    unchanged_age_secs: Option<u64>,
 }
 
 static OFFSET_OBSERVATIONS: LazyLock<dashmap::DashMap<StallLivenessKey, OffsetObservation>> =
@@ -122,11 +139,15 @@ pub(super) struct StallWatchdogLivenessEvidence {
     pub(super) pane_offset_current: Option<u64>,
     pub(super) pane_offset_previous: Option<u64>,
     pub(super) pane_offset_advanced_age_secs: Option<u64>,
+    pub(super) relay_offset_current: Option<u64>,
+    pub(super) relay_offset_previous: Option<u64>,
+    pub(super) relay_offset_advanced_age_secs: Option<u64>,
     pub(super) transcript_mtime_age_secs: Option<u64>,
     pub(super) runtime_activity_age_secs: Option<u64>,
     pub(super) outbound_activity_age_secs: Option<u64>,
     pub(super) background_synthetic_activity_age_secs: Option<u64>,
     pub(super) background_synthetic_kind: Option<String>,
+    pub(super) has_undelivered_backlog: bool,
 }
 
 impl StallWatchdogLivenessEvidence {
@@ -134,6 +155,9 @@ impl StallWatchdogLivenessEvidence {
         let mut reasons = Vec::new();
         if is_recent_age(self.pane_offset_advanced_age_secs, freshness_secs) {
             reasons.push("pane_offset_advanced_recently");
+        }
+        if is_recent_age(self.relay_offset_advanced_age_secs, freshness_secs) {
+            reasons.push("relay_offset_advanced_recently");
         }
         if is_recent_age(self.transcript_mtime_age_secs, freshness_secs) {
             reasons.push("transcript_mtime_recent");
@@ -146,6 +170,9 @@ impl StallWatchdogLivenessEvidence {
         }
         if is_recent_age(self.background_synthetic_activity_age_secs, freshness_secs) {
             reasons.push("background_synthetic_activity_recent");
+        }
+        if self.has_undelivered_backlog {
+            reasons.push("has_undelivered_backlog");
         }
         reasons
     }
@@ -285,6 +312,22 @@ pub(super) fn clear_stall_watchdog_liveness_state_if_healthy(
     true
 }
 
+pub(super) fn stalled_undelivered_backlog_for_redrive(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    snapshot: &WatcherStateSnapshot,
+    now_unix_secs: i64,
+) -> bool {
+    if !live_undelivered_backlog(snapshot) {
+        return false;
+    }
+
+    let key = StallLivenessKey::from_snapshot(provider, channel_id, snapshot);
+    let relay_observation = observe_relay_offset(&key, snapshot.last_relay_offset, now_unix_secs);
+    !relay_offset_advanced_this_tick(snapshot, &relay_observation)
+        && relay_offset_unchanged_past_backlog_grace(&relay_observation)
+}
+
 pub(super) fn gc_stall_watchdog_liveness_state(now_unix_secs: i64) {
     OFFSET_OBSERVATIONS.retain(|_, observation| {
         !liveness_state_expired(observation.last_updated_unix_secs, now_unix_secs)
@@ -353,11 +396,15 @@ pub(super) fn log_stall_watchdog_liveness_deferred(
         pane_offset_current = ?decision.evidence.pane_offset_current,
         pane_offset_previous = ?decision.evidence.pane_offset_previous,
         pane_offset_advanced_age_secs = ?decision.evidence.pane_offset_advanced_age_secs,
+        relay_offset_current = ?decision.evidence.relay_offset_current,
+        relay_offset_previous = ?decision.evidence.relay_offset_previous,
+        relay_offset_advanced_age_secs = ?decision.evidence.relay_offset_advanced_age_secs,
         transcript_mtime_age_secs = ?decision.evidence.transcript_mtime_age_secs,
         runtime_activity_age_secs = ?decision.evidence.runtime_activity_age_secs,
         outbound_activity_age_secs = ?decision.evidence.outbound_activity_age_secs,
         background_synthetic_activity_age_secs = ?decision.evidence.background_synthetic_activity_age_secs,
         background_synthetic_kind = ?decision.evidence.background_synthetic_kind,
+        has_undelivered_backlog = decision.evidence.has_undelivered_backlog,
         deferral_count = ?decision.deferral_count(),
         max_deferrals = decision.max_deferrals,
         "  [{ts}] 🌱 STALL-WATCHDOG: deferred forced cleanup for desynced channel {} (provider={}) due to positive liveness evidence",
@@ -420,6 +467,8 @@ pub(super) fn log_stall_watchdog_force_cleanup_judgment(
         liveness_no_evidence = no_evidence,
         liveness_absolute_backstop_reached = absolute_backstop_reached,
         outbound_activity_age_secs = ?decision.map(|decision| decision.evidence.outbound_activity_age_secs),
+        relay_offset_advanced_age_secs = ?decision.and_then(|decision| decision.evidence.relay_offset_advanced_age_secs),
+        has_undelivered_backlog = decision.is_some_and(|decision| decision.evidence.has_undelivered_backlog),
         deferral_count = ?decision.and_then(StallWatchdogLivenessDecision::deferral_count),
         max_deferrals = decision.map(|decision| decision.max_deferrals).unwrap_or(0),
         "  [{ts}] ⚡ STALL-WATCHDOG: forced cleanup for desynced channel {}",
@@ -436,6 +485,7 @@ impl StallLivenessKey {
         started_at: Option<&str>,
     ) -> Self {
         Self {
+            offset_kind: OffsetObservationKind::PaneCapture,
             provider: provider.as_str().to_string(),
             channel_id: channel_id.get(),
             tmux_session: tmux_session.map(str::to_string),
@@ -458,6 +508,12 @@ impl StallLivenessKey {
         )
     }
 
+    fn for_offset_kind(&self, offset_kind: OffsetObservationKind) -> Self {
+        let mut key = self.clone();
+        key.offset_kind = offset_kind;
+        key
+    }
+
     fn matches_session(&self, probe: &Self) -> bool {
         self.provider == probe.provider
             && self.channel_id == probe.channel_id
@@ -472,14 +528,19 @@ impl StallWatchdogLivenessEvidence {
         inflight: Option<&InflightTurnState>,
         now_unix_secs: i64,
     ) -> Self {
-        let (pane_offset_previous, pane_offset_advanced_age_secs) =
+        let pane_observation =
             observe_pane_offset(key, snapshot.last_capture_offset, now_unix_secs);
+        let relay_observation =
+            observe_relay_offset(key, snapshot.last_relay_offset, now_unix_secs);
         let background_synthetic =
             background_synthetic_activity_age_secs(snapshot, inflight, now_unix_secs);
         Self {
             pane_offset_current: snapshot.last_capture_offset,
-            pane_offset_previous,
-            pane_offset_advanced_age_secs,
+            pane_offset_previous: pane_observation.previous_offset,
+            pane_offset_advanced_age_secs: pane_observation.advanced_age_secs,
+            relay_offset_current: Some(snapshot.last_relay_offset),
+            relay_offset_previous: relay_observation.previous_offset,
+            relay_offset_advanced_age_secs: relay_observation.advanced_age_secs,
             transcript_mtime_age_secs: transcript_mtime_age_secs(inflight, now_unix_secs),
             runtime_activity_age_secs: runtime_activity_age_secs(snapshot, now_unix_secs),
             outbound_activity_age_secs: unix_millis_age_secs(
@@ -490,6 +551,7 @@ impl StallWatchdogLivenessEvidence {
                 .as_ref()
                 .map(|(_, age)| *age),
             background_synthetic_kind: background_synthetic.map(|(kind, _)| kind),
+            has_undelivered_backlog: has_undelivered_backlog(snapshot, &relay_observation),
         }
     }
 }
@@ -498,10 +560,28 @@ fn observe_pane_offset(
     key: &StallLivenessKey,
     current_offset: Option<u64>,
     now_unix_secs: i64,
-) -> (Option<u64>, Option<u64>) {
+) -> OffsetObservationResult {
+    let key = key.for_offset_kind(OffsetObservationKind::PaneCapture);
+    observe_offset(&key, current_offset, now_unix_secs)
+}
+
+fn observe_relay_offset(
+    key: &StallLivenessKey,
+    current_offset: u64,
+    now_unix_secs: i64,
+) -> OffsetObservationResult {
+    let key = key.for_offset_kind(OffsetObservationKind::RelayDelivered);
+    observe_offset(&key, Some(current_offset), now_unix_secs)
+}
+
+fn observe_offset(
+    key: &StallLivenessKey,
+    current_offset: Option<u64>,
+    now_unix_secs: i64,
+) -> OffsetObservationResult {
     let Some(current_offset) = current_offset else {
         OFFSET_OBSERVATIONS.remove(key);
-        return (None, None);
+        return OffsetObservationResult::default();
     };
     let previous = OFFSET_OBSERVATIONS.get(key).map(|entry| entry.clone());
     let advanced_at_unix_secs = match previous.as_ref() {
@@ -509,18 +589,68 @@ fn observe_pane_offset(
         Some(prev) if current_offset == prev.offset => prev.advanced_at_unix_secs,
         _ => None,
     };
+    let unchanged_since_unix_secs = match previous.as_ref() {
+        Some(prev) if current_offset == prev.offset => prev.unchanged_since_unix_secs,
+        _ => now_unix_secs,
+    };
     OFFSET_OBSERVATIONS.insert(
         key.clone(),
         OffsetObservation {
             offset: current_offset,
             advanced_at_unix_secs,
+            unchanged_since_unix_secs,
             last_updated_unix_secs: now_unix_secs,
         },
     );
-    (
-        previous.map(|prev| prev.offset),
-        advanced_at_unix_secs.map(|at| saturating_age_secs(at, now_unix_secs)),
-    )
+    OffsetObservationResult {
+        previous_offset: previous.map(|prev| prev.offset),
+        advanced_age_secs: advanced_at_unix_secs.map(|at| saturating_age_secs(at, now_unix_secs)),
+        unchanged_age_secs: Some(saturating_age_secs(
+            unchanged_since_unix_secs,
+            now_unix_secs,
+        )),
+    }
+}
+
+fn has_undelivered_backlog(
+    snapshot: &WatcherStateSnapshot,
+    relay_observation: &OffsetObservationResult,
+) -> bool {
+    if !live_undelivered_backlog(snapshot) {
+        return false;
+    }
+
+    relay_offset_advanced_this_tick(snapshot, relay_observation)
+        || relay_offset_unchanged_inside_backlog_grace(relay_observation)
+}
+
+fn live_undelivered_backlog(snapshot: &WatcherStateSnapshot) -> bool {
+    snapshot.unread_bytes.is_some_and(|bytes| bytes > 0)
+        && snapshot.tmux_session_alive == Some(true)
+        && !snapshot.inflight_terminal_delivery_committed
+}
+
+fn relay_offset_advanced_this_tick(
+    snapshot: &WatcherStateSnapshot,
+    relay_observation: &OffsetObservationResult,
+) -> bool {
+    relay_observation
+        .previous_offset
+        .is_some_and(|previous| snapshot.last_relay_offset > previous)
+}
+
+fn relay_offset_unchanged_inside_backlog_grace(
+    relay_observation: &OffsetObservationResult,
+) -> bool {
+    relay_observation
+        .unchanged_age_secs
+        .is_some_and(|age| age < STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS)
+}
+
+fn relay_offset_unchanged_past_backlog_grace(relay_observation: &OffsetObservationResult) -> bool {
+    relay_observation
+        .unchanged_age_secs
+        .is_some_and(|age| age >= STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS)
 }
 
 fn transcript_mtime_age_secs(
@@ -770,6 +900,7 @@ mod tests {
             inflight_terminal_delivery_committed: false,
             inflight_identity: None,
             inflight_finalizer_turn_id: None,
+            inflight_output_path: Some(format!("/tmp/{tmux_session}.jsonl")),
             relay_stall_state: RelayStallState::TmuxAliveRelayDead,
             relay_health: RelayHealthSnapshot {
                 provider: ProviderKind::Codex.as_str().to_string(),
@@ -853,7 +984,9 @@ mod tests {
             tmux_session,
             Some(file.path().display().to_string()),
         );
-        let snap = snapshot(channel.get(), tmux_session, Some(20));
+        let mut snap = snapshot(channel.get(), tmux_session, Some(20));
+        snap.unread_bytes = Some(0);
+        snap.relay_health.unread_bytes = Some(0);
         let now = chrono::Utc::now().timestamp();
 
         let decision = evaluate_stall_watchdog_liveness(
@@ -919,6 +1052,226 @@ mod tests {
             StallWatchdogLivenessAction::ProceedNoEvidence
         );
         assert!(!decision.should_defer());
+    }
+
+    #[test]
+    fn advancing_relay_offset_defers_cleanup() {
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(4178_001);
+        let tmux_session = "AgentDesk-codex-relay-offset-liveness";
+        let _root = isolated_runtime_root();
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+        let mut snap = snapshot(channel.get(), tmux_session, None);
+        snap.unread_bytes = None;
+        snap.relay_health.unread_bytes = None;
+        let mut inflight = inflight_with_output(channel.get(), tmux_session, None);
+        inflight.updated_at = "2026-06-12 00:00:00".to_string();
+
+        let first = evaluate_stall_watchdog_liveness(
+            &provider,
+            channel,
+            &snap,
+            Some(&inflight),
+            1_800_000_000,
+            STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+            STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+            Some(0),
+        );
+        assert_eq!(first.action, StallWatchdogLivenessAction::ProceedNoEvidence);
+
+        snap.last_relay_offset = 64;
+        snap.relay_health.last_relay_offset = 64;
+        let advanced = evaluate_stall_watchdog_liveness(
+            &provider,
+            channel,
+            &snap,
+            Some(&inflight),
+            1_800_000_005,
+            STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+            STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+            Some(0),
+        );
+
+        assert_eq!(
+            advanced.action,
+            StallWatchdogLivenessAction::Defer { deferral_count: 0 }
+        );
+        assert_eq!(advanced.evidence.relay_offset_previous, Some(10));
+        assert_eq!(advanced.evidence.relay_offset_current, Some(64));
+        assert_eq!(advanced.evidence.relay_offset_advanced_age_secs, Some(0));
+        assert_eq!(
+            advanced
+                .evidence
+                .reason_codes_csv(STALL_WATCHDOG_POSITIVE_LIVENESS_SECS),
+            "relay_offset_advanced_recently"
+        );
+
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+    }
+
+    #[test]
+    fn frozen_undelivered_backlog_cleans_after_no_progress_grace() {
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(4178_002);
+        let tmux_session = "AgentDesk-codex-frozen-backlog-liveness";
+        let _root = isolated_runtime_root();
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+        let mut snap = snapshot(channel.get(), tmux_session, None);
+        snap.unread_bytes = Some(301_603);
+        snap.relay_health.unread_bytes = Some(301_603);
+        snap.tmux_session_alive = Some(true);
+        snap.inflight_terminal_delivery_committed = false;
+        let mut inflight = inflight_with_output(channel.get(), tmux_session, None);
+        inflight.updated_at = "2026-06-12 00:00:00".to_string();
+        let now = 1_800_000_000;
+
+        let first = evaluate_stall_watchdog_liveness(
+            &provider,
+            channel,
+            &snap,
+            Some(&inflight),
+            now,
+            STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+            STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+            Some(0),
+        );
+        assert_eq!(
+            first.action,
+            StallWatchdogLivenessAction::Defer { deferral_count: 0 },
+            "first backlog observation gets only the short no-progress grace"
+        );
+        assert!(first.evidence.has_undelivered_backlog);
+        assert_eq!(
+            first
+                .evidence
+                .reason_codes_csv(STALL_WATCHDOG_POSITIVE_LIVENESS_SECS),
+            "has_undelivered_backlog"
+        );
+
+        let still_inside_grace = evaluate_stall_watchdog_liveness(
+            &provider,
+            channel,
+            &snap,
+            Some(&inflight),
+            now + STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64 - 1,
+            STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+            STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+            Some(0),
+        );
+        assert_eq!(
+            still_inside_grace.action,
+            StallWatchdogLivenessAction::Defer { deferral_count: 0 },
+            "a frozen backlog may defer only inside the bounded grace"
+        );
+
+        let expired = evaluate_stall_watchdog_liveness(
+            &provider,
+            channel,
+            &snap,
+            Some(&inflight),
+            now + STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64,
+            STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+            STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+            Some(0),
+        );
+        assert_eq!(
+            expired.action,
+            StallWatchdogLivenessAction::ProceedNoEvidence,
+            "a frozen backlog must clean when the no-progress grace expires"
+        );
+        assert!(!expired.evidence.has_undelivered_backlog);
+        assert_eq!(
+            expired
+                .evidence
+                .reason_codes_csv(STALL_WATCHDOG_POSITIVE_LIVENESS_SECS),
+            "none"
+        );
+
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+    }
+
+    #[test]
+    fn draining_undelivered_backlog_keeps_deferring_across_ticks_until_drained() {
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(4178_003);
+        let tmux_session = "AgentDesk-codex-draining-backlog-liveness";
+        let _root = isolated_runtime_root();
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+        let capture_offset = 301_613;
+        let mut snap = snapshot(channel.get(), tmux_session, Some(capture_offset));
+        snap.tmux_session_alive = Some(true);
+        snap.inflight_terminal_delivery_committed = false;
+        let mut inflight = inflight_with_output(channel.get(), tmux_session, None);
+        inflight.updated_at = "2026-06-12 00:00:00".to_string();
+        let now = 1_800_000_000;
+
+        let first = evaluate_stall_watchdog_liveness(
+            &provider,
+            channel,
+            &snap,
+            Some(&inflight),
+            now,
+            STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+            STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+            Some(0),
+        );
+        assert!(first.should_defer());
+        assert!(first.evidence.has_undelivered_backlog);
+
+        for (tick, delivered_offset) in [(1, 64), (2, 128), (3, 192)] {
+            snap.last_relay_offset = delivered_offset;
+            snap.relay_health.last_relay_offset = delivered_offset;
+            let unread = capture_offset.saturating_sub(delivered_offset);
+            snap.unread_bytes = Some(unread);
+            snap.relay_health.unread_bytes = Some(unread);
+
+            let decision = evaluate_stall_watchdog_liveness(
+                &provider,
+                channel,
+                &snap,
+                Some(&inflight),
+                now + i64::from(tick) * 30,
+                STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+                STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+                Some(0),
+            );
+
+            assert_eq!(
+                decision.action,
+                StallWatchdogLivenessAction::Defer { deferral_count: 0 },
+                "tick {tick} with a shrinking backlog must keep deferring"
+            );
+            assert!(decision.evidence.has_undelivered_backlog);
+            assert_eq!(
+                decision.evidence.relay_offset_current,
+                Some(delivered_offset)
+            );
+            assert_eq!(decision.evidence.relay_offset_advanced_age_secs, Some(0));
+            assert!(
+                decision
+                    .evidence
+                    .reason_codes_csv(STALL_WATCHDOG_POSITIVE_LIVENESS_SECS)
+                    .contains("has_undelivered_backlog")
+            );
+        }
+
+        snap.last_relay_offset = capture_offset;
+        snap.relay_health.last_relay_offset = capture_offset;
+        snap.unread_bytes = Some(0);
+        snap.relay_health.unread_bytes = Some(0);
+        let drained = evaluate_stall_watchdog_liveness(
+            &provider,
+            channel,
+            &snap,
+            Some(&inflight),
+            now + 120,
+            STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+            STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+            Some(0),
+        );
+        assert!(!drained.evidence.has_undelivered_backlog);
+
+        clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
     }
 
     #[test]

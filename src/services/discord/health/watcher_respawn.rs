@@ -669,6 +669,7 @@ mod tests {
             inflight_terminal_delivery_committed: false,
             inflight_identity: None,
             inflight_finalizer_turn_id: None,
+            inflight_output_path: tmux_session.map(|tmux| format!("/tmp/{tmux}.jsonl")),
             relay_stall_state: RelayStallState::TmuxAliveRelayDead,
             relay_health: RelayHealthSnapshot {
                 provider: ProviderKind::Codex.as_str().to_string(),

@@ -400,6 +400,7 @@ mod thread_guard_stale_pure_tests {
             inflight_terminal_delivery_committed: false,
             inflight_identity: None,
             inflight_finalizer_turn_id: None,
+            inflight_output_path: Some("/tmp/stale-proof-tmux.jsonl".to_string()),
             relay_stall_state,
             relay_health,
         }

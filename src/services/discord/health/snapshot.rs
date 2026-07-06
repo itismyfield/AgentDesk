@@ -100,6 +100,8 @@ pub struct WatcherStateSnapshot {
         Option<discord::inflight::InflightTurnIdentity>,
     #[serde(skip)]
     pub(in crate::services::discord) inflight_finalizer_turn_id: Option<u64>,
+    #[serde(skip)]
+    pub(in crate::services::discord) inflight_output_path: Option<String>,
     /// #1455: Pure relay-stall classifier output derived from the nested
     /// relay-health snapshot. Read-only diagnostic; no recovery behavior is
     /// triggered from this value.
@@ -575,6 +577,10 @@ async fn watcher_state_snapshot_for_shared(
             .inflight
             .as_ref()
             .map(|state| state.effective_finalizer_turn_id()),
+        inflight_output_path: session
+            .inflight
+            .as_ref()
+            .and_then(|state| state.output_path.clone()),
         relay_stall_state,
         relay_health,
     })

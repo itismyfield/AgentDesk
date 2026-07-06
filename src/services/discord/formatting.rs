@@ -2089,6 +2089,9 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
                 // inactivity window fresh so a long answer never trips the
                 // queued-card wait while it is still making progress.
                 shared.answer_flush_barrier.note_progress(channel_id);
+                shared
+                    .tmux_relay_coord(channel_id)
+                    .note_relay_progress_heartbeat(chrono::Utc::now().timestamp_millis());
                 sent_message_ids.push(message.id);
                 if is_last {
                     tracing::debug!(
@@ -2118,7 +2121,6 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
                 return Err(err.into());
             }
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     }
 
     Ok(sent_message_ids)

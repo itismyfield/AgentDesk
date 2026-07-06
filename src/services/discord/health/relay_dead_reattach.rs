@@ -136,6 +136,7 @@ mod tests {
             inflight_terminal_delivery_committed: false,
             inflight_identity: None,
             inflight_finalizer_turn_id: None,
+            inflight_output_path: Some("/tmp/AgentDesk-codex-test.jsonl".to_string()),
             relay_stall_state: RelayStallState::TmuxAliveRelayDead,
             relay_health: RelayHealthSnapshot {
                 provider: "codex".to_string(),
