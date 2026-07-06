@@ -3175,19 +3175,31 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let deferred_monitor_ready =
             monitor_auto_turn_claimed && monitor_auto_turn_deferred && !paused_now;
         if (was_paused || paused_now || epoch_changed_now) && !deferred_monitor_ready {
-            // Clean up placeholder if we created one (#3610/Phase-B defer: no emit_relay_delete here — tmux_watcher.rs raw-ratchet is at ceiling)
             if let Some(msg_id) = placeholder_msg_id {
                 if watcher_should_delete_suppressed_placeholder(placeholder_from_restored_inflight)
                 {
-                    if let Err(error) = channel_id.delete_message(&http, msg_id).await {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::warn!(
-                            "  [{ts}] ⚠ watcher pause/epoch placeholder cleanup failed for channel {} msg {}: {}",
+                    let inflight_before_cleanup =
+                        crate::services::discord::inflight::load_inflight_state(
+                            &watcher_provider,
                             channel_id.get(),
-                            msg_id.get(),
-                            error
                         );
-                    }
+                    let _ = delete_nonterminal_placeholder_unless_delivered(
+                        &http,
+                        channel_id,
+                        &shared,
+                        &watcher_provider,
+                        &tmux_session_name,
+                        msg_id,
+                        inflight_before_cleanup.as_ref(),
+                        Some((
+                            turn_data_start_offset,
+                            terminal_event_consumed_offset(current_offset, &all_data),
+                        )),
+                        response_sent_offset,
+                        &last_edit_text,
+                        "watcher_pause_epoch_placeholder_cleanup",
+                    )
+                    .await;
                 } else {
                     placeholder_from_restored_inflight = false;
                     last_edit_text.clear();
