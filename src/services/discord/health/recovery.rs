@@ -1925,9 +1925,16 @@ pub(crate) async fn run_stall_watchdog_pass(
             continue;
         }
 
+        let capture_advancing = stall_liveness::stall_watchdog_capture_offset_advancing(
+            provider,
+            channel_id,
+            &snapshot,
+            now_unix_secs,
+        );
         let should_clean = stall_watchdog_should_force_clean(
             snapshot.attached,
             snapshot.desynced,
+            capture_advancing,
             snapshot.inflight_terminal_delivery_committed,
             snapshot.inflight_started_at.as_deref(),
             now_unix_secs,
@@ -3914,6 +3921,7 @@ mod stall_watchdog_pure_tests {
             true,
             true,
             false,
+            false,
             Some(stale_str.as_str()),
             now_unix,
             STALL_WATCHDOG_THRESHOLD_SECS,
@@ -3925,6 +3933,7 @@ mod stall_watchdog_pure_tests {
             false,
             true,
             false,
+            false,
             Some(stale_str.as_str()),
             now_unix,
             STALL_WATCHDOG_THRESHOLD_SECS,
@@ -3934,6 +3943,7 @@ mod stall_watchdog_pure_tests {
         // synced → no clean.
         assert!(!stall_watchdog_should_force_clean(
             true,
+            false,
             false,
             false,
             Some(stale_str.as_str()),
@@ -3947,6 +3957,7 @@ mod stall_watchdog_pure_tests {
             true,
             true,
             false,
+            false,
             Some(fresh_str.as_str()),
             now_unix,
             STALL_WATCHDOG_THRESHOLD_SECS,
@@ -3958,6 +3969,7 @@ mod stall_watchdog_pure_tests {
             true,
             true,
             false,
+            false,
             None,
             now_unix,
             STALL_WATCHDOG_THRESHOLD_SECS,
@@ -3968,6 +3980,7 @@ mod stall_watchdog_pure_tests {
         assert!(!stall_watchdog_should_force_clean(
             true,
             true,
+            false,
             false,
             Some("not-a-real-timestamp"),
             now_unix,
@@ -3984,6 +3997,7 @@ mod stall_watchdog_pure_tests {
                 true,
                 true,
                 false,
+                false,
                 Some(stale_str.as_str()),
                 now_unix,
                 STALL_WATCHDOG_THRESHOLD_SECS,
@@ -3998,10 +4012,60 @@ mod stall_watchdog_pure_tests {
             true,
             true,
             false,
+            false,
             Some(stale_str.as_str()),
             now_unix,
             STALL_WATCHDOG_THRESHOLD_SECS,
             /* boot_unix_secs */ now_unix - (STALL_WATCHDOG_THRESHOLD_SECS as i64) - 1,
+        ));
+    }
+
+    #[test]
+    fn stall_watchdog_capture_advancing_blocks_force_clean() {
+        let now_unix = chrono::Utc::now().timestamp();
+        let stale_unix = now_unix - (STALL_WATCHDOG_THRESHOLD_SECS as i64) - 1;
+        let stale_str = chrono::Local
+            .timestamp_opt(stale_unix, 0)
+            .single()
+            .expect("valid local time")
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+
+        assert!(
+            !stall_watchdog_should_force_clean(
+                true,
+                true,
+                /* capture_advancing */ true,
+                /* inflight_terminal_delivery_committed */ false,
+                Some(stale_str.as_str()),
+                now_unix,
+                STALL_WATCHDOG_THRESHOLD_SECS,
+                stale_unix - 100,
+            ),
+            "#4178: advancing capture offset means the tmux turn is alive, so the watchdog must not force-clean"
+        );
+    }
+
+    #[test]
+    fn stall_watchdog_capture_stopped_preserves_1446_force_clean() {
+        let now_unix = chrono::Utc::now().timestamp();
+        let stale_unix = now_unix - (STALL_WATCHDOG_THRESHOLD_SECS as i64) - 1;
+        let stale_str = chrono::Local
+            .timestamp_opt(stale_unix, 0)
+            .single()
+            .expect("valid local time")
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+
+        assert!(stall_watchdog_should_force_clean(
+            true,
+            true,
+            /* capture_advancing */ false,
+            /* inflight_terminal_delivery_committed */ false,
+            Some(stale_str.as_str()),
+            now_unix,
+            STALL_WATCHDOG_THRESHOLD_SECS,
+            stale_unix - 100,
         ));
     }
 
@@ -4024,6 +4088,7 @@ mod stall_watchdog_pure_tests {
             !stall_watchdog_should_force_clean(
                 true,
                 true,
+                false,
                 false,
                 Some(fresh_started.as_str()),
                 now_unix,
@@ -4060,6 +4125,7 @@ mod stall_watchdog_pure_tests {
             !stall_watchdog_should_force_clean(
                 true,
                 true,
+                /* capture_advancing */ false,
                 /* inflight_terminal_delivery_committed */ true,
                 Some(stale_str.as_str()),
                 now_unix,
@@ -4074,6 +4140,7 @@ mod stall_watchdog_pure_tests {
         assert!(stall_watchdog_should_force_clean(
             true,
             true,
+            /* capture_advancing */ false,
             /* inflight_terminal_delivery_committed */ false,
             Some(stale_str.as_str()),
             now_unix,

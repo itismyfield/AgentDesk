@@ -25,6 +25,7 @@ fn should_reattach_relay_dead_watcher(
     if !recovery::stall_watchdog_should_force_clean(
         snapshot.attached,
         true,
+        false,
         snapshot.inflight_terminal_delivery_committed,
         snapshot.inflight_started_at.as_deref(),
         now_unix_secs,
