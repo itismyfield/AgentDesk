@@ -8,12 +8,13 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId};
 
 use crate::services::provider::ProviderKind;
+use crate::services::turn_orchestrator::INTERVENTION_DEDUP_WINDOW;
 
 use super::*;
 
@@ -581,6 +582,38 @@ pub(in crate::services::discord) fn classify_catch_up_message(
     CatchUpClassification::Recover
 }
 
+fn catch_up_intervention_created_at(
+    scan_wall_time: chrono::DateTime<chrono::Utc>,
+    scan_instant: Instant,
+    message_id: MessageId,
+) -> Instant {
+    let message_created_at = message_id.created_at();
+    match scan_wall_time
+        .signed_duration_since(*message_created_at)
+        .to_std()
+    {
+        Ok(age) => scan_instant.checked_sub(age).unwrap_or(scan_instant),
+        Err(_) => scan_instant,
+    }
+}
+
+fn catch_up_message_id_gap(last_id: MessageId, current_id: MessageId) -> Option<Duration> {
+    let last_created_at = last_id.created_at();
+    let current_created_at = current_id.created_at();
+    current_created_at
+        .signed_duration_since(*last_created_at)
+        .to_std()
+        .ok()
+}
+
+fn catch_up_last_item_dedup_is_checkpoint_safe(
+    last: Option<&Intervention>,
+    message_id: MessageId,
+) -> bool {
+    last.and_then(|last| catch_up_message_id_gap(last.message_id, message_id))
+        .is_some_and(|gap| gap <= INTERVENTION_DEDUP_WINDOW)
+}
+
 /// Startup catch-up polling: fetch messages that arrived during the restart gap.
 /// Uses saved last_message_ids to query Discord REST API for missed messages,
 /// filters out bot messages and duplicates, and inserts into intervention queue.
@@ -659,7 +692,8 @@ async fn catch_up_missed_messages_inner_with_api_and_pending_retry_channels<
     let dir = root.join(provider.as_str());
 
     let mut total_recovered = 0usize;
-    let now = Instant::now();
+    let scan_instant = Instant::now();
+    let scan_wall_time = chrono::Utc::now();
     let max_age = std::time::Duration::from_secs(300); // Only catch up messages within 5 minutes
     let current_bot_user_id = match api.current_user_id().await {
         Ok(user_id) => user_id,
@@ -949,7 +983,11 @@ async fn catch_up_missed_messages_inner_with_api_and_pending_retry_channels<
                     source_message_queued_generations: Vec::new(),
                     text: text.clone(),
                     mode: InterventionMode::Soft,
-                    created_at: now,
+                    created_at: catch_up_intervention_created_at(
+                        scan_wall_time,
+                        scan_instant,
+                        msg.id,
+                    ),
                     reply_context: None,
                     has_reply_boundary: msg.message_reference.is_some(),
                     merge_consecutive: !msg.author.bot
@@ -975,6 +1013,25 @@ async fn catch_up_missed_messages_inner_with_api_and_pending_retry_channels<
                     stats.record(CatchUpClassification::Duplicate);
                     if max_recovered_id.map(|m| mid > m).unwrap_or(true) {
                         max_recovered_id = Some(mid);
+                    }
+                }
+                Phase2EnqueueCommit::LastItemDedup => {
+                    let snapshot = mailbox_snapshot(shared, channel_id).await;
+                    if catch_up_last_item_dedup_is_checkpoint_safe(
+                        snapshot.intervention_queue.last(),
+                        msg.id,
+                    ) {
+                        stats.record(CatchUpClassification::Duplicate);
+                        if max_recovered_id.map(|m| mid > m).unwrap_or(true) {
+                            max_recovered_id = Some(mid);
+                        }
+                    } else {
+                        log_catch_up_enqueue_not_accepted("phase1", channel_id, msg.id, &enqueue);
+                        let retry_after = max_recovered_id
+                            .or(scan_checkpoint)
+                            .unwrap_or_else(|| mid.saturating_sub(1));
+                        arm_catch_up_retry_pending(shared, channel_id, retry_after);
+                        break;
                     }
                 }
                 Phase2EnqueueCommit::Deferred => {
@@ -1221,7 +1278,11 @@ async fn catch_up_missed_messages_inner_with_api_and_pending_retry_channels<
                     source_message_queued_generations: Vec::new(),
                     text: text.to_string(),
                     mode: InterventionMode::Soft,
-                    created_at: now,
+                    created_at: catch_up_intervention_created_at(
+                        scan_wall_time,
+                        scan_instant,
+                        msg.id,
+                    ),
                     reply_context: None,
                     has_reply_boundary: msg.message_reference.is_some(),
                     merge_consecutive: !msg.author.bot
@@ -1244,6 +1305,29 @@ async fn catch_up_missed_messages_inner_with_api_and_pending_retry_channels<
                     existing_ids.insert(mid);
                     phase2_checkpoint = advance_phase2_checkpoint(phase2_checkpoint, mid);
                     stats.duplicate += 1;
+                }
+                Phase2EnqueueCommit::LastItemDedup => {
+                    let snapshot = mailbox_snapshot(shared, channel_id).await;
+                    if catch_up_last_item_dedup_is_checkpoint_safe(
+                        snapshot.intervention_queue.last(),
+                        msg.id,
+                    ) {
+                        existing_ids.insert(mid);
+                        phase2_checkpoint = advance_phase2_checkpoint(phase2_checkpoint, mid);
+                        stats.duplicate += 1;
+                    } else {
+                        log_catch_up_enqueue_not_accepted("phase2", channel_id, msg.id, &enqueue);
+                        let retry_after = phase2_retry_after_checkpoint(
+                            max_recovered_id,
+                            phase2_checkpoint,
+                            last_bot_response_id,
+                        );
+                        let retry_after =
+                            arm_catch_up_retry_pending(shared, channel_id, retry_after);
+                        phase2_retry_after = Some(retry_after);
+                        stats.deferred += 1;
+                        break;
+                    }
                 }
                 Phase2EnqueueCommit::Deferred => {
                     log_catch_up_enqueue_not_accepted("phase2", channel_id, msg.id, &enqueue);
@@ -1307,8 +1391,9 @@ mod catch_up_recovery_tests {
         CatchUpDiscordApi, CatchUpFetchMode, CatchUpMessageView, CatchUpRetryScanDecision,
         CatchUpRetryState, ChannelId, MessageId, Phase2EnqueueCommit, ProviderKind,
         RuntimeChannelBindingStatus, advance_phase2_checkpoint, arm_catch_up_retry_pending,
-        catch_up_enqueue_accepted, catch_up_fetch_mode_for_scan,
-        catch_up_message_age_reference_time, catch_up_missed_messages_inner_with_api,
+        catch_up_enqueue_accepted, catch_up_fetch_mode_for_scan, catch_up_intervention_created_at,
+        catch_up_last_item_dedup_is_checkpoint_safe, catch_up_message_age_reference_time,
+        catch_up_missed_messages_inner_with_api,
         catch_up_missed_messages_inner_with_api_and_pending_retry_channels,
         catch_up_remaining_queue_capacity, classify_catch_up_message,
         classify_phase2_enqueue_commit, collect_catch_up_retry_pending_channels,
@@ -1453,8 +1538,13 @@ mod catch_up_recovery_tests {
     }
 
     fn recent_message_id(sequence: u64) -> MessageId {
+        recent_message_id_with_age(sequence, Duration::from_secs(30))
+    }
+
+    fn recent_message_id_with_age(sequence: u64, age: Duration) -> MessageId {
         const DISCORD_EPOCH_MS: i64 = 1_420_070_400_000;
-        let timestamp_ms = chrono::Utc::now().timestamp_millis() - 30_000;
+        let age_ms = i64::try_from(age.as_millis()).expect("test age fits in i64 millis");
+        let timestamp_ms = chrono::Utc::now().timestamp_millis() - age_ms;
         let discord_ms = u64::try_from(timestamp_ms - DISCORD_EPOCH_MS)
             .expect("test timestamp must be after Discord epoch");
         MessageId::new((discord_ms << 22) | sequence)
@@ -1973,17 +2063,34 @@ mod catch_up_recovery_tests {
         );
     }
 
+    #[test]
+    fn catch_up_intervention_created_at_preserves_message_gap() {
+        let scan_wall_time = chrono::Utc::now();
+        let scan_instant = Instant::now();
+        let first_id = recent_message_id_with_age(1, Duration::from_secs(240));
+        let resent_id = recent_message_id_with_age(2, Duration::from_secs(60));
+
+        let first_created_at =
+            catch_up_intervention_created_at(scan_wall_time, scan_instant, first_id);
+        let resent_created_at =
+            catch_up_intervention_created_at(scan_wall_time, scan_instant, resent_id);
+        let gap = resent_created_at.duration_since(first_created_at);
+
+        assert!(
+            (Duration::from_secs(179)..=Duration::from_secs(181)).contains(&gap),
+            "catch-up should preserve the real inter-message gap, got {gap:?}"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
-    async fn phase1_last_item_dedup_advances_checkpoint_without_retry_and_continues() {
+    async fn phase1_resend_after_real_dedup_window_survives_catch_up() {
         let root = scoped_runtime_root();
         let shared = super::super::make_shared_data_for_tests();
         let provider = ProviderKind::Claude;
         let channel_id = ChannelId::new(1479671298497183835);
         let author_id = 343742347365974026;
-        let later_author_id = author_id + 1;
-        let first_id = recent_message_id(1);
-        let duplicate_id = recent_message_id(2);
-        let later_id = recent_message_id(3);
+        let first_id = recent_message_id_with_age(1, Duration::from_secs(240));
+        let resent_id = recent_message_id_with_age(2, Duration::from_secs(60));
         let checkpoint = first_id.get() - 1;
         write_last_message_checkpoint(root.path(), &provider, channel_id, checkpoint);
 
@@ -1992,9 +2099,8 @@ mod catch_up_recovery_tests {
             binding_status: RuntimeChannelBindingStatus::Owned,
             fetch_error: None,
             messages: vec![
-                catch_up_test_message(channel_id, first_id, author_id, "repeat turn"),
-                catch_up_test_message(channel_id, duplicate_id, author_id, "repeat turn"),
-                catch_up_test_message(channel_id, later_id, later_author_id, "later turn"),
+                catch_up_test_message(channel_id, first_id, author_id, "진행해줘"),
+                catch_up_test_message(channel_id, resent_id, author_id, "진행해줘"),
             ],
             fetch_attempts: None,
             cleanup_hook: None,
@@ -2006,24 +2112,59 @@ mod catch_up_recovery_tests {
         let saved_checkpoint = *shared
             .last_message_ids
             .get(&channel_id)
-            .expect("phase1 should checkpoint through the later committed message");
-        assert_eq!(saved_checkpoint, later_id.get());
+            .expect("phase1 should checkpoint through the committed resend");
+        assert_eq!(saved_checkpoint, resent_id.get());
         assert!(!shared.catch_up_retry_pending.contains_key(&channel_id));
 
         let snapshot = super::super::mailbox_snapshot(&shared, channel_id).await;
-        let queued_ids: Vec<MessageId> = snapshot
-            .intervention_queue
-            .iter()
-            .map(|item| item.message_id)
-            .collect();
-        assert_eq!(queued_ids, vec![first_id, later_id]);
-        assert!(
-            !snapshot
-                .intervention_queue
-                .iter()
-                .any(|item| item.message_id == duplicate_id),
-            "last-item dedup must advance the checkpoint without queueing a duplicate"
-        );
+        assert_eq!(snapshot.intervention_queue.len(), 1);
+        let queued = &snapshot.intervention_queue[0];
+        assert_eq!(queued.message_id, resent_id);
+        assert_eq!(queued.source_message_ids, vec![first_id, resent_id]);
+        assert_eq!(queued.text, "진행해줘\n진행해줘");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn phase1_true_rapid_resend_dedups_and_advances_checkpoint() {
+        let root = scoped_runtime_root();
+        let shared = super::super::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(1479671298497183835);
+        let author_id = 343742347365974026;
+        let first_id = recent_message_id_with_age(1, Duration::from_secs(35));
+        let duplicate_id = recent_message_id_with_age(2, Duration::from_secs(30));
+        let checkpoint = first_id.get() - 1;
+        write_last_message_checkpoint(root.path(), &provider, channel_id, checkpoint);
+
+        let api = TestCatchUpDiscordApi {
+            current_user_id: Some(9001),
+            binding_status: RuntimeChannelBindingStatus::Owned,
+            fetch_error: None,
+            messages: vec![
+                catch_up_test_message(channel_id, first_id, author_id, "repeat turn"),
+                catch_up_test_message(channel_id, duplicate_id, author_id, "repeat turn"),
+            ],
+            fetch_attempts: None,
+            cleanup_hook: None,
+        };
+        let retry_checkpoints = HashMap::new();
+
+        catch_up_missed_messages_inner_with_api(&api, &shared, &provider, &retry_checkpoints).await;
+
+        let saved_checkpoint = *shared
+            .last_message_ids
+            .get(&channel_id)
+            .expect("phase1 should checkpoint through a genuine rapid duplicate");
+        assert_eq!(saved_checkpoint, duplicate_id.get());
+        assert!(!shared.catch_up_retry_pending.contains_key(&channel_id));
+
+        let snapshot = super::super::mailbox_snapshot(&shared, channel_id).await;
+        assert_eq!(snapshot.intervention_queue.len(), 1);
+        assert_eq!(snapshot.intervention_queue[0].message_id, first_id);
+        assert!(catch_up_last_item_dedup_is_checkpoint_safe(
+            snapshot.intervention_queue.last(),
+            duplicate_id,
+        ));
     }
 
     #[test]
@@ -2225,7 +2366,7 @@ mod catch_up_recovery_tests {
         };
         assert_eq!(
             classify_phase2_enqueue_commit(&last_item_dedup),
-            Phase2EnqueueCommit::Duplicate
+            Phase2EnqueueCommit::LastItemDedup
         );
     }
 
